@@ -1004,6 +1004,60 @@ fixture_markers() {
   local pod=$1
   pod_exec "$pod" sh -c 'ls /tmp/legion-fixture 2>/dev/null | sort | tr "\n" " "' 2>&1
 }
+# completion_verdict reads a phase worker's session (JSONL on stdin) and prints, for every
+# assignment (the daemon's task, a user message) its worker answered with the legion tool's
+# handoff_complete, the calls that got no result, how many results succeeded, and whether the phase
+# stall recorded `closed` after the call that succeeded (the extension records it inside the call,
+# before Oh My Pi writes the result); and how many phase-stall follow-ups came after the session's
+# last successful completion. It is the 4b.13b acceptance's stall check
+# (stage3-4b13b-acceptance.sh, pane-rule-phase-worker-and-stall) for a pod's saved session: a worker
+# suspended while its handoff_complete call runs leaves that call with no result and no `closed`
+# (LEGION-283), and a worker resumed from such a session may report the phase again.
+completion_verdict() {
+  jq -R -s -c --arg followup "Your turn ended with your Legion phase still open" '
+    [split("\n")[] | fromjson?] | to_entries
+    | [.[] | .key as $i | .value as $e
+        | if $e.type == "message" and $e.message.role == "user" then {i: $i, kind: "assignment"}
+          elif $e.type == "message" and $e.message.role == "assistant" then
+            [$e.message.content[]? | select(.type == "toolCall" and .name == "legion" and .arguments.op == "handoff_complete") | .id] as $ids
+            | if ($ids | length) > 0 then {i: $i, kind: "call", ids: $ids} else empty end
+          elif $e.type == "message" and $e.message.role == "toolResult" and $e.message.toolName == "legion" then
+            {i: $i, kind: "result", id: $e.message.toolCallId, ok: ($e.message.isError != true)}
+          elif $e.type == "custom" and $e.customType == "legion-phase-stall" then {i: $i, kind: "stall", state: $e.data.state}
+          elif (($e | tostring) | contains($followup)) then {i: $i, kind: "followup"}
+          else empty end] as $t
+    | [$t[] | select(.kind == "assignment") | .i] as $starts
+    | [range(0; $starts | length) as $k | $starts[$k] as $from | ($starts[$k + 1] // ($t | map(.i) | max + 1)) as $to
+        | [$t[] | select(.i >= $from and .i < $to)] as $seg
+        | [$seg[] | select(.kind == "call") | .ids[]] as $calls
+        | select(($calls | length) > 0)
+        | [$seg[] | select(.kind == "result") | select(.id as $id | $calls | index($id) != null)] as $results
+        | [$results[] | select(.ok)] as $ok
+        | ([$seg[] | select(.kind == "call" and ($ok[0].id as $id | .ids | index($id) != null)) | .i] | first) as $okcall
+        | {assignment: $from, calls: ($calls | length),
+           unanswered: [$calls[] | select(. as $id | [$results[].id] | index($id) == null)],
+           succeeded: ($ok | length),
+           closed: (($ok | length) == 1 and $okcall != null and any($seg[]; .kind == "stall" and .state == "closed" and .i > $okcall))}] as $segments
+    | ([$t[] | select(.kind == "result" and .ok) | .i] | last) as $last
+    | {segments: $segments,
+       followups_after: (if $last == null then null else [$t[] | select(.kind == "followup" and .i > $last)] | length end)}'
+}
+# completions_answered FILE: every assignment its worker answered with handoff_complete got a
+# result for each call, exactly one success (the report, made once), and `closed` after the call
+# that succeeded, and no phase-stall follow-up came after the last success.
+completions_answered() {
+  completion_verdict <"$1" | jq -e '(.segments | length) > 0
+    and all(.segments[]; (.unanswered | length) == 0 and .succeeded == 1 and .closed)
+    and .followups_after == 0' >/dev/null
+}
+# cut_at_completion_call FILE prints FILE's session up to and including its last assistant entry that
+# calls handoff_complete: the transcript a suspension that stops the worker inside that call leaves.
+cut_at_completion_call() {
+  jq -R -s -r '[split("\n")[] | select(length > 0)] as $lines
+    | ([$lines | to_entries[] | select(.value | fromjson? | .type == "message" and .message.role == "assistant"
+        and any(.message.content[]?; .type == "toolCall" and .name == "legion" and .arguments.op == "handoff_complete")) | .key] | last) as $k
+    | $lines[0:$k + 1][]' "$1"
+}
 
 # ---- teardown ------------------------------------------------------------------------------------
 
@@ -1739,6 +1793,30 @@ if issue_phase "$tree1" retro >/dev/null; then
 fi
 wait_for_phase "$tree1" merging 1800
 note "$tree1 moved planner → implementer → tester → reviewer → retro → merging with real agents; $repo#$pr_number changes $smoke_file"
+pass
+
+begin completion-closed
+# Each phase worker of tree 1 is suspended as its phase ends — the planner, the implementer
+# (implementing, and retro when it ran), the tester and the reviewer — and the workflow suspends a
+# worker as it records the completion the worker reports from inside its turn. The suspension is
+# held until that turn ends (LEGION-283), so each saved session answers every handoff_complete call,
+# reports each assignment once, and records the phase stall `closed` after the call that
+# succeeded: the 4b.13b acceptance's stall check (completion_verdict), which a suspension inside the
+# call fails. The planner, never resumed, is the case the 4b.13b acceptance saw; the implementer is
+# resumed for retro, where a session holding an unanswered report is the one that reports again.
+for role in planner implementer tester reviewer; do
+  until_true 300 "$role on $tree1 to be suspended after its phase" issue_worker_state "$tree1" "$role" suspended
+  session_copy="$evidence/completion-$role.jsonl"
+  claim_session_text "$tree1" "$role" >"$session_copy" || fail "$role on $tree1 has no readable session"
+  completion_verdict <"$session_copy" >"$evidence/completion-$role-verdict.json"
+  completions_answered "$session_copy" ||
+    fail "$role on $tree1 left a phase completion unanswered, unclosed or repeated: $(cat "$evidence/completion-$role-verdict.json")"
+  note "$role on $tree1, suspended: $(jq -c '[.segments[] | {calls, succeeded, closed}]' "$evidence/completion-$role-verdict.json")"
+done
+# The control: the planner's session cut at its handoff_complete call, the transcript a suspension
+# inside the call leaves, is refused.
+cut_at_completion_call "$evidence/completion-planner.jsonl" >"$evidence/completion-planner-cut-at-the-call.jsonl"
+expect_failure completion-cut-at-the-call completions_answered "$evidence/completion-planner-cut-at-the-call.jsonl"
 pass
 
 begin review-pair

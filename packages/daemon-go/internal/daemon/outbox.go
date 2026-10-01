@@ -133,6 +133,12 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 				if row.Attempts == 0 {
 					r.log.Info("outbox notice waits for its architect", "row", row.ID, "issue", row.Issue, "error", err)
 				}
+			} else if errors.Is(err, supervise.ErrSuspendHeld) {
+				// A suspension held for its agent's turn (supervise's holdSuspension) is a wait: the
+				// row is asked again on its backoff and finishes once the claim is suspended.
+				if row.Attempts == 0 {
+					r.log.Info("outbox suspend is held for its agent's turn to end", "row", row.ID, "issue", row.Issue, "error", err)
+				}
 			} else if errors.Is(err, supervise.ErrDeliveryPending) {
 				// A task meeting the claim's own pending delivery is a wait, not a failure: the row
 				// runs again on the same backoff once that delivery's turn is over.

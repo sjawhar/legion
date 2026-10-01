@@ -973,11 +973,11 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 
 // A task handed to a claim waits as its pending delivery until a turn confirms it. An agent that
 // refuses the prompt after acknowledging it — it was already in the turn a human's steer started —
-// has the delivery taken back, and it can finish the phase inside that turn: the transition then
-// suspends the claim with the task still pending. The suspension retires that task, so the
-// claim's next start, for the issue's next phase or round, resumes it with the new start's own
-// task rather than the finished phase's — for the next round, or for retro, never "Phase:
-// implementing" again.
+// has the delivery taken back, and it can finish the phase inside that turn: the transition's
+// suspension, held until that turn ends, then finds the task still pending. The suspension retires
+// that task, so the claim's next start, for the issue's next phase or round, resumes it with the
+// new start's own task rather than the finished phase's — for the next round, or for retro, never
+// "Phase: implementing" again.
 func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -1075,11 +1075,15 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 				t.Fatalf("refuse the acknowledged prompt: %v", err)
 			}
 
-			// Inside that turn the implementer finishes round 2, and the transition suspends it.
+			// Inside that turn the implementer finishes round 2, and the transition's suspension runs
+			// once the turn ends.
 			apply("handoff:implementer:implementing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: implementer, Commit: "impl-round-2"})
 			due("the move to testing")
+			if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
+				t.Fatalf("end the steer's turn: %v", err)
+			}
 			if got := machine.Claim().State; got != supervise.StateSuspended {
-				t.Fatalf("after round 2 the implementer is %s, want suspended", got)
+				t.Fatalf("after round 2's turn the implementer is %s, want suspended", got)
 			}
 
 			// The tester passes, and the reviewer decides.
@@ -1421,7 +1425,7 @@ func newOutboxSupervisor(t *testing.T, project, stateDir string) (*supervisor, *
 	sup.deps = supervise.Deps{
 		Runtime: rt, Conns: fake.NewConns(), Store: &outboxClaimStore{}, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
 		Limits:   supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
-		Timeouts: supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second},
+		Timeouts: supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second},
 	}
 	t.Cleanup(sup.stop)
 	return sup, rt

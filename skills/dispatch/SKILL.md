@@ -109,9 +109,14 @@ context in the spec".
 
 The block is what reaches the human's Inbox. A question phrased as prose in the spec reaches
 nobody. A spec with no ask blocks is fine only when the issue genuinely needs no human decision.
-When `dispatch_issue` or `dispatch_artifact` answers `No decision blocks in this spec …`, read it
-as a question, not an error: either no decision is needed and you say nothing, or you forgot to
-make the decision a block and must fix the spec.
+When `dispatch_issue` or `dispatch_artifact` answers `This spec holds no ask blocks …`, read it as a
+question: either no decision is needed and you say nothing, or you forgot to make it a block. When
+it answers `… typed-block openings in this document are text, not blocks`, the quoted openings are
+blocks stored as prose (inside a line, or a paste with something before every line): fix the markdown
+and upload again; a mention on purpose belongs in code. Neither answer sees a spec wrapped whole in a
+code fence (take the fence off), a malformed opening inside a line (`::ask{`, `:::ask {`: an ask opens
+only as `:::ask{…}` on a line of its own), or any `dispatch_doc_edit`: after an edit that writes an
+ask, `dispatch_doc_read` the section and check it renders as `:::ask{#<id> …}` on its own line.
 
 **Wrong:** a **Decisions needed** list at the top of the spec with three bullets.
 **Right:** each decision an `:::ask{#slug}` block at the end of the design section that discusses
@@ -123,11 +128,7 @@ the block and keeps its ask, its answer and its followers; the context paragraph
 out of Design move the same way, and the emptied section is deleted (the same repair, made on
 AGENTC-397 after Sami's 2026-09-20 request: "move the decisions items to be in context of their
 discussion in the spec, not just all piled up at the start with no context"). An ask block has two
-ids: the block id, shown as `:::ask{#<uuid> …}` in the rendered document and taken bare by
-`move`/`delete` in `block` (the `block:<uuid>` form is only for `before`/`after` anchors), and the
-ask id, which `dispatch_open_asks`, the dashboard's `?ask=` link, `dispatch_read` and
-`dispatch_comment({ reply_to_ask })` use. They differ; `dispatch://KEY/ask/<block-id>` answers
-`not found`.
+ids that differ; [Editing a document](skill://dispatch/references/document-edits.md) says which.
 
 See [Typed blocks](#typed-blocks) for the syntax and [Before you ask](#before-you-ask) under
 [Asking](#asking) to decide whether the question is a real decision at all.

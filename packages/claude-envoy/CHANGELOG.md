@@ -14,6 +14,11 @@
   point at the dispatch skill's "Writing a spec", which describes a spec as the design
   conversation: the problem and its evidence, each open question a decision block at the end of
   the section that discusses it, and approval requested only once those are settled.
+- `dispatch_search` refuses a `query` over 1,000 characters (LEGION-386) and a `project` that is
+  not a project key such as CORE before any request, naming the rule. Both ride in the search URL,
+  which the load balancer in front of production Dispatch answers with a bare HTML `414` when it
+  is too long, so this refusal is what stops a pasted passage from becoming that error; a
+  lowercased key, which used to come back as no results, is now refused by name.
 
 ## [0.5.0]
 
