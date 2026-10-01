@@ -22,8 +22,9 @@
   finishes a spec whose remaining choices are the agent's own, rather than making each of them a
   decision block.
 - `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` would take a
-  decision block out of the document while its ask is open, so its question cannot leave the
-  human's Inbox unanswered.
+  decision block out of the document while its ask is open, even in a batch that inserts it
+  again; the refusal says to reword it with `replace` or move it with `move`. A whole-document
+  replace through `dispatch_artifact` is not refused, so it can still remove an open block.
 - The root architect's role text, its Go-daemon part and `legion-architect` settle the spec's
   decision blocks first, as "Approval of a spec" defines settled, then request approval with a
   summary of what the tree will do. `legion-architect` states that condition once.

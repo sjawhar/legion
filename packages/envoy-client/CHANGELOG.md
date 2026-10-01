@@ -15,11 +15,14 @@
   human to answer or waive it. It reads `GET /artifacts/{id}/blocks` first, then, only when an
   `ask` block is present, the owner's asks and that version's markdown; an approved document skips
   the reads.
-- `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` would take a
-  decision block out of the document while its ask is open (LEGION-387). The edit would write its
-  version at once and settlement would retract the ask without another, so the human's question
-  would leave their Inbox unanswered and an approval request sent next would find no open block.
-  An edit with no `delete` or `retype` by block id reads nothing more; one with reads
+- `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` by block id would
+  take a decision block out of the document while its ask is open, even in a batch that inserts
+  markdown carrying its id (LEGION-387). The edit would write its version at once and settlement
+  would retract the ask without another, so the question would leave the human's Inbox
+  unanswered and an approval request sent next would find no open block. The refusal says to
+  reword the block with `replace` or move it with `move`. It covers `dispatch_doc_edit` only: a
+  whole-document replace through `dispatch_artifact` is sent with no reads and can still remove an
+  open block. An edit with no `delete` or `retype` by block id reads nothing more; one with reads
   `GET /artifacts/{id}/blocks`, and the owner's asks only when it reaches an `ask` block.
 
 ### Added

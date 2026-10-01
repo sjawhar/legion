@@ -11,8 +11,9 @@
 - `dispatch_request_approval` is refused, with nothing sent, while the document holds an open
   decision block, and the refusal names each block.
 - `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` would take a
-  decision block out of the document while its ask is open, so its question cannot leave the
-  human's Inbox unanswered.
+  decision block out of the document while its ask is open, even in a batch that inserts it
+  again; the refusal says to reword it with `replace` or move it with `move`. A whole-document
+  replace through `dispatch_artifact` is not refused, so it can still remove an open block.
 - The `dispatch_issue` and `dispatch_doc_edit` descriptions no longer list spec headings; they
   point at the dispatch skill's "Writing a spec".
 
