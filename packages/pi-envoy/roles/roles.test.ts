@@ -154,16 +154,23 @@ const rolePromptFiles = readdirSync(rolesDir, { recursive: true, encoding: "utf8
 );
 
 describe("the planner's plan checks", () => {
-  // The form the boot gate resolves (packages/daemon-go/internal/promptrefs: `agent="<name>"`).
-  // What each shipped agent declares is shipped-agents.test.ts's; the composed planner's dispatch
-  // order is packages/daemon-go/internal/prompts/prompts_test.go's.
+  // The form the boot gate resolves (packages/daemon-go/internal/promptrefs: `agent="<name>"`),
+  // whatever else a dispatch's parentheses carry. What each shipped agent declares is
+  // shipped-agents.test.ts's; the composed planner's dispatch order is
+  // packages/daemon-go/internal/prompts/prompts_test.go's.
   test("every task agent a role prompt dispatches is shipped in agents/", () => {
+    const dispatchers = new Map<string, string[]>();
     for (const file of rolePromptFiles)
-      for (const [, agent] of read(file).matchAll(/task\(agent="([^"]+)"\)/g))
-        expect(
-          existsSync(path.join(agentsDir, `${agent}.md`)),
-          `${agent}, dispatched by ${file}`
-        ).toBe(true);
+      for (const [, agent] of read(file).matchAll(/agent="([^"]+)"/g))
+        dispatchers.set(agent, [...(dispatchers.get(agent) ?? []), file]);
+    // A reader that finds nothing would pass below while checking nothing.
+    expect(dispatchers.get("plan-gap-analyst")).toContain("planner.md");
+    expect(dispatchers.get("plan-reviewer")).toContain("planner.md");
+    for (const [agent, files] of dispatchers)
+      expect(
+        existsSync(path.join(agentsDir, `${agent}.md`)),
+        `${agent}, dispatched by ${files}`
+      ).toBe(true);
   });
 
   // A planner that records the checks as its handoff instructions show them is not refused.
