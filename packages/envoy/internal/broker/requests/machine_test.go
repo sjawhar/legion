@@ -250,13 +250,14 @@ func TestValuesRefusesAGrantWhoseRowWasForged(t *testing.T) {
 }
 
 // TestValuesRefusesAChainTheBrokerDidNotWrite pins what "every release re-verifies the whole
-// chain" means now that no approval signature exists: a grant releases only while its record
-// reproduces its own content-addressed id, embeds a request object its requester really signed,
-// and carries exactly one terminal decision, an approval by the record's approver. Each subtest
-// writes the kind of row only a writer other than the broker could — past the append-only trigger
-// and the one-decision unique index where it must — and the grant that released before the write
-// releases nothing after it. Nor does reuse hand it back: a new request for the same name opens a
-// fresh pending request rather than returning the grant whose chain no longer verifies.
+// chain" means now that no approval signature exists: a grant releases only while its record is
+// an agent_secret record, reproduces its own content-addressed id, embeds a request object its
+// requester really signed, and carries exactly one terminal decision, an approval by the record's
+// approver. Each subtest writes the kind of row only a writer other than the broker could — past
+// the append-only trigger and the one-decision unique index where it must — and the grant that
+// released before the write releases nothing after it. Nor does reuse hand it back: a new request
+// for the same name opens a fresh pending request rather than returning the grant whose chain no
+// longer verifies.
 func TestValuesRefusesAChainTheBrokerDidNotWrite(t *testing.T) {
 	for name, tamper := range map[string]func(t testing.TB, st *store.Store, recordID string){
 		"a tampered body": storetest.Exec(
@@ -276,6 +277,13 @@ func TestValuesRefusesAChainTheBrokerDidNotWrite(t *testing.T) {
 			tag, err := st.Pool.Exec(context.Background(), `update requests set record_id=$2 where record_id=$1`, recordID, forged)
 			if err != nil || tag.RowsAffected() != 1 {
 				t.Fatalf("point the request at the forged record: %d rows, %v", tag.RowsAffected(), err)
+			}
+		},
+		"a record of the other kind": func(t testing.TB, st *store.Store, recordID string) {
+			copyID := storetest.CopyAsOtherKind(t, st, recordID)
+			tag, err := st.Pool.Exec(context.Background(), `update requests set record_id=$2 where record_id=$1`, recordID, copyID)
+			if err != nil || tag.RowsAffected() != 1 {
+				t.Fatalf("point the request at the other kind's record: %d rows, %v", tag.RowsAffected(), err)
 			}
 		},
 	} {

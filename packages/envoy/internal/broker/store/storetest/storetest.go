@@ -3,9 +3,9 @@
 // against one server at once, and the poller's passes act on every row of their tables, so tests
 // that shared tables would act on each other's rows; with a schema per test no test can see
 // another's rows, in its own package, a sibling package, or a concurrent run of either. It also
-// writes the rows only a database writer other than the broker could (Exec, ForgeRequestSignature),
-// for the tests that pin what a release or an authentication refuses. It is an ordinary package
-// rather than a _test.go file so every broker package can import it.
+// writes the rows only a database writer other than the broker could (Exec, ForgeRequestSignature,
+// CopyAsOtherKind), for the tests that pin what a release or an authentication refuses. It is an
+// ordinary package rather than a _test.go file so every broker package can import it.
 package storetest
 
 import (
@@ -17,6 +17,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -126,15 +127,7 @@ func Exec(statements ...string) func(t testing.TB, st *store.Store, recordID str
 // re-verification can refuse it.
 func ForgeRequestSignature(t testing.TB, st *store.Store, recordID string) string {
 	t.Helper()
-	ctx := context.Background()
-	var canonical string
-	if err := st.Pool.QueryRow(ctx, `select body from credential_requests where id=$1`, recordID).Scan(&canonical); err != nil {
-		t.Fatalf("read record %s: %v", recordID, err)
-	}
-	body, err := record.ParseBody(canonical)
-	if err != nil {
-		t.Fatalf("parse record %s: %v", recordID, err)
-	}
+	body, kind := readRecord(t, st, recordID)
 	parts := strings.Split(body.Request, ".")
 	if len(parts) != 3 {
 		t.Fatalf("request object has %d parts, want 3", len(parts))
@@ -146,15 +139,52 @@ func ForgeRequestSignature(t testing.TB, st *store.Store, recordID string) strin
 	signature[0] ^= 0xff
 	parts[2] = base64.RawURLEncoding.EncodeToString(signature)
 	body.Request = strings.Join(parts, ".")
-	forged := body.ID()
+	return insertApprovedCopy(t, st, recordID, body, kind)
+}
+
+// CopyAsOtherKind writes a copy of record recordID under the other record kind ('agent_secret'
+// for a 'launcher_credential' record, and the reverse), its body differing only in an expiry one
+// second later so it hashes to an id of its own, with an approved event by the record's own
+// approver, and returns the copy's id. Every link of that chain holds but the kind, so only a
+// chain verifier's scope to its own kind can refuse it.
+func CopyAsOtherKind(t testing.TB, st *store.Store, recordID string) string {
+	t.Helper()
+	body, kind := readRecord(t, st, recordID)
+	body.ExpiresAt = body.ExpiresAt.Add(time.Second)
+	other := "agent_secret"
+	if kind == other {
+		other = "launcher_credential"
+	}
+	return insertApprovedCopy(t, st, recordID, body, other)
+}
+
+func readRecord(t testing.TB, st *store.Store, recordID string) (record.Body, string) {
+	t.Helper()
+	var canonical, kind string
+	if err := st.Pool.QueryRow(context.Background(), `select body, kind from credential_requests where id=$1`, recordID).Scan(&canonical, &kind); err != nil {
+		t.Fatalf("read record %s: %v", recordID, err)
+	}
+	body, err := record.ParseBody(canonical)
+	if err != nil {
+		t.Fatalf("parse record %s: %v", recordID, err)
+	}
+	return body, kind
+}
+
+// insertApprovedCopy writes body as a record of kind under the id it hashes to, its other columns
+// copied from recordID, with an approved event by the body's approver, and returns the copy's id.
+func insertApprovedCopy(t testing.TB, st *store.Store, recordID string, body record.Body, kind string) string {
+	t.Helper()
+	ctx := context.Background()
+	copyID := body.ID()
 	if _, err := st.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, enrollment_id, code, created_at, expires_at)
-		select $2, $3, kind, approver, enrollment_id, code, created_at, expires_at from credential_requests where id=$1`,
-		recordID, forged, body.Canonical()); err != nil {
-		t.Fatalf("insert forged record: %v", err)
+		select $2, $3, $4, approver, enrollment_id, code, created_at, expires_at from credential_requests where id=$1`,
+		recordID, copyID, body.Canonical(), kind); err != nil {
+		t.Fatalf("insert record copy: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx, `insert into credential_request_events (record_id, event, login, actor) values ($1, 'approved', $2, $3)`,
-		forged, body.Approver, "human:"+body.Approver); err != nil {
-		t.Fatalf("insert forged approval: %v", err)
+		copyID, body.Approver, "human:"+body.Approver); err != nil {
+		t.Fatalf("insert record copy's approval: %v", err)
 	}
-	return forged
+	return copyID
 }

@@ -34,10 +34,10 @@ var codePattern = regexp.MustCompile(`^[A-Z2-9]{4}-[A-Z2-9]{4}$`)
 // its ChainVerifier (so AuthenticateLauncher's own issuance-chain re-verification is the genuine
 // thing, not a stub), and rules.Current loaded from a minimal valid rules file — a machine login's
 // own decision never consults the rules (it always requires approval), so the fixture needs only
-// a valid, versioned Set.
-func newFixture(t *testing.T) *Service {
+// a valid, versioned Set. params are extra connection parameters, as storetest.Open takes them.
+func newFixture(t *testing.T, params ...string) *Service {
 	t.Helper()
-	st := storetest.Open(t)
+	st := storetest.Open(t, params...)
 
 	enr := &enroll.Service{Store: st, Lease: time.Hour}
 	enr.Chain = enroll.NewChainVerifier(st, testAudience, time.Minute)
@@ -398,14 +398,60 @@ func TestApplyDecisionRefusesALoginPastItsExpiry(t *testing.T) {
 	}
 }
 
+// TestASweepWhileADecisionHoldsItsRowLockCommits pins ApplyDecision's row-lock level. The
+// sweeper's 'expired' insert checks its foreign key with `for key share` on the record's row,
+// which `for no key update` leaves free: the sweep commits while a decision holds the lock, and
+// the decision's own event insert then answers ErrAlreadyDecided and mints nothing. Under `for
+// update` the sweep waits on the decision, which would then wait on the sweep's unique-index
+// entry, a deadlock; the fixture's lock_timeout makes that wait this test's failure, not a hang.
+func TestASweepWhileADecisionHoldsItsRowLockCommits(t *testing.T) {
+	svc := newFixture(t, "lock_timeout=5000")
+	ctx := context.Background()
+	_, code, err := svc.Login(ctx, signMachineLogin(t, testApprover, "example-host-devbox", ""))
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	view, err := svc.LookupByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("LookupByCode: %v", err)
+	}
+
+	locked, release := make(chan struct{}), make(chan struct{})
+	svc.testDecisionHook = func() {
+		close(locked)
+		<-release
+	}
+	decided := make(chan error, 1)
+	go func() {
+		_, _, err := svc.ApplyDecision(ctx, view.RecordID, true, testApprover, code)
+		decided <- err
+	}()
+	<-locked
+	swept := svc.ExpirePending(ctx, time.Now().Add(svc.PendingTTL+time.Minute))
+	close(release)
+	if swept != nil {
+		t.Fatalf("ExpirePending while a decision holds the record's row lock = %v, want it to commit", swept)
+	}
+	if err := <-decided; !errors.Is(err, ErrAlreadyDecided) {
+		t.Fatalf("ApplyDecision once the sweep committed = %v, want ErrAlreadyDecided", err)
+	}
+	if state, _, err := svc.recordState(ctx, view.RecordID); err != nil || state != "expired" {
+		t.Fatalf("recordState = %q, %v, want expired", state, err)
+	}
+	var credentials int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from launcher_credentials where record_id=$1`, view.RecordID).Scan(&credentials); err != nil || credentials != 0 {
+		t.Fatalf("launcher credentials for the record = %d, %v, want 0", credentials, err)
+	}
+}
+
 // TestChainVerificationRefusesADecisionTheBrokerDidNotWrite pins what AuthenticateLauncher's
 // chain re-check proves on every call: a credential authenticates only while its record embeds a
 // request object the machine really signed and carries exactly one terminal decision, an approval
 // by the record's own approver. An approved event rewritten to name another login, a second
 // terminal event beside the real approval (which credential_request_decision's unique index
-// refuses, so the test drops it the way a direct writer could), and a copy of the record whose
-// request object's signature was altered, approved by the approver, each turn a credential that
-// authenticates into one that does not.
+// refuses, so the test drops it the way a direct writer could), a copy of the record whose
+// request object's signature was altered, approved by the approver, and an approved copy recorded
+// as an agent_secret record, each turn a credential that authenticates into one that does not.
 func TestChainVerificationRefusesADecisionTheBrokerDidNotWrite(t *testing.T) {
 	for name, tamper := range map[string]func(t testing.TB, st *store.Store, recordID string){
 		"approved by another login": storetest.Exec(`update credential_request_events set login='mallory' where record_id=$1 and event='approved'`),
@@ -418,6 +464,13 @@ func TestChainVerificationRefusesADecisionTheBrokerDidNotWrite(t *testing.T) {
 			tag, err := st.Pool.Exec(context.Background(), `update launcher_credentials set record_id=$2 where record_id=$1`, recordID, forged)
 			if err != nil || tag.RowsAffected() != 1 {
 				t.Fatalf("point the credential at the forged record: %d rows, %v", tag.RowsAffected(), err)
+			}
+		},
+		"a record of the other kind": func(t testing.TB, st *store.Store, recordID string) {
+			copyID := storetest.CopyAsOtherKind(t, st, recordID)
+			tag, err := st.Pool.Exec(context.Background(), `update launcher_credentials set record_id=$2 where record_id=$1`, recordID, copyID)
+			if err != nil || tag.RowsAffected() != 1 {
+				t.Fatalf("point the credential at the other kind's record: %d rows, %v", tag.RowsAffected(), err)
 			}
 		},
 	} {

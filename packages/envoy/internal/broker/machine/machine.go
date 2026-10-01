@@ -63,6 +63,12 @@ type Service struct {
 	// and confirmation code — a confirmation-fatigue/notification-spam vector against the named
 	// operator.
 	Replay func(ctx context.Context, jti string, expires time.Time) (fresh bool, err error)
+
+	// testDecisionHook, when set, runs inside ApplyDecision once the record's row lock is held and
+	// the record found pending, before anything is minted or recorded. It exists only so a test
+	// can run the sweeper's 'expired' insert while a decision holds that lock; no production
+	// caller sets it.
+	testDecisionHook func()
 }
 
 // jtiRetentionMargin is how long past a request object's expiry its jti is remembered, mirroring
@@ -247,6 +253,9 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 	if decided || expired {
 		return "", "", ErrAlreadyDecided
+	}
+	if s.testDecisionHook != nil {
+		s.testDecisionHook()
 	}
 	event := "denied"
 	if approve {
