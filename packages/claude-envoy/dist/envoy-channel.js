@@ -38938,7 +38938,7 @@ function requestSignal(signal) {
 }
 function whyNotAPage(answer) {
   if (typeof answer === "string") {
-    return "text that is not a JSON page, which looks like a proxy or gateway page rather than " + "Dispatch's own answer, so a retry may succeed.";
+    return `text that is not a JSON page, ${gatewayAnswer(true)}`;
   }
   let what;
   if (Array.isArray(answer)) {
@@ -38956,6 +38956,17 @@ function whyNotAPage(answer) {
     what = `an object without ${lacking.join(" or ")}`;
   }
   return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
+}
+function gatewayAnswer(retryMaySucceed) {
+  return "which looks like a proxy or gateway page rather than Dispatch's own answer, so " + (retryMaySucceed ? "a retry may succeed." : "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, " + "is fixed.");
+}
+function transientStatus(status) {
+  return status >= 500 || status === 408 || status === 429;
+}
+var REDACTED = "[redacted]";
+function bodyExcerpt(text, token) {
+  const plain = text.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ").replace(/<[^>]*>/g, " ");
+  return textHead((token === "" ? plain : plain.replaceAll(token, REDACTED)).replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
 }
 
 class DispatchClient {
@@ -39214,22 +39225,24 @@ class DispatchClient {
     };
     if (body !== undefined)
       headers["Content-Type"] = "application/json";
-    const response = await this.fetchImpl(this.#url(path2, query), {
+    const url2 = this.#url(path2, query);
+    const response = await this.fetchImpl(url2, {
       method,
       headers,
       signal: this.#signal,
       ...body === undefined ? {} : { body: JSON.stringify(body) }
     });
-    return this.#response(response);
+    return this.#response(method, url2, response);
   }
   async#form(method, path2, body) {
-    const response = await this.fetchImpl(this.#url(path2), {
+    const url2 = this.#url(path2);
+    const response = await this.fetchImpl(url2, {
       method,
       headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
       body,
       signal: this.#signal
     });
-    return this.#response(response);
+    return this.#response(method, url2, response);
   }
   #url(path2, query) {
     const url2 = new URL(`${path2.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
@@ -39245,7 +39258,7 @@ class DispatchClient {
     }
     return url2.toString();
   }
-  async#response(response) {
+  async#response(method, url2, response) {
     const text = await response.text();
     let payload = text;
     if (text && isJson(response)) {
@@ -39257,7 +39270,13 @@ class DispatchClient {
     }
     if (!response.ok) {
       const error48 = asErrorShape(payload);
-      throw new DispatchServiceError(error48.code ?? `HTTP_${response.status}`, response.status, error48.error ?? (typeof payload === "string" && payload ? payload : response.statusText), error48.candidates, error48.current, error48.mismatches);
+      if (typeof error48.error === "string") {
+        throw new DispatchServiceError(error48.code ?? `HTTP_${response.status}`, response.status, error48.error, error48.candidates, error48.current, error48.mismatches);
+      }
+      const excerpt = bodyExcerpt(text, this.token);
+      const body = excerpt === "" ? "an empty body" : `a body that is not Dispatch's error JSON (${JSON.stringify(excerpt)})`;
+      const reason = response.statusText === "" ? "" : ` ${response.statusText}`;
+      throw new DispatchServiceError(`HTTP_${response.status}`, response.status, `${method} ${url2} answered ${response.status}${reason} with ${body}, ` + gatewayAnswer(transientStatus(response.status)));
     }
     return payload;
   }
