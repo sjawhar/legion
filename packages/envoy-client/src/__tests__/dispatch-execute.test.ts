@@ -3595,17 +3595,26 @@ describe("executeDispatchTool", () => {
         [{ op: "delete", block: "b-1" }],
         [{ op: "retype", block: "b-1", type: "callout", attributes: { kind: "note" } }],
         [{ op: "delete", block: "c-1" }],
-        // Text that only quotes the block's opener does not write the block back.
+        // An insert carrying the block's id does not exempt it, whether it writes the block back
+        // or only quotes its opener in a code fence: the executor cannot tell the two apart.
         [
           { op: "delete", block: "b-1" },
-          { op: "insert", after: "block:p-1", markdown: "A block opens like `:::ask{#b-1 }`." },
+          {
+            op: "insert",
+            after: "block:p-1",
+            markdown: ':::ask{#b-1 urgency="med"}\nWhere should the nightly file go?\n:::',
+          },
+        ],
+        [
+          { op: "delete", block: "b-1" },
+          { op: "insert", after: "block:p-1", markdown: "```\n:::ask{#b-1 }\n```" },
         ],
       ]) {
         const { outcome, edits } = edit(ops);
         expect((await outcome).split("\n")).toEqual([
           "dispatch_doc_edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
           '- "Where should the nightly file be written?" (block b-1, ask ask-b-1)',
-          "A decision block leaves the document once its ask is answered or resolved.",
+          "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace or relocate it with move, which keep it.",
         ]);
         expect(edits).toEqual([]);
       }
@@ -3616,15 +3625,6 @@ describe("executeDispatchTool", () => {
         [{ op: "delete", block: "b-2" }],
         [{ op: "retype", block: "b-1", type: "ask", attributes: { urgency: "high" } }],
         [{ op: "delete", block: "p-1" }],
-        // The delete-then-insert rewrite of a typed block writes it back under its id.
-        [
-          { op: "delete", block: "b-1" },
-          {
-            op: "insert",
-            after: "block:p-1",
-            markdown: ':::ask{#b-1 urgency="med"}\nWhere should the nightly file go?\n:::',
-          },
-        ],
       ]) {
         const { outcome, edits } = edit(ops);
         expect(await outcome).toStartWith(`Applied ${ops.length} ops`);

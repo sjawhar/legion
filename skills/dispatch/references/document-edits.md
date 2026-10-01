@@ -123,6 +123,7 @@ paragraph you replaced, which keeps that paragraph's id; only when no paragraph 
 the old block's place is it a `delete` of the old block and then an `insert` of the new one, anchored on the
 block before or after it. The delete is what costs the id (below); a typed block keeps its id when the insert
 carries it, which works only in that order, because an insert carrying an id the document still holds is refused.
+For an `ask` block whose ask is still open, delete-then-insert is refused: reword it with `replace` or relocate it with `move`.
 Then read the document back with
 `dispatch_doc_read` and read the passage and its neighbours, not a grep for the words you added: an empty
 `with` deletes the matched text on purpose, so a `replace` whose `with` you meant to fill
@@ -138,8 +139,8 @@ a list emptied of every item disappears with it; a partial match keeps the block
 that holds a nested list hoists that list's items into the bullet's place (as an outliner does); a bullet with any other content
 (paragraphs, code, tables) is refused with `INVALID_OP` naming `delete {block:"<item id>"}`, which removes the item with its content.
 `delete` with `block` removes any block by id (paragraph, heading, list, list item, table, or typed block; the tools refuse a `delete` or
-`retype` that would take out an `ask` block whose ask is open, unless the same batch inserts it back under its id, and an answered or
-resolved one keeps its answer as the record), and `move` with `block` relocates one, keeping its id and
+`retype` that would take out an `ask` block whose ask is open, even in a batch that inserts it again, so reword an open one with `replace`,
+and an answered or resolved one keeps its answer as the record), and `move` with `block` relocates one, keeping its id and
 attributes — a moved `ask` keeps its ask and answer. **A block loses its id only when it is removed**, and its anchors go with it:
 `delete` by text or by id removes the block and any container it empties; `delete_row` / `delete_column` remove their cells' ids,
 which is why they are refused while an open ask or unresolved comment sits on them; and a `move` that takes the last block out of a

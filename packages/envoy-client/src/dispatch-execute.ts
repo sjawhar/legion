@@ -1673,10 +1673,12 @@ async function refuseOpenDecisionBlocks(
  * The edit writes its version at once; about two seconds later settlement retracts the ask in the
  * system's name and writes no version, so the human's question leaves the Inbox unanswered and an
  * approval request made after it names a version with no open block for
- * `refuseOpenDecisionBlocks` to find. A block an `insert` of the same batch writes back under its
- * id stays, so the delete-then-insert rewrite of a typed block passes. Costs nothing for an edit
- * with no such operation, then one `GET /artifacts/{id}/blocks`, and the owner's asks only when an
- * operation reaches an `ask` block.
+ * `refuseOpenDecisionBlocks` to find. An `insert` in the same batch that carries the block's id
+ * does not exempt it: telling a block written back from an opener quoted in code needs the
+ * server's parser, so the executor fails closed, as `refuseOpenDecisionBlocks` does for a quoted
+ * opener. An open block is reworded with `replace` and moved with `move`, which keep it. Costs
+ * nothing for an edit with no such operation, then one `GET /artifacts/{id}/blocks`, and the
+ * owner's asks only when an operation reaches an `ask` block.
  */
 async function refuseRemovingOpenDecisionBlocks(
   client: DispatchClient,
@@ -1693,20 +1695,18 @@ async function refuseRemovingOpenDecisionBlocks(
   const artifact = resolved.artifact;
   const blocks = await client.artifactBlocks(artifact.id);
   const askBlocks = blocks.filter((block) => block.type === "ask");
-  const reinserted = ops.flatMap((operation) =>
-    operation.op === "insert" && operation.markdown !== undefined ? [operation.markdown] : []
-  );
   const removed = new Set<string>();
   for (const operation of removing) {
     const target = blocks.find((block) => block.id === operation.block);
     if (target === undefined) continue;
     // A delete takes every block inside the one it names; a retype changes only that block.
     for (const block of askBlocks) {
-      const reached =
+      if (
         block.id === target.id ||
-        (operation.op === "delete" && block.from >= target.from && block.to <= target.to);
-      const kept = reinserted.some((markdown) => opensAskBlock(markdown, block.id));
-      if (reached && !kept) removed.add(block.id);
+        (operation.op === "delete" && block.from >= target.from && block.to <= target.to)
+      ) {
+        removed.add(block.id);
+      }
     }
   }
   if (removed.size === 0) return;
@@ -1729,17 +1729,9 @@ async function refuseRemovingOpenDecisionBlocks(
       ...open.map(
         (ask) => `- ${JSON.stringify(ask.question)} (block ${ask.block_id}, ask ${ask.id})`
       ),
-      "A decision block leaves the document once its ask is answered or resolved.",
+      "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace or relocate it with move, which keep it.",
     ].join("\n")
   );
-}
-
-/** Whether `markdown` opens an `ask` block with `id` on a line of its own, as a reinsert does. */
-function opensAskBlock(markdown: string, id: string): boolean {
-  return markdown.split("\n").some((line) => {
-    const opener = line.replace(/^[\s>]*:{3,}/, ":::");
-    return opener.startsWith(`:::ask{#${id} `) || opener.startsWith(`:::ask{#${id}}`);
-  });
 }
 
 /**

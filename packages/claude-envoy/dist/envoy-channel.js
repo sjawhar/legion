@@ -40316,17 +40316,15 @@ async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
   const artifact = resolved.artifact;
   const blocks = await client.artifactBlocks(artifact.id);
   const askBlocks = blocks.filter((block) => block.type === "ask");
-  const reinserted = ops.flatMap((operation) => operation.op === "insert" && operation.markdown !== undefined ? [operation.markdown] : []);
   const removed = new Set;
   for (const operation of removing) {
     const target = blocks.find((block) => block.id === operation.block);
     if (target === undefined)
       continue;
     for (const block of askBlocks) {
-      const reached = block.id === target.id || operation.op === "delete" && block.from >= target.from && block.to <= target.to;
-      const kept = reinserted.some((markdown) => opensAskBlock(markdown, block.id));
-      if (reached && !kept)
+      if (block.id === target.id || operation.op === "delete" && block.from >= target.from && block.to <= target.to) {
         removed.add(block.id);
+      }
     }
   }
   if (removed.size === 0)
@@ -40339,16 +40337,9 @@ async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
   throw new Error([
     `${tool} was not called: it would remove ${what} still open, and the human's ${question} would leave their Inbox unanswered.`,
     ...open.map((ask) => `- ${JSON.stringify(ask.question)} (block ${ask.block_id}, ask ${ask.id})`),
-    "A decision block leaves the document once its ask is answered or resolved."
+    "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace or relocate it with move, which keep it."
   ].join(`
 `));
-}
-function opensAskBlock(markdown, id) {
-  return markdown.split(`
-`).some((line) => {
-    const opener = line.replace(/^[\s>]*:{3,}/, ":::");
-    return opener.startsWith(`:::ask{#${id} `) || opener.startsWith(`:::ask{#${id}}`);
-  });
 }
 function refusalWithCode(error48, suffix = "") {
   if (!(error48 instanceof DispatchServiceError))
