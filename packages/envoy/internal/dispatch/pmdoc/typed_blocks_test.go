@@ -552,6 +552,22 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 	}
 }
 
+// An insert of table rows is parsed under a header the parse writes for itself, and a refusal it
+// makes names the line in the fragment the caller wrote, not in the parse's own text, blank lines
+// ahead of the rows counted.
+func TestTableRowFragmentRefusalNamesTheCallersLine(t *testing.T) {
+	const rows = "> | x |\n>     :::callout{kind=\"note\" title=\"a | b\"}\n"
+	for markdown, want := range map[string]string{
+		rows:        "line 2,",
+		"\n" + rows: "line 3,",
+	} {
+		_, _, err := parseTableRows(markdown, 1, NewTablePaddingBudget())
+		if err == nil || !strings.Contains(err.Error(), want+` ":::callout{`) {
+			t.Errorf("parseTableRows(%q) = %v, want a refusal naming %s", markdown, err, want)
+		}
+	}
+}
+
 // A typed block opening a writer keeps as text on purpose - escaped, standing inside a line, or
 // the whole of a replace's inline text - is stored as that text; only a line the writer broke to
 // open a block, which the parser reads as the paragraph's text anyway, is refused.
