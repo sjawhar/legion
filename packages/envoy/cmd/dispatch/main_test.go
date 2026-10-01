@@ -658,3 +658,211 @@ func TestParseAllowedLoginsLowerCasesAndTrimsEntries(t *testing.T) {
 		}
 	}
 }
+
+// devSignInEnvironment is a boot environment the dev sign-in fence accepts, with overrides
+// applied; an override of "" leaves that variable empty, which resolveBootConfig reads as unset.
+func devSignInEnvironment(overrides map[string]string) func(string) string {
+	values := map[string]string{
+		"DATABASE_URL":            "postgres://postgres:x@127.0.0.1:5432/dispatch_e2e?sslmode=disable",
+		"DISPATCH_AGENT_TOKEN":    "x",
+		"DISPATCH_ALLOWED_LOGINS": "alice",
+		"DISPATCH_LISTEN_HOST":    "127.0.0.1",
+		"DISPATCH_DEV_SIGNIN":     "1",
+	}
+	for key, value := range overrides {
+		values[key] = value
+	}
+	return envGetter(values)
+}
+
+func TestResolveBootConfigDevSignInFlagValue(t *testing.T) {
+	// Off (getenv answers "" for an unset variable as for an empty one), the fence asks nothing of
+	// the rest of the environment.
+	boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{
+		"DISPATCH_DEV_SIGNIN":  "",
+		"DISPATCH_LISTEN_HOST": "0.0.0.0",
+		"DATABASE_URL":         "postgres://u@db.example.com/d",
+		"DISPATCH_SIGNING_KEY": "abc",
+	}))
+	if err != nil || boot.DevSignIn {
+		t.Fatalf("DISPATCH_DEV_SIGNIN unset: DevSignIn=%t err=%v, want off", boot.DevSignIn, err)
+	}
+
+	boot, err = resolveBootConfig(devSignInEnvironment(nil))
+	if err != nil || !boot.DevSignIn {
+		t.Fatalf("DISPATCH_DEV_SIGNIN=1: DevSignIn=%t err=%v, want on", boot.DevSignIn, err)
+	}
+
+	for _, flag := range []string{"true", "yes", "0", " 1"} {
+		_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN": flag}))
+		if err == nil || !strings.Contains(err.Error(), "DISPATCH_DEV_SIGNIN") || !strings.Contains(err.Error(), strconv.Quote(flag)) {
+			t.Errorf("DISPATCH_DEV_SIGNIN=%q: err = %v, want a refusal naming the variable and the value", flag, err)
+		}
+	}
+}
+
+func TestResolveBootConfigDevSignInRequiresCookieIdentity(t *testing.T) {
+	_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_IDENTITY": "header:X-Dispatch-User"}))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_IDENTITY") {
+		t.Fatalf("header identity: err = %v, want a refusal naming DISPATCH_IDENTITY", err)
+	}
+}
+
+// The fence checks the address the server binds, not a second reading of the variable: every
+// spelling it accepts yields boot.ListenAddr, listenAddress's one value, which main binds.
+func TestResolveBootConfigDevSignInChecksTheAddressItBinds(t *testing.T) {
+	for _, host := range []string{"", "0.0.0.0", "::", "10.0.0.5", "localhost", "::ffff:127.0.0.1", "[::1%lo]", "]]::1[[", "[[::1]]", "127.0.0.1:9000", "[::1]:9000"} {
+		boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_LISTEN_HOST": host}))
+		if err == nil || !strings.Contains(err.Error(), "DISPATCH_LISTEN_HOST") {
+			t.Errorf("DISPATCH_LISTEN_HOST=%q: listen address %q, err = %v; want a refusal naming DISPATCH_LISTEN_HOST", host, boot.ListenAddr, err)
+		}
+	}
+	for host, want := range map[string]string{
+		"127.0.0.1":       "127.0.0.1:8799",
+		" 127.0.0.1 ":     "127.0.0.1:8799",
+		"[127.0.0.1]":     "127.0.0.1:8799",
+		"127.255.255.254": "127.255.255.254:8799",
+		"::1":             "[::1]:8799",
+		"[::1]":           "[::1]:8799",
+		"0:0:0:0:0:0:0:1": "[0:0:0:0:0:0:0:1]:8799",
+	} {
+		environment := devSignInEnvironment(map[string]string{"DISPATCH_LISTEN_HOST": host, "DISPATCH_PORT": "8799"})
+		bound, err := listenAddress(environment)
+		if err != nil || bound != want {
+			t.Fatalf("DISPATCH_LISTEN_HOST=%q: listenAddress = %q, %v; want %q", host, bound, err, want)
+		}
+		boot, err := resolveBootConfig(environment)
+		if err != nil || boot.ListenAddr != bound {
+			t.Errorf("DISPATCH_LISTEN_HOST=%q: ListenAddr = %q, %v; want the bound %q accepted", host, boot.ListenAddr, err, bound)
+		}
+	}
+
+	// Without the flag the same field carries the address, so main binds one value either way, and
+	// a bad port is refused before anything connects.
+	boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN": "", "DISPATCH_LISTEN_HOST": "", "DISPATCH_PORT": "8799"}))
+	if err != nil || boot.ListenAddr != ":8799" {
+		t.Errorf("without the flag: ListenAddr = %q, %v; want \":8799\"", boot.ListenAddr, err)
+	}
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN": "", "DISPATCH_PORT": "70000"})); err == nil || !strings.Contains(err.Error(), "DISPATCH_PORT") {
+		t.Errorf("DISPATCH_PORT=70000: err = %v, want a refusal naming DISPATCH_PORT", err)
+	}
+}
+
+func TestResolveBootConfigDevSignInRequiresALoopbackDatabase(t *testing.T) {
+	for _, tc := range []struct{ databaseURL, host string }{
+		{databaseURL: "postgres://postgres:x@db.example.com:5432/d", host: "db.example.com"},
+		{databaseURL: "postgres://u@10.0.0.5/d", host: "10.0.0.5"},
+		{databaseURL: "postgres://u@127.0.0.1:5432,db.example.com:5432/d", host: "db.example.com"},
+		{databaseURL: "host=db.example.com dbname=d", host: "db.example.com"},
+		// pgx dials the host parameter, not the URL's authority.
+		{databaseURL: "postgres://u@127.0.0.1:5432/d?host=db.example.com", host: "db.example.com"},
+	} {
+		_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DATABASE_URL": tc.databaseURL}))
+		if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") || !strings.Contains(err.Error(), tc.host) {
+			t.Errorf("DATABASE_URL=%q: err = %v, want a refusal naming DATABASE_URL and %s", tc.databaseURL, err, tc.host)
+		}
+	}
+	for _, databaseURL := range []string{
+		"postgres://u@127.0.0.1:5432/d",
+		"postgres://u@localhost:5432/d",
+		"postgres://u@[::1]:5432/d",
+		"postgres:///d?host=/var/run/postgresql",
+		"host=/tmp dbname=d",
+	} {
+		if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DATABASE_URL": databaseURL})); err != nil {
+			t.Errorf("DATABASE_URL=%q: %v, want a loopback database accepted", databaseURL, err)
+		}
+	}
+
+	// A URL naming no host is dialled at libpq's PGHOST default, which the check reads too.
+	t.Setenv("PGHOST", "db.example.com")
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DATABASE_URL": "postgres:///d"})); err == nil || !strings.Contains(err.Error(), "db.example.com") {
+		t.Errorf("DATABASE_URL=postgres:///d with PGHOST=db.example.com: err = %v, want a refusal naming db.example.com", err)
+	}
+}
+
+func TestResolveBootConfigDevSignInRefusesAConfiguredSigningKey(t *testing.T) {
+	_, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_SIGNING_KEY": "abc"}))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNING_KEY") {
+		t.Fatalf("configured signing key: err = %v, want a refusal naming DISPATCH_SIGNING_KEY", err)
+	}
+}
+
+// With the flag a loopback client acts as any allowlisted human, so the process may not publish
+// into another machine's NATS.
+func TestResolveBootConfigDevSignInRefusesRemoteNATS(t *testing.T) {
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1"})); err == nil || !strings.Contains(err.Error(), "ENVOY_ALLOW_REMOTE_NATS") {
+		t.Fatalf("ENVOY_ALLOW_REMOTE_NATS=1 with NATS on: err = %v, want a refusal naming ENVOY_ALLOW_REMOTE_NATS", err)
+	}
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1", "DISPATCH_NATS_DISABLED": "1"})); err != nil {
+		t.Fatalf("ENVOY_ALLOW_REMOTE_NATS=1 with NATS off: %v, want accepted", err)
+	}
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1", "DISPATCH_DEV_SIGNIN": ""})); err != nil {
+		t.Fatalf("ENVOY_ALLOW_REMOTE_NATS=1 without the flag: %v, want accepted", err)
+	}
+}
+
+// With the flag a loopback client acts as any allowlisted human, so the process may not decide
+// another machine's secrets broker requests as one.
+func TestResolveBootConfigDevSignInRefusesARemoteAgentSecretsBroker(t *testing.T) {
+	broker := func(brokerURL string) map[string]string {
+		return map[string]string{"DISPATCH_AGENT_SECRETS_URL": brokerURL, "DISPATCH_AGENT_SECRETS_TOKEN": "ui-token"}
+	}
+	for _, brokerURL := range []string{"https://broker.example.com", "http://10.0.0.5:13380"} {
+		if _, err := resolveBootConfig(devSignInEnvironment(broker(brokerURL))); err == nil || !strings.Contains(err.Error(), "DISPATCH_AGENT_SECRETS_URL") {
+			t.Errorf("DISPATCH_AGENT_SECRETS_URL=%s: err = %v, want a refusal naming DISPATCH_AGENT_SECRETS_URL", brokerURL, err)
+		}
+	}
+	for _, brokerURL := range []string{"http://127.0.0.1:13380", "http://localhost:13380", "http://[::1]:13380"} {
+		if _, err := resolveBootConfig(devSignInEnvironment(broker(brokerURL))); err != nil {
+			t.Errorf("DISPATCH_AGENT_SECRETS_URL=%s: %v, want a loopback broker accepted", brokerURL, err)
+		}
+	}
+	withoutFlag := broker("https://broker.example.com")
+	withoutFlag["DISPATCH_DEV_SIGNIN"] = ""
+	if _, err := resolveBootConfig(devSignInEnvironment(withoutFlag)); err != nil {
+		t.Errorf("a remote broker without the flag: %v, want accepted", err)
+	}
+}
+
+// With the flag a loopback client acts as any allowlisted human, so the process may not deliver
+// that human's mentions through another machine's Envoy listener.
+func TestResolveBootConfigDevSignInRefusesARemoteEnvoyListener(t *testing.T) {
+	for _, listenerURL := range []string{"https://listener.example.com", "http://10.0.0.5:9020"} {
+		if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_URL": listenerURL})); err == nil || !strings.Contains(err.Error(), "ENVOY_URL") {
+			t.Errorf("ENVOY_URL=%s: err = %v, want a refusal naming ENVOY_URL", listenerURL, err)
+		}
+	}
+	// Unset, ENVOY_URL defaults to this machine's listener.
+	for _, listenerURL := range []string{"", "http://127.0.0.1:9020", "http://localhost:9020", "http://[::1]:9020"} {
+		if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_URL": listenerURL})); err != nil {
+			t.Errorf("ENVOY_URL=%q: %v, want a loopback listener accepted", listenerURL, err)
+		}
+	}
+	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_URL": "https://listener.example.com", "DISPATCH_DEV_SIGNIN": ""})); err != nil {
+		t.Errorf("a remote listener without the flag: %v, want accepted", err)
+	}
+}
+
+func TestListenAddressJoinsAnIPv6LoopbackHost(t *testing.T) {
+	for _, tc := range []struct{ host, port, want string }{
+		{host: "::1", port: "", want: "[::1]:8766"},
+		{host: "::1", port: "8799", want: "[::1]:8799"},
+		{host: "[::1]", port: "", want: "[::1]:8766"},
+		{host: "[::1]", port: "8799", want: "[::1]:8799"},
+		{host: "127.0.0.1", port: "8799", want: "127.0.0.1:8799"},
+		{host: "127.0.0.1", port: "", want: "127.0.0.1:8766"},
+		{host: "", port: "", want: ":8766"},
+		{host: "", port: "8799", want: ":8799"},
+	} {
+		got, err := listenAddress(envGetter(map[string]string{"DISPATCH_LISTEN_HOST": tc.host, "DISPATCH_PORT": tc.port}))
+		if err != nil || got != tc.want {
+			t.Errorf("host %q port %q: listenAddress = %q, %v; want %q", tc.host, tc.port, got, err, tc.want)
+		}
+	}
+	for _, port := range []string{"0", "70000"} {
+		if got, err := listenAddress(envGetter(map[string]string{"DISPATCH_LISTEN_HOST": "127.0.0.1", "DISPATCH_PORT": port})); err == nil || !strings.Contains(err.Error(), "DISPATCH_PORT") {
+			t.Errorf("port %q: listenAddress = %q, %v; want a refusal naming DISPATCH_PORT", port, got, err)
+		}
+	}
+}

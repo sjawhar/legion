@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -65,5 +66,25 @@ func TestVerifySessionRejectsExpiredCookie(t *testing.T) {
 	value := signedCookie("sjawhar", 0, expired, "signing-key")
 	if _, ok := VerifySession(value, "signing-key"); ok {
 		t.Errorf("expired cookie should not verify")
+	}
+}
+
+func TestNewSigningKeyIsFreshEachCall(t *testing.T) {
+	first, err := NewSigningKey()
+	if err != nil {
+		t.Fatalf("first key: %v", err)
+	}
+	second, err := NewSigningKey()
+	if err != nil {
+		t.Fatalf("second key: %v", err)
+	}
+	if first == second {
+		t.Fatalf("two calls returned the same key %q", first)
+	}
+	for _, key := range []string{first, second} {
+		decoded, err := base64.RawURLEncoding.DecodeString(key)
+		if err != nil || len(decoded) != 32 {
+			t.Errorf("key %q decodes to %d bytes (err %v), want 32 bytes of base64url", key, len(decoded), err)
+		}
 	}
 }

@@ -56,6 +56,10 @@ type AppContext struct {
 	app            *auth.AppConfig // nil ⇒ not configured
 	appSource      string          // "env" | "file:<path>" | "" — for diagnostic logs
 	appMu          sync.RWMutex
+	// devSignInHost is the dashboard origin's host:port when the dev sign-in route is mounted,
+	// and empty otherwise. Only BuildAppContext sets it, from DevSignInOrigin, so no caller can
+	// turn the route on without the origin check.
+	devSignInHost string
 }
 
 // AppContextOptions is the explicit-injection bundle main.go assembles
@@ -87,6 +91,11 @@ type AppContextOptions struct {
 	AgentSecretsURL   string
 	AgentSecretsToken string
 	TestHooksEnabled  bool
+	// DevSignIn mounts GET /auth/_dev/signin, which issues the session cookie for an allowlisted
+	// login with no GitHub exchange, and makes the whole router refuse a request whose Host is
+	// not the dashboard origin. cmd/dispatch sets it from DISPATCH_DEV_SIGNIN behind its boot
+	// fence; BuildAppContext refuses it for a non-loopback ServerURL.
+	DevSignIn bool
 }
 
 // BuildAppContext bundles the shared HTTP-handler state.
@@ -99,6 +108,17 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	}
 	if opts.Identity == nil {
 		return nil, fmt.Errorf("BuildAppContext: Identity required")
+	}
+	var devSignInHost string
+	if opts.DevSignIn {
+		if opts.Sessions == nil {
+			return nil, fmt.Errorf("BuildAppContext: DevSignIn requires a Sessions store")
+		}
+		host, err := DevSignInOrigin(opts.ServerURL)
+		if err != nil {
+			return nil, fmt.Errorf("BuildAppContext: %w", err)
+		}
+		devSignInHost = host
 	}
 	apiDeps, err := api.NewDeps(api.DepsInput{
 		Store:             opts.Store,
@@ -135,6 +155,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		RepoProjects:   opts.RepoProjects,
 		DefaultProject: opts.DefaultProject,
 		ServerURL:      strings.TrimSuffix(opts.ServerURL, "/"),
+		devSignInHost:  devSignInHost,
 		apiDeps:        apiDeps,
 		app:            opts.App,
 		appSource:      opts.AppSource,
@@ -187,7 +208,11 @@ func New(ctx *AppContext) http.Handler {
 	mux.HandleFunc("/api/github/graphql", r.apiGithubGraphql)
 	api.Register(mux, r.ctx.apiDeps)
 	mux.HandleFunc("/", r.staticHandler)
-	return r.enforceCookieOrigin(mux)
+	if ctx.devSignInHost == "" {
+		return r.enforceCookieOrigin(mux)
+	}
+	mux.HandleFunc("GET /auth/_dev/signin", r.authDevSignIn)
+	return requireHost(ctx.devSignInHost, r.enforceCookieOrigin(mux))
 }
 
 // ───── auth ─────────────────────────────────────────────────────────────────
@@ -258,18 +283,30 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "persist user")
 		return
 	}
-	generation := int64(0)
-	if r.ctx.Sessions != nil {
-		generation, err = r.ctx.Sessions.EnsureSession(req.Context(), user.Login)
-		if err != nil {
-			slog.Error("dispatch: ensure session generation failed", "login", user.Login, "error", err)
-			writeError(w, http.StatusInternalServerError, "session generation")
-			return
-		}
+	if !r.issueSession(w, req, user.Login) {
+		return
 	}
-	w.Header().Add("Set-Cookie", auth.IssueSessionCookie(user.Login, generation, r.ctx.SigningKey))
 	http.Redirect(w, req, pending.next, http.StatusFound)
 }
+
+// issueSession ensures login's session generation and sets the session cookie a sign-in issues,
+// answering 500 when the generation cannot be recorded. authCallback and authDevSignIn both mint
+// through it, so a local dev sign-in carries exactly the cookie a GitHub sign-in does.
+func (r *router) issueSession(w http.ResponseWriter, req *http.Request, login string) bool {
+	generation := int64(0)
+	if r.ctx.Sessions != nil {
+		var err error
+		generation, err = r.ctx.Sessions.EnsureSession(req.Context(), login)
+		if err != nil {
+			slog.Error("dispatch: ensure session generation failed", "login", login, "error", err)
+			writeError(w, http.StatusInternalServerError, "session generation")
+			return false
+		}
+	}
+	w.Header().Add("Set-Cookie", auth.IssueSessionCookie(login, generation, r.ctx.SigningKey))
+	return true
+}
+
 func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
 	login, ok := r.login(w, req)
 	if !ok {
@@ -317,6 +354,12 @@ func (r *router) apiGithubGraphql(w http.ResponseWriter, req *http.Request) {
 func (r *router) requireUser(w http.ResponseWriter, req *http.Request) *auth.User {
 	login, ok := r.login(w, req)
 	if !ok {
+		return nil
+	}
+	if r.ctx.devSignInHost != "" {
+		// Any loopback client can mint any allowlisted login here, so no stored token pair is
+		// used: one a GitHub sign-in stored, or one in a database another server shares.
+		writeCodeError(w, http.StatusServiceUnavailable, "github token unavailable: a dev sign-in server never uses a stored GitHub token", "GITHUB_TOKEN_UNAVAILABLE")
 		return nil
 	}
 	user, err := r.ctx.Users.Read(req.Context(), login)
