@@ -77,10 +77,14 @@ type Client struct {
 
 	reconnectHooksMu sync.Mutex
 	reconnectHooks   []func(*nats.Conn) error
-	// hookedConn is the connection the reconnect hooks last moved the state they keep onto, under
-	// mu; nil while a run since the last reconnect has not succeeded. The hooks are due while it is
-	// not Conn.
-	hookedConn *nats.Conn
+	// rewatchMu holds a run of the reconnect hooks (rewatch), so two never run at once.
+	rewatchMu sync.Mutex
+	// connEvents counts the connection events the reconnect hooks follow, under mu: each connection
+	// the client installs after its first, and each reconnect of the current one in place.
+	// hookedEvents is the count the last run that succeeded began at. The hooks are due while the
+	// two differ.
+	connEvents   uint64
+	hookedEvents uint64
 
 	// recovery state
 	recovering int32
@@ -305,7 +309,6 @@ func newClient(urls []string, ownsStream bool, options []ConnectOption) (*Client
 		}
 	}
 	c.Conn = nc
-	c.hookedConn = nc
 	c.js = js
 	return c, nil
 }
@@ -336,7 +339,14 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 		return
 	}
 	// nc is the connection already in c.Conn, reconnected in place, and the JetStream context taken
-	// from it keeps working, so neither field is reassigned here.
+	// from it keeps working, so neither field is reassigned here. The reconnect is a connection
+	// event, so the hooks are due. A callback nats.go delivers late for a connection the client has
+	// since replaced is not: the replacement was its own event.
+	c.mu.Lock()
+	if nc == c.Conn {
+		c.connEvents++
+	}
+	c.mu.Unlock()
 	restoreErr := c.restoreSubscriptions()
 	if errors.Is(restoreErr, errStopped) {
 		// Stopped between the check above and the re-subscribe: same as that branch.
@@ -355,7 +365,7 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 	// The hooks run whatever the restore returned: the state they move holds no subscription, and
 	// while a listener waits out the task that holds its durable, the durable's restore is refused
 	// by design while /v1 and the role lane already read that state.
-	if err := c.rewatch(nc); err != nil {
+	if err := c.rewatch(); err != nil {
 		// A failure after the stop is the stop: a shutdown that began while a hook ran closed what
 		// the hook was reading through. recover reports that case the same way, with the error kept
 		// on the line in case a real failure coincided with the stop.
@@ -371,9 +381,10 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 }
 
 // AddReconnectHook registers recovery for state that is attached to NATS but not represented by
-// Client subscriptions, such as KV watchers. The hooks run once at each reconnect in place and
-// once on each connection a recovery installs, whatever restoring the subscriptions returned; a
-// recovery runs them again only after a run on its connection failed.
+// Client subscriptions, such as KV watchers. The hooks run on the client's connection once for each
+// connection event, a reconnect in place or a connection the client dials to replace a closed one,
+// whatever restoring the subscriptions returned. Runs take turns, never two at once, and a recovery
+// runs the hooks again only after a run failed.
 func (c *Client) AddReconnectHook(hook func(*nats.Conn) error) {
 	if hook == nil {
 		return
@@ -383,26 +394,36 @@ func (c *Client) AddReconnectHook(hook func(*nats.Conn) error) {
 	c.reconnectHooksMu.Unlock()
 }
 
-// rewatch runs the reconnect hooks on conn and, once they all succeed, records conn as the
-// connection they moved state onto. Until then the hooks are due (hooksDue).
-func (c *Client) rewatch(conn *nats.Conn) error {
+// rewatch runs the reconnect hooks on the current connection while they are due (hooksDue), one
+// run at a time: a caller that finds a run in progress waits for it to end, then runs the hooks only
+// if they are still due. A run that succeeds covers the connection events counted when it began, so
+// an event during the run leaves the hooks due for one more.
+func (c *Client) rewatch() error {
+	c.rewatchMu.Lock()
+	defer c.rewatchMu.Unlock()
 	c.mu.Lock()
-	c.hookedConn = nil
+	conn, events := c.Conn, c.connEvents
+	due := events != c.hookedEvents
 	c.mu.Unlock()
+	if !due {
+		return nil
+	}
 	if err := c.runReconnectHooks(conn); err != nil {
 		return err
 	}
 	c.mu.Lock()
-	c.hookedConn = conn
+	c.hookedEvents = events
 	c.mu.Unlock()
 	return nil
 }
 
-// hooksDue reports whether the reconnect hooks have yet to move state onto the current connection.
+// hooksDue reports whether a connection event has yet to be covered by a run of the reconnect hooks
+// that succeeded. It still reads true while the run covering the event is in progress, so a caller
+// that acts on it goes through rewatch, which decides under its lock.
 func (c *Client) hooksDue() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.hookedConn != c.Conn
+	return c.connEvents != c.hookedEvents
 }
 
 func (c *Client) runReconnectHooks(conn *nats.Conn) error {
@@ -624,13 +645,11 @@ func (c *Client) recover() {
 			failure = "envoy nats recovery resubscribe failed"
 			err = c.restoreSubscriptions()
 			// The hooks move onto a connection they have not reached whatever the restore returned,
-			// as onReconnect runs them, and once: a durable a listener waits out keeps the restore
-			// failing, attempt after attempt, while the hooks' state is already current.
-			if !c.stopped() && c.hooksDue() {
-				c.mu.Lock()
-				conn := c.Conn
-				c.mu.Unlock()
-				err = errors.Join(err, c.rewatch(conn))
+			// as onReconnect runs them, and only while they are due: a durable a listener waits out
+			// keeps the restore failing, attempt after attempt, while the hooks' state is already
+			// current. A run onReconnect has in progress is waited for, never joined by a second.
+			if !c.stopped() {
+				err = errors.Join(err, c.rewatch())
 			}
 		}
 		// A failure after the stop is the stop: the dial it cancelled, a subscription the drain
@@ -760,6 +779,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 	}
 	c.Conn = nc
 	c.js = js
+	c.connEvents++
 	c.mu.Unlock()
 	return nil
 }

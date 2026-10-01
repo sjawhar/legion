@@ -246,6 +246,65 @@ func TestReconnectHooksRunWhileTheDurableCannotBind(t *testing.T) {
 	}
 }
 
+// The reconnect hooks run one at a time, once for each connection event: a recovery that finds a
+// run in progress waits for it, and starts no run for an event that run covered. Here a recovery
+// waiting out a held durable runs them on the connection it dialed to replace a closed one, and an
+// in-place reconnect of that connection right after the run ends runs them again, while the
+// recovery's next attempt, a second later, lands during the reconnect's run. Two events, two runs,
+// never two at once: a recovery that read the hooks as due while the reconnect's run was still in
+// progress started a third, alongside it.
+func TestReconnectHooksRunOneAtATimeOncePerConnectionEvent(t *testing.T) {
+	_, uri := startNATS(t)
+	client, err := bus.ConnectOwningStream([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+	waitOutHeldDurable(t, client, uri)
+	// Longer than the recovery's first backoff (1 s), so its second attempt comes during the run
+	// the in-place reconnect starts as the first run ends.
+	const hookTakes = 3 * time.Second
+	var runs, running, mostAtOnce atomic.Int32
+	ended := make(chan struct{}, 8)
+	client.AddReconnectHook(func(*natsgo.Conn) error {
+		runs.Add(1)
+		now := running.Add(1)
+		for most := mostAtOnce.Load(); now > most; most = mostAtOnce.Load() {
+			if mostAtOnce.CompareAndSwap(most, now) {
+				break
+			}
+		}
+		time.Sleep(hookTakes)
+		running.Add(-1)
+		ended <- struct{}{}
+		return nil
+	})
+
+	client.Conn.Close()
+	select {
+	case <-ended:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the hooks never ran on the connection the recovery dialed")
+	}
+	if err := client.Conn.ForceReconnect(); err != nil {
+		t.Fatalf("reconnect the replacement in place: %v", err)
+	}
+	select {
+	case <-ended:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the hooks never ran for the in-place reconnect")
+	}
+	// The recovery's attempt that came during the reconnect's run, and its next one 2 s later, have
+	// both been made by now.
+	time.Sleep(hookTakes)
+	if got, most := runs.Load(), mostAtOnce.Load(); got != 2 || most != 1 {
+		t.Fatalf("the hooks ran %d time(s) for two connection events, at most %d at once; want 2 runs, one at a time", got, most)
+	}
+	if client.SubOK() {
+		t.Fatal("SubOK reports the durable bound while another connection holds it")
+	}
+}
+
 // waitOutHeldDurable puts client where a listener waiting out the task that holds its durable is:
 // a durable bound from another connection on uri, and client's own bind of it refused, which
 // leaves its JetStream subscription registered but unbound.
