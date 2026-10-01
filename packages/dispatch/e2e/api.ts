@@ -478,7 +478,7 @@ export function createBroadcast(
   return request<BroadcastCreated>(
     "/api/v1/broadcasts",
     "POST",
-    { idempotency_key: crypto.randomUUID(), ...input },
+    { ...input, idempotency_key: input.idempotency_key ?? crypto.randomUUID() },
     options
   );
 }
