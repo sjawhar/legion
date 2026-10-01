@@ -1,4 +1,4 @@
-import { DELIVERY_CAPABILITIES, MAX_BROADCAST_RECIPIENTS } from "@legion/contracts";
+import { DELIVERY_CAPABILITIES } from "@legion/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
@@ -10,7 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { agentMessagesQuery, inboxQuery, userAgentStateQuery } from "../../api/queries";
@@ -65,6 +65,8 @@ import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { deliveryAttempts } from "./attempts";
+import { type BroadcastSend, BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
+import { broadcastPlan, broadcastSendState, exclusionLine } from "./broadcast-plan";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
 import {
   AGENT_ROW_SELECTOR,
@@ -77,7 +79,7 @@ import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpe
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
-/** The composer's one notice slot: the recipient limit, a refused send or the exclusions, one at
+/** The composer's one notice slot: the recipient limit or the exclusions, one at
  *  a time. In the compact grid it is one line that scrolls sideways like the chips: between the
  *  mode and Send on a narrow screen, adding no height, and the third and last row on a short one. */
 const composerLine = `mt-2 text-sm narrow-or-short:order-2 narrow-or-short:col-start-2 narrow-or-short:mt-0 narrow-or-short:min-w-0 narrow-or-short:overflow-x-auto narrow-or-short:text-xs narrow-or-short:whitespace-nowrap short:order-3 short:col-span-4 short:col-start-1 ${dangerText}`;
@@ -1025,136 +1027,6 @@ export function filterAgents(agents: readonly Agent[], filters: AgentFilters): A
   );
 }
 
-/** A session a broadcast would leave out, worded the way the server reports it, so the
- *  composer and the create response say the same thing. */
-interface BroadcastExclusionPlan {
-  /** The live session the chosen mode leaves out; absent when it has left the registry. */
-  readonly agent: Agent | undefined;
-  readonly reason: string;
-  readonly sessionID: string;
-}
-
-/** The sessions a broadcast of the current selection reaches, and the selected ones it leaves out. */
-interface BroadcastPlan {
-  readonly excluded: readonly BroadcastExclusionPlan[];
-  readonly recipients: readonly Agent[];
-}
-
-/** What Send shows (`label`, and `compactLabel` on a narrow or short screen), why it cannot be
- *  pressed (`reason`, null while it can), and the mode that would reach a selection this one
- *  reaches none of (`hint`). */
-interface BroadcastSendState {
-  readonly compactLabel: string;
-  readonly hint: string | null;
-  readonly label: string;
-  readonly reason: string | null;
-}
-
-/**
- * What sending the current selection would do: the sessions it reaches, and the selected
- * sessions it leaves out. A session that does not advertise the chosen mode is excluded
- * rather than switched to another one - the mode is part of what the sender said - and a
- * selection kept across a session going away excludes it too, which is exactly the judgment
- * the server repeats against its own registry read when the send arrives.
- */
-export function broadcastPlan(
-  selected: ReadonlySet<string>,
-  agents: readonly Agent[],
-  delivery: MessageDeliveryMode
-): BroadcastPlan {
-  const live = new Map(agents.map((agent) => [agent.session_id, agent]));
-  const excluded: BroadcastExclusionPlan[] = [];
-  const recipients: Agent[] = [];
-  for (const sessionID of selected) {
-    const agent = live.get(sessionID);
-    if (agent === undefined) {
-      excluded.push({ agent: undefined, reason: "no live session", sessionID });
-      continue;
-    }
-    if (!agent.capabilities.includes(delivery)) {
-      excluded.push({ agent, reason: `does not advertise ${delivery}`, sessionID });
-      continue;
-    }
-    recipients.push(agent);
-  }
-  return { excluded, recipients };
-}
-
-/**
- * What Send says about the send it would make: its `label`, and the `reason` it cannot be
- * pressed (null while it can). A button that only counts - `Send to 0` - reads as a number, not
- * a refusal, so each cause reads differently: a selection none of whom this mode reaches (split
- * into sessions that do not advertise the mode and sessions that have left the registry), the
- * recipient limit, and an empty message. The limit's reason is also its notice line, word for
- * word. A send in flight is the caller's `Sending…`, and an empty selection has no composer.
- *
- * When the mode is what leaves everyone out, `hint` names the mode that reaches the most of
- * them - by what it would do, not by the control that picks it, so it holds however the mode is
- * chosen. The Excluded line carries it, since that line is what a dead button points at.
- *
- * On a narrow or short screen Send shares its row with that line, and a label as wide as
- * `No live recipient for btw` would squeeze the line to nothing - the reason a phone reader most
- * needs - so there the refusal reads `No recipient`, about as wide as a count.
- */
-export function broadcastSendState(
-  { excluded, recipients }: BroadcastPlan,
-  delivery: MessageDeliveryMode,
-  body: string
-): BroadcastSendState {
-  const label = `Send to ${recipients.length}`;
-  if (recipients.length > 0) {
-    const reason =
-      recipients.length > MAX_BROADCAST_RECIPIENTS
-        ? `At most ${MAX_BROADCAST_RECIPIENTS} recipients per broadcast; this one would reach ${recipients.length}.`
-        : body.trim() === ""
-          ? "Type a message first."
-          : null;
-    return { compactLabel: label, hint: null, label, reason };
-  }
-  // No recipient means every selected session is excluded, and the composer mounts only with a
-  // selection, so `excluded` is the whole selection here.
-  const selected = excluded.length;
-  const lacking = excluded.flatMap((item) => (item.agent === undefined ? [] : [item.agent]));
-  const gone = selected - lacking.length;
-  const sentences: string[] = [];
-  if (lacking.length > 0) {
-    sentences.push(
-      selected === 1
-        ? `The selected agent does not advertise ${delivery}.`
-        : lacking.length === selected
-          ? `None of the ${selected} selected agents advertises ${delivery}.`
-          : `${lacking.length} of the ${selected} selected agents ${lacking.length === 1 ? "does" : "do"} not advertise ${delivery}.`
-    );
-  }
-  if (gone > 0) {
-    sentences.push(
-      selected === 1
-        ? "The selected agent is no longer live."
-        : gone === selected
-          ? `None of the ${selected} selected agents is live any more.`
-          : `${gone} ${gone === 1 ? "is" : "are"} no longer live.`
-    );
-  }
-  let best: { count: number; mode: MessageDeliveryMode } | undefined;
-  for (const mode of DELIVERY_CAPABILITIES) {
-    if (mode === delivery) continue;
-    const count = lacking.filter((agent) => agent.capabilities.includes(mode)).length;
-    if (count > (best?.count ?? 0)) best = { count, mode };
-  }
-  const hint =
-    best === undefined
-      ? null
-      : selected === 1
-        ? `Sending as ${best.mode} would reach it.`
-        : `Sending as ${best.mode} would reach ${best.count} of them.`;
-  return {
-    compactLabel: "No recipient",
-    hint,
-    label: lacking.length === 0 ? "No live recipient" : `No live recipient for ${delivery}`,
-    reason: hint === null ? sentences.join(" ") : `${sentences.join(" ")} ${hint}`,
-  };
-}
-
 /** The machines, roles and directories the live sessions actually occupy: a filter can only
  *  offer what is there, so a stale option can never hide every agent. */
 function filterOptions(agents: readonly Agent[]): { machines: string[]; roles: string[] } {
@@ -1280,6 +1152,7 @@ function SelectionHeader({
  * the ones this mode leaves out. It follows the list and sticks to the viewport's bottom, so
  * appearing costs no layout above the rows: the checkbox that summoned it stays under the
  * pointer. A long recipient list scrolls inside it rather than growing it past half the screen.
+ * Send hands the request to the page's queue (`onSend`) at the press.
  */
 function BroadcastComposer({
   agents,
@@ -1287,7 +1160,7 @@ function BroadcastComposer({
   delivery,
   onBody,
   onDelivery,
-  onSent,
+  onSend,
   selected,
   onDeselect,
 }: {
@@ -1297,54 +1170,25 @@ function BroadcastComposer({
   onBody: (body: string) => void;
   onDelivery: (delivery: MessageDeliveryMode) => void;
   onDeselect: (sessionID: string) => void;
-  onSent: () => void;
+  onSend: (send: BroadcastSend) => void;
   selected: ReadonlySet<string>;
 }): ReactNode {
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const plan = broadcastPlan(selected, agents, delivery);
   const { excluded, recipients } = plan;
   // The server counts the `session_ids` it is sent - these recipients - against the shared limit
-  // and refuses a send over it; saying so before Send saves the round trip. The same predicate
-  // gives the limit the notice slot.
-  const overLimit = recipients.length > MAX_BROADCAST_RECIPIENTS;
+  // and refuses a send over it; saying so before Send saves the round trip.
   const sendState = broadcastSendState(plan, delivery, body);
   const noticeId = useId();
-  const send = useMutation({
-    mutationFn: () =>
-      api.createBroadcast({
-        body,
-        delivery,
-        session_ids: recipients.map((agent) => agent.session_id),
-      }),
-    onSuccess: (created) => {
-      onSent();
-      for (const recipient of created.recipients) {
-        void queryClient.invalidateQueries({
-          queryKey: agentMessagesQuery(recipient.session_id).queryKey,
-        });
-      }
-      void queryClient.invalidateQueries({ queryKey: ["broadcast"] });
-      // The exclusions travel with the navigation: they are a fact about this send, not about
-      // the broadcast, so the server stores none and this is the only place they can be shown.
-      void navigate(`/agents/broadcasts/${created.id}`, { state: { excluded: created.excluded } });
-    },
-  });
-  // The notice slot holds one line, highest first: the limit, then a refused send, then the
-  // exclusions. The exclusions outrank a refused send once nobody is left to reach, since then
-  // they are why Send is dead and the refusal is about a send already over. A higher notice
-  // hiding the Excluded line hides no name: every excluded session's chip still carries its
-  // reason. Whatever the line says bears on the send, so Send is described by it.
-  const notice = overLimit
-    ? "limit"
-    : send.isError && recipients.length > 0
-      ? "refused"
-      : excluded.length > 0
-        ? "excluded"
-        : null;
-  // The limit and the exclusions give Send's reason on the notice line; an empty message has no
-  // line of its own, so Send carries its reason on a hidden one.
-  const refusalShownBy = overLimit || recipients.length === 0 ? noticeId : undefined;
+  // The notice slot holds one line, highest first: the limit, then the exclusions. Over the limit
+  // and with nobody to reach, the line is Send's reason; otherwise an Excluded line still bears on
+  // the send, so Send is described by it. The limit hiding the Excluded line hides no name: every
+  // excluded session's chip still carries its reason.
+  const reasonOnNotice = sendState.kind === "limit" || sendState.kind === "nobody";
+  const notice = reasonOnNotice
+    ? sendState.reason
+    : excluded.length > 0
+      ? exclusionLine(excluded)
+      : null;
 
   // On a narrow or short screen (`narrow-or-short`, styles.css) the composer is a compact grid,
   // so it takes about a third of a phone screen: the heading on one line, the recipients in one
@@ -1357,7 +1201,7 @@ function BroadcastComposer({
   return (
     <section
       aria-label="Broadcast"
-      className={`sticky bottom-0 z-10 mt-3 max-h-[50vh] overflow-y-auto rounded-xl border p-3 narrow-or-short:grid narrow-or-short:grid-cols-[auto_minmax(0,1fr)_auto] narrow-or-short:items-center narrow-or-short:gap-2 short:grid-cols-[auto_minmax(0,1fr)_auto_auto] ${card} ${borderDefault}`}
+      className={`max-h-[50vh] overflow-y-auto rounded-xl border p-3 narrow-or-short:grid narrow-or-short:grid-cols-[auto_minmax(0,1fr)_auto] narrow-or-short:items-center narrow-or-short:gap-2 short:grid-cols-[auto_minmax(0,1fr)_auto_auto] ${card} ${borderDefault}`}
     >
       <h2
         className={`text-sm font-semibold narrow-or-short:col-span-full narrow-or-short:truncate short:col-span-1 ${textPrimaryOnCanvas}`}
@@ -1409,40 +1253,24 @@ function BroadcastComposer({
         rows={3}
         value={body}
       />
-      {notice === "limit" ? (
+      {notice === null ? null : (
         <p className={composerLine} id={noticeId}>
-          {sendState.reason}
+          {notice}
         </p>
-      ) : notice === "refused" ? (
-        <p className={composerLine} id={noticeId}>
-          Could not send: {send.error instanceof Error ? send.error.message : "network error"}
-        </p>
-      ) : notice === "excluded" ? (
-        <p className={composerLine} id={noticeId}>
-          Excluded:{" "}
-          {excluded
-            .map((item) => `${sessionLabel(item.sessionID, item.agent?.title)} (${item.reason})`)
-            .join(", ")}
-          . Nothing is sent to them, and no other mode is substituted.
-          {sendState.hint === null ? null : ` ${sendState.hint}`}
-        </p>
-      ) : null}
+      )}
       <RefusableButton
-        busy={send.isPending ? "Sending…" : undefined}
         className="mt-2 narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4"
-        describedBy={notice === null || refusalShownBy !== undefined ? undefined : noticeId}
-        onPress={() => send.mutate()}
-        refusal={sendState.reason}
-        refusalShownBy={refusalShownBy}
+        describedBy={notice === null || reasonOnNotice ? undefined : noticeId}
+        onPress={() =>
+          onSend({
+            input: { body, delivery, session_ids: recipients.map((agent) => agent.session_id) },
+            selected: [...selected],
+          })
+        }
+        refusal={sendState.kind === "ready" ? null : sendState.reason}
+        refusalShownBy={reasonOnNotice ? noticeId : undefined}
       >
-        {sendState.compactLabel === sendState.label ? (
-          sendState.label
-        ) : (
-          <>
-            <span className="narrow-or-short:hidden">{sendState.label}</span>
-            <span className="hidden narrow-or-short:inline">{sendState.compactLabel}</span>
-          </>
-        )}
+        {sendState.label}
       </RefusableButton>
     </section>
   );
@@ -1479,10 +1307,13 @@ export function AgentsPage(): ReactNode {
   // session is named in the composer, so nothing is hidden either way.
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
   // The draft is page state too: the composer unmounts whenever the selection empties, and
-  // clearing a selection to pick again must not throw away a typed message or its mode. A
-  // successful send clears it.
+  // clearing a selection to pick again must not throw away a typed message or its mode. Send
+  // hands the message to the queue and clears it with the selection; Restore draft, on a send the
+  // server refused, puts the message, its mode and its selection back.
   const [draft, setDraft] = useState("");
   const [delivery, setDelivery] = useState<MessageDeliveryMode>("btw");
+  const queue = useBroadcastQueue(draft.trim() !== "" || selected.size > 0);
+  const showComposer = selected.size > 0 && agents.length > 0;
   // Not memoised: the split is a function of the clock, like the freshness dot beside each row,
   // and is recomputed on every render of this page.
   const { active, quiet, inactive } = partitionAgents(
@@ -1580,7 +1411,25 @@ export function AgentsPage(): ReactNode {
               />
             </div>
           )}
-          {selected.size === 0 ? null : (
+        </>
+      )}
+      {/* The sends sit outside the composer and outside the list, so a send's row outlives both:
+          the composer goes at every press, and the list empties when no agent is connected. */}
+      {queue.rows.length === 0 && !showComposer ? null : (
+        <div className="sticky bottom-0 z-10 mt-3 space-y-2">
+          {queue.rows.length === 0 ? null : (
+            <BroadcastSends
+              onRestore={(row) => {
+                queue.dismiss(row);
+                setDraft(row.send.input.body);
+                setDelivery(row.send.input.delivery);
+                setSelected(new Set(row.send.selected));
+              }}
+              onRetry={queue.retry}
+              rows={queue.rows}
+            />
+          )}
+          {showComposer ? (
             <BroadcastComposer
               agents={agents}
               body={draft}
@@ -1588,14 +1437,15 @@ export function AgentsPage(): ReactNode {
               onBody={setDraft}
               onDelivery={setDelivery}
               onDeselect={(sessionID) => select(sessionID, false)}
-              onSent={() => {
+              onSend={(send) => {
+                queue.enqueue(send);
                 setSelected(new Set());
                 setDraft("");
               }}
               selected={selected}
             />
-          )}
-        </>
+          ) : null}
+        </div>
       )}
       <EndedAgentsWithReplies live={agents} />
     </section>

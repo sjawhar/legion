@@ -13,7 +13,8 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { AuthGate } from "../../app";
-import { broadcastPlan, broadcastSendState, orderAgents, partitionAgents } from "./AgentsPage";
+import { orderAgents, partitionAgents } from "./AgentsPage";
+import { broadcastPlan, broadcastSendState } from "./broadcast-plan";
 
 // Delivery attempts are dated relative to the run: the dashboard only offers a
 // same-mode Retry while an attempt is inside the stream's duplicate window, so a
@@ -1489,44 +1490,52 @@ test("Send says which of its reasons stops it, and names the mode that would rea
   ) => broadcastSendState(broadcastPlan(new Set(selected), live, delivery), delivery, body);
   const both = [planner.session_id, reviewer.session_id];
 
-  // Every selected session has left the registry: no mode would help, and the label names none.
+  const tail = "Nothing is sent to them, and no other mode is substituted.";
+
+  // Every selected session has left the registry: the line names each by its ID, and no mode
+  // would help.
   expect(state(both, [], "btw")).toEqual({
-    compactLabel: "No recipient",
-    hint: null,
-    label: "No live recipient",
-    reason: "None of the 2 selected agents is live any more.",
+    kind: "nobody",
+    label: "No recipient",
+    reason: `Excluded: session:planner-… (no live session), session:reviewer… (no live session). ${tail}`,
   });
-  // One gone, one without the mode: both causes, and the mode that reaches the live one.
+  // One gone, one without the mode: each with its own cause, then the mode that reaches the
+  // live one.
   expect(state(both, [reviewer], "btw")).toEqual({
-    compactLabel: "No recipient",
-    hint: "Sending as aside would reach 1 of them.",
-    label: "No live recipient for btw",
-    reason:
-      "1 of the 2 selected agents does not advertise btw. 1 is no longer live. Sending as aside would reach 1 of them.",
+    kind: "nobody",
+    label: "No recipient",
+    reason: `Excluded: session:planner-… (no live session), Reviewer (does not advertise btw). ${tail} Sending as aside would reach 1 of them.`,
   });
   // The hint picks the mode that reaches the most: aside reaches both, btw only the Planner.
-  expect(state(both, agents, "steer").hint).toBe("Sending as aside would reach 2 of them.");
-  // A session advertising nothing gets no hint at all.
-  expect(state([deaf.session_id], [deaf], "btw")).toEqual({
-    compactLabel: "No recipient",
-    hint: null,
-    label: "No live recipient for btw",
-    reason: "The selected agent does not advertise btw.",
+  expect(state(both, agents, "steer")).toMatchObject({
+    reason: expect.stringMatching(/ Sending as aside would reach 2 of them\.$/),
   });
-  // Reachable sessions: the count stays the label, on every screen, and only a reason explains
-  // the refusal.
+  // One session alone is "it"; a session advertising nothing gets no hint at all.
+  expect(state([reviewer.session_id], [reviewer], "btw")).toMatchObject({
+    reason: expect.stringMatching(/ Sending as aside would reach it\.$/),
+  });
+  expect(state([deaf.session_id], [deaf], "btw")).toEqual({
+    kind: "nobody",
+    label: "No recipient",
+    reason: `Excluded: Deaf (does not advertise btw). ${tail}`,
+  });
+  // Reachable sessions keep the count as the label. The limit outranks an empty message.
+  const crowd = Array.from({ length: 101 }, (_, index) => ({
+    ...planner,
+    session_id: `crowd-${index}`,
+  }));
+  const everyone = crowd.map((agent) => agent.session_id);
+  expect(state(everyone, crowd, "btw", "")).toEqual({
+    kind: "limit",
+    label: "Send to 101",
+    reason: "At most 100 recipients per broadcast; this one would reach 101.",
+  });
   expect(state([planner.session_id], agents, "btw", "  ")).toEqual({
-    compactLabel: "Send to 1",
-    hint: null,
+    kind: "empty",
     label: "Send to 1",
     reason: "Type a message first.",
   });
-  expect(state([planner.session_id], agents, "btw")).toEqual({
-    compactLabel: "Send to 1",
-    hint: null,
-    label: "Send to 1",
-    reason: null,
-  });
+  expect(state([planner.session_id], agents, "btw")).toEqual({ kind: "ready", label: "Send to 1" });
 });
 
 test("the header checkbox follows the filters and its count never hides a selected row the filter hides", async () => {
