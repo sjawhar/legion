@@ -33,6 +33,23 @@
 
 ### Added
 
+- The planner checks its plan twice, as it did in June (LEGION-421). Before it drafts, it runs
+  `task(agent="plan-gap-analyst")`, which finds the hidden requirements, ambiguities, and
+  acceptance criteria no machine could check that the issue leaves unsaid, each with what the plan
+  must answer. After it drafts, it runs `task(agent="plan-reviewer")`, which checks that the plan
+  can be carried out as written, approves when in doubt, and names at most three blocking issues,
+  each with its evidence. The planner revises for at most three rounds, then proceeds with the
+  issues still standing; a check whose model call fails is recorded and never blocks the plan. The
+  plan handoff records both results (`gapAnalysis`, `planReview`). Both agents ship in `agents/`
+  with read-only file tools: the gap analyst runs on the operator's `@oracle` role and the reviewer
+  on `@review`, the roles the Go daemon's boot gate already requires for `oracle` and the
+  reviewer's pair. Oh My Pi also gives each the Dispatch and Envoy tools; their prompts forbid
+  writing through them, and nothing enforces it (LEGION-428). The Go daemon build's role prompts
+  dispatch `plan-gap-analyst` and `plan-reviewer`, and its boot gate refuses a plugin that ships
+  neither, so install the plugin first on either runtime: on the Sandbox runtime, the worker image
+  built from this release before the Go daemon build; on the tmux runtime, this
+  `@sjawhar/pi-legion-envoy` release before restarting the Go daemon. An old daemon build boots on
+  the new plugin.
 - Every Legion pull request body opens with a `## For the reviewer` brief — `Outcome`, `Why`,
   `Change`, `Look at first`, `Proven by`, `Not proven / risk`, `Size` — above the `## Verification`
   ledger, and the merger's READY packet leads with the brief's `Outcome:` and `Not proven / risk:`

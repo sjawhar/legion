@@ -16,6 +16,12 @@ function definition(file: string): { fields: Record<string, unknown>; body: stri
   };
 }
 
+// A prompt dispatches an agent by the name its frontmatter declares, and Oh My Pi finds it by that
+// name, not by its file's.
+test.each(agents)("%s declares the name of its file", (file) => {
+  expect(definition(file).fields.name).toBe(file.replace(/\.md$/, ""));
+});
+
 // Legion names no model, provider, or route: an agent's model is a role alias, which the operator's
 // modelRoles maps, and the daemon's boot gate refuses an alias no role configures. A concrete
 // selector would run the agent on a model the operator never chose, or on the parent's when that
@@ -61,4 +67,23 @@ test.each(agents)("%s autoloads exactly the skill:// names its body already has"
 // deep-worker.md's frontmatter says why.
 test("deep-worker.md is blocking", () => {
   expect(definition("deep-worker.md").fields.blocking).toBe(true);
+});
+
+// The planner's two checks: the planner waits for each answer before it drafts or revises
+// (blocking), they change no file, and each runs on the deployment's model role for its job.
+test.each([
+  ["plan-gap-analyst.md", "@oracle"],
+  ["plan-reviewer.md", "@review"],
+])("%s is a blocking, read-only check on %s", (file, model) => {
+  const { fields } = definition(file);
+  expect(fields.model).toEqual([model]);
+  expect(fields.blocking).toBe(true);
+  const readOnly = new Set(["read", "glob", "grep", "find", "lsp", "ast_grep", "todo"]);
+  const tools = String(fields.tools)
+    .split(",")
+    .map((tool) => tool.trim());
+  expect(
+    tools.filter((tool) => !readOnly.has(tool)),
+    `${file} lists a mutation tool`
+  ).toEqual([]);
 });

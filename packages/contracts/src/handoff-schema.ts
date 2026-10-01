@@ -27,6 +27,45 @@ export interface RequiredSkills {
   review?: string[];
 }
 
+/** The most rounds of plan review a planner runs before it proceeds with the plan (LEGION-421). */
+export const PLAN_REVIEW_MAX_ROUNDS = 3;
+
+export const PLAN_REVIEW_VERDICTS = ["approved", "rejected", "failed"] as const;
+
+/** One finding of the gap analysis run before the plan was drafted, and the plan's answer to it. */
+export interface GapFinding {
+  /** The hidden requirement, ambiguity, or missing machine-checkable acceptance criterion. */
+  finding: string;
+  /** How the plan answers it: the task, criterion, or decision that settles it. */
+  answer: string;
+}
+
+/** The gap analysis: its findings, or the error of the call that produced none. */
+export interface GapAnalysis {
+  /** Every finding with the plan's answer; empty when the analyst found none. */
+  findings?: GapFinding[];
+  /** The failed call's error. */
+  error?: string;
+}
+
+/** One blocking issue the plan review's last round named. */
+export interface PlanReviewIssue {
+  issue: string;
+  evidence: string;
+}
+
+/** The plan review: `approved` by its last round, still `rejected` after the last round the
+ * planner may run, or `failed` when a review's call failed. */
+export interface PlanReview {
+  verdict: (typeof PLAN_REVIEW_VERDICTS)[number];
+  /** The reviews run, a failed one included. */
+  rounds: number;
+  /** The blocking issues still standing: required when `rejected`, none when `approved`. */
+  remainingIssues?: PlanReviewIssue[];
+  /** The failed call's error: required when `failed`, and only then. */
+  error?: string;
+}
+
 /** One production-like proof: the changed behaviour exercised on the surface a user reaches
  * it through, never a unit suite. The implementer records its own before its phase completes;
  * the tester verifies that one and records its own (LEGION-53). */
@@ -72,6 +111,10 @@ export interface PlanHandoff extends BaseHandoff {
   concerns?: string[];
   workflowRecommendation?: string;
   requiredSkills?: RequiredSkills;
+  /** Required at write time; optional at read, so plans committed before the checks still load. */
+  gapAnalysis?: GapAnalysis;
+  /** Required at write time; optional at read, so plans committed before the checks still load. */
+  planReview?: PlanReview;
 }
 
 export interface ImplementHandoff extends BaseHandoff {
@@ -170,6 +213,28 @@ const requiredSkillsSchema = z
   .passthrough()
   .optional();
 
+const gapAnalysisSchema = z
+  .object({
+    findings: z
+      .array(z.object({ finding: z.string(), answer: z.string() }).passthrough())
+      .optional(),
+    error: z.string().optional(),
+  })
+  .passthrough()
+  .optional();
+
+const planReviewSchema = z
+  .object({
+    verdict: z.enum(PLAN_REVIEW_VERDICTS),
+    rounds: z.number(),
+    remainingIssues: z
+      .array(z.object({ issue: z.string(), evidence: z.string() }).passthrough())
+      .optional(),
+    error: z.string().optional(),
+  })
+  .passthrough()
+  .optional();
+
 const planSchema = baseHandoffSchema.extend({
   phase: z.literal("plan"),
   taskCount: z.number().optional(),
@@ -178,6 +243,8 @@ const planSchema = baseHandoffSchema.extend({
   concerns: z.array(z.string()).optional(),
   workflowRecommendation: z.string().optional(),
   requiredSkills: requiredSkillsSchema,
+  gapAnalysis: gapAnalysisSchema,
+  planReview: planReviewSchema,
 });
 
 const implementSchema = baseHandoffSchema.extend({
@@ -245,13 +312,85 @@ const reviewSchema = baseHandoffSchema.extend({
     .optional(),
 });
 
-const nonEmptySkillList = z.array(z.string().trim().min(1)).min(1);
+const nonEmptySkillList = z.array(nonEmpty).min(1);
 
-/** Write-time contract for a plan handoff: every downstream role's skill list is present and
- * non-empty, so a plan that names no skills is refused before it reaches the branch. A legitimate
- * "nothing applies" is the single entry `none: <what was looked through and why nothing fits>`,
- * since a nascent project may have no agent skills yet. Read-time validation (`planSchema`) stays
- * tolerant so plans committed before this rule still load. */
+/** A write-time plan check: the object is required, and its absence is named with what to record. */
+const recorded = <Shape extends z.ZodRawShape>(shape: Shape, whatToRecord: string) =>
+  z
+    .object(shape, {
+      error: (issue) =>
+        issue.input === undefined ? `missing — record ${whatToRecord}` : undefined,
+    })
+    .passthrough();
+
+/** The gap analysis before the plan was drafted: every finding with the plan's answer, or the
+ * failed call's error, never both. */
+const gapAnalysisWriteSchema = recorded(
+  {
+    findings: z.array(z.object({ finding: nonEmpty, answer: nonEmpty }).passthrough()).optional(),
+    error: nonEmpty.optional(),
+  },
+  "the gap analyst's `findings`, each with how the plan answers it (`[]` when it found none), or its failed call's `error`"
+).refine((analysis) => (analysis.findings === undefined) !== (analysis.error === undefined), {
+  message: "record exactly one of `findings` or the failed call's `error`",
+});
+
+/** The plan review after the draft: a rejection is recorded only after the last round the planner
+ * runs, with the issues that round named; an approval leaves none; a failure names its error. */
+const planReviewWriteSchema = recorded(
+  {
+    verdict: z.enum(PLAN_REVIEW_VERDICTS),
+    rounds: z.number().int().min(1).max(PLAN_REVIEW_MAX_ROUNDS),
+    remainingIssues: z
+      .array(z.object({ issue: nonEmpty, evidence: nonEmpty }).passthrough())
+      .optional(),
+    error: nonEmpty.optional(),
+  },
+  "the plan review's `verdict` and `rounds`, with `remainingIssues` when it was rejected or `error` when a review's call failed"
+).superRefine((review, ctx) => {
+  const remaining = review.remainingIssues?.length ?? 0;
+  if (review.verdict === "rejected" && remaining === 0) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["remainingIssues"],
+      message: "a rejected review records the blocking issues its last round named",
+    });
+  }
+  if (review.verdict === "rejected" && review.rounds < PLAN_REVIEW_MAX_ROUNDS) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["rounds"],
+      message: `a review still rejecting after ${review.rounds} of ${PLAN_REVIEW_MAX_ROUNDS} rounds is revised and reviewed again, not recorded`,
+    });
+  }
+  if (review.verdict === "approved" && remaining > 0) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["remainingIssues"],
+      message: "an approved review leaves no blocking issue standing",
+    });
+  }
+  if ((review.verdict === "failed") !== (review.error !== undefined)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["error"],
+      message: "a failed review records its call's error, and only a failed review does",
+    });
+  }
+});
+
+const REQUIRED_SKILLS_PROBLEM =
+  "missing or empty — name the skills this role must load, or state `none: <what you looked through and why nothing fits>`";
+
+/** Write-time contract for a plan handoff, where read-time validation (`planSchema`) stays
+ * tolerant so plans committed before each rule still load:
+ * - every downstream role's skill list is present and non-empty, so a plan that names no skills
+ *   is refused before it reaches the branch. A legitimate "nothing applies" is the single entry
+ *   `none: <what was looked through and why nothing fits>`, since a nascent project may have no
+ *   agent skills yet.
+ * - the gap analysis before the draft and the plan review after it are both recorded, a failed
+ *   call as its error, since a missing check never blocks the plan. The record is the planner's
+ *   own report: the write checks its shape, not that the checks ran. */
 const planWriteSchema = planSchema.extend({
   requiredSkills: z
     .object({
@@ -260,6 +399,8 @@ const planWriteSchema = planSchema.extend({
       review: nonEmptySkillList,
     })
     .passthrough(),
+  gapAnalysis: gapAnalysisWriteSchema,
+  planReview: planReviewWriteSchema,
 });
 
 const phaseHandoffSchema = z.discriminatedUnion("phase", [
@@ -298,16 +439,19 @@ export function describePhaseHandoffProblems(value: unknown): string[] {
 }
 
 /** Every reason a handoff may not be WRITTEN: the read-time problems, plus the write-only rules a
- * phase adds on top — today only the plan's `requiredSkills` contract. Empty for a writable handoff. */
+ * phase adds on top — today only the plan's: its `requiredSkills`, `gapAnalysis`, and
+ * `planReview`. Empty for a writable handoff. */
 export function describePhaseHandoffWriteProblems(value: unknown): string[] {
   const problems = describePhaseHandoffProblems(value);
   if (problems.length > 0) return problems;
   if ((value as { phase?: unknown }).phase !== "plan") return [];
   const result = planWriteSchema.safeParse(value);
   if (result.success) return [];
-  const fields = [...new Set(result.error.issues.map((issue) => issue.path.map(String).join(".")))];
-  return fields.map(
-    (field) =>
-      `${field}: missing or empty — name the skills this role must load, or state \`none: <what you looked through and why nothing fits>\``
-  );
+  const described = result.error.issues.map((issue) => {
+    const field = issue.path.map(String).join(".");
+    return issue.path[0] === "requiredSkills"
+      ? `${field}: ${REQUIRED_SKILLS_PROBLEM}`
+      : `${field}: ${issue.message}`;
+  });
+  return [...new Set(described)];
 }

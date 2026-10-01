@@ -37042,6 +37042,8 @@ var EnvelopeSchema = exports_external.object({
 // ../contracts/src/handoff-schema.ts
 var HANDOFF_SCHEMA_VERSION = 1;
 var HANDOFF_PHASES = ["architect", "plan", "implement", "test", "review"];
+var PLAN_REVIEW_MAX_ROUNDS = 3;
+var PLAN_REVIEW_VERDICTS = ["approved", "rejected", "failed"];
 var isoTimestamp = exports_external.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
 var handoffPhase = exports_external.enum(HANDOFF_PHASES);
 var nonEmpty = exports_external.string().trim().min(1);
@@ -37078,6 +37080,16 @@ var requiredSkillsSchema = exports_external.object({
   test: exports_external.array(exports_external.string()).optional(),
   review: exports_external.array(exports_external.string()).optional()
 }).passthrough().optional();
+var gapAnalysisSchema = exports_external.object({
+  findings: exports_external.array(exports_external.object({ finding: exports_external.string(), answer: exports_external.string() }).passthrough()).optional(),
+  error: exports_external.string().optional()
+}).passthrough().optional();
+var planReviewSchema = exports_external.object({
+  verdict: exports_external.enum(PLAN_REVIEW_VERDICTS),
+  rounds: exports_external.number(),
+  remainingIssues: exports_external.array(exports_external.object({ issue: exports_external.string(), evidence: exports_external.string() }).passthrough()).optional(),
+  error: exports_external.string().optional()
+}).passthrough().optional();
 var planSchema = baseHandoffSchema.extend({
   phase: exports_external.literal("plan"),
   taskCount: exports_external.number().optional(),
@@ -37085,7 +37097,9 @@ var planSchema = baseHandoffSchema.extend({
   routingHints: routingHintsSchema,
   concerns: exports_external.array(exports_external.string()).optional(),
   workflowRecommendation: exports_external.string().optional(),
-  requiredSkills: requiredSkillsSchema
+  requiredSkills: requiredSkillsSchema,
+  gapAnalysis: gapAnalysisSchema,
+  planReview: planReviewSchema
 });
 var implementSchema = baseHandoffSchema.extend({
   phase: exports_external.literal("implement"),
@@ -37125,13 +37139,60 @@ var reviewSchema = baseHandoffSchema.extend({
   verdict: exports_external.enum(["approved", "changes_requested"]).optional(),
   keyFindings: exports_external.array(exports_external.object({ severity: exports_external.string(), file: exports_external.string(), description: exports_external.string() }).passthrough()).optional()
 });
-var nonEmptySkillList = exports_external.array(exports_external.string().trim().min(1)).min(1);
+var nonEmptySkillList = exports_external.array(nonEmpty).min(1);
+var recorded = (shape, whatToRecord) => exports_external.object(shape, {
+  error: (issue2) => issue2.input === undefined ? `missing \u2014 record ${whatToRecord}` : undefined
+}).passthrough();
+var gapAnalysisWriteSchema = recorded({
+  findings: exports_external.array(exports_external.object({ finding: nonEmpty, answer: nonEmpty }).passthrough()).optional(),
+  error: nonEmpty.optional()
+}, "the gap analyst's `findings`, each with how the plan answers it (`[]` when it found none), or its failed call's `error`").refine((analysis) => analysis.findings === undefined !== (analysis.error === undefined), {
+  message: "record exactly one of `findings` or the failed call's `error`"
+});
+var planReviewWriteSchema = recorded({
+  verdict: exports_external.enum(PLAN_REVIEW_VERDICTS),
+  rounds: exports_external.number().int().min(1).max(PLAN_REVIEW_MAX_ROUNDS),
+  remainingIssues: exports_external.array(exports_external.object({ issue: nonEmpty, evidence: nonEmpty }).passthrough()).optional(),
+  error: nonEmpty.optional()
+}, "the plan review's `verdict` and `rounds`, with `remainingIssues` when it was rejected or `error` when a review's call failed").superRefine((review, ctx) => {
+  const remaining = review.remainingIssues?.length ?? 0;
+  if (review.verdict === "rejected" && remaining === 0) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["remainingIssues"],
+      message: "a rejected review records the blocking issues its last round named"
+    });
+  }
+  if (review.verdict === "rejected" && review.rounds < PLAN_REVIEW_MAX_ROUNDS) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["rounds"],
+      message: `a review still rejecting after ${review.rounds} of ${PLAN_REVIEW_MAX_ROUNDS} rounds is revised and reviewed again, not recorded`
+    });
+  }
+  if (review.verdict === "approved" && remaining > 0) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["remainingIssues"],
+      message: "an approved review leaves no blocking issue standing"
+    });
+  }
+  if (review.verdict === "failed" !== (review.error !== undefined)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["error"],
+      message: "a failed review records its call's error, and only a failed review does"
+    });
+  }
+});
 var planWriteSchema = planSchema.extend({
   requiredSkills: exports_external.object({
     implement: nonEmptySkillList,
     test: nonEmptySkillList,
     review: nonEmptySkillList
-  }).passthrough()
+  }).passthrough(),
+  gapAnalysis: gapAnalysisWriteSchema,
+  planReview: planReviewWriteSchema
 });
 var phaseHandoffSchema = exports_external.discriminatedUnion("phase", [
   architectSchema,
