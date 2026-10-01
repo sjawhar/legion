@@ -34,7 +34,7 @@ var blockReader = markdownReader{md: goldmark.New(
 		parser.WithInlineParsers(inlineParsers(emphasisParser{})...),
 		parser.WithParagraphTransformers(parser.DefaultParagraphTransformers()...),
 	)),
-	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, taskList{}, footnotes{}),
+	goldmark.WithExtensions(linkify{}, lazyAwareTable{}, extension.Strikethrough, taskList{}, footnotes{}),
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
 			util.Prioritized(&typedDirectiveParser{}, 950),
@@ -244,7 +244,7 @@ func inlineParserOptions(emphasis emphasisParser) []parser.Option {
 		parser.WithInlineParsers(inlineParsers(emphasis)...),
 		parser.WithInlineParsers(
 			util.Prioritized(extension.NewStrikethroughParser(), 500),
-			util.Prioritized(extension.NewLinkifyParser(), 999),
+			util.Prioritized(newLinkifyGuard(), 999),
 		),
 	}
 }
