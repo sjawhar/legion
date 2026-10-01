@@ -1309,10 +1309,15 @@ export function AgentsPage(): ReactNode {
   // The draft is page state too: the composer unmounts whenever the selection empties, and
   // clearing a selection to pick again must not throw away a typed message or its mode. Send
   // hands the message to the queue and clears it with the selection; Restore draft, on a send the
-  // server refused, puts the message, its mode and its selection back.
+  // server refused, puts the message, its mode and its selection back. Any message in the draft
+  // was started after that press cleared it, so Restore draft refuses rather than replace it.
   const [draft, setDraft] = useState("");
   const [delivery, setDelivery] = useState<MessageDeliveryMode>("btw");
   const queue = useBroadcastQueue(draft.trim() !== "" || selected.size > 0);
+  const restoreRefusal =
+    draft.trim() === ""
+      ? null
+      : "Restore draft would replace the message you have started. Send it or clear it first.";
   const showComposer = selected.size > 0 && agents.length > 0;
   // Not memoised: the split is a function of the clock, like the freshness dot beside each row,
   // and is recomputed on every render of this page.
@@ -1426,6 +1431,7 @@ export function AgentsPage(): ReactNode {
                 setSelected(new Set(row.send.selected));
               }}
               onRetry={queue.retry}
+              restoreRefusal={restoreRefusal}
               rows={queue.rows}
             />
           )}

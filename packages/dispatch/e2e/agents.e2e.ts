@@ -1094,7 +1094,22 @@ test("a typed broadcast survives clearing the selection and picking again, and a
     await expect(failed.getByRole("status")).toHaveText(
       "Could not send to 2 agents: Envoy listener unreachable"
     );
-    await failed.getByRole("button", { name: "Restore draft" }).click();
+    // A message started since that press would be lost to Restore draft, so it refuses, and says
+    // why under its row, until the composer is empty again. Playwright waits out a click on an
+    // `aria-disabled` button, so the refused press is forced.
+    const restore = failed.getByRole("button", { name: "Restore draft" });
+    const why =
+      "Restore draft would replace the message you have started. Send it or clear it first.";
+    await header.click();
+    await message.fill("Started since.");
+    await expect(restore).toBeDisabled();
+    await expect(restore).toHaveAccessibleDescription(why);
+    await expect(failed.getByText(why, { exact: true })).toBeVisible();
+    await restore.click({ force: true });
+    await expect(message).toHaveValue("Started since.");
+    await message.fill("");
+    await expect(restore).toBeEnabled();
+    await restore.click();
     await expect(message).toHaveValue("Keep this draft.");
     await expect(mode).toHaveValue("aside");
     await expect(

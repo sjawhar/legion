@@ -596,9 +596,15 @@ export function inputClasses(recessed: boolean): string {
     : "border-slate-300 bg-white focus:border-sky-600 dark:border-slate-700 dark:bg-slate-900 dark:focus:border-sky-400";
 }
 
-/** The compact secondary button the Architecture lists and component picker share: a 44 px
- *  tap target through phone widths, 28 px from `sm`. */
-export const secondaryButtonCompact = `min-h-11 shrink-0 rounded-lg border px-3 py-1 text-xs font-medium whitespace-nowrap sm:min-h-7 sm:px-2 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`;
+const secondaryButtonCompactShape =
+  "min-h-11 shrink-0 rounded-lg border px-3 py-1 text-xs font-medium whitespace-nowrap sm:min-h-7 sm:px-2";
+/** The compact secondary button the Architecture lists, the component picker and the broadcast
+ *  Sends strip share: a 44 px tap target through phone widths, 28 px from `sm`. */
+export const secondaryButtonCompact = `${secondaryButtonCompactShape} ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`;
+/** `secondaryButtonCompact` for `components/RefusableButton.tsx`, in one string as
+ *  `primaryButtonRefusal` is: a hover that skips a refused button, and the refused look - the
+ *  secondary text on `SURFACE_MUTED`, a pair registered above. */
+export const secondaryButtonCompactRefusal = `${secondaryButtonCompactShape} ${secondaryButtonBorder} ${secondaryButtonText} not-aria-disabled:hover:border-sky-500 dark:not-aria-disabled:hover:border-sky-400 ${secondaryButtonDisabledText} aria-disabled:cursor-not-allowed aria-disabled:bg-slate-100 dark:aria-disabled:bg-slate-800`;
 
 // ---------------------------------------------------------------------------------------------
 // The navigation rail: a deliberately constant-dark surface (unlike everything else in this

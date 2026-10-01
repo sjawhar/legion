@@ -1479,6 +1479,55 @@ test("a mode both recipients advertise takes the excluded one back in", async ()
   }
 });
 
+test("Restore draft refuses, and says why on screen, while the composer holds a message started since the refused send", async () => {
+  const page = renderAgents();
+  page.createBroadcast.mockImplementationOnce(async () => {
+    throw new Error("Envoy listener unreachable");
+  });
+  const reason =
+    "Restore draft would replace the message you have started. Send it or clear it first.";
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = within(region).getByRole("checkbox", { name: "Select Planner for broadcast" });
+    const message = () =>
+      within(within(region).getByRole("region", { name: "Broadcast" })).getByRole("textbox", {
+        name: "Broadcast message",
+      });
+    fireEvent.click(planner);
+    fireEvent.change(message(), { target: { value: "Keep this." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
+    const sends = await screen.findByRole("region", { name: "Sends" });
+    await within(sends).findByText("Could not send to 1 agent: Envoy listener unreachable");
+    const restore = within(sends).getByRole("button", { name: "Restore draft" });
+    expect(restore.getAttribute("aria-disabled")).toBeNull();
+
+    // A message started since the press: Restore draft would overwrite it, so it refuses, and the
+    // line under its row, which it is described by, says why.
+    fireEvent.click(planner);
+    fireEvent.change(message(), { target: { value: "Started since." } });
+    expect(restore.getAttribute("aria-disabled")).toBe("true");
+    expect(restore.getAttribute("title")).toBe(reason);
+    const describedBy = restore.getAttribute("aria-describedby") ?? "";
+    expect(document.getElementById(describedBy)?.textContent).toBe(reason);
+    expect(within(sends).getByText(reason)).toBeTruthy();
+    fireEvent.click(restore);
+    expect(message()).toHaveProperty("value", "Started since.");
+    expect(within(sends).getByText(/^Could not send to 1 agent/)).toBeTruthy();
+
+    // Once the composer is empty again the refused send's message comes back.
+    fireEvent.change(message(), { target: { value: "" } });
+    expect(restore.getAttribute("aria-disabled")).toBeNull();
+    expect(within(sends).queryByText(reason)).toBeNull();
+    fireEvent.click(restore);
+    expect(message()).toHaveProperty("value", "Keep this.");
+    expect(screen.queryByRole("region", { name: "Sends" })).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
 test("Send says which of its reasons stops it, and names the mode that would reach a selection this one reaches none of", () => {
   const [planner, reviewer] = agents;
   const deaf = { ...reviewer, capabilities: [], session_id: "deaf-session", title: "Deaf" };

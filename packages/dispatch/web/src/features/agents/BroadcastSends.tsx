@@ -1,11 +1,12 @@
 import type { Mutation } from "@tanstack/react-query";
 import { useMutation, useMutationState, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
 import type { BroadcastCreated, CreateBroadcastInput } from "../../api/types";
+import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -14,9 +15,7 @@ import {
   dangerText,
   linkHoverText,
   linkText,
-  secondaryButtonBorder,
-  secondaryButtonHoverBorder,
-  secondaryButtonText,
+  secondaryButtonCompact,
   textMutedOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
@@ -180,18 +179,21 @@ function agentCount(count: number): string {
  * The page's sends, one row each, oldest first: queued, on the wire, sent (linking its broadcast,
  * with the send's exclusions), or refused with the server's reason, Retry and Restore draft. It
  * sits above the composer, outside it, because the composer goes whenever the selection empties
- * - at every press - and a send outlives it.
+ * - at every press - and a send outlives it. Restore draft refuses, and says why under its row,
+ * while the host says putting a draft back would replace one (`restoreRefusal`).
  */
 export function BroadcastSends({
   onRestore,
   onRetry,
+  restoreRefusal,
   rows,
 }: {
   onRestore: (row: BroadcastSendRow) => void;
   onRetry: (row: BroadcastSendRow) => void;
+  restoreRefusal: string | null;
   rows: readonly BroadcastSendRow[];
 }): ReactNode {
-  const action = `min-h-11 shrink-0 rounded-lg border px-2 text-xs font-medium md:min-h-7 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`;
+  const reasonId = useId();
   return (
     <section
       aria-label="Sends"
@@ -235,12 +237,29 @@ export function BroadcastSends({
               </TruncatedText>
               {row.status === "failed" ? (
                 <>
-                  <button className={action} onClick={() => onRetry(row)} type="button">
+                  <button
+                    className={secondaryButtonCompact}
+                    onClick={() => onRetry(row)}
+                    type="button"
+                  >
                     Retry
                   </button>
-                  <button className={action} onClick={() => onRestore(row)} type="button">
+                  <RefusableButton
+                    look="secondary"
+                    onPress={() => onRestore(row)}
+                    refusal={restoreRefusal}
+                    refusalShownBy={`${reasonId}-${row.id}`}
+                  >
                     Restore draft
-                  </button>
+                  </RefusableButton>
+                  {restoreRefusal === null ? null : (
+                    <span
+                      className={`basis-full text-xs ${textMutedOnSurface}`}
+                      id={`${reasonId}-${row.id}`}
+                    >
+                      {restoreRefusal}
+                    </span>
+                  )}
                 </>
               ) : null}
             </li>
