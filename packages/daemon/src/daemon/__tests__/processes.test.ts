@@ -1042,6 +1042,8 @@ describe("ProcessManager", () => {
       ],
       ["jj", "config", "list", "--repo", "--include-overridden", "-R", repo, "user.name"],
       ["jj", "config", "list", "--repo", "--include-overridden", "-R", repo, "user.email"],
+      ["codegraph", "status", "--json"],
+      ["codegraph", "init"],
       ["tmux", "-L", "legion-omp", "has-session", "-t", "legion-omp"],
       [
         "tmux",

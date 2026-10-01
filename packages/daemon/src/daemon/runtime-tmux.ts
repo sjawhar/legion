@@ -40,6 +40,26 @@ const TMUX_OWN_GLOBALS: Record<string, true> = { PWD: true, SHLVL: true };
 
 const MAX_TMUX_WINDOW_NAME_LENGTH = 160;
 
+/** `codegraph status --json`'s `initialized` field (AGENTC-1305 §7): `codegraph status` exits 0
+ * whether or not the project has ever been indexed, so only the parsed body tells the two apart.
+ * Anything that fails to parse as that shape — a missing CLI's empty output, a version whose
+ * JSON differs — is treated as not initialized, so `ensureCodegraphIndex` falls through to
+ * `codegraph init` rather than silently skipping it. */
+function isCodegraphInitialized(stdout: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return false;
+  }
+  return (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    "initialized" in parsed &&
+    parsed.initialized === true
+  );
+}
+
 function treeName(issue: IssueKey): string {
   const fullName = issue.toLowerCase();
   if (fullName.length <= MAX_TMUX_WINDOW_NAME_LENGTH) return fullName;
@@ -440,16 +460,48 @@ export class TmuxRuntime implements Runtime {
   private provisionWorkspace(issue: IssueKey): Promise<WorkspaceSpec> {
     const repo = this.deps.repoForIssue(issue);
     const [owner] = repo.split("/") as [string, string];
-    return serialize(this.provisionQueue, repo, () =>
-      provisionIssueWorkspace(issue, {
+    return serialize(this.provisionQueue, repo, async () => {
+      const spec = await provisionIssueWorkspace(issue, {
         repo,
         stateDir: this.deps.stateDir,
         provisioningToken: () => this.deps.provisioningToken(owner),
         credentialHelper: this.deps.credentialHelper,
         commandTimeoutMs: this.deps.slowCommandTimeoutMs,
         run: this.workspaceRun,
-      })
-    );
+      });
+      await this.ensureCodegraphIndex(spec.workspaceDir);
+      return spec;
+    });
+  }
+
+  /** Warms `@bopstack/pi-codegraph`'s index for the issue's working copy (research report
+   * AGENTC-1305 §7): the tester's `affected` and the reviewer's `impact`/`callers` queries need
+   * one already built, not one built on first use. `codegraph status` is a fast no-op on an
+   * already-indexed directory, so provisioning the same workspace again for a later phase worker
+   * of the same issue costs one quick check, not a re-index. A missing CLI or a failed build is
+   * logged loudly — never silently swallowed — but never fails the provision: a worker without an
+   * index falls back to grep, per its role prompt, rather than being wedged by an optional tool. */
+  private async ensureCodegraphIndex(workspaceDir: string): Promise<void> {
+    try {
+      const status = await this.deps.run(["codegraph", "status", "--json"], {
+        cwd: workspaceDir,
+        timeoutMs: this.deps.slowCommandTimeoutMs,
+      });
+      if (status.exitCode === 0 && isCodegraphInitialized(status.stdout)) return;
+      const result = await this.deps.run(["codegraph", "init"], {
+        cwd: workspaceDir,
+        timeoutMs: this.deps.slowCommandTimeoutMs,
+      });
+      if (result.exitCode !== 0) {
+        console.error(
+          `[legion] codegraph init failed for ${workspaceDir} (exit ${result.exitCode}): ${result.stderr ?? ""}`
+        );
+      }
+    } catch (error) {
+      console.error(
+        `[legion] codegraph init could not run for ${workspaceDir}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   /** `deps.run` as `@legion/workspace` expects it: the daemon's runner may omit `stderr`
