@@ -11,6 +11,7 @@ import {
   getArtifactVersion,
 } from "./api";
 import {
+  connectedDot,
   countDocumentSockets,
   cursorLabel,
   documentEditor,
@@ -186,8 +187,8 @@ test("two users edit the same spec, see each other's text and cursor, and settle
     await bobPage.goto(`/issues/${issue.key}/spec`);
     const bobEditor = documentEditor(bobPage);
     await expect(bobEditor).toContainText("Use SQLite");
-    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
-    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(alicePage)).toHaveText("connected");
+    await expect(connectedDot(bobPage)).toHaveText("connected");
 
     await typeAtEnd(alicePage, "hello from alice");
     await expect(bobEditor).toContainText("hello from alice");
@@ -477,7 +478,7 @@ test("a dropped document transport reconnects the mounted editor and leaves one 
     await page.goto(`/issues/${issue.key}/spec`);
     const editor = documentEditor(page);
     await expect(editor).toContainText("Original body.");
-    await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(page)).toHaveText("connected");
     await expect.poll(sockets).toBe(1);
 
     const bobPage = await bob.newPage();
@@ -486,7 +487,7 @@ test("a dropped document transport reconnects the mounted editor and leaves one 
 
     await transport.sever();
     await expect.poll(sockets).toBe(2);
-    await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(page)).toHaveText("connected");
     await expect.poll(open).toBe(1);
 
     // The reconnected document is live in both directions, not merely re-opened.

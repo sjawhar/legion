@@ -7,7 +7,14 @@ import {
   getAsk,
   getProjectArtifact,
 } from "./api";
-import { barAction, documentEditor, markSpan, selectEditorText, typeAtEnd } from "./editor";
+import {
+  barAction,
+  connectedDot,
+  documentEditor,
+  markSpan,
+  selectEditorText,
+  typeAtEnd,
+} from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -49,8 +56,8 @@ test("documentCollaborationLive", async ({ browser }, testInfo) => {
     await bobPage.goto("/projects/CORE/documents/design-notes");
     await expect(documentEditor(alicePage)).toContainText("Design notes");
     await expect(documentEditor(bobPage)).toContainText("Design notes");
-    await expect(alicePage.getByRole("status", { name: "connected" })).toHaveText("connected");
-    await expect(bobPage.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(alicePage)).toHaveText("connected");
+    await expect(connectedDot(bobPage)).toHaveText("connected");
 
     await typeAtEnd(alicePage, "Alice wrote this.");
     await expect(documentEditor(bobPage)).toContainText("Alice wrote this.");
@@ -209,7 +216,7 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
 // than the card, and a group that could not wrap pushed the dot past its edge.
 async function expectDotBeside(page: Page, neighbour: string): Promise<void> {
   const header = page.getByTestId("artifact-header");
-  const dot = header.getByRole("status", { name: "connected" });
+  const dot = connectedDot(header);
   await expect(dot).toHaveText("connected");
   const beside = await header.getByRole("button", { name: neighbour }).boundingBox();
   const dotBox = await dot.boundingBox();

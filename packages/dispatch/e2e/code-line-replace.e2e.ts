@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { createIssue, createProject, getArtifactText } from "./api";
-import { selectEditorText } from "./editor";
+import { connectedDot, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -23,7 +23,7 @@ test("typing over the whole last line of a code block replaces that line", async
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/spec`);
-    await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(page)).toHaveText("connected");
 
     await selectEditorText(page, "let y = 2;");
     await page.keyboard.type("hello");
@@ -47,7 +47,7 @@ test("typing over the text after a paragraph's hard break keeps the break", asyn
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/spec`);
-    await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect(connectedDot(page)).toHaveText("connected");
 
     await selectEditorText(page, "second line");
     await page.keyboard.type("X");
