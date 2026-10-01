@@ -47,9 +47,9 @@ func TestNonZeroPortPublicURLIsFineEvenWithRulesS3URI(t *testing.T) {
 
 // TestMainRefusesPortZeroPublicURLWithRulesS3URI drives the REAL compiled binary's main(), not
 // refusePortZeroPublicURLInProduction directly: the helper's own tests above prove only that it is
-// correct, and a commit once moved this guard's only call site to run after st.Migrate, two S3
-// reads, and net.Listen, so a misconfigured production
-// boot would migrate the production database and bind a socket before ever refusing. This builds
+// correct, and with this guard's only call site moved to run after st.Migrate, two S3 reads, and
+// net.Listen, a misconfigured production boot would migrate the production database and bind a
+// socket before ever refusing. This builds
 // cmd/broker once, execs it with BROKER_PUBLIC_URL=http://127.0.0.1:0 and BROKER_RULES_S3_URI set
 // (plus an unreachable BROKER_DATABASE_URL and just enough other required BROKER_* variables for
 // config.Load to succeed — the refusal must run before store.Open, so no real Postgres or AWS
