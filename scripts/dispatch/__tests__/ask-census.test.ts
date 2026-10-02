@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import fixture from "../__fixtures__/ask-census.json";
 import {
   applyCodes,
+  type CensusEvent,
+  dispatchConfig,
   excludeSessionAsks,
+  fetchIssueEvents,
   filterAsksInWindow,
   parseCodes,
   summarizeApprovalRounds,
@@ -214,6 +217,73 @@ describe("ask census", () => {
         exceedsHumanTurnBudget: true,
       },
     ]);
+  });
+
+  test("reads every event page before counting approval rounds", async () => {
+    const events: Array<CensusEvent & { readonly seq: number }> = Array.from(
+      { length: 201 },
+      (_, index) => ({
+        id: index + 1,
+        seq: index + 1,
+        type: "issue.updated",
+        payload: {},
+      })
+    );
+    events[0] = {
+      id: 1,
+      seq: 1,
+      type: "ask.opened",
+      actor: { kind: "session", id: "session-a" },
+      payload: {
+        id: "approval-1",
+        kind: "approval",
+        approval: { artifact_id: "artifact-1", version: 1, requested_version: 1 },
+      },
+    };
+    events[200] = {
+      id: 201,
+      seq: 201,
+      type: "comment.created",
+      actor: { kind: "user", id: "alice" },
+      payload: { ask_id: "approval-1" },
+    };
+    const requests: string[] = [];
+    const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(String(input));
+      requests.push(`${url.pathname}${url.search}`);
+      expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer token");
+      const after = Number(url.searchParams.get("after"));
+      return Response.json(events.filter((event) => event.seq > after).slice(0, 200));
+    };
+
+    const fetched = await fetchIssueEvents(
+      { url: "https://dispatch.example", token: "token" },
+      "LEGION-470",
+      fetchImpl as typeof fetch
+    );
+
+    expect(requests).toEqual([
+      "/api/v1/issues/LEGION-470/events?limit=200&after=0",
+      "/api/v1/issues/LEGION-470/events?limit=200&after=200",
+    ]);
+    expect(summarizeApprovalRounds(fetched)).toEqual([
+      {
+        artifactId: "artifact-1",
+        inboxRows: 1,
+        handbacks: 0,
+        humanTurns: 1,
+        exceedsHumanTurnBudget: false,
+      },
+    ]);
+  });
+
+  test("uses environment Dispatch credentials without reading the config file", async () => {
+    expect(
+      await dispatchConfig(
+        { DISPATCH_URL: "https://dispatch.example/", DISPATCH_TOKEN: "token" },
+        "/nonexistent-ask-census-home"
+      )
+    ).toEqual({ url: "https://dispatch.example", token: "token" });
   });
 
   test("totals supplied judgment codes and excludes known old-plugin sessions", () => {

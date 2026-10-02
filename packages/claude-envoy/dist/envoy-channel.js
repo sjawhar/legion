@@ -40569,10 +40569,13 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   if (open.length === 0)
     return;
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
+  const awaiting = artifact.approval?.state === "awaiting";
+  const consequence = awaiting ? "the open approval request moves to that version and waits on you." : "request approval only after the document carries the decision.";
+  const nextRequest = awaiting ? "hand the request back" : "open the request";
   throw new Error([
-    `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, so an existing approval request would move to that version.`,
+    `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, so ${consequence}`,
     ...open.map((line) => `- ${line}`),
-    "Do not request approval over an open block, even when a human asked for it. " + "Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold " + "the answer into the text with dispatch_doc_edit and call dispatch_request_approval once to hand the " + "request back. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as " + "the reason), write their decision into the text with dispatch_doc_edit, and call dispatch_request_approval " + "once to hand the request back."
+    "Do not request approval over an open block, even when a human asked for it. " + "Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold " + `the answer into the text with dispatch_doc_edit and call dispatch_request_approval once to ${nextRequest}. ` + "If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason), " + "write their decision into the text with dispatch_doc_edit, and call dispatch_request_approval once to " + `${nextRequest}.`
   ].join(`
 `));
 }

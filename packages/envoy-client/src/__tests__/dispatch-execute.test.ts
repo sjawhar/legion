@@ -3703,7 +3703,12 @@ describe("executeDispatchTool", () => {
   describe("dispatch_request_approval with decision blocks in the document", () => {
     const opening = (block: string, state: string) =>
       `:::ask{#${block} urgency="med" multiple="false" state="${state}"}\nQuestion of ${block}?\n:::`;
-    const requestOver = async (blocks: string[], version4: string[], asks: unknown[]) => {
+    const requestOver = async (
+      blocks: string[],
+      version4: string[],
+      asks: unknown[],
+      approval: Record<string, unknown> = { state: "draft", latest_version: 4 }
+    ) => {
       const posts: string[] = [];
       const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
         const target = new URL(String(url));
@@ -3717,7 +3722,7 @@ describe("executeDispatchTool", () => {
                 slug: "spec",
                 name: "spec.md",
                 primary: true,
-                approval: { state: "draft", latest_version: 4 },
+                approval,
               },
             ],
             open_asks: [],
@@ -3781,7 +3786,7 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n").slice(0, 5)).toEqual([
-        "dispatch_request_approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, so an existing approval request would move to that version.",
+        "dispatch_request_approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, so request approval only after the document carries the decision.",
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
         "- block b-2, whose ask Dispatch has not opened yet",
         "- block b-3, which version 4 does not hold yet",
@@ -3789,7 +3794,29 @@ describe("executeDispatchTool", () => {
       ]);
       expect(refusal).toContain("even when a human asked for it");
       expect(refusal).toContain("ask them to answer it or to waive it");
+      expect(refusal).toContain("call dispatch_request_approval once to open the request");
+      expect(refusal).not.toContain("existing approval request");
+      expect(refusal).not.toContain("hand the request back");
+      expect(posts).toEqual([]);
+    });
+
+    test("tells an agent with an open request that the request moves and waits on it", async () => {
+      const { outcome, posts } = await requestOver(
+        ["b-1"],
+        [opening("b-1", "open")],
+        [blockAsk("b-1", "open")],
+        { state: "awaiting", latest_version: 4, ask_id: "ask-approval" }
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n")[0]).toBe(
+        "dispatch_request_approval was not called: spec.md (version 4) has 1 open decision block. Answering one writes a new version, so the open approval request moves to that version and waits on you."
+      );
       expect(refusal).toContain("call dispatch_request_approval once to hand the request back");
+      expect(refusal).not.toContain("open the request");
       expect(posts).toEqual([]);
     });
 
@@ -3824,7 +3851,7 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n").slice(0, 2)).toEqual([
-        "dispatch_request_approval was not called: spec.md (version 4) has 1 open decision block. Answering one writes a new version, so an existing approval request would move to that version.",
+        "dispatch_request_approval was not called: spec.md (version 4) has 1 open decision block. Answering one writes a new version, so request approval only after the document carries the decision.",
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
       ]);
       expect(posts).toEqual([]);

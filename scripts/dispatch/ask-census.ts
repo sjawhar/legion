@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 const DEFAULT_PROJECTS = ["AGENTC", "LEGION", "OPS"] as const;
 const CODES = ["to-do", "design", "may-I-proceed", "operations"] as const;
+const EVENT_PAGE_SIZE = 200;
 
 type Code = (typeof CODES)[number];
 
@@ -35,12 +36,23 @@ export interface CensusEvent {
   readonly payload: unknown;
 }
 
+interface PagedCensusEvent extends CensusEvent {
+  readonly seq: number;
+}
+
 interface ApprovalRound {
   readonly artifactId: string;
   readonly inboxRows: number;
   readonly handbacks: number;
   readonly humanTurns: number;
   readonly exceedsHumanTurnBudget: boolean;
+}
+
+interface AskSummary {
+  readonly asks: number;
+  readonly decisionBlocks: number;
+  readonly standaloneQuestions: number;
+  readonly approvalRequests: number;
 }
 
 interface SessionSummary {
@@ -60,7 +72,7 @@ interface CensusOptions {
   readonly codesPath?: string;
 }
 
-interface DispatchConfig {
+export interface DispatchConfig {
   readonly url: string;
   readonly token: string;
 }
@@ -119,20 +131,20 @@ export function excludeSessionAsks<T extends CensusAsk>(
   );
 }
 
-export function summarizeAsks(asks: readonly CensusAsk[]): {
-  asks: number;
-  decisionBlocks: number;
-  standaloneQuestions: number;
-  approvalRequests: number;
-} {
-  return {
-    asks: asks.length,
-    decisionBlocks: asks.filter((ask) => ask.block_id !== null && ask.block_id !== undefined)
-      .length,
-    standaloneQuestions: asks.filter((ask) => ask.kind === "question" && ask.block_id === null)
-      .length,
-    approvalRequests: asks.filter((ask) => ask.kind === "approval").length,
-  };
+function isStandaloneQuestion(ask: CensusAsk): boolean {
+  return ask.kind === "question" && ask.block_id === null;
+}
+
+export function summarizeAsks(asks: readonly CensusAsk[]): AskSummary {
+  let decisionBlocks = 0;
+  let standaloneQuestions = 0;
+  let approvalRequests = 0;
+  for (const ask of asks) {
+    if (ask.block_id !== null && ask.block_id !== undefined) decisionBlocks += 1;
+    if (isStandaloneQuestion(ask)) standaloneQuestions += 1;
+    if (ask.kind === "approval") approvalRequests += 1;
+  }
+  return { asks: asks.length, decisionBlocks, standaloneQuestions, approvalRequests };
 }
 
 function approval(payload: unknown):
@@ -145,8 +157,10 @@ function approval(payload: unknown):
     }
   | undefined {
   const payloadRecord = record(payload);
-  const approvalRecord = payloadRecord === undefined ? undefined : record(payloadRecord.approval);
-  const artifactId = approvalRecord === undefined ? undefined : string(approvalRecord.artifact_id);
+  if (payloadRecord === undefined) return undefined;
+  const approvalRecord = record(payloadRecord.approval);
+  if (approvalRecord === undefined) return undefined;
+  const artifactId = string(approvalRecord.artifact_id);
   if (artifactId === undefined) return undefined;
   return {
     artifactId,
@@ -155,8 +169,8 @@ function approval(payload: unknown):
       typeof approvalRecord.requested_version === "number"
         ? approvalRecord.requested_version
         : undefined,
-    askId: payloadRecord === undefined ? undefined : string(payloadRecord.id),
-    kind: payloadRecord === undefined ? undefined : string(payloadRecord.kind),
+    askId: string(payloadRecord.id),
+    kind: string(payloadRecord.kind),
   };
 }
 
@@ -236,7 +250,7 @@ export function applyCodes(
     uncoded: 0,
   };
   for (const ask of asks) {
-    if (ask.kind !== "question" || ask.block_id !== null) continue;
+    if (!isStandaloneQuestion(ask)) continue;
     totals[codes[ask.id] ?? "uncoded"] += 1;
   }
   return totals;
@@ -336,14 +350,19 @@ function parseArguments(argv: readonly string[]): CensusOptions {
   };
 }
 
-async function dispatchConfig(): Promise<DispatchConfig> {
-  const path = join(homedir(), ".config", "opencode", "envoy.json");
-  const configured = record(JSON.parse(await readFile(path, "utf8")));
-  const dispatch = configured === undefined ? undefined : record(configured.dispatch);
-  const url =
-    process.env.DISPATCH_URL ?? (dispatch === undefined ? undefined : string(dispatch.serverUrl));
-  const token =
-    process.env.DISPATCH_TOKEN ?? (dispatch === undefined ? undefined : string(dispatch.token));
+export async function dispatchConfig(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  home = homedir()
+): Promise<DispatchConfig> {
+  let url = env.DISPATCH_URL;
+  let token = env.DISPATCH_TOKEN;
+  if (url === undefined || token === undefined) {
+    const path = join(home, ".config", "opencode", "envoy.json");
+    const configured = record(JSON.parse(await readFile(path, "utf8")));
+    const dispatch = configured === undefined ? undefined : record(configured.dispatch);
+    url ??= dispatch === undefined ? undefined : string(dispatch.serverUrl);
+    token ??= dispatch === undefined ? undefined : string(dispatch.token);
+  }
   if (url === undefined || token === undefined) {
     throw new Error(
       "set DISPATCH_URL and DISPATCH_TOKEN, or configure dispatch.serverUrl and dispatch.token"
@@ -352,12 +371,39 @@ async function dispatchConfig(): Promise<DispatchConfig> {
   return { url: url.replace(/\/+$/, ""), token };
 }
 
-async function get<T>(config: DispatchConfig, path: string): Promise<T> {
-  const response = await fetch(`${config.url}${path}`, {
+async function get<T>(
+  config: DispatchConfig,
+  path: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<T> {
+  const response = await fetchImpl(`${config.url}${path}`, {
     headers: { Authorization: `Bearer ${config.token}` },
   });
   if (!response.ok) throw new Error(`GET ${path}: ${response.status} ${await response.text()}`);
   return (await response.json()) as T;
+}
+
+export async function fetchIssueEvents(
+  config: DispatchConfig,
+  issueKey: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<PagedCensusEvent[]> {
+  const events: PagedCensusEvent[] = [];
+  let after = 0;
+  while (true) {
+    const page = await get<PagedCensusEvent[]>(
+      config,
+      `/api/v1/issues/${encodeURIComponent(issueKey)}/events?limit=${EVENT_PAGE_SIZE}&after=${after}`,
+      fetchImpl
+    );
+    events.push(...page);
+    if (page.length < EVENT_PAGE_SIZE) return events;
+    const last = page.at(-1);
+    if (last === undefined || last.seq <= after) {
+      throw new Error(`GET /api/v1/issues/${issueKey}/events returned no seq after ${after}`);
+    }
+    after = last.seq;
+  }
 }
 
 async function run(options: CensusOptions): Promise<void> {
@@ -366,16 +412,9 @@ async function run(options: CensusOptions): Promise<void> {
   const toTime = date(options.to, "to");
   const codes =
     options.codesPath === undefined ? {} : parseCodes(await readFile(options.codesPath, "utf8"));
-  const issueRows: {
-    issue: string;
-    asks: number;
-    decisionBlocks: number;
-    standaloneQuestions: number;
-    approvalRequests: number;
-  }[] = [];
+  const issueRows: Array<AskSummary & { issue: string }> = [];
   const approvalRounds: Array<ApprovalRound & { issue: string }> = [];
   const standaloneQuestions: Array<CensusAsk & { issue: string }> = [];
-  const allAsks: CensusAsk[] = [];
   const allWindowAsks: CensusAsk[] = [];
 
   for (const project of options.projects) {
@@ -392,9 +431,7 @@ async function run(options: CensusOptions): Promise<void> {
       allWindowAsks.push(...windowAsks);
       const asks = excludeSessionAsks(windowAsks, options.excludedSessionIds);
       if (asks.length === 0) continue;
-      const events = (
-        await get<CensusEvent[]>(config, `/api/v1/issues/${encodeURIComponent(issue.key)}/events`)
-      ).filter(
+      const events = (await fetchIssueEvents(config, issue.key)).filter(
         (event) =>
           (event.created_at === undefined || inWindow(event.created_at, fromTime, toTime)) &&
           (event.actor?.kind !== "session" ||
@@ -406,15 +443,20 @@ async function run(options: CensusOptions): Promise<void> {
         ...summarizeApprovalRounds(events).map((round) => ({ issue: issue.key, ...round }))
       );
       standaloneQuestions.push(
-        ...asks
-          .filter((ask) => ask.kind === "question" && ask.block_id === null)
-          .map((ask) => ({ ...ask, issue: issue.key }))
+        ...asks.filter(isStandaloneQuestion).map((ask) => ({ ...ask, issue: issue.key }))
       );
-      allAsks.push(...asks);
     }
   }
 
-  const totals = summarizeAsks(allAsks);
+  const totals = issueRows.reduce(
+    (sum, row) => ({
+      asks: sum.asks + row.asks,
+      decisionBlocks: sum.decisionBlocks + row.decisionBlocks,
+      standaloneQuestions: sum.standaloneQuestions + row.standaloneQuestions,
+      approvalRequests: sum.approvalRequests + row.approvalRequests,
+    }),
+    { asks: 0, decisionBlocks: 0, standaloneQuestions: 0, approvalRequests: 0 }
+  );
   const sessions = summarizeSessions(allWindowAsks, options.excludedSessionIds);
   console.log("Ask totals");
   console.table([totals]);
@@ -436,7 +478,7 @@ async function run(options: CensusOptions): Promise<void> {
       }))
   );
   console.log("Coding totals");
-  console.table([applyCodes(allAsks, codes)]);
+  console.table([applyCodes(standaloneQuestions, codes)]);
   console.log(`Excluded asks from old-plugin sessions: ${sessions.dropped}`);
   console.log("Sessions");
   console.table(sessions.sessions);

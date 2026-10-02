@@ -1655,13 +1655,13 @@ async function blockAsks(
 
 /**
  * Refuses an approval request while the document holds an open decision block. A request names
- * the latest version, and a new version moves it to that version to wait on the agent, so a
- * request over a block the human has yet to answer cannot be handed back yet. The live document's
- * `ask` blocks are judged by the latest version, the one the request would name: a block that
- * version shows open counts as open even when its ask is already answered or closed, since that
- * answer reaches a version only when the document settles, about two seconds later, or with the
- * next edit (the agent's fold of the answer into the text). A block not yet in that version counts
- * as open too. A block removed from the document is not judged here;
+ * the latest version, and a new version moves an open request to that version to wait on the
+ * agent. Without an open request, the agent requests approval once the document carries the
+ * decision. The live document's `ask` blocks are judged by the latest version, the one the request
+ * would name: a block that version shows open counts as open even when its ask is already answered
+ * or closed, since that answer reaches a version only when the document settles, about two seconds
+ * later, or with the next edit (the agent's fold of the answer into the text). A block not yet in
+ * that version counts as open too. A block removed from the document is not judged here;
  * `refuseRemovingOpenDecisionBlocks` keeps one whose ask is open in it. A document already
  * approved at its latest version is left to the server, which answers with that approval.
  */
@@ -1709,16 +1709,21 @@ async function refuseOpenDecisionBlocks(
   });
   if (open.length === 0) return;
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
+  const awaiting = artifact.approval?.state === "awaiting";
+  const consequence = awaiting
+    ? "the open approval request moves to that version and waits on you."
+    : "request approval only after the document carries the decision.";
+  const nextRequest = awaiting ? "hand the request back" : "open the request";
   throw new Error(
     [
-      `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, so an existing approval request would move to that version.`,
+      `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, so ${consequence}`,
       ...open.map((line) => `- ${line}`),
       "Do not request approval over an open block, even when a human asked for it. " +
         "Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold " +
-        "the answer into the text with dispatch_doc_edit and call dispatch_request_approval once to hand the " +
-        "request back. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as " +
-        "the reason), write their decision into the text with dispatch_doc_edit, and call dispatch_request_approval " +
-        "once to hand the request back.",
+        `the answer into the text with dispatch_doc_edit and call dispatch_request_approval once to ${nextRequest}. ` +
+        "If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason), " +
+        "write their decision into the text with dispatch_doc_edit, and call dispatch_request_approval once to " +
+        `${nextRequest}.`,
     ].join("\n")
   );
 }

@@ -3,7 +3,8 @@
 ## Ask census
 
 `ask-census.ts` reproduces the question and approval-request counting used for LEGION-470. It
-reads every issue updated in the selected window, then each issue's asks and events.
+reads every issue updated in the selected window, then each issue's asks and every page of its
+events.
 
 ```bash
 bun scripts/dispatch/ask-census.ts \
