@@ -162,12 +162,19 @@ export default defineConfig({
     },
     // A caret beside a collaborator's cursor behaves per engine, and the issue picker's
     // keyboard-step rule rests on each engine dispatching a closed select's `change` in the key's
-    // own task, so those two specs also run in WebKit. So do deep links: WebKit and Firefox cancel
-    // the chunk downloads in flight when a navigation starts, and a link followed while the page
-    // before it is still loading has to open rather than reload that page.
+    // own task, so those two specs also run in WebKit.
     {
       name: "webkit",
-      testMatch: /(collab-cursor|deep-links|keyboard-agents-picker)\.e2e\.ts/,
+      testMatch: /(collab-cursor|keyboard-agents-picker)\.e2e\.ts/,
+      use: { ...devices["Desktop Safari"] },
+    },
+    // WebKit and Firefox cancel the chunk downloads in flight when a navigation starts, and a link
+    // followed while the page before it is still loading has to open rather than reload that page.
+    // In WebKit only the deep-links rows that follow one link from another page run, by title.
+    {
+      name: "webkit-deep-links",
+      testMatch: /deep-links\.e2e\.ts/,
+      grep: /emitted document item hrefs select|still downloading its document opens/,
       use: { ...devices["Desktop Safari"] },
     },
     // The live view's phone layout (its keyboard cap, gutter and scroll locks) also runs in WebKit,
@@ -180,7 +187,7 @@ export default defineConfig({
     },
     // Firefox's native editing mishandles text typed over what follows a block's last line break,
     // and the issue picker's keyboard-step rule rests on the engine's select dispatch, so those two
-    // specs also run in Firefox, and deep links for the reason given above WebKit's project.
+    // specs also run in Firefox, and the whole deep-links spec for the reason given above.
     {
       name: "firefox",
       testMatch: /(code-line-replace|deep-links|keyboard-agents-picker)\.e2e\.ts/,

@@ -288,8 +288,8 @@ so the retry can reject too); a failure while online, or a retry that rejects, r
 The one exception is a page being left: from `beforeunload` until the next `pageshow` no failure
 reloads it, because WebKit and Firefox cancel the chunk downloads in flight when a navigation
 starts (WebKit also refuses new ones), and a reload then would replace the reader's navigation
-with a reload of the page they are leaving (`deep-links.e2e.ts`, which the `webkit` and `firefox`
-projects run for that reason).
+with a reload of the page they are leaving (`deep-links.e2e.ts`, which the `webkit-deep-links` and
+`firefox` projects run for that reason).
 It never default-prevents Vite's `vite:preloadError` (`installChunkFailureRecovery` says why), so
 every importer sees the load failure itself: a route's error box names the failed download, and
 the first editor a page mounts after its stylesheet failed shows the document's failed state. A
@@ -569,7 +569,7 @@ one where `PLAYWRIGHT_BASE_URL` selects a deployed server, and a listing run, wh
 load task and a report-begin task with no global setup. The port validation above is not gated on
 either, so a malformed or duplicated port is refused in every invocation.
 
-The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`. Where a caret lands beside
+The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
 while Firefox is unaffected, so that spec is the one that needs a second engine. The picker spec guards the Agents
 issue picker's keyboard-step rule (`markKeyStep` in `AgentsPage.tsx`), which holds only because every engine
@@ -578,17 +578,23 @@ its arrows and type-ahead rows, each committed by Enter and driven through `page
 step commit at once in an engine that moved to the queued task, so it runs here and in `firefox` as well as in
 Chromium. Its rows that step and then leave the select by Tab, Shift+Tab or a click run in the same engines,
 since each engine takes focus out of a select its own way, and they assert that the select, the toggle and the
-send still name one issue. The deep-links spec runs here and in `firefox` because both engines cancel the chunk
-downloads in flight when a navigation starts: a deep link followed while the page before it is still loading its
-document has to open the link rather than reload that page (`installChunkFailureRecovery`). Its row that holds the
-first page's `yjs` chunk makes that case deterministic in WebKit; Firefox does not fail that row without the rule, and
-reaches the case only through the timing of the spec's first row. The project selects all three specs by file name, not
-title, so renaming a row cannot drop it. CI installs WebKit beside Chromium for them (`bun run e2e:install` does the same
-locally).
+send still name one issue. The project selects both specs by file name, not title, so renaming a row cannot drop it. CI
+installs WebKit beside Chromium for them (`bun run e2e:install` does the same locally).
+
+The `webkit-deep-links` project runs two rows of `e2e/deep-links.e2e.ts` in WebKit, and `firefox` runs the whole spec,
+because both engines cancel the chunk downloads in flight when a navigation starts: a deep link followed while the page
+before it is still loading its document has to open the link rather than reload that page
+(`installChunkFailureRecovery`). The two are "emitted document item hrefs select and scroll their anchored thread" and
+the row that holds the first page's `yjs` chunk, which makes the case deterministic in WebKit; Firefox does not fail that
+row without the rule, and reaches the case only through the first row's timing. The project's `grep` selects them by
+title, so renaming either drops its WebKit run with no failure; rename the `grep` with it. The spec's margin-hold rows
+stay out of WebKit: "a linked card the margin's later cards push down is scrolled back into view" and "a press while a
+comment link reached from another document is landing does not end the hold" failed in CI's WebKit (LEGION-458's pull
+request, #1655) while passing locally in WebKit, the Playwright image's WebKit included.
 
 The `webkit-iphone` project runs the live view's two phone-layout rows in `e2e/agent-view.e2e.ts` (its project `grep` selects them by title, so renaming either test silently drops its WebKit run with no failure; rename the `grep` with it) in WebKit with the iPhone 13 profile, since iOS Safari is the engine the keyboard cap exists for and the `iphone` project is Chromium. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so those rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
 
-No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (2 tests become 1, with no error), then restore it. Repeat the check whenever the `grep` or the titles change.
+No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (2 tests become 1, with no error), then restore it. The same check holds for `webkit-deep-links`. Repeat it whenever the `grep` or the titles change.
 
 The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`: Firefox's native
 editing puts text typed over a code block's last line before that line's newline, and deletes a
