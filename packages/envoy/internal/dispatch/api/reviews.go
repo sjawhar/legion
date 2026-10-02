@@ -320,7 +320,7 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 	}
 	// A moved approval ask names this latest version and is answered by the header action, keeping
 	// its thread as the review's provenance.
-	open, err := docs.ApprovalAskAt(r.Context(), tx, artifact.ID)
+	open, err := docs.OpenApprovalAsk(r.Context(), tx, artifact.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -430,20 +430,21 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	open, err := docs.ApprovalAskAt(r.Context(), tx, artifact.ID)
+	open, err := docs.OpenApprovalAsk(r.Context(), tx, artifact.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	events := []model.Event{}
 	if open != nil {
+		openSummary, err := docs.ApprovalAskSummary(*open)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		// A request without a summary keeps the one the open ask carries.
 		if !hasSummary {
-			// A request without a summary keeps the one the open ask carries.
-			if summary, err = docs.ApprovalAskSummary(*open); err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-			question = docs.ApprovalQuestion(artifact.Name, version, summary)
+			summary = openSummary
 		}
 		// Read before this request writes anything: whether a hand-back is due is the turn every
 		// read reports, and a reworded question does not change it.
@@ -452,7 +453,9 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 			s.writeHandlerError(w, err)
 			return
 		}
-		if open.Question != question {
+		// Every version write moves the open request to its version (docs.MoveApprovalAsk) under
+		// the owner row this request holds, so only a new summary rewords it here.
+		if summary != openSummary {
 			event, err := docs.RewriteApprovalAsk(
 				r.Context(), tx, s.deps.Events, open, actor, version, summary, s.deps.ServerURL,
 			)
@@ -577,10 +580,10 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 // ask.handed_back event. It records version as the one handed back and the thread's newest reply as
 // the one this hand-back answered (waitingOnExpression). The caller holds the owner row every reply
 // takes before it inserts, so no reply commits between that read and this transaction's commit, and
-// a reply that inserts after it stamps a later created_at (commentInsertedAt), sorts after the one
-// recorded and decides the turn, however early its own transaction began. The question is left as
-// it stands: a request that changes it rewords first through docs.RewriteApprovalAsk, which
-// ask.edited records.
+// a reply that inserts after it gets a later created_at (the insert time, migration 0065), sorts
+// after the one recorded and decides the turn, however early its own transaction began. The
+// question is left as it stands: a request that changes it rewords first through
+// docs.RewriteApprovalAsk, which ask.edited records.
 func (s *server) handBackApprovalAsk(ctx context.Context, tx pgx.Tx, owner owner, ask *model.Ask, actor model.Actor, version int) (model.Event, error) {
 	ask.Approval.RequestedVersion = version
 	approval, err := json.Marshal(ask.Approval)

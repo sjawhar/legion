@@ -3637,7 +3637,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toStartWith(
-      "The approval request for spec.md (document id artifact-42) at version 3 (ask ask-8) already waits on the human, so this call changed nothing"
+      "The approval request for spec.md (document id artifact-42) at version 3 (ask ask-8) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you."
     );
     expect(result.text).not.toContain("Approval requested");
     expect(result.text).toContain(
@@ -5487,7 +5487,7 @@ describe("executeDispatchTool", () => {
         reply_to: null,
         ask_id: askID,
         turn: "human",
-        waiting_on: "human",
+        ask_waiting_on: "human",
         resolved: false,
         suggestion: null,
         created_at: "2026-09-09T00:00:00Z",
@@ -5581,7 +5581,7 @@ describe("executeDispatchTool", () => {
         reply_to: null,
         ask_id: askID,
         turn: "agent",
-        waiting_on: "agent",
+        ask_waiting_on: "agent",
         resolved: false,
         suggestion: null,
         created_at: "2026-09-09T00:00:00Z",
@@ -5634,7 +5634,7 @@ describe("executeDispatchTool", () => {
           issue_key: "DSP-42",
           ask_id: askID,
           turn: "human",
-          waiting_on: "agent",
+          ask_waiting_on: "agent",
         })) as unknown as typeof fetch,
     });
 

@@ -738,8 +738,8 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 	// with no `turn` does.
 	turn := thread.replyTurn(actor, nil)
 	reply, err := scanComment(tx.QueryRow(r.Context(), `
-		insert into comments (issue_key, artifact_id, author, body, reply_to, ask_id, turn, created_at)
-		values ($1, $2, $3, $4, $5, $6, $7, `+commentInsertedAt+`)
+		insert into comments (issue_key, artifact_id, author, body, reply_to, ask_id, turn)
+		values ($1, $2, $3, $4, $5, $6, $7)
 		returning `+commentColumns+`
 	`, comment.IssueKey, comment.ArtifactID, author, *input.Body, thread.ReplyTo, thread.AskID, turn))
 	if err != nil {
@@ -752,7 +752,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	reply.WaitingOn, err = thread.waitingOn(r.Context(), tx)
+	waitingOn, err := thread.waitingOn(r.Context(), tx)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -775,7 +775,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload, err := s.commentEventPayload(
-		r.Context(), tx, reply, artifactName, thread.eventThread(reply.WaitingOn), referenceChanges,
+		r.Context(), tx, reply, artifactName, thread.eventThread(waitingOn), referenceChanges,
 	)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -797,5 +797,5 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
-	WriteJSON(w, http.StatusCreated, reply)
+	WriteJSON(w, http.StatusCreated, commentWriteResponse{Comment: reply, AskWaitingOn: waitingOn})
 }

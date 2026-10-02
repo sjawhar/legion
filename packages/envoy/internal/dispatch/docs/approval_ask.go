@@ -14,9 +14,9 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-// ApprovalAskAt returns the open approval ask on artifactID, or nil. The caller holds the document
-// owner's row, so it observes the same version the review and approval routes use.
-func ApprovalAskAt(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
+// OpenApprovalAsk returns the open approval ask on artifactID, locked, or nil. The caller holds the
+// document owner's row, so it observes the same version the review and approval routes use.
+func OpenApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
 	row := tx.QueryRow(ctx, `
 		select `+AskColumns+`
 		from asks a
@@ -39,7 +39,7 @@ func ApprovalAskAt(ctx context.Context, tx pgx.Tx, artifactID string) (*model.As
 // row and its thread stay open; requested_version records that the agent must hand it back before
 // a human sees it in Waiting on you again.
 func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, serverURL string) ([]model.Event, error) {
-	ask, err := ApprovalAskAt(ctx, tx, artifactID)
+	ask, err := OpenApprovalAsk(ctx, tx, artifactID)
 	if err != nil {
 		return nil, err
 	}

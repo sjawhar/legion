@@ -2482,10 +2482,12 @@ export async function executeDispatchTool(
           (comment.advice?.your_open_asks?.some((ask) => ask.id === replyToAsk) ?? false),
       });
       if (replyToAsk !== undefined) {
-        // The server computes waiting_on from the ask after inserting this comment. It differs
-        // from this comment's turn for an agent reply on a moved approval request.
+        // The server answers whom the ask waits on now that this comment is its newest reply. It
+        // differs from this comment's turn for an agent reply on a moved approval request.
         const askState =
-          comment.waiting_on === undefined ? "" : `; ask now waiting on ${comment.waiting_on}`;
+          comment.ask_waiting_on === undefined
+            ? ""
+            : `; ask now waiting on ${comment.ask_waiting_on}`;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner)}`,
@@ -2495,7 +2497,9 @@ export async function executeDispatchTool(
             ...commentDetails,
             ask: replyToAsk,
             follows: { ask: replyToAsk },
-            ...(comment.waiting_on === undefined ? {} : { ask_waiting_on: comment.waiting_on }),
+            ...(comment.ask_waiting_on === undefined
+              ? {}
+              : { ask_waiting_on: comment.ask_waiting_on }),
             ...(comment.advice === undefined ? {} : { advice: comment.advice }),
           },
         };
@@ -2750,7 +2754,7 @@ export async function executeDispatchTool(
       // waiting on the human says nothing changed, so a retry never reads as a fresh hand-back.
       const outcome = result.recorded
         ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).`
-        : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: no reply in its thread is newer than its last hand-back.`;
+        : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you.`;
       return {
         text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version },

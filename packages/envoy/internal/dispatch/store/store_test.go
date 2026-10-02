@@ -892,7 +892,7 @@ func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 	}
 }
 
-// 0053 pairs an ask's kind with its approval; 0056 adds requested_version to that approval. An
+// 0053 pairs an ask's kind with its approval; 0064 adds requested_version to that approval. An
 // approval ask carries the fields model.AskApproval decodes and no other kind carries approval,
 // not even JSON null. A hand-written row that breaks the pairing either way is refused at insert.
 // The rows named in residual are shapes 0053 admits and ScanAsk still fails on. They are skipped,
@@ -933,12 +933,12 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		// an object.
 		{"an approval ask whose document id is empty, as the JSON null reads back", "approval", new(`{"artifact_id":"","name":"","version":0}`), true},
 		// An id that is not a uuid fails the cast answering the ask makes on it (22P02), and one in
-		// capitals is never found by docs.ApprovalAskAt, which compares the id as text with the
+		// capitals is never found by docs.OpenApprovalAsk, which compares the id as text with the
 		// lowercase text Postgres writes, so a new version would never move the ask.
 		{"an approval ask whose document id is empty at a real version", "approval", new(`{"artifact_id":"","name":"spec.md","version":1}`), true},
 		{"an approval ask whose document id is in capitals", "approval", new(`{"artifact_id":"7C1E8A52-3F4B-4D6E-9A0B-1C2D3E4F5A6B","name":"spec.md","version":1}`), true},
 		// A character before or after the uuid, or a letter past f in it, also fails that cast, and
-		// docs.ApprovalAskAt never finds the ask. Each row is refused only while its anchor, or the
+		// docs.OpenApprovalAsk never finds the ask. Each row is refused only while its anchor, or the
 		// pattern's hex class, is as written.
 		{"an approval ask whose document id has a digit after the uuid", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b0","name":"spec.md","version":1}`), true},
 		{"an approval ask whose document id has a digit before the uuid", "approval", new(`{"artifact_id":"07c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1}`), true},
@@ -1010,15 +1010,17 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 	}
 }
 
-// 0056 backfills the version every existing approval request was shown to, then keeps an older
+// 0064 backfills the version every existing approval request was shown to, then keeps an older
 // binary's approval insert valid by adding requested_version from version before the check runs. A
 // moved request may advance version while preserving this value, which is how ask reads distinguish
 // a human-ready request from one an agent still owns. Its handed_back_reply_id starts null on every
-// row and names a reply in the comments table, on an approval ask only.
-func TestMigrate0056BackfillsAndRequiresApprovalRequestedVersion(t *testing.T) {
+// row and names a reply in the comments table (0066's key, validated), on an approval ask only.
+// From 0065 a comment that names no created_at is stamped when its insert runs, so two comments
+// one transaction inserts are ordered as they were written.
+func TestMigrate0064To0066RecordApprovalHandBacks(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
-	migrateThrough(t, store, 55)
+	migrateThrough(t, store, 63)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
@@ -1028,7 +1030,7 @@ func TestMigrate0056BackfillsAndRequiresApprovalRequestedVersion(t *testing.T) {
 				'[{"label":"Approve"},{"label":"Request changes"}]', 'approval',
 				'{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":7}');
 	`); err != nil {
-		t.Fatalf("seed pre-0056 approval ask: %v", err)
+		t.Fatalf("seed pre-0064 approval ask: %v", err)
 	}
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -1118,6 +1120,25 @@ func TestMigrate0056BackfillsAndRequiresApprovalRequestedVersion(t *testing.T) {
 		if !errors.As(err, &refusal) || refusal.Code != refused.code || refusal.ConstraintName != refused.constraint {
 			t.Fatalf("handed_back_reply_id on %s: error = %v, want %s", refused.name, err, refused.constraint)
 		}
+	}
+	// Two comments one transaction inserts with no created_at: the default stamps each when it is
+	// inserted, where now() gave both the transaction's start.
+	tx, err := store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	var first, second time.Time
+	const insertComment = `insert into comments (issue_key, author, body)
+		values ('CORE-1', '{"kind":"user","id":"alice"}', $1) returning created_at`
+	if err := tx.QueryRow(ctx, insertComment, "First.").Scan(&first); err != nil {
+		t.Fatalf("insert the first comment: %v", err)
+	}
+	if err := tx.QueryRow(ctx, insertComment, "Second.").Scan(&second); err != nil {
+		t.Fatalf("insert the second comment: %v", err)
+	}
+	if !second.After(first) {
+		t.Fatalf("comments inserted in one transaction: created_at %s then %s, want the second later", first, second)
 	}
 }
 

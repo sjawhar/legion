@@ -15,6 +15,7 @@ import type {
   AskRead,
   Comment,
   CommentRead,
+  CommentWriteResponse,
   CreateArtifactInput,
   CreateAskInput,
   CreateCommentInput,
@@ -517,7 +518,7 @@ export class DispatchClient {
     return this.#json("PATCH", ["api", "v1", "asks", id], input);
   }
 
-  async comment(issue: string, input: CreateCommentInput): Promise<Advised<Comment>> {
+  async comment(issue: string, input: CreateCommentInput): Promise<Advised<CommentWriteResponse>> {
     return this.#json(
       "POST",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"],
@@ -570,7 +571,10 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "artifacts", id, "comments"]);
   }
 
-  async artifactComment(id: string, input: CreateCommentInput): Promise<Advised<Comment>> {
+  async artifactComment(
+    id: string,
+    input: CreateCommentInput
+  ): Promise<Advised<CommentWriteResponse>> {
     return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], input);
   }
 

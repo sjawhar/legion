@@ -7,10 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 type turnAskRow struct {
@@ -316,36 +314,15 @@ func TestReplyUnderAnAnsweredAskRecordsNoTurn(t *testing.T) {
 	}
 }
 
-// waitForLockWaiters returns once want sessions on the test's database wait on a lock.
-func waitForLockWaiters(t *testing.T, database *store.Store, want int) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		var waiting int
-		if err := database.Pool.QueryRow(context.Background(), `
-			select count(*) from pg_stat_activity
-			where datname = current_database() and wait_event_type = 'Lock'
-		`).Scan(&waiting); err != nil {
-			t.Fatalf("read lock waiters: %v", err)
-		}
-		if waiting >= want {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("lock waiters = %d, want %d", waiting, want)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// An ask reply stamps created_at once it holds the owner row, so the thread's newest reply is the
-// one that committed last. Here the agent's reply begins first and waits for the owner row while
-// a human's reply, begun after it, commits; the agent's reply is the newer one, and the ask's
-// turn, its Inbox row and its place in the Inbox follow it. The test holds the owner row and
-// writes the human's reply directly, in a transaction that begins after the agent's: a reply that
-// took the owner row itself would commit at that moment or later, with a created_at no later than
-// its commit. Stamped at its transaction's start, the agent's reply would sort before the human's,
-// and the ask would wait on the agent that had already answered.
+// A comment's created_at is when its insert ran (migration 0065's default), after the reply took
+// the owner row, so the thread's newest reply is the one that committed last. Here the agent's
+// reply begins first and waits for the owner row while a human's reply, begun after it, commits;
+// the agent's reply is the newer one, and the ask's turn, its Inbox row and its place in the Inbox
+// follow it. The test holds the owner row and writes the human's reply directly, in a transaction
+// that begins after the agent's: a reply that took the owner row itself would commit at that
+// moment or later, with a created_at no later than its commit. Stamped at its transaction's start,
+// the agent's reply would sort before the human's, and the ask would wait on the agent that had
+// already answered.
 func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 	for _, path := range []struct {
 		name   string
@@ -403,7 +380,7 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 			}
 			replied := make(chan *httptest.ResponseRecorder, 1)
 			go func() { replied <- agentReply() }()
-			waitForLockWaiters(t, database, 1)
+			waitForDatabaseLocks(t, hold, 1)
 			var humanReplyID string
 			if err := database.Pool.QueryRow(ctx, `
 				insert into comments (issue_key, author, body, ask_id, turn)
@@ -421,13 +398,16 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 			if err := hold.Rollback(ctx); err != nil {
 				t.Fatalf("release the owner row: %v", err)
 			}
-			response := <-replied
+			response := awaitResponse(t, replied)
 			if response.Code != http.StatusCreated {
 				t.Fatalf("agent's reply: status=%d body=%s", response.Code, response.Body.String())
 			}
-			reply := decodeBody[model.Comment](t, response)
-			if reply.WaitingOn != "human" {
-				t.Fatalf("agent's reply waiting_on = %q, want human", reply.WaitingOn)
+			reply := decodeBody[struct {
+				model.Comment
+				AskWaitingOn string `json:"ask_waiting_on"`
+			}](t, response)
+			if reply.AskWaitingOn != "human" {
+				t.Fatalf("agent's reply ask_waiting_on = %q, want human", reply.AskWaitingOn)
 			}
 			events := decodeBody[[]struct {
 				Type    string         `json:"type"`

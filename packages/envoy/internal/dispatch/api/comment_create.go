@@ -471,8 +471,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	var comment model.Comment
 	if err := tx.QueryRow(r.Context(), `
-		insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, turn, suggestion, created_at)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, `+commentInsertedAt+`)
+		insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, turn, suggestion)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		returning created_at
 	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, turn, suggestionJSON).Scan(&comment.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
@@ -496,7 +496,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	comment.Suggestion = suggestion
 	comment.Mentions = mentions
 	comment.Deliveries = []model.CommentDelivery{}
-	comment.WaitingOn, err = threadTarget.waitingOn(r.Context(), tx)
+	waitingOn, err := threadTarget.waitingOn(r.Context(), tx)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -607,7 +607,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		events = append(events, event)
 	}
 	payload, err := s.commentEventPayload(
-		r.Context(), tx, comment, artifactName, threadTarget.eventThread(comment.WaitingOn), referenceChanges,
+		r.Context(), tx, comment, artifactName, threadTarget.eventThread(waitingOn), referenceChanges,
 	)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -650,5 +650,5 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		}
 		comment.Deliveries = append(comment.Deliveries, attempt)
 	}
-	WriteJSON(w, http.StatusCreated, withAdvice(comment, advice))
+	WriteJSON(w, http.StatusCreated, withAdvice(commentWriteResponse{Comment: comment, AskWaitingOn: waitingOn}, advice))
 }

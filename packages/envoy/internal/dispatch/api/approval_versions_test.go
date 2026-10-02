@@ -291,8 +291,8 @@ func TestApprovalHandBackWaitsOnTheHuman(t *testing.T) {
 			if again.Code != http.StatusCreated {
 				t.Fatalf("second human comment: status=%d body=%s", again.Code, again.Body.String())
 			}
-			if response := decodeBody[map[string]any](t, again); response["waiting_on"] != "agent" {
-				t.Fatalf("second human comment waiting_on = %#v, want agent", response["waiting_on"])
+			if response := decodeBody[map[string]any](t, again); response["ask_waiting_on"] != "agent" {
+				t.Fatalf("second human comment ask_waiting_on = %#v, want agent", response["ask_waiting_on"])
 			}
 			if event := latestCommentCreatedPayload(t, handler, issue.Key); event["ask_waiting_on"] != "agent" {
 				t.Fatalf("second human comment's comment.created ask_waiting_on = %#v, want agent", event["ask_waiting_on"])
@@ -407,7 +407,7 @@ func TestARewordlessHandBackKeepsTheQuestionsRevision(t *testing.T) {
 // A reply whose transaction begins while a hand-back holds the owner row waits for that row and
 // commits after the hand-back, so it is the thread's newest reply and its turn decides the request.
 // The test parks the hand-back after it has taken the owner row, with a lock on the ask row that
-// ApprovalAskAt waits for, then starts the human's comment, which queues on the owner row.
+// OpenApprovalAsk waits for, then starts the human's comment, which queues on the owner row.
 func TestAReplyQueuedBehindAHandBackTakesTheTurn(t *testing.T) {
 	ctx := context.Background()
 	handler, database := newInteractionHandler(t, nil)
@@ -440,24 +440,24 @@ func TestAReplyQueuedBehindAHandBackTakesTheTurn(t *testing.T) {
 	}
 	handedBack := make(chan *httptest.ResponseRecorder, 1)
 	go func() { handedBack <- approvalRequest() }()
-	waitForLockWaiters(t, database, 1)
+	waitForDatabaseLocks(t, hold, 1)
 	commented := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		commented <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
 			map[string]any{"ask_id": askID, "body": "And the backoff?"}, "alice")
 	}()
-	waitForLockWaiters(t, database, 2)
+	waitForDatabaseLocks(t, hold, 2)
 	if err := hold.Rollback(ctx); err != nil {
 		t.Fatalf("release the ask row: %v", err)
 	}
-	handBack := <-handedBack
-	comment := <-commented
+	handBack := awaitResponse(t, handedBack)
+	comment := awaitResponse(t, commented)
 	if comment.Code != http.StatusCreated {
 		t.Fatalf("second human comment: status=%d body=%s", comment.Code, comment.Body.String())
 	}
 	// The comment is the thread's newest reply, so every read waits on the agent it asked.
-	if response := decodeBody[map[string]any](t, comment); response["waiting_on"] != "agent" {
-		t.Fatalf("second human comment waiting_on = %#v, want agent", response["waiting_on"])
+	if response := decodeBody[map[string]any](t, comment); response["ask_waiting_on"] != "agent" {
+		t.Fatalf("second human comment ask_waiting_on = %#v, want agent", response["ask_waiting_on"])
 	}
 	if event := latestCommentCreatedPayload(t, handler, issue.Key); event["ask_waiting_on"] != "agent" {
 		t.Fatalf("second human comment's comment.created ask_waiting_on = %#v, want agent", event["ask_waiting_on"])
@@ -528,11 +528,17 @@ func TestCommentOnMovedApprovalAskReportsItsDerivedWaitingOn(t *testing.T) {
 	if comment.Code != http.StatusCreated {
 		t.Fatalf("comment on moved approval: status=%d body=%s", comment.Code, comment.Body.String())
 	}
-	if response := decodeBody[map[string]any](t, comment); response["waiting_on"] != "agent" {
-		t.Fatalf("comment waiting_on = %#v, want agent", response["waiting_on"])
+	// The derived turn is on the wire once, as ask_waiting_on: the comment row itself carries none.
+	response := decodeBody[map[string]any](t, comment)
+	event := latestCommentCreatedPayload(t, handler, issue.Key)
+	if response["ask_waiting_on"] != "agent" || event["ask_waiting_on"] != "agent" {
+		t.Fatalf("comment ask_waiting_on = %#v, comment.created ask_waiting_on = %#v, want agent on both", response["ask_waiting_on"], event["ask_waiting_on"])
 	}
-	if event := latestCommentCreatedPayload(t, handler, issue.Key); event["ask_waiting_on"] != "agent" {
-		t.Fatalf("comment.created ask_waiting_on = %#v, want agent", event["ask_waiting_on"])
+	if _, ok := response["waiting_on"]; ok {
+		t.Fatalf("comment response carries waiting_on beside ask_waiting_on: %#v", response)
+	}
+	if _, ok := event["waiting_on"]; ok {
+		t.Fatalf("comment.created carries waiting_on beside ask_waiting_on: %#v", event)
 	}
 	if detail := readAskDetail(t, handler, askID); detail.WaitingOn != "agent" {
 		t.Fatalf("ask detail waiting_on = %q, want agent", detail.WaitingOn)

@@ -796,9 +796,6 @@ export interface Comment extends AnchorPosition {
   readonly anchor: Anchor | null;
   readonly reply_to: string | null;
   readonly ask_id: string | null;
-  /** The open ask's derived turn once this comment is its newest reply. It may differ from
-   *  `turn`: an agent reply on a moved approval request leaves that request waiting on the agent. */
-  readonly waiting_on?: AskTurn;
   /** On a reply to an open ask, who holds the turn after it; null under a closed ask (nothing is
    *  waiting) and on every other comment. A human's reply is always `agent`; a session's is
    *  `human` unless posted as a progress note. */
@@ -811,6 +808,15 @@ export interface Comment extends AnchorPosition {
   readonly created_at: string;
   readonly mentions: CommentMention[];
   readonly deliveries: CommentDelivery[];
+}
+
+/** What a route that posts a comment answers (`POST /api/v1/issues/{key}/comments`,
+ *  `POST /api/v1/artifacts/{id}/comments`): the comment row and, on a reply to an open ask, whom
+ *  that ask waits on now that the reply is its newest. It is the value the comment's event carries
+ *  under the same name, and may differ from `turn`: an agent's reply on a moved approval request
+ *  leaves that request waiting on the agent. */
+export interface CommentWriteResponse extends Comment {
+  readonly ask_waiting_on?: AskTurn;
 }
 
 export interface Suggestion {

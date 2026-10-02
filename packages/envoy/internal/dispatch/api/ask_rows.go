@@ -23,16 +23,10 @@ const askRowFrom = `from asks a
 	left join artifacts ba on ba.id = a.block_artifact_id
 	left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid`
 
-// commentInsertedAt is the created_at both comment inserts write (createCommentFor, replyComment).
-// Each runs after its transaction has taken the owner row, which every comment insert takes, so
-// the clock there orders an owner's comments as they commit; the column default, now(), is the
-// transaction's start, and a reply that began first but waited for the row would sort before one
-// that committed while it waited.
-const commentInsertedAt = `clock_timestamp()`
-
 // newestReply selects the newest comment in the thread of the ask aliased a: the one that
-// committed last (commentInsertedAt). lastReplyJoin reads it for every ask read, and a hand-back
-// records its id, so both agree on which reply is newest.
+// committed last, since a comment's created_at is when its insert ran (migration 0065) and every
+// comment insert first takes the owner row. lastReplyJoin reads it for every ask read, and a
+// hand-back records its id, so both agree on which reply is newest.
 const newestReply = `select c.id, c.author, c.created_at, c.turn from comments c
 			where c.ask_id = a.id
 			order by c.created_at desc, c.id desc
