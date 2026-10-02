@@ -14,8 +14,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-// ApprovalAskAt returns the newest open approval ask on artifactID, or nil. The caller holds the
-// document owner's row, so it observes the same version the review and approval routes use.
+// ApprovalAskAt returns the open approval ask on artifactID, or nil. The caller holds the document
+// owner's row, so it observes the same version the review and approval routes use.
 func ApprovalAskAt(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
 	row := tx.QueryRow(ctx, `
 		select `+AskColumns+`

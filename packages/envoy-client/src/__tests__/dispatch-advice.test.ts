@@ -90,6 +90,7 @@ async function executeWrite(tool: string, args: Record<string, unknown>, advice?
             ask_id: body.ask_id ?? null,
             reply_to: null,
             turn: body.ask_id === undefined ? null : "human",
+            waiting_on: body.ask_id === undefined ? undefined : "human",
           },
           advice
         )

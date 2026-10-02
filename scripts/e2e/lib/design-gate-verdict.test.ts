@@ -53,7 +53,12 @@ function approvalEvents(asks: unknown[]): unknown[] {
  * Runs the stage 4b design-gate verdict as the driver does: the issue's asks, approval lifecycle
  * events, then each spec version that an approval ask was handed back at, slurped.
  */
-function verdict(asks: unknown[], versions: Version[], approved = 5, events = approvalEvents(asks)): Verdict {
+function verdict(
+  asks: unknown[],
+  versions: Version[],
+  approved = 5,
+  events = approvalEvents(asks)
+): Verdict {
   const run = Bun.spawnSync(
     [
       "jq",
@@ -183,14 +188,14 @@ describe("design-gate-verdict.jq", () => {
         payload: current,
       },
     ];
-    expect(verdict([block, current], [specAt(1, "open"), specAt(2, "answered")], 2, events)).toEqual(
-      {
-        request: "Approve spec.md (version 2)? Adds the rollback budget.",
-        summarized: true,
-        blocks: 1,
-        early: ["version 1: Where does the smoke file go?"],
-      }
-    );
+    expect(
+      verdict([block, current], [specAt(1, "open"), specAt(2, "answered")], 2, events)
+    ).toEqual({
+      request: "Approve spec.md (version 2)? Adds the rollback budget.",
+      summarized: true,
+      blocks: 1,
+      early: ["version 1: Where does the smoke file go?"],
+    });
   });
 
   // The version-3 request was retracted when the block's answer wrote version 4, and the approved

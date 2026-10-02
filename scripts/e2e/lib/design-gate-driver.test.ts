@@ -10,10 +10,9 @@ const script = readFileSync(
 );
 
 function handedBackVersions(events: unknown[]): string {
-  const run = Bun.spawnSync(
-    ["jq", "-r", "-L", library, "--arg", "artifact", "spec-1", selector],
-    { stdin: new TextEncoder().encode(JSON.stringify(events)) }
-  );
+  const run = Bun.spawnSync(["jq", "-r", "-L", library, "--arg", "artifact", "spec-1", selector], {
+    stdin: new TextEncoder().encode(JSON.stringify(events)),
+  });
   if (run.exitCode !== 0) throw new Error(`jq exited ${run.exitCode}: ${run.stderr.toString()}`);
   return run.stdout.toString();
 }
