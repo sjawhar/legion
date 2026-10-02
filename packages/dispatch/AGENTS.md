@@ -285,11 +285,13 @@ document tab mounts. `loadDocumentTransport` resolves to a synchronous `connect`
 browser is offline is retried once the network returns (Chromium caches a failed module fetch,
 so the retry can reject too); a failure while online, or a retry that rejects, reaches
 `DeploymentResilience`, which treats it as a replaced deployment and reloads once per session.
-The one exception is a page being left: from `beforeunload` until the next `pageshow` no failure
-reloads it, because WebKit and Firefox cancel the chunk downloads in flight when a navigation
-starts (WebKit also refuses new ones), and a reload then would replace the reader's navigation
-with a reload of the page they are leaving (`deep-links.e2e.ts`, which the `webkit-deep-links` and
-`firefox` projects run for that reason).
+The one exception is a page being left: from `beforeunload` no failure reloads it, because WebKit
+and Firefox cancel the chunk downloads in flight when a navigation starts (WebKit also refuses new
+ones), and a reload then would replace the reader's navigation with a reload of the page they are
+leaving (`deep-links.e2e.ts`, which the `webkit-deep-links` and `firefox` projects run for that
+reason). The page counts as staying again once it is shown (`pageshow`, or the tab turning
+visible) or pressed (a pointer or a key), since a navigation cancelled at a leave prompt, stopped,
+or answered with a download fires no event of its own.
 It never default-prevents Vite's `vite:preloadError` (`installChunkFailureRecovery` says why), so
 every importer sees the load failure itself: a route's error box names the failed download, and
 the first editor a page mounts after its stylesheet failed shows the document's failed state. A

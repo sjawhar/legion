@@ -83,6 +83,55 @@ test("a chunk that fails while the page is being left does not reload over the n
   }
 });
 
+test("a page still in use after a navigation began reloads for its next chunk failure", () => {
+  window.sessionStorage.clear();
+  installChunkFailureRecovery();
+  const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
+  const failChunk = () =>
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+  // The navigation never happens - cancelled at a leave prompt, stopped, or answered with a
+  // download - so no pageshow and no unload follow it, and the reader goes on using the page.
+  const press = (type: string) => () =>
+    document.body.dispatchEvent(new Event(type, { bubbles: true }));
+  const stillInUse = [
+    ["a pointer press", press("pointerdown")],
+    ["a key press", press("keydown")],
+    ["the tab shown again", () => document.dispatchEvent(new Event("visibilitychange"))],
+  ] as const;
+
+  try {
+    // A tab hidden while its navigation is under way is still being left.
+    window.dispatchEvent(new Event("beforeunload"));
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+    } finally {
+      Reflect.deleteProperty(document, "visibilityState");
+    }
+    failChunk();
+    expect(reload).not.toHaveBeenCalled();
+
+    for (const [signal, use] of stillInUse) {
+      window.sessionStorage.clear();
+      reload.mockClear();
+      window.dispatchEvent(new Event("beforeunload"));
+      failChunk();
+      const whileLeaving = reload.mock.calls.length;
+      use();
+      failChunk();
+      expect({ signal, whileLeaving, afterUse: reload.mock.calls.length }).toEqual({
+        signal,
+        whileLeaving: 0,
+        afterUse: 1,
+      });
+    }
+  } finally {
+    window.dispatchEvent(new Event("pageshow"));
+    reload.mockRestore();
+    window.sessionStorage.clear();
+  }
+});
+
 test("a chunk that fails while the browser is offline is not a stale deployment: no reload, the importer sees the error", () => {
   window.sessionStorage.clear();
   installChunkFailureRecovery();

@@ -61,19 +61,30 @@ async function deploymentChanged(): Promise<boolean> {
   return latest !== undefined && latest !== runningIndexAsset();
 }
 
-// Set from the start of a navigation away from this page (`beforeunload`) until the page is shown
-// again (`pageshow`, which a back/forward-cache restore fires). WebKit and Firefox cancel the chunk
-// downloads still in flight when a navigation starts, WebKit also refuses the ones the page starts
-// after it, and Vite reports each as a failed chunk. Those are not a replaced deployment, and a
-// reload then would replace the reader's navigation with a reload of the page they are leaving.
+// Set from the start of a navigation away from this page (`beforeunload`) until the page is
+// plainly still the reader's: shown again (`pageshow`, which a back/forward-cache restore fires,
+// or the tab becoming visible again), or pressed (a pointer or a key on it). WebKit and Firefox
+// cancel the chunk downloads still in flight when a navigation starts, WebKit also refuses the ones
+// the page starts after it, and Vite reports each as a failed chunk. Those are not a replaced
+// deployment, and a reload then would replace the reader's navigation with a reload of the page
+// they are leaving. A navigation can also not happen after all - cancelled at another page's leave
+// prompt, stopped, or answered with a download - and no event says so; the press or the return
+// that follows is what ends the state, never a timer, since a refusal can arrive any number of
+// tasks after the navigation started.
 let leavingPage = false;
 
 function markPageLeaving(): void {
   leavingPage = true;
 }
 
-function markPageShown(): void {
+function markPageStaying(): void {
   leavingPage = false;
+}
+
+function markPageStayingWhenVisible(): void {
+  if (document.visibilityState === "visible") {
+    leavingPage = false;
+  }
 }
 
 // Reloads the page once per session for a chunk that failed to download while online.
@@ -102,7 +113,11 @@ function reloadForChunkFailure(): void {
 // once per session, never while it is being left.
 export function installChunkFailureRecovery(): void {
   window.addEventListener("beforeunload", markPageLeaving);
-  window.addEventListener("pageshow", markPageShown);
+  window.addEventListener("pageshow", markPageStaying);
+  // Captured on the window, so a handler that stops a press from propagating cannot hide it.
+  window.addEventListener("pointerdown", markPageStaying, { capture: true });
+  window.addEventListener("keydown", markPageStaying, { capture: true });
+  document.addEventListener("visibilitychange", markPageStayingWhenVisible);
   window.addEventListener("vite:preloadError", reloadForChunkFailure);
 }
 
