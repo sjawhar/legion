@@ -245,6 +245,17 @@ it was queued behind, and the `pg_stat_activity` query that lists the holders; e
 let it finish and start the server again. A migration that needs another bound sets its own
 `SET LOCAL lock_timeout`.
 
+Migrations `0056`–`0062` make search indexing linear. Each table has its own migration, so its
+transaction holds an `ACCESS EXCLUSIVE` lock only for the `DROP EXPRESSION` and trigger setup;
+`0062` re-indexes only rows holding sixteen or more underscore-joined segments under `ROW EXCLUSIVE`.
+Their censuses answer `0` for 0056–0061, which neither refuse nor rewrite a row, and, for 0062,
+the candidate rows whose stored vector the new expression changes.
+
+Migration `0063_doc_settlements_pending` creates the table in which every durable document update
+records the settlement it owes, which the settlement deletes when it commits. A room's load and the
+server's minute-by-minute resumption arm the settlement a row names, so one a shutdown cuts short
+still runs. It creates a table and touches no row; its census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -411,10 +422,15 @@ value: dashboard-URL mentions are recognised only against it, so an empty URL wo
 
 ## Search
 
-Migration 0010 adds stored generated `search` columns. Postgres computes them on every write, so
-no application code writes or refreshes the search vectors. Search covers issue titles, the latest
-settled document text, comments, asks (questions and free-text answers), and messages. Live
-document text takes up to the 2 s settle delay to appear in search results.
+Migration 0010 added stored generated `search` columns. Migrations `0057`–`0061` made them
+plain columns that a `BEFORE INSERT OR UPDATE` trigger per table fills
+(`issues_search`, `artifact_versions_search`, `comments_search`, `asks_search`,
+`messages_search`), so no application code writes or refreshes a search vector. Every indexed
+text, headline, and duplicate-title comparison first passes through `search_text` (0056), which
+puts a space after every sixteenth underscore-joined segment. A query is not normalised and is
+limited to 1,000 characters. Search covers issue titles, the latest settled document text,
+comments, asks (questions and free-text answers), and messages. Live document text takes up to
+the 2 s settle delay to appear in search results.
 
 Search snippets are escaped text with only server-inserted `<mark>` elements around matches. Native
 issue creation rejects a title that near-duplicates an existing issue in the same project with
@@ -486,8 +502,8 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/comments/{id}/accept` | POST | cookie or trusted header | Apply and accept an anchored suggestion. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and leaves the suggestion open; one removed after it answers `200` with `lost: true`. |
 | `/api/v1/comments/{id}/reject` | POST | cookie or trusted header | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | cookie, trusted header, or bearer | Post an issue message. |
-| `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |
-| `/api/v1/projects/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |
+| `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose formatting is more items than one document update can store (1,048,576), naming the count. |
+| `/api/v1/projects/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose formatting is more items than one document update can store (1,048,576), naming the count. |
 | `/api/v1/artifacts/{id}` | GET | cookie, trusted header, or bearer | Read an artifact, its versions, and incoming references. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/text` | GET | cookie, trusted header, or bearer | Read a live document's markdown. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | cookie, trusted header, or bearer | Read a document version or download a blob. `{id}` must be a UUID. |

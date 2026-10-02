@@ -63,6 +63,9 @@
 
 ### Changed
 
+- A markdown document uploaded as an artifact is at most 1 MiB, the bound an issue's spec and
+  every edit already have; other artifacts keep the 25 MiB limit. The dashboard shows the
+  server's message for a refused upload (LEGION-465).
 - The stream stores an envelope under a MsgId, and so recognises its repeat, when its dedupe key was
   minted once for its message: the listener's own `publish.<id>` and `agent.<session>.<id>`, and the
   same around the shared transport's UUID idempotency key (`contracts.MintedDedupeKeyPattern`,
@@ -146,6 +149,39 @@
   because its `dispatch_search` refuses the same rules before any request.
 
 ### Fixed
+
+- Saving a document, comment, ask, or message with a long run of underscore-joined characters
+  no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
+  in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds
+  one update's 1,048,576-item cap is now refused as `413 CAP_EXCEEDED` with its item count instead
+  of `500` (LEGION-465).
+- A Dispatch shutdown no longer drops a document settlement its budget cuts short. The settlement
+  was armed only in memory, so a deploy that stopped the server while a large document settled
+  (a 1 MiB `a_b*` document took 4.5-6.8 s at load 90-170, past the 5 s budget) left its ask blocks
+  unindexed and an edit's version unwritten until the next edit. Every durable document update
+  now records the settlement it owes in `doc_settlements_pending` (migration 0063), which the
+  settlement deletes when it commits. A room's load settles a document with that row, and the
+  server arms the settlement of every open document whose row is a minute old, at start and each
+  minute, so one nobody opens settles too. Shutdown settles only the documents that owe one,
+  cancels a settlement past its budget so its transaction rolls back, and logs per document
+  whether it settled or was left to resume (LEGION-465).
+- Dispatch indexes a mention written in markdown (LEGION-463): `**dispatch://KEY**`,
+  `` `dispatch://KEY` ``, `_dispatch://KEY_`, `~~dispatch://KEY~~`,
+  `[dispatch://KEY](dispatch://KEY)` (how a document stores `<dispatch://KEY>`), a bracketed
+  dashboard URL, a reference in a table cell written without padding (`|dispatch://KEY|`), and a
+  reference followed by a no-break or ideographic space each write their `mentions` edge. A
+  reference ends at whitespace, an angle or square bracket, a quote, a backtick or a pipe, except
+  the bracketed host of an IPv6 dashboard URL, and the sentence punctuation, emphasis delimiters
+  and unbalanced `)` after it are dropped in one pass, where a spec of one reference and 900,000
+  `)` took 21 s to save. The server parses a reference as the dashboard does: a query's pairs
+  split on `&` alone, an item id decoded, a slug only whole, a version without a leading zero, and
+  nothing from a reference holding a control character or an item id that decodes to one. A body
+  citing `…/spec?comment=%00` was answered 500, since Postgres refuses a NUL in the index, and is
+  now stored. The dashboard's composer pills, unfurl cards and linked text read text by the same
+  rule. Text stored before the deploy gets its edges from `envoy-dispatch rebuild-refs`.
+- The dashboard no longer hangs on a comment or an ask question made of repeated `http://`. The
+  check that shows an unfurl card only for a body of nothing but references tried every way to
+  split the body into references, which in Chromium ran for minutes on a 2,000-character comment.
 - During a rolling deploy the replacement listener serves `/v1` and runs its role lane once NATS
   is connected and the interest and session caches are warm (about 100 ms after it listens),
   instead of answering every `/v1` call `503 service starting` until the old task let go of the
@@ -156,7 +192,6 @@
   message twice. A SIGTERM during the bind wait is an ordered shutdown. The bus now restores every
   subscription after a reconnect even when one cannot be restored, so a role lane is not left down
   while the durable still refuses the bind (LEGION-456).
-
 - Dispatch exits with status 1 when it cannot bind its listen address. It logged
   `dispatch: listen … bind: address already in use` and exited 0, so a supervisor read a port
   clash as a clean stop.

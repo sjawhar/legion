@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1060,7 +1061,12 @@ func TestSettleCapturesOnlyItsOwnIdentityUpdate(t *testing.T) {
 	}
 	t.Cleanup(unsubscribe)
 
-	service.settleRoom(artifactID, 0)
+	// The load armed the settlement the seeded update owes, which moved the generation.
+	state := service.room(artifactID)
+	state.mu.Lock()
+	armed := state.gen
+	state.mu.Unlock()
+	service.settleRoom(artifactID, armed)
 	<-foreignApplied
 	if foreignErr != nil {
 		t.Fatalf("apply foreign update during identity settlement: %v", foreignErr)
@@ -1084,12 +1090,11 @@ func TestSettleCapturesOnlyItsOwnIdentityUpdate(t *testing.T) {
 	if markdown != "before\n" {
 		t.Fatalf("identity update changed document = %q, want only identity repairs", markdown)
 	}
-	state := service.room(artifactID)
 	state.mu.Lock()
 	generation := state.gen
 	state.mu.Unlock()
-	if generation != 1 {
-		t.Fatalf("generation after foreign update = %d, want 1", generation)
+	if generation != armed+1 {
+		t.Fatalf("generation after foreign update = %d, want %d", generation, armed+1)
 	}
 	waitForPersistedProofText(t, database, artifactID, "foreign\n")
 	service.settleRoom(artifactID, generation)
@@ -1538,6 +1543,9 @@ func TestRolledBackWriteNeverReachesTheRoom(t *testing.T) {
 	const settleInterval = 50 * time.Millisecond
 	service.settle = settleInterval
 	seedServiceText(t, service, artifactID, "before")
+	// The seed owes a settlement, which versions it (the fixture's first version is another
+	// text); settled here, it is not what a load during the transaction arms below.
+	settleCurrentGeneration(t, service, artifactID)
 	ctx := context.Background()
 	tx, err := service.store.Pool.Begin(ctx)
 	if err != nil {
@@ -1567,8 +1575,8 @@ func TestRolledBackWriteNeverReachesTheRoom(t *testing.T) {
 	`, artifactID).Scan(&versions); err != nil {
 		t.Fatalf("count versions after rollback: %v", err)
 	}
-	if versions != 1 {
-		t.Fatalf("versions after rollback = %d, want 1", versions)
+	if versions != 2 {
+		t.Fatalf("versions after rollback = %d, want the fixture's and the seed's 2", versions)
 	}
 }
 
@@ -2082,6 +2090,94 @@ func TestShutdownContextDoesNotWaitForBlockedSettlement(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("shutdown waited on the blocked settlement")
+	}
+}
+
+// A deploy stops the server on a fixed budget, and a large document's settlement can take longer
+// than it: a 1 MiB `a_b*` document's took 4.5 s at load 90, and a shutdown running it took 8.4 s
+// against its 5 s budget. Shutdown abandoned the settlement its budget cut short, and the
+// settlement lived only in memory, so the restarted server armed none: the document's ask blocks
+// stayed out of the open asks, and an edit's version unwritten, until someone edited it again. The
+// settlement a shutdown leaves runs on the document's next load instead, and Shutdown names it.
+func TestShutdownThatCutsASettlementShortLeavesItToTheNextLoad(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID,
+		":::ask{#ask-block urgency=\"high\" multiple=\"false\" state=\"open\"}\nWhich transport?\n:::\n")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load live document: %v", err)
+	}
+	// The settlement Shutdown runs stops once it holds the document's locks, and stays stopped
+	// past the shutdown budget, as a settlement that renders 1 MiB under load does.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+	service.afterSettleLock = func(string) {
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	err := service.Shutdown(ctx)
+	close(release)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown past its budget = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-entered:
+	default:
+		t.Fatal("shutdown never ran the document's settlement")
+	}
+	if asks := indexedAsks(t, service, artifactID); asks != 0 {
+		t.Fatalf("the settlement shutdown cut short indexed %d asks", asks)
+	}
+
+	restarted := New(Deps{Store: service.store, Events: events.NewBroker(), Settle: 10 * time.Millisecond})
+	t.Cleanup(func() {
+		if err := restarted.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown restarted document service: %v", err)
+		}
+	})
+	if err := restarted.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the document on the restarted server: %v", err)
+	}
+	deadline := time.Now().Add(recoveryBound)
+	for indexedAsks(t, restarted, artifactID) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the restarted server never ran the settlement the shutdown left: its ask block is unindexed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !strings.Contains(err.Error(), artifactID) {
+		t.Fatalf("shutdown error %q does not name the document whose settlement it left", err)
+	}
+}
+
+// A document left owing a settlement settles without anyone opening it. On a rolling deploy the
+// old server stops after the new one has started, so the new server's resumption, not a room
+// load, is what reaches the settlement the old one's shutdown cut short. A row younger than the
+// resumption's age belongs to a settlement its writer is about to run, and is left to it.
+func TestResumptionSettlesAnOwedDocumentNobodyOpens(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID,
+		":::ask{#ask-block urgency=\"high\" multiple=\"false\" state=\"open\"}\nWhich transport?\n:::\n")
+	if err := service.resumeOwedSettlements(context.Background(), time.Hour); err != nil {
+		t.Fatalf("resume settlements owed for an hour: %v", err)
+	}
+	// Ten times the test service's settle delay.
+	time.Sleep(200 * time.Millisecond)
+	if asks := indexedAsks(t, service, artifactID); asks != 0 {
+		t.Fatalf("the resumption settled a document owing one for less than its age: %d asks indexed", asks)
+	}
+	if err := service.resumeOwedSettlements(context.Background(), 0); err != nil {
+		t.Fatalf("resume every owed settlement: %v", err)
+	}
+	deadline := time.Now().Add(recoveryBound)
+	for indexedAsks(t, service, artifactID) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the resumption never settled the owed document: its ask block is unindexed")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

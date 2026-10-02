@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.2]
+
+### Fixed
+
+- A malformed delivery can no longer make Claude Code accept a repeat just because one identity
+  field is empty or otherwise invalid (LEGION-468, #1668). The channel read a frame's `event_id`,
+  `dedupe_key`, `source` and `source_event_id` as one record, so a single invalid field discarded
+  all of them and the frame passed as new. It now ignores only the invalid field and keeps a
+  valid `event_id` or `dedupe_key`, so either still recognises the second copy; when neither is
+  valid, the delivery remains at-least-once.
+
 ## [0.6.1]
 
 ### Fixed
@@ -22,10 +33,6 @@
   carries a recorded Dispatch key cannot unclaim it. Keys live in memory, at most 250,000 of them
   with the oldest forgotten first; a restarted channel server (`claude --resume` included)
   forgets them.
-- A malformed delivery can no longer make Claude Code accept a repeat just because one identity
-  field is empty or otherwise invalid. The channel now ignores only the invalid field and keeps a
-  valid `event_id` or `dedupe_key`, so either still recognises the second copy; when neither is
-  valid, the delivery remains at-least-once.
 
 ## [0.6.0]
 

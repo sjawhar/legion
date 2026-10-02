@@ -212,7 +212,14 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		where schemaname = current_schema()
 	`, []string{"graph_edges"})
 
+	// Every search column is filled by its table's BEFORE trigger (0057-0061), never by application code.
 	assertDatabaseObjects(t, ctx, store.Pool, `
+		select event_object_table
+		from information_schema.triggers
+		where trigger_schema = current_schema() and trigger_name = event_object_table || '_search'
+		  and event_manipulation = 'INSERT'
+	`, []string{"issues", "artifact_versions", "comments", "asks", "messages"})
+	assertDatabaseObjectsAbsent(t, ctx, store.Pool, `
 		select table_name
 		from information_schema.columns
 		where table_schema = current_schema() and column_name = 'search' and is_generated = 'ALWAYS'

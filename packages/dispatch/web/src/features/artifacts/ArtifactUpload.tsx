@@ -40,10 +40,9 @@ export async function uploadFile(
   });
 }
 
+// A refused upload is described by the server, which names the bound it hit: a markdown document
+// is at most 1 MiB and any other file at most 25 MiB, so a 413 is not one message.
 export function uploadErrorMessage(error: unknown): string {
-  if (error instanceof ApiError && error.status === 413) {
-    return "file exceeds 25 MB";
-  }
   if (error instanceof ApiError) {
     return error.message;
   }

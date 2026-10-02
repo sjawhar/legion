@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -114,10 +115,6 @@ type Service struct {
 	// write's (liveWriteOrigin), is a connected peer.
 	serviceOrigins   sync.Map
 	conditionalGates sync.Map
-	// settleAfterReload names the rooms whose failure dropped their settlement, so the load
-	// of the room that replaces one settles it once (failRoomLocked, onLoadDocument). A
-	// failed room's state is discarded with the room, so the mark cannot live on the state.
-	settleAfterReload sync.Map
 }
 
 type roomState struct {
@@ -144,6 +141,9 @@ type roomState struct {
 	// meanwhile, which finishing the write arms.
 	liveWriter     *liveWrite
 	settleDeferred bool
+	// settleWarming is set while a settlement loads the room it is about to settle, so that load
+	// arms no second settlement for the document's pending-settlement row (onLoadDocument).
+	settleWarming  bool
 	settleFailures int
 	closed         bool
 	failed         error
@@ -408,8 +408,21 @@ func New(deps Deps) *Service {
 	return service
 }
 
-// Shutdown stops queued settlements, joins any already-running callbacks, and
-// flushes ygo's document persistence workers.
+// shutdownDrainBudget bounds the part of Shutdown that waits on document work - connected peers
+// closing, queued durable appends landing, and the settlements owed - inside whatever deadline its
+// caller passes.
+const shutdownDrainBudget = 5 * time.Second
+
+// Shutdown stops queued settlements, runs the settlement of each loaded room whose document owes
+// one inside the drain budget, joins the settlements and evictions already running, and flushes
+// ygo's document persistence workers.
+//
+// A settlement the budget cuts short is not lost. Its database work is cancelled and its
+// transaction rolls back, and the pending-settlement row the document's updates wrote
+// (markSettlementPending) arms it again on the room's next load (onLoadDocument) or at the next
+// resumption (RunSettlementResumption). For each document that owed a settlement Shutdown logs
+// whether it settled or was left to resume; once the caller's deadline has passed it cannot read
+// that back, and its error names those documents.
 func (s *Service) Shutdown(ctx context.Context) error {
 	type pendingSettlement struct {
 		room       string
@@ -430,8 +443,11 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		return true
 	})
 	s.stopAllSettleTimers()
-	drainCtx, cancelDrain := context.WithTimeout(ctx, 5*time.Second)
+	drainCtx, cancelDrain := context.WithTimeout(ctx, shutdownDrainBudget)
 	defer cancelDrain()
+	// drainErr is a peer or a durable append the budget did not see through, which Shutdown
+	// cannot leave to a later load; a settlement it cuts short it can.
+	var drainErr error
 	for _, room := range connectedRooms {
 		closed := make(chan error, 1)
 		go func(room string) {
@@ -444,41 +460,131 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		case <-drainCtx.Done():
 			slog.Warn("dispatch: peer close exceeded shutdown budget", "room", room, "error", drainCtx.Err())
+			drainErr = drainCtx.Err()
 		}
 	}
+	rooms := make([]string, 0, len(pending))
 	for _, settlement := range pending {
+		rooms = append(rooms, settlement.room)
 		if err := s.waitForDurableAppends(drainCtx, settlement.room); err != nil {
 			slog.Warn("dispatch: stop document settlement before durable append drain", "room", settlement.room, "error", err)
+			drainErr = err
 		}
 	}
-	settled := make(chan struct{})
-	go func() {
-		var drain sync.WaitGroup
-		for _, settlement := range pending {
-			drain.Add(1)
-			go func(room string, generation uint64) {
-				defer drain.Done()
-				s.settleRoom(room, generation)
-			}(settlement.room, settlement.generation)
-		}
-		drain.Wait()
-		close(settled)
-	}()
-	select {
-	case <-settled:
-	case <-ctx.Done():
-		s.stopAccepting()
-		return ctx.Err()
+	// Only a document that owes a settlement is settled. One whose updates have all been settled
+	// would spend the budget repeating that work - a 1 MiB document's for seconds, one at a time
+	// per issue, since each holds the issue's row - and push the settlement that is owed past it.
+	// When the read fails every room is settled, since nothing says which can be skipped.
+	owed, err := s.roomsOwingSettlement(drainCtx, rooms)
+	if err != nil {
+		slog.Warn("dispatch: read the documents owing a settlement before shutdown", "error", err)
 	}
+	finished := make(chan string, len(pending))
+	running := make(map[string]bool, len(pending))
+	for _, settlement := range pending {
+		if owed != nil && !owed[settlement.room] {
+			continue
+		}
+		running[settlement.room] = true
+		go func(room string, generation uint64) {
+			s.settleRoomWithin(drainCtx, room, generation)
+			finished <- room
+		}(settlement.room, settlement.generation)
+	}
+	budget := drainCtx.Done()
+	for len(running) > 0 {
+		select {
+		case room := <-finished:
+			delete(running, room)
+		case <-budget:
+			// The cancelled settlements still have to return: one may be rendering, which
+			// no context interrupts, and the store has to outlast it.
+			budget = nil
+		case <-ctx.Done():
+			s.stopAccepting()
+			return settlementsUnconfirmed(ctx.Err(), owed, rooms)
+		}
+	}
+	// A settlement a timer started before the timers stopped runs under no budget of its own; it
+	// gets what is left of this one before the gate closes and abandons it.
+	waitGroup(drainCtx, &s.settleWG)
 	s.stopAccepting()
 	s.waitSettles(ctx)
 	// A room that failed evicts itself on its own goroutine, and that eviction flushes the
 	// room through the store, so it has to finish before the store can go.
 	s.waitEvictions(ctx)
-	if err := drainCtx.Err(); err != nil {
-		return err
+	if err := ctx.Err(); err != nil {
+		return settlementsUnconfirmed(err, owed, rooms)
+	}
+	s.reportShutdownSettlements(ctx, owed, rooms, drainCtx.Err() != nil)
+	if drainErr != nil {
+		return drainErr
 	}
 	return s.srv.Shutdown(ctx)
+}
+
+// roomsOwingSettlement is which of rooms owe a settlement no settlement has committed.
+func (s *Service) roomsOwingSettlement(ctx context.Context, rooms []string) (map[string]bool, error) {
+	pending := make(map[string]bool)
+	if len(rooms) == 0 {
+		return pending, nil
+	}
+	rows, err := s.store.Pool.Query(ctx, `
+		select artifact_id::text from doc_settlements_pending where artifact_id::text = any($1)
+	`, rooms)
+	if err != nil {
+		return nil, fmt.Errorf("read pending document settlements: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var room string
+		if err := rows.Scan(&room); err != nil {
+			return nil, fmt.Errorf("scan pending document settlement: %w", err)
+		}
+		pending[room] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read pending document settlements: %w", err)
+	}
+	return pending, nil
+}
+
+// reportShutdownSettlements logs, for each document that owed a settlement when Shutdown's
+// settlements started, whether it settled or is left to resume, and whether the drain budget ended
+// first. owed is nil when Shutdown could not read it, and then only the documents left are named.
+func (s *Service) reportShutdownSettlements(ctx context.Context, owed map[string]bool, rooms []string, budgetEnded bool) {
+	left, err := s.roomsOwingSettlement(ctx, rooms)
+	if err != nil {
+		slog.Warn("dispatch: read the documents left owing a settlement at shutdown", "error", err)
+		return
+	}
+	for _, room := range rooms {
+		switch {
+		case left[room]:
+			slog.Warn("dispatch: document settlement left to resume after shutdown",
+				"room", room, "shutdown_budget_ended", budgetEnded)
+		case owed[room]:
+			slog.Info("dispatch: document settled before shutdown", "room", room)
+		}
+	}
+}
+
+// settlementsUnconfirmed is the error of a Shutdown whose caller's deadline passed before it could
+// read back which settlements committed. It names the documents that owed one, every room when
+// that read failed too; each that did not settle resumes from its pending-settlement row.
+func settlementsUnconfirmed(cause error, owed map[string]bool, rooms []string) error {
+	named := make([]string, 0, len(rooms))
+	for _, room := range rooms {
+		if owed == nil || owed[room] {
+			named = append(named, room)
+		}
+	}
+	if len(named) == 0 {
+		return cause
+	}
+	sort.Strings(named)
+	return fmt.Errorf("document settlement unconfirmed at shutdown for %s; one that did not commit resumes from its pending-settlement row: %w",
+		strings.Join(named, ", "), cause)
 }
 
 // Quiesce closes every live document room, flushing each through the store, and waits for the
@@ -706,6 +812,21 @@ func ensureBlockIDsInDocument(doc *crdt.Doc, origin any) (*pmdoc.Node, int, erro
 }
 
 func (s *Service) settleRoom(room string, generation uint64) {
+	s.settleRoomWithin(context.Background(), room, generation)
+}
+
+// settleRoomWithin settles room under parent. A timer's settlement runs under no deadline; the one
+// Shutdown runs gets its drain budget. When parent ends first the settlement's database work is
+// cancelled and its transaction rolls back, and nothing retries it or counts it as a failure: the
+// document's pending-settlement row leaves it to resume (onLoadDocument, RunSettlementResumption).
+func (s *Service) settleRoomWithin(parent context.Context, room string, generation uint64) {
+	retry := func(err error) {
+		if parent.Err() != nil {
+			slog.Warn("dispatch: document settlement stopped at the shutdown budget", "room", room, "error", err)
+			return
+		}
+		s.retrySettle(room, generation, err)
+	}
 	state := s.room(room)
 	state.mu.Lock()
 	if s.stopping.Load() || state.closed || state.failed != nil || state.gen != generation {
@@ -717,9 +838,15 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return
 	}
 	if s.srv.GetDoc(room) == nil {
-		err := s.srv.Apply(context.Background(), room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
+		state.mu.Lock()
+		state.settleWarming = true
+		state.mu.Unlock()
+		err := s.srv.Apply(parent, room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
+		state.mu.Lock()
+		state.settleWarming = false
+		state.mu.Unlock()
 		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-			s.retrySettle(room, generation, fmt.Errorf("warm document for settlement: %w", err))
+			retry(fmt.Errorf("warm document for settlement: %w", err))
 			return
 		}
 	}
@@ -766,16 +893,16 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	state.mu.Unlock()
 
 	ledger := &Ledger{service: s, settling: true}
-	ctx := store.WithTransactionTracking(withLedger(context.Background(), ledger))
+	ctx := store.WithTransactionTracking(withLedger(parent, ledger))
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
-		s.retrySettle(room, generation, fmt.Errorf("begin document transaction: %w", err))
+		retry(fmt.Errorf("begin document transaction: %w", err))
 		return
 	}
 	defer tx.Rollback(ctx)
 	owner, open, err := lockArtifactOwner(ctx, tx, room)
 	if err != nil {
-		s.retrySettle(room, generation, err)
+		retry(err)
 		return
 	}
 	if !open {
@@ -787,7 +914,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	ctx = withOwnerVerified(ctx)
 	latest, err := latestVersion(ctx, tx, room)
 	if err != nil {
-		s.retrySettle(room, generation, err)
+		retry(err)
 		return
 	}
 	if err := s.lockSettlementCursor(ctx, tx, room); err != nil {
@@ -795,7 +922,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			slog.Warn("dispatch: skip shutdown document settlement while cursor lock is held", "room", room, "error", err)
 			return
 		}
-		s.retrySettle(room, generation, fmt.Errorf("lock document cursor: %w", err))
+		retry(fmt.Errorf("lock document cursor: %w", err))
 		return
 	}
 	if s.afterSettleLock != nil {
@@ -811,7 +938,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	}
 	snapshotCursor, err := currentUpdateCursor(ctx, tx, room)
 	if err != nil {
-		s.retrySettle(room, generation, err)
+		retry(err)
 		return
 	}
 	tree, err := treeOf(doc)
@@ -820,7 +947,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
 			return
 		}
-		s.retrySettle(room, generation, err)
+		retry(err)
 		return
 	}
 
@@ -850,7 +977,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 				slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
 				return
 			}
-			s.retrySettle(room, generation, err)
+			retry(err)
 			return
 		}
 	}
@@ -921,7 +1048,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			s.failRoom(room, err)
 			return
 		}
-		s.retrySettle(room, generation, err)
+		retry(err)
 		return
 	}
 	if reconciliation.changed {
@@ -983,7 +1110,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
 			return
 		}
-		s.retrySettle(room, generation, err)
+		retry(err)
 		return
 	}
 
@@ -1034,7 +1161,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			s.failRoom(room, err)
 			return
 		}
-		s.retrySettle(room, generation, err)
+		retry(err)
 		return
 	}
 	versioning := contentChanged && markdown != latest.markdown
@@ -1048,7 +1175,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			s.failRoom(room, err)
 			return
 		}
-		s.retrySettle(room, generation, err)
+		retry(err)
 		return
 	}
 	if versioning {
@@ -1062,7 +1189,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 				s.failRoom(room, writeErr)
 				return
 			}
-			s.retrySettle(room, generation, writeErr)
+			retry(writeErr)
 			return
 		}
 		published = append(published, ledger.events...)
@@ -1083,7 +1210,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 				s.failRoom(room, err)
 				return
 			}
-			s.retrySettle(room, generation, err)
+			retry(err)
 			return
 		}
 	}
@@ -1093,7 +1220,18 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			s.failRoom(room, err)
 			return
 		}
-		s.retrySettle(room, generation, err)
+		retry(err)
+		return
+	}
+	// Every update this settlement read is settled once it commits, so the row that left the
+	// settlement to a later load goes with that commit.
+	if err := clearSettlementPending(ctx, tx, room); err != nil {
+		if stamped > 0 {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, err)
+			return
+		}
+		retry(err)
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1102,7 +1240,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			s.failRoom(room, fmt.Errorf("commit document settlement: %w", err))
 			return
 		}
-		s.retrySettle(room, generation, fmt.Errorf("commit document settlement: %w", err))
+		retry(fmt.Errorf("commit document settlement: %w", err))
 		return
 	}
 	if stamped > 0 {
@@ -1426,11 +1564,9 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	s.purgeSuppressedPersistence(room)
 	// The failure drops this room's settlement: a queued one is stopped just above, one
 	// already running refuses on the failed room (settleRoom), and its retry stops because
-	// the generation moved (retrySettleLocked). The replacement room arms one on its next
-	// update alone (onLoadDocument's observer), so the ask blocks the dropped settlement
-	// would have indexed would stay out of the open asks until someone edited the document.
-	// The replacement's load settles once instead.
-	s.settleAfterReload.Store(room, struct{}{})
+	// the generation moved (retrySettleLocked). The document's pending-settlement row, which
+	// only a committed settlement deletes, makes the replacement's load settle it once
+	// (onLoadDocument).
 	// Shutdown joins the evictions it did not cause. The consequence differs from settleWG's
 	// gate, which skips the work as well as the waiting: this eviction runs either way, because
 	// awaitRoomRecovery blocks every reader of a failed room on the close(done) below, and a

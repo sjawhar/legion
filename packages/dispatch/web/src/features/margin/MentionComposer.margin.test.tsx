@@ -6,9 +6,9 @@ import { ApiError, api } from "../../api/client";
 import {
   type ComposerAnchor,
   type ComposerKind,
-  composerReferences,
   MentionComposer,
 } from "../conversation/MentionComposer";
+import { composerReferences } from "../refs/routes";
 import type { MarginOwner } from "./useMarginItems";
 
 function Composer({

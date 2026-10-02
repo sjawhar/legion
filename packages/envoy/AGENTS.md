@@ -45,6 +45,28 @@ captured update in the same Postgres transaction as any resulting version and ev
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
+The closer's timer lives in memory, so the database says which documents still owe it: every
+durable document update writes the document's `doc_settlements_pending` row in its own transaction
+(`markSettlementPending`, migration 0063), and the settlement that has read every update deletes it
+in the transaction that commits its writes. A settlement that did not commit - one a shutdown's
+budget cut short or a room failure dropped - is armed again from that row two ways: a room's load
+arms one when the row is there (`onLoadDocument`, unless the load is a settlement's own warm-up),
+and `cmd/dispatch` runs `docs.Service.RunSettlementResumption`, which at start and every minute
+arms the settlement of each document whose row is a minute old and whose issue is open
+(`resumeOwedSettlements`), so a document nobody opens settles too. It runs on an interval because a
+rolling deploy stops the old task after the new one has started. A closed issue's rooms arm none
+until it reopens. `docs.Service.Shutdown` runs the settlement of each loaded room whose document has
+that row, and no other, inside its 5 s drain budget (`shutdownDrainBudget`, within the caller's
+deadline: `cmd/dispatch` gives HTTP shutdown and document shutdown one 5 s context between them,
+`shutdownTimout`); a settled document's repeat would spend the budget for nothing. It cancels the
+database work of any settlement the budget cuts short so its transaction rolls back, and logs for
+each document that owed one whether it settled or was left to resume (`dispatch: document settled
+before shutdown`, `dispatch: document settlement left to resume after shutdown` with
+`shutdown_budget_ended`). A settlement cut short is not an error; a caller's deadline
+that passes before Shutdown can read that back is, and its error names the documents that owed
+one. A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on the development
+machine, past that budget.
+
 A write never puts one block id on two blocks. `EnsureBlockIDs` keeps a repeated id for the first
 holder in document order, and ask rows and anchors are keyed on block ids, so a block written ahead
 of an answered ask under its id would take the ask's row and answer, and the question would come
@@ -154,7 +176,8 @@ transaction rolls back, and the caller retries once the room has reloaded; so do
 room fails before its first append, since the reloaded room may lack it. A room's own load never
 waits for that recovery either - the eviction waits in ygo's `CloseRoom` for the load's ready
 barrier, so the two would hold each other - and refuses instead, which ends the eviction; the
-replacement room's load then runs the one settlement the failure dropped.
+replacement room's load then runs the settlement the failure dropped, which the document's
+`doc_settlements_pending` row still names.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
@@ -779,6 +802,26 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifact
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
 exists, and refuses to run without `dispatch.server_url`.
+A mention's source is the node whose text holds it, never the issue that text belongs to: a
+citation in an issue's spec is an edge out of the spec document, so
+`GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
+issue's own `child_of` and `affects` edges, and the cited node's `?to=` backlink names the spec.
+Where a reference in text ends, and what it names, is one rule with two readers: `text.ExtractAt`,
+which every write indexes through, and the dashboard's `composerReferences` (`refs/routes.ts`,
+scanning with `referenceSpans` and parsing with `referenceRouteFromHref`), behind its reference
+pills, unfurl cards and linked text. `DISPATCH_TEXT_REFERENCES` in `@legion/contracts`, whose
+JSON copy is `text/testdata/dispatch-text-references.json`, is the table both are tested against,
+so a change to the rule changes both readers and the table: `**dispatch://KEY**`,
+`` `dispatch://KEY` `` and `[dispatch://KEY](dispatch://KEY)` (how a document stores
+`<dispatch://KEY>`) all mention `KEY`, though the dashboard shows the code span as code, not a
+link. The Go reader parses a reference as the browser does: a query's pairs split on `&` alone,
+as `URLSearchParams` splits them (`searchParams`), an item id is decoded as `decodeURIComponent`
+decodes it, a slug is the whole segment, and a reference holding a control character, or an item
+id that decodes to one, names nothing; the index binds ids as `text[]`, where Postgres refuses a
+NUL, so a decoded NUL would fail the write and stop `rebuild-refs` at the body holding it. Where a
+browser normalizes a URL and net/url does not (host case, a default port, dot segments, a
+backslash), the two still differ, and so does how many U+FFFD stand for the invalid UTF-8 in a
+query's item id, an id no item has.
 
 The live document holds the tree as the browser editor holds it (`pmdoc.Update`, `pmdoc.Read`).
 That editor builds each node it loads with its schema, so an attribute the live document lacks
