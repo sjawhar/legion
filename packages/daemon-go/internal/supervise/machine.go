@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 // ClaimState is where a claim is in its life.
@@ -655,12 +656,15 @@ func (m *Machine) checkLaunch(ctx context.Context) error {
 // first, so it is the one waited out. The boot token's hash is persisted before the process
 // starts, so the shim's first hello resolves. A launch the runtime or the spec refuses is a launch
 // failure and is tried again at once, waiting out the same process, until the budget runs out;
-// only a start that succeeds forgets it.
+// only a start that succeeds forgets it. The one refusal that is not a failure is the tree's
+// cleanup reservation, met by the runtime's resource recheck after checkLaunch passed: nothing
+// started, so it is returned at once as the reservation's wait, uncharged and without a retry.
 func (m *Machine) launch(ctx context.Context) error {
 	if err := m.checkLaunch(ctx); err != nil {
 		return err
 	}
 	m.letGo()
+	before := m.claim.State
 	for {
 		m.claim.Generation++
 		token := rand.Text()
@@ -678,6 +682,16 @@ func (m *Machine) launch(ctx context.Context) error {
 			m.log.Info("supervise: launched", "generation", m.claim.Generation, "incarnation", loc.Incarnation,
 				"resumed", m.claim.SessionFile != "")
 			return m.persist(ctx)
+		}
+		if errors.Is(err, treelifecycle.ErrCleanupReserved) {
+			// A claim brought back from rest rests again, so a later start, once its tree is
+			// admitted anew, brings it back; one relaunched in its lifetime is left launching with
+			// nothing running, for its tree's close to stop.
+			if slices.Contains([]ClaimState{StateQueued, StateSuspended, StateFailed, StateRetired}, before) {
+				m.claim.State = before
+			}
+			m.log.Info("supervise: launch waits for its tree's cleanup", "generation", m.claim.Generation, "error", err)
+			return errors.Join(err, m.persist(ctx))
 		}
 		m.claim.Budgets.LaunchFailures++
 		m.log.Warn("supervise: launch failed", "generation", m.claim.Generation, "error", err,

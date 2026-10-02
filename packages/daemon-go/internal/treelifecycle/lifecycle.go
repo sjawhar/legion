@@ -183,8 +183,10 @@ func ReserveCleanup(ctx context.Context, tx pgx.Tx, project, tree string, author
 	return lifecycle, nil
 }
 
-// CheckReservation proves the physical cleanup caller holds the current reservation epoch.
-func CheckReservation(ctx context.Context, tx pgx.Tx, project, tree string, authority Authority, epoch uint64) error {
+// CheckReservation proves the physical cleanup caller holds the current reservation epoch. It takes
+// the shared serializer before the lifecycle row, as every lifecycle operation does. The authority
+// was checked when the reservation was taken through its own entry point; the epoch names it.
+func CheckReservation(ctx context.Context, tx pgx.Tx, project, tree string, epoch uint64) error {
 	if epoch == 0 {
 		return fmt.Errorf("check cleanup reservation of tree %s: unbound lifecycle epoch", tree)
 	}
@@ -195,7 +197,7 @@ func CheckReservation(ctx context.Context, tx pgx.Tx, project, tree string, auth
 	if err != nil {
 		return fmt.Errorf("check cleanup reservation of tree %s: %w", tree, err)
 	}
-	if lifecycle.Authority != authority || lifecycle.Epoch != epoch || !lifecycle.CleanupStarted || !lifecycle.CleanupConfirmedAt.IsZero() {
+	if lifecycle.Epoch != epoch || !lifecycle.CleanupStarted || !lifecycle.CleanupConfirmedAt.IsZero() {
 		return fmt.Errorf("check cleanup reservation of tree %s: reservation is not current", tree)
 	}
 	return nil

@@ -164,14 +164,10 @@ func (s *Store) PendingTreeClaims(ctx context.Context, project, tree string) ([]
 }
 
 // CheckTreeCleanupReservation proves the physical caller owns the current explicitly reserved
-// epoch. Authority is read from that reservation; no caller-provided zero/value can choose it.
+// epoch, taking the shared serializer before the lifecycle row (treelifecycle.CheckReservation).
 func (s *Store) CheckTreeCleanupReservation(ctx context.Context, project, tree string, epoch uint64) error {
 	return s.Tx(ctx, func(tx pgx.Tx) error {
-		var authority string
-		if err := tx.QueryRow(ctx, `select authority from tree_lifecycles where project = $1 and tree = $2 for update`, project, tree).Scan(&authority); err != nil {
-			return err
-		}
-		return treelifecycle.CheckReservation(ctx, tx, project, tree, treelifecycle.Authority(authority), epoch)
+		return treelifecycle.CheckReservation(ctx, tx, project, tree, epoch)
 	})
 }
 

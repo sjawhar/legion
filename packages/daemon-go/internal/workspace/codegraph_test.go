@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // stubCodegraph puts a fake `codegraph` executable first on PATH. Its `status --json` reports
@@ -327,6 +330,14 @@ esac
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = builder.Process.Kill() })
+	// Start returns once the builder's execve has begun, before the kernel sets the new image's
+	// argument range, and bash then execs again: in between, /proc/<pid>/cmdline reads empty, which
+	// the check rightly calls stale. Name the builder in the lock only once its final argv shows.
+	builderCmdline := fmt.Sprintf("/proc/%d/cmdline", builder.Process.Pid)
+	testwait.Eventually(t, "the builder runs as codegraph", func() bool {
+		raw, err := os.ReadFile(builderCmdline)
+		return err == nil && string(raw) == "codegraph\x0060\x00"
+	})
 	lock := filepath.Join(dir, ".codegraph", "codegraph.lock")
 	if err := os.WriteFile(lock, []byte(strconv.Itoa(builder.Process.Pid)), 0o600); err != nil {
 		t.Fatal(err)

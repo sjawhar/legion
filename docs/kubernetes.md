@@ -367,7 +367,12 @@ a re-admission that committed first fences it; an operator close reserves after 
 the root close. Either reservation comes before the census, which then reads every stored claim of
 the tree, including one that persisted before the reservation but has not admitted resources yet,
 and deletes nothing until all of them retired. A reservation that is not confirmed resumes on the
-next attempt, even after a re-admission, and stays the new start's wait until API confirmation.
+next attempt, even after a re-admission, and stays the new start's wait until API confirmation:
+every close row of the tree, however stale its generation or the linger it closed, still retires
+its claim and drives that cleanup before the checks that finish a stale close apply. A launch whose
+resource recheck meets a reservation committed after its own check is refused at once, with the
+same uncharged wait, rather than held toward the boot deadline. Every lifecycle step takes the
+global serializer before any lifecycle or resource row.
 
 A child issue's Sandbox is deleted and its absence confirmed through the API. A root is cleaned
 last: its cleanup begins only when every child record is confirmed, then refuses new children and

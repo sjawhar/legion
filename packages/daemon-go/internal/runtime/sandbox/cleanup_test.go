@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	corev1 "k8s.io/api/core/v1"
@@ -436,5 +437,28 @@ func TestATreeCleanupBeforeAnyResourceConfirmsItsReservation(t *testing.T) {
 	opened, err := st.OpenTreeLifecycle(ctx, testProject, testTree, treelifecycle.AuthorityWorkflow)
 	if err != nil || opened.Epoch != epoch+1 {
 		t.Fatalf("next admission = %+v, err %v; want epoch %d", opened, err, epoch+1)
+	}
+}
+
+// A launch whose tree's cleanup reserved its epoch is refused at the resource recheck at once,
+// before any pod or Secret is touched, with the reservation's sentinel: waiting out the boot
+// deadline would hold the claim's machine while the close needs it to stop the claim.
+func TestALaunchIntoAReservedTreeIsRefusedAtOnceAndTouchesNothing(t *testing.T) {
+	c := newCleanupRig(t, false)
+	if _, reserved, err := c.r.ReserveWorkflowTreeCleanup(c.ctx, testProject, testTree, 1); err != nil || !reserved {
+		t.Fatalf("reserve: reserved %t, err %v", reserved, err)
+	}
+	spec := rootSpec(t)
+	spec.TreeEpoch = 1
+	started := time.Now()
+	_, err := c.r.Spawn(c.ctx, spec)
+	if !errors.Is(err, treelifecycle.ErrCleanupReserved) {
+		t.Fatalf("launch into a reserved tree = %v, want the reservation's refusal", err)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("the refusal took %s; it must not wait toward the %s boot deadline", elapsed, 2*time.Second)
+	}
+	if writes := c.writes(); len(writes) != 0 {
+		t.Fatalf("a refused launch wrote %+v", writes)
 	}
 }
