@@ -36,7 +36,7 @@ describe("ToolInputError", () => {
         "- a",
         "- b",
         "- Allowed keys: issue, project, artifact, ref, question, options, multiple, urgency, anchor",
-        '- Example: dispatch_ask({"issue":"DSP-1","question":"Ship this?"})',
+        '- Example: dispatch_ask({"issue":"DSP-1","question":"The release is ready, but the revised plan has not been reviewed. How should we proceed? Recommendation: review the revised plan before release to keep the review gate.","options":[{"label":"Review the revised plan","description":"Keeps the review gate in place."},{"label":"Release without review","description":"Delivers now but skips review."}]})',
       ].join("\n")
     );
   });

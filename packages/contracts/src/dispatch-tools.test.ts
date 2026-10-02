@@ -66,11 +66,23 @@ const validCalls = {
   dispatch_issue: { project: "DSP", title: "Native workspace" },
   dispatch_issue_update: { issue: "DSP-1", status: "in_progress" },
   dispatch_claim: { issue: "DSP-1" },
-  dispatch_ask: { issue: "DSP-1", question: "Ship this?" },
+  dispatch_ask: {
+    issue: "DSP-1",
+    question:
+      "The release is ready, but the revised plan has not been reviewed. How should we proceed? Recommendation: review the revised plan before release to keep the review gate.",
+    options: [
+      { label: "Review the revised plan", description: "Keeps the review gate in place." },
+      { label: "Release without review", description: "Delivers now but skips review." },
+    ],
+  },
   dispatch_edit_ask: {
     ask: "ask-1",
-    question: "Ship the revised plan?",
-    options: [{ label: "Ship", description: "Approve the revision." }],
+    question:
+      "The revised plan changes the release, but it has not been reviewed. How should we proceed? Recommendation: review it before release to keep the review gate.",
+    options: [
+      { label: "Review the revised plan", description: "Keeps the review gate in place." },
+      { label: "Release without review", description: "Delivers now but skips review." },
+    ],
     multiple: false,
     urgency: "high",
   },
@@ -529,9 +541,13 @@ describe("dispatchToolSpecs", () => {
     const schema = schemaFor("dispatch_edit_ask");
 
     expect(schema.safeParse({ ask: "ask-1" }).success).toBe(false);
-    expect(schema.safeParse({ ask: "ask-1", question: "Ship the revised plan?" }).success).toBe(
-      true
-    );
+    expect(
+      schema.safeParse({
+        ask: "ask-1",
+        question:
+          "The revised plan changes the release, but it has not been reviewed. How should we proceed?",
+      }).success
+    ).toBe(true);
   });
 
   test("accepts a comment turn only alongside reply_to_ask", () => {
@@ -699,7 +715,14 @@ describe("dispatchToolSpecs", () => {
 
   test("accepts exactly one issue or project owner", () => {
     const cases = [
-      ["dispatch_ask", { project: "CORE", artifact: "runbook-md", question: "Publish?" }],
+      [
+        "dispatch_ask",
+        {
+          project: "CORE",
+          artifact: "runbook-md",
+          question: "The runbook is ready for readers. How should we publish it?",
+        },
+      ],
       ["dispatch_comment", { project: "CORE", artifact: "runbook-md", body: "Looks good." }],
       [
         "dispatch_suggest",
@@ -734,7 +757,10 @@ describe("dispatchToolSpecs", () => {
 
   test("requires artifact with project on document tools but not dispatch_artifact", () => {
     const cases = [
-      ["dispatch_ask", { project: "CORE", question: "Publish?" }],
+      [
+        "dispatch_ask",
+        { project: "CORE", question: "The runbook is ready. How should we publish it?" },
+      ],
       ["dispatch_comment", { project: "CORE", body: "Looks good." }],
       ["dispatch_suggest", { project: "CORE", quote: "draft", replace_with: "final" }],
       [
@@ -771,7 +797,7 @@ describe("dispatchToolSpecs", () => {
     expect(
       schemaFor("dispatch_ask").safeParse({
         ref: "dispatch://CORE/artifact/runbook-md",
-        question: "Publish?",
+        question: "The runbook is ready for readers. How should we publish it?",
       }).success
     ).toBe(true);
     expect(

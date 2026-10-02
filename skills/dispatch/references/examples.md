@@ -8,19 +8,18 @@ message that should not be sent, and a draft placed where the human reads it.
 Before — a wall of text hides the decision and makes the choices unclickable:
 
 ```text
-We need to settle the release gate because the deploy branch has the migration and the
-dashboard changes, I checked the staging result and it is fine except the release notes are
-not reviewed, so should we ship today, wait for docs, or cut the dashboard from this release?
-I think waiting is safest but the customer demo is tomorrow and the list above is probably stale.
+The deploy branch has the migration and dashboard changes. Staging is fine, but release notes are
+not reviewed before tomorrow's customer demo. Review the notes, ship without them, or cut the
+dashboard from the release. Waiting is safest, but the list above may be stale.
 ```
 
-After — anchor the decision and make each option a button:
+After — state the problem and make each genuinely different option a button:
 
 ```ts
 dispatch_ask({
   issue: "LEGION-815",
   question:
-    "Choose the release gate. Recommendation: ship after release-note review, since the tested deployment is otherwise ready.",
+    "Release notes are unreviewed, so the release cannot pass its review gate before tomorrow's customer demo. How should we proceed? Recommendation: review the notes, then ship, to keep the release complete and reviewed.",
   options: [
     { label: "Review notes, then ship", description: "Keeps the release intact and reviewed." },
     { label: "Ship now", description: "Meets the demo deadline; release notes follow later." },
@@ -54,11 +53,19 @@ dispatch_artifact({ issue: "OPS-52", name: "cu-update-2026-09-15.md", content: "
 dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
   { op: "insert", after: "## Context", markdown: "## Draft (artifact cu-update-2026-09-15.md)" },
 ]})
-dispatch_ask({ issue: "OPS-52", question: "Send the customer update as drafted?", options: [...] })
+dispatch_ask({
+  issue: "OPS-52",
+  question:
+    "Customers need an update today, but the draft is only in a separate file. How should we proceed? Recommendation: put the draft in the spec before sending it.",
+  options: [
+    { label: "Put the draft in the spec", description: "Lets the reader review the update in context." },
+    { label: "Keep the separate file", description: "Leaves the reader to find the draft themselves." },
+  ],
+})
 ```
 
 After — the draft is a section of the spec, and the ask anchors there. If it really must be a
-file (something to send as-is), the spec and the ask both link the slug from the upload result:
+file, the spec and the ask both link the slug from the upload result:
 
 ```ts
 dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
@@ -66,17 +73,25 @@ dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
 ]})
 dispatch_ask({
   issue: "OPS-52",
-  question: "Send the customer update as drafted?",
-  options: [...],
+  question:
+    "Customers need an update today, and the draft is ready in the spec. How should we proceed? Sending it reaches customers. Recommendation: send the reviewed update.",
+  options: [
+    { label: "Send the reviewed update", description: "Delivers the update to customers today." },
+    { label: "Hold the update", description: "Leaves customers without the update until it is revised." },
+  ],
   anchor: { artifact: "spec", quote: "Hi team," },
 })
 // or, for a real file — the spec links it where the reader needs it, and so does the ask:
 dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
-  { op: "insert", after: "## Context", markdown: "## Draft\n\nThe update to send as-is: dispatch://OPS-52/artifact/cu-update-2026-09-15-md" },
+  { op: "insert", after: "## Context", markdown: "## Draft\n\nThe update to send: dispatch://OPS-52/artifact/cu-update-2026-09-15-md" },
 ]})
 dispatch_ask({
   issue: "OPS-52",
-  question: "Send this customer update as-is? dispatch://OPS-52/artifact/cu-update-2026-09-15-md",
-  options: [...],
+  question:
+    "Customers need an update today, and its reviewed text is in dispatch://OPS-52/artifact/cu-update-2026-09-15-md. How should we proceed? Recommendation: send the reviewed update.",
+  options: [
+    { label: "Send the reviewed update", description: "Delivers the linked update to customers today." },
+    { label: "Hold the update", description: "Leaves customers without the update until it is revised." },
+  ],
 })
 ```

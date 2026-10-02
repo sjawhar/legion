@@ -15,14 +15,22 @@ It returns `details` `{ session, owner, service }`: `owner` is the lowercase log
 
 ## Handing a human a to-do, editing, resolving, and replying
 
-A to-do handed to a human is an ordinary question: phrase the to-do as the question and give it
-the options that name its outcomes, in the human's words - there is no fixed vocabulary and the
-server treats no label specially. If an outcome needs a reason, say so in that option's
-description, and the human's free-text answer carries it:
+A to-do handed to a human starts with the problem they need to solve and why it matters, then what
+constrains the answer. State what the action changes and risks, give genuinely different outcomes
+as options with their costs, and recommend one. Ask how to solve the problem or which outcome to
+choose, not whether to perform the to-do. There is no fixed vocabulary and the server treats no
+label specially. If an outcome needs a reason, say so in that option's description, and the
+human's free-text answer carries it:
 ```ts
-dispatch_ask({ issue: "DSP-42",
-  question: "Run the production deploy for #19125?",
-  options: [{ label: "Deployed" }, { label: "Blocked", description: "Say what is missing." }] })
+dispatch_ask({
+  issue: "DSP-42",
+  question:
+    "The verified fix remains unavailable because production deployment is pending. How should we proceed? The deployment changes production. Recommendation: deploy the verified fix now.",
+  options: [
+    { label: "Deploy the verified fix", description: "Makes the fix available in production." },
+    { label: "Hold the deploy", description: "Keeps production unchanged until the blocker is resolved." },
+  ],
+})
 ```
 
 Correct or refine an open ask in place instead of opening a second question:

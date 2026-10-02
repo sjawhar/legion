@@ -49,9 +49,11 @@ not share this session's vocabulary, and is often on a phone. Write for that per
 - Expand every identifier the first time it appears: an issue key gets its title, a PR number its
   title, a file what it is for, a session id who it is. Link a URL rather than pasting a bare id.
 - A question lives in the spec or discussion it came from, placed as
-  [Decision blocks](#decision-blocks) says, never as a compressed standalone ask. Give the reader
-  the options, what each costs, and your recommendation with its reason; do not prescribe yourself
-  a form.
+  [Decision blocks](#decision-blocks) says, never as a compressed standalone ask. Start with the
+  problem the reader recognises and why it matters now, then say what constrains the answer, the
+  genuinely different options and what each costs, and your recommendation with its reason. Ask
+  how to solve the problem or which outcome the reader wants, never whether to apply a solution
+  you already chose.
 - Describe a change by what its reader stands to lose, not by what the system does. The
   engineering sentence names the change; the reader's sentence names who can do what today, what
   they will not be able to do after it, what still works, and what you cannot tell. It is a
@@ -214,8 +216,9 @@ Every `dispatch_ask` passes four gates first:
    gate: it is your own `dispatch_ask` to Sami on your own issue.
 2. **Is there genuine uncertainty, and have you measured what you can?** If there is none, it is
    a plan you execute. The one legitimate ask without uncertainty is permission for an action
-   only a human can authorise — a production write, an external send, a console action — and then
-   the question is that action in one sentence, with options that name its outcomes (below).
+   only a human can authorise — a production write, an external send, a console action. Start it
+   with the problem and why the action is needed, then state what the action changes and risks;
+   its options name the outcomes.
    Measure before you write: how many are affected, whether anything reaches the path, what the
    current state already is. The measurement decides whether a human is needed at all, and when
    one is, it turns a research request he cannot answer into a decision he can. Put the
@@ -267,13 +270,15 @@ It returns `details` `{ issue, ask, follows: { ask } }` for an issue or `{ proje
 
 References belong in the question text; `ref` is sugar that appends its `dispatch://` value to the question as a rendered link.
 
-An ask is read on a phone by someone who has not read the code. Open with one or two plain
-sentences: what needs deciding and why it matters now. Each option is a button with a label and
-one sentence saying what happens if it is chosen; never enumerate choices in prose. Put the
-recommendation and its reason last, in `question`. Never put file paths, line numbers, sequence
-numbers, document versions, or role tokens in the question; if the human needs that detail, anchor
-the ask to the document passage instead. Apply the phone test from "Writing for the human" before
-posting. Anchor a document question with `anchor: { artifact, quote, occurrence? }`; `occurrence`
+An ask is read on a phone by someone who has not read the code. Start with the problem that person
+recognises and why it matters now, then state what constrains the answer. Each genuinely different
+option is a button with a label and one sentence saying what it costs; never enumerate choices in
+prose. Put the recommendation and its reason last in `question`. The question asks how to solve
+the problem or which outcome is wanted, never whether to apply a solution you already chose.
+Never put file paths, line numbers, sequence numbers, document versions, or role tokens in the
+question; if the human needs that detail, anchor the ask to the document passage instead. Apply
+the phone test from "Writing for the human" before posting. Anchor a document question with
+`anchor: { artifact, quote, occurrence? }`; `occurrence`
 is zero-based and selects a repeated quote. A quote anchor is pinned to its lowest complete
 containing block while retaining its quote as display text, so rewording the passage keeps it
 attached; a quote spanning top-level blocks, and existing anchors without a block, stay readable
@@ -314,12 +319,14 @@ Before saying you are waiting for human input, call `dispatch_open_asks`. With n
 **Anything you are blocked on a human for is an open ask.** An agent waits on a human only through
 an open ask. An approval, a credential or grant to renew, a setting only they can change, a review
 click, a decision, or a conflict between two of their own rules: open a `dispatch_ask` the moment
-you know, the action as the question. Never write it
-into a spec, a comment reply, a message, or a pull-request body: nothing in those paths reaches
-the human's Inbox, and a human who is not reading your document does not know they are the
-blocker. Before asking, try to remove the step: a value already on the machine, a permission you
-already hold, an API that replaces the click. One ask per item, `urgency: "high"` when work is
-stopped on it; while it is open, keep working on everything that is not.
+you know. Start with the problem and why it matters, then the constraints, options and their
+costs, and your recommendation. For an action only the human can perform, state what it changes
+and risks; never make the action itself the question. Never write it into a spec, a comment reply,
+a message, or a pull-request body: nothing in those paths reaches the human's Inbox, and a human
+who is not reading your document does not know they are the blocker. Before asking, try to remove
+the step: a value already on the machine, a permission you already hold, an API that replaces the
+click. One ask per item, `urgency: "high"` when work is stopped on it; while it is open, keep
+working on everything that is not.
 
 Once an ask is open (who answers it, handing a human a to-do, editing, retracting or resolving it,
 answering a clarification, whose turn a reply gives), see

@@ -386,10 +386,19 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_ask",
-    example: { issue: "DSP-1", question: "Ship this?" },
+    example: {
+      issue: "DSP-1",
+      question:
+        "The release is ready, but the revised plan has not been reviewed. How should we proceed? Recommendation: review the revised plan before release to keep the review gate.",
+      options: [
+        { label: "Review the revised plan", description: "Keeps the review gate in place." },
+        { label: "Release without review", description: "Delivers now but skips review." },
+      ],
+    },
     description:
       "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " +
-      "use dispatch_message instead. A to-do a human must complete is a question phrased as that to-do, with the options you want (for example Done / Can't). " +
+      "use dispatch_message instead. Start with the problem the human recognises and why it matters, then state what constrains the answer, the genuinely different options and what each costs, and your recommendation with its reason. Ask how to solve the problem or which outcome the human wants, never whether to apply a solution you already chose. " +
+      "For an action only a human can perform, state what it changes and risks, then give outcome-named options. " +
       "Anything you are blocked on a human for, including a credential or grant to renew, an approval, or a decision, is an ask, never a message. " +
       "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " +
       `reference — it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} ` +
@@ -406,7 +415,9 @@ export const dispatchToolSpecs = [
         .optional(),
       question: z
         .string({ max: ASK_QUESTION_MAX })
-        .describe(`Decision question, at most ${ASK_QUESTION_MAX} characters.`),
+        .describe(
+          `Problem-first decision question: state the problem and why it matters, its constraints, genuinely different options with their costs, and your recommendation; ask how to solve it or which outcome is wanted, not whether to apply a chosen solution. At most ${ASK_QUESTION_MAX} characters.`
+        ),
       options: z
         .array(
           z.object({
@@ -415,7 +426,9 @@ export const dispatchToolSpecs = [
           }),
           { max: 8 }
         )
-        .describe("Up to 8 choices, each an object { label, description? } (never a bare string).")
+        .describe(
+          "Up to 8 genuinely different approaches, each an object { label, description? } (never a bare string)."
+        )
         .optional(),
       multiple: z.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z.enum(ASK_URGENCIES).describe("Optional decision urgency.").optional(),
@@ -437,7 +450,12 @@ export const dispatchToolSpecs = [
     name: "dispatch_edit_ask",
     example: {
       ask: "01234567-0000-4000-8000-000000000001",
-      question: "Ship the revised plan?",
+      question:
+        "The revised plan changes the release, but it has not been reviewed. How should we proceed? Recommendation: review it before release to keep the review gate.",
+      options: [
+        { label: "Review the revised plan", description: "Keeps the review gate in place." },
+        { label: "Release without review", description: "Delivers now but skips review." },
+      ],
     },
     description:
       "Edit an open question in place. Use it to correct or refine the same decision; retract the " +
@@ -458,7 +476,9 @@ export const dispatchToolSpecs = [
         ),
       question: z
         .string({ max: ASK_QUESTION_MAX })
-        .describe(`Replacement decision question, at most ${ASK_QUESTION_MAX} characters.`)
+        .describe(
+          `Replacement problem-first decision question, at most ${ASK_QUESTION_MAX} characters.`
+        )
         .optional(),
       options: z
         .array(
@@ -468,7 +488,7 @@ export const dispatchToolSpecs = [
           }),
           { max: 8 }
         )
-        .describe("Replacement choices, at most 8.")
+        .describe("Replacement genuinely different approaches, at most 8.")
         .optional(),
       multiple: z.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z.enum(ASK_URGENCIES).describe("Replacement decision urgency.").optional(),

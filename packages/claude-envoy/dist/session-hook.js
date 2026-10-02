@@ -14213,18 +14213,25 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_ask",
-    example: { issue: "DSP-1", question: "Ship this?" },
-    description: "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " + "use dispatch_message instead. A to-do a human must complete is a question phrased as that to-do, with the options you want (for example Done / Can't). " + "Anything you are blocked on a human for, including a credential or grant to renew, an approval, or a decision, is an ask, never a message. " + "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} ` + `characters and has at most 8 options. ${OWNER_REFERENCE}`,
+    example: {
+      issue: "DSP-1",
+      question: "The release is ready, but the revised plan has not been reviewed. How should we proceed? Recommendation: review the revised plan before release to keep the review gate.",
+      options: [
+        { label: "Review the revised plan", description: "Keeps the review gate in place." },
+        { label: "Release without review", description: "Delivers now but skips review." }
+      ]
+    },
+    description: "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " + "use dispatch_message instead. Start with the problem the human recognises and why it matters, then state what constrains the answer, the genuinely different options and what each costs, and your recommendation with its reason. Ask how to solve the problem or which outcome the human wants, never whether to apply a solution you already chose. " + "For an action only a human can perform, state what it changes and risks, then give outcome-named options. " + "Anything you are blocked on a human for, including a credential or grant to renew, an approval, or a decision, is an ask, never a message. " + "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} ` + `characters and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Project document artifact id, slug, or filename.").optional(),
       ref: z2.string().describe("Optional dispatch:// reference (issue, document, message, or ask); appended to the question and rendered as a link.").optional(),
-      question: z2.string({ max: ASK_QUESTION_MAX }).describe(`Decision question, at most ${ASK_QUESTION_MAX} characters.`),
+      question: z2.string({ max: ASK_QUESTION_MAX }).describe(`Problem-first decision question: state the problem and why it matters, its constraints, genuinely different options with their costs, and your recommendation; ask how to solve it or which outcome is wanted, not whether to apply a chosen solution. At most ${ASK_QUESTION_MAX} characters.`),
       options: z2.array(z2.object({
         label: z2.string().describe("Selectable option label."),
         description: z2.string().describe("Optional option context.").optional()
-      }), { max: 8 }).describe("Up to 8 choices, each an object { label, description? } (never a bare string).").optional(),
+      }), { max: 8 }).describe("Up to 8 genuinely different approaches, each an object { label, description? } (never a bare string).").optional(),
       multiple: z2.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z2.enum(ASK_URGENCIES).describe("Optional decision urgency.").optional(),
       anchor: z2.object({
@@ -14239,16 +14246,20 @@ var dispatchToolSpecs = [
     name: "dispatch_edit_ask",
     example: {
       ask: "01234567-0000-4000-8000-000000000001",
-      question: "Ship the revised plan?"
+      question: "The revised plan changes the release, but it has not been reviewed. How should we proceed? Recommendation: review it before release to keep the review gate.",
+      options: [
+        { label: "Review the revised plan", description: "Keeps the review gate in place." },
+        { label: "Release without review", description: "Delivers now but skips review." }
+      ]
     },
     description: "Edit an open question in place. Use it to correct or refine the same decision; retract the " + "old ask and open a new one when the decision itself changes. Previous text remains in the " + "event log. Only the asking session can edit it; answered or resolved asks cannot be edited. " + "An ask that lives as an `ask` block in a document is written in the document too, changing " + "only the fields you name - pass urgency alone and the question's wording, formatting, links " + "and comment anchors are untouched - so the edit writes a document version and closes a " + "spec's design gate until that version is " + "approved; text the block cannot carry back unchanged is refused, naming the field - an " + 'option label containing ": ", the separator between a label and its description, is one ' + "example.",
     arguments: (z2) => ({
       ask: z2.string().describe("Ask id (uuid); an 8+ hex prefix unique among this session's own open asks works too."),
-      question: z2.string({ max: ASK_QUESTION_MAX }).describe(`Replacement decision question, at most ${ASK_QUESTION_MAX} characters.`).optional(),
+      question: z2.string({ max: ASK_QUESTION_MAX }).describe(`Replacement problem-first decision question, at most ${ASK_QUESTION_MAX} characters.`).optional(),
       options: z2.array(z2.object({
         label: z2.string().describe("Selectable option label."),
         description: z2.string().describe("Optional option context.").optional()
-      }), { max: 8 }).describe("Replacement choices, at most 8.").optional(),
+      }), { max: 8 }).describe("Replacement genuinely different approaches, at most 8.").optional(),
       multiple: z2.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z2.enum(ASK_URGENCIES).describe("Replacement decision urgency.").optional()
     }),
