@@ -14,8 +14,9 @@ type Enrollment struct {
 
 // PodEnrollment is what the machine hands the broker for one pod generation: the pod UID the
 // runtime recorded as the locator's incarnation, the identity the shim's hello carried, and the
-// agent's session id. It carries no issue: the broker's rules pick a request's approver at
-// request time, never at enrollment (contract v9).
+// agent's session id. It carries no issue: per the shared broker contract
+// (dispatch://AGENTC-393/artifact/plan-overview-md), the broker's rules pick a request's approver
+// at request time, never at enrollment.
 type PodEnrollment struct {
 	PodUID, Thumbprint, PodToken, Session string
 }

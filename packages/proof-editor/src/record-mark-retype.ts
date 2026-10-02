@@ -64,7 +64,7 @@ export function findRecordMark(
   let from = -1;
   let to = -1;
   let type = "";
-  let text = false;
+  let sawText = false;
   doc.descendants((node, pos) => {
     if (!node.isInline) return true;
     const held = node.marks.find(
@@ -76,10 +76,10 @@ export function findRecordMark(
       type = held.type.name;
     }
     to = pos + node.nodeSize;
-    if (node.isText) text = true;
+    if (node.isText) sawText = true;
     return true;
   });
-  return from === -1 || !text ? null : { range: { from, to }, type };
+  return from === -1 || !sawText ? null : { range: { from, to }, type };
 }
 
 /** The meta key `removeRecordMark` sets on its transaction, and the value it sets there. Both are

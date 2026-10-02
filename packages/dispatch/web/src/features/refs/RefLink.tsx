@@ -1,15 +1,13 @@
-import { itemFromSearch } from "@legion/contracts";
 import type { ReactNode } from "react";
 
-import { trimReference } from "../conversation/MentionComposer";
 import {
   buildDispatchReference,
   buildReferencePath,
   type DispatchReferenceRoute,
   isProjectRoute,
   parseDispatchReference,
-  parseIssuePath,
-  parseProjectPath,
+  referenceRouteFromHref,
+  referenceSpans,
 } from "./routes";
 import { useReferenceTarget } from "./Unfurl";
 
@@ -56,8 +54,6 @@ export function RefLink({ route }: { route: DispatchReferenceRoute }): ReactNode
   return <>{title ?? shortForm(route)}</>;
 }
 
-const bareDispatchRefPattern = /dispatch:\/\/\S+/g;
-
 const excludedRefAncestorTags: Record<string, true> = { A: true, CODE: true, PRE: true };
 
 function isInsideExcludedAncestor(node: Node, root: Node): boolean {
@@ -75,11 +71,12 @@ function isInsideExcludedAncestor(node: Node, root: Node): boolean {
 
 /**
  * Wraps every bare `dispatch://…` reference in root's text into a real `<a>`, so
- * `collectReferenceAnchors` can then resolve it like any other link. Text already inside a link,
- * inline code span, or code block is left alone (its ancestor already parsed as a distinct node,
- * so there is no need to re-tokenize raw Markdown to find code/link boundaries by hand). Only
- * `dispatch://` needs this pass — remark-gfm already autolinks bare `http(s)://` URLs into real
- * link marks during Markdown parsing, before this ever runs.
+ * `collectReferenceAnchors` can then resolve it like any other link; a reference ends where the
+ * composer's and the server's do (`referenceSpans`). Text already inside a link, inline code
+ * span, or code block is left alone (its ancestor already parsed as a distinct node, so there is
+ * no need to re-tokenize raw Markdown to find code/link boundaries by hand). Only `dispatch://`
+ * needs this pass — remark-gfm already autolinks bare `http(s)://` URLs into real link marks
+ * during Markdown parsing, before this ever runs.
  */
 export function linkifyDispatchRefs(root: HTMLElement): void {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -91,17 +88,13 @@ export function linkifyDispatchRefs(root: HTMLElement): void {
   }
   for (const textNode of candidates) {
     const value = textNode.data;
-    bareDispatchRefPattern.lastIndex = 0;
-    if (!bareDispatchRefPattern.test(value)) {
+    if (!value.includes("dispatch://")) {
       continue;
     }
-    bareDispatchRefPattern.lastIndex = 0;
     const fragment = document.createDocumentFragment();
     let lastIndex = 0;
     let replaced = false;
-    for (const match of value.matchAll(bareDispatchRefPattern)) {
-      const start = match.index ?? 0;
-      const raw = trimReference(match[0]);
+    for (const { start, value: raw } of referenceSpans(value, "dispatch://")) {
       if (parseDispatchReference(raw) === undefined) {
         continue;
       }
@@ -119,44 +112,6 @@ export function linkifyDispatchRefs(root: HTMLElement): void {
     fragment.appendChild(document.createTextNode(value.slice(lastIndex)));
     textNode.replaceWith(fragment);
   }
-}
-
-/** The reference a `dispatch://` URL or a same-origin dashboard path names; undefined for an
- * external link or a dashboard path that is not an issue/document reference. */
-export function referenceRouteFromHref(
-  href: string,
-  appOrigin: string = window.location.origin
-): DispatchReferenceRoute | undefined {
-  if (href.startsWith("dispatch://")) {
-    return parseDispatchReference(href);
-  }
-  let url: URL;
-  try {
-    url = new URL(href, appOrigin);
-  } catch {
-    return undefined;
-  }
-  if (url.origin !== appOrigin) {
-    return undefined;
-  }
-  const route =
-    parseIssuePath(url.pathname, url.search) ?? parseProjectPath(url.pathname, url.search);
-  if (route === undefined || (isProjectRoute(route) && route.kind !== "document")) {
-    return undefined;
-  }
-  // An issue document path carrying `?comment=`/`?ask=` names that item, the same rule
-  // `parseProjectPath` already applies to a project document. Without it a search hit's hover
-  // card previewed the document instead of the comment the reader is about to open.
-  if (!isProjectRoute(route) && (route.kind === "spec" || route.kind === "artifact")) {
-    const item = itemFromSearch(url.search);
-    if (item === null) {
-      return undefined;
-    }
-    if (item !== undefined) {
-      return { id: item.id, key: route.key, kind: item.kind };
-    }
-  }
-  return route;
 }
 
 /**

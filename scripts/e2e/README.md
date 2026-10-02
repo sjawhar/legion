@@ -493,8 +493,9 @@ Dispatch of its own (the GitHub App's credentials cannot cross accounts), so it 
 launcher credential — nothing, the daemon included, can enroll against it. Instead the proof runs
 against the **production broker** with a rules file carrying only two throwaway secrets
 (`LEGION_E2E_AUTO`: pod, automatic, inject; `LEGION_E2E_APPROVAL`: pod, approval by
-`login:<name>` naming the same login as `LEGION_E2E_AGENT_SECRETS_OPERATOR`, inject — contract v9
-permits only `operator` or `login:<name>` approvers, never `issue_assignee`; both 3600 s, Sami's
+`login:<name>` naming the same login as `LEGION_E2E_AGENT_SECRETS_OPERATOR`, inject — the shared
+broker contract (dispatch://AGENTC-393/artifact/plan-overview-md) permits only `operator` or
+`login:<name>` approvers, never `issue_assignee`; both 3600 s, Sami's
 values seeded after Plan D's apply) —
 "before any real secret moves" is exactly this state, and it is what spec Acceptance 2's "a live
 worker pod on a development slot" means here.

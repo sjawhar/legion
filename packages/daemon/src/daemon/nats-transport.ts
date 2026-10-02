@@ -76,11 +76,12 @@ export interface NatsTransport {
 }
 
 // Canonical durable-consumer policy, mirroring the Go listener's
-// applyListenerConsumerPolicy (packages/envoy/cmd/listener/main.go:70-88): a
+// applyListenerConsumerPolicy (packages/envoy/cmd/listener/durable.go): a
 // consumer is created (or drift-corrected) via the JetStream manager and then
 // bound, never created by a plain `js.pullSubscribe` — that path deletes the
-// consumer it created on unsubscribe/drain (main.go:100-111), which would
-// silently reset the durable cursor on every daemon restart or reconnect.
+// consumer it created on unsubscribe/drain (startListenerSubscription's comment
+// there), which would silently reset the durable cursor on every daemon restart
+// or reconnect.
 const DURABLE_CONSUMER_ACK_WAIT_MS = 60_000;
 const DURABLE_CONSUMER_MAX_ACK_PENDING = 256;
 // Unlimited: a message that can never succeed is termed explicitly (never

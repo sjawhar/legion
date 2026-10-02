@@ -28,6 +28,7 @@ import type { NodeSchema } from '@milkdown/kit/transformer';
 import { $prose } from '@milkdown/kit/utils';
 import type { $NodeSchema } from '@milkdown/kit/utils';
 import { withDomAttributes } from './dom-attributes';
+import { uuidV4 } from './uuid';
 import {
   blockquoteSchema,
   bulletListSchema,
@@ -55,7 +56,7 @@ export const BLOCK_ID_DOM_ATTR = 'data-block-id';
 
 export type BlockIdGenerator = () => string;
 
-const defaultGenerator: BlockIdGenerator = () => crypto.randomUUID();
+const defaultGenerator: BlockIdGenerator = uuidV4;
 let generator: BlockIdGenerator = defaultGenerator;
 
 /** Replaces the id generator - tests and fixture generators use a deterministic one. */

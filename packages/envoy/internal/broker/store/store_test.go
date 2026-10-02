@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
@@ -203,5 +205,128 @@ func TestMigrationFiveHandlesPreexistingLauncherCredentialsRow(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("expected migration 0005 to delete the pre-existing row, got %d remaining", n)
+	}
+}
+
+// TestMigrationSevenKeysLiveEnrollmentsBySlot applies 0001-0006 by hand inside an isolated schema
+// (dropped on rollback, as TestMigrationFiveHandlesPreexistingLauncherCredentialsRow does), writes
+// a live box and a live pod enrollment the way a broker before slots did, then runs 0007: both
+// rows keep their identity with the empty slot, a second slot of the same pod is a live row of its
+// own, and a second live row in one slot is still refused, by the new index and not the old one.
+func TestMigrationSevenKeysLiveEnrollmentsBySlot(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, testDatabaseURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `create schema migration_seven_slot`); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `set local search_path to migration_seven_slot`); err != nil {
+		t.Fatalf("set search_path: %v", err)
+	}
+	apply := func(version string) {
+		t.Helper()
+		sql, err := migrationFiles.ReadFile("migrations/" + version)
+		if err != nil {
+			t.Fatalf("read %s: %v", version, err)
+		}
+		if _, err := tx.Exec(ctx, string(sql)); err != nil {
+			t.Fatalf("apply %s: %v", version, err)
+		}
+	}
+	for _, version := range []string{
+		"0001_init.up.sql",
+		"0002_launcher_request_service.up.sql",
+		"0003_enrollment_subject.up.sql",
+		"0004_ask_retraction.up.sql",
+		"0005_credential_requests.up.sql",
+		"0006_approval_by_login.up.sql",
+	} {
+		apply(version)
+	}
+	const credential = "00000000-0000-0000-0000-0000000000c1"
+	if _, err := tx.Exec(ctx, `insert into launcher_credentials (id, service, host, key_thumbprint, public_jwk, expires_at)
+		values ($1, 'legion-daemon', 'cluster', 'tp-launcher', '{}'::jsonb, now() + interval '1 day')`, credential); err != nil {
+		t.Fatalf("insert launcher credential: %v", err)
+	}
+	enrol := func(sp pgx.Tx, id, kind, runtimeID, thumbprint string, slot *string) error {
+		columns, values, args := "", "", []any{id, kind, runtimeID, thumbprint, credential}
+		if slot != nil {
+			columns, values, args = ", slot", ", $6", append(args, *slot)
+		}
+		_, err := sp.Exec(ctx, `insert into enrollments (id, kind, runtime_id, thumbprint, launcher_credential_id, lease_expires_at`+columns+`)
+			values ($1, $2, $3, $4, $5, now() + interval '1 hour'`+values+`)`, args...)
+		return err
+	}
+	if err := enrol(tx, "00000000-0000-0000-0000-0000000000e1", "box", "box-1", "tp-box", nil); err != nil {
+		t.Fatalf("insert pre-slot box enrollment: %v", err)
+	}
+	if err := enrol(tx, "00000000-0000-0000-0000-0000000000e2", "pod", "pod-uid-1", "tp-pod", nil); err != nil {
+		t.Fatalf("insert pre-slot pod enrollment: %v", err)
+	}
+
+	apply("0007_enrollment_slot.up.sql")
+
+	var empty int
+	if err := tx.QueryRow(ctx, `select count(*) from enrollments where slot = ''`).Scan(&empty); err != nil || empty != 2 {
+		t.Fatalf("pre-slot enrollments with the empty slot = %d (%v), want both", empty, err)
+	}
+	var indexes []string
+	rows, err := tx.Query(ctx, `select indexname from pg_indexes where schemaname = 'migration_seven_slot' and tablename = 'enrollments' order by indexname`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		indexes = append(indexes, name)
+	}
+	rows.Close()
+	if strings.Join(indexes, ",") != "enrollments_live_runtime_slot,enrollments_pkey" {
+		t.Fatalf("enrollments indexes = %v, want the slot index and the primary key alone", indexes)
+	}
+
+	inSavepoint := func(insert func(sp pgx.Tx) error) error {
+		t.Helper()
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sp.Rollback(ctx)
+		if err := insert(sp); err != nil {
+			return err
+		}
+		return sp.Commit(ctx)
+	}
+	implementer, reviewer := "implementer-g1", "reviewer-g1"
+	for id, slot := range map[string]*string{"00000000-0000-0000-0000-0000000000a1": &implementer, "00000000-0000-0000-0000-0000000000a2": &reviewer} {
+		if err := inSavepoint(func(sp pgx.Tx) error { return enrol(sp, id, "pod", "pod-uid-1", "tp-"+*slot, slot) }); err != nil {
+			t.Fatalf("second live enrollment of pod-uid-1 in slot %s: %v", *slot, err)
+		}
+	}
+	for name, slot := range map[string]*string{"the empty slot": nil, "slot implementer-g1": &implementer} {
+		err := inSavepoint(func(sp pgx.Tx) error {
+			return enrol(sp, "00000000-0000-0000-0000-0000000000ff", "pod", "pod-uid-1", "tp-other", slot)
+		})
+		if err == nil || !strings.Contains(err.Error(), "enrollments_live_runtime_slot") {
+			t.Fatalf("a second live row of pod-uid-1 in %s = %v, want a violation of enrollments_live_runtime_slot", name, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `update enrollments set revoked_at = now() where slot = $1`, implementer); err != nil {
+		t.Fatal(err)
+	}
+	if err := inSavepoint(func(sp pgx.Tx) error {
+		return enrol(sp, "00000000-0000-0000-0000-0000000000fe", "pod", "pod-uid-1", "tp-implementer-again", &implementer)
+	}); err != nil {
+		t.Fatalf("re-enrolling a revoked slot: %v", err)
 	}
 }

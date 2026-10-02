@@ -1,5 +1,6 @@
 // Package agentsecrets relays Dispatch's credential-request UI to the secrets broker's
-// UI-bearer API (contract v9 §3.3). Reads and the machine-login lookup carry and return
+// UI-bearer API (the shared broker contract, dispatch://AGENTC-393/artifact/plan-overview-md,
+// Authentication item 3). Reads and the machine-login lookup carry and return
 // json.RawMessage, so a broker read-shape change never requires a Dispatch code change. Every
 // decision (approve, deny, revoke) instead carries a Decision Dispatch builds itself: its
 // approver is the login Dispatch's own session resolved, which the UI bearer vouches for to the

@@ -102,6 +102,10 @@ with iPhone 13 viewport, touch, and user-agent emulation. A `webkit` project run
 collaborator's cursor differs by engine, and a `firefox` project runs
 `e2e/code-line-replace.e2e.ts` alone, since Firefox's own editing mishandles text
 typed over what follows a block's last line break; `bun run e2e:install` installs all three browsers.
+A `chromium-plain-http` project runs `e2e/plain-http-origin.e2e.ts` alone, with the page opened at
+`http://dispatch-e2e.test:<port>` (Chromium maps that name to the harness host), a plain-HTTP origin
+that is not loopback and so not a secure context: it proves a document takes a new paragraph and a
+comment renders formatted there, where `crypto.randomUUID` does not exist.
 
 ## Phone check
 

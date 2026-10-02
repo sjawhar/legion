@@ -13979,6 +13979,9 @@ function claimHolds(claim, titles) {
   return titles.has(claim.actor.id) ? "holds" : "lapsed";
 }
 // ../contracts/src/dispatch-href.ts
+function hasControlCharacter(value) {
+  return /\p{Cc}/u.test(value);
+}
 function itemFromSearch(search) {
   const params = new URLSearchParams(search);
   const ask = params.get("ask");
@@ -13997,6 +14000,9 @@ function itemFromSearch(search) {
   try {
     id = decodeURIComponent(raw);
   } catch {
+    return null;
+  }
+  if (hasControlCharacter(id)) {
     return null;
   }
   return ask === null ? { id, kind: "comment" } : { id, kind: "ask" };
@@ -14424,7 +14430,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + OWNER_REFERENCE,
+    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair) or `INTERNAL`. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -15171,6 +15177,7 @@ class DispatchServiceError extends Error {
   current;
   mismatches;
   name = "DispatchServiceError";
+  fromDispatch = true;
   constructor(code, status, message, candidates, current, mismatches) {
     super(message);
     this.code = code;
@@ -15178,6 +15185,21 @@ class DispatchServiceError extends Error {
     this.candidates = candidates;
     this.current = current;
     this.mismatches = mismatches;
+  }
+}
+
+class DispatchGatewayError extends DispatchServiceError {
+  answer;
+  advice;
+  fromDispatch = false;
+  transient;
+  mayHaveReachedDispatch;
+  constructor(status, answer, advice, message = `${answer}, so ${advice}.`) {
+    super(`HTTP_${status}`, status, message);
+    this.answer = answer;
+    this.advice = advice;
+    this.transient = transientStatus(status);
+    this.mayHaveReachedDispatch = reachesDispatch(status);
   }
 }
 function asErrorShape(value) {
@@ -15193,7 +15215,7 @@ function requestSignal(signal) {
 }
 function whyNotAPage(answer) {
   if (typeof answer === "string") {
-    return "text that is not a JSON page, which looks like a proxy or gateway page rather than " + "Dispatch's own answer, so a retry may succeed.";
+    return `text that is not a JSON page, ${GATEWAY_PAGE}, so a retry may succeed.`;
   }
   let what;
   if (Array.isArray(answer)) {
@@ -15211,6 +15233,53 @@ function whyNotAPage(answer) {
     what = `an object without ${lacking.join(" or ")}`;
   }
   return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
+}
+var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
+function gatewayAdvice(method, status) {
+  if (!transientStatus(status)) {
+    return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
+  }
+  if (method === "GET")
+    return "a retry may succeed";
+  return reachesDispatch(status) ? "the write may or may not have reached Dispatch: check whether it took effect before retrying it" : "the write did not reach Dispatch, and a retry may succeed";
+}
+function transientStatus(status) {
+  return status >= 500 || status === 408 || status === 429;
+}
+function reachesDispatch(status) {
+  return status >= 500;
+}
+var REDACTED = "[redacted]";
+var EXCERPT_SCAN_LIMIT = 64 * 1024;
+var BEARER_PIECE = 8;
+function redactBearer(text, bearer) {
+  if (bearer === "")
+    return text.slice(0, EXCERPT_SCAN_LIMIT);
+  const length = Math.min(BEARER_PIECE, bearer.length);
+  const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
+  const covered = new Uint8Array(scanned.length);
+  const pieces = new Set;
+  for (let at = 0;at + length <= bearer.length; at++)
+    pieces.add(bearer.slice(at, at + length));
+  for (const piece of pieces) {
+    let found = scanned.indexOf(piece);
+    while (found !== -1) {
+      covered.fill(1, found, found + length);
+      found = scanned.indexOf(piece, found + 1);
+    }
+  }
+  let redacted = "";
+  let kept = 0;
+  for (let start = covered.indexOf(1);start !== -1; start = covered.indexOf(1, kept)) {
+    redacted += `${scanned.slice(kept, start)}${REDACTED}`;
+    const end = covered.indexOf(0, start);
+    kept = end === -1 ? scanned.length : end;
+  }
+  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
+}
+function excerpt(text, token) {
+  const plain = redactBearer(text, token.trim()).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
+  return textHead(plain.replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
 }
 
 class DispatchClient {
@@ -15469,22 +15538,24 @@ class DispatchClient {
     };
     if (body !== undefined)
       headers["Content-Type"] = "application/json";
-    const response = await this.fetchImpl(this.#url(path2, query), {
+    const url2 = this.#url(path2, query);
+    const response = await this.fetchImpl(url2, {
       method,
       headers,
       signal: this.#signal,
       ...body === undefined ? {} : { body: JSON.stringify(body) }
     });
-    return this.#response(response);
+    return this.#response(method, url2, response);
   }
   async#form(method, path2, body) {
-    const response = await this.fetchImpl(this.#url(path2), {
+    const url2 = this.#url(path2);
+    const response = await this.fetchImpl(url2, {
       method,
       headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
       body,
       signal: this.#signal
     });
-    return this.#response(response);
+    return this.#response(method, url2, response);
   }
   #url(path2, query) {
     const url2 = new URL(`${path2.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
@@ -15500,7 +15571,7 @@ class DispatchClient {
     }
     return url2.toString();
   }
-  async#response(response) {
+  async#response(method, url2, response) {
     const text = await response.text();
     let payload = text;
     if (text && isJson(response)) {
@@ -15512,7 +15583,23 @@ class DispatchClient {
     }
     if (!response.ok) {
       const error48 = asErrorShape(payload);
-      throw new DispatchServiceError(error48.code ?? `HTTP_${response.status}`, response.status, error48.error ?? (typeof payload === "string" && payload ? payload : response.statusText), error48.candidates, error48.current, error48.mismatches);
+      if (typeof error48.error === "string") {
+        throw new DispatchServiceError(error48.code ?? `HTTP_${response.status}`, response.status, error48.error, error48.candidates, error48.current, error48.mismatches);
+      }
+      const quoted = excerpt(text, this.token);
+      let body;
+      if (quoted !== "") {
+        body = `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
+      } else if (text === "") {
+        body = "an empty body";
+      } else {
+        const within = text.length > EXCERPT_SCAN_LIMIT ? ` in its first ${EXCERPT_SCAN_LIMIT / 1024} KiB` : "";
+        const size = Buffer.byteLength(text).toLocaleString("en-US");
+        body = `a body of ${size} bytes and no readable text${within}`;
+      }
+      const reasonPhrase = excerpt(response.statusText, this.token);
+      const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
+      throw new DispatchGatewayError(response.status, `${method} ${url2} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
     }
     return payload;
   }
@@ -16255,7 +16342,7 @@ async function resolveArtifact(client, owner, artifactReference, { canonical = f
       throw new Error("artifact is required for a project document");
     }
     const routed = await client.getProjectArtifact(owner.project, artifactReference).catch((error48) => {
-      if (!(error48 instanceof DispatchServiceError) || error48.status !== 404)
+      if (!dispatchAnswered(error48, 404))
         throw error48;
       return;
     });
@@ -16423,12 +16510,12 @@ function referenceLines(edges) {
   if (edges.length === 0)
     return ["- none"];
   return edges.map((edge) => {
-    const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
-    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt}${edge.created_at})`;
+    const excerpt2 = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
+    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt2}${edge.created_at})`;
   });
 }
 function unavailableReason(error48) {
-  return error48 instanceof DispatchServiceError && error48.status === 404 ? "unavailable" : `unavailable: ${messageFor(error48)}`;
+  return dispatchAnswered(error48, 404) ? "unavailable" : `unavailable: ${messageFor(error48)}`;
 }
 async function graphEdges(client, query) {
   try {
@@ -16515,6 +16602,7 @@ function askSummary({ ask, replies }, graph) {
   ]);
   return [
     `Question: ${ask.question}`,
+    ...anchorLines(ask),
     "Options:",
     ...ask.options.length === 0 ? ["- none"] : ask.options.map((option) => `- ${option.label}${option.description ? ` \u2014 ${option.description}` : ""}`),
     `State: ${ask.state}`,
@@ -16578,12 +16666,12 @@ function formatOpenAsksSummary(response, baseUrl) {
 function commentSummary({ comment, replies }, graph) {
   const root = [
     `${comment.id} \xB7 ${actorText(comment.author)}`,
-    ...comment.anchor?.quote === undefined ? [] : [`> ${comment.anchor.quote}`],
+    ...anchorLines(comment),
     `Body: ${comment.body}`
   ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
-    ...reply.anchor?.quote === undefined ? [] : [`> ${reply.anchor.quote}`],
+    ...anchorLines(reply),
     `Body: ${reply.body}`
   ]);
   return [
@@ -16594,6 +16682,28 @@ function commentSummary({ comment, replies }, graph) {
     ...graph
   ].join(`
 `);
+}
+function anchorLines(record2) {
+  return [
+    ...record2.anchor?.quote === undefined ? [] : [`> ${record2.anchor.quote}`],
+    ...record2.anchor_block === undefined ? [] : [`Position: ${positionText(record2.anchor_block)}`],
+    ...record2.anchor_block_error === undefined ? [] : [`Position: unavailable (${record2.anchor_block_error})`]
+  ];
+}
+function positionText(block) {
+  const { table, path: path2 } = block;
+  const segments = path2.map((entry) => `${entry.type}[${entry.index}]`);
+  if (table === undefined || table.row === null)
+    return segments.join(" \u203A ");
+  const tableAt = path2.findIndex((entry) => entry.type === "table");
+  const cells = table.cells ?? [];
+  const label = (table.column === null ? cells : cells.slice(0, table.column)).map((cell) => cell.trim()).filter((cell) => cell !== "" && !/^\d+$/.test(cell)).join(" \xB7 ");
+  const row = label === "" ? `row ${table.row}` : `row ${table.row} (${label})`;
+  const header = table.header === null || table.header === "" ? String(table.column) : table.header;
+  return [
+    ...segments.slice(0, tableAt + 1),
+    table.column === null ? row : `${row}, column ${header}`
+  ].join(" \u203A ");
 }
 function messageSummary({ message, replies }, graph) {
   const root = [`${message.id} \xB7 ${actorText(message.author)}`, `Body: ${message.body}`];
@@ -16618,9 +16728,8 @@ async function openArtifactMarks(client, resolved) {
   const marks = asks.filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id).map((ask) => `ask ${ask.id}`);
   const commentsResult = await commentsResultPromise;
   if (commentsResult.status === "rejected") {
-    if (commentsResult.reason instanceof DispatchServiceError && commentsResult.reason.status === 404) {
+    if (dispatchAnswered(commentsResult.reason, 404))
       return marks;
-    }
     throw commentsResult.reason;
   }
   return [
@@ -16706,10 +16815,32 @@ async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
   ].join(`
 `));
 }
-function refusalWithCode(error48, suffix = "") {
+function refusalWithCode(error48, ...clauses) {
+  const suffix = clauses.filter((clause) => clause !== "").join("; ");
+  const joined = suffix === "" ? "" : `; ${suffix}`;
+  if (error48 instanceof DispatchGatewayError) {
+    let told = error48.message;
+    if (joined !== "") {
+      told = error48.mayHaveReachedDispatch ? `${error48.answer}${joined}` : `${error48.answer}, so ${error48.advice}${joined}`;
+    }
+    return new DispatchGatewayError(error48.status, error48.answer, error48.advice, `${error48.code}: ${told}`);
+  }
   if (!(error48 instanceof DispatchServiceError))
     return error48;
-  return new DispatchServiceError(error48.code, error48.status, `${error48.code}: ${error48.message}${suffix}`, error48.candidates, error48.current, error48.mismatches);
+  return new DispatchServiceError(error48.code, error48.status, `${error48.code}: ${error48.message}${joined}`, error48.candidates, error48.current, error48.mismatches);
+}
+function dispatchAnswered(error48, status) {
+  return error48 instanceof DispatchServiceError && error48.fromDispatch && error48.status === status;
+}
+function writeMayHaveLanded(error48) {
+  if (error48 instanceof DispatchGatewayError)
+    return error48.mayHaveReachedDispatch;
+  return !(error48 instanceof DispatchServiceError) || error48.status >= 500;
+}
+function withAccount(error48, account) {
+  const message = messageFor(error48);
+  const told = /[.!?]$/.test(message) ? `${message} ${account.charAt(0).toUpperCase()}${account.slice(1)}` : `${message}; ${account}`;
+  return new Error(told, { cause: error48 });
 }
 async function executeDispatchTool(input) {
   const configUrl = input.config.url;
@@ -16880,7 +17011,10 @@ async function executeDispatchTool(input) {
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id)
           };
         } catch (error48) {
-          throw refusalWithCode(error48, "; the reason was not posted, so the close was not sent");
+          const told = writeMayHaveLanded(error48) ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "the reason was not posted, so the close was not sent";
+          if (error48 instanceof DispatchServiceError)
+            throw refusalWithCode(error48, told);
+          throw withAccount(error48, told);
         }
       }
       const linked = before.external_links.map((link) => link.url);
@@ -16899,17 +17033,15 @@ async function executeDispatchTool(input) {
           actor
         });
       } catch (error48) {
-        const taken = error48 instanceof DispatchServiceError && error48.status === 500 && newLinks.length > 0 ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
+        const taken = dispatchAnswered(error48, 500) && newLinks.length > 0 ? `one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
         if (closingNote === undefined)
           throw refusalWithCode(error48, taken);
-        const refused = error48 instanceof DispatchServiceError && error48.status < 500;
-        const posted = `; the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
-        const landed = refused ? `${posted} but the issue did not close. Retrying this call posts its reason again, so fix what refused the close, then retry with a reason that points at message ${closingNote.id}` : `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`;
+        const posted = `the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
+        const fix = error48 instanceof DispatchGatewayError && error48.transient ? "" : "fix what refused the close, then ";
+        const landed = writeMayHaveLanded(error48) ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again` : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
         if (error48 instanceof DispatchServiceError)
-          throw refusalWithCode(error48, taken + landed);
-        throw new Error(`${error48 instanceof Error ? error48.message : String(error48)}${landed}`, {
-          cause: error48
-        });
+          throw refusalWithCode(error48, taken, landed);
+        throw withAccount(error48, landed);
       }
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
       const changes = [
@@ -17513,7 +17645,7 @@ async function resolveExistingIssue(client, issueReference) {
   try {
     return await client.resolveIssue(issueReference);
   } catch (error48) {
-    if (error48 instanceof DispatchServiceError && error48.status === 404) {
+    if (dispatchAnswered(error48, 404)) {
       throw new Error(`no Dispatch issue is linked to ${issueReference}; create it first with ` + `dispatch_issue({ external: "${issueReference}", ... })`);
     }
     throw error48;

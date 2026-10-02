@@ -4,6 +4,7 @@
 
 ### Added
 
+- `envoy-dispatch census`: the pre-deploy census of the migrations a database has not recorded (the runner's own rule), for a deployment to run before it rolls the service. It prints, for each pending migration, the tables it locks above ACCESS SHARE with size, row count and the sessions holding locks on them (pid, role, application, state and transaction age, "not visible" where Postgres hides one, or "autovacuum worker"; never query text), the transactions open longer than a minute or of an age it cannot see, and the count the migration's own `<version>_<name>.census.sql` answers. Those tables are the ones its statements name (an aliased `update` and a foreign key's referenced table among them; none in a comment, a string literal or the body of a function the migration defines), the table behind an index it drops or alters, and every table a foreign key reaches from rows it writes (a cascade, or a check that a row is still referenced), read from `pg_constraint` and from the keys earlier pending migrations add, inside a `DO` block too, and checked for holders and readability but not counted. It refuses (exit 1) a census that counts rows; a table a migration names above 1 GiB, which it does not count; a lock on a touched table held by a transaction older than a minute, or by one whose age Postgres hides from the census's role (granting that role `pg_read_all_stats` lets it read the age) or does not record (`track_activities` off), but not by an autovacuum, which Postgres cancels for the migration, unless it is anti-wraparound, or may be (its activity hidden or untracked, its table past its freeze age), or `deadlock_timeout` is not shorter than the lock timeout; a touched table it cannot read within the five-second lock timeout or the statement timeout; a census that fails, a name the database lacks included, even behind an earlier pending migration that may create it; and a database that records no version yet holds tables. A fresh database, one recording no version and holding no table, passes with `census: fresh database, nothing to check`. A failure names the file and the SQLSTATE, and Postgres's message only when it points into the census's own text, so no row value reaches a log. The census exits 2 when it cannot be taken (a connection whose `search_path` names no schema that exists among the causes), and writes nothing: one read-only transaction, the census statement sent through the extended protocol whatever the connection string asks. `pgmigrate.Load` refuses a census that is not one select, that holds a Unicode escape (`U&'…'`, `U&"…"`), or that names `pg_terminate_backend`, `pg_cancel_backend`, `pg_sleep`, an advisory-lock function (`pg_try_advisory_*` included) or a function that runs a query given as text (`query_to_xml` and its kin, `ts_stat`, `ts_rewrite`), bare or quoted and in any case, anywhere outside its comments and string literals, which it finds as Postgres 16's lexer does; the census runs with `standard_conforming_strings` on, so Postgres reads its literals the same way. Every migration from `censusRequiredFrom` (56, `internal/dispatch/store/store_test.go`) declares a census; 0053, 0054 and 0055 carry worked examples. Each store's tests hold the census's reading of every migration to the locks it really takes, run every shipped census at the schema just before its migration, and require a census that reads what a migration from `censusRequiredFrom` on creates, renames or gives a new type to name that migration, since a release carrying both refuses every deploy. An unknown `envoy-dispatch` subcommand now exits 2 instead of serving, which migrated the database (LEGION-459).
 - `DISPATCH_DEV_SIGNIN=1` mounts `GET /auth/_dev/signin?login=<login>&next=<path>` on Dispatch, which signs an allowlisted login in with the same session cookie a GitHub sign-in issues, with no GitHub step, so a local instance can be driven signed-in. Boot refuses the flag unless identity is cookie, the listen address is a loopback IP literal, the dashboard origin names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, a set `DISPATCH_AGENT_SECRETS_URL` names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, since a signed-in session can have the App probe and import any repository it is installed on. A key in `app.json`, where a developer keeps the real App's key, is refused whatever the base, naming the file; the environment's key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, because every App call hands a signed App JWT to whatever listens at that base. These refusals come before NATS or Postgres is dialled. The signing key is then generated per process, so a minted cookie is worthless on any other server and dies with the process. What a signed-in session writes to the database (a `dsp_` token it mints, the session and token rows its sign-out changes) is honoured by every server on that database, so a dev-sign-in server needs a database of its own. While the flag is on, every request must carry the dashboard origin as its `Host` (`421 HOST_MISMATCH`), the route serves only a loopback peer with no forwarding header (`403 DEV_SIGNIN_FORBIDDEN`) and logs every mint at WARN, and the GitHub proxy answers `503 GITHUB_TOKEN_UNAVAILABLE` without reading a stored token pair. `DISPATCH_LISTEN_HOST` may now be an IPv6 literal with or without brackets: `::1` listened on `::1:8766` and failed with "too many colons", and now listens on `[::1]:8766`. A bad `DISPATCH_PORT` now refuses the boot before NATS and Postgres connect.
 - Every cache warm-up logs one line when its initial scan ends, `<cache> cache warm-up`, with the bucket, `elapsed_ms`, `entries`, `delete_markers` and `outcome` (`completed`, or `timed out` at WARN when nats.go's idle timer gave up on the scan). The counts are disjoint, like the role restore line's: `entries` is the live keys the scan delivered, `delete_markers` what it streamed past to find them. The line goes through the logger the listener passes each cache (`store.WithLogger`, `session.WithSessionLogger`, the CI store's own), so it is a JSON record with `machine_id`, and so are the cache watchers' other lines (a failed first start, a recreated bucket, a watcher that stopped). A restart now names its own cost — measured on a listener with a seeded bucket: `{"msg":"interest registry cache warm-up","machine_id":"smoke374r2","bucket":"envoy_interests","elapsed_ms":5,"entries":3,"delete_markers":500,"outcome":"completed"}`. A timed-out scan is logged and never recorded as the watcher's terminal error, so a live watcher whose warm-up merely timed out is not a 503 or a rebuild.
 - A listener start logs one INFO line for the role-claim snapshot it restores, `restored role claims`, with two disjoint fields: `restored`, the claims whose revision the scan read and which therefore keep their holder's restart grace, and `delete_markers`, the tombstones the scan streamed past to find them (production on 2026-09-28: `restored=9 delete_markers=757`). They are separate on purpose — one total of both reads as claims the restart failed to restore. `internal/store`'s lines, this one and both reaper cycles, now go through the logger the listener passes it (`store.WithLogger`), so they are JSON records carrying `machine_id` like the rest of the listener's output. `internal/bus`'s lines and the stdlib `log` package's stay in Go's text format, which the deployed CloudWatch metric filters for publish failures, webhook refusals and dropped stream subjects match on.
@@ -38,6 +39,27 @@
   change should do (restore its draft, copy the message, reload and send again). Keys are stored
   per human in `broadcast_idempotency_keys` (migration `0055`) and kept as long as their
   broadcast (LEGION-446).
+- Each request a listener's starting gate refuses logs `request refused while starting` with the
+  `gate` (`webhook` or `v1`), `method` and `path`; a start logs `envoy-listener /v1 open` with
+  `since_listening_ms` and `durable bound` with `attempts` and `waited_ms`.
+  `packages/envoy/scripts/listener-deploy-probe.sh` watches a listener deploy from a client's
+  seat, at every address the listener's name resolves to, and exits 1 when a task refused `/v1`
+  while it answered `/healthz`, or, with `--dispatch-*`, when a Dispatch message it posted did not
+  record state `sent` (LEGION-456).
+- `GET /api/v1/artifacts/{id}/blocks/{block_id}` says where one block stands in a Dispatch
+  document: its path from the top-level block down (each node's type, block id and child index)
+  and, for a table block, row or cell, the table's id, the row index (0 is the header row), the
+  cell's column index (the indexes `delete_row` and `delete_column` take), the text of the header
+  cell drawn above it (in a table with colspans or rowspans, the column the cell is drawn in) and
+  the row's cells. An id the live document does not hold is `404 TARGET_NOT_FOUND`.
+  `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}` carry the same answer for their
+  anchor's block as `anchor_block`, derived from the live document at read time and absent when
+  the anchor names no block or the block has left the document; lists and events do not carry
+  it. When the anchor's document cannot be read, those two reads still answer `200`, without
+  `anchor_block` and with `anchor_block_error` (`DOC_SERVICE_UNAVAILABLE`, `DOC_SCHEMA` or
+  `INTERNAL`, the codes the API answers those errors with elsewhere), logged at WARN, and they do
+  not wait for a failed document room's recovery; only a request that has itself gone away fails
+  them (LEGION-460).
 
 ### Changed
 
@@ -124,9 +146,44 @@
   because its `dispatch_search` refuses the same rules before any request.
 
 ### Fixed
+- Dispatch indexes a mention written in markdown (LEGION-463): `**dispatch://KEY**`,
+  `` `dispatch://KEY` ``, `_dispatch://KEY_`, `~~dispatch://KEY~~`,
+  `[dispatch://KEY](dispatch://KEY)` (how a document stores `<dispatch://KEY>`), a bracketed
+  dashboard URL, a reference in a table cell written without padding (`|dispatch://KEY|`), and a
+  reference followed by a no-break or ideographic space each write their `mentions` edge. A
+  reference ends at whitespace, an angle or square bracket, a quote, a backtick or a pipe, except
+  the bracketed host of an IPv6 dashboard URL, and the sentence punctuation, emphasis delimiters
+  and unbalanced `)` after it are dropped in one pass, where a spec of one reference and 900,000
+  `)` took 21 s to save. The server parses a reference as the dashboard does: a query's pairs
+  split on `&` alone, an item id decoded, a slug only whole, a version without a leading zero, and
+  nothing from a reference holding a control character or an item id that decodes to one. A body
+  citing `…/spec?comment=%00` was answered 500, since Postgres refuses a NUL in the index, and is
+  now stored. The dashboard's composer pills, unfurl cards and linked text read text by the same
+  rule. Text stored before the deploy gets its edges from `envoy-dispatch rebuild-refs`.
+- The dashboard no longer hangs on a comment or an ask question made of repeated `http://`. The
+  check that shows an unfurl card only for a body of nothing but references tried every way to
+  split the body into references, which in Chromium ran for minutes on a 2,000-character comment.
+- During a rolling deploy the replacement listener serves `/v1` and runs its role lane once NATS
+  is connected and the interest and session caches are warm (about 100 ms after it listens),
+  instead of answering every `/v1` call `503 service starting` until the old task let go of the
+  durable consumer (84 s in production on 2026-10-01). The durable's bind is polled every 2 s and
+  lands within 2 s of the old task's exit, still giving up after 135 s with
+  `subscribe failed after max attempts, shutting down`; `/healthz` stays 200 `starting` until it
+  binds. Both tasks of a machine are one role-lane queue group, so the overlap forwards no role
+  message twice. A SIGTERM during the bind wait is an ordered shutdown. The bus now restores every
+  subscription after a reconnect even when one cannot be restored, so a role lane is not left down
+  while the durable still refuses the bind (LEGION-456).
+
 - Dispatch exits with status 1 when it cannot bind its listen address. It logged
   `dispatch: listen … bind: address already in use` and exited 0, so a supervisor read a port
   clash as a clean stop.
+
+- A Dispatch request refused because its document room failed answers
+  `503 DOC_SERVICE_UNAVAILABLE` whatever failed the room, as a comment's or ask's
+  `anchor_block_error` names it: both name a document error through one classification
+  (`api.documentErrorCode`), which takes a failed room before any cause the room carries. A room
+  failed by settlement's schema refusal answered `500 DOC_SCHEMA`, though the request had not met
+  that refusal itself; a retry once the room is evicted meets the document (LEGION-460).
 
 - A search that contains only stop words now returns `200` with no results, so every consumer
   can show an empty result rather than a retryable failure.

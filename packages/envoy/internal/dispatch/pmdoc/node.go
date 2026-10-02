@@ -288,7 +288,7 @@ func askQuestionOpening(ask *Node) string {
 	if len(ask.Children) == 0 || ask.Children[0] == nil || ask.Children[0].Type != "paragraph" {
 		return ""
 	}
-	question := openingWords(strings.Join(strings.Fields(textContent(ask.Children[0])), " "))
+	question := openingWords(oneLineText(ask.Children[0]))
 	if question == "" {
 		return ""
 	}

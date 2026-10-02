@@ -640,6 +640,99 @@ func TestRebuildRefsRefusesWithoutServerURL(t *testing.T) {
 	}
 }
 
+// An argument envoy-dispatch does not know is refused, never served: the server migrates the
+// database at boot, so `envoy-dispatch census` on an image that predates the subcommand would
+// otherwise apply the very migrations the census was to inspect.
+func TestRunSubcommandRefusesAnUnknownSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runSubcommand(context.Background(), []string{"cenus"}, func(string) string { return "" }, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	for _, want := range []string{`unknown subcommand "cenus"`, "census", "redeliver-webhooks"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr %q lacks %q", stderr.String(), want)
+		}
+	}
+	if strings.Contains(stderr.String(), "DATABASE_URL") {
+		t.Errorf("stderr %q reads like a boot, not a refusal", stderr.String())
+	}
+}
+
+// The census exits 2 when it could not be taken and 0 when nothing refuses, and prints the report
+// to stdout.
+func TestCensusSubcommandExitCodes(t *testing.T) {
+	ctx := context.Background()
+	var out, errOut bytes.Buffer
+	if code := census(ctx, "", &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "DATABASE_URL is required") {
+		t.Errorf("no URL: exit %d, stderr %q", code, errOut.String())
+	}
+	errOut.Reset()
+	if code := census(ctx, "postgres://nobody:nothing@127.0.0.1:1/none?sslmode=disable&connect_timeout=1", &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "census: connect") {
+		t.Errorf("unreachable: exit %d, stderr %q", code, errOut.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("a census that could not be taken printed a report: %q", out.String())
+	}
+	database := storetest.Open(t)
+	out.Reset()
+	errOut.Reset()
+	if code := census(ctx, database.Pool.Config().ConnString(), &out, &errOut); code != 0 {
+		t.Fatalf("migrated database: exit %d, stderr %q, stdout %q", code, errOut.String(), out.String())
+	}
+	if !strings.Contains(out.String(), "no pending migration") || !strings.HasSuffix(strings.TrimSpace(out.String()), "census: ok") {
+		t.Errorf("stdout:\n%s", out.String())
+	}
+}
+
+// pgmigrate.Census already prefixes its errors with "census:", so the command prints that
+// prefix once when a census cannot be taken.
+func TestCensusSubcommandPrintsACensusErrorWithOnePrefix(t *testing.T) {
+	database := storetest.Open(t)
+	var out, errOut bytes.Buffer
+	if code := census(context.Background(), database.Pool.Config().ConnString()+"&search_path=nosuch", &out, &errOut); code != 2 {
+		t.Fatalf("exit %d, want 2; stderr %q", code, errOut.String())
+	}
+	const want = "census: the connection's search_path names no schema that exists, so current_schema() is null: the census would find neither schema_migrations nor any table, and the runner can create neither; name an existing schema in the search_path\n"
+	if got := errOut.String(); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+}
+
+// A database at 52 holding a row 0053's check refuses is refused by the embedded 0053 census,
+// exit 1, and the report names the migration, the count and the census file.
+func TestCensusSubcommandExitsOneWhenAPendingMigrationsCensusCountsRows(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	if _, err := database.Pool.Exec(ctx, `
+		alter table asks drop constraint asks_approval_kind_check;
+		delete from schema_migrations where version >= 53;
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into issues (key, project_key, number, title, created_by, rank)
+			values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"session","id":"s"}', 'U');
+		insert into asks (issue_key, author, question, options, kind, approval)
+			values ('CORE-1', '{"kind":"session","id":"s"}', 'A question?', '[]', 'question', '{}');
+	`); err != nil {
+		t.Fatalf("seed a database at 52 with a row 0053 refuses: %v", err)
+	}
+	var out, errOut bytes.Buffer
+	if code := census(ctx, database.Pool.Config().ConnString(), &out, &errOut); code != 1 {
+		t.Fatalf("exit %d, want 1; stderr %q, stdout:\n%s", code, errOut.String(), out.String())
+	}
+	for _, want := range []string{
+		"census: schema version 52 (schema_migrations); pending: 0053_asks_approval_kind_check.up.sql, 0054_message_delivery_acceptance.up.sql, 0055_broadcast_idempotency_keys.up.sql",
+		"census: REFUSED 0053_asks_approval_kind_check.up.sql: its census counts 1 (0053_asks_approval_kind_check.census.sql)",
+		"census: 0055_broadcast_idempotency_keys.up.sql touches broadcasts: 0 rows, ",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("stdout lacks %q:\n%s", want, out.String())
+		}
+	}
+	if last := strings.TrimSpace(out.String()); !strings.HasSuffix(last, "census: REFUSED (1 reason)") {
+		t.Errorf("stdout does not end with the verdict:\n%s", out.String())
+	}
+}
+
 func TestWriteRebuildRefsReport(t *testing.T) {
 	var output bytes.Buffer
 	writeRebuildRefsReport(&output, refs.Rebuild{Documents: 4, Asks: 3, Comments: 2, Messages: 1, Orphans: 5, Edges: 9})
