@@ -66,8 +66,9 @@ import {
   type DeliveryPlan,
   deliveryPlan,
   mentionText,
+  SendDeadlineError,
   type SentRequest,
-  sendRequest,
+  sendWithinDeadline,
   survivingMentions,
 } from "./send-request";
 import { useAgents } from "./useAgents";
@@ -393,6 +394,11 @@ interface MentionComposerProps {
   readonly agents?: readonly Agent[];
   readonly anchor?: ComposerAnchor;
   readonly autoFocus?: boolean;
+  /** The owner takes no more sends: its issue is closed. The composer stays mounted, so a send
+   *  still out and its refusal keep their draft: it shows itself only while it holds one of them,
+   *  with Send refused and Discard in place of Retry, and otherwise renders nothing, its draft
+   *  kept for a reopen. */
+  readonly closed?: boolean;
   readonly docked?: boolean;
   readonly edit?: { readonly body: string; readonly id: string };
   /** The channel's own mentions: seeded at mount, again by every reset (a send, Discard), and
@@ -421,6 +427,7 @@ export function MentionComposer({
   agents: suppliedAgents,
   anchor,
   autoFocus = false,
+  closed = false,
   docked = false,
   edit,
   seedMentions = [],
@@ -568,7 +575,7 @@ export function MentionComposer({
   }, [replaceDraft, replyTo]);
 
   const save = useMutation({
-    mutationFn: sendRequest,
+    mutationFn: sendWithinDeadline,
     mutationKey,
     // A refusal restores the complete draft the request turned down, not a later edit: its body,
     // accepted mentions, and suggestion replacement stay in step for Retry or further editing.
@@ -609,9 +616,11 @@ export function MentionComposer({
       if (!inline && sentEdit === undefined) onClose();
     },
   });
+  // Closed, with no send out and no refusal to show: nothing of this composer is on screen.
+  const dormant = closed && !save.isPending && !save.isError;
   useEffect(() => {
     const form = formRef.current;
-    if (form === null) return;
+    if (form === null || dormant) return;
     const handleEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape") return;
       // A message on its way is the server's until it answers. The submit guard becomes held in
@@ -653,6 +662,8 @@ export function MentionComposer({
     autocomplete,
     body,
     confirmingDiscard,
+    // A dormant composer renders no form; the one it renders when it wakes takes the listener.
+    dormant,
     onCancelReply,
     onClose,
     referencePickerOpen,
@@ -661,11 +672,12 @@ export function MentionComposer({
     submitGuard,
   ]);
   const upload = useMutation({
-    // The upload answers with where the file went, and everything after reads that rather than
-    // the latest render's owner, which a pick made while the file was in the air has moved on:
-    // the reference names the issue or document that holds the artifact.
-    mutationFn: async (file: File) => {
-      const target = owner;
+    // An upload carries where it goes as its own variable, taken by the paste or drop that starts
+    // it, as a send carries its `SentRequest`: TanStack gives a pending mutation each new render's
+    // options before `mutationFn` runs, so an owner read from the closure would follow a pick made
+    // in that task. Everything after - the reference, the refreshed caches, a Retry - reads the same
+    // target, so the reference names the issue or document that holds the artifact.
+    mutationFn: async ({ file, target }: { file: File; target: ComposerOwner }) => {
       if (target.kind === "session")
         throw new Error("The direct session channel does not support uploads.");
       const { artifact } = await uploadFile(
@@ -798,7 +810,11 @@ export function MentionComposer({
           ? "steer"
           : undefined;
   const outbound = deliveryPlan(body, inheritedDelivery);
-  const submitReason = draftRefusal(kind, body, replacement, outbound);
+  // A closed owner takes no send: the composer is only still here for a send of its own that is
+  // out, or its refusal, and Send says why it cannot go.
+  const submitReason = closed
+    ? "This issue is closed. Reopen it to send."
+    : draftRefusal(kind, body, replacement, outbound);
   const footId = useId();
   const canSubmit = canSubmitComposer(submitReason, save.isPending, pendingUploads);
   /** Sends the draft as it stands, its whole request frozen here (`sentRequest`), so nothing done
@@ -820,6 +836,16 @@ export function MentionComposer({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (canSubmit) send();
+  };
+  /** Drops the draft and a refusal with it. Offered only while no send is out - the prompt never
+   *  shows then (`send` closes it, and Escape raises none), and a closed composer's Discard sits
+   *  beside a refusal - so the save it resets has its answer: the refusal goes with the draft it
+   *  was about. */
+  const discard = () => {
+    clearDraft();
+    save.reset();
+    setConfirmingDiscard(false);
+    onClose();
   };
   const bodyLabel =
     edit !== undefined
@@ -945,19 +971,7 @@ export function MentionComposer({
           role="alert"
         >
           <span>Discard draft?</span>
-          <button
-            className="font-semibold underline"
-            onClick={() => {
-              clearDraft();
-              // The prompt never shows while a send is out (`send` closes it, and Escape raises
-              // none then), so the save it resets has its answer: the refusal goes with the
-              // draft it was about.
-              save.reset();
-              setConfirmingDiscard(false);
-              onClose();
-            }}
-            type="button"
-          >
+          <button className="font-semibold underline" onClick={discard} type="button">
             Discard
           </button>
           <button
@@ -1001,7 +1015,8 @@ export function MentionComposer({
               ? undefined
               : (event: DragEvent<HTMLTextAreaElement>) => {
                   event.preventDefault();
-                  for (const file of event.dataTransfer.files) upload.mutate(file);
+                  for (const file of event.dataTransfer.files)
+                    upload.mutate({ file, target: owner });
                 }
           }
           onInput={
@@ -1032,7 +1047,7 @@ export function MentionComposer({
                   const files = [...event.clipboardData.files];
                   if (files.length > 0) {
                     event.preventDefault();
-                    for (const file of files) upload.mutate(file);
+                    for (const file of files) upload.mutate({ file, target: owner });
                   }
                 }
           }
@@ -1235,18 +1250,31 @@ export function MentionComposer({
         </>
       )}
       {save.isError ? (
-        <QueryError
-          message={
-            save.error instanceof ApiError &&
-            save.error.status === 409 &&
-            save.error.code === "ANCHOR_MISSING"
-              ? save.error.message
-              : `Couldn't send — ${apiErrorMessage(save.error, "network error")}`
-          }
-          // Retry sends the draft as it stands, so it asks what Send asks of it.
-          onRetry={canSubmit ? send : undefined}
-          retrying={save.isPending}
-        />
+        <div className="flex flex-wrap items-center gap-3">
+          <QueryError
+            message={
+              save.error instanceof ApiError &&
+              save.error.status === 409 &&
+              save.error.code === "ANCHOR_MISSING"
+                ? save.error.message
+                : `Couldn't send — ${save.error instanceof SendDeadlineError ? save.error.message : apiErrorMessage(save.error, "network error")}`
+            }
+            // Retry sends the draft as it stands, so it asks what Send asks of it.
+            onRetry={canSubmit ? send : undefined}
+            retrying={save.isPending}
+          />
+          {/* A closed owner takes no Retry, so the refusal's own way out is to drop the draft it
+              handed back, once the reader has it. */}
+          {closed ? (
+            <button
+              className={`text-sm font-medium underline ${dangerText}`}
+              onClick={discard}
+              type="button"
+            >
+              Discard draft
+            </button>
+          ) : null}
+        </div>
       ) : null}
       <RefusableButton
         busy={save.isPending ? "Sending…" : pendingUploads > 0 ? "Uploading file…" : undefined}
@@ -1263,6 +1291,10 @@ export function MentionComposer({
       </p>
     </fieldset>
   );
+  // A closed owner's composer stays mounted, keeping its draft, and shows itself only for a send
+  // of its own that is out or that send's refusal; a host's frame around it collapses with it
+  // (`empty:hidden`).
+  if (dormant) return null;
   return (
     <form
       aria-label="Comment composer"

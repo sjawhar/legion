@@ -1,3 +1,4 @@
+import { type MutationKey, useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
   type ReactNode,
@@ -42,6 +43,11 @@ interface MarkComposeRequest {
 }
 
 type PendingCompose = MarkComposeRequest & { seq: number };
+
+/** The name of the margin composer's send (`MentionComposer`'s `mutationKey`). While one is out
+ *  the open compose is that send's: it neither moves to a newer selection nor ends unsaved, so the
+ *  send's outcome - its refusal, with its draft - lands on the composer that sent it. */
+export const MARGIN_COMPOSER_SEND_KEY: MutationKey = ["margin-composer"];
 
 /** The open mark composer: what it is about, and the editor's promise it settles. */
 interface OpenCompose {
@@ -116,6 +122,7 @@ const MarginContext = createContext<MarginContextValue>({
 });
 
 export function MarginProvider({ children }: { children: ReactNode }): ReactNode {
+  const queryClient = useQueryClient();
   const [blockFilterId, setBlockFilterId] = useState<string>();
   const [blockFocusRequest, setBlockFocusRequest] = useState<{
     blockId: string;
@@ -152,10 +159,20 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   // composer ends unsaved - cancelled, or replaced by a newer composer - and it changes kind with
   // the composer (`retypeCompose`). The editor's own catch (`runAction` in
   // @legion/proof-editor's dispatch-action-bar.ts) still removes the mark it created, which is a
-  // no-op by then, and cannot know a retyped mark's id.
+  // no-op by then, and cannot know a retyped mark's id. A newer selection-bar action while the
+  // open composer's send is out is refused, and the margin takes back the mark that action wrote,
+  // as it does a replaced one - that catch cannot see a provisional comment, whose body is empty
+  // (`removeRecordMark` in @legion/proof-editor says why). The compose is the send's until the
+  // server answers: re-pointing it would hand the send's outcome to the newer one - a success
+  // closing it as saved, a refusal's Retry posting to its mark.
   const composeForMark = useCallback(
     (request: MarkComposeRequest): Promise<void> =>
       new Promise<void>((resolve, reject) => {
+        if (queryClient.isMutating({ mutationKey: MARGIN_COMPOSER_SEND_KEY }) > 0) {
+          bridgeRef.current?.removeMark(request.anchor.mark_id);
+          reject(new Error("the open composer's send is out"));
+          return;
+        }
         const replaced = openCompose.current;
         if (replaced !== undefined) {
           bridgeRef.current?.removeMark(replaced.request.anchor.mark_id);
@@ -164,7 +181,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
         sequence.current += 1;
         publishCompose({ reject, request: { ...request, seq: sequence.current }, resolve });
       }),
-    [publishCompose]
+    [publishCompose, queryClient]
   );
   const settleCompose = useCallback(
     (outcome: "saved" | "cancelled") => {

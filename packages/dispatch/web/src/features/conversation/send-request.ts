@@ -100,6 +100,33 @@ export function survivingMentions(
   return surviving;
 }
 
+/** How long a send waits for the server's answer before the composer gives it up. A send's draft,
+ *  and every control a host holds for it, are the server's until it answers; a request the server
+ *  never answers would hold them for good, so past this the send ends as refused, with its draft. */
+export const SEND_DEADLINE_MS = 30_000;
+
+/** A send the server did not answer within `SEND_DEADLINE_MS`. The request may still land, so the
+ *  refusal says to look for it before sending again. */
+export class SendDeadlineError extends Error {
+  constructor() {
+    super(
+      `the server did not answer within ${SEND_DEADLINE_MS / 1000} seconds. It may still arrive, so look for it before you retry`
+    );
+    this.name = "SendDeadlineError";
+  }
+}
+
+/** `sendRequest`, refused with a `SendDeadlineError` once `SEND_DEADLINE_MS` passes unanswered.
+ *  The request itself is left to finish: the client cannot take back one the server may have. */
+export function sendWithinDeadline(sent: SentRequest): Promise<unknown> {
+  const { promise, reject, resolve } = Promise.withResolvers<unknown>();
+  const deadline = setTimeout(() => reject(new SendDeadlineError()), SEND_DEADLINE_MS);
+  sendRequest(sent)
+    .then(resolve, reject)
+    .finally(() => clearTimeout(deadline));
+  return promise;
+}
+
 /** Sends a `SentRequest`. It sits outside the composer, so no later render's props or state can
  *  reach the request it builds. */
 export async function sendRequest({

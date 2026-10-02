@@ -13,6 +13,8 @@ import {
   createMessage,
   createProject,
   createProjectDocument,
+  patchIssue,
+  resolveComment,
   retryCommentDelivery,
 } from "./api";
 import { barAction, documentEditor, selectEditorText } from "./editor";
@@ -274,6 +276,161 @@ test("a conversation thread's own reply holds Collapse thread while it is out", 
     await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
     await expect(field).toHaveValue("Thread reply");
     await expect(collapse).toBeEnabled();
+  } finally {
+    await alice.close();
+  }
+});
+
+// The issue closing under a send is not the reader leaving it: the docked composer stays,
+// holding the draft until the server answers, and shows the refusal beside the draft it hands
+// back - with no Retry, which a closed issue would refuse again, and a way to drop it.
+test("a docked send out when its issue closes keeps the draft and shows the refusal", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Closed under a send" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const form = page.getByRole("form", { name: "Comment composer" });
+    const field = form.getByLabel("Comment");
+    const send = await holdPosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Before the close");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await patchIssue(issue.key, { status: "done" }, { login: "bob" });
+    await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
+    await expect(field).toHaveValue("Before the close");
+    await expect(field).toBeDisabled();
+
+    const refused = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().endsWith(`/api/v1/issues/${issue.key}/comments`)
+    );
+    send.release();
+    expect((await refused).status()).toBe(409);
+    await expect(form.getByText("Couldn't send — issue is closed")).toBeVisible();
+    await expect(field).toHaveValue("Before the close");
+    await expect(form.getByRole("button", { name: "Retry" })).toHaveCount(0);
+    await expect(form.getByRole("button", { exact: true, name: "Send" })).toHaveAttribute(
+      "aria-disabled",
+      "true"
+    );
+    // On a phone the page has scrolled under the docked composer, and `Jump to latest` floats
+    // over its lower rows; back at the latest turn, as a reader taps it, the pill goes.
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await expect(page.getByTestId("jump-to-latest")).toHaveCount(0);
+    await form.getByRole("button", { name: "Discard draft" }).click();
+    await expect(page.getByRole("form", { name: "Comment composer" })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// Closing and reopening the issue while a send is out leaves the send's own composer where it
+// was: the draft held through it, the refusal shown beside it, and the field taking typing after.
+test("an issue closed and reopened under a docked send leaves that send's composer in place", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Closed and reopened" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const form = page.getByRole("form", { name: "Comment composer" });
+    const field = form.getByLabel("Comment");
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Through the close");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await patchIssue(issue.key, { status: "done" }, { login: "bob" });
+    await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
+    await patchIssue(issue.key, { status: "backlog" }, { login: "bob" });
+    await expect(page.getByRole("button", { name: "Close issue" })).toBeVisible();
+    await expect(field).toHaveValue("Through the close");
+    await expect(field).toBeDisabled();
+
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(field).toHaveValue("Through the close");
+    await field.fill("Typed after");
+    await expect(field).toHaveValue("Typed after");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A thread the reader has open stays in the Conversation whoever resolves its comment, so the
+// thread's own reply - its draft, the send it has out and that send's refusal - stays with it.
+test("a thread resolved while its own reply is out stays open with the reply and its refusal", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "a phone opens the thread full-screen instead");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Resolved under a reply" });
+  const earlier = await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const turn = page.locator(`[data-turn="comment:${earlier.id}"]`);
+    await turn.getByRole("button", { name: "Expand thread" }).click();
+    const form = turn.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Reply under a resolve");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await resolveComment(earlier.id, { login: "bob" });
+    await expect(turn.getByText(/^Resolved by bob/)).toBeVisible();
+    await expect(field).toHaveValue("Reply under a resolve");
+
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(field).toHaveValue("Reply under a resolve");
+    await expect(field).toBeEnabled();
+  } finally {
+    await alice.close();
+  }
+});
+
+// Narrowing to a phone unmounts nothing: a thread open inline on a wider screen stays open in the
+// Conversation, and its reply's refusal shows there with the draft.
+test("a thread's own reply out when the viewport narrows to a phone keeps its draft and refusal", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "the row starts on a wider screen");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Narrowed under a reply" });
+  const earlier = await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const turn = page.locator(`[data-turn="comment:${earlier.id}"]`);
+    await turn.getByRole("button", { name: "Expand thread" }).click();
+    const form = turn.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Reply through a narrowing");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await page.setViewportSize({ height: 844, width: 390 });
+    await expect(field).toHaveValue("Reply through a narrowing");
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(field).toHaveValue("Reply through a narrowing");
   } finally {
     await alice.close();
   }

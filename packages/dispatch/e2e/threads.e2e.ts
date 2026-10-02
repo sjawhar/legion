@@ -144,6 +144,70 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await alice.close();
 });
 
+// The row above, with the race it can lose made certain: the margin's answered-ask read is held
+// until a reply has been typed into the answered card's thread, so the card moves out of Needs you
+// with the reply in it. The card moves in place, and the reply is still there to send.
+test("an answered ask's thread keeps a reply typed before the card leaves Needs you", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Ship the change to production",
+    title: "Reply across the move",
+  });
+  const ask = await createAsk(
+    issue.key,
+    {
+      anchor: { artifact: "spec", quote: "production" },
+      options: [{ label: "Ship" }, { label: "Hold" }],
+      question: "Ship the change?",
+    },
+    bobSession
+  );
+  await expect
+    .poll(async () =>
+      (await getIssueEvents(issue.key)).some((event) => event.type === "ask.opened")
+    )
+    .toBe(true);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("tab", { name: "Spec" }).click();
+    await setSheet(page, testInfo.project.name, true);
+    const margin = page.getByTestId("margin-sheet");
+    const card = margin.getByTestId(`ask-${ask.id}`);
+    await expect(card).toContainText("Ship the change?");
+    await expect(margin.getByRole("heading", { name: "Needs you" })).toBeVisible();
+
+    // From here on the issue's asks read waits until the reply is typed.
+    const { promise: typed, resolve: releaseAsks } = Promise.withResolvers<void>();
+    await page.route(
+      (url) => url.pathname === `/api/v1/issues/${issue.key}/asks`,
+      async (route) => {
+        await typed;
+        await route.fallback();
+      }
+    );
+    await card.getByRole("radio", { name: "Ship" }).check();
+    await card.getByRole("button", { exact: true, name: "Answer" }).click();
+    await expect(margin.getByText(/Answered by/)).toBeVisible();
+    await expect(margin.getByRole("heading", { name: "Needs you" })).toBeVisible();
+
+    const thread = margin.getByTestId(`thread-${ask.id}`);
+    await thread.getByLabel("Reply").fill("Shipping now.");
+    releaseAsks();
+    await expect(margin.getByRole("heading", { name: "Needs you" })).toHaveCount(0);
+    await expect(thread.getByLabel("Reply")).toHaveValue("Shipping now.");
+    await thread.getByRole("button", { name: "Reply" }).click();
+    await expect(thread.getByText("Shipping now.")).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
 test("a Conversation reply after an agent-authored reply targets the root without copying its anchor", async ({
   browser,
 }) => {

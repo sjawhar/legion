@@ -318,6 +318,15 @@ export function rejectSuggestion(id: string, options: ApiOptions = {}): Promise<
   return request<Comment>(`/api/v1/comments/${encodeURIComponent(id)}/reject`, "POST", {}, options);
 }
 
+export function resolveComment(id: string, options: ApiOptions = {}): Promise<Comment> {
+  return request<Comment>(
+    `/api/v1/comments/${encodeURIComponent(id)}/resolve`,
+    "POST",
+    {},
+    options
+  );
+}
+
 export function editComment(
   id: string,
   input: { body: string },

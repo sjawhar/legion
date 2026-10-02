@@ -8,6 +8,7 @@ import {
   deleteEditorText,
   documentEditor,
   expectMark,
+  needsYouCards,
   placeCaret,
   selectEditorText,
 } from "./editor";
@@ -118,10 +119,7 @@ test("switching an anchored composer from Comment to Ask retypes its mark and as
 
       await composer(alicePage).getByLabel("Question").fill("Why brown?");
       await composer(alicePage).locator('button[type="submit"]').click();
-      const askCard = alicePage
-        .getByRole("region", { name: "Needs you" })
-        .locator("[data-margin-item]")
-        .filter({ hasText: "Why brown?" });
+      const askCard = needsYouCards(alicePage).filter({ hasText: "Why brown?" });
       await expect(askCard).toBeVisible();
       const askId = await askCard.getAttribute("data-margin-item");
       if (askId === null) {

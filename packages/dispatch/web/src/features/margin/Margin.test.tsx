@@ -51,6 +51,18 @@ const unanchoredAsk: Ask = {
 
 const markComposerAnchor = { artifact: "artifact-1", mark_id: "m-1", quote: "selected" };
 
+/** A margin ask card by its ask, in the group it is listed under: open and waiting on the reader,
+ *  or decided. Both groups are one keyed list, so the group is the card's own attribute. */
+function marginAskCard(id: string, section: "needs-you" | "decided"): Promise<HTMLElement> {
+  return waitFor(() => {
+    const card = document.querySelector<HTMLElement>(
+      `[data-margin-item="${id}"][data-margin-section="${section}"]`
+    );
+    if (card === null) throw new Error(`no ${section} card for ${id}`);
+    return card;
+  });
+}
+
 function MarkComposerProbe(): ReactNode {
   const { composeForMark } = useMargin();
   const [firstOutcome, setFirstOutcome] = useState("idle");
@@ -375,7 +387,8 @@ test("Margin puts an unanchored open ask under Needs you and sends its answer", 
   );
 
   try {
-    const needsYou = await screen.findByRole("region", { name: "Needs you" });
+    expect(await screen.findByRole("heading", { name: "Needs you" })).toBeTruthy();
+    const needsYou = await marginAskCard(unanchoredAsk.id, "needs-you");
     expect(await within(needsYou).findByText(unanchoredAsk.question)).toBeTruthy();
     expect(within(needsYou).getAllByRole("time")).toHaveLength(1);
     expect(within(needsYou).queryByLabelText("Your answer")).toBeNull();
@@ -398,7 +411,10 @@ test("Margin puts an unanchored open ask under Needs you and sends its answer", 
   }
 });
 
-test("Margin clears an answered anchored ask from Needs you without an event stream", async () => {
+// The answered card moves from Needs you to the decided asks in place - one keyed list - so its
+// card is the one the reader was in, with whatever they had started in it (`threads.e2e.ts` types
+// a reply there), rather than a fresh mount of it.
+test("Margin moves an answered anchored ask out of Needs you in place, without an event stream", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -421,7 +437,8 @@ test("Margin clears an answered anchored ask from Needs you without an event str
   queryClient.setQueryData(["user-state"], {});
   queryClient.setQueryData(["comments", issue.key], []);
   const answerAsk = spyOn(api, "answerAsk").mockResolvedValue(answeredAsk);
-  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([answeredAsk]);
+  const refetched = Promise.withResolvers<Ask[]>();
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockImplementation(() => refetched.promise);
   const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
       <QueryClientProvider client={queryClient}>
@@ -433,7 +450,7 @@ test("Margin clears an answered anchored ask from Needs you without an event str
   );
 
   try {
-    const needsYou = await screen.findByRole("region", { name: "Needs you" });
+    const needsYou = await marginAskCard(anchoredAsk.id, "needs-you");
     fireEvent.click(await within(needsYou).findByRole("radio", { name: "Ship" }));
     fireEvent.click(within(needsYou).getByRole("button", { name: "Answer" }));
     await waitFor(() =>
@@ -442,12 +459,15 @@ test("Margin clears an answered anchored ask from Needs you without an event str
         expected_edited_at: null,
       })
     );
-    await waitFor(() => expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull());
+    await waitFor(() => expect(listIssueAsks).toHaveBeenCalled());
+    const answered = await within(needsYou).findByTestId(`ask-${anchoredAsk.id}`);
+
+    await act(async () => refetched.resolve([answeredAsk]));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Needs you" })).toBeNull());
     expect(screen.getByRole("button", { name: "Open review panel (0 open asks)" })).toBeTruthy();
-    expect(answerAsk).toHaveBeenCalledWith(anchoredAsk.id, {
-      selected: ["Ship"],
-      expected_edited_at: null,
-    });
+    const decided = await marginAskCard(anchoredAsk.id, "decided");
+    expect(decided).toBe(needsYou);
+    expect(within(decided).getByTestId(`ask-${anchoredAsk.id}`)).toBe(answered);
   } finally {
     view.unmount();
     answerAsk.mockRestore();

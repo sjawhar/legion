@@ -20,7 +20,7 @@ import {
   useDialog,
   useMediaQuery,
 } from "../shell/useDialog";
-import { CommentsTab, type MarginComposer } from "./CommentsTab";
+import { CommentsTab, type MarginComposer, MarginComposerSlot } from "./CommentsTab";
 import { PinnedTab } from "./PinnedTab";
 import { ThreadCard } from "./ThreadCard";
 import type { CommentActionFailure } from "./useCommentActionQueue";
@@ -104,11 +104,18 @@ export interface MarginSheetModel {
 }
 
 interface MarginSheetProps {
+  /** The desktop margin is collapsed to its rail: the sheet stays mounted, hidden, holding only an
+   *  open composer. */
+  collapsed?: boolean;
   desktopControl?: ReactNode;
   model: MarginSheetModel;
 }
 
-export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactNode {
+export function MarginSheet({
+  collapsed = false,
+  desktopControl,
+  model,
+}: MarginSheetProps): ReactNode {
   const {
     actions,
     composer,
@@ -162,6 +169,8 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
     onClose: sheet.closeThread,
     open: isPhoneViewport && phoneThread !== undefined,
   });
+  // What the margin's own tabs give way to: the rail it collapses to, or a phone margin thread.
+  const covered = collapsed || (isPhoneViewport && phoneThread !== undefined);
 
   return (
     <>
@@ -227,112 +236,131 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
             </button>
           </>
         ) : null}
-        {!isPhoneViewport || phoneThread === undefined ? (
-          <div className={sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}>
-            <div className={`flex items-center justify-between border-b ${borderDefault}`}>
-              <div className="flex" role="tablist">
-                {(owner?.kind === "document"
-                  ? (["comments"] as MarginTab[])
-                  : owner?.kind === "issue"
-                    ? (["comments", "pinned"] as MarginTab[])
-                    : []
-                ).map((name) => (
+        {/* The tabs and what they show. Mounted under a phone margin thread and under the
+            collapsed rail too, holding only the composer then: the composer a selection-bar
+            action opened lives as long as its compose, so its draft, a send it has out and that
+            send's refusal survive whatever the margin shows over it. */}
+        <div
+          className={sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}
+          hidden={covered}
+        >
+          {covered ? null : (
+            <>
+              <div className={`flex items-center justify-between border-b ${borderDefault}`}>
+                <div className="flex" role="tablist">
+                  {(owner?.kind === "document"
+                    ? (["comments"] as MarginTab[])
+                    : owner?.kind === "issue"
+                      ? (["comments", "pinned"] as MarginTab[])
+                      : []
+                  ).map((name) => (
+                    <button
+                      aria-selected={tab.value === name}
+                      className={
+                        tab.value === name
+                          ? `min-h-11 border-b-2 px-3 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
+                          : `min-h-11 px-3 py-2 text-sm ${textSecondaryOnSurface}`
+                      }
+                      key={name}
+                      onClick={() => tab.set(name)}
+                      role="tab"
+                      type="button"
+                    >
+                      {name === "comments" ? "Comments" : "Pinned"}
+                    </button>
+                  ))}
+                </div>
+                {desktopControl === undefined ? null : (
+                  <span className="hidden xl:block">{desktopControl}</span>
+                )}
+              </div>
+              {owner === undefined ? (
+                <p className={`pt-3 text-sm ${textMutedOnSurface}`}>
+                  Open an issue or document to review its margin.
+                </p>
+              ) : null}
+              {owner?.kind === "issue" && visibleArtifact === undefined && issuePending ? (
+                <p className={`pt-3 text-sm ${textMutedOnSurface}`}>Loading margin…</p>
+              ) : null}
+              {owner?.kind === "issue" && visibleArtifact === undefined && issueError ? (
+                <div className="pt-3">
+                  <QueryError
+                    message="Could not load this issue's margin."
+                    onRetry={actions.onRetryIssue}
+                  />
+                </div>
+              ) : null}
+              {tab.value === "pinned" && owner?.kind === "issue" ? (
+                <PinnedTab events={pinned} onUnpin={actions.onUnpin} pinnedIds={pinnedIds} />
+              ) : null}
+              {filter.blockId === undefined ? null : (
+                <div
+                  className={`mt-3 flex items-center justify-between gap-2 text-sm ${textMutedOnSurface}`}
+                >
+                  <span>References for this block</span>
                   <button
-                    aria-selected={tab.value === name}
-                    className={
-                      tab.value === name
-                        ? `min-h-11 border-b-2 px-3 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
-                        : `min-h-11 px-3 py-2 text-sm ${textSecondaryOnSurface}`
-                    }
-                    key={name}
-                    onClick={() => tab.set(name)}
-                    role="tab"
+                    className={`min-h-11 font-medium ${textPrimaryOnSurface}`}
+                    onClick={filter.clear}
                     type="button"
                   >
-                    {name === "comments" ? "Comments" : "Pinned"}
+                    Clear filter
                   </button>
-                ))}
-              </div>
-              {desktopControl === undefined ? null : (
-                <span className="hidden xl:block">{desktopControl}</span>
+                </div>
               )}
-            </div>
-            {owner === undefined ? (
-              <p className={`pt-3 text-sm ${textMutedOnSurface}`}>
-                Open an issue or document to review its margin.
-              </p>
-            ) : null}
-            {owner?.kind === "issue" && visibleArtifact === undefined && issuePending ? (
-              <p className={`pt-3 text-sm ${textMutedOnSurface}`}>Loading margin…</p>
-            ) : null}
-            {owner?.kind === "issue" && visibleArtifact === undefined && issueError ? (
-              <div className="pt-3">
-                <QueryError
-                  message="Could not load this issue's margin."
-                  onRetry={actions.onRetryIssue}
-                />
-              </div>
-            ) : null}
-            {tab.value === "pinned" && owner?.kind === "issue" ? (
-              <PinnedTab events={pinned} onUnpin={actions.onUnpin} pinnedIds={pinnedIds} />
-            ) : null}
-            {filter.blockId === undefined ? null : (
-              <div
-                className={`mt-3 flex items-center justify-between gap-2 text-sm ${textMutedOnSurface}`}
-              >
-                <span>References for this block</span>
-                <button
-                  className={`min-h-11 font-medium ${textPrimaryOnSurface}`}
-                  onClick={filter.clear}
-                  type="button"
-                >
-                  Clear filter
-                </button>
-              </div>
-            )}
-            {tab.value === "comments" && owner !== undefined && visibleArtifact !== undefined ? (
-              <CommentsTab
-                actionFailure={actionFailure}
-                answeredAsksPending={answeredAsksPending}
-                artifactSlug={visibleArtifact.slug}
-                asksPending={asksPending}
-                commentsError={commentsError}
-                commentsPending={commentsPending}
-                composer={composer}
-                expandedThreadKey={selection.expandedThreadKey}
-                editingCommentId={selection.editingCommentId}
-                savingCommentEditId={selection.savingCommentEditId}
-                onEditingChange={actions.onEditingChange}
-                historicalAsks={historicalAsks}
-                hoveredItemId={selection.hoveredItemId}
-                hoveredMarkId={selection.hoveredMarkId}
-                isClosed={isClosed}
-                owner={owner}
-                markPlacements={placement.markPlacements}
-                blockPlacements={placement.blockPlacements}
-                needsYou={needsYou}
-                onAction={actions.onAction}
-                onCloseComposer={actions.closeComposer}
-                onComposerSaved={actions.onComposerSaved}
-                onComposerKindChange={actions.onComposerKindChange}
-                onEdit={actions.onEdit}
-                onRetryAction={actions.onRetryAction}
-                onRetryAnsweredAsk={actions.onRetryAnsweredAsk}
-                onRetryComments={actions.onRetryComments}
-                onSelectCard={onSelectCard}
-                onToggleResolved={actions.onToggleResolved}
-                onToggleThread={actions.onToggleThread}
-                pendingActionIds={pendingActionIds}
-                resolvedThreads={resolvedThreads}
-                retractedAskCount={retractedAskCount}
-                selectedItemId={selection.selectedItemId}
-                showResolved={selection.showResolved}
-                threads={threads}
-                viewerLogin={viewerLogin}
-              />
-            ) : null}
-          </div>
-        ) : null}
+            </>
+          )}
+          {composer === undefined || owner === undefined || visibleArtifact === undefined ? null : (
+            <MarginComposerSlot
+              composer={composer}
+              hidden={tab.value !== "comments"}
+              isClosed={isClosed}
+              onClose={actions.closeComposer}
+              onKindChange={actions.onComposerKindChange}
+              onSent={actions.onComposerSaved}
+              owner={owner}
+            />
+          )}
+          {tab.value === "comments" &&
+          !covered &&
+          owner !== undefined &&
+          visibleArtifact !== undefined ? (
+            <CommentsTab
+              actionFailure={actionFailure}
+              answeredAsksPending={answeredAsksPending}
+              artifactSlug={visibleArtifact.slug}
+              asksPending={asksPending}
+              commentsError={commentsError}
+              commentsPending={commentsPending}
+              expandedThreadKey={selection.expandedThreadKey}
+              editingCommentId={selection.editingCommentId}
+              savingCommentEditId={selection.savingCommentEditId}
+              onEditingChange={actions.onEditingChange}
+              historicalAsks={historicalAsks}
+              hoveredItemId={selection.hoveredItemId}
+              hoveredMarkId={selection.hoveredMarkId}
+              isClosed={isClosed}
+              owner={owner}
+              markPlacements={placement.markPlacements}
+              blockPlacements={placement.blockPlacements}
+              needsYou={needsYou}
+              onAction={actions.onAction}
+              onEdit={actions.onEdit}
+              onRetryAction={actions.onRetryAction}
+              onRetryAnsweredAsk={actions.onRetryAnsweredAsk}
+              onRetryComments={actions.onRetryComments}
+              onSelectCard={onSelectCard}
+              onToggleResolved={actions.onToggleResolved}
+              onToggleThread={actions.onToggleThread}
+              pendingActionIds={pendingActionIds}
+              resolvedThreads={resolvedThreads}
+              retractedAskCount={retractedAskCount}
+              selectedItemId={selection.selectedItemId}
+              showResolved={selection.showResolved}
+              threads={threads}
+              viewerLogin={viewerLogin}
+            />
+          ) : null}
+        </div>
         {isPhoneViewport &&
         phoneThread !== undefined &&
         owner !== undefined &&

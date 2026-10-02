@@ -419,9 +419,12 @@ export function ThreadCard({
                 ))}
               </ol>
             )}
-            {isClosed || terminalSuggestion || hideReplyComposer ? null : (
-              <div className={composerClassName}>
+            {/* Mounted on a closed issue too, where the composer shows only a reply of its own
+                still out or its refusal (`closed`), and its frame collapses with it otherwise. */}
+            {terminalSuggestion || hideReplyComposer ? null : (
+              <div className={`empty:hidden ${composerClassName ?? ""}`}>
                 <MentionComposer
+                  closed={isClosed}
                   inline
                   kind="comment"
                   mutationKey={replyMutationKey}

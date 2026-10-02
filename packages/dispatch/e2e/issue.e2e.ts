@@ -13,6 +13,7 @@ import {
   patchIssue,
 } from "./api";
 import { recordClipboard } from "./clipboard";
+import { needsYouCards } from "./editor";
 import { clearIssueCreator, resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -431,7 +432,7 @@ test("a quote-anchored ask identifies its document in the margin and Conversatio
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
     }
-    const marginCard = page.getByRole("region", { name: "Needs you" }).getByTestId(`ask-${ask.id}`);
+    const marginCard = needsYouCards(page).getByTestId(`ask-${ask.id}`);
     await expect(marginCard.getByRole("link", { name: "spec.md" })).toHaveAttribute(
       "href",
       documentHref

@@ -21,6 +21,7 @@ import {
   expectMark,
   marginCard,
   markSpan,
+  needsYouCards,
   selectEditorText,
 } from "./editor";
 import { resetDatabase, setCommentAuthorService } from "./seed";
@@ -173,10 +174,7 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     const askComposer = alicePage.getByRole("form", { name: "Comment composer" });
     await askComposer.getByLabel("Question").fill("Why fox?");
     await askComposer.locator('button[type="submit"]').click();
-    const askCard = alicePage
-      .getByRole("region", { name: "Needs you" })
-      .locator("[data-margin-item]")
-      .filter({ hasText: "Why fox?" });
+    const askCard = needsYouCards(alicePage).filter({ hasText: "Why fox?" });
     await expect(askCard).toBeVisible();
     const askId = await askCard.getAttribute("data-margin-item");
     if (askId === null) {
@@ -650,10 +648,9 @@ test("margin ask composer sends option choices that the inbox records as a selec
     });
     await composer.getByRole("button", { exact: true, name: "Ask" }).last().click();
 
-    const createdCard = page
-      .getByRole("region", { name: "Needs you" })
-      .locator("[data-margin-item]")
-      .filter({ hasText: "Which direction should we take?" });
+    const createdCard = needsYouCards(page).filter({
+      hasText: "Which direction should we take?",
+    });
     const askId = await createdCard.getAttribute("data-margin-item");
     if (askId === null) {
       throw new Error("The created ask has no margin id.");
@@ -786,7 +783,7 @@ test("long option labels and descriptions wrap inside the margin ask card", asyn
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}`);
     await setSheet(page, testInfo.project.name, true);
-    const card = page.getByRole("region", { name: "Needs you" }).getByTestId(`ask-${ask.id}`);
+    const card = needsYouCards(page).getByTestId(`ask-${ask.id}`);
     await expect(card).toContainText("severity table shape");
     await expect(
       card.getByRole("button", { name: "Add a note or answer in your own words" })

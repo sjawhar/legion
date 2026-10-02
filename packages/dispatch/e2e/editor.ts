@@ -143,6 +143,13 @@ export function threadCard(page: Page, rootId: string): Locator {
   return page.locator(`[data-turn="comment:${rootId}"]`).locator(`[data-margin-item="${rootId}"]`);
 }
 
+/** The margin's open asks waiting on the reader. Every margin ask card, open or decided, is in one
+ *  keyed list - an answered ask moves to the decided ones in place - so the group is each card's
+ *  own `data-margin-section`, and a card is found inside it by its `ask-<id>` test id. */
+export function needsYouCards(page: Page): Locator {
+  return page.locator('[data-margin-section="needs-you"]');
+}
+
 export async function replyInThread(page: Page, rootId: string, body: string): Promise<void> {
   const card = threadCard(page, rootId);
   if ((await card.getAttribute("aria-expanded")) !== "true") {

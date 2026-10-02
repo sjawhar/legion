@@ -1,7 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { holdPosts, refusePosts } from "./agents";
-import { createComment, createIssue, createMessage, createProject } from "./api";
+import { createComment, createIssue, createMessage, createProject, resolveComment } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -291,6 +291,126 @@ test("on a phone, a thread's own reply holds Back and Escape while it is out, an
     await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
     await expect(field).toHaveValue("Inline reply");
     await expect(back).toBeEnabled();
+  } finally {
+    await alice.close();
+  }
+});
+
+// Widening past the phone layout used to close the thread view, and its card's reply composer
+// with it - the draft, the send it had out and that send's refusal. While a send from the view is
+// out it stays open, full-screen at any width, until the reader leaves it with Back.
+test("on a phone, a thread's own reply out when the viewport widens keeps its thread, draft and refusal", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Widened under a reply" });
+  const earlier = await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = await openThread(page, earlier.id);
+    const form = thread.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const back = thread.getByRole("button", { name: "Back" });
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Reply through a widening");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await page.setViewportSize({ height: 900, width: 1280 });
+    await expect(thread).toBeVisible();
+    await expect(field).toHaveValue("Reply through a widening");
+    await expect(back).toBeDisabled();
+
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(field).toHaveValue("Reply through a widening");
+    await expect(back).toBeEnabled();
+    await back.click();
+    await expect(threadView(page)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A thread the reader has open stays open whoever resolves its comment, so its own reply - the
+// draft, the send it has out and that send's refusal - stays in front of them.
+test("on a phone, a thread resolved while its own reply is out stays open with the reply and its refusal", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Resolved under a phone reply" });
+  const earlier = await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = await openThread(page, earlier.id);
+    const form = thread.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Reply under a resolve");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await resolveComment(earlier.id, { login: "bob" });
+    await expect(thread.getByText(/^Resolved by bob/)).toBeVisible();
+    await expect(field).toHaveValue("Reply under a resolve");
+
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(field).toHaveValue("Reply under a resolve");
+    await expect(thread.getByRole("button", { name: "Back" })).toBeEnabled();
+  } finally {
+    await alice.close();
+  }
+});
+
+// Back, Escape and the thread's own controls wait for a send from the thread, so a request the
+// server never answers must not keep the reader there: past the client's deadline the send ends
+// as refused, with its draft, and Back takes the reader out.
+test("on a phone, a thread reply the server never answers is refused at the deadline, and Back works", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Hung thread reply" });
+  const earlier = await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.clock.install();
+    await page.setViewportSize(phone);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = await openThread(page, earlier.id);
+    const form = thread.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const back = thread.getByRole("button", { name: "Back" });
+    // Held for good: the server never answers this one.
+    const send = await holdPosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Reply into the void");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+    await expect(back).toBeDisabled();
+
+    await page.clock.fastForward(29_000);
+    await expect(back).toBeDisabled();
+    await page.clock.fastForward(1_500);
+    await expect(
+      form.getByText(
+        "Couldn't send — the server did not answer within 30 seconds. It may still arrive, so look for it before you retry"
+      )
+    ).toBeVisible();
+    await expect(field).toHaveValue("Reply into the void");
+    await expect(field).toBeEnabled();
+    expect(send.posts()).toBe(1);
+    await back.click();
+    await expect(threadView(page)).toHaveCount(0);
   } finally {
     await alice.close();
   }

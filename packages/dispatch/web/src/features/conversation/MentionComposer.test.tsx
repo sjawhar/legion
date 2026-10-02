@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type ReactNode, useState } from "react";
@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import { ApiError, api } from "../../api/client";
 import type { Agent, Comment, Message } from "../../api/types";
 import { type ComposerOwner, MentionComposer, reconcileMentions } from "./MentionComposer";
+import { SEND_DEADLINE_MS } from "./send-request";
 
 const planner: Agent = {
   capabilities: ["btw"],
@@ -54,6 +55,7 @@ const createdComment: Comment = {
 interface ComposerOptions {
   agents?: readonly Agent[];
   anchor?: { artifact: string; mark_id: string; quote: string };
+  closed?: boolean;
   edit?: { body: string; id: string };
   kind?: "ask" | "comment" | "suggestion";
   seedMentions?: readonly { target: string; title: string }[];
@@ -83,6 +85,7 @@ function renderComposer(options: ComposerOptions = {}) {
         <MentionComposer
           agents={props.agents}
           anchor={props.anchor}
+          closed={props.closed}
           edit={props.edit}
           kind={props.kind}
           seedMentions={props.seedMentions}
@@ -1432,5 +1435,109 @@ test("a refusal belongs to the mark it answered: a newer anchor leaves it behind
     expect(screen.queryByRole("status")).toBeNull();
   } finally {
     view.unmount();
+  }
+});
+
+// A send's draft and every control a host holds for it are the server's until it answers, so a
+// request the server never answers cannot keep them: past the deadline the send ends as refused,
+// with the draft it sent handed back, and the composer takes the reader's next move.
+test("a send the server never answers is refused at the deadline, with its draft", async () => {
+  const createComment = spyOn(api, "createComment").mockImplementation(
+    () => Promise.withResolvers<Comment>().promise
+  );
+  jest.useFakeTimers();
+  const { view } = renderComposer();
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Hung send" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    expect(createComment).toHaveBeenCalledTimes(1);
+    expect(holdControls().disabled).toBe(true);
+
+    await act(async () => {
+      jest.advanceTimersByTime(SEND_DEADLINE_MS - 1);
+    });
+    expect(holdControls().disabled).toBe(true);
+    await act(async () => {
+      jest.advanceTimersByTime(1);
+    });
+    expect(
+      screen.getByText(
+        "Couldn't send — the server did not answer within 30 seconds. It may still arrive, so look for it before you retry"
+      )
+    ).toBeTruthy();
+    expect(holdControls().disabled).toBe(false);
+    expect(field.value).toBe("Hung send");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  } finally {
+    jest.useRealTimers();
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// A closed owner takes no send. Its composer stays mounted for a send it still has out and for
+// that send's refusal - Send refused, Discard draft in place of Retry - and shows nothing else.
+test("a closed composer shows only a send of its own still out, then its refusal with Discard", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(refused.promise);
+  const { rerender, view } = renderComposer();
+
+  try {
+    rerender({ closed: true });
+    expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull();
+    rerender({});
+
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Closing under me" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    rerender({ closed: true });
+    expect(screen.getByRole("form", { name: "Comment composer" })).toBeTruthy();
+    expect(holdControls().disabled).toBe(true);
+
+    refused.reject(new ApiError(409, { code: "ISSUE_CLOSED", error: "issue is closed" }));
+    await screen.findByText("Couldn't send — issue is closed");
+    expect(screen.getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("Closing under me");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send.getAttribute("aria-disabled")).toBe("true");
+    expect(send.getAttribute("title")).toBe("This issue is closed. Reopen it to send.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+    expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull();
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// An upload carries its target from the paste that starts it: a host that re-addresses the
+// composer in the paste's own task - before React re-renders - moves where the next upload goes,
+// never this one, and the reference it appends names where the file went.
+test("a pick in the paste's own task cannot move the upload", async () => {
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockResolvedValue({
+    artifact: { slug: "notes-md" } as never,
+    version: {} as never,
+  });
+  const { rerender, view } = renderComposer();
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    const file = new File(["# Notes"], "notes.md", { type: "text/markdown" });
+    act(() => {
+      fireEvent.paste(field, { clipboardData: { files: [file] } });
+      rerender({ owner: { issueKey: "CORE-2", kind: "issue" } });
+    });
+
+    await waitFor(() => expect(uploadArtifact).toHaveBeenCalledTimes(1));
+    expect(uploadArtifact.mock.calls[0]?.[0]).toEqual({ issue: "CORE-1" });
+    await waitFor(() => expect(field.value).toBe("dispatch://CORE-1/artifact/notes-md"));
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
   }
 });

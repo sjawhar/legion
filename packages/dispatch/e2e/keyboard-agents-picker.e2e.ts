@@ -528,6 +528,55 @@ test.describe("agents page", () => {
     }
   });
 
+  // An upload carries its target from the paste that starts it, as a send carries its request: a
+  // pick in the paste's own task, before React re-renders, moves where the next message goes but
+  // not where this file goes, and the reference the upload adds names the issue that holds it.
+  test("a same-task issue pick cannot move an upload", async ({ browser }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = agentRow(page, plannerSession.session_id);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const picker = row.getByRole("combobox", { name: "Issue" });
+      const uploaded = page.waitForRequest(
+        (request) =>
+          request.method() === "POST" &&
+          /\/api\/v1\/issues\/[^/]+\/artifacts$/.test(new URL(request.url()).pathname)
+      );
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await toggle.click();
+      await picker.selectOption("CORE-1");
+      await expect(field).toHaveValue("@Planner");
+      await toggle.click();
+      await expect(picker).toBeVisible();
+      await row.evaluate((node) => {
+        const textarea = node.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]');
+        const select = node.querySelector<HTMLSelectElement>('select[aria-label="Issue"]');
+        if (textarea === null || select === null)
+          throw new Error("expected the composer and the issue picker");
+        const data = new DataTransfer();
+        data.items.add(new File(["# Notes\n"], "notes.md", { type: "text/markdown" }));
+        const paste = new Event("paste", { bubbles: true, cancelable: true });
+        Object.defineProperty(paste, "clipboardData", { value: data });
+        textarea.dispatchEvent(paste);
+        select.value = "CORE-2";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+
+      expect(new URL((await uploaded).url()).pathname).toBe("/api/v1/issues/CORE-1/artifacts");
+      await expect(field).toHaveValue("@Planner dispatch://CORE-1/artifact/notes-md");
+      await expect(toggle).toContainText("CORE-2");
+    } finally {
+      await context.close();
+    }
+  });
+
   // Cancel reply is the same address mutation in reverse. The send retains its direct reply
   // target until its refusal arrives, even when the click shares Send's task.
   test("a same-task Cancel reply keeps the direct reply it sent", async ({ browser }) => {

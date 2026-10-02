@@ -15,7 +15,7 @@ import {
   getAsk,
   patchIssue,
 } from "./api";
-import { actionBar, barAction, documentEditor, selectEditorText } from "./editor";
+import { actionBar, barAction, documentEditor, needsYouCards, selectEditorText } from "./editor";
 import { insertExternalLink, resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -107,9 +107,7 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
       const reviewToggle = page.getByRole("button", { name: "Open review panel (1 open ask)" });
       await expect(reviewToggle).toBeVisible();
       await reviewToggle.click();
-      const askCard = page
-        .getByRole("region", { name: "Needs you" })
-        .getByTestId(`ask-${openAsk.id}`);
+      const askCard = needsYouCards(page).getByTestId(`ask-${openAsk.id}`);
       await askCard.getByRole("button", { name: "Add a note or answer in your own words" }).click();
       await askCard.getByLabel("Your answer").fill("Yes.");
       await askCard.getByRole("button", { exact: true, name: "Answer" }).click();
@@ -535,14 +533,21 @@ test("an inline link keeps its line and grows its hit box without covering its n
 
 /** The name is cut, and whatever cuts it draws an ellipsis. `text-overflow` applies to a block
  *  container's own text, never to a flex container's, and below 1280 px every link is an
- *  inline-flex box: a `truncate` link there clipped its name mid-word with nothing to say so. */
+ *  inline-flex box: a `truncate` link there clipped its name mid-word with nothing to say so.
+ *  An inline box clips nothing (`overflow` does not apply to it), so it is not counted: from
+ *  1280 px a link is a block and the `TruncatedText` span inside it stays inline, and Firefox
+ *  reports that span's `scrollWidth` as its text's width beside a `clientWidth` of 0, where
+ *  Chromium and WebKit report 0 for both. */
 async function expectEllipsis(link: Locator): Promise<void> {
   const state = await link.evaluate((node) => {
-    const clippers = [node, ...node.querySelectorAll("*")].filter(
-      (element) =>
+    const clippers = [node, ...node.querySelectorAll("*")].filter((element) => {
+      const style = getComputedStyle(element);
+      return (
+        style.display !== "inline" &&
         element.scrollWidth > element.clientWidth &&
-        getComputedStyle(element).overflowX === "hidden"
-    );
+        style.overflowX === "hidden"
+      );
+    });
     const container = node.parentElement?.getBoundingClientRect();
     return {
       clipperStyles: clippers.map((element) => {

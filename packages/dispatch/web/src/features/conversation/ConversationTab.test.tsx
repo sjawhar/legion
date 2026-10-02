@@ -825,6 +825,54 @@ test("hides resolved comment turns behind their disclosure", async () => {
   }
 });
 
+// A thread the reader has open is in their hand: resolving its comment - anyone's resolve, here
+// arriving on the stream - leaves the turn, its open thread and the reply they are writing where
+// they are, and the turn takes the resolved filter only once they collapse the thread.
+test("a comment resolved while its thread is open stays, with its reply, until the thread closes", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  const root = commentEvent(1, "root-comment", "Root comment");
+  const resolved: Event = {
+    ...root,
+    id: 2,
+    payload: {
+      ...root.payload,
+      resolved: true,
+      resolved_at: "2026-09-20T00:01:00Z",
+      resolved_by: { id: "bob", kind: "user" },
+    },
+    seq: 2,
+    type: "comment.resolved",
+  };
+  let unmount: (() => void) | undefined;
+
+  try {
+    api.getIssueEvents = async () => [root];
+    api.listAgents = async () => [];
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText("Root comment");
+    fireEvent.click(screen.getByRole("button", { name: "Expand thread" }));
+    const field = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Reply" });
+    fireEvent.change(field, { target: { value: "Half a reply" } });
+
+    act(() => {
+      prependEventToLog(queryClient, resolved);
+    });
+    await screen.findByRole("button", { name: "Resolved (1)" });
+    expect(screen.getByText("Root comment")).toBeTruthy();
+    expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Reply" })).toBe(field);
+    expect(field.value).toBe("Half a reply");
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse thread" }));
+    await waitFor(() => expect(screen.queryByText("Root comment")).toBeNull());
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
 test("shows Jump to latest until the reader returns to the top", async () => {
   const originalGetIssueEvents = api.getIssueEvents;
   const originalListAgents = api.listAgents;
