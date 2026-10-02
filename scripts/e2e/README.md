@@ -641,8 +641,8 @@ at once. Its room is the Ready, schedulable pool nodes, neither tainted `karpent
 nor being deleted, that no live tree pod of the namespace is on, plus the floor-sized nodes its cpu
 and memory limits still allow. A wait that needs a tree's pods placed names that tree (or the
 reachability pod) as its subject. If it times out while one of its subject's pods is Pending
-Unschedulable, and a Karpenter event naming that pod's uid, no older than its Unschedulable
-transition, finds every instance type over the pool's limits, it ends BLOCKED `capacity: …`,
+Unschedulable, and Karpenter's newest FailedScheduling event for that pod's uid, no older than its
+Unschedulable transition, finds every instance type over the pool's limits, it ends BLOCKED `capacity: …`,
 naming the pod. A wait with no subject, a starved pod outside the subject, any other timeout, and
 any check that fails outright stay FAIL. A failed teardown check outranks every reason
 the run stopped: it prints its own `CHECK <name>: FAIL` line (the audit's names the run's writes and
