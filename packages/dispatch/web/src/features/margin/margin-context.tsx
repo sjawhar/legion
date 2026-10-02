@@ -9,7 +9,6 @@ import {
 } from "react";
 import type { ComposerAnchor, ComposerKind } from "../conversation/MentionComposer";
 import type { RetypeOutcome, RetypeRefusal } from "../doc/editor";
-import { pulseBlock } from "../doc/marks";
 import type { MarkPlacement } from "./useMarginItems";
 
 export interface DocumentBridge {
@@ -211,7 +210,6 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const focusBlock = useCallback(
     (blockId: string) => {
       sequence.current += 1;
-      pulseBlock(blockId);
       setBlockFocusRequest({ blockId, seq: sequence.current });
       documentBridge?.focusBlock(blockId);
     },

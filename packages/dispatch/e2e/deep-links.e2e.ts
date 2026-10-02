@@ -583,7 +583,7 @@ test("an iPhone document item link brings its far-away mark above the closed rev
 
     const sheet = page.getByTestId("margin-sheet");
     const mark = markSpan(page, markId);
-    await expect(mark).toHaveClass(/dispatch-mark-active/);
+    await expect(mark.locator(".dispatch-mark-active")).toHaveCount(1);
     await expect(mark).toBeInViewport();
     await expect(sheet).toHaveAttribute("data-expanded", "false");
 

@@ -44,8 +44,6 @@ import {
   composerKindFor,
   markPlacements,
   selectionBarKindFor,
-  setActiveBlockClass,
-  setActiveMarkClass,
 } from "./marks";
 import { NameVersionDialog } from "./NameVersionDialog";
 import { DocumentRuntime } from "./runtime";
@@ -390,8 +388,8 @@ export function ProofDocument({
                   removeMark: (markId) => handle.removeMark(markId),
                   retypeMark: (markId, kind) =>
                     handle.retypeMark(markId, selectionBarKindFor(kind)),
-                  setActiveBlocks: (blockIds) => setActiveBlockClass(handle.view.dom, blockIds),
-                  setActiveMarks: (markIds) => setActiveMarkClass(handle.view.dom, markIds),
+                  setActiveBlocks: (blockIds) => handle.setActiveBlocks(blockIds),
+                  setActiveMarks: (markIds) => handle.setActiveMarks(markIds),
                 });
                 const unbindRemoteMarks = bindRemoteMarks(connection.doc, handle);
                 const fragment = connection.doc.getXmlFragment("prosemirror");

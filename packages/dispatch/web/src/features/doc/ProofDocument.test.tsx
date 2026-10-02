@@ -693,9 +693,6 @@ test("a highlight click focuses its margin item and hover identifies its matchin
 
     act(() => margin.current?.documentBridge?.focusMark("m-9"));
     expect(editors[0]?.focused).toEqual(["m-9"]);
-
-    act(() => margin.current?.documentBridge?.setActiveMarks(["m-9"]));
-    expect(span.classList.contains("dispatch-mark-active")).toBe(true);
   } finally {
     view.unmount();
   }

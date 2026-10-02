@@ -116,7 +116,10 @@ navigates away from the document. Two readers' comments, suggestions or asks may
 text: the record marks declare `excludes: ''` (the pinned fork's schema for comments and
 suggestions, `packages/proof-editor/src/dispatch-marks.ts` for asks), so their spans nest and a
 click opens the innermost mark's thread, and removing a mark removes that mark's instance, never
-the type over its range. Issue margins additionally show Pinned and their Ask section;
+the type over its range. A selected margin item, its orphaned block, and the brief focus pulse are
+editor decorations (`ProofEditorHandle.setActiveMarks`, `setActiveBlocks`, `focusMark` and
+`focusBlock`), never classes Dispatch writes into editor DOM: ProseMirror reads such a write back
+as a document edit. Issue margins additionally show Pinned and their Ask section;
 pinned events retain their original event body and have an `Unpin` action, so a pin made before a
 comment lifecycle event began folding into its comment turn remains removable.
 

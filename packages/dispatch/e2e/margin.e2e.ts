@@ -26,6 +26,7 @@ import {
   selectEditorText,
 } from "./editor";
 import { resetDatabase, setCommentAuthorService } from "./seed";
+import { centerOf, touchHold } from "./touch";
 import { asUser } from "./users";
 
 const session = {
@@ -1029,6 +1030,132 @@ test("two readers' comments can cover the same text, and neither cuts the other'
     await expect.poll(() => markText(bobPage, aliceMark)).toBe("brown");
     await expect(marginCard(bobPage, bobComment.id)).toBeAttached();
     await expect(marginCard(bobPage, aliceComment.id)).toBeAttached();
+  } finally {
+    await bob.close();
+    await alice.close();
+  }
+});
+
+// Bob suggests on "quick brown" and his thread stays selected while Alice suggests on "brown"
+// from the same selection control a person uses. Selecting a thread only highlights its text;
+// both browsers keep Bob's anchor whole, show Alice's inside it, and send both quotes to the server.
+test("two readers' suggestions keep both action-bar anchors", async ({ browser }, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: initialMarkdown,
+    title: "Suggestion overlap",
+  });
+  const artifactId = issue.primary_artifact_id;
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+
+  try {
+    const alicePage = await alice.newPage();
+    const bobPage = await bob.newPage();
+    await Promise.all([
+      alicePage.goto(`/issues/${issue.key}/spec`),
+      bobPage.goto(`/issues/${issue.key}/spec`),
+    ]);
+    for (const page of [alicePage, bobPage]) {
+      await expect(connectedDot(page)).toHaveText("connected");
+    }
+
+    const pressSuggestion = async (page: Page) => {
+      const button = actionBar(page).getByRole("button", { exact: true, name: "Suggest" });
+      if (testInfo.project.name === "iphone") {
+        await touchHold(page, await centerOf(button), 0);
+        return;
+      }
+      await button.click();
+    };
+
+    await selectEditorText(bobPage, "quick brown");
+    await pressSuggestion(bobPage);
+    const bobComposer = bobPage.getByRole("form", { name: "Comment composer" });
+    await bobComposer.getByLabel("Replacement").fill("swift umber");
+    await bobComposer.getByRole("button", { exact: true, name: "Send" }).click();
+    const bobSuggestion = await commentWithBody(issue.key, artifactId, "Suggested replacement.");
+    if (bobSuggestion.anchor === null) {
+      throw new Error("Bob's suggestion has no anchor.");
+    }
+    expect(bobSuggestion.anchor.quote).toBe("quick brown");
+    const bobMark = bobSuggestion.anchor.mark_id;
+    for (const page of [alicePage, bobPage]) {
+      await expect.poll(() => markText(page, bobMark)).toBe("quick brown");
+    }
+
+    await setSheet(alicePage, testInfo.project.name, false);
+    await selectEditorText(alicePage, "brown");
+    await pressSuggestion(alicePage);
+    const aliceComposer = alicePage.getByRole("form", { name: "Comment composer" });
+    await expect(aliceComposer).toBeVisible();
+
+    // Check before Send: the editor itself must hold both marks, with no rewrite on either side.
+    const suggestionMarks = documentEditor(alicePage).locator(
+      'span[data-proof="suggestion"][data-id]'
+    );
+    await expect
+      .poll(() =>
+        suggestionMarks.evaluateAll(
+          (spans, existingId) =>
+            [...new Set(spans.map((span) => span.getAttribute("data-id")))].filter(
+              (id): id is string => id !== null && id !== existingId
+            ),
+          bobMark
+        )
+      )
+      .toEqual([expect.any(String)]);
+    const aliceMark = (
+      await suggestionMarks.evaluateAll(
+        (spans, existingId) =>
+          [...new Set(spans.map((span) => span.getAttribute("data-id")))].filter(
+            (id): id is string => id !== null && id !== existingId
+          ),
+        bobMark
+      )
+    )[0];
+    if (aliceMark === undefined) {
+      throw new Error("Alice's action-bar suggestion mark was not created.");
+    }
+    for (const page of [alicePage, bobPage]) {
+      await expect.poll(() => markText(page, bobMark)).toBe("quick brown");
+      await expect.poll(() => markText(page, aliceMark)).toBe("brown");
+    }
+
+    await aliceComposer.getByLabel("Replacement").fill("red");
+    await aliceComposer.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect
+      .poll(() =>
+        listComments(issue.key, artifactId).then(
+          (comments) =>
+            comments.find((comment) => comment.anchor?.mark_id === aliceMark)?.anchor?.quote
+        )
+      )
+      .toBe("brown");
+    const aliceSuggestion = (await listComments(issue.key, artifactId)).find(
+      (comment) => comment.anchor?.mark_id === aliceMark
+    );
+    if (aliceSuggestion === undefined) {
+      throw new Error("Alice's suggestion was not created.");
+    }
+    const [savedBob, savedAlice] = await Promise.all([
+      getComment(bobSuggestion.id),
+      getComment(aliceSuggestion.id),
+    ]);
+    expect({
+      quote: savedBob.comment.anchor?.quote,
+      orphaned: savedBob.comment.anchor?.orphaned,
+    }).toEqual({ quote: "quick brown", orphaned: false });
+    expect({
+      quote: savedAlice.comment.anchor?.quote,
+      orphaned: savedAlice.comment.anchor?.orphaned,
+    }).toEqual({ quote: "brown", orphaned: false });
+
+    await bobPage.reload();
+    await expect(connectedDot(bobPage)).toHaveText("connected");
+    await expect.poll(() => markText(bobPage, bobMark)).toBe("quick brown");
+    await expect.poll(() => markText(bobPage, aliceMark)).toBe("brown");
   } finally {
     await bob.close();
     await alice.close();
