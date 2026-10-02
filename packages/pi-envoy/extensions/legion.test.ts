@@ -5710,6 +5710,9 @@ async function goController(options: {
   readonly register?: (
     body: Record<string, unknown>
   ) => Response | undefined | Promise<Response | undefined>;
+  /** The project token the Go controller carries as LEGION_PROJECT; `legion controller start`
+   * derives it from the configured project spelling. */
+  readonly project?: string;
   /** The project the daemon's `GET /legion/v1/state` names, as its operator wrote it: `OMP`,
    * whose token is `omp`, unless a test says otherwise. */
   readonly daemonProject?: string;
@@ -5727,7 +5730,8 @@ async function goController(options: {
   readonly handlers: Map<string, Handler>;
   readonly context: (sessionId: string, sessionFile?: string) => SessionContext;
 }> {
-  const token = "legion-omp-controller";
+  const project = options.project ?? "omp";
+  const token = `legion-${project}-controller`;
   const registration = {
     claimToken: token,
     role: "controller",
@@ -5747,7 +5751,7 @@ async function goController(options: {
   process.env.LEGION_CONTROLLER_SECRET_FILE = capabilityFile;
   process.env.LEGION_DAEMON_URL = "http://daemon.test";
   process.env.ENVOY_URL = "http://envoy.test";
-  process.env.LEGION_PROJECT = "omp";
+  process.env.LEGION_PROJECT = project;
   process.env.LEGION_STATE_DIR = stateDir;
   process.env.LEGION_GRANT_FILE = grantFile;
 
@@ -5760,7 +5764,7 @@ async function goController(options: {
   );
   const daemonState = {
     ...goldenState,
-    daemon: { ...goldenState.daemon, project: options.daemonProject ?? "OMP" },
+    daemon: { ...goldenState.daemon, project: options.daemonProject ?? project.toUpperCase() },
   };
   let grants = 0;
   let holder = options.sessionId;
@@ -6475,16 +6479,34 @@ describe("a Legion session's title", () => {
     });
   });
 
-  test("the controller is titled by its project, and so is the session a /new leaves it on", async () => {
+  test("a Go controller titles its lowercased project token with the canonical project spelling", async () => {
+    // `legion controller start` gives the plugin LEGION_PROJECT=agentc from controller.yaml's
+    // project: AGENTC; Dispatch and Envoy must show the project as AGENTC.
+    const controller = await goController({
+      sessionId: "ses_go_agentc_controller_title",
+      project: "agentc",
+    });
+    await controller.handlers.get("session_start")?.(
+      {},
+      controller.context("ses_go_agentc_controller_title")
+    );
+
+    expect(controller.title.set).toEqual(["Legion controller · AGENTC"]);
+    expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
+      title: "Legion controller · AGENTC",
+    });
+  });
+
+  test("the controller titles the session a /new leaves it on", async () => {
     const controller = await goController({ sessionId: "ses_go_controller_title" });
     await controller.handlers.get("session_start")?.(
       {},
       controller.context("ses_go_controller_title")
     );
 
-    expect(controller.title.set).toEqual(["Legion controller · omp"]);
+    expect(controller.title.set).toEqual(["Legion controller · OMP"]);
     expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
-      title: "Legion controller · omp",
+      title: "Legion controller · OMP",
     });
 
     // `/new` clears the session manager's title in place and moves it to a fresh session.
@@ -6496,10 +6518,10 @@ describe("a Legion session's title", () => {
       controller.context("ses_go_controller_title_new")
     );
 
-    expect(controller.title.set).toEqual(["Legion controller · omp", "Legion controller · omp"]);
+    expect(controller.title.set).toEqual(["Legion controller · OMP", "Legion controller · OMP"]);
     expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
       session_id: "ses_go_controller_title_new",
-      title: "Legion controller · omp",
+      title: "Legion controller · OMP",
     });
   });
 
@@ -6527,9 +6549,9 @@ describe("a Legion session's title", () => {
       controller.context("ses_go_controller_auto_title")
     );
 
-    expect(controller.title.set).toEqual(["Legion controller · omp"]);
+    expect(controller.title.set).toEqual(["Legion controller · OMP"]);
     expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
-      title: "Legion controller · omp",
+      title: "Legion controller · OMP",
     });
   });
 });

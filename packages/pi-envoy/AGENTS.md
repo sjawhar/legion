@@ -263,9 +263,10 @@ takes `--operator-token-file`, which buys a controller grant over the operator's
 Every Legion session names itself as soon as it starts, under either daemon, in a tmux pane or a
 pod: `Legion <role> · <ISSUE>` for a root architect or a phase worker (a sub-architect included),
 from `LEGION_ROLE` and `LEGION_ISSUE`, and `Legion controller · <PROJECT>` for a controller, from
-`LEGION_PROJECT` (the project token; without it the title is `Legion controller`, so no daemon
-contract number moves for it). `session_start` in `extensions/legion.ts` calls
-`pi.setSessionName` (`src/legion/session-title.ts`) after the subagent check and before any daemon
+`LEGION_PROJECT` displayed in uppercase (the daemon carries that token in lowercase for subjects
+and paths; without it the title is `Legion controller`, so no daemon contract number moves for it).
+`session_start` in `extensions/legion.ts` calls `pi.setSessionName`
+(`src/legion/session-title.ts`) after the subagent check and before any daemon
 call or Envoy role claim, so the claim's registration already carries the title the Envoy listener
 lists, and every Dispatch write stamps it as `origin.session_title` (`getSessionName`, read at
 call time). Oh My Pi titles a session itself from the first message typed at its terminal or given

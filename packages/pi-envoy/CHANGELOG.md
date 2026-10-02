@@ -36,6 +36,12 @@
   lanes is settled by those two lanes over Envoy, and nobody audits or retracts another session's
   asks.
 
+### Fixed
+
+- A controller now displays its project token in canonical uppercase
+  (`Legion controller · AGENTC`), rather than the lowercase token the Go daemon carries in
+  `LEGION_PROJECT` (LEGION-480).
+
 ### Added
 
 - Every Legion session names itself when it starts, so Dispatch and Envoy show who wrote what

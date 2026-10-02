@@ -14,9 +14,9 @@ export function legionSessionTitle(
 ): string | undefined {
   switch (session.kind) {
     case "controller":
-      // Both daemons and `legion controller start` set LEGION_PROJECT on a controller; the title
-      // names only what the pane says.
-      return project ? `Legion controller · ${project}` : "Legion controller";
+      // LEGION_PROJECT is the lowercased project token the daemon uses in subjects and paths.
+      // Dispatch and Envoy display the canonical uppercase project label.
+      return project ? `Legion controller · ${project.toUpperCase()}` : "Legion controller";
     case "root-architect":
       return `Legion architect · ${session.tree}`;
     case "phase-worker":
