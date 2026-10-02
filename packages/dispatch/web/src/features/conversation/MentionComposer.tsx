@@ -29,7 +29,7 @@ import { QueryError } from "../../components/QueryError";
 import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
-import { useSubmitGuard } from "../../hooks/useSubmitGuard";
+import { type SubmitGuard, useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   badgeMed,
   borderDefault,
@@ -512,6 +512,8 @@ interface MentionComposerProps {
   readonly kind?: ComposerKind;
   /** Names the send, so a host can read whether it is in flight (`useIsMutating`). */
   readonly mutationKey?: MutationKey;
+  /** A host can share its guard with controls outside this fieldset that change the send's route. */
+  readonly submitGuard?: SubmitGuard;
   readonly onCancelReply?: () => void;
   readonly onClose: () => void;
   readonly onSent: () => void;
@@ -535,6 +537,7 @@ export function MentionComposer({
   inline = false,
   kind = "comment",
   mutationKey,
+  submitGuard: suppliedSubmitGuard,
   onCancelReply,
   onClose,
   onKindChange,
@@ -609,7 +612,8 @@ export function MentionComposer({
     setAskOptions([emptyAskOption()]);
   };
   const references = useMemo(() => composerReferences(body), [body]);
-  const submitGuard = useSubmitGuard();
+  const localSubmitGuard = useSubmitGuard();
+  const submitGuard = suppliedSubmitGuard ?? localSubmitGuard;
   const uploadRetryGuard = useSubmitGuard();
   const editBody = edit?.body;
 

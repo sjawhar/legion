@@ -1,5 +1,5 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
-import { setLiveSessions } from "./agents";
+import { refusePosts, setLiveSessions } from "./agents";
 
 import {
   createArtifactAsk,
@@ -187,6 +187,62 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
     const margin = page.getByTestId("margin-sheet");
     await expect(margin.getByText(pinnedMessage)).toBeVisible();
     await expect(margin.getByText(/^Event \d+$/)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a phone thread trap skips a held composer's disabled controls", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: initialMarkdown,
+    title: "Held composer focus trap",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 844, width: 390 });
+    await page.goto(`/issues/${issue.key}`);
+    await selectEditorText(page, "brown");
+    await barAction(page, "Comment");
+    const sheet = page.getByTestId("margin-sheet");
+    const form = sheet.getByRole("form", { name: "Comment composer" });
+    const body = form.getByLabel("Comment");
+    const refuse = await refusePosts(page, "**/api/v1/issues/*/comments");
+    await body.fill("Keep this draft");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(body).toBeDisabled();
+
+    const focused = await sheet.evaluate((container) => {
+      const controls = [
+        ...container.querySelectorAll<HTMLElement>(
+          'a[href], button, textarea, input, select, [tabindex]:not([tabindex="-1"])'
+        ),
+      ];
+      const last = controls.filter((control) => !control.matches(":disabled")).at(-1);
+      if (last === undefined) throw new Error("expected an enabled focus target");
+      last.focus();
+      return {
+        focused: document.activeElement === last,
+        hasDisabledControlAfter: controls
+          .slice(controls.indexOf(last) + 1)
+          .some((control) => control.matches(":disabled")),
+      };
+    });
+    expect(focused).toEqual({ focused: true, hasDisabledControlAfter: true });
+    await page.keyboard.press("Tab");
+    expect(await activeElementInside(page, '[data-testid="margin-sheet"]')).toBe(true);
+    expect(
+      await sheet.evaluate(
+        (container) =>
+          document.activeElement instanceof HTMLElement &&
+          container.contains(document.activeElement) &&
+          !document.activeElement.matches(":disabled")
+      )
+    ).toBe(true);
+    refuse();
   } finally {
     await alice.close();
   }

@@ -4,6 +4,7 @@ import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState }
 import { api } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
 import type { Agent } from "../../api/types";
+import type { SubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   borderDefault,
   dangerText,
@@ -54,6 +55,7 @@ export function AgentMessageComposer({
   onClose,
   replyTo,
   sending,
+  submitGuard,
   sendKey,
 }: {
   agent: Agent;
@@ -66,6 +68,8 @@ export function AgentMessageComposer({
   /** Whether this row's send is in flight (`sendKey`). The message is addressed by then, so the
    *  picker holds until it lands. */
   sending: boolean;
+  /** The row's synchronous send hold, shared with the composer and route controls. */
+  submitGuard: SubmitGuard;
   /** The row's `useAgentSendKey`, which names the composer's send. */
   sendKey: MutationKey;
 }): ReactNode {
@@ -132,6 +136,7 @@ export function AgentMessageComposer({
    *  issue already held leaves alone. */
   const [commits, setCommits] = useState(0);
   const commitIssue = (value: string) => {
+    if (submitGuard.held()) return;
     setIssueKey(value);
     setIssuePickerOpen(false);
     setCommits((count) => count + 1);
@@ -212,7 +217,9 @@ export function AgentMessageComposer({
           className={`min-h-11 rounded-lg border px-3 text-sm font-medium disabled:cursor-not-allowed ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
           data-agent-issue-picker=""
           disabled={sending}
-          onClick={() => setIssuePickerOpen((open) => !open)}
+          onClick={() => {
+            if (!submitGuard.held()) setIssuePickerOpen((open) => !open);
+          }}
           type="button"
         >
           Issue: {issueKey === "" ? "No issue" : committedLabel}
@@ -241,6 +248,7 @@ export function AgentMessageComposer({
                   setPendingIssue(issueKey);
                 }}
                 onChange={(event) => {
+                  if (submitGuard.held()) return;
                   setPendingIssue(event.target.value);
                   // A step from the select's own keys only moves the selection, so a keyboard
                   // reader can pass the first option to reach the second; `Enter` below is the
@@ -250,6 +258,10 @@ export function AgentMessageComposer({
                   commitIssue(event.target.value);
                 }}
                 onKeyDown={(event) => {
+                  if (submitGuard.held()) {
+                    event.preventDefault();
+                    return;
+                  }
                   if (event.key === "Enter") {
                     // The commit is this key's, and it stops here: left to bubble it would land
                     // in the message the pick just addressed, as a newline at its top.
@@ -289,7 +301,10 @@ export function AgentMessageComposer({
             : [{ target: `session:${agent.session_id}`, title: agent.title || agent.session_id }]
         }
         mutationKey={sendKey}
-        onCancelReply={onCancelReply}
+        submitGuard={submitGuard}
+        onCancelReply={() => {
+          if (!submitGuard.held()) onCancelReply();
+        }}
         onClose={() => {
           if (sentJustNow.current) {
             sentJustNow.current = false;

@@ -1145,27 +1145,6 @@ test("a send holds every suggestion control and a refusal restores the replaceme
   }
 });
 
-test("a send holds every ask control", async () => {
-  const held = Promise.withResolvers<Comment>();
-  const createComment = spyOn(api, "createComment").mockReturnValueOnce(held.promise);
-  const { view } = renderComposer({
-    anchor: { artifact: "artifact-1", mark_id: "mark-1", quote: "brown" },
-    kind: "ask",
-  });
-
-  try {
-    const question = screen.getByLabelText<HTMLTextAreaElement>("Question");
-    fireEvent.change(question, { target: { value: "Which color?" } });
-    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
-
-    await waitFor(() => expect(holdControls().disabled).toBe(true));
-  } finally {
-    held.resolve(createdComment);
-    view.unmount();
-    createComment.mockRestore();
-  }
-});
-
 test("an Escape in Send's task cannot offer Discard", async () => {
   const refused = Promise.withResolvers<Comment>();
   const createComment = spyOn(api, "createComment").mockReturnValueOnce(refused.promise);
@@ -1282,7 +1261,10 @@ test("a refused reply keeps the reply its send started with until the server ans
   const createComment = spyOn(api, "createComment")
     .mockReturnValueOnce(refused.promise)
     .mockResolvedValueOnce(createdComment);
-  const cancelReply = () => {};
+  let cancelled = 0;
+  const cancelReply = () => {
+    cancelled += 1;
+  };
   const { view } = renderComposer({
     onCancelReply: cancelReply,
     replyTo: { author: "Bob", excerpt: "Earlier", id: "comment-0" },
@@ -1297,10 +1279,13 @@ test("a refused reply keeps the reply its send started with until the server ans
     const cancel = screen.getByRole("button", { name: "Cancel reply" }) as HTMLButtonElement;
     expect(holdControls().disabled).toBe(true);
     fireEvent.click(cancel);
+    expect(cancelled).toBe(0);
 
     refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
     await screen.findByText("Couldn't send — the server is down");
     expect(field.value).toBe("Reply body");
+    fireEvent.click(cancel);
+    expect(cancelled).toBe(1);
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));

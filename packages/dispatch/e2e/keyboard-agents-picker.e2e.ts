@@ -433,6 +433,147 @@ test.describe("agents page", () => {
     }
   });
 
+  // A direct send owns its address in the same task that begins it. A Reply click before React
+  // re-renders must not move that in-flight request onto this issue's message route.
+  test("a same-task Reply cannot re-address a direct send", async ({ browser }) => {
+    const issueKey = await seedAgents();
+    await createMessage(issueKey, {
+      body: "Can this ship?",
+      delivery: "btw",
+      target: `session:${plannerSession.session_id}`,
+    });
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = shownAgentRows(page).nth(0);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const sent = page.waitForRequest(
+        (request) =>
+          request.method() === "POST" &&
+          /\/api\/v1\/(agents\/[^/]+|issues\/[^/]+)\/messages$/.test(
+            new URL(request.url()).pathname
+          )
+      );
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await field.fill("Status please");
+      await row.evaluate((node) => {
+        const send = node.querySelector<HTMLButtonElement>('button[type="submit"]');
+        const reply = node.querySelector<HTMLButtonElement>('button[aria-label="Reply"]');
+        if (send === null || reply === null) throw new Error("expected send and Reply controls");
+        send.click();
+        reply.click();
+      });
+
+      expect(new URL((await sent).url()).pathname).toBe(
+        `/api/v1/agents/${plannerSession.session_id}/messages`
+      );
+      refuse();
+      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(field).toHaveValue("Status please");
+      await expect(row.getByRole("button", { name: "Cancel reply" })).toHaveCount(0);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // An already-open picker can commit an issue in the same task as Send. Its commit must not
+  // turn the direct send into an issue message before the request takes its owner.
+  test("a same-task issue pick cannot re-address a direct send", async ({ browser }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = shownAgentRows(page).nth(0);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const picker = row.getByRole("combobox", { name: "Issue" });
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const sent = page.waitForRequest(
+        (request) =>
+          request.method() === "POST" &&
+          /\/api\/v1\/(agents\/[^/]+|issues\/[^/]+)\/messages$/.test(
+            new URL(request.url()).pathname
+          )
+      );
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await toggle.click();
+      await expect(picker).toBeVisible();
+      await field.fill("Status please");
+      await row.evaluate((node) => {
+        const send = node.querySelector<HTMLButtonElement>('button[type="submit"]');
+        const picker = node.querySelector<HTMLSelectElement>('select[aria-label="Issue"]');
+        if (send === null || picker === null)
+          throw new Error("expected send and issue picker controls");
+        send.click();
+        picker.value = "CORE-1";
+        picker.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+
+      expect(new URL((await sent).url()).pathname).toBe(
+        `/api/v1/agents/${plannerSession.session_id}/messages`
+      );
+      refuse();
+      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(field).toHaveValue("Status please");
+      await expect(toggle).toContainText("No issue");
+    } finally {
+      await context.close();
+    }
+  });
+
+  // Cancel reply is the same address mutation in reverse. The send retains its direct reply
+  // target until its refusal arrives, even when the click shares Send's task.
+  test("a same-task Cancel reply keeps the direct reply it sent", async ({ browser }) => {
+    await seedAgents();
+    await createAgentMessage(plannerSession.session_id, {
+      body: "Are you free?",
+      delivery: "btw",
+    });
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const row = shownAgentRows(page).nth(0);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const sent = page.waitForRequest(
+        (request) =>
+          request.method() === "POST" &&
+          new URL(request.url()).pathname === `/api/v1/agents/${plannerSession.session_id}/messages`
+      );
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await row.getByRole("button", { name: "Reply" }).first().click();
+      await field.fill("Yes");
+      await row.evaluate((node) => {
+        const send = node.querySelector<HTMLButtonElement>('button[type="submit"]');
+        const cancel = node.querySelector<HTMLButtonElement>('button[aria-label="Cancel reply"]');
+        if (send === null || cancel === null)
+          throw new Error("expected send and Cancel reply controls");
+        send.click();
+        cancel.click();
+      });
+
+      expect(new URL((await sent).url()).pathname).toBe(
+        `/api/v1/agents/${plannerSession.session_id}/messages`
+      );
+      refuse();
+      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(field).toHaveValue("Yes");
+      await expect(row.getByRole("button", { name: "Cancel reply" })).toBeVisible();
+    } finally {
+      await context.close();
+    }
+  });
+
   // A refusal is about the draft it turned down. Retry sends the draft as it stands, so it is
   // offered only when Send would be; Discard drops the draft, and the notice goes with it.
   test("Retry asks what Send asks, and Discard takes a refusal's notice with the draft", async ({

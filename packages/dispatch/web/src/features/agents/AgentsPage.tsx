@@ -28,6 +28,7 @@ import { LabelPill } from "../../components/Pill";
 import { PinButton } from "../../components/PinButton";
 import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   borderDefault,
   card,
@@ -579,6 +580,10 @@ function AgentRow({
   if (expanded && !opened) setOpened(true);
   const sendKey = useAgentSendKey(agent.session_id);
   const sending = useIsMutating({ mutationKey: sendKey }) > 0;
+  const submitGuard = useSubmitGuard();
+  const beginReply = (next: AgentReply) => {
+    if (!submitGuard.held()) setReplyTo(next);
+  };
   const detailsId = useId();
 
   return (
@@ -708,7 +713,7 @@ function AgentRow({
           <AgentMessageList
             agent={agent}
             liveAgents={liveAgents}
-            onReply={setReplyTo}
+            onReply={beginReply}
             // Open means on screen: an expanded row a closed fold or a filter hides is as unseen
             // as a collapsed one, so it marks nothing read, and showing it again is an open that
             // freezes its unread set afresh.
@@ -723,6 +728,7 @@ function AgentRow({
               replyTo={replyTo}
               sending={sending}
               sendKey={sendKey}
+              submitGuard={submitGuard}
             />
           </div>
         </div>

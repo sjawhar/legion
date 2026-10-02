@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 
 export interface RetryableMutation<Input> {
   mutate: (input: Input) => void;
@@ -24,25 +24,26 @@ export interface SubmitGuard {
 
 export function useSubmitGuard(): SubmitGuard {
   const inFlight = useRef(false);
-  const guard = (fn: () => void): boolean => {
+  const guard = useCallback((fn: () => void): boolean => {
     if (inFlight.current) {
       return false;
     }
     inFlight.current = true;
     fn();
     return true;
-  };
-  return {
-    guard,
-    held: () => inFlight.current,
-    release: () => {
-      inFlight.current = false;
-    },
-    retryLast: <Input>({ mutate, variables }: RetryableMutation<Input>): boolean => {
+  }, []);
+  const held = useCallback(() => inFlight.current, []);
+  const release = useCallback(() => {
+    inFlight.current = false;
+  }, []);
+  const retryLast = useCallback(
+    <Input>({ mutate, variables }: RetryableMutation<Input>): boolean => {
       if (variables === undefined) {
         return false;
       }
       return guard(() => mutate(variables));
     },
-  };
+    [guard]
+  );
+  return useMemo(() => ({ guard, held, release, retryLast }), [guard, held, release, retryLast]);
 }
