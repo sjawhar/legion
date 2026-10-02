@@ -89,7 +89,10 @@ type Service struct {
 	// the publish decides whether to fail that room. Nil outside tests; tests use it to let the
 	// refused room's recovery finish in that window.
 	afterPublishRefused func(room string)
-	settleWG            sync.WaitGroup
+	// now is the clock the unrecorded-mark sweep ages marks by (sweepUnrecordedMarks). Nil
+	// outside tests, where the sweep reads time.Now; tests set it to age a mark without waiting.
+	now      func() time.Time
+	settleWG sync.WaitGroup
 	// evictWG counts the forced evictions failRoomLocked spawns. They flush the room through
 	// the store, so shutdown joins them before it closes.
 	evictWG sync.WaitGroup

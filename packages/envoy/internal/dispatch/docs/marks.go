@@ -815,6 +815,9 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 		return
 	}
 	now := time.Now()
+	if s.now != nil {
+		now = s.now()
+	}
 	seen := make(map[pmdoc.MarkRef]struct{})
 	var expired []pmdoc.MarkRef
 	var next time.Duration
