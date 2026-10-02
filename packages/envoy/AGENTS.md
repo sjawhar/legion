@@ -1546,8 +1546,8 @@ credential, runtime id and slot: `POST /v1/enrollments` takes an optional pod-on
 same way) naming one of several independent identities in one pod. The launcher whose proof
 authenticates the enrollment chooses the slot; a session's proof cannot enroll anything
 (`401 LAUNCHER_INVALID`). So each slot of a pod holds its own key, lease, requests and grants,
-while a pod's `runtime_id` stays the pod UID its
-token proves. Omitted or `""` is the runtime's one enrollment, every box's and host's. The same key
+while a pod's `runtime_id` stays the pod UID its token proves. Omitted or `""` is the runtime's
+one enrollment, every box's and host's. The same key
 in the same slot gets its live enrollment back (200), a different key in a live slot is `409
 ALREADY_ENROLLED`, and the rules never see the slot: every slot of a pod matches on its verified
 service account alone. Migration 0007 is forward-only: an older broker binary's conflict lookup
