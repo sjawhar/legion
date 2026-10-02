@@ -171,25 +171,25 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	`, room, int64(version), update, contentChanged); err != nil {
 		return 0, fmt.Errorf("append document update: %w", err)
 	}
-	if err := markSettlementPending(ctx, tx, room, int64(version)); err != nil {
+	if err := markSettlementPending(ctx, tx, room); err != nil {
 		return 0, err
 	}
 	return version, nil
 }
 
 // markSettlementPending records, in the transaction that appends a document update, that the
-// document owes a settlement through that update. Every update a room persists arms a settlement,
-// and the timer that runs it lives only in memory, so a settlement a shutdown cut short is found
-// here by the room's next load (onLoadDocument) and by the resumption (RunSettlementResumption).
-// The settlement that covers the update deletes the row in the transaction that commits its writes
+// document owes a settlement. Every update a room persists arms a settlement, and the timer that
+// runs it lives only in memory, so a settlement a shutdown cut short is found here by the room's
+// next load (onLoadDocument) and by the resumption (RunSettlementResumption). The settlement that
+// covers the update deletes the row in the transaction that commits its writes
 // (clearSettlementPending). The caller holds the document's advisory lock, which orders this row's
 // writers as it orders the updates.
-func markSettlementPending(ctx context.Context, tx pgx.Tx, room string, through int64) error {
+func markSettlementPending(ctx context.Context, tx pgx.Tx, room string) error {
 	if _, err := tx.Exec(ctx, `
-		insert into doc_settlements_pending (artifact_id, through_version) values ($1, $2)
+		insert into doc_settlements_pending (artifact_id) values ($1)
 		on conflict (artifact_id) do update
-		set through_version = excluded.through_version, marked_at = now()
-	`, room, through); err != nil {
+		set marked_at = now()
+	`, room); err != nil {
 		return fmt.Errorf("record the document's pending settlement: %w", err)
 	}
 	return nil

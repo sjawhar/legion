@@ -475,7 +475,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	// would spend the budget repeating that work - a 1 MiB document's for seconds, one at a time
 	// per issue, since each holds the issue's row - and push the settlement that is owed past it.
 	// When the read fails every room is settled, since nothing says which can be skipped.
-	owed, err := s.pendingSettlements(drainCtx, rooms)
+	owed, err := s.roomsOwingSettlement(drainCtx, rooms)
 	if err != nil {
 		slog.Warn("dispatch: read the documents owing a settlement before shutdown", "error", err)
 	}
@@ -523,8 +523,8 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
 }
 
-// pendingSettlements is which of rooms owe a settlement no settlement has committed.
-func (s *Service) pendingSettlements(ctx context.Context, rooms []string) (map[string]bool, error) {
+// roomsOwingSettlement is which of rooms owe a settlement no settlement has committed.
+func (s *Service) roomsOwingSettlement(ctx context.Context, rooms []string) (map[string]bool, error) {
 	pending := make(map[string]bool)
 	if len(rooms) == 0 {
 		return pending, nil
@@ -553,7 +553,7 @@ func (s *Service) pendingSettlements(ctx context.Context, rooms []string) (map[s
 // settlements started, whether it settled or is left to resume, and whether the drain budget ended
 // first. owed is nil when Shutdown could not read it, and then only the documents left are named.
 func (s *Service) reportShutdownSettlements(ctx context.Context, owed map[string]bool, rooms []string, budgetEnded bool) {
-	left, err := s.pendingSettlements(ctx, rooms)
+	left, err := s.roomsOwingSettlement(ctx, rooms)
 	if err != nil {
 		slog.Warn("dispatch: read the documents left owing a settlement at shutdown", "error", err)
 		return

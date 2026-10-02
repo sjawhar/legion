@@ -25,7 +25,7 @@ import (
 
 const (
 	maxArtifactBlobSize      = 25 << 20
-	maxDocumentMarkdownBytes = 1 << 20 // A Markdown document; maxJSONRequestBytes bounds an issue's spec and every edit the same way (LEGION-465).
+	maxDocumentMarkdownBytes = int(maxJSONRequestBytes) // A Markdown document; maxJSONRequestBytes bounds an issue's spec and every edit the same way (LEGION-465).
 )
 
 func (s *server) listArtifacts(w http.ResponseWriter, r *http.Request) {
