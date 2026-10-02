@@ -836,9 +836,9 @@ claim's pod and the image probe's.
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
   (AGENTC-393 Plan C), so an agent in a pod runs `agent-secrets <SECRET> -- <command>` and gets only
   that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback
-  address); `operator` is the login that approves this daemon's own machine logins on the Dispatch
-  credential page — there is no launcher-token file and no manual CLI step. The daemon runs its own
-  login at boot, on a background context, and logs the confirmation code exactly once:
+  address); `operator` is the email of the person who approves this daemon's own machine logins on
+  the Dispatch credential page — there is no launcher-token file and no manual CLI step. The daemon
+  runs its own login at boot, on a background context, and logs the confirmation code exactly once:
   `agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page (approver:
   <operator>); pod enrollment is held until approved`. The same code and the login's current status
   ("none", "pending", "issued", "denied", or "expired") are on `GET /legion/v1/state`'s

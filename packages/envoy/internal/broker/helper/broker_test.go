@@ -413,13 +413,13 @@ func waitFor(t *testing.T, cond func() bool) {
 
 func TestLoginHoldsTheKeyInMemoryAndEnrollSignsLauncherProofs(t *testing.T) {
 	f := newFakeBroker(t) // records the login request object; issues after one poll
-	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "sjawhar"), HTTP: f.srv.Client()}
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), HTTP: f.srv.Client()}
 	code, err := b.Login(context.Background(), "example-host-devbox")
 	if err != nil || !regexp.MustCompile(`^[A-Z2-9]{4}-[A-Z2-9]{4}$`).MatchString(code) {
 		t.Fatalf("code %q err %v", code, err)
 	}
 	ro, err := record.VerifyRequestObject(f.lastLoginRequest, f.srv.URL, time.Minute, time.Now())
-	if err != nil || ro.LoginHint != "sjawhar" || ro.Details[0].Type != "launcher_credential" || ro.Details[0].Identifier != "example-host-devbox" {
+	if err != nil || ro.LoginHint != "ada@example.com" || ro.Details[0].Type != "launcher_credential" || ro.Details[0].Identifier != "example-host-devbox" {
 		t.Fatalf("request object: %+v %v", ro, err)
 	}
 	waitFor(t, func() bool { return b.LoginStatus().State == "issued" })
@@ -632,7 +632,7 @@ func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
 
 func TestEnrollSendsKindHostAndAcceptsBothStatuses(t *testing.T) {
 	f := newFakeBroker(t)
-	b := loggedInBroker(t, f, "sjawhar")
+	b := loggedInBroker(t, f, "ada@example.com")
 	sess, _ := newSession(1234, 77, "example-host-devbox:1234:77", nil)
 	id, lease, err := b.Enroll(context.Background(), sess)
 	if err != nil || id == "" || time.Until(lease) < 10*time.Minute {
@@ -640,7 +640,7 @@ func TestEnrollSendsKindHostAndAcceptsBothStatuses(t *testing.T) {
 	}
 	posts, _, _ := f.snapshot()
 	post := posts[0]
-	if post["kind"] != "host" || post["runtime_id"] != "example-host-devbox:1234:77" || post["operator"] != "sjawhar" ||
+	if post["kind"] != "host" || post["runtime_id"] != "example-host-devbox:1234:77" || post["operator"] != "ada@example.com" ||
 		post["thumbprint"] != sess.Thumbprint || post["approver"] != nil ||
 		post["session_id"] != nil || post["pod_token"] != nil {
 		t.Fatalf("enroll body: %+v", post)

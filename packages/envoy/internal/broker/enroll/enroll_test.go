@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -90,26 +91,42 @@ func mintCredential(t *testing.T, svc *Service, operator, service *string, host 
 	return Credential{ID: id, Operator: operator, Service: service, Host: host}
 }
 
-func TestCreateSucceedsForMatchingOperatorAndRejectsMismatch(t *testing.T) {
+// TestAnOperatorCredentialEnrollsItsOwnOperator: a personal launcher credential's operator is the
+// email of the person who approved its machine login, and every enrollment it makes records that
+// person. A stated operator must name the same person, in any casing; one that names anyone else is
+// refused; an enrollment that states none is that person's all the same.
+func TestAnOperatorCredentialEnrollsItsOwnOperator(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
-	cred := mintCredential(t, svc, str("sjawhar"), nil, "devbox")
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
 
-	enr, err := svc.Create(ctx, cred, Enrollment{
-		Kind: "box", RuntimeID: "box-sjawhar-1", Operator: str("sjawhar"), Thumbprint: "tp-match",
-	})
-	if err != nil {
-		t.Fatalf("Create(matching operator): %v", err)
-	}
-	if enr.ID == uuid.Nil || enr.Existing {
-		t.Fatalf("Create(matching operator) = %+v, want a fresh enrollment", enr)
+	for i, tc := range []struct {
+		name   string
+		stated *string
+	}{
+		{"the credential's email", str("ada@example.com")},
+		{"that email in other casing", str(" Ada@Example.COM ")},
+		{"no operator", nil},
+	} {
+		runtimeID := fmt.Sprintf("host-ada-%d", i)
+		enr, err := svc.Create(ctx, cred, Enrollment{Kind: "host", RuntimeID: runtimeID, Operator: tc.stated, Thumbprint: "tp-" + runtimeID})
+		if err != nil {
+			t.Fatalf("Create(stating %s): %v", tc.name, err)
+		}
+		if enr.ID == uuid.Nil || enr.Existing || enr.Operator == nil || *enr.Operator != "ada@example.com" {
+			t.Fatalf("Create(stating %s) = %+v, want a fresh enrollment of ada@example.com", tc.name, enr)
+		}
+		stored, err := svc.Get(ctx, enr.ID.String())
+		if err != nil || stored.Operator == nil || *stored.Operator != "ada@example.com" {
+			t.Fatalf("Get(enrollment stating %s) = %+v %v, want operator ada@example.com", tc.name, stored, err)
+		}
 	}
 
-	_, err = svc.Create(ctx, cred, Enrollment{
-		Kind: "box", RuntimeID: "box-mallory-1", Operator: str("mallory"), Thumbprint: "tp-mallory",
+	_, err := svc.Create(ctx, cred, Enrollment{
+		Kind: "host", RuntimeID: "host-mallory", Operator: str("mallory@example.com"), Thumbprint: "tp-mallory",
 	})
 	if !errors.Is(err, ErrOperatorMismatch) {
-		t.Fatalf("Create(operator mismatch) = %v, want ErrOperatorMismatch", err)
+		t.Fatalf("Create(another person's email) = %v, want ErrOperatorMismatch", err)
 	}
 }
 
@@ -332,15 +349,15 @@ func TestRevokeRefusesWrongOperator(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
 
-	credB := mintCredential(t, svc, str("bob"), nil, "bobs-box")
-	enrB, err := svc.Create(ctx, credB, Enrollment{Kind: "box", RuntimeID: "box-bob-1", Operator: str("bob"), Thumbprint: "tp-bob"})
+	credB := mintCredential(t, svc, str("bob@example.com"), nil, "bobs-box")
+	enrB, err := svc.Create(ctx, credB, Enrollment{Kind: "box", RuntimeID: "box-bob-1", Operator: str("bob@example.com"), Thumbprint: "tp-bob"})
 	if err != nil {
 		t.Fatalf("Create(bob's enrollment): %v", err)
 	}
 
-	credA := mintCredential(t, svc, str("alice"), nil, "alices-box")
+	credA := mintCredential(t, svc, str("alice@example.com"), nil, "alices-box")
 
-	if err := svc.Revoke(ctx, credA, enrB.ID.String(), "alice"); !errors.Is(err, ErrOperatorMismatch) {
+	if err := svc.Revoke(ctx, credA, enrB.ID.String(), "alice@example.com"); !errors.Is(err, ErrOperatorMismatch) {
 		t.Fatalf("Revoke(alice's credential, bob's enrollment) = %v, want ErrOperatorMismatch", err)
 	}
 

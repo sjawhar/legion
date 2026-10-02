@@ -18,7 +18,7 @@ import (
 func TestADeniedReLoginSaysDeniedWhenTheOldCredentialIsRefusedMeanwhile(t *testing.T) {
 	rig := brokertest.NewRig(t)
 	binary := buildAgentSecrets(t)
-	srv, sock := serveRealHelper(t, rig.URL)
+	srv, sock := serveRealHelper(t, rig.URL, rig.Operator)
 
 	if code, exit, stderr := launcherLoginThen(t, rig, binary, sock, "approve", nil); exit != 0 {
 		t.Fatalf("approved launcher login (code %s): exit %d, stderr %q; want 0", code, exit, stderr)

@@ -33,7 +33,7 @@ import (
 func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 	rig := brokertest.NewRig(t)
 	binary := buildAgentSecrets(t)
-	srv, sock := serveRealHelper(t, rig.URL)
+	srv, sock := serveRealHelper(t, rig.URL, rig.Operator)
 	loginStatus := func() (string, string, int) {
 		t.Helper()
 		return runAgentSecrets(t, binary, rig.URL, t.TempDir(), []string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login-status")
