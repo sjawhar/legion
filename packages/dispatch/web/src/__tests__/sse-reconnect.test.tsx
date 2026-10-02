@@ -444,7 +444,7 @@ test("a reconnect refreshes every rendered query, including ones no key list nam
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
     await waitFor(() => expect(fetches).toEqual({ checks: 1, issues: 1 }));
-    // The very first open has nothing stale to refresh.
+    // The page's first attempt opened, so there is nothing stale to refresh.
     const { promise: drained, resolve: drain } = Promise.withResolvers<void>();
     setTimeout(drain, 150);
     await drained;
@@ -462,6 +462,50 @@ test("a reconnect refreshes every rendered query, including ones no key list nam
     globalThis.fetch = originalFetch;
   }
 }, 10_000);
+
+// The page's queries are read when it loads, and a first attempt that never opened leaves the
+// stream covering none of what followed; `forceReconnect` resets the backoff counter, so the
+// `online` route reopens at attempt 0 like a first connection would.
+for (const reopen of ["the backoff timer", "an online event"] as const) {
+  test(`the open after a first attempt that never opened refreshes everything (${reopen})`, async () => {
+    const originalFetch = globalThis.fetch;
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wholeCache = countWholeCacheRefreshes(queryClient);
+    const streamCalls: number[] = [];
+
+    function Wrapper({ children }: { children: ReactNode }): ReactNode {
+      return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+    }
+
+    try {
+      globalThis.fetch = (async (
+        _input: RequestInfo | URL,
+        init?: RequestInit
+      ): Promise<Response> => {
+        streamCalls.push(streamCalls.length);
+        if (streamCalls.length === 1) {
+          // What a network change does to a request: it rejects before any response.
+          throw new TypeError("Failed to fetch");
+        }
+        return openStreamResponse(init?.signal);
+      }) as typeof fetch;
+
+      const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+      await waitFor(() => expect(streamCalls.length).toBe(1));
+      if (reopen === "an online event") {
+        window.dispatchEvent(new Event("online"));
+      }
+      // The backoff route waits out reconnectDelayMs(0) = 1 s on the real clock.
+      await waitFor(() => expect(streamCalls.length).toBe(2), { timeout: 2_000 });
+      await waitFor(() => expect(wholeCache.count()).toBe(1));
+
+      unmount();
+    } finally {
+      wholeCache.restore();
+      globalThis.fetch = originalFetch;
+    }
+  }, 10_000);
+}
 
 test("an event during a list's first load beats the response that predates it", async () => {
   const originalFetch = globalThis.fetch;

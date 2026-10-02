@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import {
   createAsk,
+  createComment,
   createIssue,
   createMessage,
   createProject,
@@ -378,6 +379,66 @@ test("live: a forced server disconnect reconnects from the last event id, not fr
   expect(Number(reconnectSince)).toBeGreaterThan(0);
 
   await alice.close();
+});
+
+test("live: an event committed while the stream's first attempt fails shows once the retry opens", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "First attempt fails" });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const { promise: released, resolve: release } = Promise.withResolvers<void>();
+    // Until the document's Conversation read lands, every stream attempt it makes fails the way a
+    // network change aborts one, so its first attempt never opens; later attempts are held until
+    // the comment below is committed, so the retry's cold connect starts at a head past it. The
+    // state is per document, since a chunk download a network change aborts reloads the page.
+    let attemptFailed = false;
+    let readLanded = false;
+    page.on("request", (request) => {
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        attemptFailed = false;
+        readLanded = false;
+      }
+    });
+    page.on("response", (response) => {
+      if (new URL(response.url()).pathname === `/api/v1/issues/${issue.key}/events`) {
+        readLanded = true;
+      }
+    });
+    await page.route(/\/api\/v1\/events(\?|$)/, async (route) => {
+      if (!readLanded) {
+        attemptFailed = true;
+        await route.abort("failed");
+        return;
+      }
+      await released;
+      await route.continue();
+    });
+
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect.poll(() => attemptFailed && readLanded).toBe(true);
+    // Committed after the Conversation's read and before any stream is open: nothing the page has
+    // read or will be sent includes it.
+    const comment = await createComment(
+      issue.key,
+      { body: "Committed before the retry opened" },
+      bob
+    );
+    const opened = page.waitForResponse((response) =>
+      /\/api\/v1\/events(\?|$)/.test(response.url())
+    );
+    release();
+    await opened;
+
+    await expect(page.locator(`[data-turn="comment:${comment.id}"]`)).toContainText(
+      "Committed before the retry opened"
+    );
+  } finally {
+    await alice.close();
+  }
 });
 
 test("live: a fresh page load opens the stream at the current head and stays within a bounded request budget", async ({
