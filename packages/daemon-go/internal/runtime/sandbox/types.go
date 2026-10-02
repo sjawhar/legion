@@ -56,9 +56,9 @@ type Options struct {
 	// Namespace is where every Sandbox, pod, and Secret of the runtime lives; Project is the
 	// value of the legion.dev/project label on every one of them, and the informers select on it.
 	Namespace, Project string
-	// SkipLegacyLayoutCensusForTest is test-only. Production construction always refuses
-	// pre-migration per-claim Sandbox objects before it registers a launcher resolver.
-	SkipLegacyLayoutCensusForTest bool
+	// SkipIssueResourceStoreForTest is test-only: a unit rig launches with no durable issue
+	// resource store. Production boot always injects one (SetIssueResourceStore) before any launch.
+	SkipIssueResourceStoreForTest bool
 	// Image is the worker image, pinned by digest: New refuses one without "@sha256:".
 	Image string
 	// StorageClass is the tree volume's class. Required: production has no default class.

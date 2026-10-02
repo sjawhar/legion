@@ -113,9 +113,9 @@ type Runtime struct {
 	launchedMu sync.Mutex
 	launched   map[string]bool
 	// resourceStore is injected by daemon boot before any claim launches. Unit rigs explicitly
-	// skip the production layout census and resource capability with test-only options.
-	resourceStore           *store.Store
-	testLayoutCensusSkipped bool
+	// launch without the durable resource capability through a test-only option.
+	resourceStore            *store.Store
+	withoutResourceStoreTest bool
 }
 
 // New builds the runtime from opts, starts its Sandbox and pod informers for ctx's lifetime, and
@@ -137,11 +137,6 @@ func New(ctx context.Context, rc *rest.Config, opts Options) (*Runtime, error) {
 	if err := r.start(ctx, dyn, kube); err != nil {
 		return nil, err
 	}
-	if !opts.SkipLegacyLayoutCensusForTest {
-		if err := r.rejectLegacyIssueSandboxes(ctx); err != nil {
-			return nil, err
-		}
-	}
 
 	if listener, ok := opts.Conns.(*stream.Listener); ok {
 		listener.SetLauncherResolver(r.LauncherResolver())
@@ -151,21 +146,30 @@ func New(ctx context.Context, rc *rest.Config, opts Options) (*Runtime, error) {
 
 // SetIssueResourceStore injects the daemon's durable capability before supervision launches any
 // role. It is deliberately not an Option: production boot owns the store; unit rigs use the
-// explicit test-only layout-census skip.
+// explicit test-only skip.
 func (r *Runtime) SetIssueResourceStore(resources *store.Store) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.resourceStore = resources
 }
 
-// rejectLegacyIssueSandboxes is the Kubernetes half of the issue-pod layout fence. It runs before
-// a launcher resolver is registered: a legacy claim/object pair must never be adopted, suspended
-// or deleted as though it belonged to the new shared-pod layout. Image probes are explicit
-// non-issue Sandboxes and are excluded.
-func (r *Runtime) rejectLegacyIssueSandboxes(ctx context.Context) error {
+// CensusLegacyIssueSandboxes is the Kubernetes half of the issue-pod layout fence. Daemon boot
+// runs it before the store opens, so before any schema write, image probe or reconcile: a
+// per-claim Sandbox of the layout before issue pods must never be adopted, suspended or deleted
+// as though it belonged to a shared issue pod, and nothing may change what an older binary needs
+// to clean it up. Image probes are explicit non-issue Sandboxes and are excluded.
+func CensusLegacyIssueSandboxes(ctx context.Context, rc *rest.Config, namespace, project string) error {
+	dyn, err := dynamic.NewForConfig(rc)
+	if err != nil {
+		return fmt.Errorf("sandbox runtime: dynamic client: %w", err)
+	}
+	return rejectLegacyIssueSandboxes(ctx, dyn.Resource(sandboxGVR).Namespace(namespace), project)
+}
+
+func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceInterface, project string) error {
 	reading, cancel := call(ctx)
 	defer cancel()
-	list, err := r.sandboxClient().List(reading, metav1.ListOptions{LabelSelector: labelProject + "=" + r.project})
+	list, err := sandboxes.List(reading, metav1.ListOptions{LabelSelector: labelProject + "=" + project})
 	if err != nil {
 		return fmt.Errorf("sandbox runtime: census existing issue Sandboxes before layout migration: %w", err)
 	}
@@ -271,7 +275,7 @@ func configure(opts Options) (*Runtime, error) {
 		tokens: opts.Tokens, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, issues: map[string]chan struct{}{},
 		trees: map[string]chan struct{}{}, launched: map[string]bool{}, launchers: newLaunchers(),
-		testLayoutCensusSkipped: opts.SkipLegacyLayoutCensusForTest,
+		withoutResourceStoreTest: opts.SkipIssueResourceStoreForTest,
 	}
 	if len(r.agent) == 0 {
 		r.agent = []string{defaultAgent}
@@ -625,12 +629,17 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	return nil
 }
 
-// CleanupIssue is the sole whole-issue delete capability. Outbox calls it only after its complete
-// persisted sibling-claim census says every claim of issue is retired for generation. BeginCleanup
-// repeats the generation/cleanup fence transactionally, so a re-admission that recorded a newer
-// resource generation turns an old close into a no-op. The root's tree PVC is deleted only after a
-// Get confirms its root Sandbox is gone.
-func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string, generation uint64) error {
+// CleanupIssue is the sole whole-issue delete capability, which the outbox calls once an issue's
+// close retired every claim of it. BeginIssueCleanup decides, atomically with its own census of
+// the issue's claims, whether there is anything to clean, so a re-admitted issue begins nothing. A
+// child issue's Sandbox is deleted and its absence confirmed through the API before its record is
+// confirmed. A tree root is cleaned last, because its Sandbox owns the tree PVC and deleting it
+// lets owner-reference garbage collection take the volume every pod of the tree mounts:
+// BeginIssueCleanup refuses the root while any child record of the tree is unconfirmed and, once
+// begun, refuses every new child admission; then the API must list no child Sandbox of the tree
+// either. Only after both is the root Sandbox deleted and waited out, then the PVC, and the root's
+// cleanup is confirmed once both are gone.
+func (r *Runtime) CleanupIssue(ctx context.Context, project, issue string) error {
 	if project != r.project {
 		return fmt.Errorf("cleanup issue %s: project %s is not runtime project %s", issue, project, r.project)
 	}
@@ -640,15 +649,21 @@ func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string,
 	if resources == nil {
 		return errors.New("cleanup issue resources: no durable issue resource store")
 	}
-	resource, began, err := resources.BeginIssueCleanup(ctx, project, issue, generation)
+	resource, began, err := resources.BeginIssueCleanup(ctx, project, issue)
 	if err != nil {
-		return err
+		return fmt.Errorf("cleanup issue %s: %w", issue, err)
 	}
 	if !began {
 		return nil
 	}
-	deleting, cancel := call(ctx)
-	sandbox, err := r.sandboxClient().Get(deleting, resource.Sandbox, metav1.GetOptions{})
+	root := resource.Tree == resource.Issue
+	if root {
+		if err := r.refuseTreeChildSandboxes(ctx, resource); err != nil {
+			return err
+		}
+	}
+	reading, cancel := call(ctx)
+	sandbox, err := r.sandboxClient().Get(reading, resource.Sandbox, metav1.GetOptions{})
 	cancel()
 	switch {
 	case apierrors.IsNotFound(err):
@@ -656,7 +671,7 @@ func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string,
 		return fmt.Errorf("cleanup issue %s: read Sandbox %s: %w", issue, resource.Sandbox, err)
 	default:
 		uid := sandbox.GetUID()
-		deleting, cancel = call(ctx)
+		deleting, cancel := call(ctx)
 		err = r.sandboxClient().Delete(deleting, resource.Sandbox, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
 		cancel()
 		if err != nil && !apierrors.IsNotFound(err) {
@@ -666,29 +681,38 @@ func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string,
 	if err := r.awaitSandboxDeleted(ctx, resource.Sandbox); err != nil {
 		return err
 	}
-	if issue != tree {
-		return resources.ConfirmIssueCleanup(ctx, project, issue, generation)
+	if root {
+		pvc := treeVolume + "-" + resource.Sandbox
+		deleting, cancel := call(ctx)
+		err = r.kube.CoreV1().PersistentVolumeClaims(r.namespace).Delete(deleting, pvc, metav1.DeleteOptions{})
+		cancel()
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("cleanup root issue %s: delete tree PVC %s after its root Sandbox is gone: %w", issue, pvc, err)
+		}
+		if err := r.awaitPVCDeleted(ctx, pvc); err != nil {
+			return err
+		}
 	}
-	childrenConfirmed, err := resources.TreeChildrenCleanupConfirmed(ctx, project, tree, issue)
+	return resources.ConfirmIssueCleanup(ctx, project, issue, resource.CleanupGeneration)
+}
+
+// refuseTreeChildSandboxes is the API half of the root-last fence: the root's cleanup has begun,
+// so no new child can be admitted, and the API must list no Sandbox of another issue of its tree.
+func (r *Runtime) refuseTreeChildSandboxes(ctx context.Context, root store.IssueResources) error {
+	reading, cancel := call(ctx)
+	defer cancel()
+	list, err := r.sandboxClient().List(reading, metav1.ListOptions{
+		LabelSelector: labelProject + "=" + r.project + "," + labelTree + "=" + labelValue(root.Tree),
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("cleanup root issue %s: list its tree's Sandboxes: %w", root.Issue, err)
 	}
-	if !childrenConfirmed {
-		return fmt.Errorf("cleanup root issue %s: wait for API-confirmed deletion of every tree child Sandbox", issue)
+	for _, object := range list.Items {
+		if object.GetName() != root.Sandbox {
+			return fmt.Errorf("cleanup root issue %s: Sandbox %s of its tree still exists; the root Sandbox owns the tree PVC and is deleted last", root.Issue, object.GetName())
+		}
 	}
-	pvc := TreeClaimName(claim.Token("legion-" + project + "-" + tree + "-architect"))
-	deleting, cancel = call(ctx)
-	err = r.kube.CoreV1().PersistentVolumeClaims(r.namespace).Delete(deleting, pvc, metav1.DeleteOptions{})
-	cancel()
-	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("cleanup root issue %s: delete tree PVC %s after Sandbox confirmation: %w", issue, pvc, err)
-	}
-	if err := r.awaitPVCDeleted(ctx, pvc); err != nil {
-		return err
-	}
-	// A root is not cleanup-confirmed — and therefore cannot be re-admitted — until its root
-	// Sandbox and its tree PVC have both disappeared through their APIs.
-	return resources.ConfirmIssueCleanup(ctx, project, issue, generation)
+	return nil
 }
 
 func (r *Runtime) awaitSandboxDeleted(ctx context.Context, name string) error {

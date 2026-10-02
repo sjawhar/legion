@@ -623,7 +623,7 @@ func (r *outbox) cleanupIssueResources(ctx context.Context, issue record.Issue) 
 	if !found {
 		return nil
 	}
-	if err := cleaner.CleanupIssue(ctx, r.project, issue.Key, issue.Tree, issue.Generation); err != nil {
+	if err := cleaner.CleanupIssue(ctx, r.project, issue.Key); err != nil {
 		return fmt.Errorf("cleanup resources of closed issue %s: %w", issue.Key, err)
 	}
 	return nil

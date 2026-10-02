@@ -14,7 +14,9 @@ import (
 // IssueResources is the durable ownership record for one issue's shared Sandbox resources. A
 // claim only owns its role process; the issue owns this record, its Sandbox, its six launcher
 // Secrets and, when it is a root, the tree PVC. Cleanup is a capability transition, not an
-// inference from whichever claims happen to be live in one runtime.
+// inference from whichever claims happen to be live in one runtime. Generation is the record's own
+// admission epoch: 1 at the issue's first launch, one more at each re-admission after a confirmed
+// cleanup. It is neither a claim's launch generation nor the workflow's issue generation.
 type IssueResources struct {
 	Project, Issue, Tree, Sandbox string
 	Generation                    uint64
@@ -25,62 +27,137 @@ type IssueResources struct {
 
 const issuePodLayout = "issue-pod-v1"
 
-// EnsureIssueResources records an issue's resources before its first role process starts. A newer
-// issue generation re-admits the record only after its previous cleanup was fenced and started;
-// a stale caller cannot clear a cleanup that belongs to a later generation.
-func (s *Store) EnsureIssueResources(ctx context.Context, resources IssueResources) error {
-	if err := validResources(resources); err != nil {
-		return err
+const selectIssueResources = `select project, issue, tree, sandbox_name, generation, cleanup_started,
+	cleanup_generation, cleanup_confirmed_at from issue_resources`
+
+// ErrIssueCleanupInProgress refuses a launch while its issue's resources, or its tree root's, are
+// being deleted. The issue is admitted again once that cleanup is confirmed.
+var ErrIssueCleanupInProgress = errors.New("issue resources are being cleaned up")
+
+// ErrTreeChildrenPending refuses to begin a tree root's cleanup while a child issue of the tree
+// holds resources whose deletion is not confirmed: the root Sandbox owns the tree PVC, and
+// deleting it lets owner-reference garbage collection remove the volume a child still mounts.
+var ErrTreeChildrenPending = errors.New("a child issue of the tree still holds resources")
+
+// EnsureIssueResources records an issue's resources before any role process of it starts. A
+// record whose cleanup was confirmed is re-admitted at the next epoch; one being cleaned up refuses
+// the launch (ErrIssueCleanupInProgress). A child issue is admitted under its tree root's record,
+// locked for share, so a root's BeginIssueCleanup, which locks that record for update, either sees
+// the child's record or is seen by it: once the root's cleanup has begun, a new child admission (no
+// record, or a confirmed one) is refused.
+func (s *Store) EnsureIssueResources(ctx context.Context, project, issue, tree, sandbox string) error {
+	switch {
+	case project == "":
+		return errors.New("issue resources have no project")
+	case issue == "":
+		return errors.New("issue resources have no issue")
+	case tree == "":
+		return fmt.Errorf("issue resources %s have no tree", issue)
+	case sandbox == "":
+		return fmt.Errorf("issue resources %s have no Sandbox name", issue)
 	}
-	_, err := s.pool.Exec(ctx, `insert into issue_resources (project, issue, tree, sandbox_name, generation)
-		values ($1, $2, $3, $4, $5)
-		on conflict (project, issue) do update set tree = excluded.tree, sandbox_name = excluded.sandbox_name,
-		generation = excluded.generation, cleanup_started = false, cleanup_generation = null,
-		cleanup_confirmed_at = null, updated_at = now()
-		where issue_resources.generation < excluded.generation`,
-		resources.Project, resources.Issue, resources.Tree, resources.Sandbox, int64(resources.Generation))
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		rootCleaning := false
+		if issue != tree {
+			err := tx.QueryRow(ctx, `select cleanup_started from issue_resources where project = $1 and issue = $2 for share`,
+				project, tree).Scan(&rootCleaning)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("its tree root %s has no issue resources", tree)
+			}
+			if err != nil {
+				return fmt.Errorf("read its tree root %s: %w", tree, err)
+			}
+		}
+		own, err := scanIssueResources(tx.QueryRow(ctx, selectIssueResources+` where project = $1 and issue = $2 for update`, project, issue))
+		exists := err == nil
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		confirmed := exists && own.CleanupStarted && !own.CleanupConfirmedAt.IsZero()
+		switch {
+		case exists && own.CleanupStarted && !confirmed:
+			return ErrIssueCleanupInProgress
+		case exists && !confirmed && (own.Tree != tree || own.Sandbox != sandbox):
+			return fmt.Errorf("recorded as tree %s and Sandbox %s, not tree %s and Sandbox %s", own.Tree, own.Sandbox, tree, sandbox)
+		case exists && !confirmed:
+			return nil
+		case rootCleaning:
+			return fmt.Errorf("its tree root %s: %w", tree, ErrIssueCleanupInProgress)
+		case exists:
+			_, err = tx.Exec(ctx, `update issue_resources set tree = $3, sandbox_name = $4, generation = generation + 1,
+				cleanup_started = false, cleanup_generation = null, cleanup_confirmed_at = null, updated_at = now()
+				where project = $1 and issue = $2`, project, issue, tree, sandbox)
+		default:
+			_, err = tx.Exec(ctx, `insert into issue_resources (project, issue, tree, sandbox_name, generation)
+				values ($1, $2, $3, $4, 1) on conflict (project, issue) do nothing`, project, issue, tree, sandbox)
+		}
+		return err
+	})
 	if err != nil {
-		return fmt.Errorf("ensure issue resources %s: %w", resources.Issue, err)
+		return fmt.Errorf("ensure issue resources %s: %w", issue, err)
 	}
 	return nil
 }
 
-// BeginIssueCleanup claims cleanup exactly once for the closing generation. The caller already
-// proved every stored sibling claim of this issue is retired in the same cleanup effect; a start
-// at another generation makes this a no-op rather than deleting re-admitted resources.
-func (s *Store) BeginIssueCleanup(ctx context.Context, project, issue string, generation uint64) (IssueResources, bool, error) {
-	if generation == 0 || generation > math.MaxInt64 {
-		return IssueResources{}, false, fmt.Errorf("begin issue cleanup %s: invalid generation %d", issue, generation)
-	}
-	row := s.pool.QueryRow(ctx, `update issue_resources set cleanup_started = true, cleanup_generation = $3,
-		updated_at = now() where project = $1 and issue = $2 and generation = $3 and cleanup_started = false
-		returning project, issue, tree, sandbox_name, generation, cleanup_started, cleanup_generation, cleanup_confirmed_at`, project, issue, int64(generation))
-	resources, err := scanIssueResources(row)
-	if err == nil {
-		return resources, true, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+// BeginIssueCleanup takes the issue's resources into cleanup once, atomically with the census that
+// justifies it: no claim of the issue is anything but retired, and, for a tree root, every child
+// record of the tree is cleanup-confirmed (ErrTreeChildrenPending otherwise, which takes nothing).
+// A launch that recorded the issue first shows as its non-retired claim, persisted before the
+// launch; one after is refused by the cleanup this begins. A cleanup begun and not confirmed
+// resumes, so a retried close finishes it; an issue with no record, a confirmed cleanup, or a live
+// claim begins nothing.
+func (s *Store) BeginIssueCleanup(ctx context.Context, project, issue string) (IssueResources, bool, error) {
+	var resources IssueResources
+	began := false
+	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		own, err := scanIssueResources(tx.QueryRow(ctx, selectIssueResources+` where project = $1 and issue = $2 for update`, project, issue))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if own.CleanupStarted {
+			if own.CleanupConfirmedAt.IsZero() {
+				resources, began = own, true
+			}
+			return nil
+		}
+		var live bool
+		if err := tx.QueryRow(ctx, `select exists (
+			select 1 from claims where project = $1 and issue = $2 and state <> 'retired')`, project, issue).Scan(&live); err != nil {
+			return fmt.Errorf("census its claims: %w", err)
+		}
+		if live {
+			return nil
+		}
+		if own.Tree == own.Issue {
+			var pending bool
+			if err := tx.QueryRow(ctx, `select exists (
+				select 1 from issue_resources where project = $1 and tree = $2 and issue <> $2 and cleanup_confirmed_at is null)`,
+				project, own.Tree).Scan(&pending); err != nil {
+				return fmt.Errorf("census its tree's child issues: %w", err)
+			}
+			if pending {
+				return ErrTreeChildrenPending
+			}
+		}
+		if _, err := tx.Exec(ctx, `update issue_resources set cleanup_started = true, cleanup_generation = generation,
+			updated_at = now() where project = $1 and issue = $2`, project, issue); err != nil {
+			return err
+		}
+		own.CleanupStarted, own.CleanupGeneration = true, own.Generation
+		resources, began = own, true
+		return nil
+	})
+	if err != nil {
 		return IssueResources{}, false, fmt.Errorf("begin issue cleanup %s: %w", issue, err)
 	}
-	// A previous attempt began the durable effect but failed before confirmation. The outbox row
-	// retries with the same close generation; it must resume this cleanup rather than silently
-	// leave cleanup_started true forever. Rows of another generation or a confirmed cleanup remain
-	// no-ops.
-	resources, err = scanIssueResources(s.pool.QueryRow(ctx, `select project, issue, tree, sandbox_name,
-		generation, cleanup_started, cleanup_generation, cleanup_confirmed_at from issue_resources
-		where project = $1 and issue = $2 and generation = $3 and cleanup_started = true
-			and cleanup_generation = $3 and cleanup_confirmed_at is null`, project, issue, int64(generation)))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return IssueResources{}, false, nil
-	}
-	if err != nil {
-		return IssueResources{}, false, fmt.Errorf("resume issue cleanup %s: %w", issue, err)
-	}
-	return resources, true, nil
+	return resources, began, nil
 }
 
-// ConfirmIssueCleanup records the API-confirmed Sandbox deletion. The root PVC deletion effect may
-// run only after this transition, fenced to the same generation.
+// ConfirmIssueCleanup records that every resource of the issue's cleanup epoch is gone through its
+// API: its Sandbox, and for a root also the tree PVC. Until then the record refuses re-admission.
 func (s *Store) ConfirmIssueCleanup(ctx context.Context, project, issue string, generation uint64) error {
 	if generation == 0 || generation > math.MaxInt64 {
 		return fmt.Errorf("confirm issue cleanup %s: invalid generation %d", issue, generation)
@@ -99,8 +176,7 @@ func (s *Store) ConfirmIssueCleanup(ctx context.Context, project, issue string, 
 
 // IssueResources reads an issue's durable resource capability.
 func (s *Store) IssueResources(ctx context.Context, project, issue string) (IssueResources, bool, error) {
-	resources, err := scanIssueResources(s.pool.QueryRow(ctx, `select project, issue, tree, sandbox_name,
-		generation, cleanup_started, cleanup_generation, cleanup_confirmed_at from issue_resources where project = $1 and issue = $2`, project, issue))
+	resources, err := scanIssueResources(s.pool.QueryRow(ctx, selectIssueResources+` where project = $1 and issue = $2`, project, issue))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return IssueResources{}, false, nil
 	}
@@ -110,13 +186,11 @@ func (s *Store) IssueResources(ctx context.Context, project, issue string) (Issu
 	return resources, true, nil
 }
 
-// EnsureIssuePodLayout atomically installs the issue-pod marker after a caller's legacy-object
-// census succeeded. A different marker is a pre-migration refusal: no runtime may guess which pod
-// layout an old claim or Sandbox belongs to.
-func (s *Store) EnsureIssuePodLayout(ctx context.Context, project string, legacyClaims bool) error {
-	if legacyClaims {
-		return fmt.Errorf("project %s still has legacy per-claim Sandbox locators; migrate or remove them before enabling issue pods", project)
-	}
+// EnsureIssuePodLayout atomically installs the issue-pod marker once boot's legacy censuses (the
+// claims before migration, the cluster's Sandboxes before the store opened) found no old layout. A
+// different marker is a refusal: no runtime may guess which pod layout an old claim or Sandbox
+// belongs to.
+func (s *Store) EnsureIssuePodLayout(ctx context.Context, project string) error {
 	var layout string
 	err := s.pool.QueryRow(ctx, `select layout from runtime_layouts where project = $1`, project).Scan(&layout)
 	switch {
@@ -156,37 +230,6 @@ func (s *Store) HasLegacySandboxClaims(ctx context.Context, project string) (boo
 		return false, fmt.Errorf("census legacy Sandbox claims for %s: %w", project, err)
 	}
 	return legacy, nil
-}
-
-// TreeChildrenCleanupConfirmed is the root-last fence: a root PVC remains while any child
-// issue's Sandbox deletion has not been confirmed through its API. It reads durable resource rows,
-// not this runtime's live claim map, so a restarted daemon cannot miss a child.
-func (s *Store) TreeChildrenCleanupConfirmed(ctx context.Context, project, tree, rootIssue string) (bool, error) {
-	var pending bool
-	err := s.pool.QueryRow(ctx, `select exists (
-		select 1 from issue_resources where project = $1 and tree = $2 and issue <> $3
-			and cleanup_confirmed_at is null
-	)`, project, tree, rootIssue).Scan(&pending)
-	if err != nil {
-		return false, fmt.Errorf("read tree child cleanup fence for %s: %w", tree, err)
-	}
-	return !pending, nil
-}
-
-func validResources(resources IssueResources) error {
-	switch {
-	case resources.Project == "":
-		return errors.New("issue resources have no project")
-	case resources.Issue == "":
-		return errors.New("issue resources have no issue")
-	case resources.Tree == "":
-		return fmt.Errorf("issue resources %s have no tree", resources.Issue)
-	case resources.Sandbox == "":
-		return fmt.Errorf("issue resources %s have no Sandbox name", resources.Issue)
-	case resources.Generation == 0 || resources.Generation > math.MaxInt64:
-		return fmt.Errorf("issue resources %s have invalid generation %d", resources.Issue, resources.Generation)
-	}
-	return nil
 }
 
 type issueResourcesRow interface{ Scan(...any) error }

@@ -85,7 +85,15 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 		p.newRuntime, p.probe = o.runtime, o.probe
 		return nil
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, cfg.SlowCommandTimeout)
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts)
+	p.clusterCheck = func(ctx context.Context) error {
+		checking, cancel := context.WithTimeout(ctx, cfg.SlowCommandTimeout)
+		defer cancel()
+		if err := sandbox.CheckInstalled(checking, reads.client, agentSandbox); err != nil {
+			return err
+		}
+		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project)
+	}
 	p.probe = func(ctx context.Context, rt runtime.Runtime) error {
 		sandboxed, ok := rt.(*sandbox.Runtime)
 		if !ok {
@@ -295,17 +303,12 @@ func quantities(q config.Quantities, key string) (corev1.ResourceList, error) {
 	return list, nil
 }
 
-// sandboxRuntime builds the Agent Sandbox runtime in the order its boot refusals need: Agent
-// Sandbox's install check first, so a cluster without it is refused by name, then the runtime,
-// whose informers run for ctx (supervision's lifetime), over the worker stream and with the
-// workflow's implement App as every pod's provisioning token source.
-func sandboxRuntime(rc *rest.Config, opts sandbox.Options, budget time.Duration) runtimeFactory {
+// sandboxRuntime builds the Agent Sandbox runtime, whose informers run for ctx (supervision's
+// lifetime), over the worker stream and with the workflow's implement App as every pod's
+// provisioning token source. Boot has already run the cluster check (plan.clusterCheck): Agent
+// Sandbox is installed and no per-claim Sandbox of the layout before issue pods remains.
+func sandboxRuntime(rc *rest.Config, opts sandbox.Options) runtimeFactory {
 	return func(ctx context.Context, conns runtime.Conns, stream string, apps appauth.Tokens) (runtime.Runtime, error) {
-		checking, cancel := context.WithTimeout(ctx, budget)
-		defer cancel()
-		if err := sandbox.CheckInstalled(checking, rc, agentSandbox); err != nil {
-			return nil, err
-		}
 		opts.Conns, opts.StreamURL = conns, stream
 		if apps != nil {
 			opts.Tokens = implementTokens{apps}
