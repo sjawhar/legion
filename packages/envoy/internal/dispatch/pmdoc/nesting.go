@@ -40,7 +40,7 @@ const maxInlineNesting = 100
 // that recurses through inline nodes - footnoteLabels, the conversion's parseInlineMarks - and each
 // of those meets at most that many.
 func inlineNesting(root ast.Node, source []byte) error {
-	depth := 0 // the inline nodes node is inside
+	depth := 0 // how many inline nodes currently enclose node
 	for node := root; node != nil; {
 		if child := node.FirstChild(); child != nil {
 			if node.Type() == ast.TypeInline {

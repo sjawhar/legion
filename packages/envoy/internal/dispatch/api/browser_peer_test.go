@@ -14,10 +14,10 @@ import (
 
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
-	"github.com/reearth/ygo/encoding"
 	ygsync "github.com/reearth/ygo/sync"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/synctest"
 )
 
 // servedSockets lets a test wait until the document server is done with one of its
@@ -94,49 +94,20 @@ func (p *syncedPeer) connect(t *testing.T) {
 // updates the room lacks, and hands barrier the content of each sync step 2 it applies.
 func (p *syncedPeer) read(connection *gws.Conn, done chan<- struct{}, answers chan<- []byte) {
 	defer close(done)
-	for {
-		_, message, err := connection.ReadMessage()
-		if err != nil {
-			return
+	synctest.Drain(connection, p.doc, func(syncMessage []byte) error {
+		return p.write(connection, syncMessage)
+	}, func(content []byte) {
+		select {
+		case answers <- content:
+		default:
 		}
-		decoder := encoding.NewDecoder(message)
-		if _, err := decoder.ReadVarString(); err != nil {
-			return
-		}
-		if kind, err := decoder.ReadVarUint(); err != nil || kind != 0 {
-			continue
-		}
-		payload := decoder.RemainingBytes()
-		kind, content, err := ygsync.ReadSyncMessage(payload)
-		if err != nil {
-			return
-		}
-		reply, err := ygsync.ApplySyncMessage(p.doc, payload, nil)
-		if err != nil {
-			return
-		}
-		if kind == ygsync.MsgSyncStep1 && reply != nil {
-			if p.write(connection, reply) != nil {
-				return
-			}
-		}
-		if kind == ygsync.MsgSyncStep2 {
-			select {
-			case answers <- content:
-			default:
-			}
-		}
-	}
+	})
 }
 
 func (p *syncedPeer) write(connection *gws.Conn, syncMessage []byte) error {
-	frame := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
-		encoder.WriteVarString(p.artifactID)
-		encoder.WriteVarUint(0) // Hocuspocus sync message.
-	})
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return connection.WriteMessage(gws.BinaryMessage, append(frame, syncMessage...))
+	return connection.WriteMessage(gws.BinaryMessage, synctest.Frame(p.artifactID, syncMessage))
 }
 
 // barrier returns once the room holds everything the peer sent and has answered a request sent

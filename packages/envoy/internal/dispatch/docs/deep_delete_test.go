@@ -13,10 +13,10 @@ import (
 
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
-	"github.com/reearth/ygo/encoding"
 	ygsync "github.com/reearth/ygo/sync"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/synctest"
 	"github.com/sjawhar/envoy/internal/stacktest"
 )
 
@@ -138,33 +138,7 @@ func newDeepPeer(t *testing.T, serverURL, artifactID string) *deepPeer {
 // drain reads the room's messages, applying each sync message and answering its sync step 1, as a
 // browser's provider does, until the connection closes.
 func (p *deepPeer) drain() {
-	for {
-		_, message, err := p.connection.ReadMessage()
-		if err != nil {
-			return
-		}
-		decoder := encoding.NewDecoder(message)
-		if _, err := decoder.ReadVarString(); err != nil {
-			return
-		}
-		if kind, err := decoder.ReadVarUint(); err != nil || kind != 0 {
-			continue
-		}
-		payload := decoder.RemainingBytes()
-		kind, _, err := ygsync.ReadSyncMessage(payload)
-		if err != nil {
-			return
-		}
-		reply, err := ygsync.ApplySyncMessage(p.doc, payload, nil)
-		if err != nil {
-			return
-		}
-		if kind == ygsync.MsgSyncStep1 && reply != nil {
-			if err := p.sendFrame(reply); err != nil {
-				return
-			}
-		}
-	}
+	synctest.Drain(p.connection, p.doc, p.sendFrame, nil)
 }
 
 // send runs change in one transaction and sends the update it produced, as a keystroke does.
@@ -191,14 +165,5 @@ func (p *deepPeer) write(t *testing.T, syncMessage []byte) {
 func (p *deepPeer) sendFrame(syncMessage []byte) error {
 	p.writes.Lock()
 	defer p.writes.Unlock()
-	return p.connection.WriteMessage(gws.BinaryMessage, p.frame(syncMessage))
-}
-
-// frame wraps a sync message as Hocuspocus carries it: the document's name, then the kind.
-func (p *deepPeer) frame(syncMessage []byte) []byte {
-	header := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
-		encoder.WriteVarString(p.artifactID)
-		encoder.WriteVarUint(0)
-	})
-	return append(header, syncMessage...)
+	return p.connection.WriteMessage(gws.BinaryMessage, synctest.Frame(p.artifactID, syncMessage))
 }
