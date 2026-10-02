@@ -203,14 +203,21 @@ func (l *busLogs) errorLine() string {
 	return l.lineAt("ERROR", "")
 }
 
-// lineAt returns the first record at level whose text holds fragment, or "".
-func (l *busLogs) lineAt(level, fragment string) string {
+// lineAt returns the first record at level whose text holds every fragment, or "".
+func (l *busLogs) lineAt(level string, fragments ...string) string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+lines:
 	for _, line := range strings.Split(l.buffer.String(), "\n") {
-		if strings.Contains(line, `"level":"`+level+`"`) && strings.Contains(line, fragment) {
-			return line
+		if !strings.Contains(line, `"level":"`+level+`"`) {
+			continue
 		}
+		for _, fragment := range fragments {
+			if !strings.Contains(line, fragment) {
+				continue lines
+			}
+		}
+		return line
 	}
 	return ""
 }

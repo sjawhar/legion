@@ -239,8 +239,12 @@ func TestReconnectHooksRunWhileTheDurableCannotBind(t *testing.T) {
 			if client.SubOK() {
 				t.Fatal("SubOK reports the durable bound while another connection holds it")
 			}
-			// Recovery's next attempts come 1 s and 3 s after its first.
-			time.Sleep(2500 * time.Millisecond)
+			// Recovery retries the refused restore 1 s and 3 s after its first attempt, and each
+			// attempt asks rewatch for a run before it logs its failure, so once the third attempt has
+			// logged, every retry has had its chance to run the hook again.
+			waitFor(t, 30*time.Second, "the recovery's third attempt at the refused restore", func() bool {
+				return logs.lineAt("ERROR", "envoy nats recovery resubscribe failed", `"attempt":3,`) != ""
+			})
 			if runs := len(hooked); runs != 0 {
 				t.Fatalf("the reconnect hook ran %d more time(s) for one reconnect", runs)
 			}
@@ -512,11 +516,20 @@ func waitOutHeldDurable(t *testing.T, client *bus.Client, uri string) {
 	if _, err := holderJS.Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck()); err != nil {
 		t.Fatalf("bind the durable as the other task: %v", err)
 	}
-	if err := holderConn.Flush(); err != nil {
-		t.Fatalf("flush the holder: %v", err)
-	}
-	if _, err := client.Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck()); err == nil {
+	// The holder's bind returns before the server has read its SUB, and a Flush proves only that it
+	// has: nats-server applies the new interest on the consumer's own goroutine afterwards
+	// (updateDeliveryInterest), so until the consumer reports itself push-bound, the consumer info a
+	// second bind reads says it is free, and that bind succeeds.
+	waitFor(t, 10*time.Second, "the durable to be push-bound to the other task", func() bool {
+		info, err := holderJS.ConsumerInfo(bus.Stream, consumer)
+		return err == nil && info.PushBound
+	})
+	_, err = client.Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck())
+	if err == nil {
 		t.Fatal("bound a durable another connection holds")
+	}
+	if !strings.Contains(err.Error(), "consumer is already bound") {
+		t.Fatalf("the bind of a durable another connection holds failed for another reason: %v", err)
 	}
 }
 
