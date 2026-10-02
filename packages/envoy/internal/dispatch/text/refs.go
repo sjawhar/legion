@@ -81,10 +81,8 @@ func Extract(body, serverURL string) []Ref {
 // block a mention sits in. Trailing punctuation the grammar trims never moves the start.
 func ExtractAt(body, serverURL string) []Located {
 	refs := []Located{}
-	base, err := url.Parse(serverURL)
-	if err != nil {
-		base = nil
-	}
+	var base *url.URL
+	baseParsed := false
 	for _, span := range referencePattern.FindAllStringIndex(body, -1) {
 		raw := trimReference(body[span[0]:span[1]])
 		if raw == "" {
@@ -95,6 +93,10 @@ func ExtractAt(body, serverURL string) []Located {
 				refs = append(refs, Located{Ref: ref, Offset: span[0]})
 			}
 			continue
+		}
+		if !baseParsed {
+			base, _ = url.Parse(serverURL)
+			baseParsed = true
 		}
 		if ref, ok := parseServer(raw, base); ok {
 			refs = append(refs, Located{Ref: ref, Offset: span[0]})
