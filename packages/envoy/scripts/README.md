@@ -133,7 +133,8 @@ and let it run past the old task's exit. Options:
   `--dispatch-session <session>` (all four together), `--dispatch-mode btw|steer`
   (default `btw`), `--dispatch-every <n>` (default 10) — post a Dispatch issue
   message targeting the session every `n` ticks and record its delivery
-  attempt's `state` (and `error`), which is how a Dispatch delivery during the
+  attempt's `state` (and `error`), or `http_<code>` (and Dispatch's `error`)
+  when Dispatch refuses the post, which is how a Dispatch delivery during the
   overlap is observed.
 
 Each tick prints one tab-separated line per target:
@@ -158,12 +159,15 @@ answered (curl exit 7) is counted in the summary, not judged a refusal: a
 listener that stops closes its listening socket first, so the task stopped
 between the tick's two requests. A target that never answers `/healthz` is
 **unreached**: named in the summary, not failed (a stale A record during the
-handover is one).
+handover is one). With `--dispatch-*`, the run also **fails** when any Dispatch
+message did not record `state` `sent`: a failed delivery attempt, or a post
+Dispatch refused (`http_401:invalid bearer token` for a wrong Dispatch
+bearer), and the verdict names each such outcome with its count.
 
 | Code | Meaning |
 |------|---------|
-| 0 | At least one target answered `/healthz`, and every target that did passed. |
-| 1 | A target failed, or no target ever answered `/healthz`. |
+| 0 | At least one target answered `/healthz`, every target that did passed, and every Dispatch message recorded `state` `sent`. |
+| 1 | A target failed, a Dispatch message did not record `state` `sent`, or no target ever answered `/healthz`. |
 | 2 | Usage error, or every `/v1` answer of the run was 401 or 403: the bearer is wrong, not the listener. |
 | 4 | A required tool is missing (`curl`, `sed`, or `getent` without `--targets`). |
 

@@ -236,16 +236,19 @@ expect_text 'target 127.0.0.1: fail - ' "a task whose /v1 never answers 200"
 expect_text '; /v1 never answered 200' "a task whose /v1 never answers 200"
 printf 'PASS: a task whose /v1 never answers 200 while /healthz answers fails the run (exit 1)\n'
 
-# (h) Dispatch messages during the run: a fake Dispatch that takes only the request Dispatch's
+# (h) Dispatch messages during the run. A fake Dispatch takes only the request Dispatch's
 # POST /api/v1/issues/<KEY>/messages takes from a bearer (the session target, the mode, the bearer's
-# session actor) answers the first message with a failed delivery attempt and the second with a
-# sent one, in Dispatch's own answer shape.
+# session actor) and answers it in Dispatch's own shape: in mode sent every delivery attempt is
+# sent; in mode refused-first the first attempt is failed with the listener's "service starting",
+# as a send to a replacement whose /v1 is closed fails, and the rest are sent. Any other bearer is
+# 401 "invalid bearer token", as Dispatch answers it. The run passes only when every message
+# records state sent.
 cat >"$dispatch_server" <<'EOF'
 import http.server
 import json
 import sys
 
-port = int(sys.argv[1])
+port, mode = int(sys.argv[1]), sys.argv[2]
 posts = 0
 
 
@@ -267,12 +270,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         global posts
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        if self.path != "/api/v1/issues/LEGION-1/messages" or self.headers.get("Authorization") != "Bearer dispatch-token":
-            return self.answer(401, {"code": "UNAUTHORIZED", "error": "unauthorized"})
+        if self.path != "/api/v1/issues/LEGION-1/messages":
+            return self.answer(404, {"code": "NOT_FOUND", "error": "no route for POST " + self.path})
+        if self.headers.get("Authorization") != "Bearer dispatch-token":
+            return self.answer(401, {"code": "UNAUTHORIZED", "error": "invalid bearer token"})
         if body.get("target") != "session:ses_probe" or body.get("delivery") != "btw" or body.get("actor", {}).get("kind") != "session":
             return self.answer(400, {"code": "MESSAGE_INPUT", "error": "bad message"})
         posts += 1
-        state, error = ("failed", "service starting") if posts == 1 else ("sent", None)
+        state, error = ("failed", "service starting") if mode == "refused-first" and posts == 1 else ("sent", None)
         delivery = {"message_id": "m%d" % posts, "attempt": 1, "delivery": "btw", "session_id": "ses_probe",
                     "envelope_id": None, "duplicate": False, "state": state, "error": error, "reply_id": None,
                     "created_at": "2026-10-01T00:00:00Z", "requested_by": body["actor"], "accepted_at": None,
@@ -287,23 +292,55 @@ http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
 EOF
 dispatch_port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
 printf 'dispatch-token\n' >"${temporary_dir}/dispatch-token"
-python3 "$dispatch_server" "$dispatch_port" &
-dispatch_pid="$!"
-for attempt in $(seq 50); do
-  curl -s -o /dev/null "http://127.0.0.1:${dispatch_port}/" && break
-  [[ "$attempt" -lt 50 ]] || fail "the fake Dispatch never answered"
-  sleep 0.1
-done
-run_case ok ok --dispatch-url "http://127.0.0.1:${dispatch_port}" --dispatch-token-file "${temporary_dir}/dispatch-token" \
-  --dispatch-issue LEGION-1 --dispatch-session ses_probe --dispatch-every 2
-kill "$dispatch_pid" 2>/dev/null || true
-wait "$dispatch_pid" 2>/dev/null || true
-expect_status 0 "Dispatch messages during the run"
+printf 'wrong-token\n' >"${temporary_dir}/wrong-dispatch-token"
+
+stop_dispatch() {
+  [[ -n "$dispatch_pid" ]] || return 0
+  kill "$dispatch_pid" 2>/dev/null || true
+  wait "$dispatch_pid" 2>/dev/null || true
+  dispatch_pid=""
+}
+
+# run_dispatch_case MODE TOKEN_FILE runs case (h)'s probe, a Dispatch message at ticks 1 and 3,
+# against a fake Dispatch in MODE, with the Dispatch bearer in TOKEN_FILE.
+run_dispatch_case() {
+  local mode="$1" token_file="$2" attempt
+  python3 "$dispatch_server" "$dispatch_port" "$mode" &
+  dispatch_pid="$!"
+  for attempt in $(seq 50); do
+    curl -s -o /dev/null "http://127.0.0.1:${dispatch_port}/" && break
+    [[ "$attempt" -lt 50 ]] || fail "the fake Dispatch never answered"
+    sleep 0.1
+  done
+  run_case ok ok --dispatch-url "http://127.0.0.1:${dispatch_port}" --dispatch-token-file "$token_file" \
+    --dispatch-issue LEGION-1 --dispatch-session ses_probe --dispatch-every 2
+  stop_dispatch
+}
+
+run_dispatch_case sent "${temporary_dir}/dispatch-token"
+expect_status 0 "every Dispatch message sent"
+[[ "$(grep -c $'\tprobe.test\t000\t-\t000\tnot resolved\t-\tsent$' "$output_file")" == 2 ]] ||
+  fail "every Dispatch message sent: want each attempt's sent state on the name's line at ticks 1 and 3"
+expect_text 'sent=2' "every Dispatch message sent"
+expect_text 'verdict: pass - 2 target(s)' "every Dispatch message sent"
+printf 'PASS: a run whose every Dispatch message records state sent passes (exit 0)\n'
+
+run_dispatch_case sent "${temporary_dir}/wrong-dispatch-token"
+expect_status 1 "a Dispatch that refuses the bearer"
+expect_text 'http_401:invalid bearer token=2' "a Dispatch that refuses the bearer"
+expect_line 'verdict: fail - 2 of 2 Dispatch message(s) did not record state sent: http_401:invalid bearer token=2' \
+  "a Dispatch that refuses the bearer"
+printf 'PASS: a run whose Dispatch messages Dispatch refuses (401) fails (exit 1)\n'
+
+run_dispatch_case refused-first "${temporary_dir}/dispatch-token"
+expect_status 1 "a Dispatch message whose delivery failed"
 [[ "$(grep -c $'\tprobe.test\t000\t-\t000\tnot resolved\t-\tfailed:service starting$' "$output_file")" == 1 ]] ||
-  fail "Dispatch messages during the run: want the first attempt's failed state on the name's line"
-expect_text 'failed:service starting=1' "Dispatch messages during the run"
-expect_text 'sent=1' "Dispatch messages during the run"
-printf 'PASS: each Dispatch message records its delivery attempt state, on ticks 1 and 3 at every 2\n'
+  fail "a Dispatch message whose delivery failed: want the first attempt's failed state on the name's line"
+expect_text 'target 127.0.0.1: pass - ' "a Dispatch message whose delivery failed"
+expect_text 'target 127.0.0.2: pass - ' "a Dispatch message whose delivery failed"
+expect_line 'verdict: fail - 1 of 2 Dispatch message(s) did not record state sent: failed:service starting=1' \
+  "a Dispatch message whose delivery failed"
+printf 'PASS: a Dispatch message whose delivery attempt failed fails the run though /v1 served (exit 1)\n'
 
 # (i) to (k): a task that serves /v1 by its last tick, after its first two /v1 requests drew no
 # answer at ticks its /healthz answered 200: a connection closed without an answer (Go's net/http

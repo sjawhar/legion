@@ -18,11 +18,14 @@
 # counts as a non-200 answer. One that never connects right after /healthz answered (curl exit 7) is
 # counted and shown, not judged a refusal: a listener that stops closes its listening socket first,
 # so that is the task stopping between the tick's two requests. A target that never answers
-# /healthz is unreached: named, not failed.
+# /healthz is unreached: named, not failed. With --dispatch-*, the run also fails when a Dispatch
+# message did not record state sent: its delivery attempt failed, or Dispatch refused the post.
 #
 # Exit codes:
-#   0 — at least one target answered /healthz, and every target that did passed.
-#   1 — a target failed, or no target ever answered /healthz.
+#   0 — at least one target answered /healthz, every target that did passed, and every Dispatch
+#       message recorded state sent.
+#   1 — a target failed, a Dispatch message did not record state sent, or no target ever answered
+#       /healthz.
 #   2 — usage error, or every /v1 answer of the run was 401 or 403 (the bearer, not the listener).
 #   4 — a required tool is missing.
 set -euo pipefail
@@ -49,7 +52,8 @@ Options:
                              tick, under one idempotency key per tick.
   --dispatch-url URL         Dispatch's base URL; with --dispatch-token-file, --dispatch-issue and
                              --dispatch-session, post an issue message targeting the session every
-                             --dispatch-every ticks and record its delivery attempt's state.
+                             --dispatch-every ticks and record its delivery attempt's state; the
+                             run fails unless every message records state sent.
   --dispatch-token-file PATH File holding a Dispatch bearer.
   --dispatch-issue KEY       The open issue the messages are posted on.
   --dispatch-session SESSION The live session the messages target.
@@ -328,6 +332,7 @@ probe_tick() {
 
 finish() {
   local failing=0 reached=0 target bucket seen answered ok bad passed verdict why
+  local posted=0 unsent=0 unsent_outcomes="" reasons=()
   printf '# summary\n'
   for target in "${order[@]}"; do
     seen="${seen_ticks[$target]}"
@@ -369,7 +374,15 @@ finish() {
   fi
   if ((dispatching)); then
     printf 'dispatch messages to %s:' "$dispatch_session"
-    for bucket in "${!dispatch_outcomes[@]}"; do printf ' %s=%d' "$bucket" "${dispatch_outcomes[$bucket]}"; done
+    for bucket in "${!dispatch_outcomes[@]}"; do
+      printf ' %s=%d' "$bucket" "${dispatch_outcomes[$bucket]}"
+      posted=$((posted + ${dispatch_outcomes[$bucket]}))
+      # An outcome is the attempt's state, or http_<code> for a post Dispatch refused, then any error
+      # after a colon.
+      [[ "${bucket%%:*}" != sent ]] || continue
+      unsent=$((unsent + ${dispatch_outcomes[$bucket]}))
+      unsent_outcomes+="${unsent_outcomes:+, }${bucket}=${dispatch_outcomes[$bucket]}"
+    done
     printf '\n'
   fi
   if ((v1_answers > 0 && v1_unauthorized == v1_answers)); then
@@ -380,11 +393,17 @@ finish() {
     printf 'verdict: fail - no target ever answered /healthz\n'
     exit 1
   fi
-  if ((failing > 0)); then
-    printf 'verdict: fail - %d target(s) refused /v1 while in service\n' "$failing"
+  ((failing == 0)) || reasons+=("${failing} target(s) refused /v1 while in service")
+  ((unsent == 0)) || reasons+=("${unsent} of ${posted} Dispatch message(s) did not record state sent: ${unsent_outcomes}")
+  if ((${#reasons[@]} > 0)); then
+    verdict="${reasons[0]}"
+    for why in "${reasons[@]:1}"; do verdict+="; ${why}"; done
+    printf 'verdict: fail - %s\n' "$verdict"
     exit 1
   fi
-  printf 'verdict: pass - %d target(s) served /v1 at every tick /healthz answered 200\n' "$reached"
+  printf 'verdict: pass - %d target(s) served /v1 at every tick /healthz answered 200' "$reached"
+  ((!dispatching)) || printf '; %d Dispatch message(s) recorded state sent' "$posted"
+  printf '\n'
   exit 0
 }
 

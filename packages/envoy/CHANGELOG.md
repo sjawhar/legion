@@ -43,7 +43,8 @@
   `since_listening_ms` and `durable bound` with `attempts` and `waited_ms`.
   `packages/envoy/scripts/listener-deploy-probe.sh` watches a listener deploy from a client's
   seat, at every address the listener's name resolves to, and exits 1 when a task refused `/v1`
-  while it answered `/healthz` (LEGION-456).
+  while it answered `/healthz`, or, with `--dispatch-*`, when a Dispatch message it posted did not
+  record state `sent` (LEGION-456).
 - `GET /api/v1/artifacts/{id}/blocks/{block_id}` says where one block stands in a Dispatch
   document: its path from the top-level block down (each node's type, block id and child index)
   and, for a table block, row or cell, the table's id, the row index (0 is the header row), the
