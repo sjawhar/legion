@@ -445,12 +445,30 @@ func (r *Runtime) sandboxClient() dynamic.ResourceInterface {
 	return r.dyn.Resource(sandboxGVR).Namespace(r.namespace)
 }
 
-// locatorFor is the locator of the claim's pod at uid.
-func (r *Runtime) locatorFor(token claim.Token, uid types.UID) runtime.Locator {
-	return runtime.Locator{
-		Runtime: runtime.RuntimeSandbox, Claim: token, Incarnation: string(uid),
-		Sandbox: &runtime.SandboxLocator{Namespace: r.namespace, Name: SandboxName(token)},
+// locatorFor is one role process's address in an issue pod.
+func (r *Runtime) locatorFor(token claim.Token, uid types.UID, generation uint64) runtime.Locator {
+	container, ok := roleContainer(token)
+	if !ok {
+		panic(fmt.Sprintf("sandbox runtime: claim %s has no role container", token))
 	}
+	podUID := string(uid)
+	return runtime.Locator{
+		Runtime:     runtime.RuntimeSandbox,
+		Claim:       token,
+		Incarnation: runtime.SandboxIncarnation(podUID, generation),
+		Sandbox: &runtime.SandboxLocator{
+			Namespace: r.namespace, Name: SandboxName(token), PodUID: podUID, Container: container, Generation: generation,
+		},
+	}
+}
+
+func roleContainer(token claim.Token) (string, bool) {
+	for _, role := range claim.Roles {
+		if strings.HasSuffix(string(token), "-"+string(role)) {
+			return string(role), true
+		}
+	}
+	return "", false
 }
 
 // checkLocator refuses a locator this runtime did not mint.
