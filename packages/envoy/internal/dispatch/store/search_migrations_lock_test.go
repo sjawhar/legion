@@ -84,7 +84,11 @@ func TestSearchMigrationsLockOneTableAtATime(t *testing.T) {
 	if err := store.Pool.QueryRow(ctx, "select max(version) from schema_migrations").Scan(&version); err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if version != 62 {
-		t.Errorf("schema_migrations at %d after the holder ended, want 62", version)
+	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
+	if err != nil {
+		t.Fatalf("load migrations: %v", err)
+	}
+	if last := migrations[len(migrations)-1].Version; version != last {
+		t.Errorf("schema_migrations at %d after the holder ended, want %d, the highest migration", version, last)
 	}
 }

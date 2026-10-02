@@ -251,6 +251,11 @@ transaction holds an `ACCESS EXCLUSIVE` lock only for the `DROP EXPRESSION` and 
 Their censuses answer `0` for 0056–0061, which neither refuse nor rewrite a row, and, for 0062,
 the candidate rows whose stored vector the new expression changes.
 
+Migration `0063_doc_settlements_pending` creates the table in which every durable document update
+records the settlement it owes, which the settlement deletes when it commits. A room's load and the
+server's minute-by-minute resumption arm the settlement a row names, so one a shutdown cuts short
+still runs. It creates a table and touches no row; its census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

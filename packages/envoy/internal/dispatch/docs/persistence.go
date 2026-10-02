@@ -171,7 +171,51 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	`, room, int64(version), update, contentChanged); err != nil {
 		return 0, fmt.Errorf("append document update: %w", err)
 	}
+	if err := markSettlementPending(ctx, tx, room, int64(version)); err != nil {
+		return 0, err
+	}
 	return version, nil
+}
+
+// markSettlementPending records, in the transaction that appends a document update, that the
+// document owes a settlement through that update. Every update a room persists arms a settlement,
+// and the timer that runs it lives only in memory, so a settlement a shutdown cut short is found
+// here by the room's next load (onLoadDocument) and by the resumption (RunSettlementResumption).
+// The settlement that covers the update deletes the row in the transaction that commits its writes
+// (clearSettlementPending). The caller holds the document's advisory lock, which orders this row's
+// writers as it orders the updates.
+func markSettlementPending(ctx context.Context, tx pgx.Tx, room string, through int64) error {
+	if _, err := tx.Exec(ctx, `
+		insert into doc_settlements_pending (artifact_id, through_version) values ($1, $2)
+		on conflict (artifact_id) do update
+		set through_version = excluded.through_version, marked_at = now()
+	`, room, through); err != nil {
+		return fmt.Errorf("record the document's pending settlement: %w", err)
+	}
+	return nil
+}
+
+// clearSettlementPending deletes the document's pending settlement inside the settlement
+// transaction that has read every update, so it commits only with that settlement's writes. The
+// settlement holds the document's advisory lock from before it reads the update cursor until it
+// commits, so no update it has not read can be appended meanwhile.
+func clearSettlementPending(ctx context.Context, tx pgx.Tx, room string) error {
+	if _, err := tx.Exec(ctx, `delete from doc_settlements_pending where artifact_id = $1`, room); err != nil {
+		return fmt.Errorf("clear the document's pending settlement: %w", err)
+	}
+	return nil
+}
+
+// settlementPending reports whether the document owes a settlement that no settlement has
+// committed.
+func settlementPending(ctx context.Context, q Queryer, room string) (bool, error) {
+	var pending bool
+	if err := q.QueryRow(ctx, `
+		select exists(select 1 from doc_settlements_pending where artifact_id = $1)
+	`, room).Scan(&pending); err != nil {
+		return false, fmt.Errorf("read the document's pending settlement: %w", err)
+	}
+	return pending, nil
 }
 
 // ListVersions returns persisted incremental update metadata newest-first.

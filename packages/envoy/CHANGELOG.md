@@ -148,6 +148,16 @@
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds
   one update's 1,048,576-item cap is now refused as `413 CAP_EXCEEDED` with its item count instead
   of `500` (LEGION-465).
+- A Dispatch shutdown no longer drops a document settlement its budget cuts short. The settlement
+  was armed only in memory, so a deploy that stopped the server while a large document settled
+  (a 1 MiB `a_b*` document took 4.5-6.8 s at load 90-170, past the 5 s budget) left its ask blocks
+  unindexed and an edit's version unwritten until the next edit. Every durable document update
+  now records the settlement it owes in `doc_settlements_pending` (migration 0063), which the
+  settlement deletes when it commits. A room's load settles a document with that row, and the
+  server arms the settlement of every open document whose row is a minute old, at start and each
+  minute, so one nobody opens settles too. Shutdown settles only the documents that owe one,
+  cancels a settlement past its budget so its transaction rolls back, and logs per document
+  whether it settled or was left to resume (LEGION-465).
 - Dispatch exits with status 1 when it cannot bind its listen address. It logged
   `dispatch: listen … bind: address already in use` and exited 0, so a supervisor read a port
   clash as a clean stop.

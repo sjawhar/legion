@@ -277,6 +277,9 @@ func main() {
 			Docs:      documentService,
 		})
 	}
+	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
+	// anyone opening its document.
+	go documentService.RunSettlementResumption(ctx)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
