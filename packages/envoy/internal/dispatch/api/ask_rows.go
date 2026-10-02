@@ -23,24 +23,28 @@ const askRowFrom = `from asks a
 	left join artifacts ba on ba.id = a.block_artifact_id
 	left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid`
 
+// newestReply selects the newest comment in the thread of the ask aliased a. lastReplyJoin reads
+// it for every ask read, and a hand-back records its id, so both agree on which reply is newest.
+const newestReply = `select c.id, c.author, c.created_at, c.turn from comments c
+			where c.ask_id = a.id
+			order by c.created_at desc, c.id desc
+			limit 1`
+
 // lastReplyJoin attaches the newest comment in the ask's thread as lr; the ask must be
 // aliased a. askReadFrom and listOpenAsks both read the reply through it.
 const lastReplyJoin = `
-		left join lateral (
-			select c.author, c.created_at, c.turn from comments c
-			where c.ask_id = a.id
-			order by c.created_at desc, c.id desc
-			limit 1
-		) lr on true`
+		left join lateral (` + newestReply + `) lr on true`
 
-// waitingOnExpression puts a moved approval request with its agent until that agent hands its
-// current version back. A hand-back is newer than the thread reply it follows, so it hands the
-// turn to the human before ordinary replies again decide it.
+// waitingOnExpression is the one turn rule every open-ask read, the Inbox order, a reply's
+// waiting_on and the approval route's hand-back decision share. A moved approval request waits on
+// its agent until that agent hands its current version back. A hand-back records the reply that
+// was newest when it ran (handed_back_reply_id), so the request waits on the human until a newer
+// reply's turn decides it. Every other ask follows its newest reply's turn.
 const waitingOnExpression = `case
 	when a.kind = 'approval'
 		and (a.approval->>'requested_version')::bigint < (a.approval->>'version')::bigint
 	then 'agent'
-	when a.kind = 'approval' and a.edited_at >= lr.created_at
+	when a.kind = 'approval' and lr.id = a.handed_back_reply_id
 	then 'human'
 	else coalesce(lr.turn, 'human')
 end`

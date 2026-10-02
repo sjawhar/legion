@@ -1006,7 +1006,8 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 // 0056 backfills the version every existing approval request was shown to, then keeps an older
 // binary's approval insert valid by adding requested_version from version before the check runs. A
 // moved request may advance version while preserving this value, which is how ask reads distinguish
-// a human-ready request from one an agent still owns.
+// a human-ready request from one an agent still owns. Its handed_back_reply_id starts null on every
+// row and names a reply in the comments table, on an approval ask only.
 func TestMigrate0056BackfillsAndRequiresApprovalRequestedVersion(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -1077,6 +1078,39 @@ func TestMigrate0056BackfillsAndRequiresApprovalRequestedVersion(t *testing.T) {
 			'{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":8,"requested_version":8}')
 	`); err != nil {
 		t.Fatalf("approval with requested_version: %v", err)
+	}
+	var handedBack *string
+	if err := store.Pool.QueryRow(ctx, `
+		select handed_back_reply_id::text from asks where question = 'Approve spec.md (version 7)?'
+	`).Scan(&handedBack); err != nil || handedBack != nil {
+		t.Fatalf("migrated handed_back_reply_id = %v (%v), want null", handedBack, err)
+	}
+	var replyID string
+	if err := store.Pool.QueryRow(ctx, `
+		insert into comments (issue_key, author, body) values ('CORE-1', '{"kind":"user","id":"alice"}', 'Why?')
+		returning id::text
+	`).Scan(&replyID); err != nil {
+		t.Fatalf("seed reply: %v", err)
+	}
+	if _, err := store.Pool.Exec(ctx, `
+		update asks set handed_back_reply_id = $1 where question = 'Approve spec.md (version 7)?'
+	`, replyID); err != nil {
+		t.Fatalf("record a hand-back on an approval ask: %v", err)
+	}
+	for _, refused := range []struct {
+		name, sql, code, constraint string
+	}{
+		{"a question ask", `insert into asks (issue_key, author, question, handed_back_reply_id)
+			values ('CORE-1', '{"kind":"session","id":"s"}', 'Which?', '` + replyID + `')`,
+			"23514", "asks_handed_back_reply_approval"},
+		{"a reply that does not exist", `update asks set handed_back_reply_id = gen_random_uuid()
+			where question = 'Approve spec.md (version 7)?'`,
+			"23503", "asks_handed_back_reply_id_fkey"},
+	} {
+		_, err := store.Pool.Exec(ctx, refused.sql)
+		if !errors.As(err, &refusal) || refusal.Code != refused.code || refusal.ConstraintName != refused.constraint {
+			t.Fatalf("handed_back_reply_id on %s: error = %v, want %s", refused.name, err, refused.constraint)
+		}
 	}
 }
 

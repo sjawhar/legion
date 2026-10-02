@@ -13,6 +13,7 @@ type turnAskRow struct {
 	ID        string              `json:"id"`
 	Question  string              `json:"question"`
 	WaitingOn string              `json:"waiting_on"`
+	EditedAt  *string             `json:"edited_at"`
 	LastReply *model.AskLastReply `json:"last_reply"`
 }
 

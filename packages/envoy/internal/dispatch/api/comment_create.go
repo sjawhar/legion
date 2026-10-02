@@ -104,10 +104,7 @@ func (t commentThreadTarget) replyTurn(actor model.Actor, requested *string) *st
 // eventThread is what a comment event says about the thread the comment joined, given the
 // derived ask turn after this comment is its newest reply.
 func (t commentThreadTarget) eventThread(waitingOn string) commentEventThread {
-	thread := commentEventThread{AskQuestion: t.AskQuestion, AskState: t.AskState}
-	if waitingOn != "" {
-		thread.AskWaitingOn = waitingOn
-	}
+	thread := commentEventThread{AskQuestion: t.AskQuestion, AskState: t.AskState, AskWaitingOn: waitingOn}
 	if t.ReplyTo != nil {
 		thread.ThreadRootID = *t.ReplyTo
 	}

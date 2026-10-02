@@ -648,7 +648,7 @@ The version rule judges every hand-back: the version its event records in `reque
 hold none of the spec's blocks open, read from the version itself by the block ids of the spec's
 block asks, because Dispatch indexes a block as an ask only when it settles the document, after
 the edit that wrote it. An approval row follows versions in place, so `ask.opened` records its
-first hand-back and only `ask.edited` events that advance `requested_version` record later ones.
+first hand-back and each `ask.handed_back` a later one; an `ask.edited` only rewords the request.
 The answer-time rule judges a hand-back no human answered: it must not come before a human answered
 one of the spec's blocks, which catches a request made while the choice was still prose or sent in
 parallel with the edit that wrote the block. A request the human answered is left to the version

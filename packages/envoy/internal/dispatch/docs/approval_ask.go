@@ -35,10 +35,10 @@ func ApprovalAskAt(ctx context.Context, tx pgx.Tx, artifactID string) (*model.As
 	return nil, fmt.Errorf("read open approval ask: %w", err)
 }
 
-// MoveApprovalAsks advances the document's one open approval ask to a new settled version. The
+// MoveApprovalAsk advances the document's one open approval ask to a new settled version. The
 // row and its thread stay open; requested_version records that the agent must hand it back before
 // a human sees it in Waiting on you again.
-func MoveApprovalAsks(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, serverURL string) ([]model.Event, error) {
+func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, serverURL string) ([]model.Event, error) {
 	ask, err := ApprovalAskAt(ctx, tx, artifactID)
 	if err != nil {
 		return nil, err
@@ -54,24 +54,24 @@ func MoveApprovalAsks(ctx context.Context, tx pgx.Tx, broker *events.Broker, art
 	if err != nil {
 		return nil, err
 	}
-	event, err := RewriteApprovalAsk(
-		ctx, tx, broker, ask, actor, version.Number, ask.Approval.RequestedVersion, summary, serverURL,
-	)
+	event, err := RewriteApprovalAsk(ctx, tx, broker, ask, actor, version.Number, summary, serverURL)
 	if err != nil {
 		return nil, err
 	}
 	return []model.Event{event}, nil
 }
 
-// RewriteApprovalAsk updates one open approval row, indexes its new question, and records its
-// ask.edited event. It is shared by a document version move and a later hand-back to the human.
+// RewriteApprovalAsk rewords one open approval row to name version with summary, indexes its new
+// question, stamps edited_at, and records its ask.edited event. A document version move and a
+// request with a new summary both reword; neither hands the request back, so requested_version
+// stays as it was.
 func RewriteApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,
 	broker *events.Broker,
 	ask *model.Ask,
 	actor model.Actor,
-	version, requestedVersion int,
+	version int,
 	summary, serverURL string,
 ) (model.Event, error) {
 	previous := model.AskEditPrevious{
@@ -82,7 +82,6 @@ func RewriteApprovalAsk(
 	}
 	ask.Question = ApprovalQuestion(ask.Approval.Name, version, summary)
 	ask.Approval.Version = version
-	ask.Approval.RequestedVersion = requestedVersion
 	approval, err := json.Marshal(ask.Approval)
 	if err != nil {
 		return model.Event{}, fmt.Errorf("encode approval ask: %w", err)

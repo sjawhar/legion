@@ -23,8 +23,9 @@ import { DispatchClient } from "../dispatch-http";
 import { dispatchFollowNotice } from "../dispatch-subscribe";
 import { ToolInputError } from "../tool-input-errors";
 
-function response(body: unknown): Response {
+function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
+    status,
     headers: { "Content-Type": "application/json" },
   });
 }
@@ -3536,17 +3537,20 @@ describe("executeDispatchTool", () => {
       if (target.pathname === "/api/v1/artifacts/artifact-42/approval-requests") {
         const body = JSON.parse(String(init?.body)) as { summary: string };
         posts.push({ path: target.pathname, body });
-        return response({
-          ask: {
-            id: "ask-9",
-            issue_key: "DSP-42",
-            artifact_id: null,
-            kind: "approval",
-            question: `Approve spec.md (version 3)? ${body.summary}`,
+        return response(
+          {
+            ask: {
+              id: "ask-9",
+              issue_key: "DSP-42",
+              artifact_id: null,
+              kind: "approval",
+              question: `Approve spec.md (version 3)? ${body.summary}`,
+            },
+            artifact_id: "artifact-42",
+            version: 3,
           },
-          artifact_id: "artifact-42",
-          version: 3,
-        });
+          201
+        );
       }
       throw new Error(`unexpected request: ${target.pathname}`);
     };
@@ -3580,9 +3584,10 @@ describe("executeDispatchTool", () => {
     expect(result.details).not.toHaveProperty("topic");
   });
 
-  // A repeat at the version an open request already names returns that request unchanged, so
-  // the question the human sees carries the earlier summary, not the one this call sent.
-  test("dispatch_request_approval reports the open request's own question, not the summary it sent", async () => {
+  // A call that finds the open request already waiting on the human (Dispatch's 200) changed
+  // nothing, and says so rather than reporting a fresh request; the question it quotes is the open
+  // request's own.
+  test("dispatch_request_approval says a repeat changed nothing and quotes the open request's question", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
       if (target.pathname === "/api/v1/issues/DSP-42") {
@@ -3622,7 +3627,7 @@ describe("executeDispatchTool", () => {
 
     const result = await executeDispatchTool({
       tool: "dispatch_request_approval",
-      args: { issue: "DSP-42", summary: "Proposes a live sync in place of the nightly export." },
+      args: { issue: "DSP-42", summary: "Proposes a nightly export to the archive." },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -3631,10 +3636,13 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
+    expect(result.text).toStartWith(
+      "The approval request for spec.md (document id artifact-42) at version 3 (ask ask-8) already waits on the human, so this call changed nothing"
+    );
+    expect(result.text).not.toContain("Approval requested");
     expect(result.text).toContain(
       '"Approve spec.md (version 3)? Proposes a nightly export to the archive."'
     );
-    expect(result.text).not.toContain("live sync");
   });
 
   test("dispatch_request_approval on a document approved at its current version opens nothing", async () => {
@@ -3730,11 +3738,14 @@ describe("executeDispatchTool", () => {
         if (target.pathname === "/api/v1/issues/DSP-42/asks") return response(asks);
         if (target.pathname === "/api/v1/artifacts/artifact-42/approval-requests") {
           posts.push(target.pathname);
-          return response({
-            ask: { id: "ask-9", kind: "approval", question: "Approve spec.md (version 4)? X." },
-            artifact_id: "artifact-42",
-            version: 4,
-          });
+          return response(
+            {
+              ask: { id: "ask-9", kind: "approval", question: "Approve spec.md (version 4)? X." },
+              artifact_id: "artifact-42",
+              version: 4,
+            },
+            201
+          );
         }
         throw new Error(`unexpected request: ${target.pathname}`);
       };
