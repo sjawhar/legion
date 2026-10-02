@@ -173,8 +173,9 @@ describe("the planner's plan checks", () => {
       ).toBe(true);
   });
 
-  // A planner that records the checks as its handoff instructions show them is not refused.
-  test("every plan-check shape the handoff instructions show is one the plan write accepts", () => {
+  // A planner that records the checks and its spec departures as its handoff instructions show
+  // them is not refused.
+  test("every plan handoff shape the instructions show is one the plan write accepts", () => {
     const residue = read("planner.md");
     const shapes = (field: string) => {
       const line = residue.split("\n").find((text) => text.startsWith(`- \`${field}\`:`));
@@ -189,9 +190,11 @@ describe("the planner's plan checks", () => {
     };
     const gapAnalyses = shapes("gapAnalysis");
     const planReviews = shapes("planReview");
+    const specDepartures = shapes("specDepartures");
     expect(gapAnalyses).toHaveLength(2);
     expect(planReviews.map((review) => review.verdict)).toEqual(["approved", "rejected", "failed"]);
     expect(planReviews[1]).toMatchObject({ rounds: PLAN_REVIEW_MAX_ROUNDS });
+    expect(specDepartures).toHaveLength(1);
     const requiredSkills = { implement: ["none: x"], test: ["none: x"], review: ["none: x"] };
     for (const gapAnalysis of gapAnalyses)
       for (const planReview of planReviews) {
@@ -202,6 +205,7 @@ describe("the planner's plan checks", () => {
           requiredSkills,
           gapAnalysis,
           planReview,
+          specDepartures,
         };
         expect(describePhaseHandoffWriteProblems(handoff), JSON.stringify(handoff)).toEqual([]);
       }

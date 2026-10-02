@@ -7,3 +7,5 @@ Plan the assigned issue completely for implementation, testing, review, and inte
 State the required implementation, test, review, and integration evidence, including file-level work and ordering; surface uncertainty, discovered scope, and choices to whoever owns the plan.
 
 A finished plan answers what the issue leaves unsaid that would change the work: each hidden requirement, ambiguity, and acceptance criterion no machine could check, with a task, an acceptance criterion and its check, or a decision and its reason. One only whoever owns the plan can decide goes to them, and saying so is its answer.
+
+A plan that builds something differently from the spec's design says so: what the spec says, what the plan does instead, the evidence for it, and any acceptance criterion it changes. The plan records that departure; the spec stays as it is, for whoever owns it to change.

@@ -81,7 +81,8 @@ a new version that keeps the human's own text, never a second "spec" artifact be
   section for what it discusses.
 - **A changed point is rewritten, not appended to.** When an answer or a new fact changes the
   design, rewrite the text it changes and fold the answered decision into it; the document's
-  versions keep the history.
+  versions keep the history. An approved Legion root spec is the exception: a design change that
+  leaves what the tree delivers intact goes in the plan ([Approval of a spec](#approval-of-a-spec)).
 - **No placeholders.** No TBD, TODO, or hedging ("might", "could consider"): an open item is a
   decision block, a technical decision your lane makes and records in the text, or, for a
   contract between two lanes, a question for the platform PO (see
@@ -364,8 +365,8 @@ version, the way a pull-request review approves a commit, and any later version 
 approval stale. Answering a decision block writes a new version, so request approval only when
 both hold: every decision block is settled, which means answered and folded into the text, or
 waived as the next paragraph says; and it proposes something the human has not already settled.
-A Legion root spec under an armed design gate always goes to approval once its blocks are settled
-(`skill://legion-architect`).
+A Legion root spec under an armed design gate always goes to approval once its blocks are settled,
+and once approved it changes only when what the tree delivers changes (`skill://legion-architect`).
 
 When both hold, request it in the pass that finishes the spec: a design waiting with nothing in
 the human's Inbox waits on nobody. A choice you can make yourself is not a decision block
