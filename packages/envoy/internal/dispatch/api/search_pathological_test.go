@@ -16,16 +16,18 @@ import (
 func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
-	// `)_` is linear with a large constant - every `)_` is an italic span, so 1 MiB of it is
-	// 524,288 text nodes and more items than one document update can hold
-	// (TestUploadRefusesADocumentTooLargeToStore) - and pmdoc's linear-time test holds it at
-	// 1 MiB; here 256 KB keeps its settlement inside the test server's shutdown budget.
+	// Written as paragraph text, each of these runs makes more elements than one write may
+	// (TestUploadRefusesADocumentTooLargeToStore), so each is a code block's text: the document
+	// stores it whole and search indexes it whole, which is what took the time; pmdoc's linear-time
+	// test holds the parser on the same runs.
 	for _, test := range []struct {
 		shape string
 		bytes int
 	}{{"a_", 1 << 20}, {"a_b*", 1 << 20}, {")_", 256 << 10}} {
 		shape := test.shape
-		body := strings.Repeat(shape, test.bytes/len(shape))
+		const fence = "```\n"
+		run := strings.Repeat(shape, (test.bytes-2*len(fence)-1)/len(shape))
+		body := fence + run + "\n" + fence
 		started := time.Now()
 		response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
 			"name": "pathological-" + strings.Map(func(r rune) rune {
@@ -136,17 +138,17 @@ func TestSearchFindsOrdinaryAndUnderscoredTextAfterSearchText(t *testing.T) {
 	}
 }
 
-// A document whose formatting cannot be stored - 1 MiB of `)_` is 524,288 italic spans, over the
-// 1,048,576 items one document update may hold - is refused as the cap it hit, with the count, on
-// a new document (SeedText) and on a replacement (ReplaceText), never a 500.
+// A document whose markdown makes more elements than one write may - 1 MiB of `)_`, 262,144
+// italic spans, held a gigabyte while it was saved (LEGION-481) - is refused as too large to store,
+// naming the limit, on a new document (SeedText) and on a replacement (ReplaceText), never a 500.
 func TestUploadRefusesADocumentTooLargeToStore(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
 	body := strings.Repeat(")_", (1<<20)/2)
 	// A new document (SeedText): refused, and nothing is created.
 	response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "too-large.md"}, "body.md", "text/markdown", []byte(body), "alice")
-	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(response.Body.String(), "1048576") {
-		t.Fatalf("seed of a document too large to store: status=%d body=%.400s, want 413 CAP_EXCEEDED naming the 1048576-item cap", response.Code, response.Body.String())
+	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(response.Body.String(), "more than 65536 elements") {
+		t.Fatalf("seed of a document too large to store: status=%d body=%.400s, want 413 CAP_EXCEEDED naming the 65536-element limit", response.Code, response.Body.String())
 	}
 	if listing := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/artifacts", nil, "alice"); strings.Contains(listing.Body.String(), "too-large") {
 		t.Fatalf("the refused seed left an artifact behind: %.300s", listing.Body.String())
@@ -157,11 +159,53 @@ func TestUploadRefusesADocumentTooLargeToStore(t *testing.T) {
 		t.Fatalf("seed notes.md: status=%d body=%.300s", first.Code, first.Body.String())
 	}
 	response = multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "notes.md"}, "body.md", "text/markdown", []byte(body), "alice")
-	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(response.Body.String(), "1048576") {
-		t.Fatalf("replacement by a document too large to store: status=%d body=%.400s, want 413 CAP_EXCEEDED naming the 1048576-item cap", response.Code, response.Body.String())
+	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(response.Body.String(), "more than 65536 elements") {
+		t.Fatalf("replacement by a document too large to store: status=%d body=%.400s, want 413 CAP_EXCEEDED naming the 65536-element limit", response.Code, response.Body.String())
 	}
 	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/artifacts/notes-md/text", nil, "alice")
 	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"# Notes\n"`) {
 		t.Fatalf("notes.md after the refused replacement: status=%d body=%.300s, want its first version", text.Code, text.Body.String())
+	}
+}
+
+// Every route that writes a caller's markdown refuses markdown past the element limit as 413
+// CAP_EXCEEDED naming the limit, and writes nothing: a spec at issue creation, an issue's and a
+// project's document upload as JSON, and an edit's insert and replace.
+func TestEveryMarkdownWriteRefusesMarkdownPastTheElementLimit(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Element limit", "Before.\n")
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "DOCS", "name": "Docs"}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	heavy := strings.Repeat(")_", 200_000)
+	for _, write := range []struct {
+		name, path string
+		body       any
+	}{
+		{"a spec at issue creation", "/api/v1/issues", map[string]string{"project": "TEST", "title": "Too heavy", "spec": heavy}},
+		{"an issue's document upload", "/api/v1/issues/" + issue.Key + "/artifacts", map[string]string{"name": "heavy.md", "content": heavy}},
+		{"a project's document upload", "/api/v1/projects/DOCS/artifacts", map[string]string{"name": "heavy.md", "content": heavy}},
+		{"an edit's insert", "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/edits", map[string]any{
+			"ops": []map[string]string{{"op": "insert", "after": "end", "markdown": heavy}},
+		}},
+		{"an edit's replace", "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/edits", map[string]any{
+			"ops": []map[string]string{{"op": "replace", "find": "Before.", "with": heavy}},
+		}},
+	} {
+		response := dispatchRequest(t, handler, http.MethodPost, write.path, write.body, "alice")
+		if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(response.Body.String(), "more than 65536 elements") {
+			t.Errorf("%s past the element limit: status=%d body=%.300s, want 413 CAP_EXCEEDED naming the limit", write.name, response.Code, response.Body.String())
+		}
+	}
+	if listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST", nil, "alice"); strings.Contains(listed.Body.String(), "Too heavy") {
+		t.Errorf("the refused issue was created: %.300s", listed.Body.String())
+	}
+	for _, path := range []string{"/api/v1/issues/" + issue.Key + "/artifacts", "/api/v1/projects/DOCS/artifacts"} {
+		if listed := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice"); strings.Contains(listed.Body.String(), "heavy") {
+			t.Errorf("a refused upload left a document behind at %s: %.300s", path, listed.Body.String())
+		}
+	}
+	if text := documentMarkdown(t, handler, issue.PrimaryArtifactID); text != "Before.\n" {
+		t.Errorf("the spec after the refused edits = %q, want it unchanged", text)
 	}
 }

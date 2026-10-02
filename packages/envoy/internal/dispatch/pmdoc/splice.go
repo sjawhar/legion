@@ -116,7 +116,12 @@ func InsertTableRows(doc *Node, target Range, markdown string, after bool, budge
 
 	table := nodeAtPath(doc, tablePath)
 	width := len(table.Children[0].Children)
+	spent := budget.elements
 	rows, supported, err := parseTableRows(markdown, width, budget)
+	if err == nil && !supported {
+		// The block path parses the fragment again on this budget, so its elements count once.
+		budget.elements = spent
+	}
 	if err != nil || !supported {
 		return nil, supported, err
 	}

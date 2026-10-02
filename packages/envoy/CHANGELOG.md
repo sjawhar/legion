@@ -150,6 +150,16 @@
 
 ### Fixed
 
+- A markdown write of any shape at the 1 MiB cap no longer takes Dispatch down. One 1 MiB upload of
+  `)_` held about a gigabyte while it was saved, which killed the 1,024 MiB production task
+  (LEGION-481): every element the markdown makes costs memory in the parse, the read-back, the
+  render and the live document. A caller's markdown - a spec, an uploaded document or version,
+  an edit batch's inserts and replaces - may now make at most 65,536 elements (a block weighs 3, a
+  table cell 4, a piece of inline syntax, a mark or a line of text 1); past that it is `413
+  CAP_EXCEEDED` naming the line, refused while goldmark parses, before it allocates the rest. The
+  heaviest document the limit admits holds under 170 MiB above an idle server to store, settle and
+  read; hand-written markdown weighs 30 to 90 elements a kibibyte.
+
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds

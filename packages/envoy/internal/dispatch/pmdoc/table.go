@@ -46,35 +46,39 @@ func (p tablePadding) cells() int {
 	return p.implied - p.written
 }
 
-// TablePaddingBudget bounds the empty cells reading or padding tables may add to their short rows.
-// A caller write takes one (NewTablePaddingBudget) and spends it on every parse of the markdown it
-// sends and every table it pads, so the cells it costs are bounded however many operations carry
-// them. Reading back a rendering spends a budget of its own (readBackPaddingBudget).
+// TablePaddingBudget bounds the empty cells reading or padding tables may add to their short rows,
+// and the elements the markdown makes (elementCount). A caller write takes one
+// (NewTablePaddingBudget) and spends it on every parse of the markdown it sends and every table it
+// pads, so the cells and elements it costs are bounded however many operations carry them. Reading
+// back a rendering spends a budget of its own (readBackPaddingBudget), which counts no elements.
 type TablePaddingBudget struct {
-	cells  int
-	tables int
-	limit  int
-	scope  string
+	cells    int
+	tables   int
+	limit    int
+	scope    string
+	elements elementCount
 }
 
-// NewTablePaddingBudget is the budget of one caller write, maxTablePaddingCells cells.
+// NewTablePaddingBudget is the budget of one caller write, maxTablePaddingCells cells and
+// maxWriteElements elements.
 func NewTablePaddingBudget() *TablePaddingBudget {
-	return &TablePaddingBudget{limit: maxTablePaddingCells, scope: "this write"}
+	return &TablePaddingBudget{limit: maxTablePaddingCells, scope: "this write", elements: newElementCount(maxWriteElements)}
 }
 
 // readBackPaddingBudget is the budget of one parse of a rendering. The renderer writes a row short
 // where its table's spans are left unwritten (renderSpanless) or past the cells its spans may add
 // (maxSpanCells), or where the tree holds a short row, so the cells its parse pads are the tree's
 // own, not a caller's: a table the browser editor pads whose spans the renderer writes whole pads
-// at most maxSpanCells cells in any read-back.
+// at most maxSpanCells cells in any read-back. A rendering's elements are its tree's, so they are
+// not counted.
 func readBackPaddingBudget() *TablePaddingBudget {
-	return &TablePaddingBudget{limit: maxSpanCells, scope: "this read-back"}
+	return &TablePaddingBudget{limit: maxSpanCells, scope: "this read-back", elements: newElementCount(0)}
 }
 
 // quotePaddingBudget is the budget of a quote read as markdown (renderedMarkdownQuote), which
 // matches by text: the cells a short row is padded with hold none, so a quote pads none.
 func quotePaddingBudget() *TablePaddingBudget {
-	return &TablePaddingBudget{limit: 0, scope: "a quote"}
+	return &TablePaddingBudget{limit: 0, scope: "a quote", elements: newElementCount(0)}
 }
 
 func (b *TablePaddingBudget) add(padding tablePadding) error {
@@ -126,7 +130,11 @@ func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 	if lazy := lazyLines(node.Lines(), source); lazy != nil && (lazy[rows.header] || lazy[rows.header+1]) || lonePipe(source[header.Start:header.Stop]) {
 		return
 	}
-	if recordTablePadding(pc, rows.padding(node.Lines(), source)) {
+	padding := rows.padding(node.Lines(), source)
+	if recordTablePadding(pc, padding) {
+		return
+	}
+	if count := countedElements(pc); count != nil && count.charge(padding.implied, header.Start) {
 		return
 	}
 	t.transform(node, reader, pc)

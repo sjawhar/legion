@@ -36,10 +36,12 @@ var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithExtensions(linkify{}, lazyAwareTable{}, strikethrough{}, taskList{}, footnotes{}),
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
+			util.Prioritized(elementBlockCounter{}, -1),
 			util.Prioritized(&typedDirectiveParser{}, 950),
 			util.Prioritized(&unsupportedDirectiveParser{}, 900),
 			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
 		),
+		parser.WithInlineParsers(util.Prioritized(elementInlineCounter{}, -1)),
 	),
 )}
 
@@ -211,6 +213,9 @@ func parseUnstamped(markdown string, firstLine int, readFrontmatter bool, budget
 		source = source[rest:]
 	}
 	root, err := blockReader.parse(source, unclosedFrontmatter, budget)
+	if refusal := budget.elements.refusal(root, source, firstLine); refusal != nil {
+		return nil, refusal
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -239,9 +244,13 @@ func parseUnstamped(markdown string, firstLine int, readFrontmatter bool, budget
 // delimiter runs read by emphasis.
 func inlineParserOptions(emphasis emphasisParser) []parser.Option {
 	return []parser.Option{
-		parser.WithBlockParsers(util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000)),
+		parser.WithBlockParsers(
+			util.Prioritized(elementBlockCounter{}, -1),
+			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000),
+		),
 		parser.WithInlineParsers(inlineParsers(emphasis)...),
 		parser.WithInlineParsers(
+			util.Prioritized(elementInlineCounter{}, -1),
 			util.Prioritized(newStrikethroughGuard(), 500),
 			util.Prioritized(newLinkifyGuard(), 999),
 		),
@@ -272,7 +281,7 @@ var inlineMarkdown, flankingOnlyMarkdown = newInlineReader(emphasisParser{}), ne
 // definition.
 func parseInlineWithDefinitions(markdown string, labels []string, reader inlineReader) ([]*Node, error) {
 	if len(labels) == 0 {
-		return readInline(markdown, reader.run)
+		return readInline(markdown, reader.run, nil)
 	}
 	var full strings.Builder
 	full.WriteString(markdown)
@@ -309,16 +318,32 @@ func referencedLabels(nodes []*Node) []string {
 
 // ParseInline converts one textblock's worth of inline markdown into inline
 // nodes. Markdown that forms more than one paragraph, or holds text after its
-// paragraph's last line, is ErrSchema.
+// paragraph's last line, is ErrSchema. It is a caller's write, and the elements it makes are
+// counted on a budget of its own (ParseInlineOn).
 func ParseInline(markdown string) (nodes []*Node, err error) {
-	return readInline(markdown, inlineMarkdown.run)
+	return ParseInlineOn(markdown, NewTablePaddingBudget())
 }
 
-// readInline is ParseInline read with inline, one of an inlineReader's parsers.
-func readInline(markdown string, inline parser.Parser) (nodes []*Node, err error) {
+// ParseInlineOn is ParseInline spending budget, its caller write's, on the elements it makes.
+func ParseInlineOn(markdown string, budget *TablePaddingBudget) (nodes []*Node, err error) {
+	return readInline(markdown, inlineMarkdown.run, budget)
+}
+
+// readInline is ParseInline read with inline, one of an inlineReader's parsers, counting the
+// elements it makes on budget, a caller write's, or none when budget is nil (a read-back).
+func readInline(markdown string, inline parser.Parser, budget *TablePaddingBudget) (nodes []*Node, err error) {
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
 	source := []byte(LineFeeds(markdown))
-	root := withLineStarts(inline, source, parser.NewContext())
+	context := parser.NewContext()
+	if budget != nil {
+		context.Set(tablePaddingBudgetKey, budget)
+	}
+	root := withLineStarts(inline, source, context)
+	if budget != nil {
+		if refusal := budget.elements.refusal(root, source, 1); refusal != nil {
+			return nil, refusal
+		}
+	}
 	if root.ChildCount() > 1 {
 		return nil, fmt.Errorf("%w: inline markdown forms %d paragraphs", ErrSchema, root.ChildCount())
 	}

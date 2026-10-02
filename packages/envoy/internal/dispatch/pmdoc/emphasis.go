@@ -80,7 +80,7 @@ func (p emphasisParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) 
 		block.Advance(length)
 		return text
 	}
-	node := parser.NewDelimiter(canOpen, canClose, length, char, emphasisDelimiters{})
+	node := parser.NewDelimiter(canOpen, canClose, length, char, emphasisDelimiters{count: countedElements(pc)})
 	node.Segment = segment.WithStop(segment.Start + node.OriginalLength)
 	block.Advance(node.OriginalLength)
 	pc.PushDelimiter(node)
@@ -117,8 +117,9 @@ func (g strikethroughGuard) Parse(parent ast.Node, block text.Reader, context pa
 // the strong pair is made, the engine leaves as text the `**` the closer has left, where goldmark
 // pairs one of them with the opener's last `*`. Goldmark asks this before it measures a pair, and
 // the rule is the only reader of OriginalLength after a run is scanned, so CanOpenCloser gives
-// both runs their remaining length as that.
-type emphasisDelimiters struct{}
+// both runs their remaining length as that. Each pair it makes is a mark, which count, the write's
+// element count when the parse counts them, is charged for.
+type emphasisDelimiters struct{ count *elementCount }
 
 func (emphasisDelimiters) IsDelimiter(b byte) bool {
 	return b == '*' || b == '_'
@@ -132,6 +133,9 @@ func (emphasisDelimiters) CanOpenCloser(opener, closer *parser.Delimiter) bool {
 	return true
 }
 
-func (emphasisDelimiters) OnMatch(consumes int) ast.Node {
+func (d emphasisDelimiters) OnMatch(consumes int) ast.Node {
+	if d.count != nil {
+		d.count.charge(1, d.count.last)
+	}
 	return ast.NewEmphasis(consumes)
 }
