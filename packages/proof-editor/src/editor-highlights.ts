@@ -5,32 +5,41 @@ import { Decoration, DecorationSet, type EditorView } from "@milkdown/kit/prose/
 import { $prose } from "@milkdown/kit/utils";
 import { blockIdOf } from "./editor/schema/block-ids";
 
-const ACTIVE_MARK_CLASS = "dispatch-mark-active";
-const ACTIVE_BLOCK_CLASS = "dispatch-block-active";
+type HighlightTarget = "mark" | "block";
+
+const ACTIVE_CLASS: Readonly<Record<HighlightTarget, string>> = {
+  mark: "dispatch-mark-active",
+  block: "dispatch-block-active",
+};
 const PULSE_CLASS = "dispatch-mark-pulse";
 const PULSE_DURATION_MS = 1200;
 
-type HighlightTarget = "mark" | "block";
+/** One target's highlighted ids: the selected ones, and the pulsing ones by the token of the pulse
+ *  that started each, so the timer of a pulse a later pulse of the same id replaced ends nothing. */
+interface TargetHighlights {
+  active: ReadonlySet<string>;
+  pulsed: ReadonlyMap<string, number>;
+}
 
 interface EditorHighlights {
-  activeMarks: ReadonlySet<string>;
-  activeBlocks: ReadonlySet<string>;
-  pulsedMarks: ReadonlyMap<string, number>;
-  pulsedBlocks: ReadonlyMap<string, number>;
+  mark: TargetHighlights;
+  block: TargetHighlights;
+  /** The token of this editor's latest pulse; each pulse takes the next one. */
+  lastPulse: number;
   decorations: DecorationSet;
 }
 
 type HighlightChange =
   | { kind: "active"; target: HighlightTarget; ids: ReadonlySet<string> }
-  | { kind: "pulse"; target: HighlightTarget; id: string; token: number }
+  | { kind: "pulse"; target: HighlightTarget; id: string }
   | { kind: "pulse-end"; target: HighlightTarget; id: string; token: number };
 
 const highlightsKey = new PluginKey<EditorHighlights>("dispatch-editor-highlights");
+const noTargetHighlights: TargetHighlights = { active: new Set(), pulsed: new Map() };
 const noHighlights: EditorHighlights = {
-  activeMarks: new Set(),
-  activeBlocks: new Set(),
-  pulsedMarks: new Map(),
-  pulsedBlocks: new Map(),
+  mark: noTargetHighlights,
+  block: noTargetHighlights,
+  lastPulse: 0,
   decorations: DecorationSet.empty,
 };
 
@@ -42,75 +51,65 @@ function sameIds(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean
   return true;
 }
 
-function withPulse(
-  pulses: ReadonlyMap<string, number>,
-  id: string,
-  token: number
-): ReadonlyMap<string, number> {
-  if (pulses.get(id) === token) return pulses;
-  const next = new Map(pulses);
-  next.set(id, token);
-  return next;
-}
-
-function withoutPulse(
-  pulses: ReadonlyMap<string, number>,
-  id: string,
-  token: number
-): ReadonlyMap<string, number> {
-  if (pulses.get(id) !== token) return pulses;
-  const next = new Map(pulses);
-  next.delete(id);
-  return next;
+function withTarget(
+  value: EditorHighlights,
+  target: HighlightTarget,
+  highlights: TargetHighlights
+): EditorHighlights {
+  return { ...value, [target]: highlights };
 }
 
 function applyChange(value: EditorHighlights, change: HighlightChange): EditorHighlights {
-  if (change.kind === "active") {
-    const active = change.target === "mark" ? value.activeMarks : value.activeBlocks;
-    if (sameIds(active, change.ids)) return value;
-    return change.target === "mark"
-      ? { ...value, activeMarks: change.ids }
-      : { ...value, activeBlocks: change.ids };
+  const current = value[change.target];
+  switch (change.kind) {
+    case "active":
+      if (sameIds(current.active, change.ids)) return value;
+      return withTarget(value, change.target, { ...current, active: change.ids });
+    case "pulse": {
+      const token = value.lastPulse + 1;
+      const pulsed = new Map(current.pulsed).set(change.id, token);
+      return { ...withTarget(value, change.target, { ...current, pulsed }), lastPulse: token };
+    }
+    case "pulse-end": {
+      if (current.pulsed.get(change.id) !== change.token) return value;
+      const pulsed = new Map(current.pulsed);
+      pulsed.delete(change.id);
+      return withTarget(value, change.target, { ...current, pulsed });
+    }
   }
-  const pulses = change.target === "mark" ? value.pulsedMarks : value.pulsedBlocks;
-  const nextPulses =
-    change.kind === "pulse"
-      ? withPulse(pulses, change.id, change.token)
-      : withoutPulse(pulses, change.id, change.token);
-  if (nextPulses === pulses) return value;
-  return change.target === "mark"
-    ? { ...value, pulsedMarks: nextPulses }
-    : { ...value, pulsedBlocks: nextPulses };
 }
 
 function hasHighlights(value: EditorHighlights): boolean {
-  return (
-    value.activeMarks.size > 0 ||
-    value.activeBlocks.size > 0 ||
-    value.pulsedMarks.size > 0 ||
-    value.pulsedBlocks.size > 0
+  return [value.mark, value.block].some(
+    (highlights) => highlights.active.size > 0 || highlights.pulsed.size > 0
   );
 }
 
+/** The classes a node carrying `ids` of `target` draws: active when one of them is selected, and
+ *  pulsing when one of them is pulsing. */
+function targetClasses(
+  value: EditorHighlights,
+  target: HighlightTarget,
+  ids: readonly string[]
+): string[] {
+  const { active, pulsed } = value[target];
+  const classes: string[] = [];
+  if (ids.some((id) => active.has(id))) classes.push(ACTIVE_CLASS[target]);
+  if (ids.some((id) => pulsed.has(id))) classes.push(PULSE_CLASS);
+  return classes;
+}
+
 function markClasses(node: ProseMirrorNode, value: EditorHighlights): string[] {
-  let active = false;
-  let pulsed = false;
+  const ids: string[] = [];
   for (const mark of node.marks) {
-    const id = mark.attrs.id;
-    if (typeof id !== "string") continue;
-    active ||= value.activeMarks.has(id);
-    pulsed ||= value.pulsedMarks.has(id);
+    if (typeof mark.attrs.id === "string") ids.push(mark.attrs.id);
   }
-  return [active ? ACTIVE_MARK_CLASS : "", pulsed ? PULSE_CLASS : ""].filter(Boolean);
+  return targetClasses(value, "mark", ids);
 }
 
 function blockClasses(node: ProseMirrorNode, value: EditorHighlights): string[] {
   const id = blockIdOf(node);
-  if (id === null) return [];
-  return [
-    value.activeBlocks.has(id) ? ACTIVE_BLOCK_CLASS : "",
-    value.pulsedBlocks.has(id) ? PULSE_CLASS : "",
-  ].filter(Boolean);
+  return id === null ? [] : targetClasses(value, "block", [id]);
 }
 
 function highlightDecorations(doc: ProseMirrorNode, value: EditorHighlights): DecorationSet {
@@ -196,18 +195,14 @@ export function setActiveHighlights(
   ids: readonly string[]
 ): void {
   const next = new Set(ids);
-  const value = highlightsKey.getState(view.state) ?? noHighlights;
-  const current = target === "mark" ? value.activeMarks : value.activeBlocks;
+  const current = (highlightsKey.getState(view.state) ?? noHighlights)[target].active;
   if (sameIds(current, next)) return;
   dispatchHighlightChange(view, { kind: "active", target, ids: next });
 }
 
-let nextPulseToken = 0;
-
 export function pulseHighlight(view: EditorView, target: HighlightTarget, id: string): void {
-  nextPulseToken += 1;
-  const token = nextPulseToken;
-  dispatchHighlightChange(view, { kind: "pulse", target, id, token });
+  dispatchHighlightChange(view, { kind: "pulse", target, id });
+  const token = (highlightsKey.getState(view.state) ?? noHighlights).lastPulse;
   window.setTimeout(() => {
     if (!view.isDestroyed) dispatchHighlightChange(view, { kind: "pulse-end", target, id, token });
   }, PULSE_DURATION_MS);
