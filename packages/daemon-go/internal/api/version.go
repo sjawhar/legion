@@ -27,4 +27,8 @@ package api
 //
 // 11: LEGION-208 -- legionAppLogins on POST /legion/v1/gh-token, each Legion role App's login keyed by
 // its App role.
-const GoDaemonAPIVersion = 11
+//
+// 12: LEGION-462 -- a Sandbox locator on GET /legion/v1/state addresses one role process in its
+// issue's shared pod: the issue Sandbox's name, the pod's uid, the role container and the process
+// generation, with the incarnation `<pod uid>/<generation>`.
+const GoDaemonAPIVersion = 12

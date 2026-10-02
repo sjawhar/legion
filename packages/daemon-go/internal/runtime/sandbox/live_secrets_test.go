@@ -281,7 +281,7 @@ func (r *liveRig) checkSecretsCopiedTokenNegative() error {
 func (r *liveRig) checkSecretsSelfEnrollNegative() error {
 	root := r.claim("root")
 	script := fmt.Sprintf(`mkdir -p /tmp/second && tp=$(/opt/legion/go/bin/agent-secrets keygen --out /tmp/second) && /opt/legion/go/bin/agent-secrets enroll --launcher-token-file %s/%s --kind pod --runtime-id "$POD_UID" --thumbprint "$tp" --approver-issue %s --pod-token-file %s/%s 2>&1; echo "---exit $?---"`,
-		BootDir, bootTokenKey, root.issue, AgentSecretsTokenDir, AgentSecretsTokenFile)
+		generationDir(root.gen), bootTokenKey, root.issue, AgentSecretsTokenDir, AgentSecretsTokenFile)
 	out, err := r.exec(root, "sh", "-c", script)
 	if err != nil && !strings.Contains(out, "---exit ") {
 		return err

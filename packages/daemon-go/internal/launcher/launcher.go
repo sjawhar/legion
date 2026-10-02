@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,15 +26,21 @@ import (
 )
 
 // Config is the role-private launcher configuration. Token is read from the role-private
-// projected Secret before Run is called. BootTokenFile is a role-private memory-backed path; no
-// other container mounts it.
+// projected Secret before Run is called. PrivateDir is the role container's own memory-backed
+// directory, which no other container mounts: each generation's credentials live in a fresh
+// `g<generation>` directory under it for exactly that generation's lifetime.
 type Config struct {
-	Connect, Token, Sandbox, Role, PodUID, BootTokenFile string
-	Stdout, Stderr                                      io.Writer
+	Connect, Token, Sandbox, Role, PodUID, PrivateDir string
+	Stdout, Stderr                                    io.Writer
 }
+
+// reconnectDelay is the pause between daemon connections. A lost connection never stops the
+// child: a daemon restart re-adopts the role process the launcher still owns.
+const reconnectDelay = time.Second
 
 // Run serves launcher commands until ctx ends. A stopped child is reported, never restarted by
 // the launcher: the daemon owns generations and decides whether a new generation should start.
+// Only ctx's end (the container's SIGTERM) stops the child the launcher owns.
 func Run(ctx context.Context, cfg Config) error {
 	if err := cfg.validate(); err != nil {
 		return err
@@ -42,57 +49,79 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	m := &manager{cfg: cfg, requests: map[string]request{}}
+	launcherID := randomID()
+	for {
+		err := m.serve(ctx, address, launcherID)
+		if ctx.Err() != nil {
+			m.stopActive()
+			return ctx.Err()
+		}
+		if cfg.Stderr != nil {
+			fmt.Fprintf(cfg.Stderr, "launcher: daemon connection: %v; reconnecting\n", err)
+		}
+		select {
+		case <-ctx.Done():
+			m.stopActive()
+			return ctx.Err()
+		case <-time.After(reconnectDelay):
+		}
+	}
+}
+
+// serve is one authenticated daemon connection: hello, acknowledgement, the launcher's actual
+// state, then start and stop commands until the connection ends.
+func (m *manager) serve(ctx context.Context, address, launcherID string) error {
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
 	if err != nil {
-		return fmt.Errorf("launcher dial %s: %w", cfg.Connect, err)
+		return fmt.Errorf("dial %s: %w", address, err)
 	}
 	defer conn.Close()
 	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopClose()
-
-	m := manager{cfg: cfg, writer: shimwire.NewWriter(conn), requests: map[string]request{}}
-	if err := m.writer.WriteFrame(shimwire.LauncherHello{
-		Token: cfg.Token, Sandbox: cfg.Sandbox, Role: cfg.Role, PodUID: cfg.PodUID, LauncherID: randomID(),
+	writer := shimwire.NewWriter(conn)
+	if err := writer.WriteFrame(shimwire.LauncherHello{
+		Token: m.cfg.Token, Sandbox: m.cfg.Sandbox, Role: m.cfg.Role, PodUID: m.cfg.PodUID, LauncherID: launcherID,
 	}); err != nil {
-		return fmt.Errorf("launcher hello: %w", err)
+		return fmt.Errorf("hello: %w", err)
 	}
 	reader := bufio.NewReaderSize(conn, shimwire.MaxHelloBytes+1)
 	frame, err := readFrame(reader)
 	if err != nil {
-		return fmt.Errorf("launcher hello acknowledgement: %w", err)
+		return fmt.Errorf("hello acknowledgement: %w", err)
 	}
 	if _, ok := frame.(shimwire.LauncherHelloAck); !ok {
-		return fmt.Errorf("launcher hello acknowledgement: got %T, want launcher_hello_ack", frame)
+		return fmt.Errorf("hello acknowledgement: got %T, want launcher_hello_ack", frame)
 	}
+	m.mu.Lock()
+	m.writer = writer
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		if m.writer == writer {
+			m.writer = nil
+		}
+		m.mu.Unlock()
+	}()
 	if err := m.state(); err != nil {
 		return err
 	}
 	for {
 		frame, err := readFrame(reader)
 		if err != nil {
-			if ctx.Err() != nil {
-				m.stopActive()
-				return ctx.Err()
-			}
-			m.stopActive()
-			return fmt.Errorf("launcher read command: %w", err)
+			return fmt.Errorf("read command: %w", err)
 		}
+		var answer shimwire.Frame
 		switch command := frame.(type) {
 		case shimwire.LauncherStart:
-			result := m.start(command)
-			if err := m.writer.WriteFrame(result); err != nil {
-				m.stopActive()
-				return fmt.Errorf("launcher start result: %w", err)
-			}
+			answer = m.start(command)
 		case shimwire.LauncherStop:
-			result := m.stop(command)
-			if err := m.writer.WriteFrame(result); err != nil {
-				m.stopActive()
-				return fmt.Errorf("launcher stop result: %w", err)
-			}
+			answer = m.stop(command)
 		default:
-			m.stopActive()
-			return fmt.Errorf("launcher command: got %T", frame)
+			return fmt.Errorf("command: got %T", frame)
+		}
+		if err := writer.WriteFrame(answer); err != nil {
+			return fmt.Errorf("answer %T: %w", answer, err)
 		}
 	}
 }
@@ -109,8 +138,8 @@ func (c Config) validate() error {
 		return errors.New("launcher: no role")
 	case c.PodUID == "":
 		return errors.New("launcher: no pod UID")
-	case !filepath.IsAbs(c.BootTokenFile):
-		return fmt.Errorf("launcher: boot token file %q is not absolute", c.BootTokenFile)
+	case !filepath.IsAbs(c.PrivateDir):
+		return fmt.Errorf("launcher: private directory %q is not absolute", c.PrivateDir)
 	}
 	return nil
 }
@@ -146,6 +175,7 @@ type request struct {
 type child struct {
 	generation uint64
 	pid        int
+	dir        string
 	done       chan struct{}
 }
 
@@ -158,14 +188,20 @@ type manager struct {
 	requests map[string]request
 }
 
+// state reports the actual child to the current daemon connection, if one is up. A state change
+// while disconnected is reported by the next connection's first state frame.
 func (m *manager) state() error {
 	m.mu.Lock()
 	state := shimwire.LauncherState{LastExit: m.lastExit}
 	if m.child != nil {
 		state.Child = &shimwire.LauncherChild{Generation: m.child.generation, PID: m.child.pid}
 	}
+	writer := m.writer
 	m.mu.Unlock()
-	if err := m.writer.WriteFrame(state); err != nil {
+	if writer == nil {
+		return nil
+	}
+	if err := writer.WriteFrame(state); err != nil {
 		return fmt.Errorf("launcher state: %w", err)
 	}
 	return nil
@@ -178,11 +214,12 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 	body, _ := json.Marshal(command)
 	m.mu.Lock()
 	if prior, ok := m.requests[command.ID]; ok {
+		result, matches := prior.result.(shimwire.LauncherStartResult)
 		m.mu.Unlock()
-		if string(prior.body) != string(body) {
+		if !matches || string(prior.body) != string(body) {
 			return shimwire.LauncherStartResult{ID: command.ID, Error: "launcher_start reused an id with a different payload"}
 		}
-		return prior.result.(shimwire.LauncherStartResult)
+		return result
 	}
 	if current := m.child; current != nil {
 		m.mu.Unlock()
@@ -193,7 +230,17 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 		return shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("generation %d already exited", command.Generation)}
 	}
 	m.mu.Unlock()
-	if err := writeBootToken(m.cfg.BootTokenFile, command.BootToken); err != nil {
+	// A resume of a session the tree volume no longer holds is a launch failure, never a fresh
+	// agent: the same rule workspace-init enforces for a pod's first start.
+	if command.ResumeFile != "" {
+		if _, err := os.Stat(command.ResumeFile); err != nil {
+			result := shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("resume session file %s: %v", command.ResumeFile, err)}
+			m.remember(command.ID, body, result)
+			return result
+		}
+	}
+	dir, err := m.writeFiles(command)
+	if err != nil {
 		result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
 		m.remember(command.ID, body, result)
 		return result
@@ -203,17 +250,19 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 	cmd.Stdout, cmd.Stderr = m.cfg.Stdout, m.cfg.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
+		_ = os.RemoveAll(dir)
 		result := shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("start child: %v", err)}
 		m.remember(command.ID, body, result)
 		return result
 	}
-	active := &child{generation: command.Generation, pid: cmd.Process.Pid, done: make(chan struct{})}
+	active := &child{generation: command.Generation, pid: cmd.Process.Pid, dir: dir, done: make(chan struct{})}
 	m.mu.Lock()
 	m.child = active
 	result := shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation}
 	m.requests[command.ID] = request{body: body, result: result}
 	m.mu.Unlock()
 	go m.wait(cmd, active)
+	_ = m.state()
 	return result
 }
 
@@ -231,6 +280,8 @@ func (m *manager) wait(cmd *exec.Cmd, active *child) {
 		m.child = nil
 		m.lastExit = &exit
 	}
+	// The generation's credentials end with it.
+	_ = os.RemoveAll(active.dir)
 	close(active.done)
 	m.mu.Unlock()
 	_ = m.state()
@@ -243,11 +294,12 @@ func (m *manager) stop(command shimwire.LauncherStop) shimwire.LauncherStopResul
 	body, _ := json.Marshal(command)
 	m.mu.Lock()
 	if prior, ok := m.requests[command.ID]; ok {
+		result, matches := prior.result.(shimwire.LauncherStopResult)
 		m.mu.Unlock()
-		if string(prior.body) != string(body) {
+		if !matches || string(prior.body) != string(body) {
 			return shimwire.LauncherStopResult{ID: command.ID, Error: "launcher_stop reused an id with a different payload"}
 		}
-		return prior.result.(shimwire.LauncherStopResult)
+		return result
 	}
 	active := m.child
 	m.mu.Unlock()
@@ -303,18 +355,46 @@ func (m *manager) stopActive() {
 	}
 }
 
-func writeBootToken(path, token string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("launcher boot token directory: %w", err)
+// generationDir is where generation's credentials live under the private directory.
+func generationDir(private string, generation uint64) string {
+	return filepath.Join(private, "g"+strconv.FormatUint(generation, 10))
+}
+
+// writeFiles materializes command's credentials in a fresh directory for its generation. No child
+// runs when it is called, so everything already in the private directory — an earlier
+// generation's credentials a crashed launcher never removed, or a directory, file or symlink the
+// previous generation's agent planted toward the shared workspace — is removed without being
+// followed; the directory is made owner-only and each file is created exclusively without
+// following a link, so no credential is written anywhere but that directory. An error names the
+// file, never its bytes.
+func (m *manager) writeFiles(command shimwire.LauncherStart) (string, error) {
+	entries, err := os.ReadDir(m.cfg.PrivateDir)
+	if err != nil {
+		return "", fmt.Errorf("read the private directory: %v", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(token+"\n"), 0o600); err != nil {
-		return fmt.Errorf("launcher boot token: %w", err)
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(m.cfg.PrivateDir, entry.Name())); err != nil {
+			return "", fmt.Errorf("clear %s from the private directory: %v", entry.Name(), err)
+		}
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("launcher publish boot token: %w", err)
+	dir := generationDir(m.cfg.PrivateDir, command.Generation)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return "", fmt.Errorf("make credential directory for generation %d: %v", command.Generation, err)
 	}
-	return nil
+	for name, content := range command.Files {
+		file, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+		if err == nil {
+			_, err = file.WriteString(content)
+			if closeErr := file.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		if err != nil {
+			_ = os.RemoveAll(dir)
+			return "", fmt.Errorf("write credential %s for generation %d: %v", name, command.Generation, err)
+		}
+	}
+	return dir, nil
 }
 
 func mergeEnv(base, updates []string) []string {

@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 const (
@@ -53,6 +55,22 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		return []k8sruntime.Object{sandboxObject(t, name, sandboxUID, mode, labels, conditions...), pod}
 	}
 	running := corev1.PodStatus{Phase: corev1.PodRunning}
+	for _, role := range claim.Roles {
+		running.ContainerStatuses = append(running.ContainerStatuses, corev1.ContainerStatus{
+			Name: string(role), State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		})
+	}
+	withStatus := func(name string, state corev1.ContainerState) corev1.PodStatus {
+		status := running
+		status.ContainerStatuses = slices.Clone(running.ContainerStatuses)
+		for i := range status.ContainerStatuses {
+			if status.ContainerStatuses[i].Name == name {
+				status.ContainerStatuses[i].State = state
+			}
+		}
+		return status
+	}
+	alive := &shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 1, PID: 42}}
 	failed := func(statuses ...corev1.ContainerStatus) corev1.PodStatus {
 		status := corev1.PodStatus{Phase: corev1.PodFailed}
 		for _, s := range statuses {
@@ -67,6 +85,7 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 	for _, tc := range []struct {
 		row           string
 		objects       []k8sruntime.Object
+		launcher      *shimwire.LauncherState
 		want          runtime.ObservationKind
 		detail        []string
 		absent        []string
@@ -91,14 +110,14 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		},
 		{
 			row:     "4 another uid, before its phase is read",
-			objects: withPod(modeRunning, nil, "uid-pod-newer", sandboxUID, failed(terminated(mainContainer, 137, "Error"))),
-			want:    runtime.NotRecordedProcess, detail: []string{"is uid uid-pod-newer, not the recorded " + recorded},
+			objects: withPod(modeRunning, nil, "uid-pod-newer", sandboxUID, failed(terminated(workerContainer, 137, "Error"))),
+			want:    runtime.NotRecordedProcess, detail: []string{"is uid uid-pod-newer, not the recorded pod UID " + recorded},
 		},
 		{
-			row:     "5 the main container ended",
-			objects: withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(initContainer, 0, "Completed"), terminated(mainContainer, 137, "Error"))),
+			row:     "5 the role container ended with the pod",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(initContainer, 0, "Completed"), terminated(workerContainer, 137, "Error"))),
 			want:    runtime.Gone,
-			detail:  []string{"pod " + name + " (uid " + recorded + ") Failed: main container worker terminated (Error, exit code 137)", "last lines of worker:\nfake logs"},
+			detail:  []string{"pod " + name + " (uid " + recorded + ") Failed: role container tester terminated (Error, exit code 137)", "last lines of tester:\nfake logs"},
 		},
 		{
 			row:           "5 workspace-init lost the workspace",
@@ -109,20 +128,20 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		},
 		{
 			row:     "5 the agent exited cleanly",
-			objects: withPod(modeRunning, nil, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{terminated(mainContainer, 0, "Completed")}}),
-			want:    runtime.Gone, detail: []string{"Succeeded: main container worker terminated (Completed, exit code 0)"},
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{terminated(workerContainer, 0, "Completed")}}),
+			want:    runtime.Gone, detail: []string{"Succeeded: role container tester terminated (Completed, exit code 0)"},
 		},
 		{
 			row: "5 before 7, quoting Finished only when current",
 			objects: withPod(modeRunning, []metav1.Condition{
 				condition(conditionReady, "False", reasonReconcilerError, 2), condition(conditionFinished, "True", "PodFailed", 2),
-			}, recorded, sandboxUID, failed(terminated(mainContainer, 1, "Error"))),
+			}, recorded, sandboxUID, failed(terminated(workerContainer, 1, "Error"))),
 			want: runtime.Gone, detail: []string{"; sandbox Finished=True PodFailed;"},
 		},
 		{
 			row: "5 a Finished left by the previous generation is not quoted",
 			objects: withPod(modeRunning, []metav1.Condition{condition(conditionFinished, "True", "PodSucceeded", 1)},
-				recorded, sandboxUID, failed(terminated(mainContainer, 1, "Error"))),
+				recorded, sandboxUID, failed(terminated(workerContainer, 1, "Error"))),
 			want: runtime.Gone, absent: []string{"Finished"},
 		},
 		{
@@ -146,9 +165,10 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want:    runtime.Uncertain, detail: []string{"Ready=False MultiplePods"},
 		},
 		{
-			row:     "7 a reconciler error left by the previous generation",
-			objects: withPod(modeRunning, []metav1.Condition{condition(conditionReady, "False", reasonReconcilerError, 1)}, recorded, sandboxUID, running),
-			want:    runtime.Alive,
+			row:      "7 a reconciler error left by the previous generation",
+			objects:  withPod(modeRunning, []metav1.Condition{condition(conditionReady, "False", reasonReconcilerError, 1)}, recorded, sandboxUID, running),
+			launcher: alive,
+			want:     runtime.Alive,
 		},
 		{
 			row: "8 pending before its init container starts (B4)",
@@ -163,9 +183,40 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want:    runtime.Alive,
 		},
 		{
-			row:     "8 running",
+			row:      "8 running",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running),
+			launcher: alive,
+			want:     runtime.Alive, detail: []string{"(uid " + recorded + ") role container tester runs generation 1"},
+		},
+		{
+			row: "8 a neighbour's container restarting leaves the role alive",
+			objects: withPod(modeRunning, []metav1.Condition{condition(conditionReady, "False", "ContainersNotReady", 2)}, recorded, sandboxUID,
+				withStatus(string(claim.RoleArchitect), corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}})),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:     "8 the role launcher is not connected",
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, running),
-			want:    runtime.Alive, detail: []string{"(uid " + recorded + ") Running"},
+			want:    runtime.Uncertain, detail: []string{"role launcher tester is disconnected"},
+		},
+		{
+			row:      "8 the launcher runs a later generation",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running),
+			launcher: &shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 2, PID: 43}},
+			want:     runtime.NotRecordedProcess, detail: []string{"runs generation 2, not the recorded 1"},
+		},
+		{
+			row:      "8 the launcher reports the recorded generation exited",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running),
+			launcher: &shimwire.LauncherState{LastExit: &shimwire.LauncherExit{Generation: 1, Code: 143, Signal: "terminated"}},
+			want:     runtime.Gone, detail: []string{"reports generation 1 exited (code 143, signal terminated)"},
+		},
+		{
+			row:      "8 the role container terminated in a running pod",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, withStatus(workerContainer, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}})),
+			launcher: alive,
+			want:     runtime.Gone, detail: []string{"role container tester terminated (OOMKilled, exit code 137)"},
 		},
 		{
 			row: "8 a pod being deleted is alive until it is gone",
@@ -173,7 +224,8 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 				now := metav1.NewTime(rigNow)
 				p.DeletionTimestamp, p.Finalizers = &now, []string{"test/hold"}
 			}),
-			want: runtime.Alive,
+			launcher: alive,
+			want:     runtime.Alive,
 		},
 		{
 			row: "8 a new pod's ADD while the sandbox still holds the old Finished (B5)",
@@ -190,6 +242,9 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 	} {
 		t.Run(tc.row, func(t *testing.T) {
 			g := newRig(t, tc.objects, withoutController())
+			if tc.launcher != nil {
+				g.reportLauncher(workerToken, *tc.launcher)
+			}
 			loc := sandboxLocator(workerToken, recorded)
 			obs, err := g.r.Probe(g.ctx, loc)
 			if err != nil {

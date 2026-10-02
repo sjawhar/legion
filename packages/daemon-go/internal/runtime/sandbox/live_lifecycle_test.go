@@ -444,8 +444,8 @@ func (r *liveRig) checkKillPod() error {
 	if !ok {
 		return fmt.Errorf("no gone for %s within %s", name, liveGoneLimit)
 	}
-	if !sameLocator(gone.Locator, old) || !strings.Contains(gone.Detail, string(old.Incarnation)) || !strings.Contains(gone.Detail, "main container "+mainContainer+" terminated") {
-		return fmt.Errorf("the gone carries %s, want the old %s with the main container's exit: %s", gone.Locator.Incarnation, old.Incarnation, gone.Detail)
+	if !sameLocator(gone.Locator, old) || !strings.Contains(gone.Detail, string(old.Sandbox.PodUID)) || !strings.Contains(gone.Detail, "role container "+old.Sandbox.Container+" terminated") {
+		return fmt.Errorf("the gone carries %s, want the old %s with the role container's exit: %s", gone.Locator.Incarnation, old.Incarnation, gone.Detail)
 	}
 	exit := regexp.MustCompile(`exit code (-?\d+)`).FindStringSubmatch(gone.Detail)
 	if exit == nil {

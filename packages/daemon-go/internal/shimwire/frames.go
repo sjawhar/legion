@@ -40,13 +40,13 @@ const (
 	TypeHello2                       = "hello2"
 	TypeAgentSecretsEnrollment       = "agent-secrets-enrollment"
 	TypeAgentSecretsEnrollmentResult = "agent-secrets-enrollment-result"
-	TypeLauncherHello       = "launcher_hello"
-	TypeLauncherHelloAck    = "launcher_hello_ack"
-	TypeLauncherState       = "launcher_state"
-	TypeLauncherStart       = "launcher_start"
-	TypeLauncherStartResult = "launcher_start_result"
-	TypeLauncherStop        = "launcher_stop"
-	TypeLauncherStopResult  = "launcher_stop_result"
+	TypeLauncherHello                = "launcher_hello"
+	TypeLauncherHelloAck             = "launcher_hello_ack"
+	TypeLauncherState                = "launcher_state"
+	TypeLauncherStart                = "launcher_start"
+	TypeLauncherStartResult          = "launcher_start_result"
+	TypeLauncherStop                 = "launcher_stop"
+	TypeLauncherStopResult           = "launcher_stop_result"
 )
 
 // The protocol's sizes, verified against the shipped files: the largest plain line including its
@@ -150,14 +150,19 @@ type LauncherState struct {
 }
 
 // LauncherStart starts one worker-shim child. The daemon owns the generation and request ID; a
-// repeated request is idempotent only when its payload is unchanged.
+// repeated request is idempotent only when its payload, Files included, is unchanged. Files are
+// the generation's credentials, the boot token among them: the launcher writes each, owner-only
+// and exclusively, into a fresh directory for this generation in its own memory-backed storage
+// before the child starts, and removes the directory when the child ends — so a role started in a
+// running pod never waits on the kubelet to propagate a Secret. Argv and Env name those files by
+// path; no credential is ever in Argv, Env, or an error.
 type LauncherStart struct {
-	ID         string   `json:"id"`
-	Generation uint64   `json:"generation"`
-	BootToken  string   `json:"bootToken"`
-	Argv       []string `json:"argv"`
-	Env        []string `json:"env"`
-	ResumeFile string   `json:"resumeFile,omitempty"`
+	ID         string            `json:"id"`
+	Generation uint64            `json:"generation"`
+	Argv       []string          `json:"argv"`
+	Env        []string          `json:"env"`
+	Files      map[string]string `json:"files,omitempty"`
+	ResumeFile string            `json:"resumeFile,omitempty"`
 }
 
 // LauncherStartResult is the launcher's answer to LauncherStart.
@@ -295,13 +300,13 @@ func (r Raw) FrameType() string                        { return r.Type }
 func (Hello2) FrameType() string                       { return TypeHello2 }
 func (AgentSecretsEnrollment) FrameType() string       { return TypeAgentSecretsEnrollment }
 func (AgentSecretsEnrollmentResult) FrameType() string { return TypeAgentSecretsEnrollmentResult }
-func (LauncherHello) FrameType() string       { return TypeLauncherHello }
-func (LauncherHelloAck) FrameType() string    { return TypeLauncherHelloAck }
-func (LauncherState) FrameType() string       { return TypeLauncherState }
-func (LauncherStart) FrameType() string       { return TypeLauncherStart }
-func (LauncherStartResult) FrameType() string { return TypeLauncherStartResult }
-func (LauncherStop) FrameType() string        { return TypeLauncherStop }
-func (LauncherStopResult) FrameType() string  { return TypeLauncherStopResult }
+func (LauncherHello) FrameType() string                { return TypeLauncherHello }
+func (LauncherHelloAck) FrameType() string             { return TypeLauncherHelloAck }
+func (LauncherState) FrameType() string                { return TypeLauncherState }
+func (LauncherStart) FrameType() string                { return TypeLauncherStart }
+func (LauncherStartResult) FrameType() string          { return TypeLauncherStartResult }
+func (LauncherStop) FrameType() string                 { return TypeLauncherStop }
+func (LauncherStopResult) FrameType() string           { return TypeLauncherStopResult }
 
 func (f Hello) MarshalJSON() ([]byte, error) {
 	type plain Hello
@@ -481,10 +486,13 @@ func (f LauncherStart) Validate() error {
 		return fmt.Errorf("%w: launcher_start carries no id", ErrMalformedFrame)
 	case f.Generation == 0:
 		return fmt.Errorf("%w: launcher_start carries no generation", ErrMalformedFrame)
-	case f.BootToken == "":
-		return fmt.Errorf("%w: launcher_start carries no bootToken", ErrMalformedFrame)
 	case len(f.Argv) == 0:
 		return fmt.Errorf("%w: launcher_start carries no argv", ErrMalformedFrame)
+	}
+	for name := range f.Files {
+		if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\x00") {
+			return fmt.Errorf("%w: launcher_start file name %q is not a plain file name", ErrMalformedFrame, name)
+		}
 	}
 	return nil
 }

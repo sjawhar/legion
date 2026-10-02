@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
 
 func TestAFreshLaunchEnrollsAtRegistrationWithTheSession(t *testing.T) {
@@ -32,6 +33,29 @@ func TestAFreshLaunchEnrollsAtRegistrationWithTheSession(t *testing.T) {
 	}
 	if got := h.conn.Enrollments(); len(got) != 1 || got[0] != "enr-1" {
 		t.Fatalf("the shim was told %v, want [enr-1]", got)
+	}
+}
+
+// In an issue pod six role processes share one pod uid, so the broker tells their enrollments
+// apart by slot: the pod's real uid stays the identity the broker verifies against the projected
+// token, and the slot is the daemon's own `<role>-g<generation>`, never the composed incarnation.
+func TestAnIssuePodProcessEnrollsWithItsPodUIDAndRoleSlot(t *testing.T) {
+	h := newHarness(t)
+	broker := h.withSecrets()
+	h.rt.ScriptSpawn(fake.SpawnResult{Locator: runtime.Locator{
+		Runtime: runtime.RuntimeSandbox, Claim: testToken, Incarnation: runtime.SandboxIncarnation("pod-uid-9", 1),
+		Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-209", PodUID: "pod-uid-9", Container: "implementer", Generation: 1},
+	}})
+	h.launch()
+	h.helloWithIdentity()
+	h.register()
+	enrollments := broker.enrolled()
+	want := PodEnrollment{PodUID: "pod-uid-9", Slot: "implementer-g1", Thumbprint: testIdentity.Thumbprint, PodToken: testIdentity.PodToken, Session: session}
+	if len(enrollments) != 1 || enrollments[0] != want {
+		t.Fatalf("enrolled %+v, want %+v", enrollments, want)
+	}
+	if stored := h.store.load(testToken); stored.Enrollment == nil || stored.Enrollment.Incarnation != "pod-uid-9/1" {
+		t.Fatalf("stored enrollment %+v, want it bound to the process incarnation", stored.Enrollment)
 	}
 }
 

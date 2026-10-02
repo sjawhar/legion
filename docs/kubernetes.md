@@ -327,11 +327,29 @@ checkout, an image that prints the token also carries the plugin's storage-indep
 
 ## Kubernetes runtime: the Go daemon on Agent Sandbox
 
-Under the Go coordinator, `runtime: kubernetes` runs every claim as one Agent Sandbox: each root
-architect, sub-architect and phase worker gets a `agents.x-k8s.io` `Sandbox` (kubernetes-sigs/agent-sandbox,
-LEGION-206), and its pod runs under gVisor on the Legion pool. The Sandbox is named by the claim token,
-`legion-<project>-<issue>-<role>`, and keeps that name across generations: a new generation rotates
-the boot token and takes the Sandbox `Suspended` and then `Running` again
+Under the Go coordinator, `runtime: kubernetes` runs every issue as one Agent Sandbox: an
+`agents.x-k8s.io` `Sandbox` (kubernetes-sigs/agent-sandbox, LEGION-206) named for the issue,
+`legion-<project>-<issue>`, whose one pod runs under gVisor on the Legion pool. The pod holds the
+two init containers and six role containers — `architect`, `planner`, `implementer`, `tester`,
+`reviewer`, `merger` — each of which runs `legion launcher`, a supervisor with no workflow policy
+that authenticates to the daemon's worker stream with its role's own token and starts or stops
+that role's `legion worker-shim` and Oh My Pi when the daemon tells it to. Every role of the issue
+shares the issue's checkout, the tree volume, the sessions directory and the pod's network; each
+role keeps its own state directory, agent-secrets key and launch credentials. A role's Secret holds
+only its launcher token, projected into that role's container alone and bound to the pod's uid; the
+daemon accepts a launcher only for that role, that pod and that token. Each generation's boot token
+and launch credentials (the Envoy and Dispatch bearers, a spec's secrets) travel in the authenticated
+start command, and the launcher writes them owner-only and exclusively into a fresh `g<generation>`
+directory of its role's memory-backed private directory, removing anything already there without
+following it, and removes that directory when the generation ends: a role started in a running pod
+never waits on the kubelet to refresh a Secret, and no credential is in an argv, an environment
+value, a log or an error. The role's own agent runs as the same user in the same container, so it
+can read its own generation's credentials, as a pane can; it cannot read another role's. A role
+process is addressed by the pod's uid, its
+container and its generation (the incarnation `<pod uid>/<generation>`): starting, suspending or
+recovering one role never restarts the pod or touches another role, and a new generation of a role
+in a running pod is a new child of its launcher. The pod itself is replaced only when it dies or
+was not made by this runtime, and the Sandbox is deleted once the last of its roles is released
 (`packages/daemon-go/internal/runtime/sandbox`). The daemon runs on a host its pods can reach and
 serves the worker stream they dial. The controller is `legion controller start` on the operator's
 machine ([Operator-launched controller](#operator-launched-controller)).

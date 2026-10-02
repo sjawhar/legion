@@ -799,7 +799,7 @@ func (r *liveRig) kubectl(args ...string) (string, error) {
 
 // exec runs a command in a claim's main container, through the admin context.
 func (r *liveRig) exec(c *liveClaim, command ...string) (string, error) {
-	out, err := r.kubectl(append([]string{"exec", SandboxName(c.token), "-c", mainContainer, "--"}, command...)...)
+	out, err := r.kubectl(append([]string{"exec", SandboxName(c.token), "-c", string(c.role), "--"}, command...)...)
 	return strings.TrimSpace(out), err
 }
 

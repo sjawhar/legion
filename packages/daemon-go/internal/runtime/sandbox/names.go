@@ -4,28 +4,26 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
-// The pod's own paths. The tree volume is mounted whole at TreeRoot in the workspace-init and main
-// containers, and its SessionsSubPath directory again at Oh My Pi's sessions directory in the main
-// container, so a session the agent writes is on the volume and workspace-init sees it under
-// TreeRoot. The claim's Secret is projected twice: its boot half at BootDir for the main
-// container, its provisioning token at ProvisionDir for the workspace-fetch container alone.
-// FeedDir is the feed workspace-fetch fills and workspace-init reads. StateDir is the main
-// container's in-memory LEGION_STATE_DIR. ProvidersDir is where the main container mounts the
-// configured keys of the providers Secret (ProvidersSecretName), one file per variable Oh My Pi
-// reads, which the shim exports into Oh My Pi's environment alone (--provider-env-dir).
+// The pod's own paths. The tree volume is mounted whole at TreeRoot in workspace-init and each
+// role launcher, and sessions stay on it. Each role container has its own launcher token
+// projection at LauncherDir, and its own memory-backed LauncherPrivateDir, where its launcher
+// writes the generation's boot token and launch credentials, and StateDir.
 const (
-	TreeRoot        = "/legion"
-	SessionsSubPath = "sessions"
-	BootDir         = "/var/run/legion/boot"
-	ProvisionDir    = "/var/run/legion/provision"
-	FeedDir         = "/var/run/legion/feed"
-	StateDir        = "/var/run/legion/state"
-	ProvidersDir    = "/var/run/legion/providers"
+	TreeRoot           = "/legion"
+	SessionsSubPath    = "sessions"
+	LauncherDir        = "/var/run/legion/launcher"
+	LauncherPrivateDir = "/var/run/legion/private"
+	LauncherTokenFile  = "LAUNCHER_TOKEN"
+	ProvisionDir       = "/var/run/legion/provision"
+	FeedDir            = "/var/run/legion/feed"
+	StateDir           = "/var/run/legion/state"
+	ProvidersDir       = "/var/run/legion/providers"
 )
 
 // AgentSecretsKeyDir is the memory-backed directory the pod's agent-secrets key and enrollment id
@@ -121,6 +119,14 @@ func TreeClaimName(root claim.Token) string { return treeVolume + "-" + SandboxN
 // secretName is the claim's Secret, which its Sandbox owns.
 func secretName(sandbox string) string { return sandbox + "-boot" }
 
+// roleSecretName is one role's private Secret in an issue Sandbox. Its launcher token and every
+// `<NAME>_FILE` credential are projected only into that role's container.
+func roleSecretName(sandbox string, role claim.Role) string {
+	return sandbox + "-" + string(role) + "-boot"
+}
+
+func roleVolume(prefix string, role claim.Role) string { return prefix + "-" + string(role) }
+
 // ProvidersSecretName is the Secret the operator keeps the provider keys in, the TypeScript
 // runtime's legion-<project>-providers (k8s-manifests.ts, providersSecretName), project being the
 // project token (claim.ProjectToken: lowercase letters and digits). Every pod mounts from it exactly
@@ -153,4 +159,11 @@ func labelValue(key string) string {
 		return key
 	}
 	return dnsName(key, maxNameLength)
+}
+
+// generationDir is where a role's launcher writes one generation's credentials: a fresh
+// owner-only directory under its private directory, gone when the generation ends
+// (internal/launcher). The launcher and this runtime agree on `g<generation>`.
+func generationDir(generation uint64) string {
+	return LauncherPrivateDir + "/g" + strconv.FormatUint(generation, 10)
 }

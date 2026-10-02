@@ -90,8 +90,8 @@ func TestEveryExchangedFrameRoundTripsItsWireLine(t *testing.T) {
 		},
 		{
 			"launcher_start",
-			`{"type":"launcher_start","id":"start-1","generation":7,"bootToken":"boot-7","argv":["omp","--mode","rpc"],"env":["A=B"],"resumeFile":"/sessions/test.jsonl"}`,
-			LauncherStart{ID: "start-1", Generation: 7, BootToken: "boot-7", Argv: []string{"omp", "--mode", "rpc"}, Env: []string{"A=B"}, ResumeFile: "/sessions/test.jsonl"},
+			`{"type":"launcher_start","id":"start-1","generation":7,"argv":["omp","--mode","rpc"],"env":["A=B"],"files":{"LEGION_BOOT_TOKEN":"boot-7"},"resumeFile":"/sessions/test.jsonl"}`,
+			LauncherStart{ID: "start-1", Generation: 7, Argv: []string{"omp", "--mode", "rpc"}, Env: []string{"A=B"}, Files: map[string]string{"LEGION_BOOT_TOKEN": "boot-7"}, ResumeFile: "/sessions/test.jsonl"},
 		},
 		{
 			"launcher_start_result",

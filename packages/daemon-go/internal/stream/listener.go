@@ -77,8 +77,8 @@ type Listener struct {
 	timeout  time.Duration
 	log      *slog.Logger
 	events   *eventQueue
-	mu    sync.Mutex
-	conns map[claim.Token]*Conn
+	mu       sync.Mutex
+	conns    map[claim.Token]*Conn
 	// accepted is every connection not yet finished, the ones still in their hello included, so
 	// the end of the listener can close them all.
 	accepted map[net.Conn]struct{}
