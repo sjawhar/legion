@@ -1,7 +1,8 @@
 # Dispatch HTTP Server (Go)
 
-`cmd/dispatch` serves the Dispatch dashboard, native API, document rooms, GitHub
-OAuth, and the GitHub REST/GraphQL proxy.
+`cmd/dispatch` serves the Dispatch dashboard, native API, document rooms, Google
+sign-in through the sign-in pool, and the read-only GitHub proxy the web app's
+GitHub reads go through as the GitHub App.
 
 ## Startup and persistence
 
@@ -12,7 +13,7 @@ carrying `pool_max_conns` is refused at open rather than silently overridden —
 applies embedded migrations from `internal/dispatch/store/migrations` (refusing
 the whole set, applying nothing, when `pgmigrate.Load` refuses it, and bounding
 every migration's lock waits at `pgmigrate.LockTimeout`; README "Database
-migrations"), then starts HTTP serving. The Postgres store contains users,
+migrations"), then starts HTTP serving. The Postgres store contains people,
 native issues, artifacts, document updates, and the event outbox.
 `envoy-dispatch census` (`cmd/dispatch/census.go`, `store.Census` over
 `pgmigrate.Census`) is a deployment's pre-deploy census of the migrations the
