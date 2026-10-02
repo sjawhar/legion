@@ -248,6 +248,65 @@ test("a phone thread trap skips a held composer's disabled controls", async ({ b
   }
 });
 
+// The wrap's other end. Shift+Tab from the sheet's first control goes to its last enabled one,
+// past the held composer's disabled controls, which a trap that read the `disabled` attribute
+// counted as the last and could not focus, leaving focus where it was.
+test("a phone sheet trap wraps Shift+Tab from its first control past a held composer", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: initialMarkdown,
+    title: "Held composer reverse focus trap",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 844, width: 390 });
+    await page.goto(`/issues/${issue.key}`);
+    await selectEditorText(page, "brown");
+    await barAction(page, "Comment");
+    const sheet = page.getByTestId("margin-sheet");
+    const form = sheet.getByRole("form", { name: "Comment composer" });
+    const body = form.getByLabel("Comment");
+    const refuse = await refusePosts(page, "**/api/v1/issues/*/comments");
+    await body.fill("Keep this draft");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(body).toBeDisabled();
+
+    // The last control a reader can reach - enabled and on screen - is marked before the key.
+    const startedOnFirst = await sheet.evaluate((container) => {
+      const enabled = [
+        ...container.querySelectorAll<HTMLElement>(
+          'a[href], button, textarea, input, select, [tabindex]:not([tabindex="-1"])'
+        ),
+      ].filter((control) => !control.matches(":disabled") && control.getClientRects().length > 0);
+      const first = enabled[0];
+      const last = enabled.at(-1);
+      if (first === undefined || last === undefined || first === last)
+        throw new Error("expected two enabled focus targets");
+      last.dataset.e2eLastControl = "";
+      first.focus();
+      return document.activeElement === first;
+    });
+    expect(startedOnFirst).toBe(true);
+    await page.keyboard.press("Shift+Tab");
+    expect(
+      await page.evaluate(
+        () => document.activeElement?.hasAttribute("data-e2e-last-control") ?? false
+      )
+    ).toBe(true);
+    await expect(body).toHaveValue("Keep this draft");
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(body).toHaveValue("Keep this draft");
+  } finally {
+    await alice.close();
+  }
+});
+
 test("a project document has no horizontal overflow, 44px controls, and a Comments margin sheet", async ({
   browser,
 }, testInfo) => {
