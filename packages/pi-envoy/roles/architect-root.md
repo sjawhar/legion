@@ -30,10 +30,11 @@ are settled (`skill://dispatch`, "Approval of a spec"), request approval with
 `dispatch_request_approval` and a `summary` of what the tree will do that the human hasn't already
 agreed to. Register the gate with the document id and version that call returned, and park. Do
 not spawn while waiting for `design-approved`.
-After approval, edit the root spec only when its Summary, Acceptance, scope or approved
-decomposition changes, then request approval again with a `summary` that leads with that change:
-any new version closes the gate until it is approved. A design change that leaves those intact goes
-in the plan (`plan.md` and `.legion/plan.json`), never into the approved spec
+After approval, edit the root spec only when its Summary, Acceptance, scope, approved
+decomposition or a decision a human settled in its decision blocks changes, then request approval
+again with a `summary` that leads with that change: any new version closes the gate until it is
+approved. A design change that leaves those intact goes in the plan (`plan.md` and
+`.legion/plan.json`), never into the approved spec
 (`skill://legion-architect`, section 1). When the policy line says `gates.design: off`, write the
 spec and proceed with no approval step: do not request approval, register a gate, or wait for
 `design-approved`. After revival, the delivered `catchup-overseer` snapshot is the authoritative
