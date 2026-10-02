@@ -174,17 +174,22 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		return err
 	}
 	if cfg.Runtime.Name == "kubernetes" {
-		// The issue-pod cutover ships no outbox row that fails on every attempt: a tree close whose
-		// linger the outbox cannot decode is named before the layout marker is installed or any
-		// row runs. Migration 0016 repaired the older shape, and no daemon writes one since.
-		undecodable, err := st.UndecodableTreeCloses(boot, cfg.Project)
-		if err != nil {
+		// The issue-pod cutover ships no outbox row that fails on every attempt: a tree close that
+		// could never run (one the outbox cannot decode, or naming a root generation beyond the
+		// store's) is named before the layout marker is installed or any row runs. Migration 0016
+		// repaired the older shape, and no daemon writes one since.
+		var unrunnable []int64
+		if err := pgx.BeginFunc(boot, st.Pool(), func(tx pgx.Tx) error {
+			var err error
+			unrunnable, err = record.NewStore().UnrunnableTreeCloses(boot, tx, cfg.Project)
+			return err
+		}); err != nil {
 			st.Close()
 			return err
 		}
-		if len(undecodable) > 0 {
+		if len(unrunnable) > 0 {
 			st.Close()
-			return fmt.Errorf("refuse the Kubernetes runtime's issue-pod layout: outbox tree close rows %v name no root generation (linger) the outbox can decode, so each would fail on every attempt; delete them before the cutover", undecodable)
+			return fmt.Errorf("refuse the Kubernetes runtime's issue-pod layout: outbox tree close rows %v can never run (the outbox cannot decode them, or their linger is beyond the store's generations), so each would fail on every attempt; delete them before the cutover", unrunnable)
 		}
 	}
 	if cfg.DispatchURL != "" {

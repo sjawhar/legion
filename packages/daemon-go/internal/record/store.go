@@ -694,6 +694,43 @@ func (s *Postgres) PendingStatusWrites(ctx context.Context, tx pgx.Tx, project s
 	return pending, nil
 }
 
+// UnrunnableTreeCloses lists the outbox tree closes of project (the issue-key prefix ClaimDue
+// leases by) that can never complete and so would be retried forever. Each row is decoded exactly
+// as the outbox decodes it (DecodeOutboxPayload: known fields only, a supervise request's shape, a
+// non-zero linger); a close that decodes still never runs when its linger, the root generation it
+// expires, is above the store's largest generation, which the cleanup reservation refuses.
+// Migration 0016 gave the older shape, a close naming no linger, its root's generation or deleted
+// it, and every writer since enqueues a validated row, so after migration this census is empty
+// unless a row was written outside the daemon.
+func (s *Postgres) UnrunnableTreeCloses(ctx context.Context, tx pgx.Tx, project string) ([]int64, error) {
+	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
+		where kind = $1 and payload->>'op' = 'tree_close' and split_part(issue, '-', 1) = $2 order by id`,
+		string(OutboxKindSupervise), project)
+	if err != nil {
+		return nil, fmt.Errorf("census unrunnable tree closes: %w", err)
+	}
+	defer rows.Close()
+	var unrunnable []int64
+	for rows.Next() {
+		row, err := scanOutbox(rows)
+		if err != nil {
+			return nil, fmt.Errorf("census unrunnable tree closes: %w", err)
+		}
+		payload, err := DecodeOutboxPayload(row)
+		if err != nil {
+			unrunnable = append(unrunnable, row.ID)
+			continue
+		}
+		if request, ok := payload.(SuperviseRequest); !ok || request.Linger > maxInt64 {
+			unrunnable = append(unrunnable, row.ID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("census unrunnable tree closes: %w", err)
+	}
+	return unrunnable, nil
+}
+
 func scanOutbox(row scanner) (OutboxRow, error) {
 	var out OutboxRow
 	var kind string

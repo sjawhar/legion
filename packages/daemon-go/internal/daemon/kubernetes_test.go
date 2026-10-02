@@ -183,10 +183,13 @@ func TestAKubernetesDaemonRefusesTheBootItsWorkerImageProbeRefuses(t *testing.T)
 }
 
 // The issue-pod cutover ships no outbox row that fails on every attempt. Each tree close of the
-// daemon's own project whose linger the outbox cannot decode (zero, missing, a string) is named by
-// id and refuses the boot before the layout marker is installed or the boot recorded; a valid
-// close, and another project's row, which this daemon never leases, are not named.
-func TestAKubernetesDaemonRefusesAnUndecodableTreeCloseBeforeItsLayout(t *testing.T) {
+// daemon's own project that could never run is named by id and refuses the boot before the layout
+// marker is installed or the boot recorded: one the outbox's strict decode refuses (linger zero,
+// missing, a string, above 2^64-1, or a field it does not know) and one whose linger decodes but is
+// above the store's largest generation, 2^63-1, which the cleanup reservation refuses. A close at
+// linger 1 or exactly 2^63-1, and another project's row, which this daemon never leases, are not
+// named.
+func TestAKubernetesDaemonRefusesAnUnrunnableTreeCloseBeforeItsLayout(t *testing.T) {
 	ctx := context.Background()
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
 	pool := isolatedOutboxPool(t)
@@ -206,12 +209,16 @@ func TestAKubernetesDaemonRefusesAnUndecodableTreeCloseBeforeItsLayout(t *testin
 	missing := insert(issue, ``)
 	text := insert(issue, `, "linger": "1"`)
 	insert(issue, `, "linger": 1`)
+	insert(issue, `, "linger": 9223372036854775807`)
+	aboveInt64 := insert(issue, `, "linger": 9223372036854775808`)
+	aboveUint64 := insert(issue, `, "linger": 18446744073709551616`)
+	unknown := insert(issue, `, "linger": 1, "lingers": true`)
 	insert("OTHER-208", `, "linger": 0`)
 
 	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	err := run(runCtx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
-	want := fmt.Sprintf("outbox tree close rows %v name no root generation", []int64{zero, missing, text})
+	want := fmt.Sprintf("outbox tree close rows %v can never run", []int64{zero, missing, text, aboveInt64, aboveUint64, unknown})
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("boot = %v, want the refusal %q", err, want)
 	}
