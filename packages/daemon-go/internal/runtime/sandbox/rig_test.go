@@ -58,6 +58,7 @@ func testOptions() Options {
 	return Options{
 		Namespace:    testNamespace,
 		Project:      testProject,
+		SkipLegacyLayoutCensusForTest: true,
 		Image:        testImage,
 		StorageClass: "gp2",
 		TreeVolume:   resource.MustParse("20Gi"),
