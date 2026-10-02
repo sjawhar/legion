@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -11,7 +10,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 )
 
-const launcherUsage = "legion launcher --connect tcp://host:port --token-file <path> --sandbox <name> --role <role> --pod-uid <uid> --boot-token-file <path>"
+const launcherUsage = "legion launcher --connect tcp://host:port --token-file <path> --sandbox <name> --role <role> [--pod-uid <uid>] --private-dir <dir>"
 
 // runLauncher is PID 1 in one role container of an issue pod. It has no workflow policy: it only
 // authenticates to the daemon and starts or stops its own worker-shim child on daemon commands.
@@ -21,8 +20,8 @@ func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	tokenFile := flags.String("token-file", "", "the role-private launcher token file")
 	sandbox := flags.String("sandbox", "", "the issue Sandbox name")
 	role := flags.String("role", "", "the role container this launcher owns")
-	podUID := flags.String("pod-uid", "", "the current Kubernetes pod UID")
-	bootTokenFile := flags.String("boot-token-file", "", "the role-private worker shim boot token file")
+	podUID := flags.String("pod-uid", os.Getenv("POD_UID"), "the current Kubernetes pod UID (POD_UID by default)")
+	privateDir := flags.String("private-dir", "", "the role container's own memory-backed directory for each generation's credentials")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -37,7 +36,7 @@ func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	}
 	if err := launcher.Run(ctx, launcher.Config{
 		Connect: *connect, Token: strings.TrimSpace(string(token)), Sandbox: *sandbox, Role: *role,
-		PodUID: *podUID, BootTokenFile: *bootTokenFile, Stdout: stdout, Stderr: stderr,
+		PodUID: *podUID, PrivateDir: *privateDir, Stdout: stdout, Stderr: stderr,
 	}); err != nil && ctx.Err() == nil {
 		fmt.Fprintln(stderr, err)
 		return 1

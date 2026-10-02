@@ -20,18 +20,16 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-// The pod's containers: workspace-fetch, the one that holds the provisioning token and mounts
-// nothing a tree agent can write; workspace-init, which works on the tree volume without it; and
-// the agent's.
+// The pod's init containers: workspace-fetch, the one that holds the provisioning token and
+// mounts nothing a tree agent can write; and workspace-init, which works on the tree volume
+// without it. Each of the six role containers is named for its role.
 const (
 	fetchContainer = "workspace-fetch"
 	initContainer  = "workspace-init"
-	mainContainer  = "worker"
 )
 
 // The pod's volumes.
 const (
-	bootVolume      = "boot"
 	provisionVolume = "provision"
 	feedVolume      = "feed"
 	stateVolume     = "state"
@@ -81,23 +79,31 @@ var runtimeOwned = map[string]bool{
 	"UV_PYTHON_INSTALL_DIR": true, "UV_CACHE_DIR": true, "UV_LINK_MODE": true,
 }
 
-// legionVolumeNames are the volumes Legion puts in a pod, a worker's or the probe's, whose names
-// the operator's volumes may not take. The agent-secrets volumes are reserved whether or not this
-// deployment enrolls: an operator's pod may never claim them.
+// legionVolumeNames are the volumes Legion puts in a pod, an issue pod's or the probe's, whose
+// names the operator's volumes may not take: the shared ones and each role's private ones. The
+// agent-secrets volumes are reserved whether or not this deployment enrolls: an operator's pod may
+// never claim them.
 func legionVolumeNames() []string {
 	names := []string{
-		treeVolume, bootVolume, provisionVolume, feedVolume, stateVolume, tempVolume, configVolume, providersVolume,
-		agentSecretsTokenVolume, agentSecretsKeyVolume,
+		treeVolume, provisionVolume, feedVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
+	}
+	for _, role := range claim.Roles {
+		names = append(names, roleVolume("launcher", role), roleVolume("private", role),
+			roleVolume(stateVolume, role), roleVolume(agentSecretsKeyVolume, role))
 	}
 	slices.Sort(names)
 	return names
 }
 
 // legionMountPaths are where Legion mounts a volume in the containers the operator's mounts join,
-// the worker's and the image probe's: an operator's mount may be neither at, under, nor above one.
-// AgentSecretsKeyDir and AgentSecretsTokenDir are reserved whether or not this deployment enrolls.
+// each role container and the image probe's: an operator's mount may be neither at, under, nor
+// above one. AgentSecretsKeyDir and AgentSecretsTokenDir are reserved whether or not this
+// deployment enrolls.
 func legionMountPaths() []string {
-	paths := []string{TreeRoot, ompSessionsDir, BootDir, StateDir, xdgConfigHome, ProvidersDir, AgentSecretsKeyDir, AgentSecretsTokenDir}
+	paths := []string{
+		TreeRoot, ompSessionsDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
+		AgentSecretsKeyDir, AgentSecretsTokenDir,
+	}
 	slices.Sort(paths)
 	return paths
 }
@@ -164,7 +170,6 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	for _, name := range r.providersSecrets {
 		delete(secrets, name)
 	}
-	secrets[bootTokenKey] = spec.BootToken
 	if r.dispatchToken != "" {
 		secrets[dispatchTokenKey] = r.dispatchToken
 	}
@@ -303,17 +308,8 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 	legion := r.tools.Legion
 	helper := "!" + legion + " credential"
 	_, providersMounts := r.providers()
-	shim := []string{legion, "worker-shim", "--connect", r.streamURL, "--boot-token-file", BootDir + "/" + bootTokenKey, "--pod-safety"}
-	if len(providersMounts) > 0 {
-		shim = append(shim, "--provider-env-dir", ProvidersDir)
-	}
-	if r.agentSecrets != nil {
-		shim = append(shim, "--agent-secrets-key-dir", AgentSecretsKeyDir,
-			"--pod-token-file", AgentSecretsTokenDir+"/"+AgentSecretsTokenFile,
-			"--agent-secrets-bin", r.tools.AgentSecrets)
-	}
 	spec := corev1.PodSpec{
-		RestartPolicy:                 corev1.RestartPolicyNever,
+		RestartPolicy:                 corev1.RestartPolicyAlways,
 		TerminationGracePeriodSeconds: new(int64(math.Ceil(r.terminationGrace.Seconds()))),
 		AutomountServiceAccountToken:  new(false),
 		ServiceAccountName:            r.pod.ServiceAccount,
@@ -357,22 +353,7 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 			Resources:       resources,
 			SecurityContext: restrictedContainer(),
 		}},
-		Containers: []corev1.Container{{
-			Name:       mainContainer,
-			Image:      r.image,
-			Command:    slices.Concat(shim, []string{"--"}, l.agentArgv(r.agent)),
-			Env:        r.mainEnvironment(l, helper),
-			WorkingDir: l.workspace,
-			VolumeMounts: slices.Concat([]corev1.VolumeMount{
-				{Name: treeVolume, MountPath: TreeRoot},
-				{Name: treeVolume, MountPath: ompSessionsDir, SubPath: SessionsSubPath},
-				{Name: bootVolume, MountPath: BootDir, ReadOnly: true},
-				{Name: stateVolume, MountPath: StateDir},
-				{Name: configVolume, MountPath: xdgConfigHome},
-			}, providersMounts, r.agentSecretsMounts(), r.pod.VolumeMounts),
-			Resources:       resources,
-			SecurityContext: restrictedContainer(),
-		}},
+		Containers: r.launcherContainers(l, providersMounts),
 	}
 	for i := range spec.InitContainers {
 		kubeletLiteral(&spec.InitContainers[i])
@@ -389,6 +370,43 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 	}
 }
 
+// launcherContainers are the issue pod's six role containers. Each runs only `legion launcher`;
+// the per-generation worker-shim argv and plain environment arrive in the launcher's start
+// command, while values the kubelet must resolve (the downward API, the operator's secret refs)
+// are set on every container.
+func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMount) []corev1.Container {
+	var resolved []corev1.EnvVar
+	for _, entry := range r.mainEnvironment(l, "!"+r.tools.Legion+" credential") {
+		if entry.ValueFrom != nil {
+			resolved = append(resolved, entry)
+		}
+	}
+	containers := make([]corev1.Container, 0, len(claim.Roles))
+	for _, role := range claim.Roles {
+		containers = append(containers, corev1.Container{
+			Name:  string(role),
+			Image: r.image,
+			Command: []string{
+				r.tools.Legion, "launcher", "--connect", r.streamURL, "--token-file", LauncherDir + "/" + LauncherTokenFile,
+				"--sandbox", l.name, "--role", string(role), "--private-dir", LauncherPrivateDir,
+			},
+			Env:        slices.Clone(resolved),
+			WorkingDir: l.workspace,
+			VolumeMounts: slices.Concat([]corev1.VolumeMount{
+				{Name: treeVolume, MountPath: TreeRoot},
+				{Name: treeVolume, MountPath: ompSessionsDir, SubPath: SessionsSubPath},
+				{Name: roleVolume("launcher", role), MountPath: LauncherDir, ReadOnly: true},
+				{Name: roleVolume("private", role), MountPath: LauncherPrivateDir},
+				{Name: roleVolume(stateVolume, role), MountPath: StateDir},
+				{Name: configVolume, MountPath: xdgConfigHome},
+			}, providersMounts, r.agentSecretsMounts(role), r.pod.VolumeMounts),
+			Resources:       r.resources[role],
+			SecurityContext: restrictedContainer(),
+		})
+	}
+	return containers
+}
+
 // kubeletLiteral escapes a container's command and env values against the kubelet's expansion,
 // in which `$(NAME)` is another variable's value and `$$` a literal `$`: every `$` is doubled, so
 // the process receives the text as written, the inlined system prompt and the operator's
@@ -402,71 +420,67 @@ func kubeletLiteral(c *corev1.Container) {
 	}
 }
 
-// volumes are every volume of the pod: the tree volume, the claim's Secret projected twice (its
-// boot half for the main container, its provisioning token for the workspace-fetch container
-// alone), the feed workspace-fetch fills and workspace-init reads, on the node's disk because it
-// holds a clone of the repository, three in-memory directories — the main container's state
-// directory, workspace-fetch's TMPDIR, and the XDG config home workspace-init and the main
-// container share — the providers Secret's configured keys when there are any, and the operator's
-// volumes.
+// volumes are the issue pod's shared workspace, jj config home and init-only provisioning
+// material, plus each role's launcher token projection, private credential directory and state.
 func (r *Runtime) volumes(l launch) []corev1.Volume {
-	var boot []corev1.KeyToPath
 	providers, _ := r.providers()
-	for _, name := range sortedKeys(l.secrets) {
-		boot = append(boot, corev1.KeyToPath{Key: name, Path: name})
-	}
 	memory := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
+	roleVolumes := make([]corev1.Volume, 0, len(claim.Roles)*3)
+	for _, role := range claim.Roles {
+		roleVolumes = append(roleVolumes,
+			corev1.Volume{Name: roleVolume("launcher", role), VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: roleSecretName(l.name, role), Items: []corev1.KeyToPath{{Key: LauncherTokenFile, Path: LauncherTokenFile}},
+				DefaultMode: new(int32(0o440)),
+			}}},
+			corev1.Volume{Name: roleVolume("private", role), VolumeSource: memory},
+			corev1.Volume{Name: roleVolume(stateVolume, role), VolumeSource: memory},
+		)
+	}
 	return slices.Concat([]corev1.Volume{
 		{Name: treeVolume, VolumeSource: corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: TreeClaimName(l.root)},
 		}},
-		{Name: bootVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-			SecretName: secretName(l.name), Items: boot, DefaultMode: new(int32(0o440)),
-		}}},
 		{Name: provisionVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 			SecretName: secretName(l.name), Items: []corev1.KeyToPath{{Key: provisionTokenKey, Path: provisionTokenKey}},
 			DefaultMode: new(int32(0o440)),
 		}}},
 		{Name: feedVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-		{Name: stateVolume, VolumeSource: memory},
 		{Name: tempVolume, VolumeSource: memory},
 		{Name: configVolume, VolumeSource: memory},
-	}, r.agentSecretsVolumes(), providers, r.pod.Volumes)
+	}, roleVolumes, r.agentSecretsVolumes(), providers, r.pod.Volumes)
 }
 
-// agentSecretsVolumes are the two volumes an enrolled pod carries: the projected token for the
-// broker's audience — one source, alone in its volume, the shape the cluster's admission policy
-// admits per token — and the memory-backed key directory. None when the runtime enrolls no
-// pod.
+// agentSecretsVolumes are one shared projected ServiceAccount token volume (the admission policy
+// permits one volume per audience) and one private memory key directory per role.
 func (r *Runtime) agentSecretsVolumes() []corev1.Volume {
 	a := r.agentSecrets
 	if a == nil {
 		return nil
 	}
 	expiry := int64(math.Ceil(a.TokenExpiry.Seconds()))
-	return []corev1.Volume{
-		{Name: agentSecretsTokenVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
-			DefaultMode: new(int32(0o440)),
-			Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-				Audience: a.Audience, ExpirationSeconds: &expiry, Path: AgentSecretsTokenFile,
-			}}},
+	volumes := []corev1.Volume{{Name: agentSecretsTokenVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+		DefaultMode: new(int32(0o440)),
+		Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+			Audience: a.Audience, ExpirationSeconds: &expiry, Path: AgentSecretsTokenFile,
 		}}},
-		{Name: agentSecretsKeyVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
-			Medium: corev1.StorageMediumMemory, SizeLimit: resource.NewQuantity(1<<20, resource.BinarySI),
-		}}},
+	}}}}
+	for _, role := range claim.Roles {
+		volumes = append(volumes, corev1.Volume{Name: roleVolume(agentSecretsKeyVolume, role), VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: resource.NewQuantity(1<<20, resource.BinarySI)},
+		}})
 	}
+	return volumes
 }
 
-// agentSecretsMounts are the worker container's mounts of the two agent-secrets volumes: the
-// token read-only, and the key directory writable so the client can persist its key and
-// enrollment id across a pod's own lifetime. Neither when the runtime enrolls no pod.
-func (r *Runtime) agentSecretsMounts() []corev1.VolumeMount {
+// agentSecretsMounts keeps each role's generated private key and enrollment id out of the other
+// launcher containers while sharing the one configured audience projection.
+func (r *Runtime) agentSecretsMounts(role claim.Role) []corev1.VolumeMount {
 	if r.agentSecrets == nil {
 		return nil
 	}
 	return []corev1.VolumeMount{
 		{Name: agentSecretsTokenVolume, MountPath: AgentSecretsTokenDir, ReadOnly: true},
-		{Name: agentSecretsKeyVolume, MountPath: AgentSecretsKeyDir},
+		{Name: roleVolume(agentSecretsKeyVolume, role), MountPath: AgentSecretsKeyDir},
 	}
 }
 
@@ -607,7 +621,8 @@ func (r *Runtime) initWaitSeconds() int64 {
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): the variables every
 // tmux pane is told (runtime/tmux/spawn.go, panePairs), then the operator's (runtime.kubernetes.pod),
-// then the spec's own, then one `<NAME>_FILE` pointer per secret into the boot projection, then one
+// then the spec's own, then one `<NAME>_FILE` pointer per secret into the generation's private
+// launcher directory, then one
 // per providers secret into the providers mount. None of
 // them repeats another: the runtime refuses a spec naming one of its own (runtimeOwned), and the
 // daemon an operator's variable naming one of the runtime's or a spec's. LEGION_GRANT_FILE names
@@ -661,8 +676,11 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	for _, name := range sortedKeys(spec.Env) {
 		add(name, spec.Env[name])
 	}
+	// The launcher writes each launch credential into its private directory before the child
+	// starts (shimwire.LauncherStart.Files): no kubelet Secret propagation stands in the way of a
+	// role started in a running pod.
 	for _, name := range sortedKeys(l.secrets) {
-		add(name+"_FILE", BootDir+"/"+name)
+		add(name+"_FILE", generationDir(l.spec.Generation)+"/"+name)
 	}
 	return append(env, r.providersPointers()...)
 }

@@ -1,12 +1,16 @@
 package sandbox
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,6 +34,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 const (
@@ -43,6 +48,8 @@ var (
 	rootToken   = claim.Token("legion-legion-legion-208-architect")
 	workerToken = claim.Token("legion-legion-legion-208-tester")
 	otherToken  = claim.Token("legion-legion-legion-208-reviewer")
+	// childToken is a role of another issue of the same tree: its own issue pod.
+	childToken = claim.Token("legion-legion-legion-209-implementer")
 )
 
 // testOptions are the options every test starts from: production's shape, with budgets short
@@ -113,6 +120,10 @@ func workerSpec(t *testing.T) runtime.SpawnSpec {
 	return testSpec(t, workerToken, claim.RoleTester, testTree)
 }
 
+func childSpec(t *testing.T) runtime.SpawnSpec {
+	return testSpec(t, childToken, claim.RoleImplementer, "LEGION-209")
+}
+
 // action is one API request either fake saw, in the one order both saw them.
 type action struct {
 	verb, resource, subresource, name string
@@ -157,6 +168,12 @@ type rig struct {
 	noController bool
 	// hooks, when set, sees the runtime's Sandbox gets and deletes (withSandboxHooks).
 	hooks *sandboxHooks
+
+	// commands are what each role's fake launcher was sent, in order; wanted are the roles whose
+	// fake launcher connects again whenever their issue gets a new pod.
+	commandsMu sync.Mutex
+	commands   map[claim.Token][]shimwire.Frame
+	wanted     map[claim.Token]bool
 }
 
 type rigOption func(*rig, *Options)
@@ -425,19 +442,47 @@ func (g *rig) createPod(s *sandbox) {
 		pod.Spec.NodeName = "ip-192-0-2-7"
 		pod.Status = runningStatus()
 	}
+	// A new pod's role launchers are new processes: each one a test asked for connects afresh,
+	// with no child, replacing the previous pod's connection — before the pod is visible, so a
+	// launch that sees the pod finds its launcher.
+	g.commandsMu.Lock()
+	var reconnect []claim.Token
+	for token := range g.wanted {
+		if SandboxName(token) == s.Name {
+			reconnect = append(reconnect, token)
+		}
+	}
+	g.commandsMu.Unlock()
+	for _, token := range reconnect {
+		g.connect(token)
+	}
 	_ = g.kube.Tracker().Add(pod)
 }
 
 func runningStatus() corev1.PodStatus {
-	return corev1.PodStatus{
+	status := corev1.PodStatus{
 		Phase: corev1.PodRunning,
 		InitContainerStatuses: []corev1.ContainerStatus{{
 			Name: initContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}},
 		}},
-		ContainerStatuses: []corev1.ContainerStatus{{
-			Name: mainContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
-		}},
 	}
+	for _, role := range claim.Roles {
+		status.ContainerStatuses = append(status.ContainerStatuses, corev1.ContainerStatus{
+			Name: string(role), State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		})
+	}
+	return status
+}
+
+// reportLauncher registers a connected launcher for token reporting state, without a connection
+// to drive: the observation mapping reads only the reported state.
+func (g *rig) reportLauncher(token claim.Token, state shimwire.LauncherState) {
+	g.t.Helper()
+	s := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "test-" + string(token)})
+	s.mu.Lock()
+	s.state = state
+	close(s.ready)
+	s.mu.Unlock()
 }
 
 // pod is the pod named name in the tracker, or nil.
@@ -495,11 +540,105 @@ func (g *rig) eventually(what string, ok func() bool) {
 // spawn launches spec and fails the test on an error.
 func (g *rig) spawn(spec runtime.SpawnSpec) runtime.Locator {
 	g.t.Helper()
+	g.launcher(spec.Claim)
 	loc, err := g.r.Spawn(g.ctx, spec)
 	if err != nil {
 		g.t.Fatalf("spawn %s: %v", spec.Claim, err)
 	}
 	return loc
+}
+
+// launcher is the test rig's role-private launcher connection. It models only the launcher
+// protocol — one child generation at a time, a stop of another generation refused — and records
+// every command: child shims and their agent events remain the fake Conns this rig already owns.
+func (g *rig) launcher(token claim.Token) {
+	g.t.Helper()
+	g.commandsMu.Lock()
+	if g.wanted == nil {
+		g.wanted = map[claim.Token]bool{}
+	}
+	g.wanted[token] = true
+	g.commandsMu.Unlock()
+	g.r.launchers.mu.Lock()
+	_, exists := g.r.launchers.sessions[token]
+	g.r.launchers.mu.Unlock()
+	if exists {
+		return
+	}
+	g.connect(token)
+}
+
+// connect is one fake launcher process's connection for token, replacing any earlier one.
+func (g *rig) connect(token claim.Token) {
+	server, client := net.Pipe()
+	session := g.r.launchers.accept(token, shimwire.LauncherHello{LauncherID: "test-" + string(token)})
+	g.t.Cleanup(func() { _ = client.Close() })
+	go session.ServeLauncher(server, bufio.NewReader(server), shimwire.NewWriter(server))
+	go func() {
+		writer := shimwire.NewWriter(client)
+		_ = writer.WriteFrame(shimwire.LauncherState{})
+		reader := bufio.NewReader(client)
+		var running uint64
+		for {
+			line, err := reader.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			frame, err := shimwire.Decode(line)
+			if err != nil {
+				return
+			}
+			g.commandsMu.Lock()
+			if g.commands == nil {
+				g.commands = map[claim.Token][]shimwire.Frame{}
+			}
+			g.commands[token] = append(g.commands[token], frame)
+			g.commandsMu.Unlock()
+			switch command := frame.(type) {
+			case shimwire.LauncherStart:
+				if running != 0 {
+					_ = writer.WriteFrame(shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("generation %d is still running", running)})
+					continue
+				}
+				running = command.Generation
+				_ = writer.WriteFrame(shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation})
+				_ = writer.WriteFrame(shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: command.Generation, PID: 42}})
+			case shimwire.LauncherStop:
+				if running != 0 && running != command.Generation {
+					_ = writer.WriteFrame(shimwire.LauncherStopResult{ID: command.ID, Error: fmt.Sprintf("generation %d is running, not %d", running, command.Generation)})
+					continue
+				}
+				stopped := running
+				running = 0
+				_ = writer.WriteFrame(shimwire.LauncherStopResult{ID: command.ID, OK: true})
+				state := shimwire.LauncherState{}
+				if stopped != 0 {
+					state.LastExit = &shimwire.LauncherExit{Generation: stopped, Code: 143, Signal: "terminated"}
+				}
+				_ = writer.WriteFrame(state)
+			}
+		}
+	}()
+}
+
+// issueLaunchers connects a fake launcher for every role of token's issue.
+func (g *rig) issueLaunchers(token claim.Token) {
+	g.t.Helper()
+	role, ok := roleContainer(token)
+	if !ok {
+		g.t.Fatalf("%s names no role", token)
+	}
+	issue := strings.TrimSuffix(string(token), "-"+role)
+	for _, sibling := range claim.Roles {
+		g.launcher(claim.Token(issue + "-" + string(sibling)))
+	}
+}
+
+// sent is every command token's fake launcher received.
+func (g *rig) sent(token claim.Token) []shimwire.Frame {
+	g.commandsMu.Lock()
+	defer g.commandsMu.Unlock()
+	return slices.Clone(g.commands[token])
 }
 
 // sandboxObject is a Sandbox as the API would hold it, for a test's starting state.
@@ -535,16 +674,22 @@ func podObject(name, uid, ownerUID string, labels map[string]string, status core
 	return pod
 }
 
-// claimLabels are the labels a claim's objects carry.
-func claimLabels(role claim.Role) map[string]string {
-	return map[string]string{labelProject: testProject, labelTree: testTree, labelIssue: testTree, labelRole: string(role)}
+// claimLabels are the labels an issue's shared Sandbox carries.
+func claimLabels(_ claim.Role) map[string]string {
+	return map[string]string{labelProject: testProject, labelTree: testTree, labelIssue: testTree}
 }
 
-// sandboxLocator is a recorded locator of the claim at uid.
+// sandboxLocator is a recorded role process locator in one issue pod.
 func sandboxLocator(token claim.Token, uid string) runtime.Locator {
+	container, ok := roleContainer(token)
+	if !ok {
+		panic("test token has no role")
+	}
 	return runtime.Locator{
-		Runtime: runtime.RuntimeSandbox, Claim: token, Incarnation: uid,
-		Sandbox: &runtime.SandboxLocator{Namespace: testNamespace, Name: SandboxName(token)},
+		Runtime:     runtime.RuntimeSandbox,
+		Claim:       token,
+		Incarnation: runtime.SandboxIncarnation(uid, 1),
+		Sandbox:     &runtime.SandboxLocator{Namespace: testNamespace, Name: SandboxName(token), PodUID: uid, Container: container, Generation: 1},
 	}
 }
 

@@ -283,7 +283,7 @@ func TestADaemonRefusesARolePromptsDirectoryThatIsNotThere(t *testing.T) {
 }
 
 // A Kubernetes daemon refuses, before its boot, an operator pod that collides with Legion's own —
-// a mount at Legion's boot projection (the LEGION-270 plan's negative control), and a provider key
+// a mount at Legion's launcher token projection (the LEGION-270 plan's negative control), and a provider key
 // or pod variable a launch secret's pointer names (the Envoy bearer's, the NATS nkey seed's) — so
 // no pod is ever built with it.
 func TestAKubernetesDaemonRefusesAnOperatorPodCollidingWithLegionsBeforeItsBoot(t *testing.T) {
@@ -293,14 +293,14 @@ func TestAKubernetesDaemonRefusesAnOperatorPodCollidingWithLegionsBeforeItsBoot(
 		want   string
 	}{
 		{
-			name: "a mount at Legion's boot projection",
+			name: "a mount at Legion's launcher token projection",
 			change: func(cfg *config.Config) {
 				cfg.Runtime.Kubernetes.Pod = config.PodConfig{
 					Volumes:      []corev1.Volume{{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}}},
-					VolumeMounts: []corev1.VolumeMount{{Name: "creds", MountPath: "/var/run/legion/boot", ReadOnly: true}},
+					VolumeMounts: []corev1.VolumeMount{{Name: "creds", MountPath: "/var/run/legion/launcher", ReadOnly: true}},
 				}
 			},
-			want: "runtime.kubernetes.pod.volume_mounts[0].mount_path /var/run/legion/boot overlaps /var/run/legion/boot, which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's",
+			want: "runtime.kubernetes.pod.volume_mounts[0].mount_path /var/run/legion/launcher overlaps /var/run/legion/launcher, which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's",
 		},
 		{
 			name: "a provider key the Envoy bearer's pointer names",

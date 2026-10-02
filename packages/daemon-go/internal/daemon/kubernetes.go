@@ -227,7 +227,7 @@ type brokerEnroller struct{ client *agentsecrets.Client }
 
 func (b brokerEnroller) Enroll(ctx context.Context, e supervise.PodEnrollment) (string, error) {
 	enrolled, err := b.client.Enroll(ctx, agentsecrets.PodEnrollment{
-		PodUID: e.PodUID, Thumbprint: e.Thumbprint, PodToken: e.PodToken, Session: e.Session,
+		PodUID: e.PodUID, Slot: e.Slot, Thumbprint: e.Thumbprint, PodToken: e.PodToken, Session: e.Session,
 	})
 	if err != nil {
 		return "", err

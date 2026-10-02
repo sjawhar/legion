@@ -2,9 +2,13 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -14,6 +18,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 // Spawn starts a fresh agent for spec's claim, over whatever the claim's Sandbox already holds
@@ -43,16 +48,9 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 	return r.relaunch(ctx, prev, spec)
 }
 
-// relaunch is Spawn's and Resume's one sequence (decision 3a):
-//  1. ensure the Sandbox exists, created Suspended when absent, after any deletion in progress;
-//  2. stop any current pod: a Sandbox not Suspended is patched Suspended;
-//  3. wait out the old pod, until no pod the Sandbox owns holds the name;
-//  4. write the claim's Secret, owned by the Sandbox, with a provisioning token minted for it;
-//  5. patch the new pod template and `operatingMode: Running` in one write;
-//  6. wait for the new pod, and return its uid as the incarnation.
-//
-// Steps 4 to 6 take the tree's launch turn and wait until no other pod of the tree is in
-// workspace-init (awaitTreeInitialized).
+// relaunch ensures the issue pod once, then starts only this role's worker-shim through its
+// authenticated launcher. An existing healthy issue pod is never suspended or reinitialized when
+// another role starts or one role recovers.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	l, err := r.prepare(spec)
 	if err != nil {
@@ -61,61 +59,81 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	fail := func(step string, err error) (runtime.Locator, error) {
 		return runtime.Locator{}, fmt.Errorf("launch %s: %s: %w", spec.Claim, step, err)
 	}
-	// This launch replaces whatever process the claim ran, so nothing more is reported about it.
 	r.forget(spec.Claim)
-	// Before its Sandbox can exist, so the orphan sweep keeps it until the claim's release.
 	r.own(spec.Claim)
-	if prev != nil {
-		r.log.Info("sandbox runtime: relaunching", "claim", spec.Claim, "previous", prev.Incarnation, "resume", l.resumeFile != "")
+	release, err := r.lockIssue(ctx, spec.Issue)
+	if err != nil {
+		return fail("take its issue pod launch turn", err)
 	}
+	defer release()
 	s, err := r.ensureSandbox(ctx, l)
 	if err != nil {
 		return fail("ensure its sandbox", err)
 	}
-	if s.mode() != modeSuspended {
-		if err := r.setMode(ctx, s, modeSuspended); err != nil {
-			return fail("suspend its sandbox", err)
+	pod := r.storedPod(s.Name)
+	if !ownedBy(pod, s.UID) || terminal(pod) || !r.launcherBound(ctx, s, pod) {
+		if s.mode() != modeSuspended {
+			if err := r.setMode(ctx, s, modeSuspended); err != nil {
+				return fail("suspend its sandbox", err)
+			}
+		}
+		old, err := r.awaitPodGone(ctx, s)
+		if err != nil {
+			return fail("wait out its previous pod", err)
+		}
+		treeRelease, err := r.lockTree(ctx, l.spec.Tree)
+		if err != nil {
+			return fail("take its tree's launch turn", err)
+		}
+		defer treeRelease()
+		if err := r.awaitTreeInitialized(ctx, l); err != nil {
+			return fail("wait for its tree's other pods to finish initializing", err)
+		}
+		minting, cancel := call(ctx)
+		provisionToken, err := r.tokens.Token(minting, l.spec.Repository.Owner())
+		cancel()
+		if err != nil {
+			return fail("mint the provisioning token for "+l.spec.Repository.Owner(), err)
+		}
+		if err := r.writeSecret(ctx, s, l, provisionToken); err != nil {
+			return fail("write its secret", err)
+		}
+		template := r.podTemplate(l, r.treePodScheduled(l))
+		running, err := r.patch(ctx, s,
+			jsonPatchOp{Op: "add", Path: "/spec/podTemplate", Value: template},
+			jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeRunning},
+		)
+		if err != nil {
+			r.suspendFailedLaunch(ctx, spec.Claim, s)
+			return fail("set its sandbox running", err)
+		}
+		pod, err = r.awaitNewPod(ctx, running, old)
+		if err != nil {
+			r.suspendFailedLaunch(ctx, spec.Claim, s)
+			return fail("wait for its new pod", err)
+		}
+		s = running
+		if err := r.bindLauncherSecrets(ctx, s, l, string(pod.UID)); err != nil {
+			return fail("bind its role launchers to the new pod", err)
 		}
 	}
-	old, err := r.awaitPodGone(ctx, s)
-	if err != nil {
-		return fail("wait out its previous pod", err)
-	}
-	release, err := r.lockTree(ctx, l.spec.Tree)
-	if err != nil {
-		return fail("take its tree's launch turn", err)
-	}
-	defer release()
-	if err := r.awaitTreeInitialized(ctx, l); err != nil {
-		return fail("wait for its tree's other pods to finish initializing", err)
-	}
-	// Minted now, not before the waits: an installation token can be handed out with minutes left.
-	// Bounded like an API call, since the tree's launch turn is held while it runs.
-	owner := l.spec.Repository.Owner()
-	minting, cancel := call(ctx)
-	provisionToken, err := r.tokens.Token(minting, owner)
-	cancel()
-	if err != nil {
-		return fail("mint the provisioning token for "+owner, err)
-	}
-	if err := r.writeSecret(ctx, s, l, provisionToken); err != nil {
-		return fail("write its secret", err)
-	}
-	template := r.podTemplate(l, r.treePodScheduled(l))
-	running, err := r.patch(ctx, s,
-		jsonPatchOp{Op: "add", Path: "/spec/podTemplate", Value: template},
-		jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeRunning},
-	)
-	if err != nil {
-		r.suspendFailedLaunch(ctx, spec.Claim, s)
-		return fail("set its sandbox running", err)
-	}
-	pod, err := r.awaitNewPod(ctx, running, old)
-	if err != nil {
-		r.suspendFailedLaunch(ctx, spec.Claim, s)
-		return fail("wait for its new pod", err)
-	}
 	loc := r.locatorFor(spec.Claim, pod.UID, spec.Generation)
+	starting, cancel := context.WithTimeout(ctx, r.bootTimeout+r.terminationGrace)
+	defer cancel()
+	// A launcher still running an earlier generation of this role runs a process the supervisor has
+	// already given up on: it is stopped before the new generation starts, so two generations of a
+	// role never run side by side.
+	if state, connected := r.launchers.state(spec.Claim); connected && state.Child != nil && state.Child.Generation < spec.Generation {
+		stale := state.Child.Generation
+		if err := r.launchers.stop(starting, spec.Claim, shimwire.LauncherStop{
+			ID: "stop-" + strconv.FormatUint(stale, 10), Generation: stale, GraceMs: int(math.Ceil(r.terminationGrace.Seconds() * 1000)),
+		}); err != nil {
+			return fail(fmt.Sprintf("stop its earlier generation %d", stale), err)
+		}
+	}
+	if err := r.launchers.start(starting, spec.Claim, launcherCommand(l, r)); err != nil {
+		return fail("start through its authenticated launcher", err)
+	}
 	r.join(loc)
 	return loc, nil
 }
@@ -268,37 +286,63 @@ func (r *Runtime) waitedOut(s *sandbox) string {
 	return detail + "; it has no pod"
 }
 
-// writeSecret makes the claim's Secret hold this launch's provisioning token and its secrets, the
-// boot token among them, owned by the Sandbox so garbage collection deletes it with the Sandbox
-// (decision 6). It is written while the Sandbox is Suspended, so no pod ever waits on a missing
-// Secret or starts on the previous generation's token. A Secret left owned by an earlier Sandbox of
-// the same name is replaced, not updated: the collector may already be deleting it.
+// writeSecret makes the issue's init-only provisioning Secret and, for each of the six fixed
+// launchers, a role-private Secret holding a fresh launcher token. It runs only before a new issue
+// pod starts, so every pod's launchers authenticate with tokens no earlier pod held; a role's
+// launch credentials travel in its launcher's start command instead (launcherCommand).
 func (r *Runtime) writeSecret(ctx context.Context, s *sandbox, l launch, provisionToken string) error {
+	if err := r.upsertSecret(ctx, corev1.Secret{
+		ObjectMeta: r.secretMeta(s, l, secretName(s.Name)),
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{provisionTokenKey: []byte(provisionToken)},
+	}); err != nil {
+		return err
+	}
+	for _, role := range claim.Roles {
+		token, err := launcherToken()
+		if err != nil {
+			return err
+		}
+		if err := r.upsertSecret(ctx, corev1.Secret{
+			ObjectMeta: r.secretMeta(s, l, roleSecretName(s.Name, role)),
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{LauncherTokenFile: []byte(token)},
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Runtime) secretMeta(s *sandbox, l launch, name string) metav1.ObjectMeta {
+	return metav1.ObjectMeta{
+		Name: name, Namespace: r.namespace, Labels: r.labels(l.spec), Annotations: map[string]string{annotationIssue: l.spec.Issue},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox", Name: s.Name, UID: s.UID,
+		}},
+	}
+}
+
+func (r *Runtime) upsertSecret(ctx context.Context, want corev1.Secret) error {
 	ctx, cancel := call(ctx)
 	defer cancel()
-	data := map[string][]byte{provisionTokenKey: []byte(provisionToken)}
-	for name, value := range l.secrets {
-		data[name] = []byte(value)
-	}
-	want := corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: secretName(s.Name), Namespace: r.namespace, Labels: r.labels(l.spec),
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox", Name: s.Name, UID: s.UID,
-			}},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: data,
-	}
 	secrets := r.kube.CoreV1().Secrets(r.namespace)
 	existing, err := secrets.Get(ctx, want.Name, metav1.GetOptions{})
 	switch {
 	case apierrors.IsNotFound(err):
+		_, err = secrets.Create(ctx, &want, metav1.CreateOptions{})
+		return err
 	case err != nil:
 		return err
-	case ownedBySandbox(existing.OwnerReferences, s.UID):
+	case ownedBySandbox(existing.OwnerReferences, want.OwnerReferences[0].UID):
 		existing.Labels, existing.OwnerReferences, existing.Data, existing.StringData = want.Labels, want.OwnerReferences, want.Data, nil
-		_, err := secrets.Update(ctx, existing, metav1.UpdateOptions{})
+		if existing.Annotations == nil {
+			existing.Annotations = map[string]string{}
+		}
+		for key, value := range want.Annotations {
+			existing.Annotations[key] = value
+		}
+		_, err = secrets.Update(ctx, existing, metav1.UpdateOptions{})
 		return err
 	default:
 		uid := existing.UID
@@ -306,9 +350,17 @@ func (r *Runtime) writeSecret(ctx context.Context, s *sandbox, l launch, provisi
 			!apierrors.IsNotFound(err) {
 			return err
 		}
+		_, err = secrets.Create(ctx, &want, metav1.CreateOptions{})
+		return err
 	}
-	_, err = secrets.Create(ctx, &want, metav1.CreateOptions{})
-	return err
+}
+
+func launcherToken() (string, error) {
+	var bytes [32]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return "", fmt.Errorf("mint launcher token: %w", err)
+	}
+	return hex.EncodeToString(bytes[:]), nil
 }
 
 func ownedBySandbox(refs []metav1.OwnerReference, uid types.UID) bool {
@@ -354,6 +406,24 @@ func (r *Runtime) lockTree(ctx context.Context, tree string) (func(), error) {
 	if !ok {
 		turn = make(chan struct{}, 1)
 		r.trees[tree] = turn
+	}
+	r.mu.Unlock()
+	select {
+	case turn <- struct{}{}:
+		return func() { <-turn }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// lockIssue serializes first creation and replacement of one issue pod. Role starts in a healthy
+// pod share this lock only while they select a launcher command; child issue pods remain distinct.
+func (r *Runtime) lockIssue(ctx context.Context, issue string) (func(), error) {
+	r.mu.Lock()
+	turn, ok := r.issues[issue]
+	if !ok {
+		turn = make(chan struct{}, 1)
+		r.issues[issue] = turn
 	}
 	r.mu.Unlock()
 	select {

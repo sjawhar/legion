@@ -4,6 +4,11 @@
 
 ### Changed
 
+- `legion.goDaemonApiVersion` is 12. Contract 12 changes a Sandbox locator on the Go daemon's
+  `GET /legion/v1/state`: every role of an issue now runs in one shared Agent Sandbox pod, so the
+  `sandbox` member names the issue's Sandbox, the pod's uid, the role container and the process
+  generation, and the incarnation is `<pod uid>/<generation>` (LEGION-462). The Go client's strict
+  state parse needs this release beside a Go daemon at 12; the daemon's boot gate refuses an 11.
 - A spec is the design conversation (LEGION-387). The `dispatch` skill's "Writing a spec" drops
   the eight required headings: a spec starts as the problem and its evidence, puts each open
   question in a decision block at the end of the section that discusses it, records a settled

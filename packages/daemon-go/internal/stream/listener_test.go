@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"net"
@@ -379,6 +380,84 @@ func TestAV1HelloIsRefusedByName(t *testing.T) {
 	}
 	if _, ok := h.listener.Conn(testClaim); ok {
 		t.Fatal("the v1 hello registered")
+	}
+}
+
+// launcherServe records the launcher connection a resolver accepted and the frames it read.
+type launcherServe struct{ frames chan shimwire.Frame }
+
+func (s *launcherServe) ServeLauncher(_ net.Conn, reader *bufio.Reader, _ *shimwire.Writer) {
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			close(s.frames)
+			return
+		}
+		frame, err := shimwire.Decode(line)
+		if err != nil {
+			close(s.frames)
+			return
+		}
+		s.frames <- frame
+	}
+}
+
+// A role launcher's hello goes to the launcher acceptor, never to the claim resolver: an accepted
+// one is acknowledged and handed its connection, and no claim connection or agent event comes of it.
+func TestALauncherHelloReachesTheLauncherAcceptorAlone(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	served := &launcherServe{frames: make(chan shimwire.Frame, 4)}
+	var got shimwire.LauncherHello
+	h.listener.SetLauncherResolver(func(hello shimwire.LauncherHello) (LauncherHandler, string) {
+		got = hello
+		return served, ""
+	})
+	p := dial(t, h.listener.Addr())
+	hello := shimwire.LauncherHello{Token: "launcher-token", Sandbox: "legion-legion-legion-208", Role: "tester", PodUID: "pod-1", LauncherID: "l-1"}
+	p.send(hello)
+	p.expect(shimwire.TypeLauncherHelloAck)
+	p.send(shimwire.LauncherState{})
+	select {
+	case frame := <-served.frames:
+		if _, ok := frame.(shimwire.LauncherState); !ok {
+			t.Fatalf("the launcher handler read %#v, want its state", frame)
+		}
+	case <-time.After(wait):
+		t.Fatal("the accepted launcher's frames never reached its handler")
+	}
+	if got != hello {
+		t.Fatalf("the acceptor saw %+v, want %+v", got, hello)
+	}
+	if _, ok := h.listener.Conn(testClaim); ok {
+		t.Fatal("a launcher hello bound a claim connection")
+	}
+	if events := h.stop(); len(events) != 0 {
+		t.Fatalf("a launcher connection emitted agent events %v", events)
+	}
+}
+
+// A launcher the acceptor refuses, or one that arrives before any acceptor is registered, is
+// closed with nothing sent and its reason logged.
+func TestARefusedLauncherHelloIsClosedAndLogged(t *testing.T) {
+	for name, tc := range map[string]struct {
+		register bool
+		reason   string
+	}{
+		"no acceptor yet":        {false, "launcher acceptor unavailable"},
+		"refused by the runtime": {true, "launcher token is not current"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := startListener(t, harnessOptions{})
+			if tc.register {
+				h.listener.SetLauncherResolver(func(shimwire.LauncherHello) (LauncherHandler, string) { return nil, tc.reason })
+			}
+			p := dial(t, h.listener.Addr())
+			p.send(shimwire.LauncherHello{Token: "stale", Sandbox: "s", Role: "tester", PodUID: "pod-1", LauncherID: "l-1"})
+			p.awaitClosed()
+			if lines := h.logs.Lines(); len(lines) != 1 || !strings.Contains(lines[0], tc.reason) {
+				t.Fatalf("log = %q, want one refusal naming %q", lines, tc.reason)
+			}
+		})
 	}
 }
 
