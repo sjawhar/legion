@@ -375,10 +375,11 @@ Legion holds no model route. `pod` is the operator's: `env`, `volumes` (each a `
 `config_map` or `projected` source), `volume_mounts` and `service_account`, added to every pod, the
 image probe's included, and refused where they name a path or variable of Legion's own or the
 worker image's. `provider_keys` names keys of the providers Secret, which every pod mounts, those
-keys alone, for the shim to export. `deploy/kubernetes/operator-route/` is one operator's: the
+keys alone, for the shim to export. `deploy/kubernetes/operator-route/` is an example of one: the
 Hawk model gateway, keyed by a projected ServiceAccount token, with a `models.yml`, a settings
-overlay, and the pod that mounts them; the Stage 4a and 4b proofs run on it, each with its own copy
-of its ConfigMap.
+overlay, and the pod that mounts them; the operator keeps their own copies of the two files in a
+directory of their own ([Operator configuration](#operator-configuration)), and the Stage 4a and 4b
+proofs run on the example, each with its own copy of its ConfigMap.
 
 Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
@@ -719,7 +720,7 @@ worker image's; and the top-level `provider_keys` maps each variable Oh My Pi re
 providers Secret, of which every pod then mounts those keys alone, for the shim to export.
 Legion holds no model route: everything a pod's Oh My Pi needs to reach a model — a `models.yml`,
 a settings overlay in `PI_CONFIG_FILES`, a token — is the operator's, through `pod` and
-`provider_keys`. `deploy/kubernetes/operator-route/` is one such operator's (the Go live
+`provider_keys`. `deploy/kubernetes/operator-route/` is an example of one (the Go live
 harnesses': the Hawk model gateway, keyed by a projected ServiceAccount token). [Operator
 configuration](#operator-configuration) is what an operator gives it.
 
@@ -827,12 +828,17 @@ claim's pod and the image probe's.
   collides with Legion's own is refused at load, naming both: a variable the runtime, the worker
   image's `ENV` or every launch sets, a volume name Legion uses, or a mount at, under or above a path
   Legion mounts, the image owns, or a tool runs from. `legion start --check-config` runs the same
-  check. [`deploy/kubernetes/operator-route/`](../deploy/kubernetes/operator-route/README.md) is a
-  complete one, the one the Go live harnesses run on: a `models.yml` and a settings overlay from a
+  check. [`deploy/kubernetes/operator-route/`](../deploy/kubernetes/operator-route/README.md) is an
+  example of one, the one the Go live harnesses run on: a `models.yml` and a settings overlay from a
   ConfigMap, and a mounted token its key command reads. Its README lists what an operator supplies
-  and how `pod` and `provider_keys` compose; its `apply.sh` creates the ConfigMap. Both files are
-  mounted by `subPath`, which the kubelet never refreshes, so a changed ConfigMap reaches only pods
-  created after the change.
+  and how `pod` and `provider_keys` compose.
+- **Each role's model** is the operator's: the `models.yml` and `overlay.yml` they keep in a
+  directory of their own (for example `~/.local/state/legion-model-config`), which
+  `deploy/kubernetes/operator-route/apply.sh --context <kube context> <directory>` writes into the
+  ConfigMap `legion-operator-route` in namespace `legion`, its only writer. To change a role's
+  model, edit its line under `modelRoles` in that `overlay.yml` and run the same command again.
+  Pods started after that use it; a running pod keeps the files it started with until it restarts,
+  since both are mounted by `subPath`, which the kubelet never refreshes.
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
   (AGENTC-393 Plan C), so an agent in a pod runs `agent-secrets <SECRET> -- <command>` and gets only
   that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback
