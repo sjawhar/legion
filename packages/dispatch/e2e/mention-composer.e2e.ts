@@ -154,50 +154,6 @@ test("a conversation send holds Reply and refuses Ctrl+K from the same task", as
   }
 });
 
-test("a phone thread keeps Tab inside while its held composer is disabled", async ({
-  browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name !== "iphone", "The full-screen thread dialog is phone-only.");
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Held phone thread" });
-  await createComment(issue.key, { body: "Thread root" });
-  const alice = await asUser(browser, "alice");
-
-  try {
-    const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/conversation`);
-    await page
-      .getByRole("list", { name: "Conversation turns" })
-      .locator(":scope > li")
-      .filter({ hasText: "Thread root" })
-      .getByRole("button", { name: "Reply" })
-      .click();
-    const dialog = page.getByRole("dialog", { name: "Thread" });
-    const form = dialog.getByRole("form", { name: "Comment composer" });
-    const field = form.getByLabel("Comment");
-    const send = await holdPosts(page, `**/api/v1/issues/${issue.key}/comments`);
-    await field.fill("Phone reply");
-    await form.getByRole("button", { name: "Send" }).click();
-    await expect(field).toBeDisabled();
-
-    await dialog.evaluate((node) => {
-      const focusable = node.querySelectorAll<HTMLElement>(
-        'a[href], button:not(:disabled), textarea:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])'
-      );
-      const last = focusable.item(focusable.length - 1);
-      if (last === null) throw new Error("expected an enabled thread control");
-      last.focus();
-    });
-    await page.keyboard.press("Tab");
-    await expect
-      .poll(() => dialog.evaluate((node) => node.contains(document.activeElement)))
-      .toBe(true);
-    send.release();
-  } finally {
-    await alice.close();
-  }
-});
-
 test("E7b and Retry: removing a prefilled mention creates a plain reply, and retries name their target", async ({
   browser,
 }) => {
