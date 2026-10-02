@@ -227,55 +227,97 @@ blocked() {
 
 rk() { timeout --foreground 300 kubectl --kubeconfig "$runtime_kubeconfig" --context "$runtime_context" "$@"; }
 
-# ---- capacity: one tree per node, across every project ------------------------------------------
-# Every tree pod refuses a node that holds another tree's pod, whatever that tree's project
-# (manifest.go affinity, docs/kubernetes.md "Tree sizing"), and the legion NodePool's limits bound
-# its nodes. A tree therefore needs a schedulable pool node no tree pod is on, or room under the
-# limits for one more node of the floor's size.
+# ---- capacity: one tree per node, across every project in the namespace -------------------------
+# Every tree pod refuses a node that holds another tree's pod in its own namespace, whatever that
+# tree's project (manifest.go affinity, docs/kubernetes.md "Tree sizing"): the anti-affinity term has
+# no namespaceSelector. Every daemon on the legion pool runs its trees in namespace legion, and the
+# legion NodePool's limits bound its nodes. A tree therefore needs a ready pool node no live tree
+# pod of the namespace is on, or room under the limits for one more node of the floor's size.
 
-# pool_tree_room prints the trees the legion pool can place now, as JSON: its schedulable nodes no
-# tree pod is on, and the nodes of the floor's size (instance-cpu and instance-memory Gt) that its
-# cpu and memory limits leave room for beside the capacity it already runs.
+# pool_tree_room prints the trees the legion pool can place now, as JSON: its pool nodes that are
+# Ready, schedulable, not tainted karpenter.sh/disrupted and not being deleted, with no non-terminal
+# tree pod of the namespace on them; and the nodes of the floor's size (instance-cpu and
+# instance-memory Gt) that its cpu and memory limits leave room for beside what it already runs.
+# The reads go through files in the run's work directory: a namespace's pods and events can exceed
+# the argument list a --argjson would put them in.
 pool_tree_room() {
-  local pool nodes pods
-  pool=$(kubectl --context "$operator" --request-timeout=30s get nodepool legion -o json) || return 1
-  nodes=$(kubectl --context "$operator" --request-timeout=30s get nodes -l karpenter.sh/nodepool=legion -o json) || return 1
-  pods=$(kubectl --context "$operator" --request-timeout=30s get pods -A -l legion.dev/tree -o json) || return 1
-  jq -cn --argjson pool "$pool" --argjson nodes "$nodes" --argjson pods "$pods" '
-    def qty: tostring | capture("^(?<n>[0-9.]+)(?<u>[a-zA-Z]*)$")
+  kubectl --context "$operator" --request-timeout=30s get nodepool legion -o json >"$work/room-pool.json" || return 1
+  kubectl --context "$operator" --request-timeout=30s get nodes -l karpenter.sh/nodepool=legion -o json >"$work/room-nodes.json" || return 1
+  kubectl --context "$operator" -n "$namespace" --request-timeout=30s get pods -l legion.dev/tree -o json >"$work/room-pods.json" || return 1
+  jq -cn --slurpfile pool "$work/room-pool.json" --slurpfile nodes "$work/room-nodes.json" --slurpfile pods "$work/room-pods.json" '
+    $pool[0] as $pool | $nodes[0] as $nodes | $pods[0] as $pods
+    | def qty: tostring | capture("^(?<n>[0-9.]+)(?<u>[a-zA-Z]*)$")
       | (.n | tonumber) * {"": 1, m: 0.001, k: 1e3, M: 1e6, G: 1e9, T: 1e12, Ki: 1024, Mi: 1048576, Gi: 1073741824, Ti: 1099511627776}[.u];
     def gt($key): [$pool.spec.template.spec.requirements[] | select(.key == $key and .operator == "Gt") | .values[0] | tonumber] | max // 0;
     ($pool.spec.limits // {}) as $limit | ($pool.status.resources // {}) as $used
     | [ if $limit.cpu then ((($limit.cpu | qty) - (($used.cpu // 0) | qty)) / (gt("karpenter.k8s.aws/instance-cpu") + 1) | floor) else empty end,
         if $limit.memory then ((($limit.memory | qty) - (($used.memory // 0) | qty)) / ((gt("karpenter.k8s.aws/instance-memory") + 1) * 1048576) | floor) else empty end
       ] as $by_limit
-    | ([$pods.items[] | .spec.nodeName // empty] | unique) as $held
-    | [$nodes.items[] | select((.spec.unschedulable // false) | not) | .metadata.name | . as $n | select($held | index($n) | not)] as $free
+    | ([$pods.items[] | select(.status.phase != "Succeeded" and .status.phase != "Failed") | .spec.nodeName // empty] | unique) as $held
+    | [$nodes.items[]
+        | select((.spec.unschedulable // false) | not)
+        | select(.metadata.deletionTimestamp == null)
+        | select(any(.spec.taints[]?; .key == "karpenter.sh/disrupted") | not)
+        | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+        | .metadata.name | . as $n | select($held | index($n) | not)] as $free
     | {free_nodes: $free, new_nodes: (if ($by_limit | length) == 0 then null else ([$by_limit | min, 0] | max) end), tree_nodes: $held}
     | .room = (if .new_nodes == null then null else (.free_nodes | length) + .new_nodes end)'
 }
 
-# limit_pending prints each pod of the run the scheduler cannot place because the legion pool is at
-# its limits: Pending and PodScheduled=False Unschedulable, with Karpenter's FailedScheduling event
-# saying every instance type exceeds the pool's limits. It prints nothing when there is none, or
-# when the cluster cannot be read.
+# limit_pending SELECTOR prints each pod of the run matching SELECTOR (label pairs added to the
+# run's project label) that the scheduler cannot place because the legion pool is at its limits:
+# Pending and PodScheduled=False Unschedulable, with a Karpenter FailedScheduling event saying
+# every instance type exceeds the pool's limits that names this pod by uid and is no older than its
+# Unschedulable transition. A Sandbox pod keeps its Sandbox's name across replacements, and events
+# outlive the pod they name, so a name match is no evidence. Prints nothing when there is none,
+# or when the cluster cannot be read.
 limit_pending() {
-  local pods events
-  pods=$(kubectl --context "$operator" -n "$namespace" --request-timeout=20s get pods -l "legion.dev/project=$run_label" -o json) || return 0
-  events=$(kubectl --context "$operator" -n "$namespace" --request-timeout=20s get events --field-selector reason=FailedScheduling -o json) || return 0
-  jq -r --argjson events "$events" '
-    [.items[] | select(.status.phase == "Pending" and any(.status.conditions[]?; .type == "PodScheduled" and .status == "False" and .reason == "Unschedulable")) | .metadata.name] as $pending
-    | $events.items[] | select(.involvedObject.kind == "Pod" and (.involvedObject.name as $n | $pending | index($n)) and ((.message // "") | contains("exceed limits for nodepool (NodePool=legion)")))
-    | "pod \(.involvedObject.name) (Karpenter: all available instance types exceed limits for nodepool legion)"' <<<"$pods" | sort -u
+  kubectl --context "$operator" -n "$namespace" --request-timeout=20s get pods -l "legion.dev/project=$run_label,$1" -o json >"$work/limit-pods.json" || return 0
+  kubectl --context "$operator" -n "$namespace" --request-timeout=20s get events --field-selector reason=FailedScheduling -o json >"$work/limit-events.json" || return 0
+  jq -r --slurpfile events "$work/limit-events.json" '
+    $events[0] as $events
+    | def seconds: sub("\\.[0-9]+"; "") | fromdateiso8601;
+    [.items[] | select(.status.phase == "Pending")
+      | {name: .metadata.name, uid: .metadata.uid,
+         since: ([.status.conditions[]? | select(.type == "PodScheduled" and .status == "False" and .reason == "Unschedulable") | .lastTransitionTime // empty] | first)}
+      | select(.uid != null and .since != null) | .since |= seconds] as $pending
+    | $events.items[]
+    | select(.involvedObject.kind == "Pod" and ((.message // "") | contains("exceed limits for nodepool (NodePool=legion)")))
+    | (.series.lastObservedTime // .lastTimestamp // .eventTime // .metadata.creationTimestamp) as $at
+    | select($at != null)
+    | ($at | seconds) as $t | .involvedObject.uid as $uid
+    | $pending[] | select(.uid == $uid and $t >= .since)
+    | "pod \(.name) (uid \(.uid); Karpenter: all available instance types exceed limits for nodepool legion)"' "$work/limit-pods.json" | sort -u
+}
+
+# capacity_subject is the label selector (within the run) of the pods the current wait needs placed,
+# set by on_subject for that wait alone; empty, no wait is a capacity question.
+capacity_subject=
+# on_subject SELECTOR CMD... runs CMD, a wait (until_true, or a helper that waits) whose progress
+# needs the run's pods matching SELECTOR placed, with SELECTOR as the subject limit_pending_blocked
+# asks about if it times out. on_tree TREE CMD... is the same for TREE's pods.
+on_subject() {
+  local previous=$capacity_subject
+  capacity_subject=$1
+  shift
+  "$@"
+  capacity_subject=$previous
+}
+on_tree() {
+  local tree=$1
+  shift
+  on_subject "legion.dev/tree=$tree" "$@"
 }
 
 # limit_pending_blocked is the run's timeout_hook (lib/rig.sh until_true). A wait that timed out
-# while a pod of the run could not be placed for the pool's limits was starved by capacity, which is
-# no verdict on the change, so the check ends BLOCKED naming the pod. Any other timeout still fails,
-# and a check that fails outright (a leak, an audit, a pod verdict) is never asked.
+# while one of its own subject's pods could not be placed for the pool's limits was starved by
+# capacity, which is no verdict on the change, so the check ends BLOCKED naming the pod. A wait with
+# no subject, a starved pod outside the subject, any other timeout, and every check that fails
+# outright (a leak, an audit, a pod verdict) still fail.
 limit_pending_blocked() {
   local pending
-  pending=$(limit_pending 2>/dev/null) || pending=
+  [ -n "$capacity_subject" ] || return 0
+  pending=$(limit_pending "$capacity_subject" 2>/dev/null) || pending=
   [ -z "$pending" ] || blocked "capacity: the legion pool is at its limits, so the scheduler cannot place $(tr '\n' ';' <<<"$pending")"
 }
 
@@ -1674,7 +1716,7 @@ spec:
       securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
 EOF
 op apply -f "$reach" >/dev/null || blocked "the operator could not create the reachability pod ($reach)"
-until_true 600 "the reachability pod to finish" sh -c "timeout 120 kubectl --context '$operator' -n '$namespace' get pod legion-e2e4b-reach-$$ -o jsonpath='{.status.phase}' | grep -qx 'Succeeded\|Failed'"
+on_subject legion.dev/e2e-control=reach until_true 600 "the reachability pod to finish" sh -c "timeout 120 kubectl --context '$operator' -n '$namespace' get pod legion-e2e4b-reach-$$ -o jsonpath='{.status.phase}' | grep -qx 'Succeeded\|Failed'"
 op logs "legion-e2e4b-reach-$$" >"$evidence/reach.txt" 2>&1
 op delete pod "legion-e2e4b-reach-$$" --wait=false >/dev/null 2>&1
 while read -r service answer; do
@@ -1847,7 +1889,7 @@ if [ -n "$design_gate" ]; then
   drive_gated_spec "$tree1"
 else
   specs+=("$tree2")
-  for issue in "${specs[@]}"; do drive_spec "$issue"; done
+  for issue in "${specs[@]}"; do on_tree "$issue" drive_spec "$issue"; done
 fi
 for issue in "${specs[@]}"; do
   version=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.currentVersion')
@@ -1856,13 +1898,13 @@ done
 pass
 
 begin tree-separation
-wait_for_worker "$tree1" planner
+on_tree "$tree1" wait_for_worker "$tree1" planner
 record_resident "$tree1" planner || fail "tree 1's planner has no session and pod to keep: $(claim_view "$tree1" planner)"
 send_agent "$tree1" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
-wait_for_phase "$tree1" implementing 1800
-wait_for_worker "$tree1" implementer
+on_tree "$tree1" wait_for_phase "$tree1" implementing 1800
+on_tree "$tree1" wait_for_worker "$tree1" implementer
 record_resident "$tree1" implementer || fail "tree 1's implementer has no session and pod to keep: $(claim_view "$tree1" implementer)"
-wait_for_worker "$tree2" planner
+on_tree "$tree2" wait_for_worker "$tree2" planner
 node_of_tree() { op get pods -l "legion.dev/project=$run_label,legion.dev/tree=$1" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u; }
 at=$(date -u +%FT%TZ)
 nodes1=$(node_of_tree "$tree1")
@@ -1884,7 +1926,7 @@ begin repository-configuration
 # its agent with is recorded beside them.
 nonce="fixture-read-$RANDOM$RANDOM"
 send_agent "$tree2" planner "Stage 4b proof repository-configuration operation: read this repository's README and AGENTS.md, then answer this message with the single word $nonce and wait for the next instruction. Do not write a handoff yet."
-until_true 900 "tree 2's planner to answer $nonce" assistant_said "$tree2" planner "$nonce"
+on_tree "$tree2" until_true 900 "tree 2's planner to answer $nonce" assistant_said "$tree2" planner "$nonce"
 pod=$(claim_sandbox "$tree2" planner) || fail "tree 2's planner has no Sandbox"
 # No marker proves nothing unless the fixture is in the workspace the agent runs in: a workspace
 # provisioned from another branch reads the same.
@@ -1898,7 +1940,7 @@ argv=$(pod_commands "$pod" planner)
 note "tree 2 planner container $pod: fixture markers [${markers:-none}]; process argv $(tr '\n' ';' <<<"$argv")"
 if grep -q -- '--no-extensions' <<<"$argv"; then note "the planner runs with --no-extensions"; else note "the planner runs without --no-extensions"; fi
 send_agent "$tree2" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary."
-wait_for_phase "$tree2" implementing 900
+on_tree "$tree2" wait_for_phase "$tree2" implementing 900
 pass
 
 begin finished-idle-planner-death
@@ -1914,8 +1956,8 @@ planner2_task_deliveries() {
   claim_session_text "$tree2" planner | jq -R -s -r --arg issue "$tree2" \
     '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "user" and (.message.content | tostring | contains("Issue: " + $issue + ". Phase: planning.")))] | length'
 }
-until_true 300 "tree 2's completed planner idle with no task" planner2_idle_without_task
-wait_for_worker "$tree2" implementer
+on_tree "$tree2" until_true 300 "tree 2's completed planner idle with no task" planner2_idle_without_task
+on_tree "$tree2" wait_for_worker "$tree2" implementer
 planner_before=$(planner2_claim)
 planner_session=$(jq -r '.session // empty' <<<"$planner_before")
 planner_incarnation=$(jq -r '.locator.incarnation // empty' <<<"$planner_before")
@@ -1941,7 +1983,7 @@ planner_failed() {
 planner_recovery_progress() { planner_failed || planner_launching_without_task; }
 planner_deletes=0
 while ! planner_failed; do
-  until_true 600 "tree 2's planner recovery to launch before registering or fail" planner_recovery_progress
+  on_tree "$tree2" until_true 600 "tree 2's planner recovery to launch before registering or fail" planner_recovery_progress
   planner_failed && break
   planner_now=$(planner2_claim)
   planner_failures=$(jq -r '.budgets.launchFailures // -1' <<<"$planner_now")
@@ -1955,7 +1997,7 @@ done
 planner_after=$(planner2_claim)
 printf '%s\n' "$planner_after" >"$evidence/finished-idle-planner-after.json"
 worker_died=$(notice_needle worker-died "$tree2")
-until_true 300 "tree 2's architect to receive worker-died for its finished planner" notice_delivered "$tree2" architect "$worker_died"
+on_tree "$tree2" until_true 300 "tree 2's architect to receive worker-died for its finished planner" notice_delivered "$tree2" architect "$worker_died"
 planner_notice=$(notice_line "$tree2" architect "$worker_died" | head -1 || true)
 printf '%s\n' "$planner_notice" >"$evidence/notice-finished-idle-planner-worker-died.jsonl"
 [ "$(notice_deliveries "$tree2" architect "$worker_died")" = 1 ] ||
@@ -1979,7 +2021,7 @@ begin issue-cap-moves
 set_status "$tree2" backlog
 until_true 300 "the daemon to set $tree2 back from backlog" status_set_back "$tree2" backlog
 needle=$(notice_needle status-reasserted "$tree2")
-until_true 300 "tree 2's architect to be told of the proof human's backlog" notice_delivered "$tree2" architect "$needle"
+on_tree "$tree2" until_true 300 "tree 2's architect to be told of the proof human's backlog" notice_delivered "$tree2" architect "$needle"
 # head ends the pipeline early, which pipefail would report as a failure, hence `|| true`: an empty
 # line fails the check below, naming it.
 told=$(notice_line "$tree2" architect "$needle" | head -1 || true)
@@ -2002,13 +2044,13 @@ pass
 
 begin tree-moved
 send_agent "$tree1" implementer "Stage 4b proof implementation operation: make the smallest one-file change described by this issue in your $repo workspace, commit it on legion/$tree1, open its pull request, record the required implementation proof and handoff, then call the legion tool's handoff_complete. Do not merge."
-until_true 1200 "implementer pull request on legion/$tree1" sh -c \
+on_tree "$tree1" until_true 1200 "implementer pull request on legion/$tree1" sh -c \
   "timeout 60 gh -R '$repo' pr list --head 'legion/$tree1' --state open --json number | jq -e 'length == 1' >/dev/null"
 pr_number=$(gh -R "$repo" pr list --head "legion/$tree1" --state open --json number --jq '.[0].number')
-wait_for_phase "$tree1" testing 1200
+on_tree "$tree1" wait_for_phase "$tree1" testing 1200
 assert_handoff_committer "$tree1" implementer implementing 0
 smoke_file=$(pull_request_product_files)
-wait_for_worker "$tree1" tester
+on_tree "$tree1" wait_for_worker "$tree1" tester
 record_resident "$tree1" tester || fail "tree 1's tester has no session and pod to keep: $(claim_view "$tree1" tester)"
 # The adoption on top of a described commit: the tester's @ is a new empty change authored by the
 # reviewer App, and the implementer's handoff commit keeps its author.
@@ -2031,24 +2073,24 @@ begin ci-red-takeover
 tester_pod=$(claim_sandbox "$tree1" tester) || fail "tree 1's tester has no Sandbox"
 witness=/tmp/stage4b-takeover-witness control=/tmp/stage4b-takeover-control
 send_agent "$tree1" tester "Stage 4b proof control operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 20 && date -u +%FT%TZ > $control && echo CONTROL-WRITTEN. Then reply WAITING and wait for the next targeted message."
-until_true 300 "the tester's control command to write $control" pod_file "$tester_pod" tester "$control"
-until_true 300 "tree 1's tester to go idle after the control" resident_idle "$tree1" tester
+on_tree "$tree1" until_true 300 "the tester's control command to write $control" pod_file "$tester_pod" tester "$control"
+on_tree "$tree1" until_true 300 "tree 1's tester to go idle after the control" resident_idle "$tree1" tester
 note "the control: the tester's uninterrupted /usr/bin/sleep 20 chain wrote $control in pod $tester_pod"
 send_agent "$tree1" tester "Stage 4b proof witness operation: run exactly this as one bash tool call, with the tool's timeout at least 1800 seconds, and change nothing else: /usr/bin/sleep 1207 && date -u +%FT%TZ > $witness && echo WITNESS-WRITTEN. Wait for it to finish."
-until_true 300 "the tester's witness command to run in its pod" pod_runs "$tester_pod" tester "/usr/bin/sleep 1207"
+on_tree "$tree1" until_true 300 "the tester's witness command to run in its pod" pod_runs "$tester_pod" tester "/usr/bin/sleep 1207"
 issue_worker_state "$tree1" tester working || fail "the tester runs its witness command while its claim is $(claim_view "$tree1" tester | jq -c .state), not working"
 fail_me=$(jq -cn --arg branch "legion/$tree1" --arg content "$(printf 'Stage 4b CI-red takeover\n' | base64 -w0)" \
   '{message: "Stage 4b proof: fail-on-demand", content: $content, branch: $branch}' |
   timeout 60 gh api --method PUT "repos/$repo/contents/.fail-me" --input - --jq .commit.sha) ||
   fail "the proof human could not commit .fail-me to legion/$tree1"
 note "the proof human committed .fail-me to legion/$tree1 as $fail_me while the tester's witness command ran"
-wait_for_phase "$tree1" implementing 900
-until_true 120 "tree 1's interrupted tester to go idle on its session in its first pod" resident_idle "$tree1" tester
+on_tree "$tree1" wait_for_phase "$tree1" implementing 900
+on_tree "$tree1" until_true 120 "tree 1's interrupted tester to go idle on its session in its first pod" resident_idle "$tree1" tester
 ! pod_runs "$tester_pod" tester "/usr/bin/sleep 1207" || fail "the tester's witness command still runs after its turn was interrupted"
 ! pod_file "$tester_pod" tester "$witness" || fail "the tester's interrupted witness command wrote $witness"
 takeover_row=$(log_lines "$takeover_held" | jq -s -r --arg issue "$tree1" 'map(select(.issue == $issue)) | last | .row // empty')
 [ -n "$takeover_row" ] || fail "the daemon log holds no implementer start of $tree1 held for the tester's turn"
-until_true 300 "the implementer's CI-red task to reach its session" session_contains "$tree1" implementer "Reason: CI is red at"
+on_tree "$tree1" until_true 300 "the implementer's CI-red task to reach its session" session_contains "$tree1" implementer "Reason: CI is red at"
 task_at=$(claim_session_text "$tree1" implementer | jq -R -s -r '[split("\n")[] | fromjson? |
   select(.type == "message" and .message.role == "user" and (tostring | contains("Reason: CI is red at"))) | .timestamp] | first // empty')
 [ -n "$task_at" ] || fail "the implementer's session holds no CI-red task"
@@ -2061,17 +2103,17 @@ interrupted_at=$(jq -s -r --arg m "$takeover_interrupted" 'map(select(.msg == $m
 expect_failure takeover-task-before-turn-over takeover_ordered "$evidence/ci-red-takeover-log.jsonl" "$interrupted_at"
 note "start row $takeover_row was held, the tester's turn interrupted and over, and only then did the start go on; the implementer's task reached it at $task_at ($evidence/ci-red-takeover-log.jsonl); no witness, the tester idle in its first pod"
 send_agent "$tree1" implementer "Stage 4b proof CI-red operation: CI on pull request #$pr_number is red because the proof committed the file .fail-me to legion/$tree1, which the smoke repository's fail-on-demand check fails on. Fetch the branch, start a new change on top of legion/$tree1@origin, delete .fail-me and change nothing else, commit it and push it with legion push, record the required implementation handoff, then call the legion tool's handoff_complete. Do not merge."
-wait_for_phase "$tree1" testing 1800
-until_true 300 "tree 1's tester to be handed testing again in its first pod and session" resident_kept "$tree1" tester
+on_tree "$tree1" wait_for_phase "$tree1" testing 1800
+on_tree "$tree1" until_true 300 "tree 1's tester to be handed testing again in its first pod and session" resident_kept "$tree1" tester
 ! pod_file "$tester_pod" tester "$witness" || fail "the tester's interrupted witness command wrote $witness after all"
 note "the implementer removed .fail-me and $tree1 is back in testing; the tester, in its first pod and session, still never wrote $witness"
 pass
 
 begin tree-reviewed
 send_agent "$tree1" tester "Stage 4b proof test operation: inspect the implementer's actual one-file change and pull request #$pr_number, run a focused observable check, record the required test handoff with verdict pass, then call the legion tool's handoff_complete with verdict pass."
-wait_for_phase "$tree1" reviewing 1200
+on_tree "$tree1" wait_for_phase "$tree1" reviewing 1200
 assert_handoff_committer "$tree1" tester testing 0
-wait_for_worker "$tree1" reviewer
+on_tree "$tree1" wait_for_worker "$tree1" reviewer
 record_resident "$tree1" reviewer || fail "tree 1's reviewer has no session and pod to keep: $(claim_view "$tree1" reviewer)"
 # A round no review decides (LEGION-326): the reviewer comments instead of deciding, and completes.
 # The daemon leaves the issue in reviewing and tells the architect, naming the head. The proof's
@@ -2084,11 +2126,11 @@ record_resident "$tree1" reviewer || fail "tree 1's reviewer has no session and 
 # (LEGION-413).
 send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents. This round deliberately proves what the daemon does with a round no review decides: submit your review as legion-reviewer[bot] as a COMMENT review, never APPROVE or REQUEST_CHANGES, take the round's other steps in the order your role gives, and complete the reviewer handoff. Submit no other review until you are asked for the round's decision; when you are, your decision is APPROVE."
 pair_session=$(claim_session_file "$tree1" reviewer) || fail "the reviewer on $tree1 has no session file"
-until_true 1800 "the reviewer's two thermonuclear dispatches to reach an outcome" pair_settled
+on_tree "$tree1" until_true 1800 "the reviewer's two thermonuclear dispatches to reach an outcome" pair_settled
 record_pair || fail "the reviewer's session and its review pair could not be recorded"
 note "the review pair's dispatches are kept in $evidence/review-pair ($(jq -r -s 'map("\(.agent): \(.calls | length) calls, \(.results | length) results, \(.deliveries | length) deliveries") | join("; ")' "$evidence"/review-pair/thermonuclear-*.json))"
-until_true 1800 "legion-reviewer[bot]'s COMMENT review of pull request #$pr_number" reviewer_commented
-until_true 900 "the daemon to record the reviewer's completion of $tree1's round" reviewer_completed "$tree1"
+on_tree "$tree1" until_true 1800 "legion-reviewer[bot]'s COMMENT review of pull request #$pr_number" reviewer_commented
+on_tree "$tree1" until_true 900 "the daemon to record the reviewer's completion of $tree1's round" reviewer_completed "$tree1"
 # The ask baseline is read here, not before the reviewer is instructed: the notice is written in the
 # completion's own transaction and the architect needs a model turn after it, so no real ask can
 # precede this read, while a message the architect sent the reviewer earlier in the round (a reply to
@@ -2099,7 +2141,7 @@ asked_before=$(architect_messages "$tree1" reviewer)
 early_approvals=$(review_app_reviews '.state == "APPROVED"' id) || fail "read the reviews on pull request #$pr_number"
 [ -z "$early_approvals" ] || fail "the reviewer approved pull request #$pr_number before anyone asked it for the round's decision"
 issue_phase "$tree1" reviewing >/dev/null || fail "$tree1 left reviewing on a round no review decided"
-until_true 300 "the review-stuck notice on $tree1's architect" notice_delivered "$tree1" architect "$(notice_needle review-stuck "$tree1")"
+on_tree "$tree1" until_true 300 "the review-stuck notice on $tree1's architect" notice_delivered "$tree1" architect "$(notice_needle review-stuck "$tree1")"
 stuck=$(notice_line "$tree1" architect "$(notice_needle review-stuck "$tree1")" | head -1 || true)
 printf '%s\n' "$stuck" >"$evidence/notice-review-stuck.jsonl"
 # The head the notice names is the one the completion left, which GitHub's current head can have
@@ -2116,17 +2158,17 @@ note "the reviewer commented and completed; $tree1 stayed in reviewing and its a
 asked_unprompted=$(architect_messages "$tree1" reviewer)
 send_agent "$tree1" architect "Stage 4b proof review-stuck operation: handle the daemon's review-stuck notice on $tree1 now, exactly as your role says to handle a review-stuck notice."
 architect_asked() { [ "$(architect_messages "$tree1" reviewer)" -gt "$asked_before" ]; }
-until_true 900 "$tree1's architect, sent the review-stuck operation, to ask the reviewer for the round's decision" architect_asked
+on_tree "$tree1" until_true 900 "$tree1's architect, sent the review-stuck operation, to ask the reviewer for the round's decision" architect_asked
 notice_line "$tree1" reviewer "notifications.role.$(claim_token "$tree1" architect)" | tail -n +"$((asked_before + 1))" >"$evidence/architect-ask.jsonl"
 [ "$asked_unprompted" -le "$asked_before" ] || note "the architect asked the reviewer before the driver's message"
-until_true 1800 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
+on_tree "$tree1" until_true 1800 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
 note "the architect asked the reviewer over Envoy (kept in $evidence/architect-ask.jsonl), and the reviewer's approval of the head ended the round"
-until_true 900 "$tree1 to leave reviewing for retro" issue_phase_in "$tree1" retro merging
+on_tree "$tree1" until_true 900 "$tree1 to leave reviewing for retro" issue_phase_in "$tree1" retro merging
 if issue_phase "$tree1" retro >/dev/null; then
-  wait_for_worker "$tree1" implementer
+  on_tree "$tree1" wait_for_worker "$tree1" implementer
   send_agent "$tree1" implementer "Stage 4b proof retro: write the required retro handoff for pull request #$pr_number and complete the phase. Do not change the approved implementation."
 fi
-wait_for_phase "$tree1" merging 1800
+on_tree "$tree1" wait_for_phase "$tree1" merging 1800
 note "$tree1 moved planner → implementer → tester → reviewer → retro → merging with real agents; $repo#$pr_number changes $smoke_file"
 pass
 
@@ -2141,7 +2183,7 @@ begin completion-closed
 # that same session, is where a session holding an unanswered report would report again.
 for role in planner implementer tester reviewer; do
   resident_kept "$tree1" "$role" || fail "$role on $tree1 did not stay live in the pod and session it first registered with after its phase: $(resident_lost "$tree1" "$role")"
-  until_true 300 "$role on $tree1 to go idle in the pod and session it first registered with" resident_idle "$tree1" "$role"
+  on_tree "$tree1" until_true 300 "$role on $tree1 to go idle in the pod and session it first registered with" resident_idle "$tree1" "$role"
   session_copy="$evidence/completion-$role.jsonl"
   claim_session_text "$tree1" "$role" >"$session_copy" || fail "$role on $tree1 has no readable session"
   completion_verdict <"$session_copy" >"$evidence/completion-$role-verdict.json"
@@ -2162,8 +2204,8 @@ begin resident-answer
 issue_phase "$tree1" merging >/dev/null || fail "$tree1 left merging before the planner was asked: $(daemon_state | jq -c --arg i "$tree1" '.issues[$i].phase')"
 nonce="resident-answer-$RANDOM$RANDOM"
 send_agent "$tree1" planner "Stage 4b proof resident-role question: your phase is finished and another role's phase is active, so change no file and call no legion operation. Reply to this message with the single word $nonce, then wait."
-until_true 900 "tree 1's finished planner to answer $nonce" assistant_said "$tree1" planner "$nonce"
-until_true 300 "tree 1's planner to go idle again after its answer" resident_idle "$tree1" planner
+on_tree "$tree1" until_true 900 "tree 1's finished planner to answer $nonce" assistant_said "$tree1" planner "$nonce"
+on_tree "$tree1" until_true 300 "tree 1's planner to go idle again after its answer" resident_idle "$tree1" planner
 resident_kept "$tree1" planner || fail "answering relaunched or replaced tree 1's planner: $(resident_lost "$tree1" planner)"
 issue_phase "$tree1" merging >/dev/null || fail "the planner's answer moved $tree1 out of merging: $(daemon_state | jq -c --arg i "$tree1" '.issues[$i].phase')"
 note "tree 1's finished planner answered $nonce in its first pod and session $(cat "$work/resident-$tree1-planner.json"); $tree1 stayed in merging"
@@ -2250,7 +2292,7 @@ architect_pod_kept() {
   now=$(op get pod "$pod" -o jsonpath='{.metadata.uid}')
   [ "$now" = "$pod_uid" ] || fail "the architect's pod was replaced $1 ($pod_uid -> $now), so its token is another pod's first, not a renewal"
 }
-until_true 3600 "the architect pod's operator token to be renewed" token_renewed
+on_tree "$tree1" until_true 3600 "the architect pod's operator token to be renewed" token_renewed
 architect_pod_kept "during the wait"
 iat=$(token_iat) || fail "the architect pod $pod's operator token could not be read"
 rotated=$(date -u +%FT%TZ)
@@ -2261,7 +2303,7 @@ send_agent "$tree1" architect "Stage 4b proof: reply to this message with one sh
 turn_after_rotation() {
   claim_session_text "$tree1" architect | jq -R -s -e --arg at "$rotated" '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant" and .timestamp > $at)] | any(.message.stopReason == "stop")' >/dev/null
 }
-until_true 600 "a completed architect turn after the rotation" turn_after_rotation
+on_tree "$tree1" until_true 600 "a completed architect turn after the rotation" turn_after_rotation
 architect_pod_kept "before the turn after the rotation completed"
 after=$(claim_session_text "$tree1" architect | jq -R -s -c --arg at "$rotated" '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant" and .timestamp > $at) | "\(.message.provider)/\(.message.model)"] | unique')
 note "turns after the rotation were answered by $after"
@@ -2288,7 +2330,7 @@ begin kill-launcher-resume
 # Merging launches the merger. Killing only its launcher PID 1 must restart that one container,
 # keep the issue pod and every peer container, and resume the merger's session at a new process
 # generation. It is deliberately distinct from the following whole-pod loss.
-wait_for_worker "$tree1" merger
+on_tree "$tree1" wait_for_worker "$tree1" merger
 session=$(claim_view "$tree1" merger | jq -r .session)
 merger_before=$(claim_view "$tree1" merger)
 incarnation=$(jq -r '.locator.incarnation' <<<"$merger_before")
@@ -2296,7 +2338,7 @@ pod=$(jq -r '.locator.sandbox.name' <<<"$merger_before")
 uid=$(jq -r '.locator.sandbox.podUid' <<<"$merger_before")
 peer_containers=$(op get pod "$pod" -o json | jq -c '[.status.containerStatuses[] | select(.name != "merger") | {name, restartCount, containerID}] | sort_by(.name)')
 end_claim_process "$tree1" merger kill
-until_true 600 "the merger to resume after only its launcher restarted" claim_restarted_or_held "$tree1" merger "$incarnation"
+on_tree "$tree1" until_true 600 "the merger to resume after only its launcher restarted" claim_restarted_or_held "$tree1" merger "$incarnation"
 new_uid=$(claim_pod_uid "$tree1" merger)
 [ "$new_uid" = "$uid" ] || fail "the merger launcher restart replaced pod $uid with $new_uid"
 [ "$(claim_view "$tree1" merger | jq -r .session)" = "$session" ] || fail "the resumed merger has another session"
@@ -2326,7 +2368,7 @@ merger_pod_replaced() {
   claim_view "$tree1" merger | jq -e --arg uid "$uid" \
     '(.state | IN("ready", "working", "idle")) and .locator.sandbox.podUid != $uid' >/dev/null
 }
-until_true 600 "the merger to resume in a replacement pod" merger_pod_replaced
+on_tree "$tree1" until_true 600 "the merger to resume in a replacement pod" merger_pod_replaced
 third=$(claim_pod_uid "$tree1" merger)
 [ "$third" != "$uid" ] || fail "the merger still records deleted pod uid $uid"
 [ "$(claim_view "$tree1" merger | jq -r .session)" = "$session" ] || fail "the replacement merger has another session"
@@ -2336,7 +2378,7 @@ boot_rotated() {
   now=$(merger_boot_token) || return 1
   [ "$now" != "$old_token" ]
 }
-until_true 600 "the merger's boot token to rotate in its replacement role container" boot_rotated
+on_tree "$tree1" until_true 600 "the merger's boot token to rotate in its replacement role container" boot_rotated
 refused_msg="worker-stream: rejected hello (stale worker generation)"
 refused_before=$(log_lines "$refused_msg" | wc -l)
 if out=$(timeout 60 "$work/legion" worker-shim --connect "tcp://$host:$port_worker_stream" --boot-token-file "$work/old-boot-token" -- true 2>&1); then
@@ -2358,7 +2400,7 @@ before=$(claim_view "$tree1" merger | jq -c '{session, incarnation: .locator.inc
 stop_pid "$daemon_pid"
 daemon_pid=
 start_daemon
-until_true 300 "the merger to be re-adopted" sh -c \
+on_tree "$tree1" until_true 300 "the merger to be re-adopted" sh -c \
   "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg i '$tree1' '.issues[\$i].workers.merger.claim.state | IN(\"ready\", \"working\", \"idle\")' >/dev/null"
 after=$(claim_view "$tree1" merger | jq -c '{session, incarnation: .locator.incarnation, podUid: .locator.sandbox.podUid, container: .locator.sandbox.container}')
 [ "$before" = "$after" ] || fail "the restart relaunched the merger: $before → $after"
@@ -2411,9 +2453,9 @@ controller_started_itself() {
 }
 until_true 300 "the controller's first turn to start itself, with nothing typed" controller_started_itself
 note "the controller's first turn began from its start message, with nothing typed into its pane"
-wait_for_worker "$tree3" architect
-drive_spec "$tree3"
-wait_for_worker "$tree3" planner
+on_tree "$tree3" wait_for_worker "$tree3" architect
+on_tree "$tree3" drive_spec "$tree3"
+on_tree "$tree3" wait_for_worker "$tree3" planner
 # The daemon holds a phase when one of its claim's budgets reaches launch_failure_limit (3)
 # (supervise/budgets.go): launch failures, which restart at the agent's ready, or deaths after a
 # ready while the claim has its task outstanding. Tree 3's planner finishes its task turn when the
@@ -2423,8 +2465,8 @@ wait_for_worker "$tree3" planner
 # ready or in a turn with its task outstanding. Every such death is charged; the check below accepts
 # either budget.
 send_agent "$tree3" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
-wait_for_phase "$tree3" implementing 900
-wait_for_worker "$tree3" implementer
+on_tree "$tree3" wait_for_phase "$tree3" implementing 900
+on_tree "$tree3" wait_for_worker "$tree3" implementer
 killed=" "
 kills=0
 # held_ready_with_work: tree 3's implementer claim names a process none of the ends took, its agent
@@ -2440,13 +2482,13 @@ held_ready_with_work() {
 }
 until issue_phase "$tree3" held >/dev/null 2>&1; do
   [ "$kills" -lt 8 ] || fail "$tree3 was not held after $kills ended implementer launches"
-  until_true 600 "$tree3's implementer ready with its task outstanding" held_ready_with_work
+  on_tree "$tree3" until_true 600 "$tree3's implementer ready with its task outstanding" held_ready_with_work
   state=$(claim_view "$tree3" implementer | jq -r '.state // "none"')
   end_claim_process "$tree3" implementer kill
   killed="$killed$ended_incarnation "
   kills=$((kills + 1))
   note "ended implementer launch $kills of $tree3 (process $ended_incarnation in pod $ended_pod_uid), its claim $state with its task outstanding"
-  until_true 600 "$tree3 to be held or its implementer relaunched" claim_restarted_or_held "$tree3" implementer "$ended_incarnation"
+  on_tree "$tree3" until_true 600 "$tree3 to be held or its implementer relaunched" claim_restarted_or_held "$tree3" implementer "$ended_incarnation"
 done
 note "$tree3 is held after $kills ended implementer launches"
 # The hold is one of the implementer claim's own supervise budgets, launches or deaths with work
@@ -2616,26 +2658,26 @@ begin deaths-with-work
 # outstanding, until the daemon fails the claim.
 tree4=$(new_issue "Stage 4b proof tree 4: deaths with work outstanding ($work)")
 set_status "$tree4" todo
-drive_spec "$tree4"
-wait_for_worker "$tree4" planner
+on_tree "$tree4" drive_spec "$tree4"
+on_tree "$tree4" wait_for_worker "$tree4" planner
 # claim_json ISSUE ROLE is the claim as `legion claims` shows it, its budgets and pending task included.
 claim_json() { claims_cli list --json | jq -ce --arg t "$(claim_token "$1" "$2")" '.claims[] | select(.token == $t)'; }
 # in_turn ISSUE ROLE: the claim's agent is running the turn of its task.
 in_turn() { claim_json "$1" "$2" | jq -e '.state == "working" and .pending != null' >/dev/null; }
 # (a) One launcher-container kill mid-turn: the role process is relaunched in the same issue pod,
 # sent its task again, and told the turn was interrupted.
-until_true 600 "$tree4's planner to be in the turn of its task" in_turn "$tree4" planner
+on_tree "$tree4" until_true 600 "$tree4's planner to be in the turn of its task" in_turn "$tree4" planner
 end_claim_process "$tree4" planner kill
 planner_killed=$ended_incarnation
 note "killed $tree4's planner mid-turn (process $planner_killed in pod $ended_pod_uid)"
 interrupted_needle="Your previous turn on this task was interrupted when your process died."
 planner_resent() { claim_session_text "$tree4" planner | grep -qF "$interrupted_needle"; }
-until_true 600 "$tree4's planner to be sent its task again, told its turn was interrupted" planner_resent
+on_tree "$tree4" until_true 600 "$tree4's planner to be sent its task again, told its turn was interrupted" planner_resent
 send_agent "$tree4" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
-wait_for_phase "$tree4" implementing 900
+on_tree "$tree4" wait_for_phase "$tree4" implementing 900
 note "$tree4's planner was sent its task again after the kill, told the turn was interrupted, and finished planning"
 # (b) Kills after each ready, the task outstanding, until the claim fails.
-wait_for_worker "$tree4" implementer
+on_tree "$tree4" wait_for_worker "$tree4" implementer
 implementer4=$(claim_token "$tree4" implementer)
 # ready_with_work: the implementer's claim names a process no kill took, its agent is ready or in a
 # turn, and its task is outstanding.
@@ -2650,12 +2692,12 @@ work_killed=" "
 work_kills=0
 until issue_phase "$tree4" held >/dev/null 2>&1; do
   [ "$work_kills" -lt 5 ] || fail "$tree4 was not held after $work_kills implementer deaths with its task outstanding"
-  until_true 600 "$tree4's implementer ready with its task outstanding" ready_with_work
+  on_tree "$tree4" until_true 600 "$tree4's implementer ready with its task outstanding" ready_with_work
   end_claim_process "$tree4" implementer kill
   work_killed="$work_killed$ended_incarnation "
   work_kills=$((work_kills + 1))
   note "killed $tree4's implementer with its task outstanding, $work_kills (process $ended_incarnation in pod $ended_pod_uid)"
-  until_true 600 "$tree4 to be held or its implementer relaunched" claim_restarted_or_held "$tree4" implementer "$ended_incarnation"
+  on_tree "$tree4" until_true 600 "$tree4 to be held or its implementer relaunched" claim_restarted_or_held "$tree4" implementer "$ended_incarnation"
 done
 [ "$work_kills" = "$launch_failure_limit" ] || fail "$tree4 was held after $work_kills implementer deaths, want launch_failure_limit ($launch_failure_limit)"
 claim=$(claim_json "$tree4" implementer) || fail "legion claims shows no claim $implementer4"
@@ -2673,24 +2715,24 @@ take_out "$tree4"
 pass
 
 begin "done"
-wait_for_worker "$tree1" merger
+on_tree "$tree1" wait_for_worker "$tree1" merger
 send_agent "$tree1" merger "Stage 4b proof READY operation: verify pull request #$pr_number is ready to merge and call the legion tool's handoff_complete with ready true."
-wait_for_phase "$tree1" awaiting_merge 900
+on_tree "$tree1" wait_for_phase "$tree1" awaiting_merge 900
 # The hold is an open descriptor (hold_smoke_main): start no background child before
 # release_smoke_main below, or it inherits the descriptor and holds the smoke main past this run's
 # window. `9>&- 7>&-` does not close it: its number is allocated at runtime, not fixed.
 hold_smoke_main
 gh -R "$repo" pr merge "$pr_number" --squash --delete-branch
-wait_for_phase "$tree1" production_check 600
+on_tree "$tree1" wait_for_phase "$tree1" production_check 600
 if ! production_check_reported "$tree1" >/dev/null 2>&1; then
-  wait_for_worker "$tree1" implementer
+  on_tree "$tree1" wait_for_worker "$tree1" implementer
   send_agent "$tree1" implementer "Stage 4b proof production check: verify the merged smoke change through its repository surface, record the production-check handoff and required PR/Dispatch record, then complete the phase."
 fi
-until_true 900 "the implementer's production-check completion" production_check_reported "$tree1"
+on_tree "$tree1" until_true 900 "the implementer's production-check completion" production_check_reported "$tree1"
 if issue_phase "$tree1" production_check >/dev/null 2>&1; then
   send_agent "$tree1" architect "Stage 4b proof sign-off: the implementer's production check for $tree1 is recorded; use the Go-daemon sign-off operation for $tree1 now."
 fi
-wait_for_phase "$tree1" "done" 900
+on_tree "$tree1" wait_for_phase "$tree1" "done" 900
 until_true 120 "the daemon's done status on the Dispatch board" dispatch_status_is "$tree1" "done"
 clean_smoke_main
 release_smoke_main
@@ -2771,8 +2813,8 @@ begin re-admission
 set_status "$tree1" todo
 lost_msg="supervise: the tree volume was lost with the session; relaunching a fresh session"
 lost_seen() { [ "$(log_lines "$lost_msg" | wc -l)" -ge 1 ]; }
-until_true 900 "the re-admitted tree 1 to report its tree volume lost and relaunch a fresh architect" lost_seen
-wait_for_worker "$tree1" architect
+on_tree "$tree1" until_true 900 "the re-admitted tree 1 to report its tree volume lost and relaunch a fresh architect" lost_seen
+on_tree "$tree1" wait_for_worker "$tree1" architect
 pod=$(tree_pod "$tree1")
 recovered=$(pod_exec "$pod" architect cat "/legion/workspaces/$repo/${tree1,,}/.legion/workspace-recovered.json")
 jq -e --arg b "legion/$tree1" 'tostring | contains($b)' <<<"$recovered" >/dev/null || fail "the recovery marker does not name legion/$tree1: $recovered"
@@ -2813,8 +2855,8 @@ op_root=$(claims_cli spawn --json --tree "$optree" --issue "$optree" --role arch
 op_worker=$(claims_cli spawn --json --tree "$optree" --issue "$opchild" --role implementer --prompt-file "$work/op-worker.md" | jq -er .token) ||
   fail "the operator could not spawn a worker of $optree"
 claim_live() { claims_cli list --json | jq -e --arg t "$1" '.claims[] | select(.token == $t) | .state | IN("ready", "idle", "working")' >/dev/null; }
-until_true 900 "$optree's root $op_root to be live" claim_live "$op_root"
-until_true 900 "$optree's worker $op_worker to be live" claim_live "$op_worker"
+on_tree "$optree" until_true 900 "$optree's root $op_root to be live" claim_live "$op_root"
+on_tree "$optree" until_true 900 "$optree's worker $op_worker to be live" claim_live "$op_worker"
 objects=$(tree_objects "$optree")
 jq -e 'map(select(.kind == "Pod")) | length == 2' <<<"$objects" >/dev/null || fail "$optree does not have its two pods before the close: $objects"
 for uid in $(jq -r '.[] | select(.kind == "Pod") | .uid' <<<"$objects"); do driver_action close "$uid"; done

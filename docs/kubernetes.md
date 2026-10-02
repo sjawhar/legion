@@ -692,12 +692,15 @@ Every tree pod carries two rules:
 So concurrent trees never share a node. Requests stay unset because under required colocation the
 first pod placed decides the node, and a request on a later pod would strand it.
 
-**The bound.** One tree per node holds across every project whose daemon shares the `legion` pool:
-a tree pod's anti-affinity names no project, since a second tree of any project would overrun a
-node sized for one. So the pool's limits, divided by the node size its floor sets, cap the trees
-running at once across all projects together. With the floor at `instance-memory Gt 65535`
-(64 GiB) and `limits.memory: 256Gi`, that is four. An `admission_cap` (summed over the daemons
-sharing the pool) above that admits trees whose pods stay Pending until a node frees.
+**The bound.** A tree pod's anti-affinity names no project, since a second tree of any project
+would overrun a node sized for one. It has no `namespaceSelector` either, so it applies only within
+the pod's own namespace. One tree per node therefore holds across every project whose daemon shares
+the `legion` pool only while all of them run their trees in the same namespace (`legion` today);
+a daemon in another namespace could place a tree on a node another namespace's tree holds. Under
+that condition, the pool's limits divided by the node size its floor sets cap the trees running at
+once across all projects together. With the floor at `instance-memory Gt 65535` (64 GiB) and
+`limits.memory: 256Gi`, that is four. An `admission_cap` (summed over the daemons sharing the pool)
+above that admits trees whose pods stay Pending until a node frees.
 
 ### Trust model: the provisioning token
 
