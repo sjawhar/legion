@@ -830,9 +830,9 @@ export const dispatchToolSpecs = [
       "Request changes) in the human's Inbox whose question names the document and version, " +
       "followed by the summary; the answer pins a review to that version and arrives as " +
       "artifact.approved or artifact.changes_requested. An open request follows the document: a later version moves it to that version and " +
-      "parks it as waiting on you; call this again to hand the same Inbox row back to the human, with a new " +
-      "summary when the proposal changed or the same one after answering a question in its " +
-      "thread. Only an exact repeat (same version and summary, nothing newer in its thread) writes nothing; a reworded summary hands the row back again. " +
+      "parks it as waiting on you, as a human's reply in its thread does; while it waits on you, call this again to hand the same Inbox row " +
+      "back to the human, with a new summary when the proposal changed. While it already waits on the human, a new summary rewords it in " +
+      "place and the same summary changes nothing. " +
       "Approve and Request changes each close the request, so the next call opens a new one. " +
       "Call it once per revision, when the revision is complete, never after each edit. " +
       "An approval goes stale when the document changes after it; request again when the change proposes something the human has not settled, " +

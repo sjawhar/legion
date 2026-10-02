@@ -124,13 +124,15 @@ hasn't already agreed to.
 document's own header. Never open a `dispatch_ask` with an `Approve` option yourself: an
 ordinary question is not a gate and the daemon ignores its answer. Copy `artifactId` and
 `version` from the result of `dispatch_request_approval` — its text reads "Approval requested for
-spec.md (document id <UUID>) at version <N> (ask <id>)", followed by the question the human's
-Inbox shows, and its `details.artifact` / `details.version` carry the same two values. The
-document id is never the slug or file name you passed in (`spec`, `spec.md`): the daemon
-recognizes the document's approval events by that id, and both the `legion` tool and the daemon
-refuse a value that is not a UUID. A further call hands the request back to the human's Inbox
-unless it repeats the last one exactly (same version, same `summary`, nothing newer in its
-thread), so call it once per revision, when the revision is complete;
+spec.md (document id <UUID>) at version <N> (ask <id>)", or "The approval request for spec.md
+(document id <UUID>) at version <N> (ask <id>) already waits on the human" when the call changed
+nothing, followed by the question the human's Inbox shows, and its `details.artifact` /
+`details.version` carry the same two values either way. The document id is never the slug or file
+name you passed in (`spec`, `spec.md`): the daemon recognizes the document's approval events by
+that id, and both the `legion` tool and the daemon refuse a value that is not a UUID. A further
+call hands the request back to the human's Inbox only while it waits on you (a new version moved
+it, or the human replied in its thread); while it already waits on the human, the call rewords it
+or changes nothing. So call it once per revision, when the revision is complete;
 [Approval requests](../dispatch/references/documents.md#approval-requests) says how the request
 follows the document. If its text instead reads "spec.md (document id <UUID>) is already
 approved at version <N>" — a human approved from the document header before you asked — still call

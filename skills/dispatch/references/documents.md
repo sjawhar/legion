@@ -162,13 +162,14 @@ opened its ask.
 One request lasts until a human answers it:
 
 - A new version moves an open request to that version, and its `ask.edited` reaches you; the
-  request then waits on you.
-- The next `dispatch_request_approval` hands the same row back to the human's Inbox. Any change
-  hands it back: a newer version or a different `summary`. So does the same call after you
-  answered a question in its thread, even when that reply left it waiting on the agent; a later
-  reply again follows its own `turn`. Only a call that repeats the last one exactly (same version,
-  same `summary`, nothing newer in its thread) writes nothing, so a reworded `summary` for the same
-  revision puts the request in front of the human a second time.
+  request then waits on you. A human's reply in its thread leaves it waiting on you too; your own
+  reply there returns it to the human, unless you post it as a progress note (`turn: "agent"`) or
+  a new version moved it.
+- While it waits on you, the next `dispatch_request_approval` hands the same row back to the
+  human's Inbox, at the latest version and with the `summary` you pass.
+- While it waits on the human, a different `summary` rewords the question in place and hands
+  nothing back, and the same `summary` writes nothing: the result says the request already waits
+  on the human, so the call changed nothing.
 - `Approve` and `Request changes` each close the request. The answer reaches you as
   `artifact.approved` or `artifact.changes_requested` with the pinned `version`;
   `changes_requested` carries the reason, which is your next piece of work. After either answer

@@ -384,7 +384,8 @@ when the revision is complete, never after each edit. How the request follows th
 what each call does after an answer, is in [Approval requests](skill://dispatch/references/documents.md#approval-requests).
 A human who comments on the request instead of answering it is continuing the design conversation:
 reply in the thread; when the comment raises a choice that is theirs, write it into the spec as a
-decision block; when it changes the design, rewrite the text; then hand the request back once. A
+decision block; when it changes the design, rewrite the text and then hand the request back once.
+A reply that only answers the comment returns the request to the human by itself. A
 choice you can make yourself is not a decision block ([Before you ask](#before-you-ask), gate 1):
 write your call and its reason into the design and name it in `summary`; a human who disagrees
 answers `Request changes`. When a human asks for approval while a block is open, do not request it
