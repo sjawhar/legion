@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -303,9 +306,18 @@ func TestReconnectHooksRunOneAtATimeOnceForEachEventBetweenRuns(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("the hooks never ran for the in-place reconnect")
 	}
-	// The recovery's attempt that came during the reconnect's run, and its next one 2 s later, have
-	// both been made by now.
-	time.Sleep(hookTakes)
+	// The recovery keeps retrying the refused restore, one attempt at a time, and each attempt asks
+	// rewatch for a run before it logs its failure. An attempt that begins after the reconnect's run
+	// has ended finds what every later attempt finds, both events covered and no event since, and the
+	// attempt that came during the run has logged before it began. So once an attempt begun from here
+	// has logged, every chance to run the hooks again has passed.
+	afterRun := captureBusLogs(t)
+	waitFor(t, 30*time.Second, "a recovery attempt begun after the reconnect's run to log its refused restore", func() bool {
+		var begun struct{ Attempt int }
+		line := afterRun.lineAt("INFO", `"msg":"envoy nats recovery attempt"`)
+		return line != "" && json.Unmarshal([]byte(line), &begun) == nil &&
+			afterRun.lineAt("ERROR", "envoy nats recovery resubscribe failed", fmt.Sprintf(`"attempt":%d,`, begun.Attempt)) != ""
+	})
 	if got, most := runs.Load(), mostAtOnce.Load(); got != 2 || most != 1 {
 		t.Fatalf("the hooks ran %d time(s) for two connection events between runs, at most %d at once; want 2 runs, one at a time", got, most)
 	}
@@ -326,10 +338,14 @@ func TestAFailedRunOfTheReconnectHooksRunsAgainWithoutAnotherConnectionEvent(t *
 		t.Fatalf("connect: %v", err)
 	}
 	defer client.Close()
-	ran := make(chan *natsgo.Conn, 8)
+	type hookRun struct {
+		conn      *natsgo.Conn
+		goroutine uint64
+	}
+	ran := make(chan hookRun, 8)
 	var runs atomic.Int32
 	client.AddReconnectHook(func(conn *natsgo.Conn) error {
-		ran <- conn
+		ran <- hookRun{conn: conn, goroutine: goroutineID()}
 		if runs.Add(1) == 1 {
 			return errors.New("the first run fails")
 		}
@@ -339,24 +355,62 @@ func TestAFailedRunOfTheReconnectHooksRunsAgainWithoutAnotherConnectionEvent(t *
 	if err := client.Conn.ForceReconnect(); err != nil {
 		t.Fatalf("reconnect in place: %v", err)
 	}
+	var recovery uint64
 	for run := 1; run <= 2; run++ {
 		select {
-		case conn := <-ran:
-			if conn != client.Conn {
+		case got := <-ran:
+			if got.conn != client.Conn {
 				t.Fatalf("run %d of the reconnect hooks was on a connection the client no longer has", run)
 			}
+			recovery = got.goroutine
 		case <-time.After(15 * time.Second):
 			t.Fatalf("the reconnect hooks ran %d time(s) after an in-place reconnect whose first run failed; want them run again", run-1)
 		}
 	}
-	// The run that succeeded covers the reconnect, so nothing runs the hooks again.
-	time.Sleep(2500 * time.Millisecond)
+	// The run that succeeded covers the reconnect. It ran on the goroutine of the recovery the failed
+	// run started, the one thing besides a connection event that runs the hooks, and that recovery
+	// looks once more for hooks due after it clears its flag; once its goroutine has returned, every
+	// chance to run them again has passed.
+	waitFor(t, 15*time.Second, "the recovery that ran the hooks again to end", func() bool { return !goroutineLive(recovery) })
 	if extra := len(ran); extra != 0 {
 		t.Fatalf("the reconnect hooks ran %d more time(s) after a run succeeded", extra)
 	}
 	if reconnects := client.Conn.Stats().Reconnects; reconnects != 1 {
 		t.Fatalf("the connection reconnected %d time(s); want the one in-place reconnect, so no other connection event ran the hooks", reconnects)
 	}
+}
+
+// goroutineID returns the calling goroutine's id, which the runtime gives no other goroutine.
+func goroutineID() uint64 {
+	header := make([]byte, 64)
+	header = header[:runtime.Stack(header, false)]
+	// The trace opens with "goroutine <id> ".
+	id, err := strconv.ParseUint(strings.Fields(string(header))[1], 10, 64)
+	if err != nil {
+		panic(fmt.Sprintf("read the goroutine id from %q: %v", header, err))
+	}
+	return id
+}
+
+// goroutineLive reports whether the goroutine id has yet to return, from the goroutine dump, where
+// each goroutine's trace opens with "goroutine <id> ".
+func goroutineLive(id uint64) bool {
+	dump := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(dump, true)
+		if n < len(dump) {
+			dump = dump[:n]
+			break
+		}
+		dump = make([]byte, 2*len(dump))
+	}
+	header := fmt.Sprintf("goroutine %d ", id)
+	for _, trace := range strings.Split(string(dump), "\n\n") {
+		if strings.HasPrefix(trace, header) {
+			return true
+		}
+	}
+	return false
 }
 
 // A failure that wants a recovery while one is ending is not left to the next connection event:
