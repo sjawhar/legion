@@ -84,7 +84,7 @@ a new version that keeps the human's own text, never a second "spec" artifact be
   versions keep the history.
 - **No placeholders.** No TBD, TODO, or hedging ("might", "could consider"): an open item is a
   decision block, a technical decision your lane makes and records in the text, or, for a
-  contract between two lanes or a halt condition, a question for the platform PO (see
+  contract between two lanes, a question for the platform PO (see
   [Before you ask](#before-you-ask) under Asking).
 - **No progress.** The spec records the design and its decisions, never status, timestamps, an
   "Update HH:MMZ" section, a pull-request list, or handoff notes. Progress is not a Dispatch
@@ -208,10 +208,11 @@ Every `dispatch_ask` passes four gates first:
 1. **Does it need his authority, taste, or risk appetite?** This is the bar for a decision
    written as an `:::ask` block in context ([Decision blocks](#decision-blocks)). Technical
    decisions inside your outcome do not: schema shapes, table layouts, field names, and migration
-   internals are your lane's to decide and record in the spec. Two things still go to the
-   platform PO over Envoy: a contract between two lanes, and a halt condition (a change to IAM,
-   deletion or exposure of production data, anything that reaches a customer). The PO takes those
-   to Sami as a Dispatch ask; you do not open one yourself, even as a permission ask under gate 2.
+   internals are your lane's to decide and record in the spec. A contract between two lanes still
+   goes to the platform PO over Envoy, and you open no ask for it. A halt condition (a change to
+   IAM, deletion or exposure of production data, anything that reaches a customer) passes this
+   gate: it is your own `dispatch_ask` to Sami on your own issue, never routed through the
+   platform PO.
 2. **Is there genuine uncertainty, and have you measured what you can?** If there is none, it is
    a plan you execute. The one legitimate ask without uncertainty is permission for an action
    only a human can authorise — a production write, an external send, a console action — and then
@@ -314,8 +315,7 @@ Before saying you are waiting for human input, call `dispatch_open_asks`. With n
 **Anything you are blocked on a human for is an open ask.** An agent waits on a human only through
 an open ask. An approval, a credential or grant to renew, a setting only they can change, a review
 click, a decision, or a conflict between two of their own rules: open a `dispatch_ask` the moment
-you know, the action as the question. The exception is a halt condition from [Before you
-ask](#before-you-ask) gate 1, which goes to the platform PO over Envoy instead. Never write it
+you know, the action as the question. Never write it
 into a spec, a comment reply, a message, or a pull-request body: nothing in those paths reaches
 the human's Inbox, and a human who is not reading your document does not know they are the
 blocker. Before asking, try to remove the step: a value already on the machine, a permission you

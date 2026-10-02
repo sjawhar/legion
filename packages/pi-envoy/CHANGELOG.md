@@ -30,6 +30,10 @@
   summary of what the tree will do. `legion-architect` states that condition once.
 - The run-end nudge that tells an agent to open an ask no longer offers
   `dispatch_request_approval` as a way to wait on a human.
+- The `dispatch` skill makes a halt condition (a change to IAM, deletion or exposure of production
+  data, anything that reaches a customer) the lane's own `dispatch_ask` to Sami on its own issue,
+  never routed through the platform PO, in "Before you ask" gate 1, "Writing a spec" and "When you
+  need a human". A contract between two lanes still goes to the platform PO over Envoy.
 
 ### Added
 
