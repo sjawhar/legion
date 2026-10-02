@@ -394,9 +394,10 @@ Before the daemon opens its store, so before any schema write, image probe or re
 that Agent Sandbox is installed and refuses a namespace that still holds a per-claim Sandbox of the
 layout before issue pods, naming it; once the store opens and before it migrates, it refuses a
 claim that still records such a Sandbox. After it migrates and before it installs the issue-pod
-layout marker, it refuses an outbox tree close of its project whose linger (the root generation
-the close expires) it could never decode, naming each row: no daemon writes one, and such a row
-would fail on every attempt. Migrate or remove those first. The daemon runs on a host
+layout marker, it refuses an outbox tree close of its project that could never run, naming each
+row: one the outbox's strict decode refuses, or whose linger (the root generation the close
+expires) is beyond the store's largest generation. No daemon writes one, and such a row would fail
+on every attempt. Migrate or remove those first. The daemon runs on a host
 its pods can reach and serves the worker stream they dial. The controller is
 `legion controller start` on the operator's machine
 ([Operator-launched controller](#operator-launched-controller)).
