@@ -14,7 +14,6 @@ import (
 // server-owned answered_by attribute names.
 type AskAnswerer struct {
 	ArtifactID string
-	BlockID    string
 	AnsweredBy string
 }
 
@@ -24,11 +23,10 @@ type UnreadableDocument struct {
 	Err        error
 }
 
-// AnswererRename is what RenameAskAnswerers did to one document: how many ask blocks it renamed,
-// or why it left the document alone.
+// AnswererRename is how RenameAskAnswerers left one document: Skipped names why a stopping service
+// left it alone, Err why the rename failed, and neither is set once its asks name what rename gives.
 type AnswererRename struct {
 	ArtifactID string
-	Renamed    int
 	Skipped    string
 	Err        error
 }
@@ -58,8 +56,7 @@ func (s *Service) AskAnswerers(ctx context.Context) (answerers []AskAnswerer, un
 		}
 		pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
 			if by, ok := askAnsweredBy(node); ok {
-				blockID, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
-				answerers = append(answerers, AskAnswerer{ArtifactID: artifactID, BlockID: blockID, AnsweredBy: by})
+				answerers = append(answerers, AskAnswerer{ArtifactID: artifactID, AnsweredBy: by})
 			}
 			return true
 		})
@@ -79,7 +76,7 @@ func (s *Service) RenameAskAnswerers(ctx context.Context, artifactIDs []string, 
 	ctx = store.WithTransactionTracking(ctx)
 	reports := make([]AnswererRename, 0, len(artifactIDs))
 	for _, artifactID := range artifactIDs {
-		renamed, skipped, err := s.repairDocument(ctx, artifactID, func(doc *crdt.Doc, origin any) (int, bool, error) {
+		_, skipped, err := s.repairDocument(ctx, artifactID, func(doc *crdt.Doc, origin any) (int, bool, error) {
 			tree, err := treeOf(doc)
 			if err != nil {
 				return 0, false, err
@@ -107,7 +104,7 @@ func (s *Service) RenameAskAnswerers(ctx context.Context, artifactIDs []string, 
 			}
 			return renamed, false, nil
 		})
-		reports = append(reports, AnswererRename{ArtifactID: artifactID, Renamed: renamed, Skipped: skipped, Err: err})
+		reports = append(reports, AnswererRename{ArtifactID: artifactID, Skipped: skipped, Err: err})
 	}
 	return reports
 }

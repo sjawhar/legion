@@ -128,7 +128,7 @@ func TestRenameAskAnswerersAppendsOneUpdateAndKeepsTheHistory(t *testing.T) {
 	if err != nil || len(unreadable) != 0 {
 		t.Fatalf("read answerers: %v, unreadable %#v", err, unreadable)
 	}
-	if want := []AskAnswerer{{ArtifactID: artifactID, BlockID: "decision", AnsweredBy: "Ada-Example"}}; !reflect.DeepEqual(answerers, want) {
+	if want := []AskAnswerer{{ArtifactID: artifactID, AnsweredBy: "Ada-Example"}}; !reflect.DeepEqual(answerers, want) {
 		t.Fatalf("answerers = %#v, want %#v", answerers, want)
 	}
 
@@ -136,7 +136,7 @@ func TestRenameAskAnswerersAppendsOneUpdateAndKeepsTheHistory(t *testing.T) {
 	before := persistedUpdates(t, database, artifactID)
 	versions := versionMarkdowns(t, database, artifactID)
 	reports := service.RenameAskAnswerers(context.Background(), []string{artifactID}, renameAdaExample)
-	if want := []AnswererRename{{ArtifactID: artifactID, Renamed: 1}}; !reflect.DeepEqual(reports, want) {
+	if want := []AnswererRename{{ArtifactID: artifactID}}; !reflect.DeepEqual(reports, want) {
 		t.Fatalf("rename reports = %#v, want %#v", reports, want)
 	}
 
@@ -186,7 +186,7 @@ func TestRenameAskAnswerersRenamesAClosedIssuesDocument(t *testing.T) {
 	}
 	moveAnswerToEmail(t, database, artifactID)
 	reports := service.RenameAskAnswerers(context.Background(), []string{artifactID}, renameAdaExample)
-	if want := []AnswererRename{{ArtifactID: artifactID, Renamed: 1}}; !reflect.DeepEqual(reports, want) {
+	if want := []AnswererRename{{ArtifactID: artifactID}}; !reflect.DeepEqual(reports, want) {
 		t.Fatalf("rename reports = %#v, want %#v", reports, want)
 	}
 	waitForPersistedProofText(t, database, artifactID, answererAnsweredAsk("ada@example.com"))
