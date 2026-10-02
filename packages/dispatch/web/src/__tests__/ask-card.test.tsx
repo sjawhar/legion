@@ -851,7 +851,6 @@ test("an approval-kind ask submits Approve with an optional note", async () => {
   }
 });
 
-
 // A refusal of what the answer says, or of the ask it answers, is refused again however often it
 // is sent, so the card says why and offers no Retry; anything else may pass on a retry.
 for (const refusal of [

@@ -582,9 +582,11 @@ export interface Ask extends AnchorPosition {
    *  null when nobody has replied. Who spoke last; whose turn it is comes from `waiting_on`.
    *  Absent on every other ask read. */
   readonly last_reply?: AskLastReply | null;
-  /** Whose reply an open ask needs next: the `turn` of its newest reply, `human` when nobody
-   *  has replied. Present on every open-ask read (inbox rows, ask lists, the ask detail, the
-   *  issue detail's `open_asks`); absent on closed asks and on `ask.*` event payloads. */
+  /** Whose reply an open ask needs next. A moved approval request stays with its agent while
+   *  `requested_version` is below `version`; a hand-back's newer edit returns it to the human
+   *  until a later reply's `turn` decides it. Present on every open-ask read (inbox rows, ask
+   *  lists, the ask detail, the issue detail's `open_asks`); absent on closed asks and on `ask.*`
+   *  event payloads. */
   readonly waiting_on?: AskTurn;
   readonly edited_at: string | null;
   /** Present only on a server-created approval ask. */
