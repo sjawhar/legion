@@ -18,7 +18,9 @@ const maxNesting = 100
 // blocks. withChild says the parser opens the container with a child inside it on the same line,
 // as a list opens with its first item: the guard then refuses the container whose child would
 // stand past the bound, rather than leave the container without that child, which goldmark's list
-// parser does not expect and panics on at the next line.
+// parser does not expect and panics on at the next line. So a list's guard counts its first item,
+// and goldmark opens a list item only under a list, each at its first item's level: list items
+// need no guard of their own.
 type nestingGuard struct {
 	parser.BlockParser
 	withChild bool
@@ -42,7 +44,7 @@ func (g nestingGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Cont
 	if g.withChild {
 		opens = 2
 	}
-	if !opensPastBound(parent, pc, opens) {
+	if !opensPastBound(parent, opens) {
 		return node, state
 	}
 	reader.SetPosition(line, position)
@@ -53,15 +55,8 @@ func (g nestingGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Cont
 }
 
 // opensPastBound reports whether opens blocks, opened one inside another under parent, would take
-// the innermost inside maxNesting blocks. Only containers enclose a block, and nestingGuard opens
-// every one. The parser's open blocks hold each container enclosing parent, and while a line opens
-// blocks they can hold more: the paragraph a new block interrupts, and the blocks a line has left,
-// which the parser closes only once the line's new blocks have opened. So while that many fit
-// beside the open blocks, no walk is needed.
-func opensPastBound(parent ast.Node, pc parser.Context, opens int) bool {
-	if len(pc.OpenedBlocks())+opens <= maxNesting {
-		return false
-	}
+// the innermost inside maxNesting blocks, counting each container from parent up to the document.
+func opensPastBound(parent ast.Node, opens int) bool {
 	nesting := opens
 	for node := parent; node.Kind() != ast.KindDocument; node = node.Parent() {
 		if nesting++; nesting > maxNesting {

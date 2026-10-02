@@ -66,7 +66,7 @@ func blockParsers() []util.PrioritizedValue {
 		case listParser:
 			parsers[index].Value = frontmatterAttempt{tabIndented{endsContainers{emptyItemGuard{nestingGuard{BlockParser: block, withChild: true}}}, listMarkerStart}}
 		case listItemParser:
-			parsers[index].Value = tabIndented{endsContainers{listItemColumns{nestingGuard{BlockParser: block}}}, listMarkerStart}
+			parsers[index].Value = tabIndented{endsContainers{listItemColumns{block}}, listMarkerStart}
 		case quoteParser:
 			parsers[index].Value = frontmatterAttempt{tabIndented{endsContainers{nestingGuard{BlockParser: block}}, nil}}
 		case setextParser:
