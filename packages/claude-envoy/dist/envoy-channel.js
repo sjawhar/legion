@@ -44276,7 +44276,11 @@ var version2 = "0.6.1";
 
 // src/channel-forwarder.ts
 var DeliveryIdentity = DedupeIdentitySchema.extend({
-  topic: exports_external.string().min(1).optional()
+  event_id: DedupeIdentitySchema.shape.event_id.catch(undefined),
+  dedupe_key: DedupeIdentitySchema.shape.dedupe_key.catch(undefined),
+  source: DedupeIdentitySchema.shape.source.catch(undefined),
+  source_event_id: DedupeIdentitySchema.shape.source_event_id.catch(undefined),
+  topic: exports_external.string().min(1).optional().catch(undefined)
 });
 var decoder = new TextDecoder;
 var DEFAULT_DRAIN_TIMEOUT_MS = 1000;

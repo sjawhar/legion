@@ -200,10 +200,15 @@ func (l *busLogs) String() string {
 }
 
 func (l *busLogs) errorLine() string {
+	return l.lineAt("ERROR", "")
+}
+
+// lineAt returns the first record at level whose text holds fragment, or "".
+func (l *busLogs) lineAt(level, fragment string) string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for _, line := range strings.Split(l.buffer.String(), "\n") {
-		if strings.Contains(line, `"level":"ERROR"`) {
+		if strings.Contains(line, `"level":"`+level+`"`) && strings.Contains(line, fragment) {
 			return line
 		}
 	}
