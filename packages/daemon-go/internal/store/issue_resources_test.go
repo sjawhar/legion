@@ -136,6 +136,40 @@ func TestCommittedReadmissionStartFencesAnOldCleanup(t *testing.T) {
 	}
 }
 
+// A cleanup marker survives a transient API-delete failure. If the tree is re-admitted while the
+// retry backs off, the old cleanup must resume and confirm before the new start can record
+// resources: treating the changed root generation as a stale retry clears no marker and leaves the
+// new start held forever.
+func TestAnUnconfirmedCleanupResumesAcrossReadmissionBeforeTheNewStart(t *testing.T) {
+	store := migratedStore(t)
+	ctx := context.Background()
+	ensure(t, store, rootIssue, rootSandbox)
+	first, began, err := store.BeginIssueCleanup(ctx, "legion", rootIssue, rootIssue, 1)
+	if err != nil || !began {
+		t.Fatalf("begin first cleanup: %+v, began %t, err %v", first, began, err)
+	}
+	if _, err := store.Pool().Exec(ctx, `update issues set generation = 2, phase = 'admitted', status = 'todo',
+		linger_until = null where key = $1`, rootIssue); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureIssueResources(ctx, "legion", rootIssue, rootIssue, rootSandbox); !errors.Is(err, ErrIssueCleanupInProgress) {
+		t.Fatalf("new start before cleanup confirmation = %v, want ErrIssueCleanupInProgress", err)
+	}
+	retry, began, err := store.BeginIssueCleanup(ctx, "legion", rootIssue, rootIssue, 1)
+	if err != nil || !began || retry.CleanupGeneration != first.CleanupGeneration {
+		t.Fatalf("retry after re-admission = %+v, began %t, err %v; want the begun cleanup", retry, began, err)
+	}
+	if err := store.ConfirmIssueCleanup(ctx, "legion", rootIssue, retry.CleanupGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureIssueResources(ctx, "legion", rootIssue, rootIssue, rootSandbox); err != nil {
+		t.Fatalf("new start after cleanup confirmation: %v", err)
+	}
+	if got := resourcesOf(t, store, rootIssue); got.Generation != 2 || got.CleanupStarted {
+		t.Fatalf("new start resources = %+v, want admitted epoch 2 after confirmation", got)
+	}
+}
+
 // A claim of the issue that is anything but retired means the issue was re-admitted (its launch
 // persisted the claim before it recorded resources): cleanup begins nothing until it retires.
 func TestCleanupBeginsNothingWhileAClaimOfTheIssueIsLive(t *testing.T) {

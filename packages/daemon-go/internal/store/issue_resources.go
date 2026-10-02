@@ -125,11 +125,6 @@ func (s *Store) BeginIssueCleanup(ctx context.Context, project, issue, tree stri
 		if err != nil {
 			return fmt.Errorf("read tree root %s: %w", tree, err)
 		}
-		// A root that re-admitted first has a different generation and no linger. It already
-		// committed the new generation's pending starts, which appear in claims only later.
-		if uint64(currentGeneration) != treeGeneration || !lingering {
-			return nil
-		}
 		own, err := scanIssueResources(tx.QueryRow(ctx, selectIssueResources+` where project = $1 and issue = $2 for update`, project, issue))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -144,6 +139,13 @@ func (s *Store) BeginIssueCleanup(ctx context.Context, project, issue, tree stri
 			if own.CleanupConfirmedAt.IsZero() {
 				resources, began = own, true
 			}
+			return nil
+		}
+		// A root that re-admitted first has a different generation and no linger. It already
+		// committed the new generation's pending starts, which appear in claims only later. This
+		// fence applies only to beginning deletion: an existing unconfirmed cleanup must resume
+		// and confirm before its marker can admit that new start.
+		if uint64(currentGeneration) != treeGeneration || !lingering {
 			return nil
 		}
 		var live bool
