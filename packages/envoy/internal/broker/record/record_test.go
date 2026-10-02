@@ -1,6 +1,7 @@
 package record
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -179,6 +180,125 @@ func TestMachineBodyUsesDashEnrollmentAndCarriesCode(t *testing.T) {
 	back, err := ParseBody(got)
 	if err != nil || back != b {
 		t.Fatalf("round trip: %+v %v", back, err)
+	}
+}
+
+// podBody is a pod enrollment's record body with no slot: the three-field form every slotless
+// record is stored and addressed under.
+func podBody(request string) Body {
+	return Body{
+		Request:         request,
+		Approver:        "sjawhar",
+		Enrollment:      Enrollment{Kind: "pod", RuntimeID: "0b6c2f6e-pod-uid"},
+		LifetimeSeconds: 3600,
+		RulesVersion:    "ab12",
+		ExpiresAt:       time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC),
+	}
+}
+
+// TestASlotIsAFourthEnrollmentFieldAndASlotlessBodyKeepsItsBytes pins the slot's place in the
+// signed record: a body with no slot renders the exact three-field enrollment line and parses back
+// to the same bytes, and a pod's slot is a fourth field that round-trips and gives the record an id
+// of its own, distinct for every slot of one pod.
+func TestASlotIsAFourthEnrollmentFieldAndASlotlessBodyKeepsItsBytes(t *testing.T) {
+	legacyBody := podBody("eyJ.fake.jws")
+	old := legacyBody.Canonical()
+	if want := "agent-secrets-record/v1\n" +
+		"request: eyJ.fake.jws\n" +
+		"approver: sjawhar\n" +
+		"enrollment: pod\t0b6c2f6e-pod-uid\t-\n" +
+		"lifetime_seconds: 3600\n" +
+		"rules_version: ab12\n" +
+		"expires_at: 2026-09-27T12:00:00Z\n" +
+		"code: -\n"; old != want {
+		t.Fatalf("slotless pod body:\n%q\nwant:\n%q", old, want)
+	}
+	parsed, err := ParseBody(old)
+	if err != nil || parsed.Canonical() != old || parsed != legacyBody {
+		t.Fatalf("legacy signed record changed: %+v %v", parsed, err)
+	}
+
+	implementer := legacyBody
+	implementer.Enrollment.Slot = "implementer-g3"
+	got := implementer.Canonical()
+	if want := strings.Replace(old, "enrollment: pod\t0b6c2f6e-pod-uid\t-\n", "enrollment: pod\t0b6c2f6e-pod-uid\t-\timplementer-g3\n", 1); got != want {
+		t.Fatalf("slotted pod body:\n%q\nwant:\n%q", got, want)
+	}
+	back, err := ParseBody(got)
+	if err != nil || back != implementer || back.Canonical() != got {
+		t.Fatalf("slotted round trip: %+v %v", back, err)
+	}
+	reviewer := implementer
+	reviewer.Enrollment.Slot = "reviewer-g3"
+	ids := map[string]string{legacyBody.ID(): "no slot", implementer.ID(): "implementer-g3", reviewer.ID(): "reviewer-g3"}
+	if len(ids) != 3 {
+		t.Fatalf("record ids %v, want one per slot of the pod and one for no slot", ids)
+	}
+}
+
+// TestParseBodyRefusesAnEnrollmentFourthFieldThatIsNotAPodSlot pins ParseBody's slot rule: the
+// enrollment line's fourth field is a pod's nonempty slot matching ValidSlot, and nothing else.
+func TestParseBodyRefusesAnEnrollmentFourthFieldThatIsNotAPodSlot(t *testing.T) {
+	withEnrollment := func(enrollment string) string {
+		return strings.Replace(podBody("eyJ.fake.jws").Canonical(), "enrollment: pod\t0b6c2f6e-pod-uid\t-\n", "enrollment: "+enrollment+"\n", 1)
+	}
+	longest := "a" + strings.Repeat("b", 62)
+	if _, err := ParseBody(withEnrollment("pod\tuid-1\t-\t" + longest)); err != nil {
+		t.Fatalf("a 63-character slot must parse: %v", err)
+	}
+	for name, enrollment := range map[string]string{
+		"empty fourth field":      "pod\tuid-1\t-\t",
+		"uppercase slot":          "pod\tuid-1\t-\tImplementer-g1",
+		"leading digit":           "pod\tuid-1\t-\t1mplementer",
+		"leading hyphen":          "pod\tuid-1\t-\t-implementer",
+		"64-character slot":       "pod\tuid-1\t-\t" + longest + "c",
+		"slot on a box":           "box\tbox-1\tsjawhar\timplementer-g1",
+		"slot on a host":          "host\thost-1\tsjawhar\timplementer-g1",
+		"slot on a machine login": "-\t-\t-\timplementer-g1",
+		"five fields":             "pod\tuid-1\t-\timplementer-g1\textra",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if b, err := ParseBody(withEnrollment(enrollment)); err == nil {
+				t.Fatalf("enrollment %q parsed as %+v", enrollment, b)
+			}
+		})
+	}
+}
+
+// TestChainVerifierHoldsASlotlessAndASlottedRecordToTheirOwnBytes runs ChainVerifier over a pod
+// record with no slot and one with a slot, each signed by the requester and approved by its
+// approver: both verify, and a stored body that lost its slot no longer reproduces the slotted
+// record's id.
+func TestChainVerifierHoldsASlotlessAndASlottedRecordToTheirOwnBytes(t *testing.T) {
+	key, _ := proof.NewKey()
+	now := time.Now()
+	compact, err := Sign(key, "https://secrets.test", secretDetail(), "need it", "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyBody := podBody(compact)
+	slotted := legacyBody
+	slotted.Enrollment.Slot = "implementer-g3"
+	stored := map[string]string{legacyBody.ID(): legacyBody.Canonical(), slotted.ID(): slotted.Canonical()}
+	verifier := &ChainVerifier{
+		Audience: "https://secrets.test", Skew: time.Minute,
+		FetchRecord: func(_ context.Context, id string) (string, time.Time, bool, error) {
+			body, ok := stored[id]
+			return body, now, ok, nil
+		},
+		FetchDecisions: func(context.Context, string) ([]TerminalEvent, error) {
+			return []TerminalEvent{{Event: "approved", Login: "sjawhar"}}, nil
+		},
+	}
+	for _, b := range []Body{legacyBody, slotted} {
+		got, err := verifier.Verify(context.Background(), b.ID())
+		if err != nil || got != b {
+			t.Fatalf("Verify(%q slot) = %+v, %v; want the stored body back", b.Enrollment.Slot, got, err)
+		}
+	}
+	stored[slotted.ID()] = legacyBody.Canonical()
+	if _, err := verifier.Verify(context.Background(), slotted.ID()); !errors.Is(err, ErrChainBroken) {
+		t.Fatalf("Verify(slotted id, slotless body) = %v, want ErrChainBroken", err)
 	}
 }
 

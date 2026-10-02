@@ -11,7 +11,7 @@ function secretRecord(overrides: Partial<CredentialRecord> = {}): CredentialReco
   return {
     approver: "sami",
     decided: null,
-    enrollment: { kind: "devbox", operator: "sami", runtime_id: "runtime-1" },
+    enrollment: { kind: "devbox", operator: "sami", runtime_id: "runtime-1", slot: null },
     expires_at: "2026-09-27T01:00:00Z",
     identifiers: ["ANTHROPIC_API_KEY"],
     kind: "agent_secret",
@@ -139,6 +139,31 @@ test("an empty-reason record renders no reason blockquote", async () => {
     expect(await screen.findByText("ANTHROPIC_API_KEY")).toBeDefined();
     expect(screen.queryByText("The agent's stated reason")).toBeNull();
     expect(document.querySelector("blockquote")).toBeNull();
+  } finally {
+    cleanup();
+    getCredentialRecord.mockRestore();
+  }
+});
+
+// Two roles of one pod share its kind, runtime id and (absent) operator, so the slot is the fact
+// that tells their requests apart; a record without one shows the facts it always did.
+test("a pod record names its worker slot, and a record with no slot shows no slot fact", async () => {
+  const podRecord = secretRecord({
+    enrollment: { kind: "pod", operator: "", runtime_id: "3f9c-pod-uid", slot: "reviewer-g2" },
+  });
+  const getCredentialRecord = spyOn(api, "getCredentialRecord").mockResolvedValue(podRecord);
+
+  try {
+    renderPage();
+    expect(await screen.findByText("Worker slot")).toBeDefined();
+    expect(screen.getByText("reviewer-g2")).toBeDefined();
+    expect(screen.getByText("pod · 3f9c-pod-uid · —")).toBeDefined();
+    cleanup();
+
+    getCredentialRecord.mockResolvedValue(secretRecord());
+    renderPage();
+    expect(await screen.findByText("devbox · runtime-1 · sami")).toBeDefined();
+    expect(screen.queryByText("Worker slot")).toBeNull();
   } finally {
     cleanup();
     getCredentialRecord.mockRestore();

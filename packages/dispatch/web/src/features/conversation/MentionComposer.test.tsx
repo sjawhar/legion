@@ -584,6 +584,9 @@ test("opening autocomplete refetches live agents before selecting a canonical ta
 });
 
 test("an accepted mention survives its target going offline before Send", async () => {
+  // Typing @ refetches the live agents (the test above). That refetch answers what the cache
+  // already holds, so Planner goes offline only when this test takes it out of the list.
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([planner]);
   const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
@@ -604,6 +607,7 @@ test("an accepted mention survives its target going offline before Send", async 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
     fireEvent.change(field, { target: { value: "@" } });
+    await waitFor(() => expect(listAgents).toHaveBeenCalledTimes(1));
     await screen.findByRole("option", { name: "Planner" });
     fireEvent.click(screen.getByRole("option", { name: "Planner" }));
     act(() => queryClient.setQueryData(["agents"], []));
@@ -617,6 +621,7 @@ test("an accepted mention survives its target going offline before Send", async 
     );
   } finally {
     view.unmount();
+    listAgents.mockRestore();
     createComment.mockRestore();
   }
 });

@@ -1480,7 +1480,7 @@ the synchronous listener call records the sent or failed attempt instead of blin
 
 ## Secrets broker
 
-AGENTC-393 v9's secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
+AGENTC-393's secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
 and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/agent-secrets` is its
 client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
@@ -1494,13 +1494,24 @@ broker checks it against the record's approver and records it on the decision ev
 bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
 agents is the deployment's job. `internal/broker/enroll` turns a launcher credential into a leased
 enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected
-service-account token); `internal/broker/rules` evaluates `agent-secret-rules.yaml` policy per
-request (the AGENTC-393 overview document, contract v9, is its contract; a file that still has an
-`approvers:` section is refused, naming the removal); `internal/broker/proof` authenticates a
-session's or a launcher's signed request against its live enrollment or credential;
-`internal/broker/machine` decides typed-code machine logins and mints the launcher credentials
-they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets Manager, or a
-fake local file for development.
+service-account token). A live enrollment is unique per launcher credential, runtime id and slot:
+`POST /v1/enrollments` takes an optional pod-only `slot` (`^[a-z][a-z0-9-]{0,62}$`, else `400
+INVALID_SLOT`, and a slot on a box or host is refused the same way) naming one of several
+independent identities in one pod. The launcher whose proof authenticates the enrollment chooses
+the slot; a session's proof cannot enroll anything (`401 LAUNCHER_INVALID`). So each slot of a pod
+holds its own key, lease, requests and grants, while a pod's `runtime_id` stays the pod UID its
+token proves. Omitted or `""` is the runtime's one enrollment, every box's and host's. The same key
+in the same slot gets its live enrollment back (200), a different key in a live slot is `409
+ALREADY_ENROLLED`, and the rules never see the slot: every slot of a pod matches on its verified
+service account alone. Migration 0007 is forward-only: an older broker binary's conflict lookup
+reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled
+back past it once a slotted enrollment exists. `internal/broker/rules` evaluates
+`agent-secret-rules.yaml` policy per request (the AGENTC-393 overview document is its contract; a
+file that still has an `approvers:` section is refused, naming the removal); `internal/broker/proof`
+authenticates a session's or a launcher's signed request against its live enrollment or
+credential; `internal/broker/machine` decides typed-code machine logins and mints the launcher
+credentials they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets
+Manager, or a fake local file for development.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
@@ -1593,7 +1604,7 @@ broker's `_FILE` secret-loading convention: `<NAME>_FILE`, when set, names a fil
 contents win over a bare `<NAME>` — with both set, the file wins silently, nothing is refused — and
 a named-but-unreadable or empty file is a startup error naming the file, never a silent fallback to
 an unset value. `config.Load` refuses to start naming a stale removal still set in the
-environment — AGENTC-393 v9's `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
+environment — the removed `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
 `BROKER_DISPATCH_PROJECT` and `BROKER_ASK_POLL_SECONDS` (the broker holds no Dispatch credential
 and asks/issues nothing), and `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker
 checks no WebAuthn origin) — so a stale deployment fails loudly rather than silently running on
@@ -1609,7 +1620,7 @@ local-dev-only path. The broker takes no flags, and refuses any flag it is given
 
 `internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
-contract for every row is the AGENTC-393 overview document (contract v9). Each row's handler is
+contract for every row is the AGENTC-393 overview document. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
 which fixes both the credential `server.authenticate` checks and the caller the handler receives (a
 launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route — the UI bearer
@@ -1631,16 +1642,19 @@ for the current, authoritative route list.
 
 `internal/broker/record` implements the credential-request record every human decision turns
 on: `Body.Canonical()` renders the contract's fixed `\n`-terminated line format (the request
-object verbatim, the approver, the enrollment triple, lifetime, rules version, expiry, and the
+object verbatim, the approver, the enrollment's tab-separated kind, runtime id and operator, plus
+a pod's slot as a fourth field only when it has one, lifetime, rules version, expiry, and the
 machine-login code or `-`), `Body.ID()` is the lowercase-hex SHA-256 of that canonical form — the
-record's own content-addressed id — and `ParseBody` is `Canonical`'s exact inverse, refusing any
-stored body that would not reproduce itself byte-for-byte. `VerifyRequestObject` enforces the
-requester's signed request object end to end (single ES256 JWS, `typ` `agent-secrets-request+jwt`
-— disjoint from the per-call proof's `agent-secrets-proof+jwt`, each verifier refusing the other's
-— embedded P-256 JWK, `iss` equal to that JWK's own thumbprint, `aud` equal to `BROKER_PUBLIC_URL`,
-`iat`/`exp` within skew and a 600-second cap, a `reason` of at most 400 runes with bidi/zero-width
-categories refused, and `authorization_details` either every entry `agent_secret` or exactly one
-`launcher_credential` entry naming a valid hostname and an optional `[a-z0-9-]{1,64}` service).
+record's own content-addressed id, which a slotless record keeps byte for byte — and `ParseBody`
+is `Canonical`'s exact inverse, refusing any stored body that would not reproduce itself
+byte-for-byte and any fourth enrollment field that is not a pod's valid slot. `VerifyRequestObject`
+enforces the requester's signed request object end to end (single ES256 JWS, `typ`
+`agent-secrets-request+jwt` — disjoint from the per-call proof's `agent-secrets-proof+jwt`, each
+verifier refusing the other's — embedded P-256 JWK, `iss` equal to that JWK's own thumbprint, `aud`
+equal to `BROKER_PUBLIC_URL`, `iat`/`exp` within skew and a 600-second cap, a `reason` of at most
+400 runes with bidi/zero-width categories refused, and `authorization_details` either every entry
+`agent_secret` or exactly one `launcher_credential` entry naming a valid hostname and an optional
+`[a-z0-9-]{1,64}` service).
 `Body.ApproverLogin(login)` is the one approver comparison: a record's approver is resolved when
 the record is created (an approval rule's `login:<name>`, the requesting enrollment's operator for
 `approver: operator`, or a machine login's `login_hint`), and every decision and every chain
@@ -1668,8 +1682,8 @@ still-live grant covering the exact same name set (`reuseLiveGrant`: no new requ
 as long as the current rules still allow it and the grant's whole chain still verifies), then
 evaluates the rules per name: any `deny` denies the whole request with no record written at all; a
 name no rule mentions at all aborts the whole call with `rules.ErrUnknownSecret` (`400
-UNKNOWN_SECRET`, per contract v9) instead of being folded into an ordinary `deny` decision — no
-request row is written either, matching the "at record time" wording; a name
+UNKNOWN_SECRET`, per the AGENTC-393 overview document) instead of being folded into an ordinary
+`deny` decision — no request row is written either, matching the "at record time" wording; a name
 needing approval that names a *different* approver than an already-approval-needing name in the
 same request is refused `400 MIXED_APPROVERS`; when every name is decided (`granted`/`denied`) with
 nothing pending, the request and, if granted, its grant are written with no record; a request
@@ -1704,7 +1718,7 @@ a no-op, writing no second audit row. Audit rows never carry secret values: `aud
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
 machine login. `Login` verifies a machine's signed request object (`login_hint` required — the
 approving operator's login — and exactly one `launcher_credential` authorization detail), mints an
-eight-symbol confirmation code (`XXXX-XXXX`, the pre-v9 alphabet unchanged) and a separate opaque
+eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
 `pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
 pending login by that human-readable code alone (`LookupByCode` / `POST /v1/machine-logins/lookup`)
@@ -1768,6 +1782,13 @@ listens on the port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127
 AGENTC-833), so concurrent instances can never collide on a shared port either.
 `dev-broker.test.sh` proves both kinds of isolation with fakes (no real Postgres or network) and
 runs in CI's `envoy-go` job.
+
+`.github/workflows/release-envoy-listener.yaml` runs on a `main` push that touches a file the
+image builds from, and by hand (`workflow_dispatch`) from any branch. Every run builds,
+smoke-tests and pushes `ghcr.io/sjawhar/legion/envoy:<commit sha>`, labelled
+`org.opencontainers.image.revision` with that sha. Its `release` job (moving `:latest`, the
+`legion-envoy-v*` tag and the GitHub release) runs only on `refs/heads/main`, so a branch
+dispatch publishes one immutable image, for a dev slot to pin before merge, and moves no tag.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
 `cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper` (AGENTC-393): each of
