@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -80,17 +82,12 @@ func (s *server) listUsers(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, fmt.Errorf("list people: %w", err))
 		return
 	}
-	defer rows.Close()
-	users := []dispatchUser{}
-	for rows.Next() {
+	users, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (dispatchUser, error) {
 		var user dispatchUser
-		if err := rows.Scan(&user.Login); err != nil {
-			s.writeHandlerError(w, fmt.Errorf("scan person: %w", err))
-			return
-		}
-		users = append(users, user)
-	}
-	if err := rows.Err(); err != nil {
+		err := row.Scan(&user.Login)
+		return user, err
+	})
+	if err != nil {
 		s.writeHandlerError(w, fmt.Errorf("list people: %w", err))
 		return
 	}
