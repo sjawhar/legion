@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
 
@@ -105,4 +106,20 @@ func TestARevivalDuringAReservedCleanupLaunchesNothingAndChargesNoBudget(t *test
 		t.Fatalf("stored claim after the refused retry = %s, launch failures %d, epoch %d; want retired, 2, epoch 1",
 			stored.State, stored.Budgets.LaunchFailures, stored.TreeEpoch)
 	}
+}
+
+// A process that dies while its tree's cleanup is reserved is not relaunched, and the refused
+// relaunch charges no launch failure: the close retires the claim, and a budget spent here would
+// follow the claim into its tree's next run.
+func TestADeathDuringAReservedCleanupRelaunchesNothingAndChargesNoBudget(t *testing.T) {
+	store := &epochStore{epoch: 1}
+	h := lifecycleHarness(t, store, queuedClaim())
+	h.reach(StateReady)
+	store.reserved = true
+	gone := RuntimeObservation{Observation: runtime.Observation{Locator: h.locator(), Kind: runtime.Gone, At: h.clock.Now()}}
+	if err := h.handle(gone); !errors.Is(err, errReserved) {
+		t.Fatalf("death during a reserved cleanup = %v, want the reservation's wait", err)
+	}
+	h.wantCalls("Resume", 0)
+	h.wantBudgets(Budgets{})
 }

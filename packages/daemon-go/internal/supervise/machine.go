@@ -639,6 +639,16 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 	m.log.Warn("supervise: dropped a stale event", "event", event, "fence", fence, "got", got, "held", held)
 }
 
+// checkLaunch is the lifecycle recheck every launch makes first, under a runtime with shared tree
+// resources: a claim whose tree cleanup is reserved, or whose bound epoch is no longer the open
+// one, starts nothing and changes nothing, so a relaunch refused here charges no budget.
+func (m *Machine) checkLaunch(ctx context.Context) error {
+	if _, lifecycle := m.deps.Runtime.(runtime.TreeLifecycleCleaner); lifecycle {
+		return m.deps.Store.CheckLaunch(ctx, m.claim)
+	}
+	return nil
+}
+
 // launch starts a process for the claim at a new generation with a new boot token: the same
 // agent resumed from its session file when the claim has one — after the process the claim last
 // ran is gone — and a fresh spawn when it has none. A process the claim still records is let go
@@ -647,10 +657,8 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 // failure and is tried again at once, waiting out the same process, until the budget runs out;
 // only a start that succeeds forgets it.
 func (m *Machine) launch(ctx context.Context) error {
-	if _, lifecycle := m.deps.Runtime.(runtime.TreeLifecycleCleaner); lifecycle {
-		if err := m.deps.Store.CheckLaunch(ctx, m.claim); err != nil {
-			return err
-		}
+	if err := m.checkLaunch(ctx); err != nil {
+		return err
 	}
 	m.letGo()
 	for {
