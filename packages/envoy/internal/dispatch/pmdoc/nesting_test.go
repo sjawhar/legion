@@ -142,16 +142,16 @@ func TestParseRefusesAListWithNoRoomForItsItem(t *testing.T) {
 	}
 }
 
-// blockMarkdownReaders is every reader of caller markdown that opens blocks: a whole upload, and
-// the fragments written by edits and accepted suggestions.
-func blockMarkdownReaders() []struct {
+// callerReader is one reader of caller markdown, by name.
+type callerReader struct {
 	name  string
 	parse func(string) (*Node, error)
-} {
-	return []struct {
-		name  string
-		parse func(string) (*Node, error)
-	}{
+}
+
+// blockMarkdownReaders is every reader of caller markdown that opens blocks: a whole upload, and
+// the fragments written by edits and accepted suggestions.
+func blockMarkdownReaders() []callerReader {
+	return []callerReader{
 		{name: "document", parse: Parse},
 		{name: "upload", parse: func(markdown string) (*Node, error) { return ParseForWrite(markdown, nil) }},
 		{name: "fragment", parse: func(markdown string) (*Node, error) {
@@ -169,11 +169,11 @@ func TestParseRefusesInlineMarksNestedPastTheBound(t *testing.T) {
 			// Two `*` either side open one mark, so a run of twice the bound is the deepest
 			// markdown that reads.
 			deepest := strings.Repeat("*", 2*expectedMaxInlineNesting)
-			if err := reader.parse(deepest + "x" + deepest); err != nil {
+			if _, err := reader.parse(deepest + "x" + deepest); err != nil {
 				t.Fatalf("%d nested inline marks: %v, want them read", expectedMaxInlineNesting, err)
 			}
 			over := strings.Repeat("*", 2*expectedMaxInlineNesting+2)
-			err := reader.parse(over + "x" + over)
+			_, err := reader.parse(over + "x" + over)
 			if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "line 1") || !strings.Contains(err.Error(), "100 inline marks") {
 				t.Fatalf("%d nested inline marks: %v, want ErrSchema naming line 1 and the bound", expectedMaxInlineNesting+1, err)
 			}
@@ -190,7 +190,7 @@ func TestInlineMarksNestNoDeeperThanTheBoundUnderASmallStack(t *testing.T) {
 		run := strings.Repeat("*", 200_000)
 		for _, reader := range inlineMarkReaders() {
 			t.Run(reader.name, func(t *testing.T) {
-				if err := reader.parse(run + "x" + run); !errors.Is(err, ErrSchema) {
+				if _, err := reader.parse(run + "x" + run); !errors.Is(err, ErrSchema) {
 					t.Fatalf("200,000 nested inline marks: %v, want ErrSchema", err)
 				}
 			})
@@ -220,23 +220,13 @@ func TestOrdinaryNestedInlineMarksReadAndRenderUnchanged(t *testing.T) {
 	}
 }
 
-// inlineMarkReaders is every reader of caller markdown that reaches the inline parser.
-func inlineMarkReaders() []struct {
-	name  string
-	parse func(string) error
-} {
-	return []struct {
-		name  string
-		parse func(string) error
-	}{
-		{name: "document", parse: func(markdown string) error { _, err := Parse(markdown); return err }},
-		{name: "upload", parse: func(markdown string) error { _, err := ParseForWrite(markdown, nil); return err }},
-		{name: "fragment", parse: func(markdown string) error {
-			_, err := ParseFragment(markdown, true, NewTablePaddingBudget())
-			return err
-		}},
-		{name: "inline", parse: func(markdown string) error { _, err := ParseInline(markdown); return err }},
-	}
+// inlineMarkReaders is every reader of caller markdown that reaches the inline parser: the block
+// readers, and a replacement's inline markdown through ParseInline, which reads no document.
+func inlineMarkReaders() []callerReader {
+	return append(blockMarkdownReaders(), callerReader{name: "inline", parse: func(markdown string) (*Node, error) {
+		_, err := ParseInline(markdown)
+		return nil, err
+	}})
 }
 
 // nestedCallouts is depth callouts inside one another, with the outermost fenced with the most colons.
@@ -273,18 +263,21 @@ func TestParseRefusesAMebibyteOfQuotesInBoundedTime(t *testing.T) {
 // the schema allows, the document token is JSON encoding/json still reads, which it is not past
 // 10,000 nested arrays and objects.
 func TestTreesDeeperThanTheBoundAreOutsideTheSchema(t *testing.T) {
-	chain := func(blockquotes int) *Node {
+	// Both halves count a tree's depth as its text's level, the unit maxTreeDepth bounds and
+	// docstest.WriteDeepChain writes: the document is level 0, the blockquotes levels 1 through
+	// textLevel-2, and the paragraph level textLevel-1.
+	chain := func(textLevel int) *Node {
 		text := &Node{Type: "text", Text: "a", Marks: []Mark{{
 			Type: "proofComment", Attrs: Attrs{"id": "c1", "nested": nestedValue(expectedMaxAttrNesting)},
 		}}}
 		node := &Node{Type: "paragraph", Children: []*Node{text}}
-		for range blockquotes {
+		for range textLevel - 2 {
 			node = &Node{Type: "blockquote", Children: []*Node{node}}
 		}
 		return &Node{Type: "doc", Children: []*Node{node}}
 	}
 
-	deepest := chain(expectedMaxTreeDepth - 2)
+	deepest := chain(expectedMaxTreeDepth)
 	if err := deepest.Validate(); err != nil {
 		t.Fatalf("a tree %d deep: %v, want it valid", expectedMaxTreeDepth, err)
 	}
@@ -295,7 +288,7 @@ func TestTreesDeeperThanTheBoundAreOutsideTheSchema(t *testing.T) {
 	if err != nil || !json.Valid(token) {
 		t.Fatalf("token of a tree %d deep: valid JSON %t, %v; want JSON encoding/json reads", expectedMaxTreeDepth, json.Valid(token), err)
 	}
-	over := chain(expectedMaxTreeDepth - 1)
+	over := chain(expectedMaxTreeDepth + 1)
 	if err := over.Validate(); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), fmt.Sprint(expectedMaxTreeDepth)) {
 		t.Fatalf("a tree %d deep: %v, want ErrSchema naming the bound", expectedMaxTreeDepth+1, err)
 	}
