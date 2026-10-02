@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -587,10 +588,45 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
 			return fmt.Errorf("close the tree of claim %s: %w", token, err)
 		}
+		if err := r.cleanupIssueResources(ctx, issue); err != nil {
+			return err
+		}
 		return nil
 	default:
 		return fmt.Errorf("outbox row %d has unknown supervise operation %q", row.ID, payload.Op)
 	}
+}
+
+// cleanupIssueResources is the durable whole-issue effect after a tree-close row retired one
+// claim. It acts only once every persisted sibling claim of this exact issue is retired; a later
+// re-admission leaves one launching/active claim and fences an old close before the runtime ever
+// sees a delete. Runtime Release remains role-scoped.
+func (r *outbox) cleanupIssueResources(ctx context.Context, issue record.Issue) error {
+	cleaner, ok := r.supervisor.deps.Runtime.(runtime.IssueResourceCleaner)
+	if !ok {
+		return nil
+	}
+	claims, err := r.supervisor.Claims(ctx)
+	if err != nil {
+		return fmt.Errorf("read sibling claims before cleanup of %s: %w", issue.Key, err)
+	}
+	found := false
+	for _, sibling := range claims {
+		if sibling.Project != r.project || sibling.Issue != issue.Key {
+			continue
+		}
+		found = true
+		if sibling.State != supervise.StateRetired {
+			return nil
+		}
+	}
+	if !found {
+		return nil
+	}
+	if err := cleaner.CleanupIssue(ctx, r.project, issue.Key, issue.Tree, issue.Generation); err != nil {
+		return fmt.Errorf("cleanup resources of closed issue %s: %w", issue.Key, err)
+	}
+	return nil
 }
 
 // root is issue's tree root as recorded, nil when it is not, read in a transaction of its own
