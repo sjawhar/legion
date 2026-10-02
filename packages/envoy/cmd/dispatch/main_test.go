@@ -711,6 +711,27 @@ func TestRunSubcommandRefusesAnUnknownSubcommand(t *testing.T) {
 	}
 }
 
+// migrate-people reads its map before it touches the database: a run without one, or with one it
+// cannot read, stops there, whatever DATABASE_URL names.
+func TestMigratePeopleRefusesAMissingOrBadMapBeforeOpeningTheDatabase(t *testing.T) {
+	for _, test := range []struct{ name, people, refusal string }{
+		{name: "unset", refusal: "DISPATCH_PEOPLE_MAP is required"},
+		{name: "not an email", people: `{"ada-example": "ada"}`, refusal: `"ada-example" maps to "ada", which is not an email`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			env := map[string]string{"DATABASE_URL": "postgres://unreachable.invalid/dispatch", "DISPATCH_PEOPLE_MAP": test.people}
+			var stdout, stderr bytes.Buffer
+			code := runSubcommand(context.Background(), []string{"migrate-people"}, func(key string) string { return env[key] }, &stdout, &stderr)
+			if code != 1 || !strings.Contains(stderr.String(), test.refusal) {
+				t.Fatalf("exit %d, stderr %q; want 1 and %q", code, stderr.String(), test.refusal)
+			}
+			if strings.Contains(stderr.String(), "database") || stdout.Len() != 0 {
+				t.Fatalf("migrate-people went on past its map: stdout %q stderr %q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
 // The census exits 2 when it could not be taken and 0 when nothing refuses, and prints the report
 // to stdout.
 func TestCensusSubcommandExitCodes(t *testing.T) {
