@@ -114,6 +114,15 @@ func (t commentThreadTarget) eventThread(waitingOn string) commentEventThread {
 	return thread
 }
 
+// waitingOn is whom the thread's open ask waits on once a reply posted into it is its newest
+// comment, read in the reply's own transaction; "" when the thread is not an open ask's.
+func (t commentThreadTarget) waitingOn(ctx context.Context, q queryer) (string, error) {
+	if t.AskID == nil || t.AskState != "open" {
+		return "", nil
+	}
+	return askWaitingOn(ctx, q, *t.AskID)
+}
+
 func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	s.createCommentFor(w, r, issueOwner(r.PathValue("key")))
 }
@@ -490,12 +499,10 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	comment.Suggestion = suggestion
 	comment.Mentions = mentions
 	comment.Deliveries = []model.CommentDelivery{}
-	if comment.AskID != nil && threadTarget.AskState == "open" {
-		comment.WaitingOn, err = askWaitingOn(r.Context(), tx, *comment.AskID)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
+	comment.WaitingOn, err = threadTarget.waitingOn(r.Context(), tx)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
 	}
 	if comment.Anchor != nil {
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil, projectionKind), actor); err != nil {

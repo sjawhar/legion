@@ -752,12 +752,10 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if reply.AskID != nil && thread.AskState == "open" {
-		reply.WaitingOn, err = askWaitingOn(r.Context(), tx, *reply.AskID)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
+	reply.WaitingOn, err = thread.waitingOn(r.Context(), tx)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
 	}
 	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", reply.ID, reply.Body)
 	if err != nil {
