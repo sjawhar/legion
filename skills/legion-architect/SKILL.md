@@ -143,10 +143,11 @@ the primary document) as the human's reason asks, call `dispatch_request_approva
 `summary` that leads with what the revision changes — it opens the request at the new version —
 and stay parked.
 
-**After approval, the root spec changes only when what the tree delivers changes.** Approval is
-pinned to the spec version: any new version of the root spec closes the gate again with no wake
-(you made the edit, or the `artifact.version` event on your issue tells you). So edit an approved
-root spec only when its Summary, its Acceptance, the tree's scope, the approved decomposition, or a
+**After approval, the root spec changes only when what the tree delivers, or a decision a human
+settled, changes.** Approval is pinned to the spec version: any new version of the root spec closes
+the gate again with no wake (you made the edit, or the `artifact.version` event on your issue tells
+you). So edit an approved root spec only when its Summary, its Acceptance, the tree's scope, the
+approved decomposition, or a
 decision a human settled in one of its decision blocks changes: a settled decision is the human's,
 so a plan that overturns one changes the spec. Then edit it, call `dispatch_request_approval` again
 with a `summary` that leads with what changed against the approved Summary, Acceptance and settled
