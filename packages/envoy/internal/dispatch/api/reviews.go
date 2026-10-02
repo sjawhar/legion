@@ -577,9 +577,10 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 // ask.handed_back event. It records version as the one handed back and the thread's newest reply as
 // the one this hand-back answered (waitingOnExpression). The caller holds the owner row every reply
 // takes before it inserts, so no reply commits between that read and this transaction's commit, and
-// a reply whose transaction starts meanwhile sorts after the one recorded and decides the turn. The
-// question is left as it stands: a request that changes it rewords first through
-// docs.RewriteApprovalAsk, which ask.edited records.
+// a reply that inserts after it stamps a later created_at (commentInsertedAt), sorts after the one
+// recorded and decides the turn, however early its own transaction began. The question is left as
+// it stands: a request that changes it rewords first through docs.RewriteApprovalAsk, which
+// ask.edited records.
 func (s *server) handBackApprovalAsk(ctx context.Context, tx pgx.Tx, owner owner, ask *model.Ask, actor model.Actor, version int) (model.Event, error) {
 	ask.Approval.RequestedVersion = version
 	approval, err := json.Marshal(ask.Approval)

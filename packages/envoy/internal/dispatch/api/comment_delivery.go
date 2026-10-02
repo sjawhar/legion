@@ -738,8 +738,8 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 	// with no `turn` does.
 	turn := thread.replyTurn(actor, nil)
 	reply, err := scanComment(tx.QueryRow(r.Context(), `
-		insert into comments (issue_key, artifact_id, author, body, reply_to, ask_id, turn)
-		values ($1, $2, $3, $4, $5, $6, $7)
+		insert into comments (issue_key, artifact_id, author, body, reply_to, ask_id, turn, created_at)
+		values ($1, $2, $3, $4, $5, $6, $7, `+commentInsertedAt+`)
 		returning `+commentColumns+`
 	`, comment.IssueKey, comment.ArtifactID, author, *input.Body, thread.ReplyTo, thread.AskID, turn))
 	if err != nil {

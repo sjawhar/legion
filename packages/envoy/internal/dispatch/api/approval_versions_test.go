@@ -429,26 +429,6 @@ func TestAReplyQueuedBehindAHandBackTakesTheTurn(t *testing.T) {
 		map[string]any{"ask_id": askID, "body": "Why three retries?"}, "alice"); human.Code != http.StatusCreated {
 		t.Fatalf("first human comment: status=%d body=%s", human.Code, human.Body.String())
 	}
-	waitForLockWaiters := func(want int) {
-		t.Helper()
-		deadline := time.Now().Add(10 * time.Second)
-		for {
-			var waiting int
-			if err := database.Pool.QueryRow(ctx, `
-				select count(*) from pg_stat_activity
-				where datname = current_database() and wait_event_type = 'Lock'
-			`).Scan(&waiting); err != nil {
-				t.Fatalf("read lock waiters: %v", err)
-			}
-			if waiting >= want {
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("lock waiters = %d, want %d", waiting, want)
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
 
 	hold, err := database.Pool.Begin(ctx)
 	if err != nil {
@@ -460,13 +440,13 @@ func TestAReplyQueuedBehindAHandBackTakesTheTurn(t *testing.T) {
 	}
 	handedBack := make(chan *httptest.ResponseRecorder, 1)
 	go func() { handedBack <- approvalRequest() }()
-	waitForLockWaiters(1)
+	waitForLockWaiters(t, database, 1)
 	commented := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		commented <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
 			map[string]any{"ask_id": askID, "body": "And the backoff?"}, "alice")
 	}()
-	waitForLockWaiters(2)
+	waitForLockWaiters(t, database, 2)
 	if err := hold.Rollback(ctx); err != nil {
 		t.Fatalf("release the ask row: %v", err)
 	}

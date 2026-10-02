@@ -471,8 +471,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	var comment model.Comment
 	if err := tx.QueryRow(r.Context(), `
-		insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, turn, suggestion)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, turn, suggestion, created_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, `+commentInsertedAt+`)
 		returning created_at
 	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, turn, suggestionJSON).Scan(&comment.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
