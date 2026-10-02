@@ -63,6 +63,9 @@
 
 ### Changed
 
+- A markdown document uploaded as an artifact is at most 1 MiB, the bound an issue's spec and
+  every edit already have; other artifacts keep the 25 MiB limit. The dashboard shows the
+  server's message for a refused upload (LEGION-465).
 - The stream stores an envelope under a MsgId, and so recognises its repeat, when its dedupe key was
   minted once for its message: the listener's own `publish.<id>` and `agent.<session>.<id>`, and the
   same around the shared transport's UUID idempotency key (`contracts.MintedDedupeKeyPattern`,
@@ -151,6 +154,22 @@
 - One MiB of `>` formed 1,048,576 nested quotes inside the document cap and eventually ended the process in a stack overflow while its tree was validated. Dispatch now refuses the document before building that tree (LEGION-465).
 - Reading a textblock's inline markdown took one stack frame per nested mark, so the stack it needed grew with the nesting the caller wrote: 200,000 nested emphasis markers, well inside the document cap, needed more stack than the goroutine had. The inline bound above is checked before any walk of those marks (LEGION-465).
 - Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.49.6-sami.3` (commit `7cf8e9ff`), which walks the deleted children iteratively and carries the transactional GC fix; the change is open upstream (LEGION-465).
+
+- Saving a document, comment, ask, or message with a long run of underscore-joined characters
+  no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
+  in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds
+  one update's 1,048,576-item cap is now refused as `413 CAP_EXCEEDED` with its item count instead
+  of `500` (LEGION-465).
+- A Dispatch shutdown no longer drops a document settlement its budget cuts short. The settlement
+  was armed only in memory, so a deploy that stopped the server while a large document settled
+  (a 1 MiB `a_b*` document took 4.5-6.8 s at load 90-170, past the 5 s budget) left its ask blocks
+  unindexed and an edit's version unwritten until the next edit. Every durable document update
+  now records the settlement it owes in `doc_settlements_pending` (migration 0063), which the
+  settlement deletes when it commits. A room's load settles a document with that row, and the
+  server arms the settlement of every open document whose row is a minute old, at start and each
+  minute, so one nobody opens settles too. Shutdown settles only the documents that owe one,
+  cancels a settlement past its budget so its transaction rolls back, and logs per document
+  whether it settled or was left to resume (LEGION-465).
 - Dispatch indexes a mention written in markdown (LEGION-463): `**dispatch://KEY**`,
   `` `dispatch://KEY` ``, `_dispatch://KEY_`, `~~dispatch://KEY~~`,
   `[dispatch://KEY](dispatch://KEY)` (how a document stores `<dispatch://KEY>`), a bracketed
@@ -178,7 +197,6 @@
   message twice. A SIGTERM during the bind wait is an ordered shutdown. The bus now restores every
   subscription after a reconnect even when one cannot be restored, so a role lane is not left down
   while the durable still refuses the bind (LEGION-456).
-
 - Dispatch exits with status 1 when it cannot bind its listen address. It logged
   `dispatch: listen … bind: address already in use` and exited 0, so a supervisor read a port
   clash as a clean stop.
