@@ -731,6 +731,7 @@ function fakeBridge(retype: (markId: string, kind: string) => RetypeOutcome): {
   const retyped: [string, string][] = [];
   return {
     bridge: {
+      artifactId: specArtifact.id,
       focusBlock() {},
       focusMark() {},
       removeMark(markId) {

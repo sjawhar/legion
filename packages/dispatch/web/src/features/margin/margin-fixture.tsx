@@ -126,14 +126,28 @@ export function SameCommentLink(): ReactNode {
   );
 }
 
-/** Stands in for the open document reporting its layout. A document with no live mark and no
- *  typed ask block reports empty maps, which is still an answer. */
-export function ReportEmptyLayoutButton(): ReactNode {
-  const { setBlockPlacements, setMarkPlacements } = useMargin();
+/** Stands in for a document registering with the margin and reporting its layout: by default the
+ *  spec the landing tests' margin shows. A document with no live mark and no typed ask block
+ *  reports empty maps, which is still an answer. */
+export function ReportEmptyLayoutButton({
+  artifactId = specArtifact.id,
+}: {
+  artifactId?: string;
+}): ReactNode {
+  const { registerDocument, setBlockPlacements, setMarkPlacements } = useMargin();
 
   return (
     <button
       onClick={() => {
+        registerDocument({
+          artifactId,
+          focusBlock: () => {},
+          focusMark: () => {},
+          removeMark: () => {},
+          retypeMark: () => ({ refused: "missing" }),
+          setActiveBlocks: () => {},
+          setActiveMarks: () => {},
+        });
         setMarkPlacements(new Map());
         setBlockPlacements(new Map());
       }}

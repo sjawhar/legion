@@ -498,6 +498,66 @@ test("a press while a comment link reached from another document is landing does
   }
 });
 
+test("a press while the page a comment link opens is still downloading does not end the hold", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "the phone arms the hold only once the reader opens the sheet"
+  );
+  const { comment, issue, markId } = await seedLongDocument();
+  const handbook = await createProjectDocument("CORE", {
+    content: "The handbook explains the calibration.",
+    name: "handbook.md",
+  });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    const transport = await documentTransport(page);
+    await page.goto(`/projects/CORE/documents/${handbook.artifact.slug}`);
+    await expect(
+      page.getByRole("textbox", { name: "Document editor" }).getByText("The handbook explains")
+    ).toBeVisible();
+    await landingSettled(page.getByTestId("margin-sheet"));
+
+    // The issue page's own code is held, so the route stays on its loading view - with the
+    // handbook's editor still mounted behind it - while the margin, which loads its cards itself,
+    // already shows the linked one. That is the state the link's hold has to read correctly: the
+    // handbook has reported its layout, the document the card belongs to has not.
+    transport.hold();
+    const pageCodeHeld = Promise.withResolvers<void>();
+    await page.route(/\/assets\/IssuePage-[^/]+\.js$/, async (route) => {
+      await pageCodeHeld.promise;
+      await route.continue();
+    });
+    await page.getByRole("button", { name: /^search/i }).click();
+    await page.getByRole("combobox", { name: "Search" }).fill("must show its quote");
+    const hit = page.getByRole("dialog", { name: "Search" }).getByRole("option", {
+      name: /^comment /,
+    });
+    await expect(hit).toHaveCount(1);
+    await hit.click();
+    await expect(page).toHaveURL(`/issues/${issue.key}/spec?comment=${comment.id}`);
+
+    const sheet = page.getByTestId("margin-sheet");
+    const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
+    const placement = card.locator("xpath=..");
+    await card.waitFor();
+    expect(await placement.evaluate((element) => (element as HTMLElement).style.top)).toBe("0px");
+    await page.mouse.click(400, 400);
+
+    pageCodeHeld.resolve();
+    await transport.release();
+    await expect(markSpan(page, markId)).toBeInViewport();
+    await landingSettled(sheet);
+    await expect(card).toBeInViewport();
+    await expectSettledInside(card, sheet);
+  } finally {
+    await context.close();
+  }
+});
+
 test("the margin stops holding a landed card once the reader works the document", async ({
   browser,
 }, testInfo) => {

@@ -583,20 +583,22 @@ since each engine takes focus out of a select its own way, and they assert that 
 send still name one issue. The project selects both specs by file name, not title, so renaming a row cannot drop it. CI
 installs WebKit beside Chromium for them (`bun run e2e:install` does the same locally).
 
-The `webkit-deep-links` project runs two rows of `e2e/deep-links.e2e.ts` in WebKit, and `firefox` runs the whole spec,
-because both engines cancel the chunk downloads in flight when a navigation starts: a deep link followed while the page
+The `webkit-deep-links` project runs the whole of `e2e/deep-links.e2e.ts` in WebKit, and `firefox` runs it too, for two
+reasons. Both engines cancel the chunk downloads in flight when a navigation starts: a deep link followed while the page
 before it is still loading its document has to open the link rather than reload that page
-(`installChunkFailureRecovery`). The two are "emitted document item hrefs select and scroll their anchored thread" and
-the row that holds the first page's `yjs` chunk, which makes the case deterministic in WebKit; Firefox does not fail that
-row without the rule, and reaches the case only through the first row's timing. The project's `grep` selects them by
-title, so renaming either drops its WebKit run with no failure; rename the `grep` with it. The spec's margin-hold rows
-stay out of WebKit: "a linked card the margin's later cards push down is scrolled back into view" and "a press while a
-comment link reached from another document is landing does not end the hold" failed in CI's WebKit (LEGION-458's pull
-request, #1655) while passing locally in WebKit, the Playwright image's WebKit included.
+(`installChunkFailureRecovery`); the row that holds the first page's `yjs` chunk makes that case deterministic in
+WebKit, and Firefox reaches it only through "emitted document item hrefs select and scroll their anchored thread". And
+the margin's hold on a linked card (`features/margin/useCardHold.ts`) meets each engine's own order of frames, scroll
+events and Suspense reveals. It reads a press in the document as the reader only once the document whose cards the
+margin shows has reported its layout: the previous route's editor stays mounted, hidden behind the next page's loading
+view, with its own layout reported, until that page's code arrives ("a press while the page a comment link opens is
+still downloading" holds `IssuePage`'s chunk to make that deterministic). And it tells a relayout's own scroll from the
+reader's by counting rendering frames, not milliseconds, since a busy page can deliver a clamp's scroll after a long
+task (CI's WebKit did).
 
 The `webkit-iphone` project runs the live view's two phone-layout rows in `e2e/agent-view.e2e.ts` (its project `grep` selects them by title, so renaming either test silently drops its WebKit run with no failure; rename the `grep` with it) in WebKit with the iPhone 13 profile, since iOS Safari is the engine the keyboard cap exists for and the `iphone` project is Chromium. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so those rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
 
-No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (2 tests become 1, with no error), then restore it. The same check holds for `webkit-deep-links`. Repeat it whenever the `grep` or the titles change.
+No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (2 tests become 1, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
 The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`: Firefox's native
 editing puts text typed over a code block's last line before that line's newline, and deletes a

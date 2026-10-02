@@ -12,6 +12,9 @@ import type { RetypeOutcome, RetypeRefusal } from "../doc/editor";
 import type { MarkPlacement } from "./useMarginItems";
 
 export interface DocumentBridge {
+  /** The artifact the registered document shows. Its bridge and its layout describe that
+   *  document's marks only, so the margin trusts them only while it shows that artifact's cards. */
+  artifactId: string;
   focusBlock(blockId: string): void;
   focusMark(markId: string): void;
   /** Removes the record mark `markId` from the document, whatever its kind. */
@@ -60,9 +63,10 @@ interface MarginContextValue {
   hoveredMarkId: string | undefined;
   markPlacements: ReadonlyMap<string, MarkPlacement>;
   pendingCompose: PendingCompose | undefined;
-  /** Whether the open document has reported its layout: it says so by publishing placements,
-   *  and takes the answer back when it unregisters. An empty map is still an answer - a document
-   *  with no live mark and no typed block has one - so the maps cannot stand in for this. */
+  /** Whether the registered document has reported its layout: it says so by publishing
+   *  placements, and the answer resets whenever a document registers or unregisters. An empty map
+   *  is still an answer - a document with no live mark and no typed block has one - so the maps
+   *  cannot stand in for this. */
   placementsReported: boolean;
   registerDocument(bridge: DocumentBridge | undefined): void;
   /** The open mark composer's kind switch: retypes its mark and moves the pending compose to the
@@ -226,18 +230,16 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const setMarkItemIds = useCallback((nextMarkItemIds: ReadonlyMap<string, string>) => {
     markItemIds.current = nextMarkItemIds;
   }, []);
-  // Placements describe the open document. The provider outlives the route, so a document that
-  // unregisters has to take its offsets with it: left behind, they place the next document's
-  // cards from the last one's layout, and they tell the link's hold that this landing is already
-  // over before the new document has reported anything.
+  // Placements describe the registered document, so each registration - the next document, or
+  // none - starts with no report. The provider outlives the route: offsets left behind would
+  // place the next document's cards from the last one's layout, and would tell the link's hold
+  // that this landing is already over before the new document has reported anything.
   const registerDocument = useCallback((bridge: DocumentBridge | undefined) => {
     bridgeRef.current = bridge;
     setDocumentBridge(bridge);
-    if (bridge === undefined) {
-      setBlockPlacements(new Map());
-      setMarkPlacements(new Map());
-      setPlacementsReported(false);
-    }
+    setBlockPlacements(new Map());
+    setMarkPlacements(new Map());
+    setPlacementsReported(false);
   }, []);
   const publishBlockPlacements = useCallback((placements: ReadonlyMap<string, MarkPlacement>) => {
     setBlockPlacements(placements);

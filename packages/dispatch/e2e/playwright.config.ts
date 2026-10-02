@@ -169,12 +169,12 @@ export default defineConfig({
       use: { ...devices["Desktop Safari"] },
     },
     // WebKit and Firefox cancel the chunk downloads in flight when a navigation starts, and a link
-    // followed while the page before it is still loading has to open rather than reload that page.
-    // In WebKit only the deep-links rows that follow one link from another page run, by title.
+    // followed while the page before it is still loading has to open rather than reload that page;
+    // and the margin's hold on a linked card meets each engine's own order of frames and scroll
+    // events. So the whole deep-links spec also runs in WebKit.
     {
       name: "webkit-deep-links",
       testMatch: /deep-links\.e2e\.ts/,
-      grep: /emitted document item hrefs select|still downloading its document opens/,
       use: { ...devices["Desktop Safari"] },
     },
     // The live view's phone layout (its keyboard cap, gutter and scroll locks) also runs in WebKit,
