@@ -27,8 +27,8 @@ const maxStackEnv = "ENVOY_TEST_MAX_STACK_BYTES"
 //
 // In the parent it starts the test binary again for this one test, with the cap in the
 // environment, and mirrors the child's result: a skipped child skips the parent, a passing child
-// passes, and any failure shows the child's output - a stack overflow's fatal error among it. In
-// the child, where the cap is set, it runs body.
+// passes, and any failure shows the child's whole output - a stack overflow's fatal error among it.
+// In the child, where the cap is set, it runs body.
 func Under(t *testing.T, maxStackBytes int, body func(t *testing.T)) {
 	t.Helper()
 	if os.Getenv(maxStackEnv) != "" {
@@ -39,11 +39,13 @@ func Under(t *testing.T, maxStackBytes int, body func(t *testing.T)) {
 	child := exec.Command(os.Args[0], "-test.run", runPattern(t.Name()), "-test.v", "-test.count=1")
 	child.Env = append(os.Environ(), maxStackEnv+"="+strconv.Itoa(maxStackBytes))
 	output, err := child.CombinedOutput()
-	if err == nil && strings.Contains(string(output), "--- SKIP: "+t.Name()) {
-		t.Skipf("under a %d-byte stack cap, %s skipped:\n%s", maxStackBytes, t.Name(), excerpt(string(output)))
+	// go test ends a test's verdict line with its duration, so a subtest's line, which carries
+	// this name as a prefix, is not this test's.
+	if err == nil && strings.Contains(string(output), "--- SKIP: "+t.Name()+" (") {
+		t.Skipf("under a %d-byte stack cap, %s skipped:\n%s", maxStackBytes, t.Name(), output)
 	}
-	if ran := strings.Contains(string(output), "--- PASS: "+t.Name()); err != nil || !ran {
-		t.Fatalf("under a %d-byte stack cap, %s: %v\n%s", maxStackBytes, t.Name(), err, excerpt(string(output)))
+	if ran := strings.Contains(string(output), "--- PASS: "+t.Name()+" ("); err != nil || !ran {
+		t.Fatalf("under a %d-byte stack cap, %s: %v\n%s", maxStackBytes, t.Name(), err, output)
 	}
 }
 
@@ -55,14 +57,4 @@ func runPattern(name string) string {
 		parts[index] = "^" + regexp.QuoteMeta(part) + "$"
 	}
 	return strings.Join(parts, "/")
-}
-
-// excerpt is the start of a child's output: how it died, ahead of the frames a stack overflow
-// prints one of per level.
-func excerpt(output string) string {
-	const keep = 4 << 10
-	if len(output) <= keep {
-		return output
-	}
-	return output[:keep] + " …"
 }
