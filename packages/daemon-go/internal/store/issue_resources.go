@@ -120,6 +120,22 @@ func (s *Store) EnsureIssuePodLayout(ctx context.Context, project string, legacy
 	}
 }
 
+// HasLegacySandboxClaims is a raw JSON census used before Claims unmarshals locators. A legacy
+// per-claim Sandbox locator lacks podUid/container/generation, so the normal strict locator
+// decoder would refuse first without naming the layout migration that is needed.
+func (s *Store) HasLegacySandboxClaims(ctx context.Context, project string) (bool, error) {
+	var legacy bool
+	err := s.pool.QueryRow(ctx, `select exists (
+		select 1 from claims where project = $1 and locator->>'runtime' = 'sandbox'
+		and (locator->'sandbox'->>'podUid' is null or locator->'sandbox'->>'container' is null
+			or locator->'sandbox'->>'generation' is null)
+	)`, project).Scan(&legacy)
+	if err != nil {
+		return false, fmt.Errorf("census legacy Sandbox claims for %s: %w", project, err)
+	}
+	return legacy, nil
+}
+
 func validResources(resources IssueResources) error {
 	switch {
 	case resources.Project == "":

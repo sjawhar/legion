@@ -326,7 +326,7 @@ type plan struct {
 	instructions string
 	// dispatchToken is the Dispatch bearer dispatch_token_file names; "" without Dispatch.
 	dispatchToken string
-	prompts *prompts.Composer
+	prompts       *prompts.Composer
 	// roleReferences are the task agents and skills the state-local role prompt snapshot names
 	// (promptrefs.Roles), which the gate on either runtime resolves beside the plugin's own.
 	roleReferences promptrefs.Names
@@ -534,6 +534,15 @@ type supervision struct {
 // workflow): every step of supervision that can refuse, so a daemon that cannot supervise refuses
 // before its boot is recorded.
 func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, p plan, st *store.Store, apps appauth.Tokens) (*supervision, error) {
+	if cfg.Runtime.Name == "kubernetes" {
+		legacy, err := st.HasLegacySandboxClaims(boot, p.project)
+		if err != nil {
+			return nil, err
+		}
+		if legacy {
+			return nil, fmt.Errorf("refuse the Kubernetes runtime before an issue-pod layout migration: project %s still has legacy per-claim Sandbox locators", p.project)
+		}
+	}
 	claims, err := st.Claims(boot)
 	if err != nil {
 		return nil, err
@@ -556,6 +565,13 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancel()
 		cancelStream()
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
+	}
+	if cfg.Runtime.Name == "kubernetes" {
+		if err := st.EnsureIssuePodLayout(boot, p.project, false); err != nil {
+			cancel()
+			cancelStream()
+			return nil, fmt.Errorf("record the issue-pod runtime layout: %w", err)
+		}
 	}
 	repo := cfg.Projects[cfg.Project].Repo
 
