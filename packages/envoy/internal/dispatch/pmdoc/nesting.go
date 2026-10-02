@@ -14,20 +14,61 @@ import (
 // before any deep tree is built.
 const maxNesting = 100
 
-type nestingGuard struct{ parser.BlockParser }
+// nestingGuard is a container's parser refusing the container it would open inside maxNesting
+// blocks. withChild says the parser opens the container with a child inside it on the same line,
+// as a list opens with its first item: the guard then refuses the container whose child would
+// stand past the bound, rather than leave the container without that child, which goldmark's list
+// parser does not expect and panics on at the next line.
+type nestingGuard struct {
+	parser.BlockParser
+	withChild bool
+}
 
 // nestingRefusalKey holds the nestingError for the first block nestingGuard refused.
 var nestingRefusalKey = parser.NewContextKey()
 
+// Open asks the parser first, so only a block it opens is held to the bound: goldmark offers a line
+// to every parser its first character can start - the list parser is offered a paragraph's `-x`,
+// and each item of a list it opened - and most of them decline it. A refused block puts the line
+// back as the parser found it, as a parser that declines leaves it, and goldmark offers the line to
+// the parsers after it.
 func (g nestingGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
-	if len(pc.OpenedBlocks()) >= maxNesting {
-		if pc.Get(nestingRefusalKey) == nil {
-			line, _ := reader.Position()
-			pc.Set(nestingRefusalKey, nestingError{line: line})
-		}
-		return nil, parser.NoChildren
+	line, position := reader.Position()
+	node, state := g.BlockParser.Open(parent, reader, pc)
+	if node == nil {
+		return node, state
 	}
-	return g.BlockParser.Open(parent, reader, pc)
+	opens := 1
+	if g.withChild {
+		opens = 2
+	}
+	if !opensPastBound(parent, pc, opens) {
+		return node, state
+	}
+	reader.SetPosition(line, position)
+	if pc.Get(nestingRefusalKey) == nil {
+		pc.Set(nestingRefusalKey, nestingError{line: line})
+	}
+	return nil, parser.NoChildren
+}
+
+// opensPastBound reports whether opens blocks, opened one inside another under parent, would take
+// the innermost inside maxNesting blocks. Only containers enclose a block, and nestingGuard opens
+// every one. The parser's open blocks hold each container enclosing parent, and while a line opens
+// blocks they can hold more: the paragraph a new block interrupts, and the blocks a line has left,
+// which the parser closes only once the line's new blocks have opened. So while that many fit
+// beside the open blocks, no walk is needed.
+func opensPastBound(parent ast.Node, pc parser.Context, opens int) bool {
+	if len(pc.OpenedBlocks())+opens <= maxNesting {
+		return false
+	}
+	nesting := opens
+	for node := parent; node.Kind() != ast.KindDocument; node = node.Parent() {
+		if nesting++; nesting > maxNesting {
+			return true
+		}
+	}
+	return false
 }
 
 // maxInlineNesting is how many inline marks a textblock's markdown may open inside one another.

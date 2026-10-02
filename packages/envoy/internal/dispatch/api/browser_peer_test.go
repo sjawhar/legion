@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/reearth/ygo/crdt"
 	ygsync "github.com/reearth/ygo/sync"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -69,6 +71,21 @@ type syncedPeer struct {
 // syncedPeerLocal tags the peer's own transactions. It must remain non-zero sized because ygo
 // compares origins by interface equality.
 type syncedPeerLocal struct{ _ byte }
+
+// connectBrowserPeer connects alice's browser to artifactID's room, through a document server of
+// its own over documentService.
+func connectBrowserPeer(t *testing.T, documentService *docs.Service, artifactID string) *syncedPeer {
+	t.Helper()
+	sockets := &servedSockets{finished: make(map[string]chan struct{})}
+	server := httptest.NewServer(sockets.serve(documentService.ServeHTTP))
+	t.Cleanup(server.Close)
+	peer := &syncedPeer{
+		wsURL: "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID, sockets: sockets,
+		headers: http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID: artifactID, doc: crdt.New(),
+	}
+	peer.connect(t)
+	return peer
+}
 
 func (p *syncedPeer) connect(t *testing.T) {
 	t.Helper()
@@ -160,19 +177,26 @@ func (p *syncedPeer) roomHolds(t *testing.T, state []byte) bool {
 
 func (p *syncedPeer) reconnect(t *testing.T) {
 	t.Helper()
+	// A browser's reconnect reaches a server that has let its old connection go, and with it the
+	// room that connection emptied. A dial before then races that teardown, and the server can
+	// drop the new connection in the window.
+	p.closeAndWait(t)
+	p.connect(t)
+}
+
+// closeAndWait closes the peer's connection and returns once the document server has let it go,
+// which is after the room's eviction and last-peer settlement when the peer was the room's last.
+func (p *syncedPeer) closeAndWait(t *testing.T) {
+	t.Helper()
 	p.mu.Lock()
 	socketID := p.socketID
 	p.mu.Unlock()
 	p.close()
-	// A browser's reconnect reaches a server that has let its old connection go, and with it the
-	// room that connection emptied. A dial before then races that teardown, and the server can
-	// drop the new connection in the window.
 	select {
 	case <-p.sockets.done(socketID):
-	case <-time.After(10 * time.Second):
-		t.Fatal("the document server did not let go of the browser's closed connection")
+	case <-time.After(30 * time.Second):
+		t.Fatal("the document server did not let go of the browser peer's closed connection")
 	}
-	p.connect(t)
 }
 
 func (p *syncedPeer) close() {

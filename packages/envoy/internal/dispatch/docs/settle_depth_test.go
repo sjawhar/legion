@@ -7,7 +7,13 @@ import (
 	"time"
 
 	"github.com/reearth/ygo/crdt"
+
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 )
+
+// documentDepthBound is how many levels below the document a node may stand (pmdoc's
+// maxTreeDepth), the document being level 0.
+const documentDepthBound = 1_000
 
 // A crafted client can write an over-deep tree through the room's CRDT without passing through
 // pmdoc.Update. Settlement skips that tree as it does every tree outside the schema: it writes no
@@ -20,7 +26,7 @@ func TestSettlementSkipsATreeOverTheDepthBound(t *testing.T) {
 	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		fragment := doc.GetXmlFragment(fragmentName)
 		transact(func(txn *crdt.Transaction) {
-			writeOverDeepCRDTTree(txn, fragment)
+			docstest.WriteDeepChain(txn, fragment, documentDepthBound+1, "a")
 		})
 	}); err != nil {
 		t.Fatalf("write crafted CRDT tree: %v", err)
@@ -52,21 +58,4 @@ func TestSettlementSkipsATreeOverTheDepthBound(t *testing.T) {
 	if state.settleFailures != 0 {
 		t.Fatalf("settlement recorded %d failures for an over-deep document", state.settleFailures)
 	}
-}
-
-// writeOverDeepCRDTTree writes a tree one level deeper than pmdoc's bound: its text stands 1,001
-// levels below the document, under 999 blockquotes and a paragraph.
-func writeOverDeepCRDTTree(txn *crdt.Transaction, fragment *crdt.YXmlFragment) {
-	parent := crdt.NewYXmlElement("blockquote")
-	fragment.InsertElement(txn, 0, parent)
-	for range 998 {
-		child := crdt.NewYXmlElement("blockquote")
-		parent.InsertElement(txn, 0, child)
-		parent = child
-	}
-	paragraph := crdt.NewYXmlElement("paragraph")
-	parent.InsertElement(txn, 0, paragraph)
-	text := crdt.NewYXmlText()
-	paragraph.InsertText(txn, 0, text)
-	text.Insert(txn, 0, "a", nil)
 }

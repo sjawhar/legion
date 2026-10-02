@@ -6,10 +6,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/reearth/ygo/crdt"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -37,42 +37,14 @@ func TestEveryReadServesATreeAtTheDepthBound(t *testing.T) {
 			documentService, handler, database := browserDocumentService(t)
 			issue := createInteractionIssue(t, handler, "TEST", "Deep document", "before\n")
 			artifactID := issue.PrimaryArtifactID
-			sockets := &servedSockets{finished: make(map[string]chan struct{})}
-			server := httptest.NewServer(sockets.serve(documentService.ServeHTTP))
-			t.Cleanup(server.Close)
-			peer := &syncedPeer{
-				wsURL: "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID, sockets: sockets,
-				headers: http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID: artifactID, doc: crdt.New(),
-			}
-			peer.connect(t)
-
-			// Blockquotes stand at levels 1 through depth-2, then a paragraph, then its text at depth.
+			peer := connectBrowserPeer(t, documentService, artifactID)
 			peer.transact(t, func(txn *crdt.Transaction, fragment *crdt.YXmlFragment) error {
 				fragment.Delete(txn, 0, len(fragment.Children()))
-				parent := crdt.NewYXmlElement("blockquote")
-				fragment.InsertElement(txn, 0, parent)
-				for range test.depth - 3 {
-					child := crdt.NewYXmlElement("blockquote")
-					parent.InsertElement(txn, 0, child)
-					parent = child
-				}
-				paragraph := crdt.NewYXmlElement("paragraph")
-				parent.InsertElement(txn, 0, paragraph)
-				text := crdt.NewYXmlText()
-				paragraph.InsertText(txn, 0, text)
-				text.Insert(txn, 0, "deepest", nil)
+				docstest.WriteDeepChain(txn, fragment, test.depth, "deepest")
 				return nil
 			})
 			peer.barrier(t)
-			peer.mu.Lock()
-			socketID := peer.socketID
-			peer.mu.Unlock()
-			peer.close()
-			select {
-			case <-sockets.done(socketID):
-			case <-time.After(30 * time.Second):
-				t.Fatal("the document server did not let go of the browser's connection")
-			}
+			peer.closeAndWait(t)
 
 			var versions int
 			if err := database.Pool.QueryRow(context.Background(), `select count(*) from artifact_versions where artifact_id = $1`, artifactID).Scan(&versions); err != nil {

@@ -29,6 +29,7 @@ func TestUnderReportsChildStatus(t *testing.T) {
 		{name: "stack exhaustion after long output", fails: true, output: "fatal error: stack overflow"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			child := exec.Command(os.Args[0], "-test.run", "^TestUnderChildStatus$", "-test.v", "-test.count=1")
 			child.Env = append(os.Environ(), statusEnv+"="+test.name)
 			output, err := child.CombinedOutput()

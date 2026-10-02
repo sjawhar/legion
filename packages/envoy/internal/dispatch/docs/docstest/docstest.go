@@ -1,6 +1,7 @@
-// Package docstest speaks the Hocuspocus websocket sync that docs.Service.ServeHTTP serves, for
-// Dispatch tests in more than one package. It is an ordinary package rather than a _test.go file
-// because api and docs cannot import one another's test helpers, and it imports neither.
+// Package docstest speaks the Hocuspocus websocket sync that docs.Service.ServeHTTP serves, and
+// writes the deep trees a crafted client sends, for Dispatch tests in more than one package. It is
+// an ordinary package rather than a _test.go file because api, docs and pmdoc cannot import one
+// another's test helpers, and it imports none of them.
 package docstest
 
 import (
@@ -53,4 +54,24 @@ func Drain(connection *gws.Conn, document *crdt.Doc, send func([]byte) error, on
 			onSyncStep2(content)
 		}
 	}
+}
+
+// WriteDeepChain writes, as the fragment's first child, blockquotes nested one inside another
+// around a paragraph whose text, text, stands textLevel levels below the document: the document is
+// level 0, the blockquotes levels 1 through textLevel-2, and the paragraph level textLevel-1.
+// textLevel is the unit pmdoc's tree-depth bound counts. It writes the elements itself, as a
+// crafted client can, rather than through pmdoc.Update, which validates the tree first.
+func WriteDeepChain(txn *crdt.Transaction, fragment *crdt.YXmlFragment, textLevel int, text string) {
+	parent := crdt.NewYXmlElement("blockquote")
+	fragment.InsertElement(txn, 0, parent)
+	for range textLevel - 3 {
+		child := crdt.NewYXmlElement("blockquote")
+		parent.InsertElement(txn, 0, child)
+		parent = child
+	}
+	paragraph := crdt.NewYXmlElement("paragraph")
+	parent.InsertElement(txn, 0, paragraph)
+	run := crdt.NewYXmlText()
+	paragraph.InsertText(txn, 0, run)
+	run.Insert(txn, 0, text, nil)
 }

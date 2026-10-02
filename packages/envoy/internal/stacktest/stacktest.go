@@ -39,14 +39,19 @@ func Under(t *testing.T, maxStackBytes int, body func(t *testing.T)) {
 	child := exec.Command(os.Args[0], "-test.run", runPattern(t.Name()), "-test.v", "-test.count=1")
 	child.Env = append(os.Environ(), maxStackEnv+"="+strconv.Itoa(maxStackBytes))
 	output, err := child.CombinedOutput()
-	// go test ends a test's verdict line with its duration, so a subtest's line, which carries
-	// this name as a prefix, is not this test's.
-	if err == nil && strings.Contains(string(output), "--- SKIP: "+t.Name()+" (") {
+	if err == nil && hasVerdict(string(output), "SKIP", t.Name()) {
 		t.Skipf("under a %d-byte stack cap, %s skipped:\n%s", maxStackBytes, t.Name(), output)
 	}
-	if ran := strings.Contains(string(output), "--- PASS: "+t.Name()+" ("); err != nil || !ran {
+	if ran := hasVerdict(string(output), "PASS", t.Name()); err != nil || !ran {
 		t.Fatalf("under a %d-byte stack cap, %s: %v\n%s", maxStackBytes, t.Name(), err, output)
 	}
+}
+
+// hasVerdict reports whether output holds go test's verdict line for the test name. go test ends
+// that line with the test's duration, so a subtest's line, which carries name as a prefix, is not
+// the test's own.
+func hasVerdict(output, verdict, name string) bool {
+	return strings.Contains(output, "--- "+verdict+": "+name+" (")
 }
 
 // runPattern is the -test.run value naming exactly name: go test splits the pattern on "/" and

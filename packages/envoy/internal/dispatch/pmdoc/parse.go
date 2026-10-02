@@ -37,8 +37,8 @@ var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, taskList{}, footnotes{}),
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
-			util.Prioritized(nestingGuard{&typedDirectiveParser{}}, 950),
-			util.Prioritized(nestingGuard{&unsupportedDirectiveParser{}}, 900),
+			util.Prioritized(nestingGuard{BlockParser: &typedDirectiveParser{}}, 950),
+			util.Prioritized(nestingGuard{BlockParser: &unsupportedDirectiveParser{}}, 900),
 			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
 		),
 	),
@@ -65,11 +65,11 @@ func blockParsers() []util.PrioritizedValue {
 		block := prioritized.Value.(parser.BlockParser)
 		switch reflect.TypeOf(block) {
 		case listParser:
-			parsers[index].Value = frontmatterAttempt{tabIndented{endsContainers{emptyItemGuard{nestingGuard{block}}}, listMarkerStart}}
+			parsers[index].Value = frontmatterAttempt{tabIndented{endsContainers{emptyItemGuard{nestingGuard{BlockParser: block, withChild: true}}}, listMarkerStart}}
 		case listItemParser:
-			parsers[index].Value = tabIndented{endsContainers{listItemColumns{nestingGuard{block}}}, listMarkerStart}
+			parsers[index].Value = tabIndented{endsContainers{listItemColumns{nestingGuard{BlockParser: block}}}, listMarkerStart}
 		case quoteParser:
-			parsers[index].Value = frontmatterAttempt{tabIndented{endsContainers{nestingGuard{block}}, nil}}
+			parsers[index].Value = frontmatterAttempt{tabIndented{endsContainers{nestingGuard{BlockParser: block}}, nil}}
 		case setextParser:
 			parsers[index].Value = tabIndented{underlineAfterTable{block}, setextUnderline}
 		case fenceParser:

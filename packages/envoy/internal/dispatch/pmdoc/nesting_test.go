@@ -10,6 +10,7 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/stacktest"
 )
 
@@ -20,10 +21,134 @@ const (
 	expectedMaxAttrNesting   = 100
 )
 
-// A markdown document opens at most 100 blocks inside one another. The same parser handles a
-// whole upload and the fragments written by edits and accepted suggestions.
+// A markdown document opens at most 100 blocks inside one another, however the nesting is written:
+// all on one line, or one level more on each line, where the line before still holds an open
+// paragraph the next level interrupts. The same parser handles a whole upload and the fragments
+// written by edits and accepted suggestions.
 func TestParseRefusesMarkdownNestedPastTheBound(t *testing.T) {
-	parsers := []struct {
+	parsers := blockMarkdownReaders()
+	onOneLine := func(open string) func(int) string {
+		return func(levels int) string { return strings.Repeat(open, levels) + "a" }
+	}
+	onePerLine := func(level func(int) string) func(int) string {
+		return func(levels int) string {
+			lines := make([]string, 0, levels)
+			for depth := 1; depth <= levels; depth++ {
+				lines = append(lines, level(depth))
+			}
+			return strings.Join(lines, "\n")
+		}
+	}
+	firstLine := func(int) int { return 1 }
+	lastLine := func(levels int) int { return levels }
+	for _, test := range []struct {
+		name string
+		// markdown nests levels of its shape, each opening blocks blocks; the level past the bound
+		// opens on line(levels).
+		markdown func(levels int) string
+		blocks   int
+		line     func(levels int) int
+	}{
+		{name: "quotes", markdown: onOneLine("> "), blocks: 1, line: firstLine},
+		{name: "bare quotes", markdown: onOneLine(">"), blocks: 1, line: firstLine},
+		{name: "lists", markdown: onOneLine("- "), blocks: 2, line: firstLine},
+		{name: "callouts", markdown: nestedCallouts, blocks: 1, line: lastLine},
+		{name: "quotes one per line", markdown: onePerLine(func(depth int) string {
+			return strings.Repeat("> ", depth) + "a"
+		}), blocks: 1, line: lastLine},
+		{name: "lists one per line", markdown: onePerLine(func(depth int) string {
+			return strings.Repeat("  ", depth-1) + "- a"
+		}), blocks: 2, line: lastLine},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			levels := expectedMaxNesting / test.blocks
+			deepest, over := test.markdown(levels), test.markdown(levels+1)
+			refusal := fmt.Sprintf("line %d opens a block inside %d blocks", test.line(levels+1), expectedMaxNesting)
+			for _, reader := range parsers {
+				t.Run(reader.name, func(t *testing.T) {
+					if _, err := reader.parse(deepest); err != nil {
+						t.Fatalf("%d nested blocks: %v, want them read", expectedMaxNesting, err)
+					}
+					_, err := reader.parse(over)
+					if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), refusal) {
+						t.Fatalf("%d nested blocks: %v, want ErrSchema saying %q", expectedMaxNesting+test.blocks, err, refusal)
+					}
+				})
+			}
+		})
+	}
+}
+
+// The bound counts the blocks a new block would open inside, and only blocks a parser opens: the
+// next block after 100 nested quotes stands at the document's level, and text in the deepest quote
+// that a container's parser is offered but does not open - `-x`, `1x`, a link, an emoji shortcode
+// - reads as a paragraph there.
+func TestParseReadsWhatOpensNoBlockPastTheBound(t *testing.T) {
+	deepest := strings.Repeat("> ", expectedMaxNesting)
+	for _, test := range []struct {
+		markdown string
+		// blocks is how many blocks the document holds at its own level.
+		blocks int
+	}{
+		{markdown: deepest + "a\n- b", blocks: 2},
+		{markdown: deepest + "a\n\n- b", blocks: 2},
+		{markdown: deepest + "a\n# b", blocks: 2},
+		{markdown: deepest + "-x", blocks: 1},
+		{markdown: deepest + "1x", blocks: 1},
+		{markdown: deepest + "[link](https://example.com)", blocks: 1},
+		{markdown: deepest + ":smile:", blocks: 1},
+		{markdown: deepest + "a\n" + deepest + "-x", blocks: 1},
+	} {
+		for _, reader := range blockMarkdownReaders() {
+			doc, err := reader.parse(test.markdown)
+			if err != nil {
+				t.Fatalf("%s of %q after %d nested quotes: %v, want it read", reader.name, test.markdown[len(deepest):], expectedMaxNesting, err)
+			}
+			if len(doc.Children) != test.blocks {
+				t.Fatalf("%s of %q after %d nested quotes read as %d blocks at the document's level, want %d", reader.name, test.markdown[len(deepest):], expectedMaxNesting, len(doc.Children), test.blocks)
+			}
+		}
+	}
+}
+
+// A list opens with its first item, so a list whose item would stand inside 100 blocks is refused
+// with it, naming the list's line, rather than opened without the item: goldmark's list parser
+// panics on an itemless list at the list's next line. A list with room for its item reads.
+func TestParseRefusesAListWithNoRoomForItsItem(t *testing.T) {
+	quotes := func(depth int) string { return strings.Repeat("> ", depth) }
+	for _, test := range []struct {
+		name string
+		// markdown is a list inside depth quotes, followed by a line it reads.
+		markdown func(depth int) string
+	}{
+		{name: "next item", markdown: func(depth int) string { return quotes(depth) + "- a\n" + quotes(depth) + "- b\n" }},
+		{name: "continued item", markdown: func(depth int) string { return quotes(depth) + "- a\n" + quotes(depth) + "  b\n" }},
+		{name: "ordered list", markdown: func(depth int) string { return quotes(depth) + "1. a\n" + quotes(depth) + "2. b\n" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, reader := range blockMarkdownReaders() {
+				t.Run(reader.name, func(t *testing.T) {
+					if _, err := reader.parse(test.markdown(expectedMaxNesting - 2)); err != nil {
+						t.Fatalf("a list and its item inside %d quotes: %v, want them read", expectedMaxNesting-2, err)
+					}
+					_, err := reader.parse(test.markdown(expectedMaxNesting - 1))
+					refusal := fmt.Sprintf("line 1 opens a block inside %d blocks", expectedMaxNesting)
+					if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), refusal) {
+						t.Fatalf("a list and its item inside %d quotes: %v, want ErrSchema saying %q", expectedMaxNesting-1, err, refusal)
+					}
+				})
+			}
+		})
+	}
+}
+
+// blockMarkdownReaders is every reader of caller markdown that opens blocks: a whole upload, and
+// the fragments written by edits and accepted suggestions.
+func blockMarkdownReaders() []struct {
+	name  string
+	parse func(string) (*Node, error)
+} {
+	return []struct {
 		name  string
 		parse func(string) (*Node, error)
 	}{
@@ -32,36 +157,6 @@ func TestParseRefusesMarkdownNestedPastTheBound(t *testing.T) {
 		{name: "fragment", parse: func(markdown string) (*Node, error) {
 			return ParseFragment(markdown, true, NewTablePaddingBudget())
 		}},
-	}
-	for _, test := range []struct {
-		name   string
-		open   string
-		blocks int
-	}{
-		{name: "quotes", open: "> ", blocks: 1},
-		{name: "bare quotes", open: ">", blocks: 1},
-		{name: "lists", open: "- ", blocks: 2},
-		{name: "callouts", blocks: 1},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			deepest := strings.Repeat(test.open, expectedMaxNesting/test.blocks) + "a"
-			over := strings.Repeat(test.open, expectedMaxNesting/test.blocks+1) + "a"
-			if test.name == "callouts" {
-				deepest = nestedCallouts(expectedMaxNesting)
-				over = nestedCallouts(expectedMaxNesting + 1)
-			}
-			for _, reader := range parsers {
-				t.Run(reader.name, func(t *testing.T) {
-					if _, err := reader.parse(deepest); err != nil {
-						t.Fatalf("%d nested blocks: %v, want them read", expectedMaxNesting, err)
-					}
-					_, err := reader.parse(over)
-					if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "line 1") || !strings.Contains(err.Error(), "100 blocks") {
-						t.Fatalf("%d nested blocks: %v, want ErrSchema naming line 1 and the bound", expectedMaxNesting+1, err)
-					}
-				})
-			}
-		})
 	}
 }
 
@@ -206,25 +301,25 @@ func TestTreesDeeperThanTheBoundAreOutsideTheSchema(t *testing.T) {
 	}
 
 	for _, test := range []struct {
-		name        string
-		blockquotes int
-		want        error
+		name      string
+		textLevel int
+		want      error
 	}{
-		{name: "at the bound", blockquotes: expectedMaxTreeDepth - 2},
-		{name: "over the bound", blockquotes: expectedMaxTreeDepth - 1, want: ErrSchema},
+		{name: "at the bound", textLevel: expectedMaxTreeDepth},
+		{name: "over the bound", textLevel: expectedMaxTreeDepth + 1, want: ErrSchema},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ydoc := crdt.New()
 			fragment := ydoc.GetXmlFragment("prosemirror")
 			ydoc.Transact(func(txn *crdt.Transaction) {
-				writeDeepCRDTChain(txn, fragment, test.blockquotes)
+				docstest.WriteDeepChain(txn, fragment, test.textLevel, "a")
 			})
 			_, err := Read(fragment)
 			if test.want == nil && err != nil {
-				t.Fatalf("read back a chain %d deep: %v, want it valid", test.blockquotes+2, err)
+				t.Fatalf("read back a chain %d deep: %v, want it valid", test.textLevel, err)
 			}
 			if test.want != nil && !errors.Is(err, test.want) {
-				t.Fatalf("read back a chain %d deep: %v, want %v", test.blockquotes+2, err, test.want)
+				t.Fatalf("read back a chain %d deep: %v, want %v", test.textLevel, err, test.want)
 			}
 		})
 	}
@@ -236,7 +331,7 @@ func TestReadRefusesAMillionLevelCRDTTreeWithoutOverflow(t *testing.T) {
 	ydoc := crdt.New()
 	fragment := ydoc.GetXmlFragment("prosemirror")
 	ydoc.Transact(func(txn *crdt.Transaction) {
-		writeDeepCRDTChain(txn, fragment, 1_000_000)
+		docstest.WriteDeepChain(txn, fragment, 1_000_000, "a")
 	})
 
 	_, err := Read(fragment)
@@ -303,19 +398,4 @@ func nestedValue(depth int) any {
 		value = []any{value}
 	}
 	return value
-}
-
-func writeDeepCRDTChain(txn *crdt.Transaction, fragment *crdt.YXmlFragment, blockquotes int) {
-	parent := crdt.NewYXmlElement("blockquote")
-	fragment.InsertElement(txn, 0, parent)
-	for range blockquotes - 1 {
-		child := crdt.NewYXmlElement("blockquote")
-		parent.InsertElement(txn, 0, child)
-		parent = child
-	}
-	paragraph := crdt.NewYXmlElement("paragraph")
-	parent.InsertElement(txn, 0, paragraph)
-	text := crdt.NewYXmlText()
-	paragraph.InsertText(txn, 0, text)
-	text.Insert(txn, 0, "a", nil)
 }
