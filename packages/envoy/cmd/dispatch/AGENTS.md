@@ -19,6 +19,12 @@ native issues, artifacts, document updates, and the event outbox.
 database has not applied, read-only, run before the service rolls (README
 "Pre-deploy census"); `runSubcommand` refuses an argument it does not know with
 exit 2 instead of serving, since serving migrates.
+`envoy-dispatch migrate-people` (`cmd/dispatch/migrate_people.go`,
+`peoplemigration.Run`, and `docs.Service.RenameAskAnswerers` for documents)
+moves every person the database names by GitHub login to the email
+`DISPATCH_PEOPLE_MAP` gives them, refusing before any write when a login is
+missing from the map; a deployment runs it once with the service scaled to 0
+(README "Moving people from GitHub logins to email").
 
 `dispatchHandler` mounts the one `GET /healthz` the process serves on its own
 mux, above the dashboard router, and the probe reads the database through

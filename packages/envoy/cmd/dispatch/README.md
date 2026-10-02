@@ -413,6 +413,50 @@ missing name is given only for a name the census's own text spells. The census w
 argument `envoy-dispatch` does not know is refused with exit 2, never served, so an image that
 predates a subcommand cannot boot and migrate when a deployment asks it for one.
 
+## Moving people from GitHub logins to email
+
+`envoy-dispatch migrate-people` moves every record that names a person by the GitHub login the
+GitHub sign-in knew them by to the email the Google Workspace sign-in names them by. A deployment
+runs it once, as a one-off task of the Dispatch service's own task definition, with the service
+scaled to 0 and scaled back after: a running server's rooms would not see the documents' updates.
+
+```bash
+DATABASE_URL=postgres://... DISPATCH_PEOPLE_MAP='{"<login>": "<email>"}' envoy-dispatch migrate-people
+```
+
+`DISPATCH_PEOPLE_MAP` is a JSON object from each GitHub login, matched in any case, to its person's
+email, lowercased; the server never reads it. The command rewrites:
+
+- every JSON actor column and every event's actor and payload: a person
+  (`{"kind":"user","id":<login>}`), an agent writing under a person's token
+  (`{"kind":"session","owner":<login>}`), an issue's `assignee`, an answer's `user`, and the
+  `login` of `user_state.updated` and `user_agent_state.updated`;
+- `issues.assignee`, `agent_tokens.owner` and the per-person tables (`user_issue_state`,
+  `user_agent_state`, `user_agent_read`, `user_ask_snooze`, `broadcast_idempotency_keys`), merging
+  the rows two casings of one login, or a login and the email, kept apart: a pin either row held,
+  every dismissal, the later or further mark;
+- each document's answered asks (`answered_by`), by an update appended to the document's state,
+  never by replacing it, so a browser that kept the document across the outage merges the rename
+  when it reconnects. The update is no content change, so settling the document versions nothing,
+  and the document's versions keep the name they were written with. The next version the document
+  does get (an edit, or a comment or ask anchored in it) carries the email, which stales an
+  approval pinned to an earlier version as any new version does.
+
+It deletes the session generations keyed by a login, which can revoke only a cookie naming a login,
+and no such cookie verifies. It records every person a moved record names in `people`, so the
+assignee picker offers them before they first sign in. A Proof mark's `by` (the author a comment,
+suggestion or authorship highlight displays: `user:<login>` when the server wrote the mark, the
+editor's user name when a browser did) is a label nothing compares, and is left as it is.
+
+A value holding an `@` is already an email and is left alone, so a second run changes nothing. A
+login the map has no email for stops the run before it writes anything, naming each such login and
+every field holding it. The database's rows move in one transaction, which commits only when a
+second scan inside it finds no login left. The run prints each field's count of logins before and
+after (`migrate-people: before issues.assignee=2` … `migrate-people: after documents.answered_by=0`)
+and how many people it recorded. Exit 0 when everyone moved; 1 when it refused, changing nothing,
+or when a document could not be read or renamed (each named), in which case the database has moved
+and a second run finishes the documents once they can be read.
+
 ## Reference graph
 
 Mentions (`dispatch://` references and same-origin dashboard URLs) in document versions, ask
