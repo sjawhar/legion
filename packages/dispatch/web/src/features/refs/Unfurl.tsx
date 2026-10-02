@@ -20,11 +20,13 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 
-import { type ComposerReference, composerReferences } from "../conversation/MentionComposer";
 import {
+  type ComposerReference,
+  composerReferences,
   type DispatchReferenceRoute,
   isProjectRoute,
   parseDispatchReference,
+  referenceSpans,
   referenceTargetKind,
 } from "./routes";
 
@@ -300,7 +302,9 @@ function GitHubUnfurl({ href, path }: { href: string; path: string }): ReactNode
   );
 }
 
-const bareReferenceBodyPattern = /^(?:(?:dispatch:\/\/|https?:\/\/)\S+\s*)+$/;
+// Each word of the body a reference, with nothing between words but whitespace. A word is read
+// once: `\S+` and `\s+` share no character, so no body splits into words more than one way.
+const bareReferenceBodyPattern = /^(?:dispatch|https?):\/\/\S+(?:\s+(?:dispatch|https?):\/\/\S+)*$/;
 
 /**
  * Whether body is nothing but one or more reference URLs (optionally whitespace-separated) with
@@ -314,14 +318,10 @@ export function isBareReferenceBody(body: string): boolean {
 
 export function Unfurl({ body }: UnfurlProps): ReactNode {
   const dispatch = composerReferences(body);
-  const github = [...body.matchAll(/https:\/\/github\.com\/[^\s<>"]+/g)]
-    .map((match) => {
-      const href = match[0].replace(/[),.;:!?]+$/, "");
-      return { href, path: githubReference(href) };
-    })
-    .filter(
-      (reference): reference is { href: string; path: string } => reference.path !== undefined
-    );
+  const github = referenceSpans(body, "https://github.com/").flatMap(({ value }) => {
+    const path = githubReference(value);
+    return path === undefined ? [] : [{ href: value, path }];
+  });
 
   if (dispatch.length === 0 && github.length === 0) {
     return null;

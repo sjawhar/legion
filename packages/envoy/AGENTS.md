@@ -779,6 +779,26 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifact
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
 exists, and refuses to run without `dispatch.server_url`.
+A mention's source is the node whose text holds it, never the issue that text belongs to: a
+citation in an issue's spec is an edge out of the spec document, so
+`GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
+issue's own `child_of` and `affects` edges, and the cited node's `?to=` backlink names the spec.
+Where a reference in text ends, and what it names, is one rule with two readers: `text.ExtractAt`,
+which every write indexes through, and the dashboard's `composerReferences` (`refs/routes.ts`,
+scanning with `referenceSpans` and parsing with `referenceRouteFromHref`), behind its reference
+pills, unfurl cards and linked text. `DISPATCH_TEXT_REFERENCES` in `@legion/contracts`, whose
+JSON copy is `text/testdata/dispatch-text-references.json`, is the table both are tested against,
+so a change to the rule changes both readers and the table: `**dispatch://KEY**`,
+`` `dispatch://KEY` `` and `[dispatch://KEY](dispatch://KEY)` (how a document stores
+`<dispatch://KEY>`) all mention `KEY`, though the dashboard shows the code span as code, not a
+link. The Go reader parses a reference as the browser does: a query's pairs split on `&` alone,
+as `URLSearchParams` splits them (`searchParams`), an item id is decoded as `decodeURIComponent`
+decodes it, a slug is the whole segment, and a reference holding a control character, or an item
+id that decodes to one, names nothing; the index binds ids as `text[]`, where Postgres refuses a
+NUL, so a decoded NUL would fail the write and stop `rebuild-refs` at the body holding it. Where a
+browser normalizes a URL and net/url does not (host case, a default port, dot segments, a
+backslash), the two still differ, and so does how many U+FFFD stand for the invalid UTF-8 in a
+query's item id, an id no item has.
 
 The live document holds the tree as the browser editor holds it (`pmdoc.Update`, `pmdoc.Read`).
 That editor builds each node it loads with its schema, so an attribute the live document lacks
