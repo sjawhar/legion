@@ -76,7 +76,7 @@ var liveChecks = []liveCheck{
 	{"provider-key", (*liveRig).checkProviderKey, nil},
 	{"adopt-working-copy", (*liveRig).checkAdoptWorkingCopy, nil},
 	{"worker-colocated", (*liveRig).checkWorkerColocated, nil},
-	{"secrets-two-pods-enrolled", (*liveRig).checkSecretsTwoPodsEnrolled, secretsBlocked},
+	{"secrets-two-roles-enrolled", (*liveRig).checkSecretsTwoRolesEnrolled, secretsBlocked},
 	{"secrets-automatic-grant", (*liveRig).checkSecretsAutomaticGrant, secretsBlocked},
 	{"secrets-cross-pod-negative", (*liveRig).checkSecretsCrossPodNegative, secretsBlocked},
 	{"secrets-copied-token-negative", (*liveRig).checkSecretsCopiedTokenNegative, secretsBlocked},
@@ -657,7 +657,9 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		{"worker", "S4A-1", "S4A-1", claim.RoleImplementer},
 		{"second", "S4A-1", "S4A-1", claim.RoleTester},
 		{"fresh", "S4A-1", "S4A-1", claim.RoleReviewer},
-		{"orphan", "S4A-1", "S4A-1", claim.RoleMerger},
+		// orphan is a separate issue pod: its unrecorded Sandbox can be swept or deleted without
+		// taking the root issue's resident roles with it.
+		{"orphan", "S4A-4", "S4A-4", claim.RoleMerger},
 		{"root2", "S4A-2", "S4A-2", claim.RoleArchitect},
 		{"child2", "S4A-2", "S4A-3", claim.RolePlanner},
 	} {
@@ -964,27 +966,14 @@ func (r *liveRig) networkPathFailure(pod *corev1.Pod) error {
 		pod.Name, pod.UID, pod.Spec.NodeName, r.env.streamHost, r.env.streamPort, liveBootTimeout, groups, r.env.streamPort)
 }
 
-// suspend is a Suspend of the claim's running process, then the wait for its pod to be gone.
+// suspend is a role-process stop. It leaves the issue pod in place; its launcher reports the
+// child exit, so Runtime.Suspend returns only after that role's process is gone.
 func (r *liveRig) suspend(c *liveClaim) error {
 	if err := r.rt.Suspend(r.ctx, *c.loc); err != nil {
 		return err
 	}
-	if err := r.awaitPodGone(c); err != nil {
-		return err
-	}
 	c.loc, c.state = nil, stateSuspended
 	return nil
-}
-
-func (r *liveRig) awaitPodGone(c *liveClaim) error {
-	name := SandboxName(c.token)
-	return r.poll(liveGoneLimit, "pod "+name+" to be gone", func() (bool, error) {
-		_, err := r.getPod(name)
-		if apierrors.IsNotFound(err) {
-			return true, nil
-		}
-		return false, err
-	})
 }
 
 // ensureRunning and ensureSuspended put a claim where a check starts from: nothing to do in a full
