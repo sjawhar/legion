@@ -6,6 +6,11 @@
 -- 0053 already guarantees the remaining fields on every approval row. Rebuilding the check after
 -- the backfill makes every approval ask decodable by model.AskApproval and preserves the stored
 -- ordering invariant that a request can never name a version after the document's current one.
+--
+-- handed_back_reply_id is the thread reply that was newest when the agent last handed the request
+-- back, read under the owner lock every reply also takes. The request waits on the human until a
+-- newer reply decides its turn. No pre-0056 request was ever handed back, so it starts null, which
+-- leaves every existing thread's turn where its newest reply put it.
 alter table asks drop constraint asks_approval_kind_check;
 
 update asks
@@ -30,6 +35,10 @@ alter table asks add constraint asks_approval_kind_check check (
         else approval is null
     end
 );
+
+alter table asks
+    add column handed_back_reply_id uuid references comments(id),
+    add constraint asks_handed_back_reply_approval check (handed_back_reply_id is null or kind = 'approval');
 
 -- A rolling deploy can have an older binary insert the three-field approval JSON after this
 -- migration committed. Normalize that row before the check runs, preserving the version it showed.

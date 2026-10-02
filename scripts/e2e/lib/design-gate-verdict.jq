@@ -8,8 +8,8 @@
 #   early       each approval request made too early, as "version N: <block question>"
 #   open_in_version: the version a request named still held one of the spec's blocks open. The
 #   request's `requested_version` is the version the agent handed to the human. An approval ask
-#   follows later versions in place, so the shared event selector records only its initial
-#   ask.opened and each ask.edited that raises requested_version.
+#   follows later versions in place, so the shared event selector records its ask.opened and each
+#   ask.handed_back, never an ask.edited, which only rewords it.
 include "design-gate-approval-requests";
 def ts: (capture("^(?<s>[0-9-]+T[0-9:]+)(\\.(?<f>[0-9]+))?Z$") // error("not an RFC3339 UTC time: \(.)")) | ((.s + "Z") | fromdateiso8601) + ((.f // "0") | "0." + . | tonumber);
 .[0] as $asks | .[1] as $events | .[2:] as $versions

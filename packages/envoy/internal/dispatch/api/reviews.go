@@ -445,22 +445,27 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 			}
 			question = docs.ApprovalQuestion(artifact.Name, version, summary)
 		}
-		handBack := open.Approval.Version != version || open.Approval.RequestedVersion != version || open.Question != question
-		if !handBack {
-			// A thread reply newer than the last hand-back holds the turn with the agent, so this
-			// request hands the turn back even with nothing else to change. A repeat with nothing
-			// newer in the thread finds the request waiting on the human and writes nothing.
-			waitingOn, err := askWaitingOn(r.Context(), tx, open.ID)
+		// Read before this request writes anything: whether a hand-back is due is the turn every
+		// read reports, and a reworded question does not change it.
+		waitingOn, err := askWaitingOn(r.Context(), tx, open.ID)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if open.Question != question {
+			event, err := docs.RewriteApprovalAsk(
+				r.Context(), tx, s.deps.Events, open, actor, version, summary, s.deps.ServerURL,
+			)
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
-			handBack = waitingOn == "agent"
+			events = append(events, event)
 		}
-		if handBack {
-			event, err := docs.RewriteApprovalAsk(
-				r.Context(), tx, s.deps.Events, open, actor, version, version, summary, s.deps.ServerURL,
-			)
+		// A request waiting on its agent, moved or answered in its thread, goes back to the human.
+		// One already waiting on the human is a retry, and records nothing.
+		if waitingOn == "agent" {
+			event, err := s.handBackApprovalAsk(r.Context(), tx, owner, open, actor, version)
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
@@ -480,10 +485,13 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		s.publish(events...)
-		awaiting := *artifact.Approval
-		awaiting.State = "awaiting"
-		awaiting.AskID = &open.ID
-		WriteJSON(w, http.StatusOK, response{Ask: open, ArtifactID: artifact.ID, Version: version, Approval: awaiting})
+		// 201 says this request changed what the human is asked or handed it to them; 200 says the
+		// open request already stood as asked.
+		status := http.StatusOK
+		if len(events) > 0 {
+			status = http.StatusCreated
+		}
+		WriteJSON(w, status, response{Ask: open, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
 		return
 	}
 
@@ -563,6 +571,32 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	awaiting.RequestedBy = &actor
 	awaiting.AskID = &ask.ID
 	WriteJSON(w, http.StatusCreated, response{Ask: &ask, ArtifactID: artifact.ID, Version: version, Approval: awaiting})
+}
+
+// handBackApprovalAsk returns the open approval request to the human at version and appends its
+// ask.handed_back event. It records version as the one handed back and the thread's newest reply as
+// the one this hand-back answered (waitingOnExpression). The caller holds the owner row every reply
+// takes before it inserts, so no reply commits between that read and this transaction's commit, and
+// a reply that inserts after it stamps a later created_at (commentInsertedAt), sorts after the one
+// recorded and decides the turn, however early its own transaction began. The question is left as
+// it stands: a request that changes it rewords first through docs.RewriteApprovalAsk, which
+// ask.edited records.
+func (s *server) handBackApprovalAsk(ctx context.Context, tx pgx.Tx, owner owner, ask *model.Ask, actor model.Actor, version int) (model.Event, error) {
+	ask.Approval.RequestedVersion = version
+	approval, err := json.Marshal(ask.Approval)
+	if err != nil {
+		return model.Event{}, fmt.Errorf("encode approval ask: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		update asks a
+		set approval = $2, handed_back_reply_id = (select lr.id from (`+newestReply+`) lr)
+		where a.id = $1
+	`, ask.ID, approval); err != nil {
+		return model.Event{}, fmt.Errorf("hand approval ask back: %w", err)
+	}
+	return s.appendEvent(ctx, tx, owner.event(
+		"ask.handed_back", actor, model.NewAskEventPayload(*ask, model.ReferenceChanges{}),
+	))
 }
 
 // approvalQuestion is an approval ask's question: the document and version it names, then the

@@ -15381,7 +15381,8 @@ class DispatchClient {
     return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
   }
   async requestApproval(artifactID, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
+    const answer = await this.#jsonAnswer("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
+    return { ...answer.payload, recorded: answer.status === 201 };
   }
   async editAsk(id, input) {
     return this.#json("PATCH", ["api", "v1", "asks", id], input);
@@ -15526,6 +15527,9 @@ class DispatchClient {
     }
   }
   async#json(method, path2, body, query) {
+    return (await this.#jsonAnswer(method, path2, body, query)).payload;
+  }
+  async#jsonAnswer(method, path2, body, query) {
     const headers = {
       Accept: "application/json",
       Authorization: `Bearer ${this.token}`
@@ -15539,7 +15543,7 @@ class DispatchClient {
       signal: this.#signal,
       ...body === undefined ? {} : { body: JSON.stringify(body) }
     });
-    return this.#response(method, url2, response);
+    return { status: response.status, payload: await this.#response(method, url2, response) };
   }
   async#form(method, path2, body) {
     const url2 = this.#url(path2);
@@ -16545,6 +16549,7 @@ function eventHead(event) {
     case "ask.opened":
     case "ask.anchor_refreshed":
     case "ask.edited":
+    case "ask.handed_back":
     case "ask.resolved":
       return textHead(event.payload.question);
     case "ask.answered":
@@ -17479,8 +17484,9 @@ ${trailer.join(`
         };
       }
       const details = await followedAskDetails(client, result.ask, resolved.artifact);
+      const outcome = result.recorded ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).` : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: no reply in its thread is newer than its last hand-back.`;
       return {
-        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. If you revise the document, this request follows it and waits on you; call dispatch_request_approval once more when the revision is complete.`,
+        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. If you revise the document, this request follows it and waits on you; call dispatch_request_approval once more when the revision is complete.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version }
       };
     }

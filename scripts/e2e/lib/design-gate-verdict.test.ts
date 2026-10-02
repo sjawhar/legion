@@ -177,10 +177,23 @@ describe("design-gate-verdict.jq", () => {
           question: "Approve spec.md (version 2)? Proposes the file under docs/smoke/.",
         },
       },
+      // The hand-back with a new summary: its rewording, then the hand-back itself.
       {
         type: "ask.edited",
         created_at: "2026-09-30T10:06:00Z",
-        payload: { ...current, previous },
+        payload: {
+          ...current,
+          approval: { ...current.approval, requested_version: 1 },
+          previous: {
+            ...previous,
+            question: "Approve spec.md (version 2)? Proposes the file under docs/smoke/.",
+          },
+        },
+      },
+      {
+        type: "ask.handed_back",
+        created_at: "2026-09-30T10:06:00Z",
+        payload: current,
       },
       {
         type: "ask.answered",

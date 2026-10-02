@@ -1657,7 +1657,7 @@ drive_gated_spec() {
   jq . <<<"$asks" >"$evidence/$issue-asks.json"
   jq . <<<"$events" >"$evidence/$issue-events.json"
   # An approval row follows versions. The shared selector reads the full event history: ask.opened
-  # records its first hand-back and ask.edited records each later requested_version advance.
+  # records its first hand-back and each ask.handed_back a later one.
   requested_versions=$(jq -r -L "$root/scripts/e2e/lib" --arg artifact "$artifact" '
     include "design-gate-approval-requests";
     approval_requested_versions($artifact)

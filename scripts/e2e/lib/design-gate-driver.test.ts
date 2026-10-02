@@ -38,19 +38,32 @@ describe("drive_gated_spec's hand-back versions", () => {
     expect(script).not.toContain("previous.approval");
   });
 
-  test("a request at v1, the move to v2 a block answer caused, and the hand-back at v2 read versions 1 and 2", () => {
+  test("a request at v1, the move to v2 a block answer caused, and the reworded hand-back at v2 read versions 1 and 2", () => {
     const events = [
       { type: "ask.opened", payload: { id: "a", kind: "approval", approval: approval(1, 1) } },
       {
         type: "ask.edited",
         payload: { id: "a", kind: "approval", approval: approval(2, 1), previous },
       },
+      // A hand-back with a new summary rewords the request, then hands it back.
       {
         type: "ask.edited",
-        payload: { id: "a", kind: "approval", approval: approval(2, 2), previous },
+        payload: { id: "a", kind: "approval", approval: approval(2, 1), previous },
       },
+      { type: "ask.handed_back", payload: { id: "a", kind: "approval", approval: approval(2, 2) } },
       { type: "ask.answered", payload: { id: "a", kind: "approval", approval: approval(2, 2) } },
     ];
     expect(handedBackVersions(events)).toBe("1\n2\n");
+  });
+
+  test("a version the request moved to but was never handed back at is not a requested version", () => {
+    const events = [
+      { type: "ask.opened", payload: { id: "a", kind: "approval", approval: approval(1, 1) } },
+      {
+        type: "ask.edited",
+        payload: { id: "a", kind: "approval", approval: approval(2, 1), previous },
+      },
+    ];
+    expect(handedBackVersions(events)).toBe("1\n");
   });
 });

@@ -50,6 +50,26 @@ func issueEvents(t *testing.T, handler http.Handler, issueKey string) []reviewEv
 	return decodeBody[[]reviewEvent](t, response)
 }
 
+// askEventCounts counts issueKey's events about askID by type: the ask.* events, whose payload is
+// the ask, and the artifact review events that carry it as ask_id.
+func askEventCounts(t *testing.T, handler http.Handler, issueKey, askID string) map[string]int {
+	t.Helper()
+	counts := map[string]int{}
+	for _, event := range issueEvents(t, handler, issueKey) {
+		var payload struct {
+			ID    string  `json:"id"`
+			AskID *string `json:"ask_id"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode %s payload: %v", event.Type, err)
+		}
+		if payload.ID == askID || (payload.AskID != nil && *payload.AskID == askID) {
+			counts[event.Type]++
+		}
+	}
+	return counts
+}
+
 func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -176,8 +196,8 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 }
 
 // An approval request's question carries the requester's summary of what the version proposes,
-// within the ask cap. Repeating the request updates the existing row and never opens another.
-func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {
+// within the ask cap. A repeat with a new summary rewords the existing row and never opens another.
+func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -242,10 +262,10 @@ func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {
 		t.Fatalf("summarised approval ask = %#v", opened)
 	}
 
-	// A repeat at the same version updates the one open request with its new summary.
+	// A repeat at the same version rewords the one open request with its new summary.
 	other := "A different summary."
 	repeat := request(issue.PrimaryArtifactID, &other)
-	if repeat.Code != http.StatusOK {
+	if repeat.Code != http.StatusCreated {
 		t.Fatalf("repeat at the same version: status=%d body=%s", repeat.Code, repeat.Body.String())
 	}
 	updated := decodeBody[requestResponse](t, repeat).Ask

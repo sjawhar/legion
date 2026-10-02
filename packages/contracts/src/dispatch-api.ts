@@ -583,10 +583,10 @@ export interface Ask extends AnchorPosition {
    *  Absent on every other ask read. */
   readonly last_reply?: AskLastReply | null;
   /** Whose reply an open ask needs next. A moved approval request stays with its agent while
-   *  `requested_version` is below `version`; a hand-back's newer edit returns it to the human
-   *  until a later reply's `turn` decides it. Present on every open-ask read (inbox rows, ask
-   *  lists, the ask detail, the issue detail's `open_asks`); absent on closed asks and on `ask.*`
-   *  event payloads. */
+   *  `requested_version` is below `version`; a hand-back (`ask.handed_back`) returns it to the
+   *  human until a reply newer than the one it answered decides it by its `turn`. Present on every
+   *  open-ask read (inbox rows, ask lists, the ask detail, the issue detail's `open_asks`); absent on
+   *  closed asks and on `ask.*` event payloads. */
   readonly waiting_on?: AskTurn;
   readonly edited_at: string | null;
   /** Present only on a server-created approval ask. */
@@ -1444,9 +1444,18 @@ export type DispatchEvent =
       readonly type: "ask.anchor_refreshed";
       readonly payload: AskEventPayload;
     })
+  /** Every rewording: a PATCH edit, a block ask's new text, and an approval request's move to a new
+   *  version or new summary. Each one stamps the ask's `edited_at`. */
   | (DispatchEventBase & {
       readonly type: "ask.edited";
       readonly payload: AskEditEventPayload;
+    })
+  /** An agent handed its approval request back to the human: `approval.requested_version` is the
+   *  version it handed back. It rewords nothing and leaves `edited_at` as it was; a hand-back
+   *  with a new summary is an `ask.edited` followed by this event. */
+  | (DispatchEventBase & {
+      readonly type: "ask.handed_back";
+      readonly payload: AskEventPayload;
     })
   | (DispatchEventBase & { readonly type: "ask.answered"; readonly payload: AskEventPayload })
   | (DispatchEventBase & {

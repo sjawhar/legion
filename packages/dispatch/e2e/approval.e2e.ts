@@ -265,7 +265,7 @@ test("an unchanged hand-back after a human comment and a progress note returns t
     ).toBeVisible();
 
     // The same version, question and summary: the hand-back alone changes whose turn it is, and the
-    // open Inbox moves the card on the event it records.
+    // open Inbox moves the card on the ask.handed_back event it records, which rewords nothing.
     const handedBack = await requestApproval(issue.primary_artifact_id, { summary }, session);
     expect(handedBack.ask.id).toBe(requested.ask.id);
     const card = page
@@ -273,8 +273,61 @@ test("an unchanged hand-back after a human comment and a progress note returns t
       .getByTestId(`ask-${requested.ask.id}`);
     await expect(card).toBeVisible();
     await expect(card).toContainText(`Approve spec.md (version 1)? ${summary}`);
+    await expect(card).not.toContainText("Edited");
+    const askEvents = (await getIssueEvents(issue.key, { limit: 200 }, { login: "alice" }))
+      .filter((event) => event.type.startsWith("ask."))
+      .map((event) => event.type);
+    expect(askEvents).toEqual(["ask.opened", "ask.handed_back"]);
     await page.goto(`/issues/${issue.key}`);
     await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (1)");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an answer started before a hand-back that rewords nothing is saved, and the card gains no edit history", async ({
+  browser,
+}) => {
+  await createProject({ key: "KEEP", name: "Kept answer" });
+  const issue = await createIssue({ project: "KEEP", spec: "The plan.", title: "Kept answer" });
+  const summary = "Names the existing proposal.";
+  const requested = await requestApproval(issue.primary_artifact_id, { summary }, session);
+  await createComment(
+    issue.key,
+    { ask_id: requested.ask.id, body: "Please clarify the rollout." },
+    { login: "alice" }
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    // No live stream on this page: the card stays as the human loaded it, mid-answer.
+    const answering = await alice.newPage();
+    await answering.route("**/api/v1/events**", (route) => route.abort());
+    await answering.goto("/");
+    const shown = answering
+      .locator('[data-inbox-section="agent"]')
+      .getByTestId(`ask-${requested.ask.id}`);
+    await expect(shown).toBeVisible();
+    await shown.getByRole("radio", { name: /^Approve/ }).check();
+
+    await requestApproval(issue.primary_artifact_id, { summary }, session);
+
+    // Another page sees the hand-back: the card is the human's turn, and it was never reworded.
+    const watching = await alice.newPage();
+    await watching.goto("/");
+    const handedBack = watching
+      .locator('[data-inbox-section="human"]')
+      .getByTestId(`ask-${requested.ask.id}`);
+    await expect(handedBack).toBeVisible();
+    await expect(handedBack).not.toContainText("Edited");
+
+    await shown.getByRole("button", { name: "Answer" }).click();
+    await expect(
+      answering.getByText("Your answer was not saved, because the question changed.")
+    ).toHaveCount(0);
+    await expect
+      .poll(async () => (await getArtifact(issue.primary_artifact_id, { login: "alice" })).approval)
+      .toMatchObject({ state: "approved", version: 1, ask_id: requested.ask.id });
   } finally {
     await alice.close();
   }

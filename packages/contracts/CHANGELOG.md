@@ -7,6 +7,10 @@
 - Added `AskApproval.requested_version`. An open approval ask now follows a document's latest
   version in the same row, and `requested_version < version` marks the interval while the agent
   is revising before handing that row back to a human (LEGION-470).
+- Added the `ask.handed_back` event (`AskEventPayload`): an agent handed its approval request back
+  to the human, at the version `approval.requested_version` names. `ask.edited` stays a rewording:
+  a hand-back that changes no wording records only `ask.handed_back` and leaves `edited_at` as it
+  was, and one with a new summary records `ask.edited` and then `ask.handed_back` (LEGION-470).
 - `dispatch_request_approval` requires `summary`, the proposals in the document's latest version
   the human hasn't already agreed to (LEGION-387). `SPEC_SECTIONS` is removed: `dispatch_issue`'s
   `spec` and `dispatch_doc_edit` point at the dispatch skill's "Writing a spec" instead of listing

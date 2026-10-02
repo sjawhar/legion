@@ -1393,6 +1393,7 @@ function eventHead(event: Event): string | undefined {
     case "ask.opened":
     case "ask.anchor_refreshed":
     case "ask.edited":
+    case "ask.handed_back":
     case "ask.resolved":
       return textHead(event.payload.question);
     case "ask.answered":
@@ -2755,8 +2756,13 @@ export async function executeDispatchTool(
         };
       }
       const details = await followedAskDetails(client, result.ask, resolved.artifact);
+      // A call that opened, reworded or handed back the request says so; one that found it already
+      // waiting on the human says nothing changed, so a retry never reads as a fresh hand-back.
+      const outcome = result.recorded
+        ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).`
+        : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: no reply in its thread is newer than its last hand-back.`;
       return {
-        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. If you revise the document, this request follows it and waits on you; call dispatch_request_approval once more when the revision is complete.`,
+        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. If you revise the document, this request follows it and waits on you; call dispatch_request_approval once more when the revision is complete.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
       };
     }

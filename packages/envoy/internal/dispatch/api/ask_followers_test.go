@@ -152,7 +152,7 @@ func TestApprovalHandBackFollowsItsActorWithoutChangingTheRequester(t *testing.T
 			"actor":   map[string]any{"kind": "session", "id": "s-successor"},
 			"summary": "Clarifies the rollout.",
 		})
-	if handedBack.Code != http.StatusOK {
+	if handedBack.Code != http.StatusCreated {
 		t.Fatalf("hand approval back: status=%d body=%s", handedBack.Code, handedBack.Body.String())
 	}
 	type approvalResponse struct {

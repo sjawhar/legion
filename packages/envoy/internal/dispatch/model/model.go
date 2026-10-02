@@ -555,8 +555,8 @@ type Ask struct {
 	// Approval names the document an approval ask is about; nil for questions.
 	Approval *AskApproval `json:"approval,omitempty"`
 	// WaitingOn is whose reply an open ask needs next: a moved approval request stays with its
-	// agent while RequestedVersion is below Version, and a later hand-back's edit returns it to
-	// the human until the newest reply decides it. Set on ask reads only (inbox rows, ask lists,
+	// agent while RequestedVersion is below Version, and a hand-back returns it to the human until
+	// a reply newer than the one it answered decides it. Set on ask reads only (inbox rows, ask lists,
 	// the ask detail), never on the ask.* event payloads; empty for answered and resolved asks.
 	WaitingOn string `json:"waiting_on,omitempty"`
 }
@@ -620,7 +620,7 @@ type AskFollowerEventPayload struct {
 
 // AskLastReply is the newest comment in an ask's thread, carried on inbox rows and on the issue
 // detail's open asks so a human can see who spoke last. Its Turn decides an ordinary ask's
-// WaitingOn; moved and newly handed-back approval asks have their stored-version overrides.
+// WaitingOn; a moved approval request and one handed back after this reply override it.
 type AskLastReply struct {
 	Author    Actor  `json:"author"`
 	CreatedAt string `json:"created_at"`
