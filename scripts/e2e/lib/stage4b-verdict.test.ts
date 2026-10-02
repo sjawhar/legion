@@ -9,11 +9,13 @@ import { join } from "node:path";
 // helpers stubbed and production_audit's Dispatch read replaced by its result: a write outside
 // LEGSMOKE, or none.
 const script = readFileSync(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"), "utf8");
-const fn = (name: string) => {
-  const found = new RegExp(`^${name}\\(\\) \\{(?:.*\\}$|[\\s\\S]*?\\n\\}$)`, "m").exec(script);
-  if (found === null) throw new Error(`stage4b-sandbox-tree.sh defines no ${name}()`);
+const rig = readFileSync(join(import.meta.dir, "rig.sh"), "utf8");
+const fnOf = (source: string, file: string, name: string) => {
+  const found = new RegExp(`^${name}\\(\\) \\{(?:.*\\}$|[\\s\\S]*?\\n\\}$)`, "m").exec(source);
+  if (found === null) throw new Error(`${file} defines no ${name}()`);
   return found[0];
 };
+const fn = (name: string) => fnOf(script, "stage4b-sandbox-tree.sh", name);
 const dir = mkdtempSync(join(tmpdir(), "stage4b-verdict-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const bin = join(dir, "bin");
@@ -23,9 +25,14 @@ writeFileSync(join(bin, "docker"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 let runs = 0;
 const outsideWrite =
   '[{"issue":"OTHER-12","seq":3,"type":"comment.created","actor":"legion-daemon:LEGSMOKE"}]';
-// controllerRun ends the controller checkpoint in blocked, in fail (the case the notes are for), or
-// in pass as the last checkpoint of a run with STAGE4B_UNTIL=controller.
-function controllerRun(outside: string, ending: "blocked" | "fail" | "pass" = "blocked") {
+// controllerRun ends the controller checkpoint in blocked, in fail (the case the notes are for), in
+// pass as the last checkpoint of a run with STAGE4B_UNTIL=controller, or in a wait that times out
+// under the run's capacity hook while limit_pending reports `pending` (empty: no limit-Pending pod).
+function controllerRun(
+  outside: string,
+  ending: "blocked" | "fail" | "pass" | "timeout" = "blocked",
+  pending = ""
+) {
   const run = join(dir, `run-${++runs}`);
   const evidence = join(run, "evidence");
   mkdirSync(evidence, { recursive: true });
@@ -45,6 +52,7 @@ mkdir -p "$work" "$evidence/model-gateway"
 printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' 2026-09-30T12:00:05Z 4242 /x controller timeout no-key >"$evidence/model-gateway/hawk-token.calls"
 exec 7>&1
 stop_tree() { :; }; stop_pid() { :; }; collect_transcripts() { :; }; record_pair() { :; }; op() { :; }
+limit_pending() { printf '%s\\n' "$PENDING"; }
 teardown() { :; }; namespace_clean() { :; }; delete_consumers() { :; }; remove_run_branches() { :; }
 run_processes() { :; }; note() { echo "   $*"; }
 production_audit() {
@@ -59,12 +67,14 @@ ${fn("blocked")}
 ${fn("fail")}
 ${fn("until_reached")}
 ${fn("pass")}
+${fn("limit_pending_blocked")}
+${fnOf(rig, "rig.sh", "until_true")}
 ${fn("cleanup")}
 trap cleanup EXIT
-${ending} "the controller's model route could not be installed"
+${ending === "timeout" ? 'timeout_hook=limit_pending_blocked; until_true 1 "the controller to take its first turn" false' : `${ending} "the controller's model route could not be installed"`}
 `,
     ],
-    { env: { PATH: `${bin}:${process.env.PATH}`, OUTSIDE: outside } }
+    { env: { PATH: `${bin}:${process.env.PATH}`, OUTSIDE: outside, PENDING: pending } }
   );
   const stdout = result.stdout.toString();
   // cleanup's ERR trap reports every teardown command that fails, a helper this harness neither
@@ -122,5 +132,25 @@ describe("stage 4b's verdict line", () => {
       "stage 4b e2e: FAIL (check production-audit, in the teardown after check controller)"
     );
     expect(until.stdout).not.toContain("model-gateway-unserved:");
+  });
+
+  test("says BLOCKED on capacity for a wait the pool's limits starved, naming the pod", () => {
+    const pod =
+      "pod legion-legsmoke-legsmoke-2-x (Karpenter: all available instance types exceed limits for nodepool legion)";
+    const starved = controllerRun("[]", "timeout", pod);
+    expect(starved.code).toBe(1);
+    expect(starved.stdout).toContain(
+      `CHECK controller: BLOCKED: capacity: the legion pool is at its limits, so the scheduler cannot place ${pod}`
+    );
+    expect(starved.stdout).toContain("stage 4b e2e: BLOCKED (check controller)");
+    expect(starved.stdout).not.toContain("CHECK controller: FAIL");
+  });
+
+  test("still fails a wait that timed out with no pod Pending on the pool's limits", () => {
+    const timedOut = controllerRun("[]", "timeout");
+    expect(timedOut.code).toBe(1);
+    expect(timedOut.stdout).toContain("CHECK controller: FAIL: timed out after 1s");
+    expect(timedOut.stdout).toContain("stage 4b e2e: FAIL (check controller)");
+    expect(timedOut.stdout).not.toContain("BLOCKED");
   });
 });

@@ -679,9 +679,10 @@ gives that configuration nothing to take. Run no command in it that holds a toke
 
 ### Tree sizing: one tree per node
 
-The pool's floor, not the pod, decides node size. Legion pods carry no
-`karpenter.k8s.aws/instance-cpu` selector and no resource requests. The `legion` NodePool's
-`karpenter.k8s.aws/instance-cpu Gt 3` requirement makes Karpenter launch the cheapest 4-vCPU type.
+The pool's floor, not the pod, decides node size. Legion pods carry no instance-size selector and
+no resource requests. The `legion` NodePool's `karpenter.k8s.aws/instance-cpu Gt 3` and
+`karpenter.k8s.aws/instance-memory Gt 65535` requirements make Karpenter launch the cheapest type
+with at least 4 vCPU and 64 GiB.
 
 Every tree pod carries two rules:
 - a required pod affinity to the pods of its own tree, since the volume attaches to one node;
@@ -691,10 +692,12 @@ Every tree pod carries two rules:
 So concurrent trees never share a node. Requests stay unset because under required colocation the
 first pod placed decides the node, and a request on a later pod would strand it.
 
-**The bound.** The pool's `limits.cpu: 64`, with one tree per 4-vCPU node, caps concurrently running
-trees at **16**. The TypeScript production configuration runs `admission_cap: 29`. Stage 7's cutover
-raises the `legion` NodePool's `limits.cpu` to at least `4 × admission_cap`; until
-then an `admission_cap` above 16 admits trees whose pods cannot schedule.
+**The bound.** One tree per node holds across every project whose daemon shares the `legion` pool:
+a tree pod's anti-affinity names no project, since a second tree of any project would overrun a
+node sized for one. So the pool's limits, divided by the node size its floor sets, cap the trees
+running at once across all projects together. With the floor at `instance-memory Gt 65535`
+(64 GiB) and `limits.memory: 256Gi`, that is four. An `admission_cap` (summed over the daemons
+sharing the pool) above that admits trees whose pods stay Pending until a node frees.
 
 ### Trust model: the provisioning token
 

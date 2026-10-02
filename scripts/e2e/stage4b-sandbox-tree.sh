@@ -125,6 +125,8 @@ opchild="S4BOP-${$}1"
 port_daemon=13372
 port_worker_stream=13373
 stream=ENVOY_NOTIFICATIONS
+# Trees the run's daemon runs at once, each on a node of its own (pool_tree_room).
+admission_cap=2
 # One path for every run on the devbox, whatever its environment names as its state directory.
 lock=$HOME/.local/state/legion/e2e/stage4b.lock
 record=$work/sandboxes
@@ -144,7 +146,9 @@ torn_down=
 snapshotted=
 compared=
 locked=
-timeout_hook=
+# A timed-out wait first asks whether the pool's limits starved it (limit_pending_blocked); a wait
+# that sets a hook of its own sets this one back after it.
+timeout_hook=limit_pending_blocked
 daemon_pid=
 watch_pid=
 leaks_pid=
@@ -222,6 +226,58 @@ blocked() {
 
 
 rk() { timeout --foreground 300 kubectl --kubeconfig "$runtime_kubeconfig" --context "$runtime_context" "$@"; }
+
+# ---- capacity: one tree per node, across every project ------------------------------------------
+# Every tree pod refuses a node that holds another tree's pod, whatever that tree's project
+# (manifest.go affinity, docs/kubernetes.md "Tree sizing"), and the legion NodePool's limits bound
+# its nodes. A tree therefore needs a schedulable pool node no tree pod is on, or room under the
+# limits for one more node of the floor's size.
+
+# pool_tree_room prints the trees the legion pool can place now, as JSON: its schedulable nodes no
+# tree pod is on, and the nodes of the floor's size (instance-cpu and instance-memory Gt) that its
+# cpu and memory limits leave room for beside the capacity it already runs.
+pool_tree_room() {
+  local pool nodes pods
+  pool=$(kubectl --context "$operator" --request-timeout=30s get nodepool legion -o json) || return 1
+  nodes=$(kubectl --context "$operator" --request-timeout=30s get nodes -l karpenter.sh/nodepool=legion -o json) || return 1
+  pods=$(kubectl --context "$operator" --request-timeout=30s get pods -A -l legion.dev/tree -o json) || return 1
+  jq -cn --argjson pool "$pool" --argjson nodes "$nodes" --argjson pods "$pods" '
+    def qty: tostring | capture("^(?<n>[0-9.]+)(?<u>[a-zA-Z]*)$")
+      | (.n | tonumber) * {"": 1, m: 0.001, k: 1e3, M: 1e6, G: 1e9, T: 1e12, Ki: 1024, Mi: 1048576, Gi: 1073741824, Ti: 1099511627776}[.u];
+    def gt($key): [$pool.spec.template.spec.requirements[] | select(.key == $key and .operator == "Gt") | .values[0] | tonumber] | max // 0;
+    ($pool.spec.limits // {}) as $limit | ($pool.status.resources // {}) as $used
+    | [ if $limit.cpu then ((($limit.cpu | qty) - (($used.cpu // 0) | qty)) / (gt("karpenter.k8s.aws/instance-cpu") + 1) | floor) else empty end,
+        if $limit.memory then ((($limit.memory | qty) - (($used.memory // 0) | qty)) / ((gt("karpenter.k8s.aws/instance-memory") + 1) * 1048576) | floor) else empty end
+      ] as $by_limit
+    | ([$pods.items[] | .spec.nodeName // empty] | unique) as $held
+    | [$nodes.items[] | select((.spec.unschedulable // false) | not) | .metadata.name | . as $n | select($held | index($n) | not)] as $free
+    | {free_nodes: $free, new_nodes: (if ($by_limit | length) == 0 then null else ([$by_limit | min, 0] | max) end), tree_nodes: $held}
+    | .room = (if .new_nodes == null then null else (.free_nodes | length) + .new_nodes end)'
+}
+
+# limit_pending prints each pod of the run the scheduler cannot place because the legion pool is at
+# its limits: Pending and PodScheduled=False Unschedulable, with Karpenter's FailedScheduling event
+# saying every instance type exceeds the pool's limits. It prints nothing when there is none, or
+# when the cluster cannot be read.
+limit_pending() {
+  local pods events
+  pods=$(kubectl --context "$operator" -n "$namespace" --request-timeout=20s get pods -l "legion.dev/project=$run_label" -o json) || return 0
+  events=$(kubectl --context "$operator" -n "$namespace" --request-timeout=20s get events --field-selector reason=FailedScheduling -o json) || return 0
+  jq -r --argjson events "$events" '
+    [.items[] | select(.status.phase == "Pending" and any(.status.conditions[]?; .type == "PodScheduled" and .status == "False" and .reason == "Unschedulable")) | .metadata.name] as $pending
+    | $events.items[] | select(.involvedObject.kind == "Pod" and (.involvedObject.name as $n | $pending | index($n)) and ((.message // "") | contains("exceed limits for nodepool (NodePool=legion)")))
+    | "pod \(.involvedObject.name) (Karpenter: all available instance types exceed limits for nodepool legion)"' <<<"$pods" | sort -u
+}
+
+# limit_pending_blocked is the run's timeout_hook (lib/rig.sh until_true). A wait that timed out
+# while a pod of the run could not be placed for the pool's limits was starved by capacity, which is
+# no verdict on the change, so the check ends BLOCKED naming the pod. Any other timeout still fails,
+# and a check that fails outright (a leak, an audit, a pod verdict) is never asked.
+limit_pending_blocked() {
+  local pending
+  pending=$(limit_pending 2>/dev/null) || pending=
+  [ -z "$pending" ] || blocked "capacity: the legion pool is at its limits, so the scheduler cannot place $(tr '\n' ';' <<<"$pending")"
+}
 
 # ---- the runtime seam: a claim's process is its role container in one issue pod -------------------
 
@@ -516,7 +572,7 @@ projects:
   $project: { repo: $repo }
 gates:
   design: "${design_gate:-off}"
-admission_cap: 2
+admission_cap: $admission_cap
 linger_hours: 0.3
 controller_wake_interval_seconds: 60
 instructions: $work/instructions.md
@@ -592,7 +648,7 @@ start_daemon() {
   timeout_hook=report_boot
   # A daemon that exits (a refused image probe, a config it will not run) ends the wait at once.
   until_true 900 "the Go daemon to boot and answer /healthz" daemon_answers_or_exited
-  timeout_hook=
+  timeout_hook=limit_pending_blocked
   kill -0 "$daemon_pid" 2>/dev/null || fail "the Go daemon exited before it answered /healthz: $(tail -3 "$daemon_log" | cut -c1-300 | tr '\n' ' ')"
 }
 daemon_answers_or_exited() { ! kill -0 "$daemon_pid" 2>/dev/null || curl -fsS "http://$host:$port_daemon/healthz"; }
@@ -1541,6 +1597,12 @@ floor=$(kubectl --context "$operator" get nodepool legion -o json |
   jq -c '[.spec.template.spec.requirements[] | select(.key == "karpenter.k8s.aws/instance-cpu")]')
 jq -e 'any(.[]; .operator == "Gt" and (.values | index("3")))' <<<"$floor" >/dev/null || fail "the legion NodePool has no instance-cpu Gt 3 floor: $floor"
 note "[operator] CRD sandboxes.agents.x-k8s.io installed; NodePool legion floor $floor"
+# The run needs admission_cap trees placed at once, each on a node of its own; trees of any other
+# project already on the pool's nodes count against it.
+room=$(pool_tree_room) || blocked "the operator context could not read the legion NodePool, its nodes or the tree pods"
+note "[operator] legion pool room for trees: $room"
+jq -e --argjson need "$admission_cap" '.room == null or .room >= $need' <<<"$room" >/dev/null ||
+  blocked "capacity: the legion pool can place $(jq -r .room <<<"$room") more trees (free nodes $(jq -c .free_nodes <<<"$room"), new nodes under its limits $(jq -r .new_nodes <<<"$room")), and the run needs $admission_cap at once"
 # The run's Dispatch bearer authenticates as an agent session, the actor Dispatch's routes and its
 # document websocket require, and the read is what says so: the same read with an invalid bearer
 # is refused 401.
@@ -2691,7 +2753,7 @@ report_node_release() {
 }
 timeout_hook=report_node_release
 until_true 1500 "tree 1's node $node to be released, or to carry no pod of the run while another project's pod is on it" node_released "$node"
-timeout_hook=
+timeout_hook=limit_pending_blocked
 modes=$(op get sandboxes -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o jsonpath='{.items[*].spec.operatingMode}')
 bound=$(op get pvc -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o jsonpath='{.items[*].status.phase}')
 if [ -z "$modes" ] || grep -qv Suspended <<<"$(tr ' ' '\n' <<<"$modes")"; then fail "tree 1's Sandboxes are '$modes' after its node was released ($node_release), want all Suspended"; fi
