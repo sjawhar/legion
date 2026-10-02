@@ -40,9 +40,21 @@ events to the right session.
 
 Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
 and `EnsureBlockIDs` repairs legacy or duplicate IDs before agent updates are written. Document
-settlement is two-phase: it first applies `EnsureBlockIDs` in one Yjs transaction and persists that
-captured update in the same Postgres transaction as any resulting version and event, then renders
-and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
+settlement is two-phase: it first writes its repairs into the room (`EnsureBlockIDs`, then the
+server-owned attributes of each ask block it reconciled) and persists the updates they captured in
+the same Postgres transaction as any resulting version and event, then renders and compares
+canonical markdown. Each repair is read and written in one Yjs transaction, which holds the
+document's lock, so it is computed against the document as it stands: the tree settlement
+reconciled was read before its database work, and writing that tree would revert an edit a peer
+made since (LEGION-479). Each repair's update is held from the room's own persistence by a
+suppression slot of its own (`applySuppressed`; ygo's persistence worker is handed each update on
+its own), and every path releases it: a slot nothing finishes holds the worker at the room's next
+update. A repair that finds nothing to write still commits an empty transaction, for which ygo
+hands the worker an update too (`emptyUpdate`); its slot is finished with that update, so the
+worker takes it with the slot rather than storing it. A settlement that wrote
+into the room commits what it wrote even when the document moved after its read, since the room and
+its browsers hold it; one that wrote nothing leaves a moved document to the settlement the move
+scheduled. `envoy-dispatch backfill-block-ids` runs that closure across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
 The closer's timer lives in memory, so the database says which documents still owe it: every

@@ -150,6 +150,20 @@
 
 ### Fixed
 
+- Document settlement no longer undoes an edit a browser or an agent makes while it settles
+  (LEGION-479). Settlement wrote its repairs (the block ids it stamps, an ask block's server-owned
+  attributes it restores) as the tree it had read before its database work, so an edit made in
+  between was reverted in the live document for every connected browser, and could reach the
+  stored document half applied. Each repair is now read and written in one transaction on the
+  document as it stands. A repair settlement wrote into the room is committed even when the
+  document moved after the write; before, it was dropped from the store while the room and its
+  browsers kept it.
+- A settlement no longer leaves a suppression slot queued that nothing releases (LEGION-479). A
+  stamp that found the ids already repaired once it read the document kept its slot, and the
+  room's persistence worker waited on that slot at the room's next update, so the room stopped
+  storing updates. A settlement that both stamps ids and repairs an ask block held its two updates
+  with one slot that matched neither, so both were stored twice and the slot stayed queued. Each
+  update now has a slot of its own, and every path a repair takes releases its slot.
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds
