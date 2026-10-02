@@ -1846,17 +1846,24 @@ planner_launching_without_task() {
   [ -n "$inc" ] && ! grep -qF " $inc " <<<"$planner_ended" &&
     jq -e --arg session "$planner_session" '.state == "launching" and .pending == null and .session == $session' <<<"$claim" >/dev/null
 }
-for attempt in $(seq 1 "$launch_failure_limit"); do
-  until_true 300 "tree 2's planner recovery $attempt to launch before registering" planner_launching_without_task
-  end_claim_pod "$tree2" planner delete
-  planner_ended+="$ended_pod_uid "
-  note "killed tree 2's completed planner PID 1 once, then deleted unregistered recovery $attempt (uid $ended_pod_uid)"
-done
 planner_failed() {
   planner2_claim | jq -e --arg session "$planner_session" --argjson n "$launch_failure_limit" \
     '.state == "failed" and .session == $session and .pending == null and .budgets.launchFailures == $n and .budgets.deaths == 0'
 }
-until_true 600 "tree 2's completed planner to fail after its recovery budget" planner_failed
+planner_recovery_progress() { planner_failed || planner_launching_without_task; }
+planner_deletes=0
+while ! planner_failed; do
+  until_true 600 "tree 2's planner recovery to launch before registering or fail" planner_recovery_progress
+  planner_failed && break
+  planner_now=$(planner2_claim)
+  planner_failures=$(jq -r '.budgets.launchFailures // -1' <<<"$planner_now")
+  [ "$planner_failures" -lt "$launch_failure_limit" ] ||
+    fail "tree 2's planner is launching with launchFailures $planner_failures at limit $launch_failure_limit instead of failed: $planner_now"
+  end_claim_pod "$tree2" planner delete
+  planner_ended+="$ended_pod_uid "
+  planner_deletes=$((planner_deletes + 1))
+  note "killed tree 2's completed planner PID 1 once, then deleted unregistered recovery $planner_deletes (uid $ended_pod_uid, launchFailures $planner_failures)"
+done
 planner_after=$(planner2_claim)
 printf '%s\n' "$planner_after" >"$evidence/finished-idle-planner-after.json"
 worker_died=$(notice_needle worker-died "$tree2")
