@@ -24,9 +24,7 @@ async function openIssue(page: Page, issueKey: string, title: string): Promise<v
 
 test.beforeEach(async () => {
   await resetDatabase();
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([]);
-  }
+  await setLiveSessions([]);
 });
 
 test("the palette lists the issue page's actions, guarded like their buttons, and runs one", async ({

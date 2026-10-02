@@ -29,9 +29,7 @@ const session = {
 };
 test.beforeEach(async () => {
   await resetDatabase();
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([]);
-  }
+  await setLiveSessions([]);
 });
 
 test("ask cards show urgency accents and copy their session ID, title, and tmux target", async ({
@@ -335,18 +333,16 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Newest ask" },
     session
   );
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([{ session_id: "e2e-session", title: "e2e-session-title" }]);
-    await setInterests([
-      {
-        session_id: "e2e-session",
-        topics: [
-          `notifications.dispatch.issue.${firstIssue.key}`,
-          `notifications.dispatch.issue.${firstIssue.key}.>`,
-        ],
-      },
-    ]);
-  }
+  await setLiveSessions([{ session_id: "e2e-session", title: "e2e-session-title" }]);
+  await setInterests([
+    {
+      session_id: "e2e-session",
+      topics: [
+        `notifications.dispatch.issue.${firstIssue.key}`,
+        `notifications.dispatch.issue.${firstIssue.key}.>`,
+      ],
+    },
+  ]);
   await expect
     .poll(async () =>
       (await getIssueEvents(firstIssue.key)).some((event) => event.actor.id === "e2e-session")
@@ -896,7 +892,6 @@ test("the inbox defaults to Mine with an Unassigned band, Assign to me takes a r
 });
 
 test("a mentioned session's callback reply reaches the open ask card", async ({ browser }) => {
-  test.skip(process.env.PLAYWRIGHT_BASE_URL !== undefined, "drives the fake Envoy listener");
   await setLiveSessions([{ capabilities: ["btw", "steer"], session_id: "planner", title: "P" }]);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Callback ask thread" });

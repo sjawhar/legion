@@ -5,6 +5,9 @@ import { dispatchPort, fakeEnvoyPort, fakeGithubPort, harnessPorts } from "./har
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${dispatchPort}`;
 const startsOwnServers = !process.env.PLAYWRIGHT_BASE_URL;
+const startedHarnessPorts = startsOwnServers
+  ? harnessPorts
+  : harnessPorts.filter(({ variable }) => variable === "FAKE_ENVOY_PORT");
 const fakeEnvoy = fileURLToPath(new URL("./fake-envoy.ts", import.meta.url));
 const fakeGithub = fileURLToPath(new URL("./fake-github.ts", import.meta.url));
 const runServer = fileURLToPath(new URL("./run-server.sh", import.meta.url));
@@ -85,14 +88,9 @@ function isListMode(argv: readonly string[]): boolean {
 // `child_process.fork` whose stdio carries an `"ipc"` channel (`lib/runner/index.js:1915-1929`),
 // so `process.send` is a function there and undefined in the CLI that starts the servers;
 // `TEST_WORKER_INDEX` cannot discriminate them, because the loader never sets it.
-if (
-  startsOwnServers &&
-  !reuseServers &&
-  typeof process.send !== "function" &&
-  !isListMode(process.argv)
-) {
-  const used = await Promise.all(harnessPorts.map((entry) => isPortUsed(entry.port)));
-  const taken = harnessPorts.filter((_, index) => used[index]);
+if (!reuseServers && typeof process.send !== "function" && !isListMode(process.argv)) {
+  const used = await Promise.all(startedHarnessPorts.map((entry) => isPortUsed(entry.port)));
+  const taken = startedHarnessPorts.filter((_, index) => used[index]);
   if (taken.length > 0) {
     const ports = taken.map((entry) => `${entry.port} (${entry.variable})`).join(", ");
     throw new Error(
@@ -123,14 +121,14 @@ export default defineConfig({
     headless: true,
     trace: "retain-on-failure",
   },
-  ...(startsOwnServers
-    ? {
-        webServer: [
-          {
-            command: `bun ${fakeEnvoy}`,
-            port: fakeEnvoyPort,
-            reuseExistingServer: reuseServers,
-          },
+  webServer: [
+    {
+      command: `bun ${fakeEnvoy}`,
+      port: fakeEnvoyPort,
+      reuseExistingServer: reuseServers,
+    },
+    ...(startsOwnServers
+      ? [
           {
             command: `bun ${fakeGithub}`,
             port: fakeGithubPort,
@@ -141,9 +139,9 @@ export default defineConfig({
             port: dispatchPort,
             reuseExistingServer: reuseServers,
           },
-        ],
-      }
-    : {}),
+        ]
+      : []),
+  ],
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
     { name: "iphone", use: { ...devices["iPhone 13"], browserName: "chromium" } },

@@ -95,7 +95,8 @@ services:
       DISPATCH_NATS_DISABLED: "1"
       DISPATCH_SERVER_URL: http://127.0.0.1:8767
       DISPATCH_TEST_HOOKS: "1"
-      ENVOY_URL: http://127.0.0.1:1
+      # The acceptance recipe supplies this private harness fake Envoy; no token is set.
+      ENVOY_URL: ${DISPATCH_ACCEPTANCE_ENVOY_URL:?set DISPATCH_ACCEPTANCE_ENVOY_URL to the harness fake Envoy URL; see packages/dispatch/README.md}
 volumes:
   dispatch-data:
   dispatch-acceptance-pg:

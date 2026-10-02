@@ -21,11 +21,7 @@ test.beforeEach(async () => {
 
 test("a block-anchored comment remains with its block through a reword and quote deletion", async ({
   browser,
-}, testInfo) => {
-  test.skip(
-    process.env.PLAYWRIGHT_BASE_URL !== undefined && testInfo.project.name === "iphone",
-    "an unreachable Envoy puts an alert in the issue header, which moves the document on a phone"
-  );
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",

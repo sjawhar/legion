@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 
 import type { CreateBroadcastInput } from "../web/src/api/types";
 import { createAsk, createComment, createIssue, createProject } from "./api";
@@ -16,18 +16,13 @@ export interface FakeSession {
   topics?: string[];
 }
 
-/** A request to the harness's fake Envoy. A deployed server (`PLAYWRIGHT_BASE_URL`) talks to no
- *  fake, so the test that reaches this there is skipped at that point rather than failed: the
- *  state it seeds or reads exists only on the fake. */
+/** A request to the harness's fake Envoy. Playwright starts this listener for local and deployed
+ *  runs, so fixture state reaches whichever Dispatch server the suite targets. */
 async function fixtureRequest(
   path: string,
   method: "GET" | "PATCH" | "PUT",
   body?: object
 ): Promise<Response> {
-  test.skip(
-    Boolean(process.env.PLAYWRIGHT_BASE_URL),
-    "live Envoy fixtures are unavailable with PLAYWRIGHT_BASE_URL"
-  );
   const response = await fetch(`http://127.0.0.1:${fakeEnvoyPort}${path}`, {
     body: body === undefined ? undefined : JSON.stringify(body),
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },

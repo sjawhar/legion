@@ -12,9 +12,7 @@ test.beforeEach(async () => {
   await resetDatabase();
   // The ask card's `Reaches N` counts the fake Envoy's persisted interests, which outlive the
   // database reset and match the recycled issue keys, so each test starts from none.
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setInterests([]);
-  }
+  await setInterests([]);
 });
 
 test("project filters stay collapsed until needed and margin asks use the compact composer", async ({
@@ -93,15 +91,13 @@ test("project filters stay collapsed until needed and margin asks use the compac
       fullPage: true,
     });
     // The Agents page renders its list, empty or not, only once an Envoy listener answers.
-    if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await setLiveSessions([]);
-      await page.goto("/agents");
-      await expect(page.getByRole("region", { name: "Agents empty state" })).toBeVisible();
-      await page.screenshot({
-        path: testInfo.outputPath(`polish-agents-${viewport}.png`),
-        fullPage: true,
-      });
-    }
+    await setLiveSessions([]);
+    await page.goto("/agents");
+    await expect(page.getByRole("region", { name: "Agents empty state" })).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath(`polish-agents-${viewport}.png`),
+      fullPage: true,
+    });
   } finally {
     await context.close();
   }

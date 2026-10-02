@@ -383,10 +383,6 @@ test("live: a forced server disconnect reconnects from the last event id, not fr
 test("live: a fresh page load opens the stream at the current head and stays within a bounded request budget", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    process.env.PLAYWRIGHT_BASE_URL !== undefined,
-    "counts requests exactly, and an unreachable Envoy adds a failed read"
-  );
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Budget target" });
   for (let index = 0; index < 5; index += 1) {

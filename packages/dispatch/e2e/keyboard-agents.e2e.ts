@@ -18,9 +18,7 @@ async function nextTask(page: Page): Promise<void> {
 
 test.beforeEach(async () => {
   await resetDatabase();
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([]);
-  }
+  await setLiveSessions([]);
 });
 test.describe("agents page", () => {
   test("j/k rove the agent rows, Enter opens the composer, i the issue picker, x selects and Shift+P pins", async ({

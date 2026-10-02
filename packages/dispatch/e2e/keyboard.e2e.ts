@@ -28,18 +28,12 @@ async function openInbox(page: Page): Promise<void> {
 
 test.beforeEach(async () => {
   await resetDatabase();
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([]);
-  }
+  await setLiveSessions([]);
 });
 
 test("g then i goes to the Inbox, showing the pending chord until it completes", async ({
   browser,
 }, testInfo) => {
-  test.skip(
-    process.env.PLAYWRIGHT_BASE_URL !== undefined,
-    "starts on the Agents page, which renders only once an Envoy listener answers"
-  );
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();
@@ -65,10 +59,6 @@ test("g then i goes to the Inbox, showing the pending chord until it completes",
 test("an unfinished chord expires after a second and the next key stands alone", async ({
   browser,
 }) => {
-  test.skip(
-    process.env.PLAYWRIGHT_BASE_URL !== undefined,
-    "starts on the Agents page, which renders only once an Envoy listener answers"
-  );
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();

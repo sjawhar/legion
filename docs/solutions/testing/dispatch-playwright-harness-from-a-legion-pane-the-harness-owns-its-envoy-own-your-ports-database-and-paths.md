@@ -68,9 +68,10 @@ generates one for its own process under `DISPATCH_DEV_SIGNIN`. The server runs
 with no caller Home or XDG directory, so
 `~/.config/opencode/envoy.json` and
 `~/.local/share/dispatch/{app.json,signing-key}` cannot participate. The fake
-Envoy is the only Envoy this harness is ever meant to talk to
-(with `PLAYWRIGHT_BASE_URL` exported, which is what `bun run e2e:deployed` expects and does not
-set itself, no server starts and no port is probed).
+Envoy is the only Envoy this harness is ever meant to talk to. With
+`PLAYWRIGHT_BASE_URL` exported, which `bun run e2e:deployed` expects and does not set itself, no
+Dispatch server or fake GitHub starts; Playwright still starts the fake Envoy on `FAKE_ENVOY_PORT`,
+and the acceptance profile receives that URL through `DISPATCH_ACCEPTANCE_ENVOY_URL`.
 
 Proof: with `ENVOY_URL=http://127.0.0.1:1` exported, the pre-fix script
 answers `GET /api/v1/agents` with `dial tcp 127.0.0.1:1: connect: connection
@@ -88,9 +89,10 @@ The server and fake-listener defaults — Go server on `8777`, fake Envoy on
 the box. The database is deliberately not a default: `e2e/seed.ts` truncates it
 before every scenario, so each run must name its own isolated database.
 
-Sharing a port is no longer silent: before any web server starts, the Playwright config probes all
-three and fails the run naming every taken port beside its own variable, so a run can no longer
-truncate the database behind another lane's server. Sharing a database still is silent — nothing
+Sharing a port is no longer silent: before any web server starts, the Playwright config probes
+the ports it starts (all three locally, `FAKE_ENVOY_PORT` for a deployed run) and fails naming
+every taken port beside its own variable, so a local run can no longer truncate the database behind
+another lane's server. Sharing a database still is silent — nothing
 probes it — so name your own. `packages/dispatch/AGENTS.md`'s end-to-end section is where that
 rule is written out: the message, the remedies, what a bad or duplicated port does, and which
 invocations skip the probe.

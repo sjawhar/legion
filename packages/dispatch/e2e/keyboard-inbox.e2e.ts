@@ -43,9 +43,7 @@ async function askIdOf(page: Page, index: number): Promise<string> {
 
 test.beforeEach(async () => {
   await resetDatabase();
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([]);
-  }
+  await setLiveSessions([]);
 });
 
 // Both describes run in `chromium` and `iphone`: marking asks and snoozing them in one step is
