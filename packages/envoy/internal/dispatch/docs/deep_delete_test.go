@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,13 +104,16 @@ func TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel(t *testing.T) {
 }
 
 // deepPeer is a writable document connection that sends the updates its own transactions make and
-// drains everything the room sends, so the room never blocks writing to it.
+// drains everything the room sends, so the room never blocks writing to it. Its reader answers the
+// room's sync step 1 while the test sends updates, and gorilla/websocket panics on two writes at
+// once, so every write goes through writes.
 type deepPeer struct {
 	doc        *crdt.Doc
 	connection *gws.Conn
 	artifactID string
 	origin     *deepPeerOrigin
 	update     []byte
+	writes     sync.Mutex
 }
 
 func newDeepPeer(t *testing.T, serverURL, artifactID string) *deepPeer {
@@ -156,7 +160,7 @@ func (p *deepPeer) drain() {
 			return
 		}
 		if kind == ygsync.MsgSyncStep1 && reply != nil {
-			if err := p.connection.WriteMessage(gws.BinaryMessage, p.frame(reply)); err != nil {
+			if err := p.sendFrame(reply); err != nil {
 				return
 			}
 		}
@@ -178,9 +182,16 @@ func (p *deepPeer) send(t *testing.T, change func(*crdt.Transaction)) []byte {
 
 func (p *deepPeer) write(t *testing.T, syncMessage []byte) {
 	t.Helper()
-	if err := p.connection.WriteMessage(gws.BinaryMessage, p.frame(syncMessage)); err != nil {
+	if err := p.sendFrame(syncMessage); err != nil {
 		t.Fatalf("send peer update: %v", err)
 	}
+}
+
+// sendFrame writes one framed sync message, one writer at a time.
+func (p *deepPeer) sendFrame(syncMessage []byte) error {
+	p.writes.Lock()
+	defer p.writes.Unlock()
+	return p.connection.WriteMessage(gws.BinaryMessage, p.frame(syncMessage))
 }
 
 // frame wraps a sync message as Hocuspocus carries it: the document's name, then the kind.
