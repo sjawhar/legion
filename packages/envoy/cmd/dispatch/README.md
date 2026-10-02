@@ -1,8 +1,9 @@
 # Dispatch HTTP server
 
-Go binary serving the Dispatch dashboard, GitHub OAuth sign-in, and the
-per-user GitHub REST and GraphQL proxy. Dispatch stores user OAuth tokens and
-application state in Postgres.
+Go binary serving the Dispatch dashboard and API. People sign in with Google
+Workspace through the shared sign-in pool and are named by lowercase email; the
+web app's GitHub reads go to GitHub as the GitHub App. Dispatch keeps application
+state in Postgres.
 
 ## Required configuration
 
@@ -13,9 +14,12 @@ application state in Postgres.
 | `NATS_URLS` | Comma-separated NATS URLs. When set, overrides `natsUrls` from merged `envoy.json`. |
 | `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. |
 | `DISPATCH_AGENT_TOKEN` | Shared bearer fallback for devbox agents. Personal tokens minted in Settings are the normal agent credential. |
-| `DISPATCH_ALLOWED_LOGINS` | Comma-separated GitHub login allowlist. Required for cookie identity mode and enforced during OAuth sign-in. |
+| `DISPATCH_SIGNIN_ISSUER` | OpenID Connect issuer of the shared sign-in pool. Cookie identity requires all four `DISPATCH_SIGNIN_*` settings; setting some of them refuses the boot, naming the missing ones. The authorization and token endpoints come from the issuer's discovery document, read at boot. |
+| `DISPATCH_SIGNIN_CLIENT_ID` | The pool's app client for Dispatch, which lists `<DISPATCH_SERVER_URL>/auth/callback` as a callback URL. |
+| `DISPATCH_SIGNIN_CLIENT_SECRET` | That app client's secret. |
+| `DISPATCH_SIGNIN_GROUP` | The pool group (`cognito:groups`) a person must be in to sign in, and to stay signed in: membership is confirmed at least hourly. |
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount `POST /api/v1/events/_test/disconnect`, which closes every open SSE connection, and `POST /api/v1/artifacts/_test/quiesce`, which closes every live document and waits for the settlements in flight. Test/e2e only — leave unset in every real deployment. |
-| `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<login>&next=<path>`, which signs an allowlisted login in with no GitHub step, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`), and the GitHub proxy answers `503 GITHUB_TOKEN_UNAVAILABLE` for every login. The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the login's session generation and deletes its stored GitHub token pair, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
+| `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
 | `ENVOY_URL` | Base URL of the Envoy listener (`GET /v1/sessions`) behind `GET /api/v1/agents`; defaults to `http://127.0.0.1:9020`. Must name a loopback host with `DISPATCH_DEV_SIGNIN=1`. |
 | `DISPATCH_OIDC_ISSUER` | OIDC issuer whose projected service-account tokens authenticate as agents. Set with `DISPATCH_OIDC_AUDIENCE` or not at all. |
 | `DISPATCH_OIDC_AUDIENCE` | Audience those tokens must carry (`dispatch`). Set with `DISPATCH_OIDC_ISSUER` or not at all. |
@@ -31,9 +35,12 @@ created through the default also gets a `repo:owner/name` label.
 `envoy.json`. It must be an absolute `http` or `https` URL with no path.
 `NATS_URLS`, when set, overrides `natsUrls` with its comma-separated values.
 
-`DISPATCH_SERVER_URL` IS the GitHub OAuth callback origin. It must equal the
-URL humans type into their browser, and the GitHub App must list
-`<DISPATCH_SERVER_URL>/auth/callback` as its callback URL.
+`DISPATCH_SERVER_URL` IS the sign-in callback origin. It must equal the URL
+humans type into their browser, and the sign-in pool's app client must list
+`<DISPATCH_SERVER_URL>/auth/callback` as a callback URL.
+
+`DISPATCH_ALLOWED_LOGINS` and `DISPATCH_APP_CLIENT_SECRET` are removed: a boot
+that still sets either is refused, naming what replaced it.
 
 Agents normally authenticate with a personal `dsp_` token minted in Settings,
 sent as `Authorization: Bearer <token>`. `DISPATCH_AGENT_TOKEN` remains the
@@ -56,14 +63,13 @@ GitHub App credentials come either from these environment variables or from
 
 | Variable | Purpose |
 | --- | --- |
-| `DISPATCH_APP_CLIENT_ID` | GitHub App OAuth client ID. |
-| `DISPATCH_APP_CLIENT_SECRET` | GitHub App OAuth client secret. |
+| `DISPATCH_APP_CLIENT_ID` | GitHub App client ID, which the App's JWT names. |
 | `DISPATCH_APP_PEM_B64` | Base64-encoded GitHub App private key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
 | `DISPATCH_GITHUB_API_BASE` | GitHub API origin override for App calls (tests and e2e point it at a fake); empty means `https://api.github.com`. With `DISPATCH_DEV_SIGNIN=1` and an App private key loaded, it must name `127.0.0.1`, `[::1]` or `localhost`. That checks the host, not what listens there: every App call hands a signed App JWT to whatever owns the port, so the key must be a throwaway. |
 | `DISPATCH_SIGNING_KEY` | Stable HMAC key for cookie sessions. Must be unset with `DISPATCH_DEV_SIGNIN=1`. |
 
 When no GitHub App credentials are configured, the server still starts, but
-OAuth and GitHub proxy routes respond with `503`, and saving a project's
+the GitHub proxy answers `503 GITHUB_TOKEN_UNAVAILABLE`, and saving a project's
 architecture source answers `409 SOURCE_ACCESS` naming the missing key.
 
 ## Webhook redelivery
@@ -133,26 +139,35 @@ envoy-dispatch redeliver-webhooks …`.
 
 ## Identity
 
-`DISPATCH_IDENTITY` controls how browser requests identify a human:
+`DISPATCH_IDENTITY` controls how browser requests identify a person, always by
+lowercase email:
 
-- `cookie` (the default) accepts signed `dsession` cookies. GitHub OAuth
-  callbacks reject logins outside `DISPATCH_ALLOWED_LOGINS` before token
-  persistence or cookie issuance.
-- `header:<Header-Name>` trusts a reverse-proxy identity header and checks the
-  allowlist on every request. This mode logs a boot warning. When
-  `DISPATCH_APP_CLIENT_ID` is set, it requires
+- `cookie` (the default) accepts signed `dsession` cookies, which a sign-in
+  through the shared sign-in pool issues (OpenID Connect authorization code).
+  The callback names the person by
+  the email in their pool username (`<provider>_<email>`, for a provider the ID
+  token's `identities` names), never by the `email` claim, which a person can
+  write, and signs in only a member of `DISPATCH_SIGNIN_GROUP`; anyone else gets
+  a 403 page naming them. Dispatch keeps the pool's refresh token and confirms
+  the person's membership with it at least hourly: a refresh the pool refuses,
+  or one whose ID token no longer puts them in the group, ends every session
+  they hold. Logout ends Dispatch's session only, not the pool's.
+- `header:<Header-Name>` trusts a reverse-proxy identity header, accepting any
+  value, lowercased, and records each person it sees. This mode logs a boot
+  warning. When `DISPATCH_SIGNIN_ISSUER` is set, it requires
   `DISPATCH_IDENTITY_HEADER_TRUSTED=1` to prevent a direct client from
   supplying its own header.
+
+The people Dispatch has seen, either way, are the assignee picker's options and
+the only names an issue may be assigned to.
 
 `DISPATCH_INSECURE_COOKIE=1` omits the `Secure` attribute for local plain-HTTP
 testing. Do not use it on an HTTPS deployment.
 
 `DISPATCH_DEV_SIGNIN=1` adds a second way to get the cookie on a local
-instance: `GET /auth/_dev/signin?login=<login>` checks the allowlist as the
-OAuth callback does (lowercase, minting the spelling requested) and issues the
-same session cookie with no GitHub exchange. The GitHub proxy then answers
-`503 GITHUB_TOKEN_UNAVAILABLE` for every login, even one with a stored token
-pair. The route serves only a loopback peer whose request carries no forwarding
+instance: `GET /auth/_dev/signin?login=<email>` records the lowercased person
+and issues the session cookie a pool sign-in does, with no pool exchange and no
+group check. The route serves only a loopback peer whose request carries no forwarding
 header, logs every mint at WARN, and boots only behind the fence the
 configuration table lists. A request that reaches the process looking local
 (`ssh -L`, `socat`, a proxy that rewrites `Host` and adds nothing) is
@@ -200,7 +215,6 @@ cd packages/envoy
 DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable' \
 DISPATCH_AGENT_TOKEN=local-agent-token \
 DISPATCH_IDENTITY='header:X-Dispatch-User' \
-DISPATCH_ALLOWED_LOGINS=sjawhar \
 DISPATCH_INSECURE_COOKIE=1 \
 DISPATCH_DEFAULT_PROJECT=LOCAL \
 DISPATCH_NATS_DISABLED=1 \
@@ -461,18 +475,17 @@ under `/assets` stays `404 {"error":"not found"}`.
 | Path | Method | Identity | Purpose |
 | --- | --- | --- | --- |
 | `/api/v1` | GET | none | List every `/api/v1` route with its auth and purpose. |
-| `/auth/start` | GET | none | Start the GitHub OAuth web flow. |
-| `/auth/callback` | GET | OAuth state | Exchange OAuth code, enforce allowlist, persist tokens, issue cookie. |
-| `/auth/logout` | POST | cookie or trusted header | Remove the caller's stored tokens and clear the session cookie. |
-| `/auth/whoami` | GET | cookie or trusted header | Return the resolved GitHub login. |
-| `/auth/_dev/signin` | GET | none; `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Sign an allowlisted `login` in without GitHub: `302` to the sanitized `next` (default `/`) with the session cookie. `400 DEV_SIGNIN_INPUT` without `login`, `403 LOGIN_NOT_ALLOWED` off the allowlist, `403 DEV_SIGNIN_FORBIDDEN` for a non-loopback peer or a request carrying `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` or `Via`. Each mint logs at WARN with the login and the peer. Not mounted otherwise. |
-| `/api/github/rest/...` | any | cookie or trusted header | Proxy a GitHub REST request using the caller's stored token. |
-| `/api/github/graphql` | POST | cookie or trusted header | Proxy GitHub GraphQL using the caller's stored token. |
+| `/auth/start` | GET | none | Start Google sign-in through the sign-in pool. `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`. |
+| `/auth/callback` | GET | sign-in state | Exchange the pool's code, name the person by the email in their username, refuse anyone outside `DISPATCH_SIGNIN_GROUP` with a 403 page naming them, record the person and the refresh token, issue the cookie. |
+| `/auth/logout` | POST | cookie or trusted header | End the person's Dispatch sessions, forget their refresh token, and clear the session cookie. |
+| `/auth/whoami` | GET | cookie or trusted header | Return the resolved person, `{kind: "user", login}` with `login` their lowercase email. |
+| `/auth/_dev/signin` | GET | none; `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Sign in the person `login` names, lowercased, without the sign-in pool: `302` to the sanitized `next` (default `/`) with the session cookie. `400 DEV_SIGNIN_INPUT` without `login`, `403 DEV_SIGNIN_FORBIDDEN` for a non-loopback peer or a request carrying `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` or `Via`. Each mint logs at WARN with the email and the peer. Not mounted otherwise. |
+| `/api/github/rest/...` | GET | cookie or trusted header | Read GitHub as the GitHub App installation that covers the repository: a pull request (`repos/{o}/{r}/pulls/{n}`), an issue (`repos/{o}/{r}/issues/{n}`) or a commit's check runs (`repos/{o}/{r}/commits/{sha}/check-runs`), the only reads the web app makes. Every person shares the App's credential, which reads far more of a repository than that, so any other method is `405 METHOD_NOT_ALLOWED`, any other path `404 GITHUB_PATH_REFUSED`, and a repository the App is not installed on, or no App key, `503 GITHUB_TOKEN_UNAVAILABLE`. |
 | `/healthz` | GET | none | Report that the process serves, Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — and NATS is connected where configured. A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. The body also names what is deployed: `commit`, the legion commit the image build stamped (the Dockerfile's `LEGION_COMMIT`; `null` in an unstamped build), and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false). |
 | `/api/v1/events` | GET | cookie, trusted header, or bearer | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/artifacts/_test/quiesce` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every live document and wait for the settlements in flight; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/events/_test/disconnect` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every open SSE connection; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
-| `/api/v1/inbox?project=&assignee=` | GET | cookie or trusted header (human only) | List open asks newest-first, including their issue key, title, and assignee. `assignee=me\|unassigned\|<login>` keeps asks on issues held by the caller, by nobody (project-document asks included), or by that login; an unlisted login is `400 ASSIGNEE_NOT_ALLOWED`. |
+| `/api/v1/inbox?project=&assignee=` | GET | cookie or trusted header (human only) | List open asks newest-first, including their issue key, title, and assignee. `assignee=me\|unassigned\|<email>` keeps asks on issues held by the caller, by nobody (project-document asks included), or by that person; an email nobody has signed in with is `400 ASSIGNEE_NOT_ALLOWED`. |
 | `/api/v1/agents` | GET | cookie, trusted header, or bearer | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached. |
 | `/api/v1/projects` | GET | cookie, trusted header, or bearer | List projects (`key`, `name`, `open_asks`, `created_at`), ordered by key. |
 | `/api/v1/projects` | POST | cookie or trusted header | Create a project from `key` and `name`; rejects a duplicate key with `409 PROJECT_EXISTS`. |
@@ -480,8 +493,8 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | cookie or trusted header | Create or replace, or remove, an external repository mapping. |
 | `/api/v1/me/agent-tokens` | GET, POST | cookie or trusted header (human only) | List personal-token metadata or mint a personal agent token. |
 | `/api/v1/me/agent-tokens/{id}` | DELETE | cookie or trusted header (human only) | Revoke a personal agent token. |
-| `/api/v1/users` | GET | cookie or trusted header (human only) | The sign-in allowlist as `{users: [{login}]}`, sorted lowercase — the assignee picker's options. |
-| `/api/v1/whoami` | GET | cookie, trusted header, or bearer | Who the server takes the caller for: `{kind: "user", login}` for a human, `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's lowercase login, null for the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
+| `/api/v1/users` | GET | cookie or trusted header (human only) | Everyone who has signed in, as `{users: [{login}]}` sorted by email — the assignee picker's options. |
+| `/api/v1/whoami` | GET | cookie, trusted header, or bearer | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's owner by lowercase email, null for the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
 | `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=&limit=&offset=` | GET | cookie, trusted header, or bearer | List issue summaries: every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match. A repeated, blank, non-integer or out-of-range `limit` or `offset`, or any `cursor`, is `400 INVALID_QUERY` naming the parameter. The order is status, rank, creation time and key, so consecutive offsets cover the listing once while it does not change between reads; an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, so one issue is served twice and another never. Only the unpaged array is an exact set in one read. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. `route_status` (`live`, `no_holder` or `unknown`; anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority; `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`. Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` from one listener `GET /v1/sessions` per request, stored nowhere: `live` (a live session holds the role, or the session is live; `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route. |
 | `/api/v1/search?q=&project=&limit=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results with `<mark>` snippets and SPA `href`s; `limit` 1–50 (default 20). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`. |
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |
@@ -536,9 +549,6 @@ to print one matching envelope from the `natsUrls` configured in `envoy.json`.
 `ENVOY_NOTIFICATIONS` - and refuses a NATS server that is not this machine's:
 prefix the command with `ENVOY_ALLOW_REMOTE_NATS=1` where `envoy.json` names a
 shared server, as an agent devbox's does.
-
-A caller resolved by header identity without a stored GitHub token receives
-`503` with code `GITHUB_TOKEN_UNAVAILABLE` from GitHub proxy routes.
 
 ## Document edit operations
 

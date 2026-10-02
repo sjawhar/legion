@@ -2,7 +2,7 @@
 //
 // The App itself is created once at github.com/settings/apps/new (see
 // packages/envoy/cmd/dispatch/README.md for the setup checklist). The
-// resulting client_id, client_secret, and private key (PEM)
+// resulting client ID and private key (PEM)
 // are written by hand into ~/.local/share/dispatch/app.json — dispatch only
 // reads this file, never creates or modifies it.
 package auth

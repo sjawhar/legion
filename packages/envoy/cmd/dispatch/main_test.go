@@ -931,7 +931,7 @@ func TestResolveBootConfigDevSignInRefusesAConfiguredSigningKey(t *testing.T) {
 	}
 }
 
-// With the flag a loopback client acts as any allowlisted human, so the process may not publish
+// With the flag a loopback client acts as any person it names, so the process may not publish
 // into another machine's NATS.
 func TestResolveBootConfigDevSignInRefusesRemoteNATS(t *testing.T) {
 	if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1"})); err == nil || !strings.Contains(err.Error(), "ENVOY_ALLOW_REMOTE_NATS") {
@@ -945,7 +945,7 @@ func TestResolveBootConfigDevSignInRefusesRemoteNATS(t *testing.T) {
 	}
 }
 
-// With the flag a loopback client acts as any allowlisted human, so the process may not decide
+// With the flag a loopback client acts as any person it names, so the process may not decide
 // another machine's secrets broker requests as one.
 func TestResolveBootConfigDevSignInRefusesARemoteAgentSecretsBroker(t *testing.T) {
 	broker := func(brokerURL string) map[string]string {
@@ -968,7 +968,7 @@ func TestResolveBootConfigDevSignInRefusesARemoteAgentSecretsBroker(t *testing.T
 	}
 }
 
-// With the flag a loopback client acts as any allowlisted human, so the process may not deliver
+// With the flag a loopback client acts as any person it names, so the process may not deliver
 // that human's mentions through another machine's Envoy listener.
 func TestResolveBootConfigDevSignInRefusesARemoteEnvoyListener(t *testing.T) {
 	for _, listenerURL := range []string{"https://listener.example.com", "http://10.0.0.5:9020"} {
@@ -990,7 +990,7 @@ func TestResolveBootConfigDevSignInRefusesARemoteEnvoyListener(t *testing.T) {
 // devSignInOrigin is a dashboard origin the dev sign-in fence accepts.
 const devSignInOrigin = "http://127.0.0.1:8799"
 
-// With the flag a loopback client acts as any allowlisted human, and a human can have the App probe
+// With the flag a loopback client acts as any person it names, and a person can have the App probe
 // and import any repository it is installed on, so an App private key from the environment may
 // sign calls only to a loopback host.
 func TestDevSignInRefusesAnAppKeyThatReachesGitHub(t *testing.T) {

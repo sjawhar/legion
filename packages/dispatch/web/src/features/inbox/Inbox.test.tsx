@@ -18,7 +18,7 @@ let getArtifactSubscribers: Mock<typeof api.getArtifactSubscribers>;
 let getReferences: Mock<typeof api.getReferences>;
 beforeEach(() => {
   window.localStorage.clear();
-  whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "Alice" });
+  whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
   getIssueSubscribers = spyOn(api, "getIssueSubscribers").mockResolvedValue([]);
   getArtifactSubscribers = spyOn(api, "getArtifactSubscribers").mockResolvedValue([]);
   getReferences = spyOn(api, "getReferences").mockResolvedValue({
@@ -1190,7 +1190,7 @@ test("Everyone shows every open ask and is remembered for the login; ?view= wins
       "true"
     );
     expect(headings()).toEqual(["Waiting on you"]);
-    expect(window.localStorage.getItem(userPreferenceStorageKey("Alice", "inbox.view"))).toBe(
+    expect(window.localStorage.getItem(userPreferenceStorageKey("alice", "inbox.view"))).toBe(
       "everyone"
     );
   } finally {

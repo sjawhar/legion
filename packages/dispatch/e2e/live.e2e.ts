@@ -421,7 +421,7 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   // project has a source; the component tree itself is fetched only once the picker
   // opens, never on load), and me/agents/state, whose unread replies the Agents badge
   // counts on every page (the sidebar's on desktop, the compact header's on phone).
-  // The header's assignee picker reads the sign-in allowlist only once the reader
+  // The header's assignee picker reads who has signed in only once the reader
   // reaches for it, so it is not in this count. The phone project (iphone) does not
   // fetch the sidebar while its drawer is closed, so it uses 13. Asserted exactly (not
   // a ceiling) so a panel that starts eagerly fetching before its tab is ever opened

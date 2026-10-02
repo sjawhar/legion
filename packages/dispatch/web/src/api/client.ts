@@ -320,7 +320,7 @@ export class DispatchApiClient {
     );
   }
 
-  /** The sign-in allowlist, sorted: the assignee picker's options. */
+  /** Everyone who has signed in, sorted by email: the assignee picker's options. */
   async listUsers(): Promise<DispatchUser[]> {
     return (await this.json<ListUsersResponse>("/api/v1/users")).users;
   }

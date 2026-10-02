@@ -26,7 +26,7 @@ test("an authenticated user sees their empty inbox", async ({ browser }, testInf
   await context.close();
 });
 
-test("an anonymous user is sent to GitHub sign-in", async ({ browser }) => {
+test("an anonymous user is sent to Google sign-in", async ({ browser }) => {
   const context = await browser.newContext();
   const page = await context.newPage();
 

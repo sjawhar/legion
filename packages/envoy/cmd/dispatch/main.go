@@ -127,7 +127,7 @@ func main() {
 		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource.String())
 	}
 	if boot.DevSignIn {
-		slog.Warn("dispatch: dev sign-in mounted: any allowlisted login signs in at /auth/_dev/signin without GitHub; cookies are valid on this process only", "origin", serverURL)
+		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in pool; cookies are valid on this process only", "origin", serverURL)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -559,7 +559,7 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 }
 
 // devSignInFence is the dev sign-in fence over the environment; devSignInLoadedFence covers what
-// main loads after it. With the flag any loopback client signs in as any allowlisted login, so the
+// main loads after it. With the flag any loopback client signs in as any person it names, so the
 // process must listen, keep its data and reach the services that act on a human's word (NATS, the
 // secrets broker, the Envoy listener that delivers mentions and messages, GitHub as the App) on
 // this machine alone, and sign its cookies with a key no other process holds.
@@ -595,7 +595,7 @@ func devSignInFence(boot bootConfig, getenv func(string) string) error {
 
 // devSignInLoadedFence is the dev sign-in fence over what main loads after the environment: the
 // dashboard origin from envoy.json, and the GitHub App from the environment or the data dir's
-// app.json. With the flag a loopback client acts as an allowlisted human, and a human can make the
+// app.json. With the flag a loopback client acts as any person it names, and a person can make the
 // App act: saving an architecture source has the App probe and import the repository the caller
 // names. The private key is the credential that acts (githubapp.New builds no client without it,
 // the App JWT names the client ID, and nothing sends the numeric App ID), so:

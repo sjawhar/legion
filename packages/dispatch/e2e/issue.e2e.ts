@@ -938,11 +938,11 @@ test("issue header reassigns through the Assignee picker; a personal token's iss
     await page.goto(`/issues/${issue.key}`);
     const control = page.getByLabel(`Assignee of ${issue.key}`);
     await expect(control).toHaveValue("bob");
-    // The allowlist is read only once the reader reaches for the control.
+    // Who has signed in is read only once the reader reaches for the control.
     await control.focus();
     await expect(control.locator("option")).toHaveText(["Unassigned", "alice", "bob"]);
 
-    // Anyone on the allowlist may reassign: Alice takes it, and the header shows her at once.
+    // Anyone signed in may reassign: Alice takes it, and the header shows her at once.
     const patch = page.waitForRequest(
       (request) =>
         request.method() === "PATCH" &&
