@@ -24,6 +24,24 @@ func ensure(t *testing.T, store *Store, issue, sandbox string) {
 	if err := store.EnsureIssueResources(context.Background(), "legion", issue, rootIssue, sandbox); err != nil {
 		t.Fatalf("admit %s: %v", issue, err)
 	}
+	if issue == rootIssue {
+		seedLingeringRoot(t, store, 1)
+	}
+}
+
+// seedLingeringRoot is the tree-close state an old cleanup must bind to. A re-admission updates
+// this row and commits its architect start in the same transaction before the outbox has created a
+// claim, precisely the interval BeginIssueCleanup must fence.
+func seedLingeringRoot(t *testing.T, store *Store, generation int) {
+	t.Helper()
+	_, err := store.Pool().Exec(context.Background(), `insert into issues
+		(key, tree, project, title, phase, generation, status, rank, linger_until, last_dispatch_seq)
+		values ($1, $1, 'legion', 'root', 'done', $2, 'done', 'A', now() + interval '1 hour', 1)
+		on conflict (key) do update set generation = excluded.generation, status = excluded.status,
+			phase = excluded.phase, linger_until = excluded.linger_until`, rootIssue, generation)
+	if err != nil {
+		t.Fatalf("seed lingering root: %v", err)
+	}
 }
 
 func resourcesOf(t *testing.T, store *Store, issue string) IssueResources {
@@ -44,11 +62,11 @@ func TestIssueResourcesReadmitOnlyAfterAConfirmedCleanup(t *testing.T) {
 	if got := resourcesOf(t, store, rootIssue); got.Generation != 1 || got.CleanupStarted {
 		t.Fatalf("first admission = %+v", got)
 	}
-	begun, began, err := store.BeginIssueCleanup(ctx, "legion", rootIssue)
+	begun, began, err := store.BeginIssueCleanup(ctx, "legion", rootIssue, rootIssue, 1)
 	if err != nil || !began || begun.CleanupGeneration != 1 {
 		t.Fatalf("first cleanup = %+v, began %t, err %v", begun, began, err)
 	}
-	if retry, began, err := store.BeginIssueCleanup(ctx, "legion", rootIssue); err != nil || !began || retry.CleanupGeneration != 1 {
+	if retry, began, err := store.BeginIssueCleanup(ctx, "legion", rootIssue, rootIssue, 1); err != nil || !began || retry.CleanupGeneration != 1 {
 		t.Fatalf("cleanup retry = %+v, began %t, err %v", retry, began, err)
 	}
 	if err := store.EnsureIssueResources(ctx, "legion", rootIssue, rootIssue, rootSandbox); !errors.Is(err, ErrIssueCleanupInProgress) {
@@ -57,7 +75,7 @@ func TestIssueResourcesReadmitOnlyAfterAConfirmedCleanup(t *testing.T) {
 	if err := store.ConfirmIssueCleanup(ctx, "legion", rootIssue, 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, began, err := store.BeginIssueCleanup(ctx, "legion", rootIssue); err != nil || began {
+	if _, began, err := store.BeginIssueCleanup(ctx, "legion", rootIssue, rootIssue, 1); err != nil || began {
 		t.Fatalf("cleanup after confirmation: began %t, err %v", began, err)
 	}
 	ensure(t, store, rootIssue, rootSandbox)
@@ -66,6 +84,55 @@ func TestIssueResourcesReadmitOnlyAfterAConfirmedCleanup(t *testing.T) {
 	}
 	if err := store.ConfirmIssueCleanup(ctx, "legion", rootIssue, 1); err == nil {
 		t.Fatal("a stale epoch's confirmation was accepted for the re-admitted issue")
+	}
+}
+
+// A re-admission commits a new root generation and its architect start before that start has
+// created a claim. The old tree-close cleanup must wait for that transaction, then finish without
+// taking the resources; censusing only claims lets it delete the re-admitted tree in this window.
+func TestCommittedReadmissionStartFencesAnOldCleanup(t *testing.T) {
+	store := migratedStore(t)
+	ctx := context.Background()
+	ensure(t, store, rootIssue, rootSandbox)
+
+	reopening, err := store.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reopening.Rollback(ctx) }()
+	if _, err := reopening.Exec(ctx, `update issues set generation = 2, phase = 'admitted', status = 'todo',
+		linger_until = null where key = $1`, rootIssue); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopening.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error)
+		values ('supervise', $1, '{"op":"start","tree":"LEGION-208","role":"architect","generation":2}', 0, now(), '')`, rootIssue); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		resources IssueResources
+		began     bool
+		err       error
+	}
+	cleaning := make(chan result, 1)
+	go func() {
+		resources, began, err := store.BeginIssueCleanup(ctx, "legion", rootIssue, rootIssue, 1)
+		cleaning <- result{resources, began, err}
+	}()
+	select {
+	case got := <-cleaning:
+		t.Fatalf("old cleanup did not wait for committed re-admission: %+v", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := reopening.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := <-cleaning
+	if got.err != nil || got.began {
+		t.Fatalf("old cleanup after re-admission = %+v, want no cleanup", got)
+	}
+	if resources := resourcesOf(t, store, rootIssue); resources.CleanupStarted {
+		t.Fatalf("old cleanup took re-admitted root resources: %+v", resources)
 	}
 }
 
@@ -81,7 +148,7 @@ func TestCleanupBeginsNothingWhileAClaimOfTheIssueIsLive(t *testing.T) {
 	if err := store.PutClaim(ctx, live); err != nil {
 		t.Fatal(err)
 	}
-	if _, began, err := store.BeginIssueCleanup(ctx, "legion", childIssue); err != nil || began {
+	if _, began, err := store.BeginIssueCleanup(ctx, "legion", childIssue, rootIssue, 1); err != nil || began {
 		t.Fatalf("cleanup with a launching claim: began %t, err %v", began, err)
 	}
 	if got := resourcesOf(t, store, childIssue); got.CleanupStarted {
@@ -91,7 +158,7 @@ func TestCleanupBeginsNothingWhileAClaimOfTheIssueIsLive(t *testing.T) {
 	if err := store.PutClaim(ctx, live); err != nil {
 		t.Fatal(err)
 	}
-	if _, began, err := store.BeginIssueCleanup(ctx, "legion", childIssue); err != nil || !began {
+	if _, began, err := store.BeginIssueCleanup(ctx, "legion", childIssue, rootIssue, 1); err != nil || !began {
 		t.Fatalf("cleanup once the claim retired: began %t, err %v", began, err)
 	}
 }
@@ -107,23 +174,23 @@ func TestATreeRootIsCleanedLastAndFencesNewChildren(t *testing.T) {
 	}
 	ensure(t, store, rootIssue, rootSandbox)
 	ensure(t, store, childIssue, childSandbox)
-	if _, began, err := store.BeginIssueCleanup(ctx, "legion", rootIssue); !errors.Is(err, ErrTreeChildrenPending) || began {
+	if _, began, err := store.BeginIssueCleanup(ctx, "legion", rootIssue, rootIssue, 1); !errors.Is(err, ErrTreeChildrenPending) || began {
 		t.Fatalf("root cleanup with an unconfirmed child: began %t, err %v; want ErrTreeChildrenPending", began, err)
 	}
 	if got := resourcesOf(t, store, rootIssue); got.CleanupStarted {
 		t.Fatalf("a refused root cleanup took the record: %+v", got)
 	}
-	child, began, err := store.BeginIssueCleanup(ctx, "legion", childIssue)
+	child, began, err := store.BeginIssueCleanup(ctx, "legion", childIssue, rootIssue, 1)
 	if err != nil || !began {
 		t.Fatalf("child cleanup: began %t, err %v", began, err)
 	}
-	if _, _, err := store.BeginIssueCleanup(ctx, "legion", rootIssue); !errors.Is(err, ErrTreeChildrenPending) {
+	if _, _, err := store.BeginIssueCleanup(ctx, "legion", rootIssue, rootIssue, 1); !errors.Is(err, ErrTreeChildrenPending) {
 		t.Fatalf("root cleanup while the child's cleanup is unconfirmed = %v, want ErrTreeChildrenPending", err)
 	}
 	if err := store.ConfirmIssueCleanup(ctx, "legion", childIssue, child.CleanupGeneration); err != nil {
 		t.Fatal(err)
 	}
-	if _, began, err := store.BeginIssueCleanup(ctx, "legion", rootIssue); err != nil || !began {
+	if _, began, err := store.BeginIssueCleanup(ctx, "legion", rootIssue, rootIssue, 1); err != nil || !began {
 		t.Fatalf("root cleanup after every child confirmed: began %t, err %v", began, err)
 	}
 	for _, admit := range []struct{ issue, sandbox string }{{"LEGION-210", "legion-legion-legion-210"}, {childIssue, childSandbox}} {

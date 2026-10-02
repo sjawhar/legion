@@ -85,12 +85,12 @@ type Runtime interface {
 }
 
 // IssueResourceCleaner is an optional whole-issue capability. Per-role Release and Suspend never
-// delete a shared issue pod; once an issue's close has retired every claim of it, the outbox
-// invokes this cleanup, which the runtime fences against a re-admission of the issue and, for a
-// tree root, against every child of the tree. A runtime without shared issue resources simply does
-// not implement it.
+// delete a shared issue pod; after an issue's close retired every claim of it, the outbox invokes
+// this cleanup with the root linger generation that authorises the close. The runtime fences it
+// atomically against a re-admission of that root and, for a tree root, against every child of the
+// tree. A runtime without shared issue resources simply does not implement it.
 type IssueResourceCleaner interface {
-	CleanupIssue(ctx context.Context, project, issue string) error
+	CleanupIssue(ctx context.Context, project, issue, tree string, treeGeneration uint64) error
 }
 
 // Known is one claim as a runtime is told of it — each entry of the orphan sweep's known set, and

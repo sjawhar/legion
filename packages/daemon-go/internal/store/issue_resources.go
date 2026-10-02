@@ -99,23 +99,46 @@ func (s *Store) EnsureIssueResources(ctx context.Context, project, issue, tree, 
 	return nil
 }
 
-// BeginIssueCleanup takes the issue's resources into cleanup once, atomically with the census that
-// justifies it: no claim of the issue is anything but retired, and, for a tree root, every child
-// record of the tree is cleanup-confirmed (ErrTreeChildrenPending otherwise, which takes nothing).
-// A launch that recorded the issue first shows as its non-retired claim, persisted before the
-// launch; one after is refused by the cleanup this begins. A cleanup begun and not confirmed
-// resumes, so a retried close finishes it; an issue with no record, a confirmed cleanup, or a live
-// claim begins nothing.
-func (s *Store) BeginIssueCleanup(ctx context.Context, project, issue string) (IssueResources, bool, error) {
+// BeginIssueCleanup takes the issue's resources into cleanup once, atomically with the close fact
+// that authorises it: the tree root is locked and must still linger at treeGeneration, no claim of
+// the issue is anything but retired, and, for a tree root, every child record of the tree is
+// cleanup-confirmed (ErrTreeChildrenPending otherwise, which takes nothing). A re-admission updates
+// that root and enqueues its start in one transaction before the start creates a claim; locking and
+// testing the root here therefore makes the old close wait for that committed transaction, then
+// finish without deleting its new run's resources. A cleanup begun and not confirmed resumes, so a
+// retried close finishes it; an issue with no record, a confirmed cleanup, or a live claim begins
+// nothing.
+func (s *Store) BeginIssueCleanup(ctx context.Context, project, issue, tree string, treeGeneration uint64) (IssueResources, bool, error) {
+	if tree == "" || treeGeneration == 0 || treeGeneration > math.MaxInt64 {
+		return IssueResources{}, false, fmt.Errorf("begin issue cleanup %s: invalid tree close %s generation %d", issue, tree, treeGeneration)
+	}
 	var resources IssueResources
 	began := false
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		var currentGeneration int64
+		var lingering bool
+		err := tx.QueryRow(ctx, `select generation, linger_until is not null from issues
+			where key = $1 and project = $2 for update`, tree, project).Scan(&currentGeneration, &lingering)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("tree root %s has no workflow record", tree)
+		}
+		if err != nil {
+			return fmt.Errorf("read tree root %s: %w", tree, err)
+		}
+		// A root that re-admitted first has a different generation and no linger. It already
+		// committed the new generation's pending starts, which appear in claims only later.
+		if uint64(currentGeneration) != treeGeneration || !lingering {
+			return nil
+		}
 		own, err := scanIssueResources(tx.QueryRow(ctx, selectIssueResources+` where project = $1 and issue = $2 for update`, project, issue))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
 		if err != nil {
 			return err
+		}
+		if own.Tree != tree {
+			return fmt.Errorf("recorded under tree %s, not closing tree %s", own.Tree, tree)
 		}
 		if own.CleanupStarted {
 			if own.CleanupConfirmedAt.IsZero() {

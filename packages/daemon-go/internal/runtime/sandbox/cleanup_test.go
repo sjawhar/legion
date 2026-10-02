@@ -70,27 +70,40 @@ func resourceStore(t *testing.T) *store.Store {
 // store: the root's Sandbox and tree PVC exist; the child's Sandbox exists when childLive.
 type cleanupRig struct {
 	*rig
-	st                 *store.Store
-	root, child, tree  string
-	rootPVC            string
-	pvcDeletesObserved []store.IssueResources
+	st                         *store.Store
+	root, child, tree          string
+	rootPVC                    string
+	pvcDeletesObserved         []store.IssueResources
+	sandboxDeletes, pvcDeletes map[string]metav1.DeleteOptions
 }
 
 func newCleanupRig(t *testing.T, childLive bool) *cleanupRig {
 	t.Helper()
 	st := resourceStore(t)
-	c := &cleanupRig{st: st, root: SandboxName(rootToken), child: SandboxName(childToken), tree: testTree, rootPVC: TreeClaimName(rootToken)}
+	c := &cleanupRig{
+		st: st, root: SandboxName(rootToken), child: SandboxName(childToken), tree: testTree, rootPVC: TreeClaimName(rootToken),
+		sandboxDeletes: map[string]metav1.DeleteOptions{}, pvcDeletes: map[string]metav1.DeleteOptions{},
+	}
+	rootSandbox := sandboxObject(t, c.root, "uid-sandbox-root", modeRunning, claimLabels(rootSpec(t).Role))
+	rootSandbox.SetResourceVersion("sandbox-rv-root")
 	objects := []k8sruntime.Object{
-		sandboxObject(t, c.root, "uid-sandbox-root", modeRunning, claimLabels(rootSpec(t).Role)),
-		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: c.rootPVC, Namespace: testNamespace}},
+		rootSandbox,
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: c.rootPVC, Namespace: testNamespace, UID: "uid-pvc-root", ResourceVersion: "pvc-rv-root"}},
 	}
 	if childLive {
-		objects = append(objects, sandboxObject(t, c.child, "uid-sandbox-child", modeRunning,
-			map[string]string{labelProject: testProject, labelTree: testTree, labelIssue: childIssue}))
+		childSandbox := sandboxObject(t, c.child, "uid-sandbox-child", modeRunning,
+			map[string]string{labelProject: testProject, labelTree: testTree, labelIssue: childIssue})
+		childSandbox.SetResourceVersion("sandbox-rv-child")
+		objects = append(objects, childSandbox)
 	}
 	c.rig = newRig(t, objects, withoutController())
 	c.r.SetIssueResourceStore(st)
 	ctx := context.Background()
+	if _, err := st.Pool().Exec(ctx, `insert into issues
+		(key, tree, project, title, phase, generation, status, rank, linger_until, last_dispatch_seq)
+		values ($1, $1, $2, 'root', 'done', 1, 'done', 'A', now() + interval '1 hour', 1)`, testTree, testProject); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.EnsureIssueResources(ctx, testProject, testTree, testTree, c.root); err != nil {
 		t.Fatal(err)
 	}
@@ -103,6 +116,16 @@ func newCleanupRig(t *testing.T, childLive bool) *cleanupRig {
 		c.pvcDeletesObserved = append(c.pvcDeletesObserved, root)
 		return false, nil, nil
 	})
+	c.dyn.PrependReactor("delete", "sandboxes", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		delete := action.(k8stesting.DeleteAction)
+		c.sandboxDeletes[delete.GetName()] = delete.GetDeleteOptions()
+		return false, nil, nil
+	})
+	c.kube.PrependReactor("delete", "persistentvolumeclaims", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		delete := action.(k8stesting.DeleteAction)
+		c.pvcDeletes[delete.GetName()] = delete.GetDeleteOptions()
+		return false, nil, nil
+	})
 	c.clearActions()
 	return c
 }
@@ -111,7 +134,7 @@ func newCleanupRig(t *testing.T, childLive bool) *cleanupRig {
 func (c *cleanupRig) confirmChildRecord(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	child, began, err := c.st.BeginIssueCleanup(ctx, testProject, childIssue)
+	child, began, err := c.st.BeginIssueCleanup(ctx, testProject, childIssue, testTree, 1)
 	if err != nil || !began {
 		t.Fatalf("begin the child's cleanup: began %t, err %v", began, err)
 	}
@@ -159,7 +182,7 @@ func (c *cleanupRig) rootIntact(t *testing.T) {
 // and the root's record is not taken, so a re-admitted root still launches.
 func TestARootCleanupDeletesNothingWhileAChildRecordIsUnconfirmed(t *testing.T) {
 	c := newCleanupRig(t, false)
-	err := c.r.CleanupIssue(c.ctx, testProject, testTree)
+	err := c.r.CleanupIssue(c.ctx, testProject, testTree, testTree, 1)
 	if !errors.Is(err, store.ErrTreeChildrenPending) {
 		t.Fatalf("root cleanup = %v, want ErrTreeChildrenPending", err)
 	}
@@ -174,7 +197,7 @@ func TestARootCleanupDeletesNothingWhileAChildRecordIsUnconfirmed(t *testing.T) 
 func TestARootCleanupDeletesNothingWhileTheAPIListsAChildSandbox(t *testing.T) {
 	c := newCleanupRig(t, true)
 	c.confirmChildRecord(t)
-	err := c.r.CleanupIssue(c.ctx, testProject, testTree)
+	err := c.r.CleanupIssue(c.ctx, testProject, testTree, testTree, 1)
 	if err == nil || !strings.Contains(err.Error(), c.child) {
 		t.Fatalf("root cleanup = %v, want a refusal naming the child Sandbox %s", err, c.child)
 	}
@@ -189,10 +212,10 @@ func TestARootCleanupDeletesNothingWhileTheAPIListsAChildSandbox(t *testing.T) {
 // cleanup is confirmed; confirmation follows both.
 func TestARootIsCleanedAfterItsChildrenSandboxThenPVC(t *testing.T) {
 	c := newCleanupRig(t, true)
-	if err := c.r.CleanupIssue(c.ctx, testProject, childIssue); err != nil {
+	if err := c.r.CleanupIssue(c.ctx, testProject, childIssue, testTree, 1); err != nil {
 		t.Fatalf("child cleanup: %v", err)
 	}
-	if err := c.r.CleanupIssue(c.ctx, testProject, testTree); err != nil {
+	if err := c.r.CleanupIssue(c.ctx, testProject, testTree, testTree, 1); err != nil {
 		t.Fatalf("root cleanup: %v", err)
 	}
 	want := []string{"sandboxes " + c.child, "sandboxes " + c.root, "persistentvolumeclaims " + c.rootPVC}
@@ -207,5 +230,33 @@ func TestARootIsCleanedAfterItsChildrenSandboxThenPVC(t *testing.T) {
 	}
 	if root := c.rootRecord(t); root.CleanupConfirmedAt.IsZero() {
 		t.Fatalf("root record after cleanup = %+v, want confirmed", root)
+	}
+}
+
+// Deletion can race an operator replacement of a same-named object. Every deletion carries both
+// object identity fields Kubernetes checks: a stale cleaner then gets a conflict instead of
+// deleting a replacement Sandbox or root PVC.
+func TestCleanupDeletesCarryUIDAndResourceVersionPreconditions(t *testing.T) {
+	c := newCleanupRig(t, true)
+	if err := c.r.CleanupIssue(c.ctx, testProject, childIssue, testTree, 1); err != nil {
+		t.Fatalf("child cleanup: %v", err)
+	}
+	if err := c.r.CleanupIssue(c.ctx, testProject, testTree, testTree, 1); err != nil {
+		t.Fatalf("root cleanup: %v", err)
+	}
+	for name, want := range map[string]struct{ uid, version string }{
+		c.child: {"uid-sandbox-child", "sandbox-rv-child"},
+		c.root:  {"uid-sandbox-root", "sandbox-rv-root"},
+	} {
+		got, found := c.sandboxDeletes[name]
+		if !found || got.Preconditions == nil || got.Preconditions.UID == nil || got.Preconditions.ResourceVersion == nil ||
+			string(*got.Preconditions.UID) != want.uid || *got.Preconditions.ResourceVersion != want.version {
+			t.Fatalf("Sandbox %s delete options = %+v, want UID %s and resourceVersion %s", name, got, want.uid, want.version)
+		}
+	}
+	got, found := c.pvcDeletes[c.rootPVC]
+	if !found || got.Preconditions == nil || got.Preconditions.UID == nil || got.Preconditions.ResourceVersion == nil ||
+		string(*got.Preconditions.UID) != "uid-pvc-root" || *got.Preconditions.ResourceVersion != "pvc-rv-root" {
+		t.Fatalf("PVC %s delete options = %+v, want UID uid-pvc-root and resourceVersion pvc-rv-root", c.rootPVC, got)
 	}
 }
