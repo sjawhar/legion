@@ -18,7 +18,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Ctx } from "@milkdown/kit/ctx";
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
-import { EditorState, Plugin, type Transaction } from "@milkdown/kit/prose/state";
+import { EditorState, Plugin } from "@milkdown/kit/prose/state";
 import { EditorView } from "@milkdown/kit/prose/view";
 import {
   applyRemoteMarks,
@@ -32,6 +32,7 @@ import type { StoredMark } from "proof-sdk-upstream/src/formats/marks";
 import { createHeadlessProof } from "../src/lib-headless.js";
 import { withDomWindow } from "./dom-window";
 import { markedText } from "./mark-text";
+import { viewDouble } from "./view-double";
 
 const upstreamSrc = join(import.meta.dir, "..", "node_modules", "proof-sdk-upstream", "src");
 
@@ -137,9 +138,8 @@ test("the pinned dependency redraws a replacement revised on a viewer's page", a
   });
 });
 
-/** A state holding the marks plugin's metadata and the two members its actions read: the state,
- *  and dispatch applying to it. */
-function headlessMarksView(doc: ProseMirrorNode, metadata: Record<string, StoredMark>) {
+/** A view double whose state holds the marks plugin's metadata, which its actions read. */
+function headlessMarksView(doc: ProseMirrorNode, metadata: Record<string, StoredMark>): EditorView {
   const plugin = new Plugin({
     key: marksPluginKey,
     state: {
@@ -150,13 +150,7 @@ function headlessMarksView(doc: ProseMirrorNode, metadata: Record<string, Stored
       },
     },
   });
-  const double = {
-    state: EditorState.create({ doc, plugins: [plugin] }),
-    dispatch(tr: Transaction) {
-      double.state = double.state.apply(tr);
-    },
-  };
-  return double;
+  return viewDouble(EditorState.create({ doc, plugins: [plugin] })).view;
 }
 
 test("the pinned dependency acts on a split insert's own runs", async () => {
@@ -182,7 +176,7 @@ test("the pinned dependency acts on a split insert's own runs", async () => {
     a: stored("human:alice", "quick brown"),
     b: stored("human:bob", "lazy "),
   });
-  expect(reject(view as unknown as EditorView, "a")).toBe(true);
+  expect(reject(view, "a")).toBe(true);
   expect(view.state.doc.textContent).toBe("The lazy  fox");
   expect(markedText(view.state.doc, "b")).toBe("lazy ");
 });
@@ -214,9 +208,8 @@ test("the pinned dependency lets two people's comments and suggestions cover the
     schema.node("paragraph", null, [schema.text("The quick brown fox")]),
   ]);
   const view = headlessMarksView(doc, {});
-  const editorView = view as unknown as EditorView;
-  const bob = comment(editorView, "quick brown", "human:bob", "Bob", { from: 5, to: 16 });
-  const alice = comment(editorView, "brown", "human:alice", "Alice", { from: 11, to: 16 });
+  const bob = comment(view, "quick brown", "human:bob", "Bob", { from: 5, to: 16 });
+  const alice = comment(view, "brown", "human:alice", "Alice", { from: 11, to: 16 });
   expect(markedText(view.state.doc, bob.id)).toBe("quick brown");
   expect(markedText(view.state.doc, alice.id)).toBe("brown");
 
@@ -225,7 +218,7 @@ test("the pinned dependency lets two people's comments and suggestions cover the
   expect(markedText(reparsed, bob.id)).toBe("quick brown");
   expect(markedText(reparsed, alice.id)).toBe("brown");
 
-  expect(deleteMark(editorView, alice.id)).toBe(true);
+  expect(deleteMark(view, alice.id)).toBe(true);
   expect(markedText(view.state.doc, alice.id)).toBe("");
   expect(markedText(view.state.doc, bob.id)).toBe("quick brown");
 });

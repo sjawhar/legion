@@ -10,6 +10,7 @@ import {
   placeCaret,
   selectEditorText,
 } from "./editor";
+import { markTexts } from "./margin-helpers";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -261,19 +262,6 @@ test("Suggest on a mid-word selection is refused, and the comment stays", async 
   });
 });
 
-/** Each comment mark's text in `page`'s editor, keyed by mark id: a mark nested in another may
- *  render as more than one span, and an outer span's text includes the spans inside it. */
-function commentTexts(page: Page): Promise<Record<string, string>> {
-  return commentMarks(page).evaluateAll((spans) => {
-    const texts: Record<string, string> = {};
-    for (const span of spans) {
-      const id = span.getAttribute("data-id") ?? "";
-      texts[id] = (texts[id] ?? "") + (span.textContent ?? "");
-    }
-    return texts;
-  });
-}
-
 test("Comment over text another reader's comment covers goes through, and that comment stays whole", async ({
   browser,
 }) => {
@@ -303,7 +291,7 @@ test("Comment over text another reader's comment covers goes through, and that c
       let aliceCommentTexts: Record<string, string> = {};
       await expect
         .poll(async () => {
-          aliceCommentTexts = await commentTexts(alicePage);
+          aliceCommentTexts = await markTexts(commentMarks(alicePage));
           return Object.keys(aliceCommentTexts).length;
         })
         .toBe(2);
@@ -314,7 +302,7 @@ test("Comment over text another reader's comment covers goes through, and that c
       await Promise.all(
         [alicePage, bobPage].map((page) =>
           expect
-            .poll(() => commentTexts(page))
+            .poll(() => markTexts(commentMarks(page)))
             .toEqual({ [bobMark]: "quick brown", [aliceMark]: "brown" })
         )
       );
@@ -341,7 +329,7 @@ test("Comment over text another reader's comment covers goes through, and that c
       await Promise.all(
         [alicePage, bobPage].map((page) =>
           expect
-            .poll(() => commentTexts(page))
+            .poll(() => markTexts(commentMarks(page)))
             .toEqual({ [bobMark]: "quick brown", [aliceMark]: "brown" })
         )
       );

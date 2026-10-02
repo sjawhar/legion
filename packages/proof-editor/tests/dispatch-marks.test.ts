@@ -6,36 +6,18 @@
  */
 
 import { expect, test } from "bun:test";
-import { EditorState, type Transaction } from "@milkdown/kit/prose/state";
-import type { EditorView } from "@milkdown/kit/prose/view";
+import { EditorState } from "@milkdown/kit/prose/state";
 import { createAskMark, findAskMarkRange, removeAskMark } from "../src/dispatch-marks.js";
 import { createHeadlessProof } from "../src/lib-headless.js";
 import { markedText } from "./mark-text";
-
-interface ViewDouble {
-  view: EditorView;
-  transactions: Transaction[];
-}
-
-/** The two members createAskMark and removeAskMark read: the state, and dispatch applying to it. */
-function viewOver(state: EditorState): ViewDouble {
-  const transactions: Transaction[] = [];
-  const double = {
-    state,
-    dispatch(tr: Transaction) {
-      transactions.push(tr);
-      double.state = double.state.apply(tr);
-    },
-  };
-  return { view: double as unknown as EditorView, transactions };
-}
+import { viewDouble } from "./view-double";
 
 async function twoAsks() {
   const { schema } = await createHeadlessProof();
   const doc = schema.node("doc", null, [
     schema.node("paragraph", null, [schema.text("The quick brown fox")]),
   ]);
-  const { view, transactions } = viewOver(EditorState.create({ doc, schema }));
+  const { view, transactions } = viewDouble(EditorState.create({ doc, schema }));
   // "The quick brown fox": "quick brown" is 5..16, "brown" 11..16 (the paragraph opens at 0).
   const bob = createAskMark(view, { from: 5, to: 16 }, "user:bob");
   const alice = createAskMark(view, { from: 11, to: 16 }, "user:alice");

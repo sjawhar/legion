@@ -18,18 +18,12 @@ import {
   placeCaret,
   selectEditorText,
 } from "./editor";
-import { commentWithBody, setSheet } from "./margin-helpers";
+import { commentWithBody, markText, setSheet } from "./margin-helpers";
 import { resetDatabase } from "./seed";
 import { centerOf, touchHold } from "./touch";
 import { asUser } from "./users";
 
 const initialMarkdown = "The quick brown fox";
-
-function markText(page: Page, markId: string): Promise<string> {
-  return markSpan(page, markId)
-    .allTextContents()
-    .then((spans) => spans.join(""));
-}
 
 test.beforeEach(async () => {
   await resetDatabase();
