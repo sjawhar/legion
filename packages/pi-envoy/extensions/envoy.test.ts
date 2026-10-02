@@ -737,7 +737,7 @@ function responseWithRegistration(
 const dispatchToolNames = dispatchToolSpecs.map((spec) => spec.name);
 
 const UNASKED_WAIT_NUDGE =
-  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask, naming exactly what you need and from whom.";
+  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open it now: a decision block in the document it concerns (dispatch_doc_edit with an ask block), or dispatch_ask for a to-do only a human can do, naming exactly what you need and from whom.";
 
 /** Custom-message type of the nudge itself, which a session hears amid other deliveries. */
 const ASK_REMINDER_TYPE = "dispatch-ask-reminder";
@@ -2106,6 +2106,43 @@ describe("envoy OMP extension", () => {
     await session.stop();
     expect(session.fixture.deliveries).toEqual([]);
     expect(session.asked).toEqual([]);
+  });
+
+  test("a decision block written through dispatch_doc_edit spends the check, unlike a plain edit", async () => {
+    // The query creates a fresh extension module with isolated module-level awareness state.
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-document-block");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_document_block", () => ({}));
+
+    await session.userTurn();
+    await session.toolResult({
+      toolName: "dispatch_doc_edit",
+      toolCallId: "call-block",
+      input: {
+        ops: [
+          {
+            op: "insert",
+            markdown: "## Rollout\n\n:::ask{#deployment urgency=\"high\"}\nWhich deployment window?\n:::",
+          },
+        ],
+      },
+      details: {},
+      isError: false,
+    });
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+
+    await session.userTurn();
+    await session.toolResult({
+      toolName: "dispatch_doc_edit",
+      toolCallId: "call-plain-edit",
+      input: { ops: [{ op: "insert", markdown: "A plain revision." }] },
+      details: {},
+      isError: false,
+    });
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([
+      expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
+    ]);
   });
 
   test("the five-check period budget applies while the session holds open asks", async () => {

@@ -194,6 +194,29 @@ describe("dispatchToolSpecs", () => {
     );
   });
 
+  test("routes design questions into document decision blocks and approval hand-backs", () => {
+    const ask = dispatchToolSpecs.find((candidate) => candidate.name === "dispatch_ask");
+    const approval = dispatchToolSpecs.find(
+      (candidate) => candidate.name === "dispatch_request_approval"
+    );
+    const message = dispatchToolSpecs.find((candidate) => candidate.name === "dispatch_message");
+    if (ask === undefined || approval === undefined || message === undefined) {
+      throw new Error("Dispatch tool spec is missing");
+    }
+
+    expect(ask.description).toContain(
+      "A question about the design an issue's document records is not this tool"
+    );
+    expect(ask.description).toContain("decision block");
+    expect(ask.description).toContain("Never give an ask an Approve option");
+    expect(ask.description).toContain(
+      "Ask a human to approve a document only with dispatch_request_approval"
+    );
+    expect(approval.description).toContain("same Inbox row");
+    expect(approval.description).toContain("Call it once per revision");
+    expect(message.description).toContain("Not a design decision");
+  });
+
   test("dispatch_search rejects a one-character query and a limit above 50", () => {
     const schema = schemaFor("dispatch_search");
 

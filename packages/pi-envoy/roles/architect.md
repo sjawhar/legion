@@ -54,7 +54,7 @@ Never fabricate the spawned process's identity or session; the daemon returns it
 | Situation | Action |
 | --- | --- |
 | Re-file a genuinely independent child, capacity, or cross-tree conflict | Use the `legion` escalation operation for the controller. |
-| Product, scope, or human decision | Answer from tree context, or ask Sami directly through `dispatch_ask`. |
+| Product, scope, or design decision | Answer from tree context, or write it as a decision block in the root spec; a to-do only a human can do uses `dispatch_ask`. |
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 
 Before merge, send the implementer back in with `spawn_worker` (role `implementer`, task naming

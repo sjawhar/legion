@@ -1,11 +1,11 @@
-# Before and after: an ask, a message, and a draft
+# Before and after: a decision block, a message, and a draft
 
-`skill://dispatch` sends you here for worked examples: a decision written as clickable options, a
+`skill://dispatch` sends you here for worked examples: a design decision in its document, a
 message that should not be sent, and a draft placed where the human reads it.
 
 ## Before / after
 
-Before — a wall of text hides the decision and makes the choices unclickable:
+Before — a wall of text hides the decision and the human never receives it:
 
 ```text
 We need to settle the release gate because the deploy branch has the migration and the
@@ -14,19 +14,22 @@ not reviewed, so should we ship today, wait for docs, or cut the dashboard from 
 I think waiting is safest but the customer demo is tomorrow and the list above is probably stale.
 ```
 
-After — anchor the decision and make each option a button:
+After — write the design decision into the document section it concerns, so the options are
+clickable and the answer stays with the release design:
 
 ```ts
-dispatch_ask({
+dispatch_doc_edit({
   issue: "LEGION-815",
-  question:
-    "Choose the release gate. Recommendation: ship after release-note review, since the tested deployment is otherwise ready.",
-  options: [
-    { label: "Review notes, then ship", description: "Keeps the release intact and reviewed." },
-    { label: "Ship now", description: "Meets the demo deadline; release notes follow later." },
-  ],
-  urgency: "high",
-  anchor: { artifact: "spec", quote: "Release requires reviewed operator instructions before deployment." },
+  ops: [{
+    op: "insert",
+    after: "Release requires reviewed operator instructions before deployment.",
+    markdown: `:::ask{#release-gate urgency="high"}
+Choose the release gate. Recommendation: ship after release-note review, since the tested deployment is otherwise ready.
+
+- Review notes, then ship — Keeps the release intact and reviewed.
+- Ship now — Meets the demo deadline; release notes follow later.
+:::`,
+  }],
 })
 ```
 
@@ -57,8 +60,8 @@ dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
 dispatch_ask({ issue: "OPS-52", question: "Send the customer update as drafted?", options: [...] })
 ```
 
-After — the draft is a section of the spec, and the ask anchors there. If it really must be a
-file (something to send as-is), the spec and the ask both link the slug from the upload result:
+After — the draft is a section of the spec. Sending it is a to-do only a human can complete, so it
+stays a standalone ask:
 
 ```ts
 dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
@@ -70,10 +73,7 @@ dispatch_ask({
   options: [...],
   anchor: { artifact: "spec", quote: "Hi team," },
 })
-// or, for a real file — the spec links it where the reader needs it, and so does the ask:
-dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
-  { op: "insert", after: "## Context", markdown: "## Draft\n\nThe update to send as-is: dispatch://OPS-52/artifact/cu-update-2026-09-15-md" },
-]})
+// Or, for a real file, link the slug from the upload result in the question:
 dispatch_ask({
   issue: "OPS-52",
   question: "Send this customer update as-is? dispatch://OPS-52/artifact/cu-update-2026-09-15-md",

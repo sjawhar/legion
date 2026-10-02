@@ -1167,7 +1167,7 @@ function approvalLine(artifact: Pick<Artifact, "approval">): string | undefined 
     case "approved":
       return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
     case "stale":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}) - request approval again`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}); approval is needed again only if the change proposes something the human has not settled`;
     case "changes_requested":
       return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
   }
@@ -1655,15 +1655,15 @@ async function blockAsks(
 
 /**
  * Refuses an approval request while the document holds an open decision block. A request names
- * the latest version, and a new version retracts it, so a request over a block the human has yet
- * to answer goes stale the moment they answer it. The live document's `ask` blocks are judged by
- * the latest version, the one the request would name: a block that version shows open counts as
- * open even when its ask is already answered or closed, since that answer reaches a version only
- * when the document settles, about two seconds later, or with the next edit (the agent's fold of
- * the answer into the text). A block not yet in that version counts as open too. A block removed
- * from the document is not judged here; `refuseRemovingOpenDecisionBlocks` keeps one whose ask is
- * open in it. A document already approved at its latest version is left to the server, which
- * answers with that approval.
+ * the latest version, and a new version moves it to that version to wait on the agent, so a
+ * request over a block the human has yet to answer cannot be handed back yet. The live document's
+ * `ask` blocks are judged by the latest version, the one the request would name: a block that
+ * version shows open counts as open even when its ask is already answered or closed, since that
+ * answer reaches a version only when the document settles, about two seconds later, or with the
+ * next edit (the agent's fold of the answer into the text). A block not yet in that version counts
+ * as open too. A block removed from the document is not judged here;
+ * `refuseRemovingOpenDecisionBlocks` keeps one whose ask is open in it. A document already
+ * approved at its latest version is left to the server, which answers with that approval.
  */
 async function refuseOpenDecisionBlocks(
   client: DispatchClient,
@@ -1711,9 +1711,14 @@ async function refuseOpenDecisionBlocks(
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
   throw new Error(
     [
-      `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would retract this request.`,
+      `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request.`,
       ...open.map((line) => `- ${line}`),
-      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit and request approval again. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason), write their decision into the text with dispatch_doc_edit, and request approval again.",
+      "Do not request approval over an open block, even when a human asked for it. " +
+        "Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold " +
+        "the answer into the text with dispatch_doc_edit and call dispatch_request_approval once to hand the " +
+        "request back. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as " +
+        "the reason), write their decision into the text with dispatch_doc_edit, and call dispatch_request_approval " +
+        "once to hand the request back.",
     ].join("\n")
   );
 }
@@ -2733,7 +2738,7 @@ export async function executeDispatchTool(
       });
       if (result.ask === null) {
         return {
-          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version.`,
+          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. A later change makes it stale; request again only if the change proposes something the human has not settled.`,
           details: {
             ...(resolved.owner.kind === "project"
               ? documentResultDetails(resolved.artifact)
@@ -2745,7 +2750,7 @@ export async function executeDispatchTool(
       }
       const details = await followedAskDetails(client, result.ask, resolved.artifact);
       return {
-        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
+        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. If you revise the document, this request follows it and waits on you; call dispatch_request_approval once more when the revision is complete.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
       };
     }

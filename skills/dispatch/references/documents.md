@@ -157,9 +157,11 @@ names each block and its ask. An answer or a `dispatch_resolve_ask` closes the a
 reaches a version only when the document settles, about two seconds later, or with your next
 `dispatch_doc_edit`: fold the answer into the text (or, for a waiver, write the human's decision
 in) and then request. A block written in the last few seconds counts as open before Dispatch has
-opened its ask. A repeat at the same version returns the open request unchanged. A new version
-retracts an open request for an older one, and its `ask.resolved` reaches you: request again for
-the new version once its blocks are settled. The answer reaches you as `artifact.approved` or
+opened its ask. A new version moves an open request to the new version, and its `ask.edited`
+reaches you; the request then waits on you until the next `dispatch_request_approval` hands the
+same row back with its new summary. A repeat with the same summary changes nothing. An
+`APPROVAL_ASK_STALE` refusal is a race between the human's read and a new version: reload the
+document and answer it again. The answer reaches you as `artifact.approved` or
 `artifact.changes_requested` with the pinned `version`; `changes_requested` carries the reason,
 which is your next piece of work. `dispatch_read` and `dispatch_doc_read` show the document's
 approval state; `stale` means it was approved and then edited.

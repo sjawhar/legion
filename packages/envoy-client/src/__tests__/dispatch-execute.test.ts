@@ -3575,6 +3575,9 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(
       '"Approve spec.md (version 3)? Proposes a live sync in place of the nightly export."'
     );
+    expect(result.text).toContain(
+      "If you revise the document, this request follows it and waits on you; call dispatch_request_approval once more when the revision is complete."
+    );
     expect(result.details).toMatchObject({ issue: "DSP-42", ask: "ask-9", version: 3 });
     expect(result.details).toMatchObject({ follows: { ask: "ask-9" } });
     expect(result.details).not.toHaveProperty("topic");
@@ -3686,6 +3689,9 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(
       "(document id artifact-42) is already approved at version 3 by sjawhar"
     );
+    expect(result.text).toContain(
+      "request again only if the change proposes something the human has not settled"
+    );
     expect(result.text).not.toContain("ask ");
     expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42", version: 3 });
     expect(dispatchFollowNotice(result.details)).toBeNull();
@@ -3775,7 +3781,7 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n").slice(0, 5)).toEqual([
-        "dispatch_request_approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, which would retract this request.",
+        "dispatch_request_approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, which would move this request.",
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
         "- block b-2, whose ask Dispatch has not opened yet",
         "- block b-3, which version 4 does not hold yet",
@@ -3783,6 +3789,7 @@ describe("executeDispatchTool", () => {
       ]);
       expect(refusal).toContain("even when a human asked for it");
       expect(refusal).toContain("ask them to answer it or to waive it");
+      expect(refusal).toContain("call dispatch_request_approval once to hand the request back");
       expect(posts).toEqual([]);
     });
 
@@ -3817,7 +3824,7 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n").slice(0, 2)).toEqual([
-        "dispatch_request_approval was not called: spec.md (version 4) has 1 open decision block. Answering one writes a new version, which would retract this request.",
+        "dispatch_request_approval was not called: spec.md (version 4) has 1 open decision block. Answering one writes a new version, which would move this request.",
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
       ]);
       expect(posts).toEqual([]);
@@ -4038,7 +4045,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      "# Spec\n\nApproval: approved v2 by sjawhar, edited since (now v4) - request approval again"
+      "# Spec\n\nApproval: approved v2 by sjawhar, edited since (now v4); approval is needed again only if the change proposes something the human has not settled"
     );
   });
 

@@ -1,0 +1,170 @@
+{
+  "issues": [
+    {
+      "key": "LEGION-464",
+      "asks": [
+        {
+          "id": "464-v2",
+          "created_at": "2026-10-01T17:10:36Z",
+          "kind": "approval",
+          "block_id": null
+        },
+        {
+          "id": "464-v3",
+          "created_at": "2026-10-01T17:13:23Z",
+          "kind": "approval",
+          "block_id": null
+        },
+        {
+          "id": "464-v4",
+          "created_at": "2026-10-01T17:16:31Z",
+          "kind": "approval",
+          "block_id": null
+        },
+        {
+          "id": "464-v5",
+          "created_at": "2026-10-01T17:18:47Z",
+          "kind": "approval",
+          "block_id": null
+        }
+      ],
+      "events": [
+        {
+          "id": 1,
+          "type": "ask.opened",
+          "payload": {
+            "id": "464-v2",
+            "kind": "approval",
+            "approval": { "artifact_id": "artifact-464", "version": 2 }
+          }
+        },
+        {
+          "id": 2,
+          "type": "ask.opened",
+          "payload": {
+            "id": "464-v3",
+            "kind": "approval",
+            "approval": { "artifact_id": "artifact-464", "version": 3 }
+          }
+        },
+        {
+          "id": 3,
+          "type": "ask.opened",
+          "payload": {
+            "id": "464-v4",
+            "kind": "approval",
+            "approval": { "artifact_id": "artifact-464", "version": 4 }
+          }
+        },
+        {
+          "id": 4,
+          "type": "ask.opened",
+          "payload": {
+            "id": "464-v5",
+            "kind": "approval",
+            "approval": { "artifact_id": "artifact-464", "version": 5 }
+          }
+        },
+        {
+          "id": 5,
+          "type": "ask.answered",
+          "actor": { "kind": "user", "id": "reviewer" },
+          "payload": {
+            "id": "464-v5",
+            "kind": "approval",
+            "approval": { "artifact_id": "artifact-464", "version": 5 }
+          }
+        }
+      ]
+    },
+    {
+      "key": "AGENTC-418",
+      "asks": [
+        {
+          "id": "418-v3",
+          "created_at": "2026-10-01T12:04:28Z",
+          "kind": "approval",
+          "block_id": null
+        },
+        {
+          "id": "418-v4",
+          "created_at": "2026-10-01T14:14:38Z",
+          "kind": "approval",
+          "block_id": null
+        },
+        {
+          "id": "418-v12",
+          "created_at": "2026-10-01T14:40:20Z",
+          "kind": "approval",
+          "block_id": null
+        }
+      ],
+      "events": [
+        {
+          "id": 6,
+          "type": "ask.opened",
+          "payload": {
+            "id": "418-v3",
+            "kind": "approval",
+            "approval": { "artifact_id": "artifact-418", "version": 3 }
+          }
+        },
+        {
+          "id": 7,
+          "type": "ask.opened",
+          "payload": {
+            "id": "418-v4",
+            "kind": "approval",
+            "approval": { "artifact_id": "artifact-418", "version": 4 }
+          }
+        },
+        {
+          "id": 8,
+          "type": "ask.opened",
+          "payload": {
+            "id": "418-v12",
+            "kind": "approval",
+            "approval": { "artifact_id": "artifact-418", "version": 12 }
+          }
+        }
+      ]
+    },
+    {
+      "key": "LEGION-462",
+      "asks": [
+        {
+          "id": "462-v4",
+          "created_at": "2026-10-01T15:03:32Z",
+          "kind": "approval",
+          "block_id": null
+        },
+        {
+          "id": "462-v5",
+          "created_at": "2026-10-01T15:11:41Z",
+          "kind": "approval",
+          "block_id": null
+        }
+      ],
+      "events": [
+        {
+          "id": 9,
+          "type": "ask.opened",
+          "payload": {
+            "id": "462-v4",
+            "kind": "approval",
+            "approval": { "artifact_id": "artifact-462", "version": 4 }
+          }
+        },
+        {
+          "id": 10,
+          "type": "ask.opened",
+          "payload": {
+            "id": "462-v5",
+            "kind": "approval",
+            "approval": { "artifact_id": "artifact-462", "version": 5 }
+          }
+        }
+      ]
+    }
+  ]
+}

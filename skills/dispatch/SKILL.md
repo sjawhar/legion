@@ -124,6 +124,11 @@ the block and keeps its ask, its answer and its followers; the context paragraph
 out of Design move the same way, and the emptied section is deleted. An ask block has two ids that
 differ; [Editing a document](skill://dispatch/references/document-edits.md) says which.
 
+A decision block after approval reopens the design: writing it makes the approval stale, which is
+right. The request follows the document, and you fold the answered block into the text before you
+hand it back ([Approval of a spec](#approval-of-a-spec)). Outside a Legion root issue, a stale
+approval needs no new request unless the change proposes something the human has not settled.
+
 See [Typed blocks](#typed-blocks) for the syntax and [Before you ask](#before-you-ask) under
 [Asking](#asking) to decide whether the question is a real decision at all.
 
@@ -201,6 +206,12 @@ field, and choosing your next issue are in [Working an issue](skill://dispatch/r
 
 ## Asking
 
+Two kinds of question reach a human. A decision about the design a document records is a decision
+block in that document ([Decision blocks](#decision-blocks)), whatever phase the work is in and
+whether or not the document was approved; the document's approval state is the human's business,
+not a reason to keep the question out. A to-do or permission only a human can give, or a decision
+with no document to live in, is a `dispatch_ask`. The gates below apply to both.
+
 ### Before you ask
 
 Every `dispatch_ask` passes four gates first:
@@ -243,14 +254,14 @@ Every `dispatch_ask` passes four gates first:
    is not what this forbids; changing something else is. An ask that turns his complaint about
    one control into a choice about another does not address what he asked, and changing that
    other control is a change he never asked for. What is still an ask the moment you know it,
-   even before delivery, is anything "Anything you are blocked on a human for is an open ask"
-   (further down) lists that the delivery waits on — including a conflict between what he asked
-   for and another of his rules, which this gate would otherwise bury as settled.
+   even before delivery, is anything "Anything you are blocked on a human for is visible in
+   Dispatch" (further down) lists that the delivery waits on — including a conflict between what
+   he asked for and another of his rules, which this gate would otherwise bury as settled.
 
 The platform PO audits open asks. One that fails a gate — or that points at another message in
 prose instead of carrying its content (below) — is retracted, with the PO's answer as the record.
 
-Open a decision with:
+Open a standalone ask with:
 ```ts
 dispatch_ask({
   issue?,
@@ -269,18 +280,17 @@ It returns `details` `{ issue, ask, follows: { ask } }` for an issue or `{ proje
 References belong in the question text; `ref` is sugar that appends its `dispatch://` value to the question as a rendered link.
 
 An ask is read on a phone by someone who has not read the code. Open with one or two plain
-sentences: what needs deciding and why it matters now. Each option is a button with a label and
-one sentence saying what happens if it is chosen; never enumerate choices in prose. Put the
-recommendation and its reason last, in `question`. Never put file paths, line numbers, sequence
-numbers, document versions, or role tokens in the question; if the human needs that detail, anchor
-the ask to the document passage instead. Apply the phone test from "Writing for the human" before
-posting. Anchor a document question with `anchor: { artifact, quote, occurrence? }`; `occurrence`
-is zero-based and selects a repeated quote. A quote anchor is pinned to its lowest complete
-containing block while retaining its quote as display text, so rewording the passage keeps it
-attached; a quote spanning top-level blocks, and existing anchors without a block, stay readable
-against their original document version if their quote disappears.
+sentences: what the human needs to do or permit and why it matters now. Each option is a button
+with a label and one sentence saying what happens if it is chosen; never enumerate choices in
+prose. Put the recommendation and its reason last, in `question`. Never put file paths, line
+numbers, document versions, or role tokens in the question; if a to-do needs document context,
+anchor the ask to that passage. Apply the phone test from "Writing for the human" before posting.
+A quote anchor is pinned to its lowest complete containing block while retaining its quote as
+display text, so rewording the passage keeps it attached; a quote spanning top-level blocks, and
+existing anchors without a block, stay readable against their original document version if their
+quote disappears.
 
-An ask must be answerable from its own text and its anchor alone. Anchor a question about a document
+An ask must be answerable from its own text and its anchor alone. Anchor a to-do about a document
 passage with `anchor`. Follow up on an ask or comment with `dispatch_comment`; cite anything else
 with a `dispatch://` reference (see [References](#references)). Never write "see above", "the
 message above", or "as attached".
@@ -310,17 +320,26 @@ they must read to decide belongs in the spec in the first place — see [Artifac
 
 Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you audit what a whole project is waiting on rather than just your own asks.
 
-**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, send a one-line ask before the first implementation commit. A lane's schema decision or a platform-PO contract ruling does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request. A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without an ask, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for, and its ask comes before the commit that sets that shape.
+**Unsettled product shape needs a decision before implementation.** When a page, navigation entry,
+table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not
+already settled, write a decision block in the document that records the work before the first
+implementation commit. A lane's schema decision or a platform-PO contract ruling does not settle
+product shape. This does not turn a user-specified decision or routine implementation into an
+approval request. A control or behaviour the human asked for in words is settled by those words,
+together with every choice inside it that his words do not make (where it sits, its defaults, its
+options): build it without a block, as gate 4 of [Before you ask](#before-you-ask) says. This rule
+covers only product shape outside what he asked for.
 
-**Anything you are blocked on a human for is an open ask.** An agent waits on a human only through
-an open ask. An approval, a credential or grant to renew, a setting only they can change, a review
-click, a decision, or a conflict between two of their own rules: open a `dispatch_ask` the moment
-you know, the action as the question. Never write it
-into a spec, a comment reply, a message, or a pull-request body: nothing in those paths reaches
-the human's Inbox, and a human who is not reading your document does not know they are the
-blocker. Before asking, try to remove the step: a value already on the machine, a permission you
-already hold, an API that replaces the click. One ask per item, `urgency: "high"` when work is
-stopped on it; while it is open, keep working on everything that is not.
+**Anything you are blocked on a human for is visible in Dispatch.** An agent waits on a human only
+through an open ask. A to-do, permission, credential or grant renewal, setting, review click, or
+other action only a human can complete is a `dispatch_ask` the moment you know, phrased as that
+action. A decision about the design a document records is a decision block in that document,
+whatever phase the work is in. Never write a human to-do only into a spec, a comment reply, a
+message, or a pull-request body: nothing in those paths reaches the human's Inbox, and a human who
+is not reading the document does not know they are the blocker. Before asking, try to remove the
+step: a value already on the machine, a permission you already hold, an API that replaces the
+click. One ask per item, `urgency: "high"` when work is stopped on it; while it is open, keep
+working on everything that is not.
 
 Once an ask is open (who answers it, handing a human a to-do, editing, retracting or resolving it,
 answering a clarification, whose turn a reply gives), see
@@ -367,12 +386,18 @@ waived as the next paragraph says; and it proposes something the human has not a
 A Legion root spec under an armed design gate always goes to approval once its blocks are settled
 (`skill://legion-architect`).
 
-When both hold, request it in the pass that finishes the spec: a design waiting with nothing in
-the human's Inbox waits on nobody. A choice you can make yourself is not a decision block
-([Before you ask](#before-you-ask), gate 1): write your call and its reason into the design and
-name it in `summary`; a human who disagrees answers `Request changes`. When a human asks for
-approval while a block is open, do not request it and do not hold it silently: name each open
-block and ask them to answer it or waive it. For a waiver, close the block with `dispatch_resolve_ask`
+Request it once, when the spec is ready for the human to read. A request is one row in the Inbox
+for the life of the document: a later version moves that row to the new version and files it under
+Waiting on agents until you call `dispatch_request_approval` again, which hands the same row back
+with a new `summary`. Revise freely, and hand it back once per revision, when you are done. A
+human who comments on the request instead of answering it is continuing the design conversation:
+reply in the thread; when the comment raises a choice that is theirs, write it into the spec as a
+decision block (the request waits on you while the block is open); when it changes the design,
+rewrite the text; then hand the request back once. A choice you can make yourself is not a decision
+block ([Before you ask](#before-you-ask), gate 1): write your call and its reason into the design
+and name it in `summary`; a human who disagrees answers `Request changes`. When a human asks for
+approval while a block is open, do not request it and do not hold it silently: name each open block
+and ask them to answer it or waive it. For a waiver, close the block with `dispatch_resolve_ask`
 (`kind: "resolved"`, their words as `reason`), then write their decision into the text in their
 words and request. `dispatch_request_approval` refuses while any block is open.
 
