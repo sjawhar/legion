@@ -63,16 +63,7 @@ import {
 import { uploadErrorMessage, uploadFile } from "../artifacts/ArtifactUpload";
 import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
 import { ReferencePicker } from "../refs/ReferencePicker";
-import {
-  buildDispatchReference,
-  buildIssuePath,
-  buildProjectPath,
-  type DispatchRoute,
-  isProjectRoute,
-  parseDispatchReference,
-  parseIssuePath,
-  parseProjectPath,
-} from "../refs/routes";
+import { buildDispatchReference, composerReferences } from "../refs/routes";
 import { MODE_LABELS } from "./delivery";
 import { ReplyQuote, replyQuoteText } from "./ReplyQuote";
 import { useAgents } from "./useAgents";
@@ -202,60 +193,6 @@ export function mentionOptions(agents: readonly Agent[]): MentionOption[] {
 
 function appendReference(body: string, reference: string): string {
   return `${body}${body.length === 0 || /\s$/.test(body) ? "" : " "}${reference}`;
-}
-
-export interface ComposerReference {
-  href?: string;
-  reference: string;
-}
-
-export function trimReference(value: string): string {
-  return value.replace(/[),.;:!?]+$/, "");
-}
-
-function composerReference(route: DispatchRoute): ComposerReference | undefined {
-  if (isProjectRoute(route)) {
-    return route.kind === "document"
-      ? { href: buildProjectPath(route), reference: buildDispatchReference(route) }
-      : undefined;
-  }
-  return { href: buildIssuePath(route), reference: buildDispatchReference(route) };
-}
-
-function appReference(value: string, appOrigin: string): ComposerReference | undefined {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return undefined;
-  }
-  if (url.origin !== appOrigin) return undefined;
-  const route =
-    parseIssuePath(url.pathname, url.search) ?? parseProjectPath(url.pathname, url.search);
-  return route === undefined ? undefined : composerReference(route);
-}
-
-export function composerReferences(
-  body: string,
-  appOrigin = window.location.origin
-): ComposerReference[] {
-  const references: ComposerReference[] = [];
-  for (const raw of body.match(/(?:dispatch:\/\/|https?:\/\/)\S+/g) ?? []) {
-    const value = trimReference(raw);
-    const reference = value.startsWith("dispatch://")
-      ? (() => {
-          const route = parseDispatchReference(value);
-          return route === undefined ? undefined : composerReference(route);
-        })()
-      : appReference(value, appOrigin);
-    if (
-      reference !== undefined &&
-      !references.some((item) => item.reference === reference.reference)
-    ) {
-      references.push(reference);
-    }
-  }
-  return references;
 }
 
 /** Reconcile accepted mentions against the actual textarea edit range. */

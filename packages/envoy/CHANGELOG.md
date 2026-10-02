@@ -39,6 +39,13 @@
   change should do (restore its draft, copy the message, reload and send again). Keys are stored
   per human in `broadcast_idempotency_keys` (migration `0055`) and kept as long as their
   broadcast (LEGION-446).
+- Each request a listener's starting gate refuses logs `request refused while starting` with the
+  `gate` (`webhook` or `v1`), `method` and `path`; a start logs `envoy-listener /v1 open` with
+  `since_listening_ms` and `durable bound` with `attempts` and `waited_ms`.
+  `packages/envoy/scripts/listener-deploy-probe.sh` watches a listener deploy from a client's
+  seat, at every address the listener's name resolves to, and exits 1 when a task refused `/v1`
+  while it answered `/healthz`, or, with `--dispatch-*`, when a Dispatch message it posted did not
+  record state `sent` (LEGION-456).
 - `GET /api/v1/artifacts/{id}/blocks/{block_id}` says where one block stands in a Dispatch
   document: its path from the top-level block down (each node's type, block id and child index)
   and, for a table block, row or cell, the table's id, the row index (0 is the header row), the
@@ -158,6 +165,33 @@
   minute, so one nobody opens settles too. Shutdown settles only the documents that owe one,
   cancels a settlement past its budget so its transaction rolls back, and logs per document
   whether it settled or was left to resume (LEGION-465).
+- Dispatch indexes a mention written in markdown (LEGION-463): `**dispatch://KEY**`,
+  `` `dispatch://KEY` ``, `_dispatch://KEY_`, `~~dispatch://KEY~~`,
+  `[dispatch://KEY](dispatch://KEY)` (how a document stores `<dispatch://KEY>`), a bracketed
+  dashboard URL, a reference in a table cell written without padding (`|dispatch://KEY|`), and a
+  reference followed by a no-break or ideographic space each write their `mentions` edge. A
+  reference ends at whitespace, an angle or square bracket, a quote, a backtick or a pipe, except
+  the bracketed host of an IPv6 dashboard URL, and the sentence punctuation, emphasis delimiters
+  and unbalanced `)` after it are dropped in one pass, where a spec of one reference and 900,000
+  `)` took 21 s to save. The server parses a reference as the dashboard does: a query's pairs
+  split on `&` alone, an item id decoded, a slug only whole, a version without a leading zero, and
+  nothing from a reference holding a control character or an item id that decodes to one. A body
+  citing `…/spec?comment=%00` was answered 500, since Postgres refuses a NUL in the index, and is
+  now stored. The dashboard's composer pills, unfurl cards and linked text read text by the same
+  rule. Text stored before the deploy gets its edges from `envoy-dispatch rebuild-refs`.
+- The dashboard no longer hangs on a comment or an ask question made of repeated `http://`. The
+  check that shows an unfurl card only for a body of nothing but references tried every way to
+  split the body into references, which in Chromium ran for minutes on a 2,000-character comment.
+- During a rolling deploy the replacement listener serves `/v1` and runs its role lane once NATS
+  is connected and the interest and session caches are warm (about 100 ms after it listens),
+  instead of answering every `/v1` call `503 service starting` until the old task let go of the
+  durable consumer (84 s in production on 2026-10-01). The durable's bind is polled every 2 s and
+  lands within 2 s of the old task's exit, still giving up after 135 s with
+  `subscribe failed after max attempts, shutting down`; `/healthz` stays 200 `starting` until it
+  binds. Both tasks of a machine are one role-lane queue group, so the overlap forwards no role
+  message twice. A SIGTERM during the bind wait is an ordered shutdown. The bus now restores every
+  subscription after a reconnect even when one cannot be restored, so a role lane is not left down
+  while the durable still refuses the bind (LEGION-456).
 - Dispatch exits with status 1 when it cannot bind its listen address. It logged
   `dispatch: listen … bind: address already in use` and exited 0, so a supervisor read a port
   clash as a clean stop.

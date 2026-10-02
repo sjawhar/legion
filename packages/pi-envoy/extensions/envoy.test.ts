@@ -3570,6 +3570,91 @@ describe("envoy OMP extension", () => {
     expect(fixture.messages[1]).toContain("new message");
   });
 
+  test("keeps a valid event id when a frame's dedupe key is empty", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?empty-dedupe-key");
+    const fixture = createPi();
+    const sentinel = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        if (message.content.includes("identity sentinel")) sentinel.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_identity"));
+    const agent = natsState.controls.get("notifications.agent.ses_identity");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    const frame = (summary: string, identity: Record<string, string>) =>
+      JSON.stringify({
+        source: "github",
+        topic: "notifications.agent.ses_identity",
+        issued_at: 1,
+        payload_summary: summary,
+        ...identity,
+      });
+    for (const [summary, identity] of [
+      [
+        "identity valid",
+        { event_id: "evt-valid", source_event_id: "valid", dedupe_key: "github.valid" },
+      ],
+      ["identity malformed", { event_id: "evt-malformed", dedupe_key: "" }],
+      ["identity missing", {}],
+      // The mirror case: an empty event id leaves the key, which names its event, to drop the copy.
+      ["identity keyed", { event_id: "", source_event_id: "keyed", dedupe_key: "github.keyed" }],
+    ] as const) {
+      agent.push(frame(summary, identity));
+      agent.push(frame(summary, identity));
+    }
+    agent.push(frame("identity sentinel", { event_id: "evt-sentinel" }));
+    await sentinel.promise;
+    const count = (name: string) =>
+      fixture.messages.filter((message) => message.includes(`identity ${name}`)).length;
+    expect({
+      valid: count("valid"),
+      malformed: count("malformed"),
+      missing: count("missing"),
+      keyed: count("keyed"),
+    }).toEqual({
+      valid: 1,
+      malformed: 1,
+      missing: 2,
+      keyed: 1,
+    });
+  });
+
+  test("an empty event id identifies nothing, so two distinct frames that carry one both arrive", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?empty-event-id");
+    const fixture = createPi();
+    const sentinel = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        if (message.content.includes("sentinel frame")) sentinel.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_empty_id"));
+    const agent = natsState.controls.get("notifications.agent.ses_empty_id");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    const frame = (eventId: string, summary: string) =>
+      JSON.stringify({
+        event_id: eventId,
+        source: "github",
+        topic: "notifications.agent.ses_empty_id",
+        issued_at: 1,
+        payload_summary: summary,
+      });
+    const summaries = ["distinct frame one", "distinct frame two", "sentinel frame"];
+    agent.push(frame("", "distinct frame one"));
+    agent.push(frame("", "distinct frame two"));
+    agent.push(frame("evt-empty-id-sentinel", "sentinel frame"));
+    await sentinel.promise;
+
+    expect(
+      fixture.messages.map((message) => summaries.find((summary) => message.includes(summary)))
+    ).toEqual(summaries);
+  });
+
   test("never exposes a malformed envelope frame", async () => {
     // Query isolation gives this stateful extension its own NATS subscription.
     const { default: envoyExtension } = await import("./envoy.ts?toon-malformed-envelope");

@@ -212,7 +212,7 @@ func Census(ctx context.Context, conn *pgx.Conn, migrations []Migration, version
 			entry.refuse("%s records no version, yet the database holds %s: the runner would apply every migration from this one over it", versionTable, someTables(unrecorded))
 		}
 		text := readMigration(migration.SQL)
-		tables, err := censusTables(ctx, tx, text, migrationTouches(text), keys)
+		tables, err := censusTables(ctx, tx, text, matchedTouches(text.code), keys)
 		if err != nil {
 			return nil, fmt.Errorf("census: %s: %w", migration.Name, err)
 		}
