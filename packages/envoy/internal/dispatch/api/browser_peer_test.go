@@ -68,10 +68,6 @@ type syncedPeer struct {
 	answers chan []byte
 }
 
-// syncedPeerLocal tags the peer's own transactions. It must remain non-zero sized because ygo
-// compares origins by interface equality.
-type syncedPeerLocal struct{ _ byte }
-
 // connectBrowserPeer connects alice's browser to artifactID's room, through a document server of
 // its own over documentService.
 func connectBrowserPeer(t *testing.T, documentService *docs.Service, artifactID string) *syncedPeer {
@@ -232,18 +228,10 @@ func (p *syncedPeer) edit(t *testing.T, change func(*pmdoc.Node) error) {
 func (p *syncedPeer) transact(t *testing.T, change func(*crdt.Transaction, *crdt.YXmlFragment) error) {
 	t.Helper()
 	fragment := p.doc.GetXmlFragment("prosemirror")
-	origin := &syncedPeerLocal{}
-	var update []byte
-	unsubscribe := p.doc.OnUpdate(func(encoded []byte, updateOrigin any) {
-		if updateOrigin == origin {
-			update = append([]byte(nil), encoded...)
-		}
-	})
 	var changeErr error
-	p.doc.Transact(func(txn *crdt.Transaction) {
+	update := docstest.Transact(p.doc, func(txn *crdt.Transaction) {
 		changeErr = change(txn, fragment)
-	}, origin)
-	unsubscribe()
+	})
 	if changeErr != nil || update == nil {
 		t.Fatalf("browser peer edit: update=%d bytes err=%v", len(update), changeErr)
 	}

@@ -56,6 +56,25 @@ func Drain(connection *gws.Conn, document *crdt.Doc, send func([]byte) error, on
 	}
 }
 
+// Transact runs change in one transaction on document and returns the update it produced, as a
+// browser's provider sends a keystroke's, or nil when it produced none.
+func Transact(document *crdt.Doc, change func(*crdt.Transaction)) []byte {
+	origin := &transactOrigin{}
+	var update []byte
+	unsubscribe := document.OnUpdate(func(encoded []byte, updateOrigin any) {
+		if updateOrigin == origin {
+			update = append([]byte(nil), encoded...)
+		}
+	})
+	document.Transact(change, origin)
+	unsubscribe()
+	return update
+}
+
+// transactOrigin tags Transact's own transaction. ygo compares origins by interface equality, so
+// it is not zero sized: two pointers to zero-sized values may be equal.
+type transactOrigin struct{ _ byte }
+
 // WriteDeepChain writes, as the fragment's first child, blockquotes nested one inside another
 // around a paragraph whose text, text, stands textLevel levels below the document: the document is
 // level 0, the blockquotes levels 1 through textLevel-2, and the paragraph level textLevel-1.

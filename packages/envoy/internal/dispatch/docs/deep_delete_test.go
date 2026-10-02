@@ -20,10 +20,6 @@ import (
 	"github.com/sjawhar/envoy/internal/stacktest"
 )
 
-// deepPeerOrigin tags the test peer's own transactions, so the test keeps the update each one
-// produced. ygo compares origins by interface equality, so it must not be zero sized.
-type deepPeerOrigin struct{ _ byte }
-
 // An authenticated peer grows a nested element chain through the document websocket, in updates
 // small enough that none is remarkable on its own, and then sends one ordinary delete of the
 // chain's root. Deleting an element deletes everything inside it, and ygo walked those children
@@ -74,18 +70,10 @@ func TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel(t *testing.T) {
 		if err := crdt.ApplyUpdateV1(deleter, opening, nil); err != nil {
 			t.Fatalf("open the deleting document: %v", err)
 		}
-		var deletion []byte
-		origin := &deepPeerOrigin{}
-		unsubscribe := deleter.OnUpdate(func(update []byte, updateOrigin any) {
-			if updateOrigin == origin {
-				deletion = append([]byte(nil), update...)
-			}
-		})
 		deleterFragment := deleter.GetXmlFragment(fragmentName)
-		deleter.Transact(func(txn *crdt.Transaction) {
+		deletion := docstest.Transact(deleter, func(txn *crdt.Transaction) {
 			deleterFragment.Delete(txn, 0, 1)
-		}, origin)
-		unsubscribe()
+		})
 		if deletion == nil {
 			t.Fatal("deleting the chain's root produced no update")
 		}
@@ -112,8 +100,6 @@ type deepPeer struct {
 	doc        *crdt.Doc
 	connection *gws.Conn
 	artifactID string
-	origin     *deepPeerOrigin
-	update     []byte
 	writes     sync.Mutex
 }
 
@@ -126,12 +112,7 @@ func newDeepPeer(t *testing.T, serverURL, artifactID string) *deepPeer {
 		t.Fatalf("connect document peer: response=%#v err=%v", response, err)
 	}
 	t.Cleanup(func() { _ = connection.Close() })
-	peer := &deepPeer{doc: crdt.New(), connection: connection, artifactID: artifactID, origin: &deepPeerOrigin{}}
-	peer.doc.OnUpdate(func(update []byte, origin any) {
-		if origin == peer.origin {
-			peer.update = append([]byte(nil), update...)
-		}
-	})
+	peer := &deepPeer{doc: crdt.New(), connection: connection, artifactID: artifactID}
 	go peer.drain()
 	return peer
 }
@@ -145,12 +126,10 @@ func (p *deepPeer) drain() {
 // send runs change in one transaction and sends the update it produced, as a keystroke does.
 func (p *deepPeer) send(t *testing.T, change func(*crdt.Transaction)) []byte {
 	t.Helper()
-	p.update = nil
-	p.doc.Transact(change, p.origin)
-	if p.update == nil {
+	update := docstest.Transact(p.doc, change)
+	if update == nil {
 		t.Fatal("a peer transaction produced no update")
 	}
-	update := p.update
 	p.write(t, ygsync.EncodeUpdate(update))
 	return update
 }
