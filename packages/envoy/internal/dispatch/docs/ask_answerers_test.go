@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -22,12 +24,12 @@ func answererAnsweredAsk(by string) string {
 }
 
 // renameAdaExample is the rename a people migration hands RenameAskAnswerers: one login, in any
-// case, to its person's email.
-func renameAdaExample(value string) (string, bool) {
+// case, to its person's email; any other value is left as it is.
+func renameAdaExample(value string) string {
 	if strings.EqualFold(value, "ada-example") {
-		return "ada@example.com", true
+		return "ada@example.com"
 	}
-	return "", false
+	return value
 }
 
 // answeredByAdaExample seeds artifactID with an ask a person answered under the GitHub login
@@ -77,17 +79,13 @@ func persistedUpdates(t *testing.T, database *store.Store, artifactID string) []
 	if err != nil {
 		t.Fatalf("read document updates: %v", err)
 	}
-	defer rows.Close()
-	var updates []persistedUpdate
-	for rows.Next() {
+	updates, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (persistedUpdate, error) {
 		var update persistedUpdate
-		if err := rows.Scan(&update.version, &update.update); err != nil {
-			t.Fatalf("scan document update: %v", err)
-		}
-		updates = append(updates, update)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate document updates: %v", err)
+		err := row.Scan(&update.version, &update.update)
+		return update, err
+	})
+	if err != nil {
+		t.Fatalf("read document updates: %v", err)
 	}
 	return updates
 }
@@ -100,14 +98,9 @@ func versionMarkdowns(t *testing.T, database *store.Store, artifactID string) []
 	if err != nil {
 		t.Fatalf("read document versions: %v", err)
 	}
-	defer rows.Close()
-	var versions []string
-	for rows.Next() {
-		var version string
-		if err := rows.Scan(&version); err != nil {
-			t.Fatalf("scan document version: %v", err)
-		}
-		versions = append(versions, version)
+	versions, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read document versions: %v", err)
 	}
 	return versions
 }

@@ -248,10 +248,10 @@ func loginHolders(t *testing.T, database *store.Store, login string) []string {
 	return holders
 }
 
-func readJSON(t *testing.T, database *store.Store, query string, args ...any) any {
+func readJSON(t *testing.T, database *store.Store, query string) any {
 	t.Helper()
 	var raw []byte
-	if err := database.Pool.QueryRow(context.Background(), query, args...).Scan(&raw); err != nil {
+	if err := database.Pool.QueryRow(context.Background(), query).Scan(&raw); err != nil {
 		t.Fatalf("read %q: %v", query, err)
 	}
 	var value any
@@ -309,9 +309,9 @@ func TestRunMovesEveryPersonFieldToEmail(t *testing.T) {
 		{"the per-person bookkeeping events", `select jsonb_agg(payload->'login' order by type) from events where payload ? 'login'`,
 			[]any{ada, bob}},
 		{"the token's owner", `select to_jsonb(owner) from agent_tokens`, ada},
-		{"Ada's issue state on CORE-1, from two casings", `select to_jsonb(s) - 'issue_key' from user_issue_state s where login = $1 and issue_key = 'CORE-1'`,
+		{"Ada's issue state on CORE-1, from two casings", `select to_jsonb(s) - 'issue_key' from user_issue_state s where login = 'ada@example.com' and issue_key = 'CORE-1'`,
 			map[string]any{"login": ada, "pinned": true, "last_read_seq": 7.0, "dismissed": []any{"a", "b"}, "seq": 5.0}},
-		{"Ada's issue state on CORE-2, merged into the row her email already had", `select to_jsonb(s) - 'issue_key' from user_issue_state s where login = $1 and issue_key = 'CORE-2'`,
+		{"Ada's issue state on CORE-2, merged into the row her email already had", `select to_jsonb(s) - 'issue_key' from user_issue_state s where login = 'ada@example.com' and issue_key = 'CORE-2'`,
 			map[string]any{"login": ada, "pinned": true, "last_read_seq": 1.0, "dismissed": []any{"c"}, "seq": 4.0}},
 		{"Bob's issue state, its dismissals in their order", `select dismissed from user_issue_state where login = 'bob@example.com'`, []any{"z", "y"}},
 		{"Ada's Clear, the later of her two", `select jsonb_agg(to_jsonb(s)) from user_agent_state s`,
@@ -320,11 +320,7 @@ func TestRunMovesEveryPersonFieldToEmail(t *testing.T) {
 			map[string]any{ada: 1.0}},
 		{"the people the records name", `select jsonb_agg(email order by email) from people`, []any{ada, bob}},
 	} {
-		args := []any{}
-		if strings.Contains(check.query, "$1") {
-			args = append(args, ada)
-		}
-		if got := readJSON(t, database, check.query, args...); !reflect.DeepEqual(got, check.want) {
+		if got := readJSON(t, database, check.query); !reflect.DeepEqual(got, check.want) {
 			t.Errorf("%s = %#v, want %#v", check.name, got, check.want)
 		}
 	}

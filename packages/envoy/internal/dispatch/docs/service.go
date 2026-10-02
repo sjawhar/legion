@@ -793,22 +793,24 @@ func ArtifactVersionEventPayload(
 	return payload
 }
 
-func ensureBlockIDsInDocument(doc *crdt.Doc, origin any) (*pmdoc.Node, int, error) {
-	fragment := doc.GetXmlFragment(fragmentName)
+// rewriteTree hands doc's tree to rewrite, which changes it in place and counts its changes, and
+// writes the tree back under origin when it counts any.
+func rewriteTree(doc *crdt.Doc, origin any, rewrite func(*pmdoc.Node) int) (*pmdoc.Node, int, error) {
 	tree, err := treeOf(doc)
 	if err != nil {
 		return nil, 0, err
 	}
-	stamped := pmdoc.EnsureBlockIDsCount(tree)
-	if stamped == 0 {
+	changed := rewrite(tree)
+	if changed == 0 {
 		return tree, 0, nil
 	}
+	fragment := doc.GetXmlFragment(fragmentName)
 	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
 		return pmdoc.Update(transaction, fragment, tree)
 	}, origin); err != nil {
 		return nil, 0, err
 	}
-	return tree, stamped, nil
+	return tree, changed, nil
 }
 
 func (s *Service) settleRoom(room string, generation uint64) {
@@ -968,7 +970,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		origin := &identityClosureOrigin{}
 		updates, err = s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
 			var stampErr error
-			tree, stamped, stampErr = ensureBlockIDsInDocument(doc, origin)
+			tree, stamped, stampErr = rewriteTree(doc, origin, pmdoc.EnsureBlockIDsCount)
 			return stampErr
 		})
 		if err != nil {
@@ -1353,7 +1355,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	// block's repeated id changes the `#id` its directive carries.
 	stamped, skipped, err := s.repairDocument(ctx, artifactID, func(doc *crdt.Doc, origin any) (int, bool, error) {
 		before, beforeErr := renderDocument(doc)
-		tree, count, err := ensureBlockIDsInDocument(doc, origin)
+		tree, count, err := rewriteTree(doc, origin, pmdoc.EnsureBlockIDsCount)
 		if err != nil {
 			return count, false, err
 		}

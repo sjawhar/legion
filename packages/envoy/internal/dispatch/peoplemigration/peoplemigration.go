@@ -100,13 +100,16 @@ func isLogin(value string) bool {
 	return value != "" && !strings.Contains(value, "@")
 }
 
-// rename is the email people gives login, matched in any case.
-func (people Map) rename(login string) (string, bool) {
+// rename is the email people gives login, matched in any case, or login itself when people gives
+// it none or it is no login.
+func (people Map) rename(login string) string {
 	if !isLogin(login) {
-		return "", false
+		return login
 	}
-	email, mapped := people[strings.ToLower(login)]
-	return email, mapped
+	if email, mapped := people[strings.ToLower(login)]; mapped {
+		return email
+	}
+	return login
 }
 
 // loginColumn is a text column holding a person's bare login.
@@ -211,29 +214,30 @@ type keyColumn struct{ name, cast string }
 
 type actorColumn struct {
 	name string
-	// rootPerson is the key at the column value's root that names a person, given the row's
-	// typeColumn; "" when none does.
-	rootPerson func(rowType string) string
+	// root is the key at the column value's root that names a person, when one does; rootTypes,
+	// when set, limits it to rows whose typeColumn holds one of them.
+	root      string
+	rootTypes []string
+}
+
+// rootPerson is the key at the column value's root that names a person in a row of rowType; ""
+// when none does.
+func (c actorColumn) rootPerson(rowType string) string {
+	if c.rootTypes != nil && !slices.Contains(c.rootTypes, rowType) {
+		return ""
+	}
+	return c.root
 }
 
 // perPersonEvents are the event types whose payload names the person at its root, as "login".
 var perPersonEvents = []string{"user_state.updated", "user_agent_state.updated"}
 
-var (
-	uuidKey    = []keyColumn{{"id", "uuid"}}
-	answerRoot = func(string) string { return "user" }
-	loginRoot  = func(rowType string) string {
-		if slices.Contains(perPersonEvents, rowType) {
-			return "login"
-		}
-		return ""
-	}
-)
+var uuidKey = []keyColumn{{"id", "uuid"}}
 
 var actorTables = []actorTable{
 	{table: "issues", key: []keyColumn{{"key", "text"}}, columns: []actorColumn{{name: "created_by"}, {name: "claimed_by"}}},
 	{table: "artifacts", key: uuidKey, columns: []actorColumn{{name: "created_by"}}},
-	{table: "asks", key: uuidKey, columns: []actorColumn{{name: "author"}, {name: "answer", rootPerson: answerRoot}, {name: "resolution"}}},
+	{table: "asks", key: uuidKey, columns: []actorColumn{{name: "author"}, {name: "answer", root: "user"}, {name: "resolution"}}},
 	{table: "comments", key: uuidKey, columns: []actorColumn{{name: "author"}, {name: "resolved_by"}}},
 	{table: "messages", key: uuidKey, columns: []actorColumn{{name: "author"}}},
 	{table: "broadcasts", key: uuidKey, columns: []actorColumn{{name: "author"}}},
@@ -242,7 +246,7 @@ var actorTables = []actorTable{
 	{table: "repo_projects", key: []keyColumn{{"repo", "text"}}, columns: []actorColumn{{name: "created_by"}}},
 	{table: "architecture_sources", key: []keyColumn{{"project_key", "text"}}, columns: []actorColumn{{name: "created_by"}}},
 	{table: "events", key: []keyColumn{{"id", "bigint"}}, typeColumn: "type",
-		columns: []actorColumn{{name: "actor"}, {name: "payload", rootPerson: loginRoot}}},
+		columns: []actorColumn{{name: "actor"}, {name: "payload", root: "login", rootTypes: perPersonEvents}}},
 }
 
 const documentsField = "documents.answered_by"
@@ -394,7 +398,7 @@ func Run(ctx context.Context, database *store.Store, documents *docs.Service, pe
 
 	var renaming []string
 	for _, answerer := range answerers {
-		if _, ok := people.rename(answerer.AnsweredBy); ok && !slices.Contains(renaming, answerer.ArtifactID) {
+		if people.rename(answerer.AnsweredBy) != answerer.AnsweredBy && !slices.Contains(renaming, answerer.ArtifactID) {
 			renaming = append(renaming, answerer.ArtifactID)
 		}
 	}
@@ -496,18 +500,12 @@ func scanDatabase(ctx context.Context, tx pgx.Tx) (*census, error) {
 
 // moveActorRows rewrites every login in every JSON column to the email people gives it.
 func moveActorRows(ctx context.Context, tx pgx.Tx, people Map) error {
-	rename := func(person string) string {
-		if email, ok := people.rename(person); ok {
-			return email
-		}
-		return person
-	}
 	for _, table := range actorTables {
 		err := pageActorTable(ctx, tx, table, func(row actorRow) error {
 			var sets []string
 			var args []any
 			for index, column := range table.columns {
-				if row.values[index] == nil || !swapPeople(row.values[index], row.rowType, column, rename) {
+				if row.values[index] == nil || !swapPeople(row.values[index], row.rowType, column, people.rename) {
 					continue
 				}
 				encoded, err := encodeJSON(row.values[index])
@@ -659,11 +657,9 @@ func readActorPage(ctx context.Context, tx pgx.Tx, table actorTable, statement s
 // place, and reports whether anything changed.
 func swapPeople(value any, rowType string, column actorColumn, swap func(string) string) bool {
 	changed := false
-	if column.rootPerson != nil {
-		if key := column.rootPerson(rowType); key != "" {
-			if root, ok := value.(map[string]any); ok {
-				changed = swapString(root, key, swap)
-			}
+	if key := column.rootPerson(rowType); key != "" {
+		if root, ok := value.(map[string]any); ok {
+			changed = swapString(root, key, swap)
 		}
 	}
 	return swapNested(value, swap) || changed

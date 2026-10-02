@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -65,44 +66,34 @@ func (s *Service) AskAnswerers(ctx context.Context) (answerers []AskAnswerer, un
 }
 
 // RenameAskAnswerers rewrites the answered_by attribute of every answered ask block in each of
-// artifactIDs to what rename returns for it, leaving each value rename declines. Each document
+// artifactIDs to what rename returns for it, leaving each value rename keeps. Each document
 // that changes gets one server update appended to its state, never a replacement of it, so a
 // browser holding the earlier state merges the rename when it syncs; a closed issue's document is
 // renamed too. The update is recorded as no content change: answered_by is server-owned, and
 // settlement versions a document for a server-owned attribute no more than it does for its own
 // repairs of one, since that version would stale every approval pinned to the version before it.
 // The document's versions keep the name they were written with.
-func (s *Service) RenameAskAnswerers(ctx context.Context, artifactIDs []string, rename func(string) (string, bool)) []AnswererRename {
+func (s *Service) RenameAskAnswerers(ctx context.Context, artifactIDs []string, rename func(string) string) []AnswererRename {
 	ctx = store.WithTransactionTracking(ctx)
 	reports := make([]AnswererRename, 0, len(artifactIDs))
 	for _, artifactID := range artifactIDs {
 		_, skipped, err := s.repairDocument(ctx, artifactID, func(doc *crdt.Doc, origin any) (int, bool, error) {
-			tree, err := treeOf(doc)
-			if err != nil {
-				return 0, false, err
-			}
-			renamed := 0
-			pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
-				by, ok := askAnsweredBy(node)
-				if !ok {
+			_, renamed, err := rewriteTree(doc, origin, func(tree *pmdoc.Node) int {
+				renamed := 0
+				pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+					by, ok := askAnsweredBy(node)
+					if !ok {
+						return true
+					}
+					if next := rename(by); next != by {
+						node.Attrs["answered_by"] = next
+						renamed++
+					}
 					return true
-				}
-				if next, renames := rename(by); renames && next != by {
-					node.Attrs["answered_by"] = next
-					renamed++
-				}
-				return true
+				})
+				return renamed
 			})
-			if renamed == 0 {
-				return 0, false, nil
-			}
-			fragment := doc.GetXmlFragment(fragmentName)
-			if err := doc.TransactE(func(transaction *crdt.Transaction) error {
-				return pmdoc.Update(transaction, fragment, tree)
-			}, origin); err != nil {
-				return 0, false, err
-			}
-			return renamed, false, nil
+			return renamed, false, err
 		})
 		reports = append(reports, AnswererRename{ArtifactID: artifactID, Skipped: skipped, Err: err})
 	}
@@ -124,17 +115,9 @@ func (s *Service) documentIDs(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list documents: %w", err)
 	}
-	defer rows.Close()
-	var artifactIDs []string
-	for rows.Next() {
-		var artifactID string
-		if err := rows.Scan(&artifactID); err != nil {
-			return nil, fmt.Errorf("scan document: %w", err)
-		}
-		artifactIDs = append(artifactIDs, artifactID)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate documents: %w", err)
+	artifactIDs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("list documents: %w", err)
 	}
 	return artifactIDs, nil
 }

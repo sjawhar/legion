@@ -15,18 +15,14 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-func TestAnswerBlockAskWritesItsServerStateIntoTheDocument(t *testing.T) {
-	var documentService *docs.Service
-	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
-		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
-		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-		return documentService
-	})
-	issue := createInteractionIssue(t, handler, "TEST", "Answer typed ask", "Before\n")
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, ":::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n", model.Actor{Kind: "session", ID: "session-1"}); err != nil {
+// answerIndexedAsk writes an open ask block, ask-1, into artifactID, opens the ask on issueKey that
+// settlement would index for it, and answers it as answerer.
+func answerIndexedAsk(t *testing.T, handler http.Handler, database *store.Store, documentService *docs.Service, issueKey, artifactID, answerer string) {
+	t.Helper()
+	if _, err := documentService.ReplaceText(context.Background(), artifactID, ":::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n", model.Actor{Kind: "session", ID: "session-1"}); err != nil {
 		t.Fatalf("write ask block: %v", err)
 	}
-	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/asks", map[string]any{
 		"question": "Ship it?", "actor": model.Actor{Kind: "session", ID: "session-1"},
 	})
 	if created.Code != http.StatusCreated {
@@ -35,15 +31,26 @@ func TestAnswerBlockAskWritesItsServerStateIntoTheDocument(t *testing.T) {
 	askID := decodeBody[model.Ask](t, created).ID
 	if _, err := database.Pool.Exec(context.Background(), `
 		update asks set block_id = 'ask-1', block_artifact_id = $2 where id = $1
-	`, askID, issue.PrimaryArtifactID); err != nil {
+	`, askID, artifactID); err != nil {
 		t.Fatalf("attach indexed ask to block: %v", err)
 	}
 	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
 		"selected": []string{}, "text": "Yes.",
-	}, "alice")
+	}, answerer)
 	if answered.Code != http.StatusOK {
 		t.Fatalf("answer ask: status=%d body=%s", answered.Code, answered.Body.String())
 	}
+}
+
+func TestAnswerBlockAskWritesItsServerStateIntoTheDocument(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Answer typed ask", "Before\n")
+	answerIndexedAsk(t, handler, database, documentService, issue.Key, issue.PrimaryArtifactID, "alice")
 	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
 	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `state=\"answered\"`) ||
 		!strings.Contains(text.Body.String(), `answered_by=\"alice\"`) || !strings.Contains(text.Body.String(), `answer=\"Yes.\"`) {

@@ -12,7 +12,6 @@ import (
 	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/peoplemigration"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -27,28 +26,7 @@ var migrationPeople = peoplemigration.Map{"alice": "alice@example.com", "ada-exa
 func answeredUnderLogin(t *testing.T, handler http.Handler, database *store.Store, documentService *docs.Service) string {
 	t.Helper()
 	issue := createInteractionIssue(t, handler, "TEST", "Spec", "Before\n")
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID,
-		":::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n", model.Actor{Kind: "session", ID: "session-1"}); err != nil {
-		t.Fatalf("write ask block: %v", err)
-	}
-	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
-		"question": "Ship it?", "actor": model.Actor{Kind: "session", ID: "session-1"},
-	})
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create indexed ask: status=%d body=%s", created.Code, created.Body.String())
-	}
-	askID := decodeBody[model.Ask](t, created).ID
-	if _, err := database.Pool.Exec(context.Background(), `
-		update asks set block_id = 'ask-1', block_artifact_id = $2 where id = $1
-	`, askID, issue.PrimaryArtifactID); err != nil {
-		t.Fatalf("attach indexed ask to block: %v", err)
-	}
-	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
-		"selected": []string{}, "text": "Yes.",
-	}, "Ada-Example")
-	if answered.Code != http.StatusOK {
-		t.Fatalf("answer ask: status=%d body=%s", answered.Code, answered.Body.String())
-	}
+	answerIndexedAsk(t, handler, database, documentService, issue.Key, issue.PrimaryArtifactID, "Ada-Example")
 	waitForLiveText(t, documentService, issue.PrimaryArtifactID, `answered_by="ada-example"`)
 	return issue.PrimaryArtifactID
 }
