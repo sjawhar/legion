@@ -101,6 +101,8 @@ type Client struct {
 
 	mu     sync.Mutex
 	tokens map[int64]cachedToken
+	// repositories maps "owner/repo" to the installation that covers it, for RepositoryToken.
+	repositories map[string]int64
 }
 
 // New builds a client from the loaded App credentials. It returns (nil, nil)
@@ -120,12 +122,13 @@ func New(app *auth.AppConfig, base string) (*Client, error) {
 		base = defaultBase
 	}
 	return &Client{
-		app:    *app,
-		key:    key,
-		base:   strings.TrimSuffix(base, "/"),
-		http:   &http.Client{Timeout: 10 * time.Second},
-		now:    time.Now,
-		tokens: map[int64]cachedToken{},
+		app:          *app,
+		key:          key,
+		base:         strings.TrimSuffix(base, "/"),
+		http:         &http.Client{Timeout: 10 * time.Second},
+		now:          time.Now,
+		tokens:       map[int64]cachedToken{},
+		repositories: map[string]int64{},
 	}, nil
 }
 
@@ -176,6 +179,17 @@ func (c *Client) appJWT() (string, error) {
 // its Contents permission. A GitHub 404 is ErrNoInstallation; a missing or
 // "none" Contents permission is ErrNoContentsRead.
 func (c *Client) Installation(ctx context.Context, owner, repo string) (Installation, error) {
+	installation, err := c.installation(ctx, owner, repo)
+	if err != nil {
+		return Installation{}, err
+	}
+	if installation.Permissions.Contents != "read" && installation.Permissions.Contents != "write" {
+		return Installation{}, fmt.Errorf("%w on %s/%s", ErrNoContentsRead, owner, repo)
+	}
+	return installation, nil
+}
+
+func (c *Client) installation(ctx context.Context, owner, repo string) (Installation, error) {
 	if c == nil {
 		return Installation{}, ErrNoAppKey
 	}
@@ -202,10 +216,48 @@ func (c *Client) Installation(ctx context.Context, owner, repo string) (Installa
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return Installation{}, fmt.Errorf("decode installation: %w", err)
 	}
-	if payload.Permissions.Contents != "read" && payload.Permissions.Contents != "write" {
-		return Installation{}, fmt.Errorf("%w on %s/%s", ErrNoContentsRead, owner, repo)
-	}
 	return Installation{ID: payload.ID, AppSlug: payload.AppSlug, Permissions: payload.Permissions}, nil
+}
+
+// RepositoryToken returns an installation token of the installation covering owner/repo. The
+// installation a repository resolves to is remembered; a token that cannot be minted for it
+// forgets it, so an App moved between installations is looked up again.
+func (c *Client) RepositoryToken(ctx context.Context, owner, repo string) (string, error) {
+	if c == nil {
+		return "", ErrNoAppKey
+	}
+	name := owner + "/" + repo
+	c.mu.Lock()
+	installationID, known := c.repositories[name]
+	c.mu.Unlock()
+	if !known {
+		installation, err := c.installation(ctx, owner, repo)
+		if err != nil {
+			return "", err
+		}
+		installationID = installation.ID
+		c.mu.Lock()
+		c.repositories[name] = installationID
+		c.mu.Unlock()
+	}
+	token, err := c.Token(ctx, installationID)
+	if err != nil {
+		c.mu.Lock()
+		delete(c.repositories, name)
+		c.mu.Unlock()
+		return "", err
+	}
+	return token, nil
+}
+
+// Read performs GET path (an API path with its query, under the API origin) with an
+// installation token, and returns GitHub's answer as it came: body (up to the response limit),
+// status and headers.
+func (c *Client) Read(ctx context.Context, token, path string) ([]byte, int, http.Header, error) {
+	if c == nil {
+		return nil, 0, nil, ErrNoAppKey
+	}
+	return c.request(ctx, http.MethodGet, c.base+path, "Bearer "+token, responseLimit)
 }
 
 // Token returns an installation access token, minting one only when the

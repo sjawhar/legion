@@ -13,7 +13,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -170,11 +169,9 @@ func newSubscribersHandler(t *testing.T, database *store.Store, envoyURL string)
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
-	allowed := map[string]struct{}{"alice": {}}
 	deps, err := NewDeps(DepsInput{
 		Store:         database,
-		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed,
+		Identity:      headerIdentity(database),
 		AgentToken:    "agent-token",
 		ServerURL:     "https://dispatch.example",
 		Docs:          documentService,

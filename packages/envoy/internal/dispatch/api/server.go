@@ -45,19 +45,16 @@ const repoLabelPrefix = "repo:"
 
 // Deps are the API's application dependencies.
 type Deps struct {
-	Store    *store.Store
-	Identity identity.Identity
-	// AllowedLogins is the lowercase sign-in allowlist (DISPATCH_ALLOWED_LOGINS): the humans an
-	// issue may be assigned to, and the option list GET /users returns.
-	AllowedLogins  map[string]struct{}
+	Store          *store.Store
+	Identity       identity.Identity
 	AgentToken     string
 	DefaultProject string
 	ServerURL      string
 	Docs           docs.API
 	Envoy          *envoy.Client
 	Events         *events.Broker
-	// GitHub calls the GitHub App API for architecture-source access checks;
-	// nil is the "no app credentials yet" state and answers ErrNoAppKey.
+	// GitHub calls the GitHub App API for architecture-source access checks and the web app's
+	// GitHub reads; nil is the "no app credentials yet" state and answers ErrNoAppKey.
 	GitHub *githubapp.Client
 	// Architecture imports a project's architecture model from its configured
 	// source; the ticker, the Refresh route, and the sync tool share it so one
@@ -80,13 +77,18 @@ type Deps struct {
 	// is what a test gets.
 	Lifetime         context.Context
 	TestHooksEnabled bool
+	// StreamHeartbeat is how often a server-sent event stream writes a heartbeat and resolves
+	// its caller again, closing once the caller no longer resolves.
+	StreamHeartbeat time.Duration
 }
+
+// defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
+const defaultStreamHeartbeat = 15 * time.Second
 
 // DepsInput contains raw boot values used to construct API dependencies.
 type DepsInput struct {
 	Store           *store.Store
 	Identity        identity.Identity
-	AllowedLogins   map[string]struct{}
 	AgentToken      string
 	RepoProjectsRaw string
 	DefaultProject  string
@@ -111,6 +113,9 @@ type DepsInput struct {
 	AgentSecretsURL   string
 	AgentSecretsToken string
 	TestHooksEnabled  bool
+	// StreamHeartbeat replaces the event streams' heartbeat (Deps.StreamHeartbeat). Zero keeps
+	// fifteen seconds; a test proving a stream closes sets a short one.
+	StreamHeartbeat time.Duration
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -150,10 +155,13 @@ func NewDeps(input DepsInput) (Deps, error) {
 	if url := strings.TrimSpace(input.AgentSecretsURL); url != "" {
 		agentSecretsClient = agentsecrets.New(url, input.AgentSecretsToken)
 	}
+	heartbeat := input.StreamHeartbeat
+	if heartbeat == 0 {
+		heartbeat = defaultStreamHeartbeat
+	}
 	return Deps{
 		Store:            input.Store,
 		Identity:         input.Identity,
-		AllowedLogins:    input.AllowedLogins,
 		AgentToken:       input.AgentToken,
 		DefaultProject:   defaultProject,
 		ServerURL:        strings.TrimSuffix(input.ServerURL, "/"),
@@ -167,6 +175,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		AgentSecrets:     agentSecretsClient,
 		Lifetime:         input.Lifetime,
 		TestHooksEnabled: input.TestHooksEnabled,
+		StreamHeartbeat:  heartbeat,
 	}, nil
 }
 
@@ -503,7 +512,7 @@ func bearerSessionActor(authenticated model.Actor, supplied *model.Actor) (model
 }
 
 func (s *server) writeAuthenticationError(w http.ResponseWriter, err error) {
-	if errors.Is(err, identity.ErrNoIdentity) || errors.Is(err, identity.ErrLoginNotAllowed) {
+	if errors.Is(err, identity.ErrNoIdentity) {
 		identity.WriteError(w, err)
 		return
 	}

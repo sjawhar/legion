@@ -17,7 +17,6 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -457,7 +456,7 @@ func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
 		doc.handler, doc.database = newInteractionHandler(t, func(database *store.Store) docs.API {
 			doc.documentService = docs.New(docs.Deps{
 				Store: database, Events: doc.broker, Settle: settle, AgentToken: "agent-token",
-				Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"bob": {}}},
+				Identity: headerIdentity(database),
 			})
 			t.Cleanup(func() { _ = doc.documentService.Shutdown(context.Background()) })
 			return doc.documentService

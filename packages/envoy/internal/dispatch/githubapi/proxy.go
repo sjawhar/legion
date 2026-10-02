@@ -1,197 +1,74 @@
+// Package githubapi answers the web app's GitHub reads: a pull request's or issue's state and a
+// commit's checks, read as the GitHub App installation that covers the repository.
 package githubapi
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
+	"log/slog"
 	"net/http"
-	"net/url"
+	"regexp"
 	"strings"
-	"time"
 
-	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/api"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
 
-const (
-	githubAPIBase              = "https://api.github.com"
-	proactiveRefreshMS         = 5 * 60 * 1000
-	proxyRequestTimeout        = 60 * time.Second
-	proxyRequestMaxBytes int64 = 1 << 20
-)
+// Prefix is the route the web app reads GitHub under: /api/github/rest/<GitHub API path>.
+const Prefix = "/api/github/rest/"
 
-// ProxyConfig is the per-request state needed to forward a dashboard request
-// to GitHub. One config is built per request from the user's record + the
-// loaded Envoy App credentials.
-type ProxyConfig struct {
-	Tokens       *auth.Tokens
-	Users        auth.UserStore
-	Login        string
-	ClientID     string
-	ClientSecret string
-	// HTTPClient lets tests inject a fake transport. nil → default http.Client.
-	HTTPClient auth.HTTPClient
-	// RefreshFn lets tests override the refresh call. nil → real OAuth refresh.
-	RefreshFn func(ctx context.Context, tokens *auth.Tokens) (*auth.Tokens, error)
-}
+// readable are the GitHub API paths the web app reads, and the only ones the proxy forwards: a
+// pull request, an issue (which also answers for a pull request), and the check runs of a commit.
+// The App can read more of a repository than that, and none of the rest is shown anywhere.
+var readable = regexp.MustCompile(`^repos/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(?:pulls/[0-9]+|issues/[0-9]+|commits/[0-9A-Fa-f]{7,64}/check-runs)$`)
 
-func (c *ProxyConfig) httpClient() auth.HTTPClient {
-	if c.HTTPClient != nil {
-		return c.HTTPClient
+// ProxyREST answers GET Prefix<path> with GitHub's answer to GET /<path>, read with an
+// installation token of the App installation covering the path's repository. Any other method is
+// 405; a path the web app does not read is 404 GITHUB_PATH_REFUSED; a repository the App is not
+// installed on, or a deployment with no App key, is 503 GITHUB_TOKEN_UNAVAILABLE. The caller has
+// already established that a person is asking.
+func ProxyREST(w http.ResponseWriter, r *http.Request, client *githubapp.Client) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		api.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "the GitHub proxy reads only: use GET", "code": "METHOD_NOT_ALLOWED"})
+		return
 	}
-	return &http.Client{Timeout: proxyRequestTimeout}
-}
-
-func (c *ProxyConfig) refresh(ctx context.Context, tokens *auth.Tokens) (*auth.Tokens, error) {
-	if c.RefreshFn != nil {
-		return c.RefreshFn(ctx, tokens)
+	path := strings.TrimPrefix(r.URL.Path, Prefix)
+	match := readable.FindStringSubmatch(path)
+	if match == nil || match[1] == "." || match[1] == ".." || match[2] == "." || match[2] == ".." {
+		api.WriteJSON(w, http.StatusNotFound, map[string]string{"error": "the GitHub proxy reads a pull request, an issue or a commit's check runs only", "code": "GITHUB_PATH_REFUSED"})
+		return
 	}
-	return auth.RefreshTokens(ctx, c.ClientID, c.ClientSecret, tokens.RefreshToken, c.HTTPClient)
-}
-
-// ProxyREST forwards /api/github/rest/<rest_path> to GitHub.
-func ProxyREST(w http.ResponseWriter, r *http.Request, cfg *ProxyConfig) {
-	const prefix = "/api/github/rest/"
-	restPath := strings.TrimPrefix(r.URL.Path, prefix)
-	target := fmt.Sprintf("%s/%s", githubAPIBase, restPath)
+	owner, repo := match[1], match[2]
+	token, err := client.RepositoryToken(r.Context(), owner, repo)
+	switch {
+	case errors.Is(err, githubapp.ErrNoAppKey):
+		unavailable(w, "the GitHub App is not configured")
+		return
+	case errors.Is(err, githubapp.ErrNoInstallation):
+		unavailable(w, "the GitHub App is not installed on "+owner+"/"+repo)
+		return
+	case err != nil:
+		slog.Warn("dispatch: GitHub proxy could not mint an installation token", "repository", owner+"/"+repo, "error", err)
+		api.WriteJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub installation token: " + err.Error(), "code": "GITHUB_UPSTREAM"})
+		return
+	}
+	target := "/" + path
 	if r.URL.RawQuery != "" {
-		target = target + "?" + r.URL.RawQuery
+		target += "?" + r.URL.RawQuery
 	}
-	proxy(w, r, cfg, target)
-}
-
-// ProxyGraphQL forwards /api/github/graphql to GitHub.
-func ProxyGraphQL(w http.ResponseWriter, r *http.Request, cfg *ProxyConfig) {
-	proxy(w, r, cfg, githubAPIBase+"/graphql")
-}
-
-func proxy(w http.ResponseWriter, r *http.Request, cfg *ProxyConfig, target string) {
-	// Buffer body up front so we can retry after a token refresh.
-	var bodyBytes []byte
-	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Body != nil {
-		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, proxyRequestMaxBytes))
-		if err != nil {
-			var maxBytes *http.MaxBytesError
-			if errors.As(err, &maxBytes) {
-				http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, `{"error":"read body"}`, http.StatusBadRequest)
-			return
-		}
-		bodyBytes = data
-	}
-
-	ctx := r.Context()
-	tokens, err := proactivelyRefresh(ctx, cfg)
+	body, status, header, err := client.Read(r.Context(), token, target)
 	if err != nil {
-		writeNeedsReauth(w)
+		slog.Warn("dispatch: GitHub proxy read failed", "path", target, "error", err)
+		api.WriteJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub read failed", "code": "GITHUB_UPSTREAM"})
 		return
 	}
-	resp, err := forward(ctx, cfg, target, r, tokens, bodyBytes)
-	if err != nil {
-		http.Error(w, `{"error":"upstream"}`, http.StatusBadGateway)
-		return
+	if contentType := header.Get("Content-Type"); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
 	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		writeResponse(w, resp)
-		return
-	}
-	resp.Body.Close()
-
-	// Retry once after a forced refresh.
-	refreshed, err := refreshAndStore(ctx, cfg, tokens)
-	if err != nil {
-		writeNeedsReauth(w)
-		return
-	}
-	retry, err := forward(ctx, cfg, target, r, refreshed, bodyBytes)
-	if err != nil {
-		http.Error(w, `{"error":"upstream"}`, http.StatusBadGateway)
-		return
-	}
-	if retry.StatusCode == http.StatusUnauthorized {
-		retry.Body.Close()
-		writeNeedsReauth(w)
-		return
-	}
-	writeResponse(w, retry)
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
 }
 
-func proactivelyRefresh(ctx context.Context, cfg *ProxyConfig) (*auth.Tokens, error) {
-	if cfg.Tokens.AccessExpiresAt-time.Now().UnixMilli() >= proactiveRefreshMS {
-		return cfg.Tokens, nil
-	}
-	return refreshAndStore(ctx, cfg, cfg.Tokens)
-}
-
-func refreshAndStore(ctx context.Context, cfg *ProxyConfig, tokens *auth.Tokens) (*auth.Tokens, error) {
-	refreshed, err := cfg.refresh(ctx, tokens)
-	if err != nil {
-		return nil, err
-	}
-	// Persist the refreshed pair onto the existing user record. A missing
-	// record means the user logged out under a live identity; resurrecting it
-	// here would undo that, so refuse instead.
-	user, err := cfg.Users.Read(ctx, cfg.Login)
-	if err != nil {
-		return nil, err
-	}
-	if user == nil {
-		return nil, fmt.Errorf("refresh tokens: no user record for %q (logged out?)", cfg.Login)
-	}
-	user.Tokens = *refreshed
-	if err := cfg.Users.Write(ctx, user); err != nil {
-		return nil, err
-	}
-	cfg.Tokens = refreshed
-	return refreshed, nil
-}
-
-func forward(ctx context.Context, cfg *ProxyConfig, target string, r *http.Request, tokens *auth.Tokens, body []byte) (*http.Response, error) {
-	if _, err := url.Parse(target); err != nil {
-		return nil, err
-	}
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, r.Method, target, bodyReader)
-	if err != nil {
-		return nil, err
-	}
-	accept := r.Header.Get("Accept")
-	if accept == "" {
-		accept = "application/vnd.github+json"
-	}
-	req.Header.Set("Accept", accept)
-	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
-	if ct := r.Header.Get("Content-Type"); ct != "" {
-		req.Header.Set("Content-Type", ct)
-	}
-	return cfg.httpClient().Do(req)
-}
-
-func writeResponse(w http.ResponseWriter, resp *http.Response) {
-	defer resp.Body.Close()
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	}
-	for name, values := range resp.Header {
-		if strings.HasPrefix(strings.ToLower(name), "x-ratelimit-") {
-			for _, v := range values {
-				w.Header().Add(name, v)
-			}
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
-}
-
-func writeNeedsReauth(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusUnauthorized)
-	json.NewEncoder(w).Encode(map[string]bool{"needs_reauth": true})
+func unavailable(w http.ResponseWriter, message string) {
+	api.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": message, "code": "GITHUB_TOKEN_UNAVAILABLE"})
 }

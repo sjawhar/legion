@@ -429,7 +429,7 @@ func TestArtifactIDRoutesValidateBeforeDatabaseUse(t *testing.T) {
 		Store: &store.Store{},
 		Identity: identity.HeaderIdentity{
 			Header:        "X-Dispatch-User",
-			AllowedLogins: map[string]struct{}{"alice": {}},
+			People:        store.NewPgPeopleStore(nil),
 		},
 	})
 
