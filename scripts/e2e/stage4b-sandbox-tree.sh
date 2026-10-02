@@ -266,34 +266,42 @@ pool_tree_room() {
 
 # limit_pending SELECTOR prints each pod of the run matching SELECTOR (label pairs added to the
 # run's project label) that the scheduler cannot place because the legion pool is at its limits:
-# Pending and PodScheduled=False Unschedulable, and Karpenter's current verdict on it is that every
-# instance type exceeds the pool's limits. That verdict is Karpenter's newest FailedScheduling event
-# naming this pod by uid, no older than its Unschedulable transition. A Sandbox pod keeps its
-# Sandbox's name across replacements, and events outlive the pod they name, so a name match is no
-# evidence. The transition does not move while the pod stays unschedulable, so an older limit event
-# says nothing once Karpenter has given a newer reason (affinity, the volume's node, a taint). The
-# default scheduler's own FailedScheduling events, which every Pending pod gets, are not
-# Karpenter's verdict. Prints nothing when there is none, or when the cluster cannot be read.
+# Pending and PodScheduled=False Unschedulable, and Karpenter's current word on it is that every
+# instance type exceeds the pool's limits. That word is Karpenter's newest event of any reason
+# naming this pod by uid, which must be the FailedScheduling limit message and no older than the
+# pod's Unschedulable transition. A Sandbox pod keeps its Sandbox's name across replacements, and
+# events outlive the pod they name, so a name match is no evidence. The transition does not move
+# while the pod stays unschedulable, so a newer Karpenter event (a genuine reason, or Nominated
+# once room frees) supersedes an older limit event. The default scheduler's own FailedScheduling
+# events, which every Pending pod gets, are not Karpenter's word. Each line carries its evidence:
+# the limit event's time and message, the pod's PodScheduled condition, and the default
+# scheduler's newest FailedScheduling message for the pod. A misclassification is therefore
+# visible, and it can only ever read BLOCKED, never PASS. No recency window bounds the event: it
+# would rest on Karpenter's re-emit interval, which no one has measured on the deployed version.
+# Prints nothing when there is none, or when the cluster cannot be read.
 limit_pending() {
   kubectl --context "$operator" -n "$namespace" --request-timeout=20s get pods -l "legion.dev/project=$run_label,$1" -o json >"$work/limit-pods.json" || return 0
-  kubectl --context "$operator" -n "$namespace" --request-timeout=20s get events --field-selector reason=FailedScheduling -o json >"$work/limit-events.json" || return 0
+  kubectl --context "$operator" -n "$namespace" --request-timeout=20s get events --field-selector involvedObject.kind=Pod -o json >"$work/limit-events.json" || return 0
   jq -r --slurpfile events "$work/limit-events.json" '
     $events[0] as $events
     | def seconds: sub("\\.[0-9]+"; "") | fromdateiso8601;
     def at: .series.lastObservedTime // .lastTimestamp // .eventTime // .metadata.creationTimestamp;
     [.items[] | select(.status.phase == "Pending")
       | {name: .metadata.name, uid: .metadata.uid,
-         since: ([.status.conditions[]? | select(.type == "PodScheduled" and .status == "False" and .reason == "Unschedulable") | .lastTransitionTime // empty] | first)}
-      | select(.uid != null and .since != null) | .since |= seconds] as $pending
+         condition: ([.status.conditions[]? | select(.type == "PodScheduled" and .status == "False" and .reason == "Unschedulable")] | first)}
+      | select(.uid != null and .condition.lastTransitionTime != null)
+      | .since = (.condition.lastTransitionTime | seconds)] as $pending
     | [$events.items[]
-        | select(.involvedObject.kind == "Pod" and (.source.component // .reportingComponent) == "karpenter" and at != null)
-        | {uid: .involvedObject.uid, t: (at | seconds), limit: ((.message // "") | contains("exceed limits for nodepool (NodePool=legion)"))}
-      ] as $verdicts
+        | select(.involvedObject.kind == "Pod" and at != null)
+        | {uid: .involvedObject.uid, component: (.source.component // .reportingComponent), reason, message: (.message // ""), at: at, t: (at | seconds)}
+      ] as $seen
     | $pending[]
     | . as $pod
-    | ([$verdicts[] | select(.uid == $pod.uid)] | max_by(.t)) as $current
-    | select($current != null and $current.limit and $current.t >= $pod.since)
-    | "pod \(.name) (uid \(.uid); Karpenter: all available instance types exceed limits for nodepool legion)"' "$work/limit-pods.json" | sort -u
+    | ([$seen[] | select(.uid == $pod.uid and .component == "karpenter")] | max_by(.t)) as $current
+    | select($current != null and $current.reason == "FailedScheduling"
+        and ($current.message | contains("exceed limits for nodepool (NodePool=legion)")) and $current.t >= $pod.since)
+    | ([$seen[] | select(.uid == $pod.uid and .component == "default-scheduler" and .reason == "FailedScheduling")] | max_by(.t)) as $scheduler
+    | "pod \($pod.name) (uid \($pod.uid)): Karpenter at \($current.at): \($current.message | tojson); PodScheduled \($pod.condition.reason) since \($pod.condition.lastTransitionTime): \(($pod.condition.message // "") | tojson); default scheduler: \(if $scheduler == null then "none" else ($scheduler.message | tojson) end)"' "$work/limit-pods.json" | sort -u
 }
 
 # capacity_subject is the label selector (within the run) of the pods the current wait needs placed,
@@ -324,7 +332,7 @@ limit_pending_blocked() {
   local pending
   [ -n "$capacity_subject" ] || return 0
   pending=$(limit_pending "$capacity_subject" 2>/dev/null) || pending=
-  [ -z "$pending" ] || blocked "capacity: the legion pool is at its limits, so the scheduler cannot place $(tr '\n' ';' <<<"$pending")"
+  [ -z "$pending" ] || blocked "capacity: the legion pool is at its limits, so the scheduler cannot place $(awk 'NR > 1 { printf " // " } { printf "%s", $0 }' <<<"$pending")"
 }
 
 # ---- the runtime seam: a claim's process is its role container in one issue pod -------------------
