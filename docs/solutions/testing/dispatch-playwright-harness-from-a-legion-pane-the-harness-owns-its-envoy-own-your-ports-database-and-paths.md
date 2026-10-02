@@ -72,7 +72,9 @@ Envoy is the only Envoy this harness is ever meant to talk to. With `PLAYWRIGHT_
 which `bun run e2e:deployed` expects and does not set itself, no Dispatch server or fake GitHub
 starts; Playwright still starts the fake Envoy on `FAKE_ENVOY_PORT` and the plain-HTTP proxy on
 `PLAIN_HTTP_PORT`, and `deploy/compose/dispatch.acceptance.compose.yml` derives the acceptance
-server's Envoy URL from the fake Envoy port.
+server's Envoy URL from the fake Envoy port. Before any row, `e2e/preflight.ts` puts a session in
+the fake and refuses the run unless the server's `GET /api/v1/agents` lists it, so a server
+reading any other Envoy cannot pass rows against the wrong sessions.
 
 Proof: with `ENVOY_URL=http://127.0.0.1:1` exported, the pre-fix script
 answers `GET /api/v1/agents` with `dial tcp 127.0.0.1:1: connect: connection
@@ -108,9 +110,9 @@ DISPATCH_E2E_PORT=87NN FAKE_ENVOY_PORT=90NN FAKE_GITHUB_PORT=91NN PLAIN_HTTP_POR
 
 `DATABASE_URL` is read by the server script and by `e2e/seed.ts`. The four ports are resolved for
 the whole TypeScript suite by `e2e/harness-ports.ts`, whose nine importers are
-`e2e/playwright.config.ts`, `e2e/api.ts`, `e2e/agents.ts`, `e2e/agent-tokens.e2e.ts`,
-`e2e/failed-room.e2e.ts`, `e2e/fake-envoy.ts`, `e2e/fake-github.ts`,
-`e2e/fake-github-helpers.ts` and `e2e/plain-http-proxy.ts` — `e2e/seed.ts` is not one of them; it
+`e2e/playwright.config.ts`, `e2e/preflight.ts`, `e2e/api.ts`, `e2e/agents.ts`,
+`e2e/fake-envoy.ts`, `e2e/fake-github.ts`, `e2e/fake-github-helpers.ts`,
+`e2e/plain-http-origin.ts` and `e2e/plain-http-proxy.ts` — `e2e/seed.ts` is not one of them; it
 reaches the server through `e2e/api.ts`. So those variables move the whole harness together. Start
 nothing else: the
 container from `packages/envoy/scripts/dev-postgres.sh` and what the Playwright config starts are

@@ -1,5 +1,9 @@
-import { dispatchPort, plainHttpPort } from "./harness-ports";
-import { plainHttpHost } from "./plain-http-origin";
+// The `chromium-plain-http` project's origin (e2e/plain-http-origin.ts): a plain-HTTP name the
+// browser maps to this listener, forwarded to the server under test at that server's own loopback
+// origin, which its dev sign-in host fence requires.
+import { baseUrl } from "./api";
+import { plainHttpPort } from "./harness-ports";
+import { plainHttpOrigin } from "./plain-http-origin";
 
 interface ProxySocket {
   readonly headers: Record<string, string>;
@@ -14,8 +18,8 @@ const BunWebSocket = WebSocket as unknown as new (
   options: { readonly headers: Record<string, string> }
 ) => WebSocket;
 
-const target = new URL(process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${dispatchPort}`);
-const browserOrigin = `http://${plainHttpHost}:${plainHttpPort}`;
+const target = new URL(baseUrl);
+const browserHost = new URL(plainHttpOrigin).host;
 const hopByHopHeaders = new Set([
   "connection",
   "host",
@@ -37,18 +41,16 @@ function forwardedHeaders(source: Headers, websocket: boolean): Headers {
   }
   // The page's origin is the plain-HTTP name; the dev sign-in server accepts its own loopback
   // origin, so writes are forwarded as same-origin requests to the server under test.
-  if (headers.get("origin") === browserOrigin) headers.set("origin", target.origin);
-  const referer = headers.get("referer");
-  if (referer?.startsWith(`${browserOrigin}/`)) {
-    headers.set("referer", `${target.origin}${referer.slice(browserOrigin.length)}`);
-  }
+  if (headers.get("origin") === plainHttpOrigin) headers.set("origin", target.origin);
   return headers;
 }
 
+// The target is plain HTTP: the one spec this proxy serves skips an https target
+// (e2e/plain-http-origin.e2e.ts), since it has no plain-HTTP origin to stand in for.
 function upstreamUrl(request: Request, websocket: boolean): URL {
   const incoming = new URL(request.url);
   const url = new URL(`${incoming.pathname}${incoming.search}`, target);
-  if (websocket) url.protocol = target.protocol === "https:" ? "wss:" : "ws:";
+  if (websocket) url.protocol = "ws:";
   return url;
 }
 
@@ -62,8 +64,25 @@ function sendUpstream(socket: ProxySocket, message: ArrayBuffer | string | Uint8
 
 Bun.serve<ProxySocket>({
   hostname: "127.0.0.1",
+  // The workspace event stream is silent between the server's 15 s heartbeats, and Bun's default
+  // 10 s idle timeout would cut it before the first one.
+  idleTimeout: 0,
   port: plainHttpPort,
   async fetch(request, server) {
+    // Under dev sign-in the server answers only its own dashboard Host, so a page that reached it
+    // by another name (a DNS-rebinding page, a tunnel) is told so
+    // (packages/envoy/internal/dispatch/routes/devsignin.go's requireHost). This proxy is such a
+    // tunnel and sends the target's Host upstream, so it keeps the same fence for its own name.
+    const host = request.headers.get("host") ?? "";
+    if (host.toLowerCase() !== browserHost) {
+      return Response.json(
+        {
+          code: "HOST_MISMATCH",
+          error: `request Host ${JSON.stringify(host)} is not the plain-HTTP origin ${JSON.stringify(browserHost)}`,
+        },
+        { status: 421 }
+      );
+    }
     const websocket = request.headers.get("upgrade")?.toLowerCase() === "websocket";
     const url = upstreamUrl(request, websocket);
     const headers = forwardedHeaders(request.headers, websocket);
@@ -81,6 +100,9 @@ Bun.serve<ProxySocket>({
       headers,
       method: request.method,
       redirect: "manual",
+      // A browser that leaves (a closed page, a reconnecting event stream) ends the upstream
+      // request with it, so the server under test keeps no subscriber for a page that is gone.
+      signal: request.signal,
     });
   },
   websocket: {
@@ -110,4 +132,4 @@ Bun.serve<ProxySocket>({
   },
 });
 
-console.log(`plain-HTTP proxy on ${browserOrigin} for ${target.origin}`);
+console.log(`plain-HTTP proxy on ${plainHttpOrigin} for ${target.origin}`);

@@ -61,8 +61,11 @@ interface ApiOptions {
   token?: string;
 }
 
+/** The name of the session cookie the server issues at sign-in, dev or GitHub. */
+export const sessionCookieName = "dsession";
+
 /** The server's dev sign-in route for `login`, relative to the dashboard origin; it answers a
- *  sign-in with a 302 that sets the `dsession` cookie. */
+ *  sign-in with a 302 that sets the session cookie. */
 export function devSignInPath(login: string): string {
   return `/auth/_dev/signin?login=${encodeURIComponent(login)}`;
 }
@@ -73,7 +76,7 @@ export function devSignInError(login: string, status: number, responseText: stri
 
 const sessionCookies = new Map<string, Promise<string>>();
 
-/** The `dsession` cookie the server issues `login` at its dev sign-in route, minted once per
+/** The session cookie the server issues `login` at its dev sign-in route, minted once per
  *  spelling of a login and kept until something revokes it: the generation the cookie names lives
  *  in `user_sessions`, which `resetDatabase` truncates (it calls `forgetSessions`), and a browser
  *  context's Sign out as the same login advances it. A sign-in that fails, by its answer or by
@@ -87,7 +90,7 @@ function sessionCookie(login: string): Promise<string> {
     async (response) => {
       const value = response.headers
         .getSetCookie()
-        .find((header) => header.startsWith("dsession="))
+        .find((header) => header.startsWith(`${sessionCookieName}=`))
         ?.split(";")[0];
       if (response.status !== 302 || value === undefined) {
         throw devSignInError(login, response.status, await response.text());

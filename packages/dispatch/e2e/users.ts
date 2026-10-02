@@ -24,3 +24,24 @@ export async function asUser(
   await signIn(context, login);
   return context;
 }
+
+/** `asUser` for the `chromium-plain-http` project: a context signed in as `login` by opening the
+ *  dev sign-in route in a page rather than through `context.request`. The project's host name
+ *  resolves only inside Chromium (its `--host-resolver-rules`), while the request client resolves
+ *  names in Node, which answers `ENOTFOUND`. A sign-in the route refuses is not redirected, so the
+ *  page's own answer, with its body, is the refusal. */
+export async function asPlainHttpUser(browser: Browser, login: string): Promise<BrowserContext> {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const landed = await page.goto(devSignInPath(login));
+  const signInResponse = (await landed?.request().redirectedFrom()?.response()) ?? landed;
+  if (signInResponse?.status() !== 302) {
+    throw devSignInError(
+      login,
+      signInResponse?.status() ?? 0,
+      signInResponse ? await signInResponse.text() : ""
+    );
+  }
+  await page.close();
+  return context;
+}

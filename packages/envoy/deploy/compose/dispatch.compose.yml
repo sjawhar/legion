@@ -47,6 +47,5 @@ services:
       # Signing key and optional app.json credentials.
       - dispatch-data:/home/envoy/.local/share/dispatch
 
-
 volumes:
   dispatch-data:

@@ -3,7 +3,8 @@ services:
   # suite signs in through the fenced dev sign-in route, so it uses cookie identity, loopback
   # listener, origin, and database, and no signing key is passed or mounted. The server generates
   # one key for its process alone. ENVOY_URL derives from the harness port, and no Envoy token is
-  # set, so this server reaches only the fake listener Playwright starts.
+  # set, so this server reaches only the fake listener Playwright starts. The acceptance service
+  # builds its own image, so the recipe needs none of the production service's variables.
   postgres-acceptance:
     image: postgres:16
     network_mode: host
@@ -23,6 +24,9 @@ services:
 
   dispatch-acceptance:
     image: ghcr.io/sjawhar/legion/envoy:${ENVOY_IMAGE_TAG:?set ENVOY_IMAGE_TAG (see deploy/README.md)}
+    build:
+      context: ../../../..
+      dockerfile: packages/envoy/docker/Dockerfile
     network_mode: host
     entrypoint: ["/usr/local/bin/envoy-dispatch"]
     depends_on:

@@ -46,8 +46,9 @@ every interface.
 - `compose/dispatch.compose.yml` — the production Dispatch server against an external database
   (`DATABASE_URL`).
 - `compose/dispatch.acceptance.compose.yml` — isolated Postgres and Dispatch services for a
-  deployed-image acceptance run; it is separate so production Compose commands need no
-  acceptance-only harness variables.
+  deployed-image acceptance run, building the image itself; it is separate so production Compose
+  commands need no acceptance-only harness variables, and the acceptance recipe none of
+  production's.
 - `scripts/up-listener.sh` — starts the listener with `docker compose`.
 - `scripts/up-dispatch.sh` — starts Dispatch with `docker compose`.
 - `scripts/sync-host.sh` — rsyncs `deploy/` to a remote host.

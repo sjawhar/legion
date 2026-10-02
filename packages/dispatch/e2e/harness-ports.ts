@@ -31,8 +31,8 @@ export const fakeEnvoyPort = harnessPort("FAKE_ENVOY_PORT", "9021");
 export const fakeGithubPort = harnessPort("FAKE_GITHUB_PORT", "9022");
 export const plainHttpPort = harnessPort("PLAIN_HTTP_PORT", "9023");
 
-/** The same four, paired with the variable a message has to name. */
-export const harnessPorts = [
+// The same four, paired with the variable a collision message has to name.
+const harnessPorts = [
   { variable: "DISPATCH_E2E_PORT", port: dispatchPort },
   { variable: "FAKE_ENVOY_PORT", port: fakeEnvoyPort },
   { variable: "FAKE_GITHUB_PORT", port: fakeGithubPort },

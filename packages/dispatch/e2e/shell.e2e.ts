@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { baseUrl, createIssue, createProject } from "./api";
+import { baseUrl, createIssue, createProject, sessionCookieName } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -49,12 +49,14 @@ test("signing out revokes the session on the server and returns to the sign-in p
     await page.getByRole("button", { name: "Open navigation" }).click();
   }
   await expect(page.getByText("Signed in as alice")).toBeVisible();
-  const session = (await context.cookies()).find((cookie) => cookie.name === "dsession");
+  const session = (await context.cookies()).find((cookie) => cookie.name === sessionCookieName);
   if (session === undefined) {
-    throw new Error("no dsession cookie after sign-in");
+    throw new Error(`no ${sessionCookieName} cookie after sign-in`);
   }
   const whoami = () =>
-    fetch(new URL("/auth/whoami", baseUrl), { headers: { Cookie: `dsession=${session.value}` } });
+    fetch(new URL("/auth/whoami", baseUrl), {
+      headers: { Cookie: `${sessionCookieName}=${session.value}` },
+    });
   // The copy authenticates on its own before Sign out, so its refusal afterwards is the logout's.
   expect((await whoami()).status).toBe(200);
 

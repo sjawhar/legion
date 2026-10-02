@@ -502,11 +502,17 @@ paths move; the two runs' `FAILED-ROOM` lines are the comparison.
 `FAKE_ENVOY_PORT` (default `9021`) and the only Envoy a local harness server talks to:
 `run-server.sh` builds `ENVOY_URL` from that port alone. Playwright starts the same listener for a
 deployed run; `deploy/compose/dispatch.acceptance.compose.yml` requires `FAKE_ENVOY_PORT` and
-derives the target's Envoy URL from it. Tests seed live sessions and their capabilities with
+derives the target's Envoy URL from it. Before any row runs, `e2e/preflight.ts` (the config's
+`globalSetup`, which runs once the web servers are up) puts a session in this run's fake and
+requires the target's `GET /api/v1/agents` to list it, then clears the fake: a target that reads
+another Envoy listener refuses the run naming the fake's port, rather than answering every row
+from sessions none of them seeded. Tests seed live sessions and their capabilities with
 `setLiveSessions`, change their scripted 200/404 send response with `setSessionSendStatus`, and
 inspect targeted sends with `getSentMessages`; persisted subscriptions use `setInterests`, all from
 `e2e/agents.ts`. `resetDatabase()` clears every fake Envoy fixture as well as the database, so a
-subscription from an earlier row cannot match a recycled issue key. These Envoy fixture helpers run
+subscription from an earlier row cannot match a recycled issue key; the fake holds all of its
+fixture state in one object that the reset replaces whole, so a field added to it is reset with the
+rest. These Envoy fixture helpers run
 for local and deployed targets. The fake GitHub's `seedFakeGithub` remains unavailable to a deployed
 target and skips the test that calls it. A fixture call follows `resetDatabase()` rather than running
 beside it in a `Promise.all`: a reset left running would overlap the next test's, and each waits out
@@ -581,8 +587,10 @@ resolution, those listeners refuse it too, not only the Playwright config.
 
 `e2e/playwright.config.ts` probes every port it starts before any web server starts and fails the
 run with one message listing every taken port beside its own variable, before a single spec runs.
-That is all four ports for a local run and `FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed
-run. Its remedies are
+One table in the config names each listener, its port's variable and whether a deployed run starts
+it, and both the probe and `webServer` read the started rows: all four ports for a local run, and
+`FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed run. The refusal names only the variables
+the run probes. Its remedies are
 to stop whatever listens there, or to move a local run to free ports **and its own
 `DATABASE_URL`** — moving only the ports starts this run's servers elsewhere and still truncates
 the database the leftover server holds, and `e2e/seed.ts`'s quiesce reaches only the server at the
@@ -618,19 +626,29 @@ paragraph's hard break along with the text after it, which Chromium and WebKit n
 spec is the one that needs a second engine; the picker spec runs for the reason given under `webkit` above. CI installs Firefox
 beside Chromium for them (`bun run e2e:install` does the same locally).
 
-The `chromium-plain-http` project runs `e2e/plain-http-origin.e2e.ts` alone, selected by file name:
-Chromium maps `dispatch-e2e.test` to loopback with `--host-resolver-rules`, and its `baseURL` is
+The `chromium-plain-http` project runs `e2e/plain-http-origin.e2e.ts` and
+`e2e/plain-http-proxy.e2e.ts`, selected by file name: Chromium maps `dispatch-e2e.test` to
+loopback with `--host-resolver-rules`, and its `baseURL` is
 `http://dispatch-e2e.test:<PLAIN_HTTP_PORT>`. `e2e/plain-http-proxy.ts` listens there and forwards
 HTTP and WebSocket requests to the server under test at that server's own loopback origin, which
 the dev sign-in host fence requires. So the page's origin is a plain-HTTP host name that is not
 loopback - what a LAN address, a tailnet name or the phone of the manual check gets - where
-`isSecureContext` is false and `crypto.randomUUID` is undefined. Its two tests sign in by opening
-the dev sign-in route through the proxy, then open a document and type a paragraph into it, and
-check a comment body renders formatted - block ids and Markdown bodies both mint through
-`@legion/proof-editor`'s `uuidV4` (LEGION-461). Each first asserts that insecure context, so a
-fixture that drifted to a secure origin fails in any run, one test or both, rather than passing for
-another reason. `chromium` and `iphone` ignore that spec by file name. It skips when
-`PLAYWRIGHT_BASE_URL` is `https:`, where there is no plain-HTTP origin to proxy.
+`isSecureContext` is false and `crypto.randomUUID` is undefined. The proxy keeps the server's fence
+for itself: a request whose `Host` is not `dispatch-e2e.test:<PLAIN_HTTP_PORT>` is answered
+`421 HOST_MISMATCH` before anything is forwarded, since the proxy sends the target's own `Host`
+upstream and would otherwise sign in a page that reached loopback by any name. It sets no idle
+timeout, since the workspace event stream is silent between the server's 15 s heartbeats, and
+ends each upstream request when its browser request ends, so a closed page leaves the server no
+subscriber. The origin spec's two tests sign in
+by opening the dev sign-in route through the proxy (`asPlainHttpUser` in `e2e/users.ts`), then
+open a document and type a paragraph into it, and check a comment body renders formatted - block
+ids and Markdown bodies both mint through `@legion/proof-editor`'s `uuidV4` (LEGION-461). Each first
+asserts that insecure context, so a fixture that drifted to a secure origin fails in any run, one
+test or both, rather than passing for another reason. The proxy spec checks the `Host` fence both
+ways through the harness's proxy, and runs a second proxy in front of a stand-in upstream to show
+a closed page's event stream ending upstream. `chromium` and `iphone` ignore both specs by file
+name. Both skip when `PLAYWRIGHT_BASE_URL` is `https:`, where there is no plain-HTTP origin to
+proxy.
 
 ## Phone acceptance
 
