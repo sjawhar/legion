@@ -26,18 +26,18 @@ already encrypted; nothing else on the host can reach that address:
 
 ```
 DISPATCH_LISTEN_HOST=100.x.y.z        # tailscale ip -4
-DISPATCH_SERVER_URL=http://example-host-devbox:8766 # the exact browser URL and OAuth callback origin
+DISPATCH_SERVER_URL=http://example-host-devbox:8766 # the exact browser URL and sign-in callback origin
 DISPATCH_INSECURE_COOKIE=1            # cookies over the http:// tailnet URL
 ```
 
-The origin humans open in the browser is the OAuth callback origin: the server builds
+The origin humans open in the browser is the sign-in callback origin: the server builds
 `<dispatch.serverUrl>/auth/callback` from `dispatch.serverUrl` in the mounted `envoy.json`, and
-the GitHub App must list exactly that URL. On Sami's devbox that is `http://example-host-devbox:8766`
+the sign-in pool's app client must list exactly that URL. On Sami's devbox that is `http://example-host-devbox:8766`
 (recorded as `DISPATCH_PUBLIC_ORIGIN` in `compose/.env`); a deploy whose `/auth/start` redirect
 stops matching it breaks sign-in for everyone, so the auto-deployer checks the redirect after
 every deploy and rolls back on a mismatch.
 
-Never bind `0.0.0.0`: that exposes the OAuth endpoints and session cookies on
+Never bind `0.0.0.0`: that exposes the sign-in endpoints and session cookies on
 every interface.
 
 ## Layout

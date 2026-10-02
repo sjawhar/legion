@@ -34,7 +34,7 @@ func signInEnvironment(overrides map[string]string) map[string]string {
 		"DISPATCH_SIGNIN_ISSUER":        "https://issuer.example/pool",
 		"DISPATCH_SIGNIN_CLIENT_ID":     "dispatch-client",
 		"DISPATCH_SIGNIN_CLIENT_SECRET": "client-secret",
-		"DISPATCH_SIGNIN_GROUP":         "platform-managers",
+		"DISPATCH_SIGNIN_GROUP":         "dispatch-members",
 	}
 	for name, value := range overrides {
 		values[name] = value
@@ -48,7 +48,7 @@ func TestResolveBootConfigReadsTheFourSignInSettings(t *testing.T) {
 		t.Fatalf("resolve boot config: %v", err)
 	}
 	if boot.IdentityHeader != "" || boot.SignInIssuer != "https://issuer.example/pool" || boot.SignInClientID != "dispatch-client" ||
-		boot.SignInClientSecret != "client-secret" || boot.SignInGroup != "platform-managers" {
+		boot.SignInClientSecret != "client-secret" || boot.SignInGroup != "dispatch-members" {
 		t.Fatalf("boot = %#v, want cookie identity with the four sign-in settings", boot)
 	}
 }
@@ -834,7 +834,7 @@ func devSignInEnvironment(overrides map[string]string) func(string) string {
 		values["DISPATCH_SIGNIN_ISSUER"] = "https://issuer.example/pool"
 		values["DISPATCH_SIGNIN_CLIENT_ID"] = "dispatch-client"
 		values["DISPATCH_SIGNIN_CLIENT_SECRET"] = "client-secret"
-		values["DISPATCH_SIGNIN_GROUP"] = "platform-managers"
+		values["DISPATCH_SIGNIN_GROUP"] = "dispatch-members"
 	}
 	return envGetter(values)
 }

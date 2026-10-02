@@ -41,9 +41,7 @@ done
 
 # Architecture-source access checks run against the fake GitHub listener with
 # throwaway App credentials: a fresh RSA key per run (nothing secret to
-# commit), a dummy client secret because LoadAppFromEnv requires one whenever
-# the client id is set, and the trusted-header ack the server demands when App
-# credentials meet header identity. The fresh signing key makes the cookie
+# commit) beside a fake client id. The fresh signing key makes the cookie
 # layer just as isolated; nothing reaches the caller's persistent data dir.
 app_pem_b64="$(openssl genrsa 2048 2>/dev/null | base64 -w0)"
 signing_key="$(openssl rand -hex 32)"

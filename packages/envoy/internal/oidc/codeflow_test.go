@@ -14,7 +14,7 @@ const (
 	flowClientID     = "dispatch-client"
 	flowClientSecret = "dispatch-client-secret"
 	flowRedirect     = "https://dispatch.example/auth/callback"
-	flowUsername     = "GoogleWorkspace_a.b+c@d.example"
+	flowUsername     = "ExampleIdP_a.b+c@d.example"
 )
 
 // newCodeFlowFor starts a code-flow issuer for flowClientID and discovers it.
@@ -37,13 +37,13 @@ func personClaims(groups ...string) map[string]any {
 		"cognito:username": flowUsername,
 		"cognito:groups":   groups,
 		"email":            "someone-else@d.example",
-		"identities":       []map[string]any{{"providerName": "GoogleWorkspace", "providerType": "SAML", "primary": "true"}},
+		"identities":       []map[string]any{{"providerName": "ExampleIdP", "providerType": "SAML", "primary": "true"}},
 	}
 }
 
 func TestCodeFlowExchangesACodeForTheSignedInPerson(t *testing.T) {
 	issuer, flow := newCodeFlowFor(t)
-	issuer.SignInAs(personClaims("platform-managers", "hawk-users"))
+	issuer.SignInAs(personClaims("dispatch-members", "other-group"))
 
 	authURL := flow.AuthURL(flowRedirect, "state-1", "nonce-1")
 	code, state := issuer.Authorize(t, authURL)
@@ -57,10 +57,10 @@ func TestCodeFlowExchangesACodeForTheSignedInPerson(t *testing.T) {
 	if session.Claims.Username != flowUsername {
 		t.Errorf("Username = %q, want %q", session.Claims.Username, flowUsername)
 	}
-	if want := []string{"platform-managers", "hawk-users"}; !reflect.DeepEqual(session.Claims.Groups, want) {
+	if want := []string{"dispatch-members", "other-group"}; !reflect.DeepEqual(session.Claims.Groups, want) {
 		t.Errorf("Groups = %q, want %q", session.Claims.Groups, want)
 	}
-	if want := []string{"GoogleWorkspace"}; !reflect.DeepEqual(session.Claims.Providers, want) {
+	if want := []string{"ExampleIdP"}; !reflect.DeepEqual(session.Claims.Providers, want) {
 		t.Errorf("Providers = %q, want %q", session.Claims.Providers, want)
 	}
 	if session.Claims.Subject != "f3c2a7e0-person" || session.Claims.Issuer != issuer.URL() {
@@ -93,7 +93,7 @@ func TestCodeFlowAuthURLAsksForTheCodeWithTheClientsScopes(t *testing.T) {
 // sign-in minted, replayed into this callback, carries that sign-in's nonce.
 func TestCodeFlowExchangeRefusesAnIDTokenForAnotherNonce(t *testing.T) {
 	issuer, flow := newCodeFlowFor(t)
-	issuer.SignInAs(personClaims("platform-managers"))
+	issuer.SignInAs(personClaims("dispatch-members"))
 	code, _ := issuer.Authorize(t, flow.AuthURL(flowRedirect, "state-1", "nonce-of-another-sign-in"))
 	if _, err := flow.Exchange(context.Background(), flowRedirect, code, "nonce-1"); err == nil || !strings.Contains(err.Error(), "nonce") {
 		t.Fatalf("Exchange with another sign-in's nonce: err = %v, want a nonce refusal", err)
@@ -102,7 +102,7 @@ func TestCodeFlowExchangeRefusesAnIDTokenForAnotherNonce(t *testing.T) {
 
 func TestCodeFlowExchangeRefusesACodeTheIssuerRefuses(t *testing.T) {
 	issuer, flow := newCodeFlowFor(t)
-	issuer.SignInAs(personClaims("platform-managers"))
+	issuer.SignInAs(personClaims("dispatch-members"))
 	code, _ := issuer.Authorize(t, flow.AuthURL(flowRedirect, "state-1", "nonce-1"))
 	if _, err := flow.Exchange(context.Background(), flowRedirect, code, "nonce-1"); err != nil {
 		t.Fatalf("first Exchange: %v", err)
@@ -114,7 +114,7 @@ func TestCodeFlowExchangeRefusesACodeTheIssuerRefuses(t *testing.T) {
 
 func TestCodeFlowRefreshReadsThePersonsCurrentClaims(t *testing.T) {
 	issuer, flow := newCodeFlowFor(t)
-	issuer.SignInAs(personClaims("platform-managers"))
+	issuer.SignInAs(personClaims("dispatch-members"))
 	code, _ := issuer.Authorize(t, flow.AuthURL(flowRedirect, "state-1", "nonce-1"))
 	session, err := flow.Exchange(context.Background(), flowRedirect, code, "nonce-1")
 	if err != nil {
@@ -125,21 +125,21 @@ func TestCodeFlowRefreshReadsThePersonsCurrentClaims(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	if refreshed.Claims.Username != flowUsername || !reflect.DeepEqual(refreshed.Claims.Groups, []string{"platform-managers"}) {
-		t.Errorf("refreshed claims = %#v, want the same person in platform-managers", refreshed.Claims)
+	if refreshed.Claims.Username != flowUsername || !reflect.DeepEqual(refreshed.Claims.Groups, []string{"dispatch-members"}) {
+		t.Errorf("refreshed claims = %#v, want the same person in dispatch-members", refreshed.Claims)
 	}
 	// Cognito answers a refresh without a new refresh token; the one that worked stays the one to use.
 	if refreshed.RefreshToken != session.RefreshToken {
 		t.Errorf("refreshed refresh token = %q, want the original %q", refreshed.RefreshToken, session.RefreshToken)
 	}
 
-	issuer.UpdateGrants(func(claims map[string]any) { claims["cognito:groups"] = []string{"hawk-users"} })
+	issuer.UpdateGrants(func(claims map[string]any) { claims["cognito:groups"] = []string{"other-group"} })
 	removed, err := flow.Refresh(context.Background(), session.RefreshToken)
 	if err != nil {
 		t.Fatalf("Refresh after the group change: %v", err)
 	}
-	if !reflect.DeepEqual(removed.Claims.Groups, []string{"hawk-users"}) {
-		t.Errorf("Groups after removal = %q, want [hawk-users]", removed.Claims.Groups)
+	if !reflect.DeepEqual(removed.Claims.Groups, []string{"other-group"}) {
+		t.Errorf("Groups after removal = %q, want [other-group]", removed.Claims.Groups)
 	}
 
 	issuer.RevokeGrants()
