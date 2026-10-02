@@ -1,7 +1,9 @@
 package pmdoc
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +16,8 @@ import (
 const (
 	expectedMaxNesting       = 100
 	expectedMaxInlineNesting = 100
-	expectedMaxTreeDepth     = 10_000
+	expectedMaxTreeDepth     = 1_000
+	expectedMaxAttrNesting   = 100
 )
 
 // A markdown document opens at most 100 blocks inside one another. The same parser handles a
@@ -167,12 +170,19 @@ func TestParseRefusesAMebibyteOfQuotesInBoundedTime(t *testing.T) {
 	}
 }
 
-// A tree from any source is outside the schema when a node exceeds 10,000 ancestors. The CRDT
-// chains below use the same Yjs element insertion a crafted browser client can send, not Update,
-// because Update validates the server-authored tree before it writes it.
-func TestTreesDeeperThanTenThousandAreOutsideTheSchema(t *testing.T) {
+// A tree from any source is outside the schema when a node stands more than 1,000 levels below the
+// document. The CRDT chains below use the same Yjs element insertion a crafted browser client can
+// send, not Update, because Update validates the server-authored tree before it writes it.
+//
+// The bound is one every reader serves: at it, with the deepest node's attribute nested as far as
+// the schema allows, the document token is JSON encoding/json still reads, which it is not past
+// 10,000 nested arrays and objects.
+func TestTreesDeeperThanTheBoundAreOutsideTheSchema(t *testing.T) {
 	chain := func(blockquotes int) *Node {
-		node := &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: "a"}}}
+		text := &Node{Type: "text", Text: "a", Marks: []Mark{{
+			Type: "proofComment", Attrs: Attrs{"id": "c1", "nested": nestedValue(expectedMaxAttrNesting)},
+		}}}
+		node := &Node{Type: "paragraph", Children: []*Node{text}}
 		for range blockquotes {
 			node = &Node{Type: "blockquote", Children: []*Node{node}}
 		}
@@ -186,8 +196,12 @@ func TestTreesDeeperThanTenThousandAreOutsideTheSchema(t *testing.T) {
 	if _, err := Render(deepest); err != nil {
 		t.Fatalf("render a tree %d deep: %v", expectedMaxTreeDepth, err)
 	}
+	token, err := deepest.TokenJSON()
+	if err != nil || !json.Valid(token) {
+		t.Fatalf("token of a tree %d deep: valid JSON %t, %v; want JSON encoding/json reads", expectedMaxTreeDepth, json.Valid(token), err)
+	}
 	over := chain(expectedMaxTreeDepth - 1)
-	if err := over.Validate(); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "10000") {
+	if err := over.Validate(); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), fmt.Sprint(expectedMaxTreeDepth)) {
 		t.Fatalf("a tree %d deep: %v, want ErrSchema naming the bound", expectedMaxTreeDepth+1, err)
 	}
 
@@ -226,9 +240,69 @@ func TestReadRefusesAMillionLevelCRDTTreeWithoutOverflow(t *testing.T) {
 	})
 
 	_, err := Read(fragment)
-	if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "10001") {
-		t.Fatalf("read a million-level CRDT tree: %v, want ErrSchema at level 10001", err)
+	if past := fmt.Sprintf("a node %d levels deep", expectedMaxTreeDepth+1); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), past) {
+		t.Fatalf("read a million-level CRDT tree: %v, want ErrSchema at level %d", err, expectedMaxTreeDepth+1)
 	}
+}
+
+// An attribute's value nests at most 100 arrays and objects, on a node or a mark. A crafted client
+// writes a mark's attributes as JSON, which ygo decodes as deep as encoding/json reads, so Read
+// meets the bound on the live document as Validate does on a tree.
+func TestAttributesNestedPastTheBoundAreOutsideTheSchema(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		nesting int
+		want    error
+	}{
+		{name: "at the bound", nesting: expectedMaxAttrNesting},
+		{name: "past the bound", nesting: expectedMaxAttrNesting + 1, want: ErrSchema},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			value := nestedValue(test.nesting)
+			check := func(what string, err error) {
+				t.Helper()
+				if test.want == nil && err != nil {
+					t.Fatalf("%s nesting %d: %v, want it valid", what, test.nesting, err)
+				}
+				if test.want != nil && (!errors.Is(err, test.want) || !strings.Contains(err.Error(), fmt.Sprintf("more than %d arrays", expectedMaxAttrNesting))) {
+					t.Fatalf("%s nesting %d: %v, want ErrSchema naming the bound", what, test.nesting, err)
+				}
+			}
+			node := &Node{Type: "doc", Children: []*Node{{Type: "heading", Attrs: Attrs{"level": float64(1), "nested": value}, Children: []*Node{{Type: "text", Text: "a"}}}}}
+			check("a node attribute", node.Validate())
+			mark := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
+				Type: "text", Text: "a", Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "https://example.com", "nested": value}}},
+			}}}}}
+			check("a mark attribute", mark.Validate())
+
+			ydoc := crdt.New()
+			fragment := ydoc.GetXmlFragment("prosemirror")
+			ydoc.Transact(func(txn *crdt.Transaction) {
+				paragraph := crdt.NewYXmlElement("paragraph")
+				fragment.InsertElement(txn, 0, paragraph)
+				text := crdt.NewYXmlText()
+				paragraph.InsertText(txn, 0, text)
+				text.Insert(txn, 0, "a", crdt.Attributes{"link": map[string]any{"href": "https://example.com", "nested": value}})
+			})
+			// The value the live document holds is the one ygo decodes from the update a client sends.
+			update := crdt.EncodeStateAsUpdateV1(ydoc, nil)
+			received := crdt.New()
+			if err := crdt.ApplyUpdateV1(received, update, nil); err != nil {
+				t.Fatalf("apply the client's update: %v", err)
+			}
+			_, err := Read(received.GetXmlFragment("prosemirror"))
+			check("a live mark attribute", err)
+		})
+	}
+}
+
+// nestedValue is a string inside depth arrays nested one inside another.
+func nestedValue(depth int) any {
+	var value any = "x"
+	for range depth {
+		value = []any{value}
+	}
+	return value
 }
 
 func writeDeepCRDTChain(txn *crdt.Transaction, fragment *crdt.YXmlFragment, blockquotes int) {

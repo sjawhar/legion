@@ -16,8 +16,8 @@ import (
 	"github.com/reearth/ygo/crdt"
 	ygsync "github.com/reearth/ygo/sync"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
-	"github.com/sjawhar/envoy/internal/dispatch/synctest"
 )
 
 // servedSockets lets a test wait until the document server is done with one of its
@@ -94,7 +94,7 @@ func (p *syncedPeer) connect(t *testing.T) {
 // updates the room lacks, and hands barrier the content of each sync step 2 it applies.
 func (p *syncedPeer) read(connection *gws.Conn, done chan<- struct{}, answers chan<- []byte) {
 	defer close(done)
-	synctest.Drain(connection, p.doc, func(syncMessage []byte) error {
+	docstest.Drain(connection, p.doc, func(syncMessage []byte) error {
 		return p.write(connection, syncMessage)
 	}, func(content []byte) {
 		select {
@@ -107,7 +107,7 @@ func (p *syncedPeer) read(connection *gws.Conn, done chan<- struct{}, answers ch
 func (p *syncedPeer) write(connection *gws.Conn, syncMessage []byte) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return connection.WriteMessage(gws.BinaryMessage, synctest.Frame(p.artifactID, syncMessage))
+	return connection.WriteMessage(gws.BinaryMessage, docstest.Frame(p.artifactID, syncMessage))
 }
 
 // barrier returns once the room holds everything the peer sent and has answered a request sent
@@ -190,6 +190,23 @@ func (p *syncedPeer) close() {
 // produced, as a keystroke does.
 func (p *syncedPeer) edit(t *testing.T, change func(*pmdoc.Node) error) {
 	t.Helper()
+	p.transact(t, func(txn *crdt.Transaction, fragment *crdt.YXmlFragment) error {
+		tree, err := pmdoc.ReadInTransaction(txn, fragment)
+		if err != nil {
+			return err
+		}
+		if err := change(tree); err != nil {
+			return err
+		}
+		return pmdoc.Update(txn, fragment, tree)
+	})
+}
+
+// transact runs change on the peer's live fragment in one local transaction and sends the update
+// it produced. A change that writes the fragment itself rather than through pmdoc.Update can write
+// what no server route would, as a crafted client can.
+func (p *syncedPeer) transact(t *testing.T, change func(*crdt.Transaction, *crdt.YXmlFragment) error) {
+	t.Helper()
 	fragment := p.doc.GetXmlFragment("prosemirror")
 	origin := &syncedPeerLocal{}
 	var update []byte
@@ -198,21 +215,13 @@ func (p *syncedPeer) edit(t *testing.T, change func(*pmdoc.Node) error) {
 			update = append([]byte(nil), encoded...)
 		}
 	})
-	var editErr error
+	var changeErr error
 	p.doc.Transact(func(txn *crdt.Transaction) {
-		tree, err := pmdoc.ReadInTransaction(txn, fragment)
-		if err != nil {
-			editErr = err
-			return
-		}
-		if editErr = change(tree); editErr != nil {
-			return
-		}
-		editErr = pmdoc.Update(txn, fragment, tree)
+		changeErr = change(txn, fragment)
 	}, origin)
 	unsubscribe()
-	if editErr != nil || update == nil {
-		t.Fatalf("browser peer edit: update=%d bytes err=%v", len(update), editErr)
+	if changeErr != nil || update == nil {
+		t.Fatalf("browser peer edit: update=%d bytes err=%v", len(update), changeErr)
 	}
 	p.mu.Lock()
 	connection := p.connection

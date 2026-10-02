@@ -15,8 +15,8 @@ import (
 	"github.com/reearth/ygo/crdt"
 	ygsync "github.com/reearth/ygo/sync"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
-	"github.com/sjawhar/envoy/internal/dispatch/synctest"
 	"github.com/sjawhar/envoy/internal/stacktest"
 )
 
@@ -31,8 +31,9 @@ type deepPeerOrigin struct{ _ byte }
 // the nesting the peer chose; past the goroutine's stack limit that is a fatal error no recover
 // sees, in the process serving every other room. The pinned fork walks them iteratively.
 //
-// The cap below is far under Go's one-gigabyte default, so the chain stays cheap to build: at this
-// depth the recursion needed about four times it.
+// The cap below is far under Go's one-gigabyte default, so the chain stays cheap to build: a frame
+// of the recursive delete is 208 bytes, so at this depth it needs about 40 MiB, two and a half
+// times the cap.
 func TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel(t *testing.T) {
 	stacktest.Under(t, 16<<20, func(t *testing.T) {
 		const (
@@ -138,7 +139,7 @@ func newDeepPeer(t *testing.T, serverURL, artifactID string) *deepPeer {
 // drain reads the room's messages, applying each sync message and answering its sync step 1, as a
 // browser's provider does, until the connection closes.
 func (p *deepPeer) drain() {
-	synctest.Drain(p.connection, p.doc, p.sendFrame, nil)
+	docstest.Drain(p.connection, p.doc, p.sendFrame, nil)
 }
 
 // send runs change in one transaction and sends the update it produced, as a keystroke does.
@@ -165,5 +166,5 @@ func (p *deepPeer) write(t *testing.T, syncMessage []byte) {
 func (p *deepPeer) sendFrame(syncMessage []byte) error {
 	p.writes.Lock()
 	defer p.writes.Unlock()
-	return p.connection.WriteMessage(gws.BinaryMessage, synctest.Frame(p.artifactID, syncMessage))
+	return p.connection.WriteMessage(gws.BinaryMessage, docstest.Frame(p.artifactID, syncMessage))
 }

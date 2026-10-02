@@ -96,10 +96,65 @@ func (e nestingError) at(firstLine int) error {
 	return fmt.Errorf("%w: line %d opens a block inside %d blocks; a document nests at most %d blocks (quotes, lists and their items, typed blocks and footnote definitions)", ErrSchema, firstLine+e.line, maxNesting, maxNesting)
 }
 
-// maxTreeDepth is how many ancestors a node may have, with the document root excluded. It bounds
-// the recursive walks over browser-authored CRDT trees as well as schema validation and parsing.
-const maxTreeDepth = 10_000
+// maxTreeDepth is how many levels below the document a node may stand: the document is level 0 and
+// each node one level below its parent. It bounds the recursive walks over browser-authored CRDT
+// trees as well as schema validation and parsing, and it sits where every reader of a valid tree
+// serves it with room to spare. The tightest is the document token (Node.TokenJSON): encoding/json
+// refuses a value nested past 10,000 arrays and objects (from Go 1.27 it will not marshal one, and
+// no version decodes one), and a node at level d is nested 2d+1 deep, an object and a content
+// array per level, its marks and their attributes three deeper, and an attribute's value at most
+// maxAttrNesting more: 2,104 at this bound. The next is GET /blocks, which hashes each block's
+// subtree apart from the others, so its work grows with the square of the depth. Markdown, at most
+// maxNesting blocks deep, makes trees about a tenth as deep.
+const maxTreeDepth = 1_000
 
 func treeDepthError(depth int) error {
 	return fmt.Errorf("%w: a node %d levels deep; a document nests at most %d levels", ErrSchema, depth, maxTreeDepth)
+}
+
+// maxAttrNesting is how many arrays and objects a node's or a mark's attribute value may nest
+// inside one another. The schema's own attributes are scalars or lists of them; ygo decodes an
+// element's attributes about this deep at most, but a mark's from JSON as deep as encoding/json
+// reads, so without this bound a mark alone could take the document token past what it encodes.
+const maxAttrNesting = 100
+
+// attrNestingError is the refusal of an attribute in attrs whose value nests past maxAttrNesting,
+// or nil. attrs belong to the node or mark (kind) of type typ.
+func attrNestingError(kind, typ string, attrs Attrs) error {
+	for name, value := range attrs {
+		if nestsPast(value, maxAttrNesting) {
+			return fmt.Errorf("%w: %s %q attribute %q nests more than %d arrays and objects", ErrSchema, kind, typ, name, maxAttrNesting)
+		}
+	}
+	return nil
+}
+
+// nestsPast reports whether value holds arrays and objects nested more than limit deep. It
+// recurses at most limit+1 times.
+func nestsPast(value any, limit int) bool {
+	switch v := value.(type) {
+	case []any:
+		if limit < 1 {
+			return true
+		}
+		for _, item := range v {
+			if nestsPast(item, limit-1) {
+				return true
+			}
+		}
+	case map[string]any:
+		if limit < 1 {
+			return true
+		}
+		for _, item := range v {
+			if nestsPast(item, limit-1) {
+				return true
+			}
+		}
+	case Attrs:
+		return nestsPast(map[string]any(v), limit)
+	case []string:
+		return limit < 1
+	}
+	return false
 }

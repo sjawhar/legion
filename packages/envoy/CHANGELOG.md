@@ -145,12 +145,12 @@
   or Claude Code plugin built from the same executor) keeps that URL from being sent at all,
   because its `dispatch_search` refuses the same rules before any request.
 
-- A Markdown document now nests at most 100 blocks, and a document tree deeper than 10,000 levels is outside the Proof schema (LEGION-465). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line (LEGION-465).
+- A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line (LEGION-465).
 
 ### Fixed
 - One MiB of `>` formed 1,048,576 nested quotes inside the document cap and eventually ended the process in a stack overflow while its tree was validated. Dispatch now refuses the document before building that tree (LEGION-465).
 - Reading a textblock's inline markdown took one stack frame per nested mark, so the stack it needed grew with the nesting the caller wrote: 200,000 nested emphasis markers, well inside the document cap, needed more stack than the goroutine had. The inline bound above is checked before any walk of those marks (LEGION-465).
-- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.49.6-sami.2`, which walks the deleted children iteratively and carries the transactional GC fix; the change is open upstream (LEGION-465).
+- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.49.6-sami.3` (commit `7cf8e9ff`), which walks the deleted children iteratively and carries the transactional GC fix; the change is open upstream (LEGION-465).
 - Dispatch indexes a mention written in markdown (LEGION-463): `**dispatch://KEY**`,
   `` `dispatch://KEY` ``, `_dispatch://KEY_`, `~~dispatch://KEY~~`,
   `[dispatch://KEY](dispatch://KEY)` (how a document stores `<dispatch://KEY>`), a bracketed

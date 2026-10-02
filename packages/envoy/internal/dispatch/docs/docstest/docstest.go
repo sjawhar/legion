@@ -1,7 +1,7 @@
-// Package synctest shares the Hocuspocus websocket sync plumbing that Dispatch tests need across
-// packages. It is an ordinary package rather than a _test.go file because api and docs cannot
-// import one another's test helpers.
-package synctest
+// Package docstest speaks the Hocuspocus websocket sync that docs.Service.ServeHTTP serves, for
+// Dispatch tests in more than one package. It is an ordinary package rather than a _test.go file
+// because api and docs cannot import one another's test helpers, and it imports neither.
+package docstest
 
 import (
 	gws "github.com/gorilla/websocket"

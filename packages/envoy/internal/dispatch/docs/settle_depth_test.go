@@ -54,10 +54,12 @@ func TestSettlementSkipsATreeOverTheDepthBound(t *testing.T) {
 	}
 }
 
+// writeOverDeepCRDTTree writes a tree one level deeper than pmdoc's bound: its text stands 1,001
+// levels below the document, under 999 blockquotes and a paragraph.
 func writeOverDeepCRDTTree(txn *crdt.Transaction, fragment *crdt.YXmlFragment) {
 	parent := crdt.NewYXmlElement("blockquote")
 	fragment.InsertElement(txn, 0, parent)
-	for range 9_998 {
+	for range 998 {
 		child := crdt.NewYXmlElement("blockquote")
 		parent.InsertElement(txn, 0, child)
 		parent = child
