@@ -641,9 +641,12 @@ at once. Its room is the Ready, schedulable pool nodes, neither tainted `karpent
 nor being deleted, that no live tree pod of the namespace is on, plus the floor-sized nodes its cpu
 and memory limits still allow. A wait that needs a tree's pods placed names that tree (or the
 reachability pod) as its subject. If it times out while one of its subject's pods is Pending
-Unschedulable, and Karpenter's newest FailedScheduling event for that pod's uid, no older than its
-Unschedulable transition, finds every instance type over the pool's limits, it ends BLOCKED `capacity: …`,
-naming the pod. A wait with no subject, a starved pod outside the subject, any other timeout, and
+Unschedulable, and Karpenter's newest event of any reason for that pod's uid, no older than its
+Unschedulable transition, is its FailedScheduling finding every instance type over the pool's
+limits (a newer Nominated or other Karpenter event supersedes it), it ends BLOCKED `capacity: …`,
+naming the pod with its evidence: the limit event's time and message, the pod's PodScheduled
+condition, and the default scheduler's newest FailedScheduling message for it. A wrong
+classification can only read BLOCKED, never PASS, and the line shows it. A wait with no subject, a starved pod outside the subject, any other timeout, and
 any check that fails outright stay FAIL. A failed teardown check outranks every reason
 the run stopped: it prints its own `CHECK <name>: FAIL` line (the audit's names the run's writes and
 subscriptions outside LEGSMOKE, as the `production-audit` checkpoint does), and the verdict is
