@@ -722,17 +722,15 @@ claim_restarted_or_held() {
   daemon_state | jq -e --arg issue "$1" --arg role "$2" --arg incarnation "$3" '.issues[$issue] |
     .phase == "held" or (((if $role == "architect" then .architect else .workers[$role].claim end).locator.incarnation // "") as $n | $n != "" and $n != $incarnation)' >/dev/null
 }
-# end_claim_process ISSUE ROLE kill|restart|delete ends one role launch. `kill` ends a registered
-# role container's launcher PID 1; `restart` does the same while its replacement is launching, before
-# it can reset its launch-failure budget. Kubernetes restarts that launcher in the same issue pod,
-# while no peer container restarts. `delete` ends the entire issue pod. It records the current pod
-# UID plus the composed process incarnation and returns only after the corresponding Kubernetes fact
-# is observable.
+# end_claim_process ISSUE ROLE kill|delete ends one role launch. `kill` ends a registered role
+# container's launcher PID 1; Kubernetes restarts that launcher in the same issue pod, while no peer
+# container restarts. `delete` ends the entire issue pod. It records the current pod UID plus the
+# composed process incarnation and returns only after the corresponding Kubernetes fact is
+# observable.
 #
 # A claim takes its pod UID before its role has registered. `kill` refuses an unregistered claim,
-# because a PID 1 kill in that window would be a false proof. `restart` is the explicit pre-
-# registration role-container control; `delete` is the distinct pre-registration whole-pod loss
-# control.
+# because a PID 1 kill in that window would be a false proof; `delete` is the pre-registration
+# whole-pod loss control.
 end_claim_process() {
   local issue=$1 role=$2 method=$3 claim state bound exec_out
   claim=$(claim_view "$issue" "$role")
@@ -744,9 +742,9 @@ end_claim_process() {
     fail "the $role claim of $issue names no process to end: $claim"
   state=$(jq -r '.state // "none"' <<<"$claim")
   case $method in
-    kill | restart)
-      case "$method:$state" in
-        kill:ready | kill:working | kill:idle | restart:launching) ;;
+    kill)
+      case "$state" in
+        ready | working | idle) ;;
         *) fail "the $role claim of $issue is $state at $ended_incarnation, not eligible for $method" ;;
       esac
       ended_restarts=$(op get pod "$ended_pod" -o json | jq -er --arg role "$ended_container" '.status.containerStatuses[] | select(.name == $role) | .restartCount')
@@ -1959,10 +1957,14 @@ pass
 
 begin finished-idle-planner-death
 # Tree 2's planner completed planning and is now a resident, finished role while its implementer
-# owns the active phase. Its first kill ends only the planner launcher PID 1; the same issue pod
-# and implementer container stay live. Each planner recovery is then restarted while launching,
-# before Ready resets launch failures. This spends the existing recovery budget without giving the
-# finished planner more work.
+# owns the active phase. One kill ends only its launcher PID 1: Kubernetes restarts that container
+# in the same issue pod, and the daemon relaunches the planner on the session it kept, at a new
+# process generation. The relaunch registers and is ready or idle with no task handed it, while
+# tree 2 stays in implementing, unheld, with its implementer live. A relaunch registers and reaches
+# Ready in seconds, before any end the driver could aim at it, and Ready resets launch failures
+# (packages/daemon-go/internal/supervise/table.go), so the driver cannot spend that budget. The
+# exhausted budget's failure, its single worker-died notice and the unheld phase are proved by
+# packages/daemon-go/internal/daemon/outbox_lifecycle_test.go:592-633 (LEGION-462 plan version 10).
 planner2=$(claim_token "$tree2" planner)
 planner2_claim() { claims_cli list --json | jq -ce --arg t "$planner2" '.claims[] | select(.token == $t)'; }
 planner2_idle_without_task() { planner2_claim | jq -e '.state == "idle" and .pending == null'; }
@@ -1975,57 +1977,33 @@ on_tree "$tree2" wait_for_worker "$tree2" implementer
 planner_before=$(planner2_claim)
 planner_session=$(jq -r '.session // empty' <<<"$planner_before")
 planner_incarnation=$(jq -r '.locator.incarnation // empty' <<<"$planner_before")
-[ -n "$planner_session" ] && [ -n "$planner_incarnation" ] ||
-  fail "tree 2's completed planner has no recorded session and incarnation: $planner_before"
+planner_pod_uid=$(jq -r '.locator.sandbox.podUid // empty' <<<"$planner_before")
+[ -n "$planner_session" ] && [ -n "$planner_incarnation" ] && [ -n "$planner_pod_uid" ] ||
+  fail "tree 2's completed planner has no recorded session, incarnation and pod uid: $planner_before"
 printf '%s\n' "$planner_before" >"$evidence/finished-idle-planner-before.json"
 planner_tasks_before=$(planner2_task_deliveries) || fail "tree 2's planner session could not be read before its death"
 [ "$planner_tasks_before" = 1 ] ||
   fail "tree 2's completed planner has $planner_tasks_before planning task deliveries, want one: $planner_before"
 end_claim_process "$tree2" planner kill
-planner_ended=" $ended_incarnation "
-planner_launching_without_task() {
-  local claim inc
-  claim=$(planner2_claim) || return 1
-  inc=$(jq -r '.locator.incarnation // empty' <<<"$claim")
-  [ -n "$inc" ] && ! grep -qF " $inc " <<<"$planner_ended" &&
-    jq -e --arg session "$planner_session" '.state == "launching" and .pending == null and .session == $session' <<<"$claim" >/dev/null
+# planner_relaunched_idle: the planner is relaunched on the session it kept, as a process other
+# than the one killed, in the same issue pod, registered and ready or idle, with no task pending.
+planner_relaunched_idle() {
+  planner2_claim | jq -e --arg session "$planner_session" --arg killed "$ended_incarnation" --arg uid "$planner_pod_uid" \
+    '.session == $session and (.locator.incarnation // "") != "" and .locator.incarnation != $killed
+      and .locator.sandbox.podUid == $uid and (.state | IN("ready", "idle")) and .pending == null' >/dev/null
 }
-planner_failed() {
-  planner2_claim | jq -e --arg session "$planner_session" --argjson n "$launch_failure_limit" \
-    '.state == "failed" and .session == $session and .pending == null and .budgets.launchFailures == $n and .budgets.deaths == 0'
-}
-planner_recovery_progress() { planner_failed || planner_launching_without_task; }
-planner_deletes=0
-while ! planner_failed; do
-  on_tree "$tree2" until_true 600 "tree 2's planner recovery to launch before registering or fail" planner_recovery_progress
-  planner_failed && break
-  planner_now=$(planner2_claim)
-  planner_failures=$(jq -r '.budgets.launchFailures // -1' <<<"$planner_now")
-  [ "$planner_failures" -lt "$launch_failure_limit" ] ||
-    fail "tree 2's planner is launching with launchFailures $planner_failures at limit $launch_failure_limit instead of failed: $planner_now"
-  end_claim_process "$tree2" planner restart
-  planner_ended+="$ended_incarnation "
-  planner_deletes=$((planner_deletes + 1))
-  note "ended tree 2's completed planner launcher once, then restarted unregistered recovery $planner_deletes (pod uid $ended_pod_uid, launchFailures $planner_failures)"
-done
+on_tree "$tree2" until_true 600 "tree 2's planner to be relaunched on its session in its issue pod, ready or idle with no task" planner_relaunched_idle
 planner_after=$(planner2_claim)
 printf '%s\n' "$planner_after" >"$evidence/finished-idle-planner-after.json"
-worker_died=$(notice_needle worker-died "$tree2")
-on_tree "$tree2" until_true 300 "tree 2's architect to receive worker-died for its finished planner" notice_delivered "$tree2" architect "$worker_died"
-planner_notice=$(notice_line "$tree2" architect "$worker_died" | head -1 || true)
-printf '%s\n' "$planner_notice" >"$evidence/notice-finished-idle-planner-worker-died.jsonl"
-[ "$(notice_deliveries "$tree2" architect "$worker_died")" = 1 ] ||
-  fail "tree 2's architect received $(notice_deliveries "$tree2" architect "$worker_died") worker-died notices for its finished planner, want one"
 issue_phase "$tree2" implementing >/dev/null ||
-  fail "tree 2 left implementing after its completed planner failed: $(daemon_state | jq -c --arg issue "$tree2" '.issues[$issue]')"
-issue_worker_live "$tree2" implementer ||
-  fail "tree 2's implementer is not live after its completed planner failed: $(claim_view "$tree2" implementer)"
-planner_tasks_after=$(planner2_task_deliveries) || fail "tree 2's planner session could not be read after its failure"
+  fail "tree 2 left implementing, or is held, after its completed planner was relaunched: $(daemon_state | jq -c --arg issue "$tree2" '.issues[$issue]')"
+issue_worker_live "$tree2" implementer >/dev/null ||
+  fail "tree 2's implementer is not live after its completed planner was relaunched: $(claim_view "$tree2" implementer)"
+planner_tasks_after=$(planner2_task_deliveries) || fail "tree 2's planner session could not be read after its relaunch"
 [ "$planner_tasks_after" = "$planner_tasks_before" ] ||
-  fail "tree 2's completed planner got $planner_tasks_after planning task deliveries after its failure, want $planner_tasks_before"
-note "tree 2's completed planner ($planner_session, initial uid $planner_incarnation) was killed at PID 1, then failed with launchFailures $launch_failure_limit and no task; its architect received worker-died while tree 2 stayed implementing with its implementer live"
+  fail "tree 2's relaunched planner got $planner_tasks_after planning task deliveries, want $planner_tasks_before"
+note "tree 2's completed planner ($planner_session, process $planner_incarnation in pod $planner_pod_uid) was killed at its launcher PID 1 once and relaunched on its session as process $(jq -r .locator.incarnation <<<"$planner_after") in the same pod, $(jq -r .state <<<"$planner_after") with no task; tree 2 stayed implementing with its implementer live"
 pass
-
 
 begin issue-cap-moves
 # The proof human's session holds no claim in tree 2, so its backlog on tree 2's live root is set
