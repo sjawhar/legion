@@ -653,7 +653,8 @@ The answer-time rule judges a hand-back no human answered: it must not come befo
 one of the spec's blocks, which catches a request made while the choice was still prose or sent in
 parallel with the edit that wrote the block. A request the human answered is left to the version
 rule, so the flow `legion-architect` prescribes after Request changes (the revision raises a block,
-the human answers it, the architect hands the request back) passes; the trade-off is that a
+the human answers it, and the architect requests approval again, which opens a new request since
+Request changes answered the old one) passes; the trade-off is that a
 premature request the human answered with Request changes no longer fails the run, since the human
 caught it. It keeps the issue's asks as `<issue>-asks.json`, approval events as
 `<issue>-events.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as

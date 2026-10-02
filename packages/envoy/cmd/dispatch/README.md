@@ -256,6 +256,19 @@ records the settlement it owes, which the settlement deletes when it commits. A 
 server's minute-by-minute resumption arm the settlement a row names, so one a shutdown cuts short
 still runs. It creates a table and touches no row; its census answers `0`.
 
+Migrations `0064`–`0066` let an approval request follow its document's versions. `0064` backfills
+`requested_version` into every approval ask from its `version`, rebuilds `asks_approval_kind_check`
+to require it, and adds the nullable `asks.handed_back_reply_id` and an insert trigger that gives
+an older binary's approval row the same value; it locks `asks` alone. `0065` sets
+`comments.created_at`'s default to `clock_timestamp()`, so a comment is stamped when its insert
+runs, after the owner row every comment insert takes, and an ask's newest reply is the one that
+committed last; it locks `comments` alone. `0066` adds `handed_back_reply_id`'s foreign key to
+`comments` `NOT VALID` and validates it in a second statement; adding it takes `SHARE ROW EXCLUSIVE`
+on both tables, which a write waits behind but a read does not. In one migration, the column's key
+held `asks` `ACCESS EXCLUSIVE` while it waited for `comments`, and a comment write that went on to
+read `asks` deadlocked with it. Every census answers `0`: 0053's check guarantees every approval
+ask a `version` to backfill from, and the other two change no row.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
