@@ -247,7 +247,7 @@ func TestReconnectHooksRunWhileTheDurableCannotBind(t *testing.T) {
 			// which go on while the durable is held, find what the third found: the reconnect covered
 			// and no connection event since, so rewatch finds the hooks not due and runs nothing.
 			waitFor(t, 30*time.Second, "the recovery's third attempt at the refused restore", func() bool {
-				return slices.Contains(logs.attempts("ERROR"), recoveryAttempt{Msg: "envoy nats recovery resubscribe failed", Attempt: 3})
+				return slices.Contains(logs.attempts("ERROR", "envoy nats recovery resubscribe failed"), 3)
 			})
 			if runs := len(hooked); runs != 0 {
 				t.Fatalf("the reconnect hook ran %d more time(s) for one reconnect", runs)
@@ -314,12 +314,8 @@ func TestReconnectHooksRunOneAtATimeOnceForEachEventBetweenRuns(t *testing.T) {
 	// has logged, every chance to run the hooks again has passed.
 	afterRun := captureBusLogs(t)
 	waitFor(t, 30*time.Second, "a recovery attempt begun after the reconnect's run to log its refused restore", func() bool {
-		for _, begun := range afterRun.attempts("INFO") {
-			if begun.Msg == "envoy nats recovery attempt" {
-				return slices.Contains(afterRun.attempts("ERROR"), recoveryAttempt{Msg: "envoy nats recovery resubscribe failed", Attempt: begun.Attempt})
-			}
-		}
-		return false
+		begun := afterRun.attempts("INFO", "envoy nats recovery attempt")
+		return len(begun) > 0 && slices.Contains(afterRun.attempts("ERROR", "envoy nats recovery resubscribe failed"), begun[0])
 	})
 	if got, most := runs.Load(), mostAtOnce.Load(); got != 2 || most != 1 {
 		t.Fatalf("the hooks ran %d time(s) for two connection events between runs, at most %d at once; want 2 runs, one at a time", got, most)

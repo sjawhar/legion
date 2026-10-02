@@ -202,42 +202,30 @@ func (l *busLogs) String() string {
 }
 
 func (l *busLogs) errorLine() string {
-	return l.lineAt("ERROR")
+	return l.lineAt("ERROR", "")
 }
 
-// lineAt returns the first record at level whose text holds every fragment, or "".
-func (l *busLogs) lineAt(level string, fragments ...string) string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-lines:
-	for _, line := range strings.Split(l.buffer.String(), "\n") {
-		if !strings.Contains(line, `"level":"`+level+`"`) {
-			continue
+// lines returns the records logged so far, one per line.
+func (l *busLogs) lines() []string {
+	return strings.Split(l.String(), "\n")
+}
+
+// lineAt returns the first record at level whose text holds fragment, or "".
+func (l *busLogs) lineAt(level, fragment string) string {
+	for _, line := range l.lines() {
+		if strings.Contains(line, `"level":"`+level+`"`) && strings.Contains(line, fragment) {
+			return line
 		}
-		for _, fragment := range fragments {
-			if !strings.Contains(line, fragment) {
-				continue lines
-			}
-		}
-		return line
 	}
 	return ""
 }
 
-// recoveryAttempt is what a record the recovery logs about one of its attempts names: the message
-// and the attempt's number.
-type recoveryAttempt struct {
-	Msg     string
-	Attempt int
-}
-
-// attempts decodes, in the order they were logged, the records at level that carry an attempt
-// number, so a test reads the number from the record rather than from where slog writes it.
-func (l *busLogs) attempts(level string) []recoveryAttempt {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	var found []recoveryAttempt
-	for _, line := range strings.Split(l.buffer.String(), "\n") {
+// attempts decodes, in the order they were logged, the attempt numbers of the records at level
+// with message msg, so a test reads the number from the record rather than from where slog writes
+// it.
+func (l *busLogs) attempts(level, msg string) []int {
+	var found []int
+	for _, line := range l.lines() {
 		if line == "" {
 			continue
 		}
@@ -249,8 +237,8 @@ func (l *busLogs) attempts(level string) []recoveryAttempt {
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
 			panic(fmt.Sprintf("decode the bus log record %q: %v", line, err))
 		}
-		if record.Level == level && record.Attempt > 0 {
-			found = append(found, recoveryAttempt{Msg: record.Msg, Attempt: record.Attempt})
+		if record.Level == level && record.Msg == msg && record.Attempt > 0 {
+			found = append(found, record.Attempt)
 		}
 	}
 	return found
