@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { createElement } from "react";
+import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
@@ -10,9 +10,7 @@ import type { Artifact, Comment, Event } from "../../api/types";
 import {
   anchoredThreadComments,
   fetchPinnedEvents,
-  type MarginItem,
   marginItemId,
-  type Thread,
   useMarginItems,
 } from "./useMarginItems";
 
@@ -245,48 +243,33 @@ test("useMarginItems groups replies flat under their root and separates resolved
   }
 });
 
-/** The two orders a margin renders: its cards, and its comment threads. */
-interface MarginOrder {
-  items: MarginItem[];
-  threads: Thread[];
-}
-
-function MarginProbe({ read }: { read: (margin: MarginOrder) => string }) {
-  const margin = useMarginItems(
-    { artifactId: artifact.id, kind: "document", project: "CORE", slug: "design-notes" },
-    "comments",
-    { ...artifact, issue_key: null, primary: false, slug: "design-notes" },
-    new Map(),
-    new Map(),
-    undefined
-  );
-  return createElement("output", { "aria-label": "Margin probe" }, read(margin));
-}
-
-/** What `read` makes of a standalone document's margin over `comments`, none of them placed. */
-function readDocumentMargin(comments: Comment[], read: (margin: MarginOrder) => string): string {
+/** A standalone document's margin over `comments`, none of them placed. */
+function renderDocumentMargin(comments: Comment[]) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
   queryClient.setQueryData(["artifact", artifact.id, "comments"], comments);
   queryClient.setQueryData(["inbox"], []);
   queryClient.setQueryData(["user-state"], {});
-  const view = render(
-    createElement(
-      MemoryRouter,
-      { initialEntries: ["/projects/CORE/documents/design-notes"] },
-      createElement(
-        QueryClientProvider,
-        { client: queryClient },
-        createElement(MarginProbe, { read })
-      )
-    )
+  return renderHook(
+    () =>
+      useMarginItems(
+        { artifactId: artifact.id, kind: "document", project: "CORE", slug: "design-notes" },
+        "comments",
+        { ...artifact, issue_key: null, primary: false, slug: "design-notes" },
+        new Map(),
+        new Map(),
+        undefined
+      ),
+    {
+      wrapper: ({ children }: { children: ReactNode }) =>
+        createElement(
+          MemoryRouter,
+          { initialEntries: ["/projects/CORE/documents/design-notes"] },
+          createElement(QueryClientProvider, { client: queryClient }, children)
+        ),
+    }
   );
-  try {
-    return screen.getByLabelText("Margin probe").textContent ?? "";
-  } finally {
-    view.unmount();
-  }
 }
 
 // The server writes RFC 3339 and drops trailing fractional zeros, so two times in one second are
@@ -298,48 +281,59 @@ test("replies written in the same second follow their times, not their timestamp
   const root = comment("root", "mark-root", "2026-10-02T00:00:00Z");
   const early = { ...comment("early", null, sameSecondEarlier), reply_to: root.id };
   const late = { ...comment("late", null, sameSecondLater), reply_to: root.id };
+  const margin = renderDocumentMargin([root, late, early]);
 
-  expect(
-    readDocumentMargin([root, late, early], ({ threads }) =>
-      threads
-        .map(
-          (thread) =>
-            `${thread.key}:${thread.replies.map((reply) => reply.id).join(",")} last ${thread.lastReplyAt}`
-        )
-        .join("|")
-    )
-  ).toBe(`root:early,late last ${sameSecondLater}`);
+  try {
+    expect(
+      margin.result.current.threads.map((thread) => [
+        thread.key,
+        thread.replies.map((reply) => reply.id),
+        thread.lastReplyAt,
+      ])
+    ).toEqual([["root", ["early", "late"], sameSecondLater]]);
+  } finally {
+    margin.unmount();
+  }
 });
 
 test("unplaced threads written in the same second list newest first by time", () => {
-  const older = comment("older", "m-older", sameSecondEarlier);
-  const newer = comment("newer", "m-newer", sameSecondLater);
+  const margin = renderDocumentMargin([
+    comment("older", "m-older", sameSecondEarlier),
+    comment("newer", "m-newer", sameSecondLater),
+  ]);
 
-  expect(
-    readDocumentMargin(
-      [older, newer],
-      ({ items, threads }) =>
-        `${items.map(marginItemId).join(",")} | ${threads.map((thread) => thread.key).join(",")}`
-    )
-  ).toBe("newer,older | newer,older");
+  try {
+    expect(margin.result.current.items.map(marginItemId)).toEqual(["newer", "older"]);
+    expect(margin.result.current.threads.map((thread) => thread.key)).toEqual(["newer", "older"]);
+  } finally {
+    margin.unmount();
+  }
 });
 
 test("comments written at the same instant are ordered by id", () => {
   const at = "2026-10-02T00:00:00.5Z";
-  const rootB = comment("b", "m-b", at);
   const rootA = comment("a", "m-a", at);
-  const replyY = { ...comment("y", null, at), reply_to: rootA.id };
-  const replyX = { ...comment("x", null, at), reply_to: rootA.id };
+  const margin = renderDocumentMargin([
+    comment("b", "m-b", at),
+    rootA,
+    { ...comment("y", null, at), reply_to: rootA.id },
+    { ...comment("x", null, at), reply_to: rootA.id },
+  ]);
 
-  expect(
-    readDocumentMargin(
-      [rootB, rootA, replyY, replyX],
-      ({ items, threads }) =>
-        `${items.map(marginItemId).join(",")} | ${threads
-          .map((thread) => `${thread.key}:${thread.replies.map((reply) => reply.id).join(",")}`)
-          .join(" ")}`
-    )
-  ).toBe("a,b | a:x,y b:");
+  try {
+    expect(margin.result.current.items.map(marginItemId)).toEqual(["a", "b"]);
+    expect(
+      margin.result.current.threads.map((thread) => [
+        thread.key,
+        thread.replies.map((reply) => reply.id),
+      ])
+    ).toEqual([
+      ["a", ["x", "y"]],
+      ["b", []],
+    ]);
+  } finally {
+    margin.unmount();
+  }
 });
 
 function DocumentItems() {
