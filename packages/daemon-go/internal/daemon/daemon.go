@@ -173,6 +173,20 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		st.Close()
 		return err
 	}
+	if cfg.Runtime.Name == "kubernetes" {
+		// The issue-pod cutover ships no outbox row that fails on every attempt: a tree close whose
+		// linger the outbox cannot decode is named before the layout marker is installed or any
+		// row runs. Migration 0016 repaired the older shape, and no daemon writes one since.
+		undecodable, err := st.UndecodableTreeCloses(boot, cfg.Project)
+		if err != nil {
+			st.Close()
+			return err
+		}
+		if len(undecodable) > 0 {
+			st.Close()
+			return fmt.Errorf("refuse the Kubernetes runtime's issue-pod layout: outbox tree close rows %v name no root generation (linger) the outbox can decode, so each would fail on every attempt; delete them before the cutover", undecodable)
+		}
+	}
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
