@@ -234,6 +234,52 @@ test("a human comment, revision, and hand-back return an approval card to Waitin
   }
 });
 
+test("an unchanged hand-back after a human comment and a progress note returns the card to Waiting on you", async ({
+  browser,
+}) => {
+  await createProject({ key: "SAME", name: "Unchanged hand-back" });
+  const issue = await createIssue({
+    project: "SAME",
+    spec: "The plan.",
+    title: "Unchanged hand-back",
+  });
+  const summary = "Names the existing proposal.";
+  const requested = await requestApproval(issue.primary_artifact_id, { summary }, session);
+  await createComment(
+    issue.key,
+    { ask_id: requested.ask.id, body: "Please clarify the rollout." },
+    { login: "alice" }
+  );
+  await createComment(
+    issue.key,
+    { ask_id: requested.ask.id, body: "Checking the rollout.", turn: "agent" },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    await expect(
+      page.locator('[data-inbox-section="agent"]').getByTestId(`ask-${requested.ask.id}`)
+    ).toBeVisible();
+
+    // The same version, question and summary: the hand-back alone changes whose turn it is, and the
+    // open Inbox moves the card on the event it records.
+    const handedBack = await requestApproval(issue.primary_artifact_id, { summary }, session);
+    expect(handedBack.ask.id).toBe(requested.ask.id);
+    const card = page
+      .locator('[data-inbox-section="human"]')
+      .getByTestId(`ask-${requested.ask.id}`);
+    await expect(card).toBeVisible();
+    await expect(card).toContainText(`Approve spec.md (version 1)? ${summary}`);
+    await page.goto(`/issues/${issue.key}`);
+    await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (1)");
+  } finally {
+    await alice.close();
+  }
+});
+
 test("an approval ask's Inbox card shows a question carrying a long summary whole", async ({
   browser,
 }, testInfo) => {

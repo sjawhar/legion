@@ -147,15 +147,22 @@ func TestApprovalRequestFollowsDocumentVersions(t *testing.T) {
 	}
 }
 
+// A hand-back returns the approval request to the human whatever else it changes: a new version,
+// a new summary, or nothing at all after the thread has moved on. Each records one ask.edited, a
+// repeat with nothing newer in the thread records none, and the next human reply takes the turn
+// back on every read, the Inbox's order and the comment's own event included.
 func TestApprovalHandBackWaitsOnTheHuman(t *testing.T) {
 	for _, flow := range []struct {
 		name     string
 		move     bool
 		progress bool
+		summary  string
 	}{
-		{name: "after a human comment and version move", move: true},
-		{name: "after a human comment at the same version"},
-		{name: "after a human comment and agent progress before a version move", move: true, progress: true},
+		{name: "after a human comment and version move", move: true, summary: "Clarifies the rollout."},
+		{name: "after a human comment at the same version", summary: "Clarifies the rollout."},
+		{name: "after a human comment and agent progress before a version move", move: true, progress: true, summary: "Clarifies the rollout."},
+		{name: "after a human comment and agent progress with an unchanged summary", progress: true, summary: "Names the existing proposal."},
+		{name: "after a human comment with the summary omitted"},
 	} {
 		t.Run(flow.name, func(t *testing.T) {
 			var documentService *docs.Service
@@ -165,10 +172,14 @@ func TestApprovalHandBackWaitsOnTheHuman(t *testing.T) {
 				return documentService
 			})
 			issue := createInteractionIssue(t, handler, "TEST", "Hand-back turn", "A spec")
+			// An empty summary is left out of the request, which then keeps the ask's own.
 			request := func(summary string) *httptest.ResponseRecorder {
+				body := map[string]any{"actor": sessionActor()}
+				if summary != "" {
+					body["summary"] = summary
+				}
 				return sessionRequest(t, handler, http.MethodPost,
-					"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
-					map[string]any{"actor": sessionActor(), "summary": summary})
+					"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests", body)
 			}
 			first := request("Names the existing proposal.")
 			if first.Code != http.StatusCreated {
@@ -207,10 +218,35 @@ func TestApprovalHandBackWaitsOnTheHuman(t *testing.T) {
 					t.Fatalf("name revised version: status=%d body=%s", named.Code, named.Body.String())
 				}
 			}
-			handedBack := request("Clarifies the rollout.")
-			if handedBack.Code != http.StatusOK {
-				t.Fatalf("hand approval back: status=%d body=%s", handedBack.Code, handedBack.Body.String())
+			edits := func() int {
+				count := 0
+				for _, event := range issueEvents(t, handler, issue.Key) {
+					var payload struct {
+						ID string `json:"id"`
+					}
+					if err := json.Unmarshal(event.Payload, &payload); err != nil {
+						t.Fatalf("decode event payload: %v", err)
+					}
+					if event.Type == "ask.edited" && payload.ID == askID {
+						count++
+					}
+				}
+				return count
 			}
+			handBack := func(step string) {
+				t.Helper()
+				if handedBack := request(flow.summary); handedBack.Code != http.StatusOK {
+					t.Fatalf("%s: status=%d body=%s", step, handedBack.Code, handedBack.Body.String())
+				}
+			}
+			wantEdits := func(step string, want int) {
+				t.Helper()
+				if got := edits(); got != want {
+					t.Fatalf("ask.edited events after %s = %d, want %d", step, got, want)
+				}
+			}
+			handedBackEdits := edits() + 1
+			handBack("hand approval back")
 			for _, read := range []struct {
 				name string
 				ask  turnAskRow
@@ -238,6 +274,51 @@ func TestApprovalHandBackWaitsOnTheHuman(t *testing.T) {
 			}](t, openAsks); len(response.Asks) != 1 || response.Asks[0].WaitingOn != "human" {
 				t.Fatalf("open asks = %#v, want the handed-back ask waiting on human", response)
 			}
+			wantEdits("the hand-back", handedBackEdits)
+
+			// A repeat with nothing newer in the thread is a retry: no event, and the turn stays.
+			handBack("repeat the hand-back")
+			wantEdits("a repeated hand-back", handedBackEdits)
+			if detail := readAskDetail(t, handler, askID); detail.WaitingOn != "human" {
+				t.Fatalf("ask detail after a repeated hand-back waiting_on = %q, want human", detail.WaitingOn)
+			}
+
+			// Whose turn it is orders the Inbox before recency: a newer question waiting on its
+			// agent comes after the handed-back request.
+			question := openTurnAsk(t, handler, issue.Key, "Which rollout window?")
+			if replied := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
+				map[string]any{"ask_id": question, "body": "Which windows are open?"}, "alice"); replied.Code != http.StatusCreated {
+				t.Fatalf("human reply on the question: status=%d body=%s", replied.Code, replied.Body.String())
+			}
+			inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
+			if inbox.Code != http.StatusOK {
+				t.Fatalf("read inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+			}
+			if rows := decodeBody[[]turnAskRow](t, inbox); len(rows) != 2 || rows[0].ID != askID || rows[0].WaitingOn != "human" || rows[1].ID != question || rows[1].WaitingOn != "agent" {
+				t.Fatalf("Inbox rows = %#v, want the handed-back request %s waiting on human before the question %s waiting on agent", rows, askID, question)
+			}
+
+			// The next human reply takes the turn back, as the comment's own event reports it, and a
+			// later hand-back returns it to the human again.
+			again := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
+				map[string]any{"ask_id": askID, "body": "One more question."}, "alice")
+			if again.Code != http.StatusCreated {
+				t.Fatalf("second human comment: status=%d body=%s", again.Code, again.Body.String())
+			}
+			if response := decodeBody[map[string]any](t, again); response["waiting_on"] != "agent" {
+				t.Fatalf("second human comment waiting_on = %#v, want agent", response["waiting_on"])
+			}
+			if event := latestCommentCreatedPayload(t, handler, issue.Key); event["ask_waiting_on"] != "agent" {
+				t.Fatalf("second human comment's comment.created ask_waiting_on = %#v, want agent", event["ask_waiting_on"])
+			}
+			if row := readInboxRow(t, handler, askID); row.WaitingOn != "agent" {
+				t.Fatalf("Inbox after the second human comment waiting_on = %q, want agent", row.WaitingOn)
+			}
+			handBack("hand approval back again")
+			if row := readInboxRow(t, handler, askID); row.WaitingOn != "human" {
+				t.Fatalf("Inbox after the second hand-back waiting_on = %q, want human", row.WaitingOn)
+			}
+			wantEdits("the second hand-back", handedBackEdits+1)
 		})
 	}
 }
