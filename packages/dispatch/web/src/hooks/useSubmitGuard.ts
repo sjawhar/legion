@@ -10,6 +10,9 @@ export interface SubmitGuard {
    * re-render lags a same-tick double click or Retry press, so this gates on a ref that
    * updates synchronously instead of on a mutation's (React-state) `isPending`. */
   guard: (fn: () => void) => boolean;
+  /** Whether a guarded call is in flight. Unlike mutation state, this is current in the same task
+   * that began the call, so a caller can hold every control before React has re-rendered it. */
+  held: () => boolean;
   /** Clears the guard. A caller that allows one press per request calls it from the mutation's
    * `onSettled`; one that only drops a same-tick double press, letting the next press through
    * while the first is still out (the broadcast queue, `features/agents/BroadcastSends.tsx`),
@@ -31,6 +34,7 @@ export function useSubmitGuard(): SubmitGuard {
   };
   return {
     guard,
+    held: () => inFlight.current,
     release: () => {
       inFlight.current = false;
     },

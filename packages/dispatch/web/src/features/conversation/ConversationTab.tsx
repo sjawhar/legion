@@ -1,6 +1,8 @@
 import {
+  type MutationKey,
   replaceEqualDeep,
   useInfiniteQuery,
+  useIsMutating,
   useMutation,
   useQuery,
   useQueryClient,
@@ -188,6 +190,7 @@ function ConversationReply({
   issueKey,
   onReply,
   reply,
+  replyDisabled,
   root,
   titles,
 }: {
@@ -197,6 +200,7 @@ function ConversationReply({
   issueKey: string;
   onReply: (target: ReplyTarget) => void;
   reply: ThreadReply;
+  replyDisabled: boolean;
   root: ThreadRoot;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
@@ -268,6 +272,7 @@ function ConversationReply({
             ? undefined
             : buildIssuePath({ id: parentId, key: issueKey, kind: "message" }),
       }}
+      replyDisabled={replyDisabled}
       turnID={reply.id}
     />
   );
@@ -279,6 +284,7 @@ function Thread({
   isClosed,
   issueKey,
   onReply,
+  replyDisabled,
   root,
   titles,
 }: {
@@ -287,6 +293,7 @@ function Thread({
   isClosed: boolean;
   issueKey: string;
   onReply: (target: ReplyTarget) => void;
+  replyDisabled: boolean;
   root: ThreadRoot;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
@@ -302,6 +309,7 @@ function Thread({
           key={reply.id}
           onReply={onReply}
           reply={reply}
+          replyDisabled={replyDisabled}
           root={root}
           titles={titles}
         />
@@ -343,6 +351,7 @@ function MessageTurn({
   onReply,
   pinned,
   register,
+  replyDisabled,
   titles,
 }: {
   agents: readonly Agent[];
@@ -357,6 +366,7 @@ function MessageTurn({
   onReply: (target: ReplyTarget) => void;
   pinned: boolean;
   register: (element: HTMLElement | null) => void;
+  replyDisabled: boolean;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
   const replyTo = item.kind === "message" ? item.event.payload.in_reply_to : null;
@@ -395,6 +405,7 @@ function MessageTurn({
           <CopyRefButton route={{ id: item.event.payload.id, key: issueKey, kind: item.kind }} />
           {item.kind === "message" && !isClosed ? (
             <ReplyButton
+              disabled={replyDisabled}
               onClick={() => onReply(replyTargetFor(item, author, item, issueKey, agents))}
             />
           ) : null}
@@ -408,6 +419,7 @@ function MessageTurn({
           isClosed={isClosed}
           issueKey={issueKey}
           onReply={onReply}
+          replyDisabled={replyDisabled}
           root={item}
           titles={titles}
         />
@@ -532,6 +544,7 @@ function CommentTurn({
   pendingAction,
   pinned,
   register,
+  replyDisabled,
   viewerLogin,
 }: {
   actionFailure: CommentActionFailure | undefined;
@@ -554,6 +567,7 @@ function CommentTurn({
   pendingAction: boolean;
   pinned: boolean;
   register?: (element: HTMLElement | null) => void;
+  replyDisabled: boolean;
   viewerLogin: string;
 }): ReactNode {
   const queryClient = useQueryClient();
@@ -671,6 +685,7 @@ function CommentTurn({
         <CopyRefButton route={{ id: item.event.payload.id, key: issueKey, kind: "comment" }} />
         {isClosed ? null : (
           <ReplyButton
+            disabled={replyDisabled}
             onClick={() => {
               if (isPhone) {
                 onPhoneThreadToggle?.();
@@ -696,6 +711,7 @@ function TargetedMessageTurn({
   item,
   onReply,
   register,
+  replyDisabled,
   titles,
 }: {
   agents: readonly Agent[];
@@ -706,6 +722,7 @@ function TargetedMessageTurn({
   item: Extract<ConversationItem, { kind: "targeted-message" }>;
   onReply: (target: ReplyTarget) => void;
   register: (element: HTMLElement | null) => void;
+  replyDisabled: boolean;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
   const queryClient = useQueryClient();
@@ -751,6 +768,7 @@ function TargetedMessageTurn({
       onReply={() => onReply(replyTargetFor(item, asker, item, issueKey, agents))}
       onRetry={retry.mutate}
       register={register}
+      replyDisabled={replyDisabled}
       retrying={retry.isPending}
       targetName={targetName}
       thread={
@@ -760,6 +778,7 @@ function TargetedMessageTurn({
           isClosed={isClosed}
           issueKey={issueKey}
           onReply={onReply}
+          replyDisabled={replyDisabled}
           root={item}
           titles={titles}
         />
@@ -778,6 +797,8 @@ export function ConversationTab({
   visible,
 }: ConversationTabProps): ReactNode {
   const queryClient = useQueryClient();
+  const sendKey = useMemo<MutationKey>(() => ["conversation-composer", issueKey], [issueKey]);
+  const composerSending = useIsMutating({ mutationKey: sendKey }) > 0;
   const [failedOps, setFailedOps] = useState<FailedStateOperations>();
   const viewer = useQuery(whoAmIQuery());
   const [retryingFailedOps, setRetryingFailedOps] = useState(false);
@@ -1189,6 +1210,7 @@ export function ConversationTab({
       {isClosed || (isPhoneViewport && phoneThreadId !== undefined) ? null : (
         <MentionComposer
           docked
+          mutationKey={sendKey}
           onCancelReply={() => setReplyTo(null)}
           onClose={() => setReplyTo(null)}
           onSent={() => {
@@ -1280,6 +1302,7 @@ export function ConversationTab({
                 key={item.id}
                 onReply={setReplyTo}
                 register={registerObserved}
+                replyDisabled={composerSending}
                 titles={titles}
               />
             );
@@ -1300,6 +1323,7 @@ export function ConversationTab({
                 onReply={setReplyTo}
                 pinned={pinned}
                 register={registerObserved}
+                replyDisabled={composerSending}
                 titles={titles}
               />
             );
@@ -1332,6 +1356,7 @@ export function ConversationTab({
                 onReply={setReplyTo}
                 pinned={pinned}
                 register={registerObserved}
+                replyDisabled={composerSending}
                 viewerLogin={viewer.data?.login ?? ""}
               />
             );
@@ -1447,6 +1472,7 @@ export function ConversationTab({
               }
               onReply={setReplyTo}
               pinned={isPinnedEvent(issueState.dismissed, phoneThread.pinEventId)}
+              replyDisabled={composerSending}
             />
           </ol>
           {phoneReplyTargetsThread ? (
@@ -1454,6 +1480,7 @@ export function ConversationTab({
               className={`fixed inset-x-0 bottom-0 z-20 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}
             >
               <MentionComposer
+                mutationKey={sendKey}
                 onCancelReply={() => setReplyTo(null)}
                 onClose={() => setReplyTo(null)}
                 onSent={() => {

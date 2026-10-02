@@ -223,15 +223,17 @@ export async function refusePosts(page: Page, pattern: string): Promise<() => vo
   return refuse;
 }
 
-/** Pastes a text file into `field`, as the clipboard hands one to it. */
+/** Pastes a text file into `field`, as the clipboard hands one to it. Firefox ignores a
+ *  programmatic `ClipboardEvent`'s initializer, so the test event carries the `DataTransfer`
+ *  explicitly, which every browser exposes to React's paste handler. */
 export async function pasteFile(field: Locator, name: string, text: string): Promise<void> {
   await field.evaluate(
     (node, file) => {
       const data = new DataTransfer();
       data.items.add(new File([file.text], file.name, { type: "text/markdown" }));
-      node.dispatchEvent(
-        new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data })
-      );
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", { value: data });
+      node.dispatchEvent(paste);
     },
     { name, text }
   );

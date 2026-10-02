@@ -10,10 +10,10 @@ export const PHONE_VIEWPORT_QUERY = "(max-width: 767px)";
 
 const focusableSelector = [
   "a[href]",
-  "button:not([disabled])",
-  "textarea:not([disabled])",
-  "input:not([disabled])",
-  "select:not([disabled])",
+  "button:not(:disabled)",
+  "textarea:not(:disabled)",
+  "input:not(:disabled)",
+  "select:not(:disabled)",
   '[tabindex]:not([tabindex="-1"])',
 ].join(", ");
 

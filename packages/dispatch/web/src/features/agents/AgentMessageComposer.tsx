@@ -78,10 +78,10 @@ export function AgentMessageComposer({
   // is set on the way past `onSent` and consumed by the `onClose` that follows it.
   const sentJustNow = useRef(false);
   const box = useRef<HTMLDivElement>(null);
-  // `MentionComposer` disables its textarea while a send is in flight (`disabled={save.isPending}`),
-  // and a disabled field hands focus back to the document. The reader is still writing to this
-  // agent, so focus returns the moment React re-enables the field - watched, rather than guessed
-  // at with a frame or a timer, because the write's latency is the server's.
+  // `MentionComposer` disables its control fieldset while a send is in flight, including this
+  // textarea. The browser then hands focus back to the document, so focus returns the moment React
+  // re-enables the field - watched, rather than guessed at with a frame or timer, because the
+  // write's latency is the server's.
   const refocusWatcher = useRef<MutationObserver | null>(null);
   useEffect(() => () => refocusWatcher.current?.disconnect(), []);
   /** Only the focus the disable took is the composer's to give back: through the whole round trip
@@ -95,16 +95,16 @@ export function AgentMessageComposer({
       if (focusOnDocument()) field.focus();
     };
     refocusWatcher.current?.disconnect();
-    if (!field.disabled) {
+    if (!field.matches(":disabled")) {
       takeBack();
       return;
     }
     const watcher = new MutationObserver(() => {
-      if (field.disabled) return;
+      if (field.matches(":disabled")) return;
       watcher.disconnect();
       takeBack();
     });
-    watcher.observe(field, { attributeFilter: ["disabled"] });
+    watcher.observe(field.closest("fieldset") ?? field, { attributeFilter: ["disabled"] });
     refocusWatcher.current = watcher;
   };
   /** What the picker's selection reads while it is open, which is the reader's until they commit

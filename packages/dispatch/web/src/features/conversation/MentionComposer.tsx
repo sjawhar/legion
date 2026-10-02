@@ -122,11 +122,12 @@ export interface AcceptedMention {
   readonly text: string;
 }
 
-/** A draft as the composer holds it: the text, and the mentions accepted in it, which are offsets
- *  into that exact text. */
+/** A draft as the composer holds it: the text, the mentions accepted in it, and, when it is a
+ *  suggestion, its replacement. Mentions are offsets into that exact text. */
 interface Draft {
   readonly body: string;
   readonly mentions: readonly AcceptedMention[];
+  readonly replacement?: string;
 }
 
 /** A send's own copy of the draft, taken when it starts: what the request is built from, and
@@ -557,12 +558,14 @@ export function MentionComposer({
   const [body, setBody] = useState(edit?.body ?? initial.body);
   const [replacement, setReplacement] = useState("");
   const [mentions, setMentions] = useState<AcceptedMention[]>(initial.mentions);
-  /** Puts a whole draft in the field at once - its text and the records in step with it - where
-   *  the reader did not type it, so their next edit is measured from here (`previousBody`). */
+  /** Puts a whole draft in the field at once - its text, mentions, and replacement in step with
+   *  the request that supplied them - where the reader did not type it, so their next edit is
+   *  measured from here (`previousBody`). */
   const replaceDraft = useCallback((draft: Draft) => {
     setBody(draft.body);
     previousBody.current = draft.body;
     setMentions([...draft.mentions]);
+    setReplacement(draft.replacement ?? "");
   }, []);
   const [askOptions, setAskOptions] = useState<AskOptionDraft[]>(() => [emptyAskOption()]);
   const [multiple, setMultiple] = useState(false);
@@ -603,7 +606,6 @@ export function MentionComposer({
    *  the reader's settings, not the draft, and stay. */
   const clearDraft = () => {
     replaceDraft(seededDraft(seedMentions, undefined, owner));
-    setReplacement("");
     setAskOptions([emptyAskOption()]);
   };
   const references = useMemo(() => composerReferences(body), [body]);
@@ -746,11 +748,8 @@ export function MentionComposer({
         : api.createArtifactComment(owner.artifactId, input);
     },
     mutationKey,
-    // A refusal leaves the draft that was sent, not whatever the latest render holds, so the
-    // reader gets back exactly the text and records the server turned down, for Retry or an
-    // edit. It lands in the channel it was sent from, over nothing written since: while a send is
-    // out nothing that moves the message - Cancel reply here, and a host's own controls - takes
-    // effect, and nothing writes into its draft or drops it (`send`).
+    // A refusal restores the complete draft the request turned down, not a later edit: its body,
+    // accepted mentions, and suggestion replacement stay in step for Retry or further editing.
     onError: (_error, sent) => replaceDraft(sent),
     onSettled: () => submitGuard.release(),
     onSuccess: () => {
@@ -783,10 +782,10 @@ export function MentionComposer({
     if (form === null) return;
     const handleEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      // A message on its way is the server's until it answers, and so is all Escape could end
-      // here: the reply it answers stays (see Cancel reply), and its draft is the reader's
-      // neither to discard nor to close on. Nothing of the composer's is open meanwhile (`send`).
-      if (save.isPending) {
+      // A message on its way is the server's until it answers. The submit guard becomes held in
+      // the same task as Send, before mutation state can re-render, so Escape cannot raise a
+      // Discard prompt in that gap.
+      if (submitGuard.held()) {
         event.preventDefault();
         return;
       }
@@ -827,7 +826,7 @@ export function MentionComposer({
     referencePickerOpen,
     replacement,
     replyTo,
-    save.isPending,
+    submitGuard,
   ]);
   const upload = useMutation({
     // The upload answers with where the file went, and everything after reads that rather than
@@ -957,16 +956,21 @@ export function MentionComposer({
   const submitReason = draftRefusal(kind, body, replacement, outbound);
   const footId = useId();
   const canSubmit = canSubmitComposer(submitReason, save.isPending, pendingUploads);
-  /** Sends the draft as it stands. Until the server answers, the message is the server's: a
-   *  refusal hands back exactly the draft that was sent (`onError`), so nothing may write into it
-   *  or drop it meanwhile. The field holds, the `Discard draft?` prompt and the mention
-   *  suggestions close here, and the reference picker and an upload's Retry wait for the answer. */
+  /** Sends the draft as it stands. Until the server answers, one fieldset holds every control that
+   *  could change or discard it; the submit guard covers that hold in this task before React can
+   *  disable the fieldset. */
   const send = () =>
     submitGuard.guard(() => {
       setConfirmingDiscard(false);
       setAutocomplete(undefined);
+      setReferencePickerOpen(false);
       save.mutate(currentDraft());
     });
+  const stopHeldComposerInput = (event: SyntheticEvent) => {
+    if (!submitGuard.held()) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (canSubmit) send();
@@ -1009,18 +1013,20 @@ export function MentionComposer({
       unsupportedOptions.every((option) => option.capabilities.includes(mode))
   );
 
-  return (
-    <form
-      aria-label="Comment composer"
+  const composerControls = (
+    <fieldset
       className={
         compact
-          ? "space-y-2"
+          ? "min-w-0 space-y-2 border-0 p-0"
           : docked
-            ? `${autocompleteOpen ? "z-20" : "z-[8]"} fixed inset-x-0 bottom-16 border-t px-4 py-2 sm:sticky sm:top-0 sm:z-20 sm:-mx-2 sm:border-b sm:px-2 ${borderDefault} ${surfaceBg}`
-            : `space-y-3 rounded-xl border p-3 ${calloutInfoBorder} ${calloutInfoBg}`
+            ? "min-w-0 border-0 p-0"
+            : "min-w-0 space-y-3 border-0 p-0"
       }
-      onSubmit={submit}
-      ref={formRef}
+      disabled={save.isPending}
+      onChangeCapture={stopHeldComposerInput}
+      onClickCapture={stopHeldComposerInput}
+      onInputCapture={stopHeldComposerInput}
+      onKeyDownCapture={stopHeldComposerInput}
     >
       {/* The title repeats the submit button two rows below it, so the row exists only where it
           also carries Close - an anchored composer floating over a quote, where naming what is
@@ -1038,12 +1044,11 @@ export function MentionComposer({
           <ReplyQuote className="min-w-0 flex-1" to={replyTo.to}>
             {replyQuoteText(replyTo.author, replyTo.excerpt)}
           </ReplyQuote>
+          {/* The reply is part of the message's address, fixed once the send is out, so the
+              composer's control fieldset holds it with every other draft control. */}
           <button
             aria-label="Cancel reply"
             className={`inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg text-lg leading-none disabled:cursor-not-allowed disabled:opacity-50 md:min-h-8 md:min-w-8 ${textMutedOnSurfaceMuted}`}
-            // The reply is part of the message's address, fixed once the send is out, so ending it
-            // waits for the server's answer - as a host holds its Reply buttons and picker.
-            disabled={save.isPending}
             onClick={onCancelReply}
             type="button"
           >
@@ -1058,7 +1063,7 @@ export function MentionComposer({
       )}
       {onKindChange !== undefined && edit === undefined && owner.kind !== "session" ? (
         <>
-          <fieldset className="flex gap-1" disabled={save.isPending}>
+          <fieldset className="flex gap-1">
             <legend className="sr-only">Kind</legend>
             {(["comment", "suggestion", "ask"] as const).map((next) => (
               <button
@@ -1142,7 +1147,6 @@ export function MentionComposer({
         <textarea
           aria-label={bodyLabel}
           className={`mt-1 block w-full rounded-lg border px-3 py-2 font-normal outline-none ${inline ? "min-h-11 resize-none" : "min-h-24"} ${inputClasses(true)} ${textPrimaryOnSurface}`}
-          disabled={save.isPending}
           maxLength={kind === "ask" ? 800 : 2000}
           onBeforeInput={onBeforeBodyInput}
           onChange={(event) => onBodyChange(event.target.value, event.target.selectionStart)}
@@ -1170,7 +1174,7 @@ export function MentionComposer({
               event.key.toLowerCase() === "k"
             ) {
               event.preventDefault();
-              setReferencePickerOpen(true);
+              if (!submitGuard.held()) setReferencePickerOpen(true);
               return;
             }
             submitOnModifiedEnter(event);
@@ -1353,9 +1357,9 @@ export function MentionComposer({
               ))}
             </section>
           )}
-          {/* A pick appends to the draft, so while a send is out the picker waits: a Ctrl+K in
-              the task before the field disables itself opens it once the server answers. */}
-          {owner.kind === "issue" && referencePickerOpen && !save.isPending ? (
+          {/* A picker is a draft control. `send` closes one already open, and Ctrl+K consults the
+              submit guard before it can open another in the task before the fieldset disables. */}
+          {owner.kind === "issue" && referencePickerOpen ? (
             <ReferencePicker
               issueKey={owner.issueKey}
               onClose={() => setReferencePickerOpen(false)}
@@ -1378,9 +1382,7 @@ export function MentionComposer({
           {upload.isError ? (
             <QueryError
               message={uploadErrorMessage(upload.error)}
-              // Its reference would join a message on its way, for a refusal to drop, so Retry
-              // waits for the answer.
-              onRetry={save.isPending ? undefined : () => uploadRetryGuard.retryLast(upload)}
+              onRetry={() => uploadRetryGuard.retryLast(upload)}
               retrying={upload.isPending}
             />
           ) : null}
@@ -1413,6 +1415,22 @@ export function MentionComposer({
       <p className={`text-xs ${textMutedOnSurfaceMuted}`} id={footId}>
         {submitReason ?? "Ctrl/Cmd+Enter to send · Enter for a new line"}
       </p>
+    </fieldset>
+  );
+  return (
+    <form
+      aria-label="Comment composer"
+      className={
+        compact
+          ? ""
+          : docked
+            ? `${autocompleteOpen ? "z-20" : "z-[8]"} fixed inset-x-0 bottom-16 border-t px-4 py-2 sm:sticky sm:top-0 sm:z-20 sm:-mx-2 sm:border-b sm:px-2 ${borderDefault} ${surfaceBg}`
+            : `rounded-xl border p-3 ${calloutInfoBorder} ${calloutInfoBg}`
+      }
+      onSubmit={submit}
+      ref={formRef}
+    >
+      {composerControls}
     </form>
   );
 }

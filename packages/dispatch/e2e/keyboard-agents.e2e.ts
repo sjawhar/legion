@@ -346,7 +346,7 @@ test.describe("agents page", () => {
 
       await field.press("Control+Enter");
       await expect(field).toBeDisabled();
-      await expect(uploadRetry).toHaveCount(0);
+      await expect(uploadRetry).toBeDisabled();
       refuse();
 
       await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();

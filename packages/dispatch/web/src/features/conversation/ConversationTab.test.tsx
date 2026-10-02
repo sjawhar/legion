@@ -85,7 +85,7 @@ function tab(
   issueArtifacts: ReadonlyMap<string, Artifact> = new Map()
 ): ReactNode {
   return (
-    <MemoryRouter>
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
       <KeymapProvider>
         <QueryClientProvider client={queryClient}>
           <ConversationTab
@@ -198,6 +198,41 @@ test("observes message rows only while the Conversation panel is visible", async
     api.getIssueEvents = originalGetIssueEvents;
     api.listAgents = originalListAgents;
     globalThis.IntersectionObserver = originalIntersectionObserver;
+  }
+});
+
+test("Conversation holds Reply while its composer sends", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const sent = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(sent.promise);
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const event = message(1, "Earlier message");
+    api.getIssueEvents = async () => [event];
+    api.listAgents = async () => [];
+    queryClient.setQueryData(["events", "CORE-1"], { pageParams: [null], pages: [[event]] });
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+
+    const field = await screen.findByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Status please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(field.closest("fieldset")?.disabled).toBe(true));
+    const reply = screen.getByRole("button", { name: "Reply" }) as HTMLButtonElement;
+    expect(reply.disabled).toBe(true);
+    fireEvent.click(reply);
+    expect(screen.queryByRole("button", { name: "Cancel reply" })).toBeNull();
+
+    sent.reject(new Error("the server is down"));
+    await screen.findByText("Couldn't send — network error");
+    expect(createComment.mock.calls[0]).toEqual(["CORE-1", { body: "Status please" }]);
+  } finally {
+    unmount?.();
+    createComment.mockRestore();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
   }
 });
 
