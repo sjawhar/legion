@@ -666,11 +666,15 @@ func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string,
 	if err := r.awaitSandboxDeleted(ctx, resource.Sandbox); err != nil {
 		return err
 	}
-	if err := resources.ConfirmIssueCleanup(ctx, project, issue, generation); err != nil {
+	if issue != tree {
+		return resources.ConfirmIssueCleanup(ctx, project, issue, generation)
+	}
+	childrenConfirmed, err := resources.TreeChildrenCleanupConfirmed(ctx, project, tree, issue)
+	if err != nil {
 		return err
 	}
-	if issue != tree {
-		return nil
+	if !childrenConfirmed {
+		return fmt.Errorf("cleanup root issue %s: wait for API-confirmed deletion of every tree child Sandbox", issue)
 	}
 	pvc := TreeClaimName(claim.Token("legion-" + project + "-" + tree + "-architect"))
 	deleting, cancel = call(ctx)
@@ -679,7 +683,12 @@ func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string,
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("cleanup root issue %s: delete tree PVC %s after Sandbox confirmation: %w", issue, pvc, err)
 	}
-	return r.awaitPVCDeleted(ctx, pvc)
+	if err := r.awaitPVCDeleted(ctx, pvc); err != nil {
+		return err
+	}
+	// A root is not cleanup-confirmed — and therefore cannot be re-admitted — until its root
+	// Sandbox and its tree PVC have both disappeared through their APIs.
+	return resources.ConfirmIssueCleanup(ctx, project, issue, generation)
 }
 
 func (r *Runtime) awaitSandboxDeleted(ctx context.Context, name string) error {

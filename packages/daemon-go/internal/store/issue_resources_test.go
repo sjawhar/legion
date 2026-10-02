@@ -40,6 +40,30 @@ func TestIssueResourcesFenceCleanupAndReadmission(t *testing.T) {
 	}
 }
 
+func TestTreeCleanupWaitsForEveryChildConfirmation(t *testing.T) {
+	store := migratedStore(t)
+	ctx := context.Background()
+	root := IssueResources{Project: "legion", Issue: "LEGION-208", Tree: "LEGION-208", Sandbox: "legion-legion-legion-208", Generation: 1}
+	child := IssueResources{Project: "legion", Issue: "LEGION-209", Tree: root.Tree, Sandbox: "legion-legion-legion-209", Generation: 1}
+	for _, resources := range []IssueResources{root, child} {
+		if err := store.EnsureIssueResources(ctx, resources); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if confirmed, err := store.TreeChildrenCleanupConfirmed(ctx, root.Project, root.Tree, root.Issue); err != nil || confirmed {
+		t.Fatalf("before child cleanup: confirmed %t, err %v", confirmed, err)
+	}
+	if _, began, err := store.BeginIssueCleanup(ctx, child.Project, child.Issue, child.Generation); err != nil || !began {
+		t.Fatalf("begin child cleanup: began %t, err %v", began, err)
+	}
+	if err := store.ConfirmIssueCleanup(ctx, child.Project, child.Issue, child.Generation); err != nil {
+		t.Fatal(err)
+	}
+	if confirmed, err := store.TreeChildrenCleanupConfirmed(ctx, root.Project, root.Tree, root.Issue); err != nil || !confirmed {
+		t.Fatalf("after child cleanup: confirmed %t, err %v", confirmed, err)
+	}
+}
+
 func TestIssuePodLayoutRefusesLegacyClaimsAndOtherLayouts(t *testing.T) {
 	store := migratedStore(t)
 	ctx := context.Background()

@@ -158,6 +158,21 @@ func (s *Store) HasLegacySandboxClaims(ctx context.Context, project string) (boo
 	return legacy, nil
 }
 
+// TreeChildrenCleanupConfirmed is the root-last fence: a root PVC remains while any child
+// issue's Sandbox deletion has not been confirmed through its API. It reads durable resource rows,
+// not this runtime's live claim map, so a restarted daemon cannot miss a child.
+func (s *Store) TreeChildrenCleanupConfirmed(ctx context.Context, project, tree, rootIssue string) (bool, error) {
+	var pending bool
+	err := s.pool.QueryRow(ctx, `select exists (
+		select 1 from issue_resources where project = $1 and tree = $2 and issue <> $3
+			and cleanup_confirmed_at is null
+	)`, project, tree, rootIssue).Scan(&pending)
+	if err != nil {
+		return false, fmt.Errorf("read tree child cleanup fence for %s: %w", tree, err)
+	}
+	return !pending, nil
+}
+
 func validResources(resources IssueResources) error {
 	switch {
 	case resources.Project == "":
