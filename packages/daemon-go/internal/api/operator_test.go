@@ -402,6 +402,22 @@ func TestOperatorCloseInvokesDurableTreeCleanupWithoutAWorkflowRecord(t *testing
 	}
 }
 
+// A failed explicit cleanup is not a successful close: the route tells the operator its durable
+// cleanup is pending so retrying the same close resumes the marker instead of hiding the volume.
+func TestOperatorCloseSurfacesDurableTreeCleanupFailure(t *testing.T) {
+	h := newHarness(t)
+	cleaner := &recordedTreeCleanup{err: errors.New("foreground Sandbox delete conflicted")}
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, TreeCleaner: cleaner,
+	}).Handler
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+	if recorder.Code != http.StatusInternalServerError || !strings.Contains(recorder.Body.String(), "durable resource cleanup is pending") {
+		t.Fatalf("close after cleanup failure = %d %s, want 500 naming durable cleanup pending", recorder.Code, recorder.Body)
+	}
+}
+
 // The operator's close is the whole tree's, as the workflow's tree_close is: the root claim first,
 // whose close asks whether the tree may be closed, then every other claim of the tree, whatever its
 // state. A worker left running would stay on a tree volume that is being deleted. Another tree's
