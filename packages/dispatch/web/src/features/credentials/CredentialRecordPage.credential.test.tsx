@@ -11,7 +11,7 @@ function decidedSecretRecord(): CredentialRecord {
   return {
     approver: "sami",
     decided: { at: "2026-09-27T00:05:00Z", credential_id: null, event: "approved" },
-    enrollment: { kind: "box", operator: "sami", runtime_id: "box-1" },
+    enrollment: { kind: "box", operator: "sami", runtime_id: "box-1", slot: null },
     expires_at: "2026-09-27T12:00:00Z",
     identifiers: ["DEEL_API_KEY"],
     kind: "agent_secret",

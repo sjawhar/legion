@@ -36,9 +36,12 @@ import {
   textSecondaryOnSurfaceMuted,
 } from "../../theme/classes";
 import { statusText } from "../project/board-model";
-import { referenceRouteFromHref } from "../refs/RefLink";
 import { referenceTriggerProps } from "../refs/RefPreview";
-import { buildProjectPath, type DispatchReferenceRoute } from "../refs/routes";
+import {
+  buildProjectPath,
+  type DispatchReferenceRoute,
+  referenceRouteFromHref,
+} from "../refs/routes";
 import { appKeymap, DIALOG_SCOPE, type KeymapAction, useKeymap } from "../shell/keymap";
 import { KeyHints } from "../shell/ShortcutHelp";
 import { useCloseOnNavigation, useDialog } from "../shell/useDialog";

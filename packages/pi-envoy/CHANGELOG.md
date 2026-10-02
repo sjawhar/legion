@@ -30,9 +30,19 @@
   summary of what the tree will do. `legion-architect` states that condition once.
 - The run-end nudge that tells an agent to open an ask no longer offers
   `dispatch_request_approval` as a way to wait on a human.
+- The `dispatch` skill makes a halt condition (a change to IAM, deletion or exposure of production
+  data, anything that reaches a customer) the lane's own `dispatch_ask` to Sami on its own issue,
+  never routed through the platform PO, in "Before you ask" gate 1, "Writing a spec" and "When you
+  need a human". A contract between two lanes still goes to the platform PO over Envoy.
 
 ### Added
 
+- `dispatch_read` of a comment or ask anchored in a document says where its quote sits, as a
+  `Position:` line after the quote: in a table, the row (0 is the header), the cells before the
+  anchored one and the column's header, so a reader can name the row and column a comment on a
+  table cell is about without reading the document; outside a table, the path down to the block.
+  When Dispatch could not read the document it prints `Position: unavailable (<code>)`, and the
+  read still answers. An ask's read also prints its quote (LEGION-460).
 - The planner checks its plan twice, as it did in June (LEGION-421). Before it drafts, it runs
   `task(agent="plan-gap-analyst")`, which finds the hidden requirements, ambiguities, and
   acceptance criteria no machine could check that the issue leaves unsaid, each with what the plan
@@ -252,6 +262,32 @@
 
 ### Fixed
 
+- A session drops a repeated dedupe key only when the key names its event
+  (`dedupeKeyNamesItsEvent` in `@legion/contracts`: every Dispatch key, a webhook key of its
+  delivery id, a key the listener or the shared transport minted once for its message), and
+  remembers it for the 72-hour duplicate window (`DELIVERY_DUPLICATE_WINDOW_MS`). It kept every key
+  among the latest 1,000, which failed both ways: a session that follows a busy repository's topics
+  saw those 1,000 in about an hour, so a Dispatch Retry made later than that reached the agent a
+  second time while the dashboard promised it would not; and two distinct events under one key (the
+  MCP bridge's content hash, the Go daemon's outbox row id, which starts over with each new store)
+  lost the later one. A second copy of one publish, which a session that follows overlapping topics
+  (a pull request's whole thread and its checks) receives once per subscription, is recognised by
+  the `event_id` the copies share whatever its key, so a CI settlement is injected once. The keys
+  still live in memory, at most 250,000 of them with the oldest forgotten first, so a restarted
+  session no longer recognises a frame it received before the restart. A frame is now recorded
+  before its delivery awaits anything, where it was recorded once the delivery finished, so a
+  repeat that arrives while a BTW answer or a Dispatch reply is still in flight is dropped too; a
+  delivery that throws, or that ends in an error reply (a BTW whose side turn failed, a malformed
+  frame), releases what its own claim recorded, so the Retry Dispatch offers for that failed
+  attempt runs the side turn again. Before, that Retry was dropped as a repeat and nothing
+  answered it.
+- A frame whose `event_id` is empty, or a `dispatch` frame whose `dedupe_key` is, no longer counts
+  as a copy of an earlier frame with the same empty field. The session recorded `""` as an event
+  id or a Dispatch key and dropped every later frame that carried it, distinct events included. A
+  frame is now claimed under each identity field read on its own by the rule
+  `DedupeIdentitySchema` (`@legion/envoy-client/delivery`) gives it, so an empty `event_id` or
+  `dedupe_key` identifies nothing while a valid sibling still recognises a repeat. No listener or
+  bus envelope carries an empty one; only a raw NATS publisher can send it.
 - The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
   (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
   passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot

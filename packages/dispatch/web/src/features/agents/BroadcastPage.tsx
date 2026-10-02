@@ -25,12 +25,11 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
-import { MODE_LABELS } from "../conversation/delivery";
+import { MODE_LABELS, strandedRetryGuidance } from "../conversation/delivery";
 import {
   capabilitiesForTarget,
   DeliveryRetry,
   DeliveryStatus,
-  offersSafeRetry,
 } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
@@ -85,7 +84,8 @@ function BroadcastRecipientRow({
   // A pending attempt nobody has come back to. The server frees a claim after a minute
   // (`claimLapsed`), and it judges the claim; this reads the attempt's own timestamp, which is
   // never later than the claim, so at worst the retry is offered a moment early - and a
-  // same-mode retry of a send that landed is dropped by the stream, so early is safe.
+  // same-mode retry of a send that landed is recognised as a repeat and dropped
+  // (`DELIVERY_DUPLICATE_WINDOW_MS` in `@legion/contracts`), so early is safe.
   const stranded =
     latest?.state === "pending" && Date.now() - Date.parse(latest.createdAt) > CLAIM_LEASE_MS;
   const capabilities = capabilitiesForTarget(recipient.message.target, liveAgents);
@@ -100,27 +100,26 @@ function BroadcastRecipientRow({
         <DeliveryStatus
           answeredBy={answeredBy}
           deliveries={attempts}
-          retryOffered={offersSafeRetry(attempts, answeredBy === undefined)}
+          retryRow={answeredBy === undefined && latest.state === "failed"}
           targetName={label}
         />
       )}
       {answeredBy !== undefined || latest?.state === "sent" ? null : latest?.state === "failed" ? (
-        // A failure is settled news: the same-mode retry the stream deduplicates, and, since
-        // nothing is outstanding, the mode-change sends too.
+        // A failure is settled news: the same-mode retry, which `DeliveryRetry` offers on the
+        // attempt's own `isSafeRetry`, and, since nothing is outstanding, the mode-change sends too.
         <DeliveryRetry
           canAside={capabilities?.includes("aside") !== false}
           canBtw={capabilities?.includes("btw") !== false}
           canSteer={capabilities?.includes("steer") !== false}
-          mode={latest.delivery}
+          latest={latest}
           onRetry={retry.mutate}
           retrying={retry.isPending}
-          sameModeRetry={offersSafeRetry(attempts, true)}
           targetName={label}
         />
       ) : latest === undefined || stranded ? (
         // Outstanding, and nobody is carrying it. Only the attempt's own mode is offered: the
-        // frame may already have reached the agent, and the stream drops a repeat of the same
-        // mode while it cannot recognise a different one - that would be a second delivery.
+        // frame may already have reached the agent, and a repeat of the same mode is recognised
+        // by its dedupe key while a different mode is a new key - that would be a second delivery.
         <div className="mt-3">
           <button
             className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
@@ -131,8 +130,7 @@ function BroadcastRecipientRow({
             Retry
           </button>
           <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>
-            Nobody is carrying this send. Retry uses {MODE_LABELS[latest?.delivery ?? delivery]}{" "}
-            again, which cannot deliver it twice.
+            {strandedRetryGuidance(latest?.delivery ?? delivery, latest?.createdAt)}
           </p>
         </div>
       ) : null}

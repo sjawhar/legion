@@ -54,6 +54,13 @@ export function markSpan(page: Page, markId: string): Locator {
   return documentEditor(page).locator(`[data-id="${markId}"]`);
 }
 
+/** Waits until `page`'s editor shows the mark `markId` over exactly `quote`. */
+export async function expectMark(page: Page, markId: string, quote: string): Promise<void> {
+  const mark = markSpan(page, markId);
+  await expect(mark).toBeVisible();
+  await expect(mark).toHaveText(quote);
+}
+
 export function cursorLabel(page: Page, name: string): Locator {
   return page.locator(".proof-collab-cursor__label", { hasText: name });
 }
@@ -61,43 +68,56 @@ export function cursorLabel(page: Page, name: string): Locator {
 /** Selects the first occurrence of `quote` inside the focused ProseMirror node the way a drag
  * does: a DOM Range plus the selectionchange ProseMirror's DOMObserver listens to. */
 export async function selectEditorText(page: Page, quote: string): Promise<void> {
-  await setEditorRange(page, quote, "whole");
+  await setEditorRange(page, { extent: "whole", quote });
   await actionBar(page).waitFor({ state: "visible" });
 }
 
 /** Puts the caret directly before or after the first occurrence of `quote`, the way a click
  * there does. */
 export function placeCaret(page: Page, edge: "before" | "after", quote: string): Promise<void> {
-  return setEditorRange(page, quote, edge);
+  return setEditorRange(page, { extent: edge, quote });
 }
 
-async function setEditorRange(
-  page: Page,
-  quote: string,
-  extent: "whole" | "before" | "after"
-): Promise<void> {
+/** Over, before or after the first occurrence of `quote`, or the end of the last text a caret can
+ * enter: a collaborator's cursor label and an atom's text sit in `contenteditable="false"`. */
+type EditorRange = { extent: "whole" | "before" | "after"; quote: string } | { extent: "end" };
+
+/** Sets the page's selection and dispatches the selectionchange ProseMirror's DOMObserver reads, so
+ * the editor takes the selection before this returns. Without that read, ProseMirror's focus
+ * handler (prosemirror-view `handlers.focus`) writes the editor's own selection back to the page
+ * 20 ms after focus and undoes a caret placed in between. */
+async function setEditorRange(page: Page, target: EditorRange): Promise<void> {
   const editor = documentEditor(page);
   await editor.waitFor();
   await editor.focus();
-  await editor.evaluate(
-    (root, { quote, extent }) => {
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  await editor.evaluate((root, target) => {
+    const range = document.createRange();
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    if (target.extent === "end") {
+      let last: Node | null = null;
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        if (node.parentElement?.isContentEditable === true) last = node;
+      }
+      if (last === null) throw new Error("the editor holds no text a caret can enter");
+      range.setStart(last, last.textContent?.length ?? 0);
+    } else {
+      const { extent, quote } = target;
+      let found = false;
       for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
         const index = node.textContent?.indexOf(quote) ?? -1;
         if (index < 0) continue;
-        const range = document.createRange();
         range.setStart(node, extent === "after" ? index + quote.length : index);
         range.setEnd(node, extent === "before" ? index : index + quote.length);
-        const selection = window.getSelection();
-        selection?.removeAllRanges();
-        selection?.addRange(range);
-        document.dispatchEvent(new Event("selectionchange"));
-        return;
+        found = true;
+        break;
       }
-      throw new Error(`quote is not in the editor: ${quote}`);
-    },
-    { quote, extent }
-  );
+      if (!found) throw new Error(`quote is not in the editor: ${quote}`);
+    }
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  }, target);
 }
 
 export async function deleteEditorText(page: Page, quote: string): Promise<void> {
@@ -105,10 +125,10 @@ export async function deleteEditorText(page: Page, quote: string): Promise<void>
   await page.keyboard.press("Backspace");
 }
 
+/** Presses Enter at the end of the document's last text, then types `text`: after a heading or a
+ * paragraph, that is a paragraph of its own. */
 export async function typeAtEnd(page: Page, text: string): Promise<void> {
-  const editor = documentEditor(page);
-  await editor.click();
-  await page.keyboard.press("Control+End");
+  await setEditorRange(page, { extent: "end" });
   await page.keyboard.press("Enter");
   await page.keyboard.type(text);
 }

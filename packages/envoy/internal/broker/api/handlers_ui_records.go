@@ -17,10 +17,18 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
+// recordEnrollmentResp is a record's or a grant's requesting enrollment. Slot is a pod
+// enrollment's slot, one of several independent identities in one pod, and null for every
+// enrollment without one.
 type recordEnrollmentResp struct {
-	Kind      string `json:"kind"`
-	RuntimeID string `json:"runtime_id"`
-	Operator  string `json:"operator"`
+	Kind      string  `json:"kind"`
+	RuntimeID string  `json:"runtime_id"`
+	Operator  string  `json:"operator"`
+	Slot      *string `json:"slot"`
+}
+
+func enrollmentResp(e record.Enrollment) recordEnrollmentResp {
+	return recordEnrollmentResp{Kind: e.Kind, RuntimeID: e.RuntimeID, Operator: e.Operator, Slot: strPtr(e.Slot)}
 }
 
 // recordDecisionResp is a decided record's terminal event. CredentialID is null unless the
@@ -56,7 +64,8 @@ func buildRecordResponse(detail requests.RecordDetail) recordResponse {
 		RulesVersion: detail.RulesVersion, ExpiresAt: detail.ExpiresAt, RequestedAt: detail.RequestedAt,
 	}
 	if detail.Enrollment != nil {
-		resp.Enrollment = &recordEnrollmentResp{Kind: detail.Enrollment.Kind, RuntimeID: detail.Enrollment.RuntimeID, Operator: detail.Enrollment.Operator}
+		enr := enrollmentResp(*detail.Enrollment)
+		resp.Enrollment = &enr
 	}
 	resp.Service = strPtr(detail.Service)
 	if detail.Decided != nil {

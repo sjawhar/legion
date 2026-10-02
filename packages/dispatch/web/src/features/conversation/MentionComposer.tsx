@@ -63,16 +63,7 @@ import {
 import { uploadErrorMessage, uploadFile } from "../artifacts/ArtifactUpload";
 import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
 import { ReferencePicker } from "../refs/ReferencePicker";
-import {
-  buildDispatchReference,
-  buildIssuePath,
-  buildProjectPath,
-  type DispatchRoute,
-  isProjectRoute,
-  parseDispatchReference,
-  parseIssuePath,
-  parseProjectPath,
-} from "../refs/routes";
+import { buildDispatchReference, composerReferences } from "../refs/routes";
 import { MODE_LABELS } from "./delivery";
 import { ReplyQuote, replyQuoteText } from "./ReplyQuote";
 import { useAgents } from "./useAgents";
@@ -202,60 +193,6 @@ export function mentionOptions(agents: readonly Agent[]): MentionOption[] {
 
 function appendReference(body: string, reference: string): string {
   return `${body}${body.length === 0 || /\s$/.test(body) ? "" : " "}${reference}`;
-}
-
-export interface ComposerReference {
-  href?: string;
-  reference: string;
-}
-
-export function trimReference(value: string): string {
-  return value.replace(/[),.;:!?]+$/, "");
-}
-
-function composerReference(route: DispatchRoute): ComposerReference | undefined {
-  if (isProjectRoute(route)) {
-    return route.kind === "document"
-      ? { href: buildProjectPath(route), reference: buildDispatchReference(route) }
-      : undefined;
-  }
-  return { href: buildIssuePath(route), reference: buildDispatchReference(route) };
-}
-
-function appReference(value: string, appOrigin: string): ComposerReference | undefined {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return undefined;
-  }
-  if (url.origin !== appOrigin) return undefined;
-  const route =
-    parseIssuePath(url.pathname, url.search) ?? parseProjectPath(url.pathname, url.search);
-  return route === undefined ? undefined : composerReference(route);
-}
-
-export function composerReferences(
-  body: string,
-  appOrigin = window.location.origin
-): ComposerReference[] {
-  const references: ComposerReference[] = [];
-  for (const raw of body.match(/(?:dispatch:\/\/|https?:\/\/)\S+/g) ?? []) {
-    const value = trimReference(raw);
-    const reference = value.startsWith("dispatch://")
-      ? (() => {
-          const route = parseDispatchReference(value);
-          return route === undefined ? undefined : composerReference(route);
-        })()
-      : appReference(value, appOrigin);
-    if (
-      reference !== undefined &&
-      !references.some((item) => item.reference === reference.reference)
-    ) {
-      references.push(reference);
-    }
-  }
-  return references;
 }
 
 /** Reconcile accepted mentions against the actual textarea edit range. */
@@ -514,8 +451,11 @@ interface MentionComposerProps {
   readonly owner: ComposerOwner;
   readonly replyTo?: MentionReplyTarget | null;
   readonly saveEdit?: (id: string, body: string) => Promise<unknown>;
-  /** A selected document mark is the only surface where the kind can change. */
-  readonly showKindSwitch?: boolean;
+  /** Shows the Comment / Suggest / Ask switch and hands each pick to the host, which answers
+   *  through `kind` - a selected document mark is the only surface where the kind can change, and
+   *  its mark has to change with it (the margin retypes it) - or returns, in the reader's words,
+   *  why it refused, which the composer shows under the switch. */
+  readonly onKindChange?: (kind: ComposerKind) => string | undefined;
 }
 
 export function MentionComposer({
@@ -527,15 +467,15 @@ export function MentionComposer({
   edit,
   initialMentions = [],
   inline = false,
-  kind: initialKind = "comment",
+  kind = "comment",
   onCancelReply,
   onCarry,
   onClose,
+  onKindChange,
   onSent,
   owner,
   replyTo = null,
   saveEdit,
-  showKindSwitch = false,
 }: MentionComposerProps): ReactNode {
   // Only the mount reads it, so it is computed once rather than on every keystroke.
   const [initial] = useState(() => initialDraft(initialMentions, carried, owner));
@@ -551,7 +491,6 @@ export function MentionComposer({
   const queryClient = useQueryClient();
   const [body, setBody] = useState(edit?.body ?? initial.body);
   const [replacement, setReplacement] = useState("");
-  const [kind, setKind] = useState<ComposerKind>(initialKind);
   const [mentions, setMentions] = useState<AcceptedMention[]>(initial.mentions);
   const [askOptions, setAskOptions] = useState<AskOptionDraft[]>(() => [emptyAskOption()]);
   const [multiple, setMultiple] = useState(false);
@@ -560,6 +499,10 @@ export function MentionComposer({
   const [autocomplete, setAutocomplete] = useState<{ query: string; start: number }>();
   const [pendingUploads, setPendingUploads] = useState(0);
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+  // Why the last kind pick was refused, kept with the mark it answered: the composer stays mounted
+  // when a newer compose replaces the anchor, and a refusal about the old mark says nothing about
+  // the new one.
+  const [kindRefusal, setKindRefusal] = useState<{ markId: string; text: string }>();
   const autocompleteOpen = autocomplete !== undefined;
   const live = useAgents(
     suppliedAgents === undefined && owner.kind !== "session",
@@ -606,9 +549,6 @@ export function MentionComposer({
     previousBody.current = editBody;
     setMentions([]);
   }, [editBody]);
-  useEffect(() => {
-    setKind(initialKind);
-  }, [initialKind]);
   useEffect(() => {
     if (autoFocus) textarea.current?.focus();
   }, [autoFocus]);
@@ -1007,21 +947,37 @@ export function MentionComposer({
           {anchor.quote}
         </blockquote>
       )}
-      {showKindSwitch && edit === undefined && owner.kind !== "session" ? (
-        <fieldset className="flex gap-1">
-          <legend className="sr-only">Kind</legend>
-          {(["comment", "suggestion", "ask"] as const).map((next) => (
-            <button
-              aria-pressed={kind === next}
-              className={`min-h-11 rounded-lg px-3 text-sm ${kind === next ? primaryButtonBg : textSecondaryOnSurface}`}
-              key={next}
-              onClick={() => setKind(next)}
-              type="button"
-            >
-              {next === "comment" ? "Comment" : next === "suggestion" ? "Suggest" : "Ask"}
-            </button>
-          ))}
-        </fieldset>
+      {onKindChange !== undefined && edit === undefined && owner.kind !== "session" ? (
+        <>
+          <fieldset className="flex gap-1" disabled={save.isPending}>
+            <legend className="sr-only">Kind</legend>
+            {(["comment", "suggestion", "ask"] as const).map((next) => (
+              <button
+                aria-pressed={kind === next}
+                className={`min-h-11 rounded-lg px-3 text-sm ${kind === next ? primaryButtonBg : textSecondaryOnSurface}`}
+                key={next}
+                onClick={() => {
+                  const refused = onKindChange(next);
+                  setKindRefusal(
+                    refused === undefined || anchor === undefined
+                      ? undefined
+                      : { markId: anchor.mark_id, text: refused }
+                  );
+                }}
+                type="button"
+              >
+                {next === "comment" ? "Comment" : next === "suggestion" ? "Suggest" : "Ask"}
+              </button>
+            ))}
+          </fieldset>
+          {/* Why the kind did not change, where the reader pressed; a switch that takes clears it,
+              and a newer anchor leaves it behind. */}
+          {kindRefusal === undefined || kindRefusal.markId !== anchor?.mark_id ? null : (
+            <p className={`text-sm ${dangerText}`} role="status">
+              {kindRefusal.text}
+            </p>
+          )}
+        </>
       ) : null}
       {confirmingDiscard ? (
         <div

@@ -372,6 +372,82 @@ func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) 
 	}
 }
 
+// A spec seeded at issue creation that cites an issue in bold, another project's issue in a code
+// span and a third project's issue as an autolink, which the spec stores as a link whose text is
+// its target, mentions all three. The source of each mention is the spec document, not the issue
+// that owns it: the issue node writes no mention, and each target's backlink names the spec.
+func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T) {
+	handler := newTestHandler(t)
+	createReferenceAPIProject(t, handler, "LEGION")
+	createReferenceAPIProject(t, handler, "AGENTC")
+	createReferenceAPIProject(t, handler, "CORE")
+	sameProject := createReferenceAPIIssue(t, handler, "LEGION")
+	otherProject := createReferenceAPIIssue(t, handler, "AGENTC")
+	autolinked := createReferenceAPIIssue(t, handler, "CORE")
+	response := createIssueRequest(t, handler, map[string]any{
+		"project": "LEGION", "title": "Due dates",
+		"spec": "Tied to **dispatch://" + sameProject.Key + "** and `dispatch://" + otherProject.Key + "`, " +
+			"see <dispatch://" + autolinked.Key + ">.\n",
+	})
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create issue with spec: status=%d body=%s", response.Code, response.Body.String())
+	}
+	citing := decodeBody[model.Issue](t, response)
+	specRef := "dispatch://" + citing.Key + "/spec"
+	targets := []model.Issue{sameProject, otherProject, autolinked}
+
+	mentioned := map[string]bool{}
+	for _, edge := range graphEdges(t, handler, url.Values{"from": {specRef}, "kind": {"mentions"}}).Edges {
+		mentioned[edge.Node.Ref] = true
+	}
+	want := map[string]bool{}
+	for _, target := range targets {
+		want["dispatch://"+target.Key] = true
+	}
+	if !reflect.DeepEqual(mentioned, want) {
+		t.Fatalf("spec mentions = %v; want %v", mentioned, want)
+	}
+	if fromIssue := graphEdges(t, handler, url.Values{"from": {"dispatch://" + citing.Key}, "kind": {"mentions"}}); len(fromIssue.Edges) != 0 {
+		t.Fatalf("issue node mentions = %#v; want none, the spec document writes them", fromIssue.Edges)
+	}
+	for _, target := range targets {
+		backlinks := graphEdges(t, handler, url.Values{"to": {"dispatch://" + target.Key}, "kind": {"mentions"}}).Edges
+		if len(backlinks) != 1 || backlinks[0].Node.Kind != "artifact" || backlinks[0].Node.ID != citing.PrimaryArtifactID || backlinks[0].Node.Ref != specRef {
+			t.Fatalf("%s backlinks = %#v; want one mention from %s", target.Key, backlinks, specRef)
+		}
+	}
+}
+
+// An item id that decodes to a NUL names nothing. The index binds ids as `text[]`, and Postgres
+// refuses a NUL there, so a reader that decoded one failed the write holding it: the comment, the
+// seeded spec and the author's edit answered 500, and a rebuild stopped at the first stored body
+// that held one.
+func TestCitationsOfAnIDDecodingToNULDoNotFailTheWrite(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	body := "See dispatch://" + target.Key + "/comment/%00, https://dispatch.example/issues/" + target.Key +
+		"/comments/%00 and https://dispatch.example/issues/" + target.Key + "/spec?comment=%2500.\n"
+
+	comment := createReferenceAPIComment(t, handler, target.Key, body)
+	commentRef := "dispatch://" + target.Key + "/comment/" + comment.ID
+	if edges := graphEdges(t, handler, url.Values{"from": {commentRef}, "kind": {"mentions"}}).Edges; len(edges) != 0 {
+		t.Fatalf("comment mentions = %#v; want none", edges)
+	}
+	if seeded := createIssueRequest(t, handler, map[string]any{"project": "CORE", "title": "Seeded", "spec": body}); seeded.Code != http.StatusCreated {
+		t.Fatalf("create issue whose spec cites a NUL id: status=%d body=%s", seeded.Code, seeded.Body.String())
+	}
+	plain := createReferenceAPIComment(t, handler, target.Key, "Plain comment.")
+	if edit := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/comments/"+plain.ID, map[string]string{
+		"body": body,
+	}, "alice"); edit.Code != http.StatusOK {
+		t.Fatalf("edit a comment to cite a NUL id: status=%d body=%s", edit.Code, edit.Body.String())
+	}
+	if _, err := refs.RebuildAll(context.Background(), database.Pool, "https://dispatch.example"); err != nil {
+		t.Fatalf("rebuild refs over bodies citing a NUL id: %v", err)
+	}
+}
+
 type refRow struct {
 	FromKind, FromID, ToKind, ToID, Kind string
 	SourceSeq                            *int64

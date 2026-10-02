@@ -124,6 +124,10 @@ mishandles text typed over what follows a block's last line break; both also run
 `e2e/keyboard-agents-picker.e2e.ts`, whose keyboard rule rests on each engine's select dispatch.
 `webkit-iphone` runs the live view's two phone-layout rows of `e2e/agent-view.e2e.ts` in WebKit
 with the iPhone 13 profile, since iOS Safari is the engine its keyboard cap exists for.
+`chromium-plain-http` runs `e2e/plain-http-origin.e2e.ts` alone, with the page opened at
+`http://dispatch-e2e.test:<port>` (Chromium maps that name to the harness host), a plain-HTTP origin
+that is not loopback and so not a secure context: it proves a document takes a new paragraph and a
+comment renders formatted there, where `crypto.randomUUID` does not exist.
 `bun run e2e:install` installs all three browsers.
 
 ## Phone check
