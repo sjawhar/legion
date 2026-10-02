@@ -1,6 +1,6 @@
 ---
 name: dispatch
-description: "Use before posting a message, a status update, or a periodic status update; before asking a question that references another message, artifact, or eval; and when asking Sami a question, updating the spec, commenting on a document, attaching an artifact, or calling a dispatch_* tool."
+description: "Use before posting a message, a status update, or a periodic status update; before asking a question that references another message, artifact, or eval; before asking a design question or brainstorming a change; and when asking Sami a question, updating the spec, commenting on a document, attaching an artifact, or calling a dispatch_* tool."
 ---
 
 # Dispatch
@@ -35,14 +35,14 @@ after `skill://dispatch/` is relative to this skill's base directory.
 
 ## Design changes are brainstormed here
 
-When a session has Dispatch, a major design change is brainstormed in the issue's spec: this
-replaces the brainstorming skill's chat questions and its spec file, so ask no design question in
-chat and write no design document into the repository. The first version holds only what the
-conversation has established and every question that is ready, each a decision block at the end of
-the section that sets it up; a question waits only when it depends on an answer still open. Each
-next version folds the answers in, in the human's words with the date, and adds the questions they
-open. Approval is requested once, when nothing in the spec is new to the human. Before you write a
-spec's first version, and again before each next turn, read
+When a session has Dispatch, a design change that needs the human's choices is brainstormed in its
+issue's spec: this replaces the brainstorming skill's chat questions and its spec file, so ask no
+design question in chat and write no design document into the repository. The first version holds
+only what the conversation has established and every question that is ready, each a decision block
+at the end of the section that sets it up; a question waits only when it depends on an answer still
+open. Each next version folds the answers in, in the human's words (or the option they chose) with
+the date, and adds the questions they open. Approval is requested once, when nothing in the spec is
+new to the human. Before you write a spec's first version, and again before each next turn, read
 [Brainstorming in the spec](skill://dispatch/references/brainstorming.md): each step, and a worked
 example.
 
@@ -83,7 +83,8 @@ a new version that keeps the human's own text, never a second "spec" artifact be
 - **Each open question is a decision block**, placed as [Decision blocks](#decision-blocks) says.
   Because it is an ask, it reaches the human's Inbox, and the answer lands next to its context.
 - **A settled point records the human's own words and the date**, quoted, so no reader mistakes
-  it for your inference. A point you inferred says so, with the reasoning. One carried in from
+  it for your inference; an answer that is only a chosen option is recorded as the option they
+  chose, not as their words. A point you inferred says so, with the reasoning. One carried in from
   another document keeps its provenance: an agent's inference there is marked one here, or stays
   out until the human raises it.
 - **Sections follow the topic.** No heading is required and none has a fixed place; name each
@@ -98,8 +99,9 @@ a new version that keeps the human's own text, never a second "spec" artifact be
 - **No progress.** The spec records the design and its decisions, never status, timestamps, an
   "Update HH:MMZ" section, a pull-request list, or handoff notes. Progress is not a Dispatch
   object at all; it lives in your transcript and your pull request (see [Messages](#messages)).
-- **No commentary on itself.** The spec talks about the design, never about the spec: no sentence
-  calls it a draft, a conversation, a version or a turn, or says what a later version will add.
+- **No commentary.** The spec talks about the design, never about the spec or the conversation: no
+  sentence calls it a draft, a conversation, a version or a turn, says what a later version will
+  add, or narrates the exchange that produced it.
 
 Before a new version goes out, read it as the human will: no two passages conflict, each point has
 one reading, and every decision block passes the phone test above. A worked example is
@@ -373,12 +375,12 @@ See [Following](#following) for why you receive what happens to asks you open an
 Approval is a property of a document, not a question you phrase: a human approves a specific
 version, the way a pull-request review approves a commit, and any later version makes that
 approval stale. Answering a decision block writes a new version, so request approval only when
-both hold: every decision block is settled, which means answered and folded into the text, or
-waived as the next paragraph says; and the design as a whole has not been approved.
-A Legion root spec under an armed design gate always goes to approval once its blocks are settled
-(`skill://legion-architect`).
+all three hold: every decision block is settled, which means answered and folded into the text, or
+waived as the next paragraph says; the human has agreed to every point in the spec; and the design
+as a whole has not been approved. A Legion root spec under an armed design gate always goes to
+approval once all three hold (`skill://legion-architect`).
 
-When both hold, request it in the pass that finishes the spec: a design waiting with nothing in
+When all three hold, request it in the pass that finishes the spec: a design waiting with nothing in
 the human's Inbox waits on nobody. A choice you can make yourself
 ([Before you ask](#before-you-ask), gate 1) does not ride in on the approval either: leave it out
 of the spec and make it where the work happens, or, when the human will want a say in it, put it
@@ -388,12 +390,11 @@ them to answer it or waive it. For a waiver, close the block with `dispatch_reso
 (`kind: "resolved"`, their words as `reason`), then write their decision into the text in their
 words and request. `dispatch_request_approval` refuses while any block is open.
 
-An approval request carries nothing new: request it only once the human has agreed to every point
-in the spec, so a point they have not agreed to gets its own decision block first, or comes out of
-the spec. `summary` says in one to three sentences what the human is approving and nothing else:
-no commentary on itself or on the conversation, and no open question. The Inbox shows it after
-"Approve spec.md (version N)?". Never write "Approve" options into an ordinary `dispatch_ask`; only
-humans approve. The call, its result and its answer:
+An approval request carries nothing new: a point the human has not agreed to gets its own decision
+block first, or comes out of the spec. `summary` says in one to three sentences what the human is
+approving and nothing else: no commentary on itself or on the conversation, and no open question.
+The Inbox shows it after "Approve spec.md (version N)?". Never write "Approve" options into an
+ordinary `dispatch_ask`; only humans approve. The call, its result and its answer:
 [Approval requests](skill://dispatch/references/documents.md#approval-requests).
 
 ## The Spec

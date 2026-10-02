@@ -159,8 +159,9 @@ reaches a version only when the document settles, about two seconds later, or wi
 in) and then request. A block written in the last few seconds counts as open before Dispatch has
 opened its ask. A repeat at the same version returns the open request unchanged. A new version
 retracts an open request for an older one, and its `ask.resolved` reaches you: request again for
-the new version once its blocks are settled. The answer reaches you as `artifact.approved` or
-`artifact.changes_requested` with the pinned `version`; `changes_requested` carries the reason,
+the new version once its blocks are settled and the human has agreed to every point in it. The
+answer reaches you as `artifact.approved` or `artifact.changes_requested` with the pinned
+`version`; `changes_requested` carries the reason,
 which is your next piece of work. `dispatch_read` and `dispatch_doc_read` show the document's
 approval state; `stale` means it was approved and then edited.
 

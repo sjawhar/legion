@@ -545,7 +545,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 }
 
 // approvalQuestion is an approval ask's question: the document and version it names, then the
-// requester's summary of what that version proposes when one was given. A summary that would
+// requester's summary of what the human is approving, when one was given. A summary that would
 // take the question past the ask cap is refused naming the characters left for it.
 func approvalQuestion(name string, version int, summary string) (string, error) {
 	question := fmt.Sprintf("Approve %s (version %d)?", name, version)

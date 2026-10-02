@@ -4,6 +4,8 @@
 
 ### Changed
 
+- A stale approval's line in a document read says to request approval again only once the human
+  has agreed to every point in the new version (LEGION-475).
 - `DispatchClient.requestApproval` takes `{ actor, summary }`, and `dispatch_request_approval`
   sends `summary` and quotes the question the server returned in its result (LEGION-387).
 - `dispatch_request_approval` is refused, with no request sent, while the version it would name

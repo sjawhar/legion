@@ -820,14 +820,15 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_request_approval",
-    example: { issue: "DSP-1", summary: "Proposes a live sync in place of the nightly export." },
+    example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
     description:
       "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " +
       "Request changes) in the human's Inbox whose question names the document and version, " +
       "followed by the summary; the answer pins a review to that version and arrives as " +
       "artifact.approved or artifact.changes_requested. A later version makes an approval stale, " +
       "and writing it retracts an open request for an older version; request again for the new " +
-      "one. A repeat at the version an open request names returns that request unchanged. " +
+      "one once the human has agreed to every point in it. A repeat at the version an open " +
+      "request names returns that request unchanged. " +
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +

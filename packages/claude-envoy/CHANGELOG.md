@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.3]
+
+### Changed
+
+- An approval request carries nothing new (LEGION-475). `dispatch_request_approval`'s `summary`
+  says only what the human is approving, with no commentary and no question; its description and a
+  stale approval's line say to request again only once the human has agreed to every point in the
+  new version. The `dispatch` and `dispatch-first` skills this plugin ships say to brainstorm a
+  design change in its issue's spec rather than in chat.
+
 ## [0.6.2]
 
 ### Fixed
