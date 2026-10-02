@@ -43,10 +43,14 @@ unreadable in the browser refuses nothing it is carried through unchanged by. Fo
 
 ```md
 :::ask{urgency="high" multiple="false"}
-Should we ship the migration?
+Today's release is blocked by a database migration. The maintenance window closes in two hours;
+whether production data needs an index rebuild is unknown. How should we complete the migration?
+Recommendation: rehearse on a production snapshot, then apply in the window, because it finds the
+unknown cost before production while keeping today's release possible.
 
-- Ship: Release the verified change.
-- Hold: Wait for another review.
+- Apply now: Meets today's release, but recovery may be slower if the index rebuild is needed.
+- Rehearse then apply: Costs rehearsal time, but exposes the rebuild and rollback cost before production.
+- Defer the release: Avoids migration risk today, but leaves the release and its fixes unavailable.
 :::
 ```
 
