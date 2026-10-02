@@ -61,7 +61,6 @@ const planner: FakeSession = {
 
 test.beforeEach(async () => {
   await resetDatabase();
-  await setLiveSessions([]);
 });
 
 test("Conversation owns the route, groups chronological Markdown turns, and resolves live agent names", async ({

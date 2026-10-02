@@ -21,9 +21,6 @@ const replier = { kind: "session" as const, id: "e2e-follow-replier" };
 
 test.beforeEach(async () => {
   await resetDatabase();
-  // `Reaches N` counts the fake Envoy's persisted interests, which outlive the database reset
-  // and match the recycled issue keys, so each test starts from none.
-  await setInterests([]);
 });
 
 test("the ask card lists every session that wrote to the ask and a human can unfollow one", async ({

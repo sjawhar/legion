@@ -29,7 +29,6 @@ const session = {
 };
 test.beforeEach(async () => {
   await resetDatabase();
-  await setLiveSessions([]);
 });
 
 test("ask cards show urgency accents and copy their session ID, title, and tmux target", async ({

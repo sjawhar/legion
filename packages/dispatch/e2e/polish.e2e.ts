@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { setInterests, setLiveSessions } from "./agents";
+import { setLiveSessions } from "./agents";
 import { createAsk, createIssue, createProject, patchIssue } from "./api";
 import { filterPicker, pickFilterOption } from "./filters";
 import { resetDatabase } from "./seed";
@@ -10,9 +10,6 @@ const session = { actor: { id: "e2e-polish", kind: "session" as const }, as: "ag
 
 test.beforeEach(async () => {
   await resetDatabase();
-  // The ask card's `Reaches N` counts the fake Envoy's persisted interests, which outlive the
-  // database reset and match the recycled issue keys, so each test starts from none.
-  await setInterests([]);
 });
 
 test("project filters stay collapsed until needed and margin asks use the compact composer", async ({
@@ -90,8 +87,6 @@ test("project filters stay collapsed until needed and margin asks use the compac
       path: testInfo.outputPath(`polish-margin-${viewport}.png`),
       fullPage: true,
     });
-    // The Agents page renders its list, empty or not, only once an Envoy listener answers.
-    await setLiveSessions([]);
     await page.goto("/agents");
     await expect(page.getByRole("region", { name: "Agents empty state" })).toBeVisible();
     await page.screenshot({

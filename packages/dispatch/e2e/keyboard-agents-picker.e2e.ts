@@ -1,6 +1,6 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { openAgents, plannerSession, seedAgents, setLiveSessions } from "./agents";
+import { openAgents, plannerSession, seedAgents } from "./agents";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -14,7 +14,6 @@ import { asUser } from "./users";
 
 test.beforeEach(async () => {
   await resetDatabase();
-  await setLiveSessions([]);
 });
 
 /** The send the rows below make, and the path of the one `POST` it produces. A comment and a

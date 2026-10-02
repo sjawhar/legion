@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { openAgents, setLiveSessions } from "./agents";
+import { openAgents } from "./agents";
 import { createAsk, createIssue, createProject, getIssue, patchIssue } from "./api";
 import { recordClipboard } from "./clipboard";
 import { resetDatabase } from "./seed";
@@ -28,7 +28,6 @@ async function openInbox(page: Page): Promise<void> {
 
 test.beforeEach(async () => {
   await resetDatabase();
-  await setLiveSessions([]);
 });
 
 test("g then i goes to the Inbox, showing the pending chord until it completes", async ({

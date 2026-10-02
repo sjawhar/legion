@@ -1,6 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { setLiveSessions } from "./agents";
 import { createAsk, createComment, createIssue, createProject, getInbox, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -43,7 +42,6 @@ async function askIdOf(page: Page, index: number): Promise<string> {
 
 test.beforeEach(async () => {
   await resetDatabase();
-  await setLiveSessions([]);
 });
 
 // Both describes run in `chromium` and `iphone`: marking asks and snoozing them in one step is

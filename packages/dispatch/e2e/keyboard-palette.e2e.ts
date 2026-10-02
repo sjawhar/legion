@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { openAgents, seedAgents, setLiveSessions } from "./agents";
+import { openAgents, seedAgents } from "./agents";
 import {
   createAsk,
   createIssue,
@@ -24,7 +24,6 @@ async function openIssue(page: Page, issueKey: string, title: string): Promise<v
 
 test.beforeEach(async () => {
   await resetDatabase();
-  await setLiveSessions([]);
 });
 
 test("the palette lists the issue page's actions, guarded like their buttons, and runs one", async ({
