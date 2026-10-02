@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const library = fileURLToPath(new URL(".", import.meta.url));
@@ -65,5 +67,78 @@ describe("drive_gated_spec's hand-back versions", () => {
       },
     ];
     expect(handedBackVersions(events)).toBe("1\n");
+  });
+});
+
+// drive_gated_spec's own verdict line, run as the driver runs it: through bash, from a directory
+// that is not lib/, on files shaped as Dispatch serves them.
+describe("drive_gated_spec's verdict", () => {
+  test("the driver's verdict command compiles and judges a hand-back at the approved version", () => {
+    const line = script
+      .split("\n")
+      .find((text) => /^\s*verdict=\$\(jq .*design-gate-verdict\.jq/.test(text));
+    expect(line).toBeDefined();
+    const evidence = mkdtempSync(join(tmpdir(), "design-gate-driver-"));
+    try {
+      const question = "Approve spec.md (version 2)? Adds the budget.";
+      const ask = {
+        id: "a",
+        kind: "approval",
+        question,
+        approval: approval(2, 2),
+        state: "answered",
+      };
+      writeFileSync(join(evidence, "T-1-asks.json"), JSON.stringify([ask]));
+      writeFileSync(
+        join(evidence, "T-1-events.json"),
+        JSON.stringify([
+          {
+            type: "ask.opened",
+            created_at: "2026-10-02T10:00:00Z",
+            payload: {
+              ...ask,
+              question: "Approve spec.md (version 1)? Asks.",
+              approval: approval(1, 1),
+            },
+          },
+          { type: "ask.handed_back", created_at: "2026-10-02T10:05:00Z", payload: ask },
+          { type: "ask.answered", created_at: "2026-10-02T10:06:00Z", payload: ask },
+        ])
+      );
+      for (const number of [1, 2]) {
+        writeFileSync(
+          join(evidence, `T-1-spec-v${number}.json`),
+          JSON.stringify({ number, markdown: "The plan." })
+        );
+      }
+      const run = Bun.spawnSync(
+        [
+          "bash",
+          "-c",
+          `set -euo pipefail; requested=("$evidence/T-1-spec-v1.json" "$evidence/T-1-spec-v2.json")\n${line}\nprintf '%s\\n' "$verdict"`,
+        ],
+        {
+          cwd: evidence,
+          env: {
+            ...process.env,
+            root: fileURLToPath(new URL("../../..", import.meta.url)),
+            artifact: "spec-1",
+            approved: "2",
+            evidence,
+            issue: "T-1",
+          },
+        }
+      );
+      expect(run.stderr.toString()).toBe("");
+      expect(run.exitCode).toBe(0);
+      expect(JSON.parse(run.stdout.toString())).toEqual({
+        request: question,
+        summarized: true,
+        blocks: 0,
+        early: [],
+      });
+    } finally {
+      rmSync(evidence, { recursive: true, force: true });
+    }
   });
 });

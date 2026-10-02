@@ -1667,7 +1667,7 @@ drive_gated_spec() {
       fail "$issue: version $version of its spec could not be read"
     requested+=("$evidence/$issue-spec-v$version.json")
   done
-  verdict=$(jq -c -s --arg artifact "$artifact" --argjson version "$approved" -f "$root/scripts/e2e/lib/design-gate-verdict.jq" "$evidence/$issue-asks.json" "$evidence/$issue-events.json" "${requested[@]}")
+  verdict=$(jq -c -s -L "$root/scripts/e2e/lib" --arg artifact "$artifact" --argjson version "$approved" -f "$root/scripts/e2e/lib/design-gate-verdict.jq" "$evidence/$issue-asks.json" "$evidence/$issue-events.json" "${requested[@]}")
   printf '%s\n' "$verdict" >"$evidence/$issue-gate-verdict.json"
   request=$(jq -r '.request // empty' <<<"$verdict")
   [ -n "$request" ] || fail "$issue: no approval request names version $approved of its spec ($evidence/$issue-asks.json)"
