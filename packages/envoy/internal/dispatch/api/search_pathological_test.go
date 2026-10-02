@@ -124,12 +124,16 @@ func TestGrowsLinearlyRejectsQuadraticFinalRung(t *testing.T) {
 			if err == nil {
 				t.Fatalf("quadratic final rung passed:\n%s", output)
 			}
-			if !strings.Contains(string(output), "at 64 B") {
+			if !strings.Contains(string(output), "at "+sizeText(quadraticFinalRung)) {
 				t.Fatalf("quadratic final rung failed unexpectedly:\n%s", output)
 			}
 		})
 	}
 }
+
+// quadraticFinalRung is the last size of the helper's ladder, the rung whose time grows
+// quadratically and fails the bound.
+const quadraticFinalRung = 64
 
 func TestGrowsLinearlyRejectsQuadraticFinalRungHelper(t *testing.T) {
 	slowFirstValue, helper := os.LookupEnv("GROWS_LINEARLY_SLOW_FIRST")
@@ -138,7 +142,7 @@ func TestGrowsLinearlyRejectsQuadraticFinalRungHelper(t *testing.T) {
 	}
 	slowFirstSample := slowFirstValue == "true"
 	firstSamples := 0
-	growsLinearly(t, "a quadratic final rung", []int{1, 8, 64}, func(size int) time.Duration {
+	growsLinearly(t, "a quadratic final rung", []int{1, 8, quadraticFinalRung}, func(size int) time.Duration {
 		switch size {
 		case 1:
 			firstSamples++
@@ -148,7 +152,7 @@ func TestGrowsLinearlyRejectsQuadraticFinalRungHelper(t *testing.T) {
 			return time.Millisecond
 		case 8:
 			return 32 * time.Millisecond
-		case 64:
+		case quadraticFinalRung:
 			return time.Duration(size*size/4) * time.Millisecond
 		default:
 			t.Fatalf("unexpected size %d", size)
