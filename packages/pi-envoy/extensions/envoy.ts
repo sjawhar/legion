@@ -18,6 +18,7 @@ import {
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import {
   createDeliveryDedupe,
+  DedupeIdentitySchema,
   type DispatchDelivery,
   expectsLaneReceipt,
   inboundTimestamp,
@@ -644,7 +645,10 @@ export default function envoyExtension(pi: PiApi): void {
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
-    const claim = rendered.skip ? undefined : delivered.claim(rendered.envelope);
+    const dedupeIdentity = DedupeIdentitySchema.safeParse(rendered.envelope);
+    const claim = rendered.skip
+      ? undefined
+      : delivered.claim(dedupeIdentity.success ? dedupeIdentity.data : undefined);
     if (claim !== undefined) {
       const envelope = rendered.envelope;
       if (envelope !== undefined) {
