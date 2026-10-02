@@ -187,13 +187,14 @@ test("ProofDocument offers a markdown upload when the stored tree is outside the
     },
   });
   try {
-    const { view } = renderProofDocument();
+    const { connections, view } = renderProofDocument();
 
     expect(
       await screen.findByText(
         "document is outside the Proof schema; replace the document from markdown to repair it"
       )
     ).not.toBeNull();
+    expect(connections).toHaveLength(0);
     fireEvent.change(screen.getByLabelText("Upload artifact"), {
       target: { files: [new File(["repaired\n"], "spec.md", { type: "text/markdown" })] },
     });

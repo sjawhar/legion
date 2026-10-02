@@ -301,6 +301,7 @@ test("the Artifacts badge counts the rows the tab lists, and a row's details are
 test("an out-of-schema document names its repair and uploads replacement markdown", async ({
   page,
 }) => {
+  await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Repair an unreadable document" });
   const upload = await createIssueArtifact(issue.key, {
     content: "before\n",

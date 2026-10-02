@@ -10,7 +10,7 @@ import {
 } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import { ApiError, api } from "../../api/client";
+import { ApiError, api, isDocumentSchemaError } from "../../api/client";
 import type { Artifact, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
 import { TruncatedText } from "../../components/TruncatedText";
 import { copyText } from "../../lib/clipboard";
@@ -179,7 +179,7 @@ export function ProofDocument({
     owner.kind === "issue" ? { issue: owner.key } : { project: owner.project }
   );
   const repairError =
-    liveTextQuery.error instanceof ApiError && liveTextQuery.error.code === "DOC_SCHEMA"
+    liveTextQuery.error instanceof ApiError && isDocumentSchemaError(liveTextQuery.error)
       ? liveTextQuery.error
       : undefined;
   const rebuildError =
@@ -311,7 +311,10 @@ export function ProofDocument({
       setLoadError((repairError ?? rebuildError)?.message);
       return;
     }
-    if (blockSchema === undefined) {
+    // The first live read decides whether the editor may open the room. A browser editor
+    // normalizes a tree it cannot represent, so connecting before a DOC_SCHEMA answer can
+    // silently rewrite the document the page is about to offer to repair.
+    if (liveTextQuery.isPending || blockSchema === undefined) {
       return;
     }
     const parent = root.current;
@@ -475,7 +478,15 @@ export function ProofDocument({
         editorRef.current = undefined;
       }
     };
-  }, [artifact.id, blockSchema, createEditor, loadTransport, rebuildError, repairError]);
+  }, [
+    artifact.id,
+    blockSchema,
+    createEditor,
+    liveTextQuery.isPending,
+    loadTransport,
+    rebuildError,
+    repairError,
+  ]);
 
   useEffect(() => {
     editorRef.current?.setReadOnly(isClosed || schemaReadOnlyRef.current);
