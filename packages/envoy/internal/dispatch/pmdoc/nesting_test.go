@@ -7,11 +7,14 @@ import (
 	"time"
 
 	"github.com/reearth/ygo/crdt"
+
+	"github.com/sjawhar/envoy/internal/stacktest"
 )
 
 const (
-	expectedMaxNesting   = 100
-	expectedMaxTreeDepth = 10_000
+	expectedMaxNesting       = 100
+	expectedMaxInlineNesting = 100
+	expectedMaxTreeDepth     = 10_000
 )
 
 // A markdown document opens at most 100 blocks inside one another. The same parser handles a
@@ -56,6 +59,85 @@ func TestParseRefusesMarkdownNestedPastTheBound(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// A textblock's inline markdown opens at most 100 marks inside one another. Every reader of
+// caller markdown refuses the same run: an upload, an edit fragment and an accepted suggestion
+// through the document readers, and a replacement's inline markdown through ParseInline.
+func TestParseRefusesInlineMarksNestedPastTheBound(t *testing.T) {
+	for _, reader := range inlineMarkReaders() {
+		t.Run(reader.name, func(t *testing.T) {
+			// Two `*` either side open one mark, so a run of twice the bound is the deepest
+			// markdown that reads.
+			deepest := strings.Repeat("*", 2*expectedMaxInlineNesting)
+			if err := reader.parse(deepest + "x" + deepest); err != nil {
+				t.Fatalf("%d nested inline marks: %v, want them read", expectedMaxInlineNesting, err)
+			}
+			over := strings.Repeat("*", 2*expectedMaxInlineNesting+2)
+			err := reader.parse(over + "x" + over)
+			if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "line 1") || !strings.Contains(err.Error(), "100 inline marks") {
+				t.Fatalf("%d nested inline marks: %v, want ErrSchema naming line 1 and the bound", expectedMaxInlineNesting+1, err)
+			}
+		})
+	}
+}
+
+// The inline bound is what keeps the readers' recursion off a stack that grows with the caller's
+// nesting: each of them walks a textblock's marks once per level. Under a stack far below the
+// default, a run that nests two thousand times past the bound is refused rather than recursed
+// into.
+func TestInlineMarksNestNoDeeperThanTheBoundUnderASmallStack(t *testing.T) {
+	stacktest.Under(t, 64<<20, func(t *testing.T) {
+		run := strings.Repeat("*", 200_000)
+		for _, reader := range inlineMarkReaders() {
+			t.Run(reader.name, func(t *testing.T) {
+				if err := reader.parse(run + "x" + run); !errors.Is(err, ErrSchema) {
+					t.Fatalf("200,000 nested inline marks: %v, want ErrSchema", err)
+				}
+			})
+		}
+	})
+}
+
+// The nesting an ordinary document reaches - emphasis, strikethrough and a code span inside
+// strong, and marks inside a link - is far below the bound, and reads and writes back unchanged.
+func TestOrdinaryNestedInlineMarksReadAndRenderUnchanged(t *testing.T) {
+	for _, markdown := range []string{
+		"**strong *and emphasis*, ~~struck~~ and `code`**\n",
+		"[**a *b***](https://example.com)\n",
+		"> **strong *and emphasis* and ~~struck~~**\n",
+	} {
+		doc, err := Parse(markdown)
+		if err != nil {
+			t.Fatalf("read %q: %v", markdown, err)
+		}
+		written, err := Render(doc)
+		if err != nil {
+			t.Fatalf("write %q: %v", markdown, err)
+		}
+		if written != markdown {
+			t.Fatalf("%q wrote back as %q", markdown, written)
+		}
+	}
+}
+
+// inlineMarkReaders is every reader of caller markdown that reaches the inline parser.
+func inlineMarkReaders() []struct {
+	name  string
+	parse func(string) error
+} {
+	return []struct {
+		name  string
+		parse func(string) error
+	}{
+		{name: "document", parse: func(markdown string) error { _, err := Parse(markdown); return err }},
+		{name: "upload", parse: func(markdown string) error { _, err := ParseForWrite(markdown, nil); return err }},
+		{name: "fragment", parse: func(markdown string) error {
+			_, err := ParseFragment(markdown, true, NewTablePaddingBudget())
+			return err
+		}},
+		{name: "inline", parse: func(markdown string) error { _, err := ParseInline(markdown); return err }},
 	}
 }
 

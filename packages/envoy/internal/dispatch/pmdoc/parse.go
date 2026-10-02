@@ -212,9 +212,8 @@ func parseUnstamped(markdown string, firstLine int, readFrontmatter bool, budget
 		source = source[rest:]
 	}
 	root, err := blockReader.parse(source, unclosedFrontmatter, budget)
-	var nesting nestingError
-	if errors.As(err, &nesting) {
-		return nil, fmt.Errorf("%w: line %d opens a block inside %d blocks; a document nests at most %d blocks (quotes, lists and their items, typed blocks and footnote definitions)", ErrSchema, firstLine+nesting.line, MaxNesting, MaxNesting)
+	if nesting := (nestingError{}); errors.As(err, &nesting) {
+		return nil, nesting.at(firstLine)
 	}
 	if err != nil {
 		return nil, err
@@ -286,6 +285,9 @@ func parseInlineWithDefinitions(markdown string, labels []string, reader inlineR
 	}
 	source := []byte(full.String())
 	root := withLineStarts(reader.withDefinitions, source, parser.NewContext())
+	if err := inlineNesting(root, source); err != nil {
+		return nil, err
+	}
 	first, ok := root.FirstChild().(*ast.Paragraph)
 	if !ok {
 		return nil, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
@@ -324,6 +326,9 @@ func readInline(markdown string, inline parser.Parser) (nodes []*Node, err error
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
 	source := []byte(LineFeeds(markdown))
 	root := withLineStarts(inline, source, parser.NewContext())
+	if err := inlineNesting(root, source); err != nil {
+		return nil, err
+	}
 	if root.ChildCount() > 1 {
 		return nil, fmt.Errorf("%w: inline markdown forms %d paragraphs", ErrSchema, root.ChildCount())
 	}

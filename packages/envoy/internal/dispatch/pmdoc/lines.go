@@ -39,8 +39,11 @@ func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budg
 	}
 	pc.Set(tablePaddingBudgetKey, budget)
 	root := withLineStarts(reader.md.Parser(), source, pc)
-	if line, refused := nestingRefusal(pc); refused {
-		return nil, nestingError{line: line}
+	if err, _ := pc.Get(nestingRefusalKey).(error); err != nil {
+		return nil, err
+	}
+	if err := inlineNesting(root, source); err != nil {
+		return nil, err
 	}
 	if err, _ := pc.Get(tablePaddingErrorKey).(error); err != nil {
 		return nil, err

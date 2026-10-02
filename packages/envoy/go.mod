@@ -103,3 +103,10 @@ require (
 	google.golang.org/grpc v1.79.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
+
+// ygo's delete of a live element recursed over its nested children, so the stack an ordinary
+// delete needs grew with the tree's nesting - a tree an authenticated peer grows through any
+// number of small websocket updates - and past the goroutine's stack it is a fatal error no
+// recover sees. The fork makes that cascade iterative (774a728d) and carries the transactional
+// GC fix (ae2134cf); both are in the upstream pull request this pin is waiting on.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.49.6-sami.2
