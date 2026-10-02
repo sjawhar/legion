@@ -94,7 +94,7 @@ a new version that keeps the human's own text, never a second "spec" artifact be
   versions keep the history.
 - **No placeholders.** No TBD, TODO, or hedging ("might", "could consider"): an open item is a
   decision block, a technical decision your lane makes where the work happens, outside the spec,
-  or, for a contract between two lanes, a question for the platform PO (see
+  or, for a contract between two lanes, a question you settle with the other lane over Envoy (see
   [Before you ask](#before-you-ask) under Asking).
 - **No progress.** The spec records the design and its decisions, never status, timestamps, an
   "Update HH:MMZ" section, a pull-request list, or handoff notes. Progress is not a Dispatch
@@ -222,10 +222,10 @@ Every `dispatch_ask` passes four gates first:
    written as an `:::ask` block in context ([Decision blocks](#decision-blocks)). Technical
    decisions inside your outcome do not: schema shapes, table layouts, field names, and migration
    internals are your lane's to decide where the work happens, in the plan or the code, not in the
-   spec. A contract between two lanes still goes to the platform PO over Envoy, and you open no
-   ask for it. A halt condition (a change to IAM, deletion or exposure of production data,
-   anything that reaches a customer) passes this gate: it is your own `dispatch_ask` to Sami on
-   your own issue, never routed through the platform PO.
+   spec. A contract between two lanes is settled by those two lanes over Envoy, and you open no ask
+   for it. A halt condition (a change to IAM, deletion or exposure of production data, anything
+   that reaches a customer) passes this gate: it is your own `dispatch_ask` to Sami on your own
+   issue.
 2. **Is there genuine uncertainty, and have you measured what you can?** If there is none, it is
    a plan you execute. The one legitimate ask without uncertainty is permission for an action
    only a human can authorise — a production write, an external send, a console action — and then
@@ -260,8 +260,8 @@ Every `dispatch_ask` passes four gates first:
    (further down) lists that the delivery waits on — including a conflict between what he asked
    for and another of his rules, which this gate would otherwise bury as settled.
 
-The platform PO audits open asks. One that fails a gate — or that points at another message in
-prose instead of carrying its content (below) — is retracted, with the PO's answer as the record.
+Nobody audits or retracts another session's asks: passing every gate, and carrying the content
+instead of pointing at another message in prose (below), is the asking session's own check.
 
 Open a decision with:
 ```ts
@@ -302,11 +302,11 @@ message above", or "as attached".
 issue's comments. The rules:
 
 - An ask that names another message in prose — "my comment above", "the procedure I posted",
-  "see the earlier message" — is retracted by the PO as failing the gates. Put the content IN the
-  ask. If it does not fit the 800-character budget, the step is too big: split the step, never
-  point elsewhere. The only pointers an ask may carry are a `dispatch://` reference or a document
-  `anchor`, and they cite — the ask still says in one line what the reader will find there and can
-  be answered without following them.
+  "see the earlier message" — fails the gates. Put the content IN the ask. If it does not fit the
+  800-character budget, the step is too big: split the step, never point elsewhere. The only
+  pointers an ask may carry are a `dispatch://` reference or a document `anchor`, and they cite —
+  the ask still says in one line what the reader will find there and can be answered without
+  following them.
 - Expand every term the reader has not used first. A product name, an internal setting, an
   acronym, a value you coined this session — write what it is in the ask, in his words.
 - A runbook the human must execute is one ask per step, each self-contained: what to do, where,
@@ -321,9 +321,9 @@ they must read to decide belongs in the spec in the first place — see [Artifac
 
 ### When you need a human
 
-Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you audit what a whole project is waiting on rather than just your own asks.
+Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you see what a whole project is waiting on rather than just your own asks.
 
-**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, send a one-line ask before the first implementation commit. A lane's schema decision or a platform-PO contract ruling does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request. A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without an ask, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for, and its ask comes before the commit that sets that shape.
+**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, send a one-line ask before the first implementation commit. A lane's schema decision or a contract two lanes agree does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request. A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without an ask, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for, and its ask comes before the commit that sets that shape.
 
 **Anything you are blocked on a human for is an open ask.** An agent waits on a human only through
 an open ask. An approval, a credential or grant to renew, a setting only they can change, a review
