@@ -243,17 +243,19 @@ writer's `context.Canceled` in its cause. Nor does that read wait for a failed r
 
 A read of a resident room reads a copy taken under its document lock (`snapshotDocument`,
 `crdt.EncodeStateAsUpdateV1`), never the live tree: `GET /text` and the document websocket's
-admission check (`loadDocument`), a version's capture (`captureLiveTextAndAuthors`) and a read
-outside any transaction (`docView`). A walk of the live tree takes no lock (reearth/ygo v1.49.5,
-`crdt/yxml.go`) while every peer update and service write holds that lock as it applies, so the walk
-can read a write halfway through as a tree outside the schema and answer a healthy document 409 with
-the repair. A version's capture holds the room's state lock across the copy and the authors it
-captures, so an author the update observer credits is captured only with that update's text; the
-order - state lock, then document lock - is never reversed, since only a Yjs transaction's own
-function holds a document's lock and none takes a room's state lock. A read that may load its room
-(a version's capture, `docView`, `VerifyMark`'s subscription) takes what it reads inside the
-`Server.Apply` that loads and holds the room: a room looked up again with `GetDoc` once that Apply
-returned can have been evicted in between.
+admission check (`loadDocument`), a version's capture (`captureLiveTextAndAuthors`), a read
+outside any transaction (`docView`), and settlement's reads of the room (`settleRoomWithin`,
+`ensureBlockIDsInDocument`), so a torn read is never versioned as the document; the unrecorded-mark
+sweep (`sweepUnrecordedMarks`) reads the tree inside the transaction that unmarks it. A walk of the
+live tree takes no lock (reearth/ygo v1.49.5, `crdt/yxml.go`) while every peer update and service
+write holds that lock as it applies, so the walk can read a write halfway through as a tree outside
+the schema and answer a healthy document 409 with the repair. A version's capture holds the room's
+state lock across the copy and the authors it captures, so an author the update observer credits is
+captured only with that update's text; the order - state lock, then document lock - is never
+reversed, since only a Yjs transaction's own function holds a document's lock and none takes a
+room's state lock. A read that may load its room (a version's capture, `docView`, `VerifyMark`'s
+subscription) takes what it reads inside the `Server.Apply` that loads and holds the room: a room
+looked up again with `GetDoc` once that Apply returned can have been evicted in between.
 
 The room's update observer (`updateChangesMarkdown`) renders a replica of the room, not the live
 tree, since ygo fires it after the transaction has released the document's lock and another write
