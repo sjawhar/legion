@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -105,14 +106,14 @@ func TestDrainLetsTheDeliveriesOfABindEndingAfterTheStopFinish(t *testing.T) {
 					t.Fatal("the second role message never queued behind the first")
 				}
 			}
-
 			// Drain's stop lands, and then the bind ends.
-			client.stop()
+			client.subscriptionsMu.Lock()
+			client.stopMode = clientDraining
 			if tc.late {
-				client.subscriptionsMu.Lock()
 				client.drainCollected = true
-				client.subscriptionsMu.Unlock()
 			}
+			client.subscriptionsMu.Unlock()
+			client.stop()
 			_ = client.endBind(slot, sub, nil)
 			drained := make(chan error, 1)
 			go func() { drained <- client.Drain(5 * time.Second) }()
@@ -132,6 +133,103 @@ func TestDrainLetsTheDeliveriesOfABindEndingAfterTheStopFinish(t *testing.T) {
 			}
 			if forwarded := forwarded.Load(); !tc.late && forwarded != 2 {
 				t.Fatalf("%d of the 2 role messages routed to the bind were forwarded (last forward error: %v); want both", forwarded, forwardErr.Load())
+			}
+		})
+	}
+}
+
+// Close may arrive after a subscription's raw bind succeeded and before it has installed the
+// subscription. That bind belongs to the stopped client: it must not be recorded as active.
+func TestCloseDoesNotInstallABindThatFinishesAfterStop(t *testing.T) {
+	client, err := ConnectOwningStream([]string{testnats.URL(t)})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	const subject = "notifications.role.close-after-bind"
+	client.subscriptionsMu.Lock()
+	slot := &client.subscriptions[coreSubscription]
+	*slot = recoverableSubscription{
+		transport: coreSubscription,
+		subject:   subject,
+		handler:   func(*nats.Msg) {},
+		binding:   make(chan struct{}),
+	}
+	registration := *slot
+	client.subscriptionsMu.Unlock()
+	sub, err := bind(registration, client.Conn, client.js)
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	client.Close()
+	if err := client.endBind(slot, sub, nil); !errors.Is(err, errStopped) {
+		t.Fatalf("end bind after Close: %v, want %v", err, errStopped)
+	}
+	client.subscriptionsMu.Lock()
+	active := slot.active
+	client.subscriptionsMu.Unlock()
+	if active != nil {
+		t.Fatal("a bind that finished after Close was installed as active")
+	}
+}
+
+// Once a client stops, neither subscription transport starts another registration.
+func TestStoppedClientRefusesNewSubscriptions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stop    func(*Client) error
+		stopped bool
+	}{
+		{name: "Running"},
+		{
+			name:    "Close",
+			stopped: true,
+			stop: func(client *Client) error {
+				client.Close()
+				return nil
+			},
+		},
+		{
+			name:    "Drain",
+			stopped: true,
+			stop: func(client *Client) error {
+				return client.Drain(5 * time.Second)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := ConnectOwningStream([]string{testnats.URL(t)})
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			if tc.stop != nil {
+				if err := tc.stop(client); err != nil {
+					t.Fatalf("stop: %v", err)
+				}
+			}
+			t.Cleanup(client.Close)
+
+			for _, subscribe := range []struct {
+				name string
+				run  func() error
+			}{
+				{"Subscribe", func() error {
+					_, err := client.Subscribe("notifications.github.acme.widgets.push.branch.main", func(*nats.Msg) {})
+					return err
+				}},
+				{"SubscribeCore", func() error {
+					_, err := client.SubscribeCore("notifications.role.close-after-stop", func(*nats.Msg) {})
+					return err
+				}},
+			} {
+				err := subscribe.run()
+				if tc.stopped && !errors.Is(err, errStopped) {
+					t.Fatalf("%s after %s: %v, want %v", subscribe.name, tc.name, err, errStopped)
+				}
+				if !tc.stopped && err != nil {
+					t.Fatalf("%s while %s: %v", subscribe.name, tc.name, err)
+				}
 			}
 		})
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -180,11 +181,15 @@ func startListenerProcess(t *testing.T, binary, uri, machineID string, env ...st
 	return process
 }
 
-// buildListener builds this package's listener binary into the test's temporary directory.
 func buildListener(t *testing.T) string {
 	t.Helper()
 	binary := filepath.Join(t.TempDir(), "envoy-listener")
-	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+	args := []string{"build", "-o", binary}
+	if overlay := os.Getenv("ENVOY_TEST_GO_OVERLAY"); overlay != "" {
+		args = append(args, "-overlay", overlay)
+	}
+	args = append(args, ".")
+	if out, err := exec.Command("go", args...).CombinedOutput(); err != nil {
 		t.Fatalf("build the listener: %v\n%s", err, out)
 	}
 	return binary

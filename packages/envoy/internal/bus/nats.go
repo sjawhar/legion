@@ -53,6 +53,14 @@ const (
 	subscriptionCount
 )
 
+type clientStopMode uint8
+
+const (
+	clientRunning clientStopMode = iota
+	clientDraining
+	clientClosed
+)
+
 type recoverableSubscription struct {
 	transport subscriptionTransport
 	subject   string
@@ -74,14 +82,17 @@ type Client struct {
 	publishAcknowledgementClock AcknowledgementClock
 	mu                          sync.Mutex
 
-	// subscriptionsMu guards subscriptions and drainCollected. It is held to read and write them,
-	// never across a bind's request to the server, so a reconnect's restore, the health reads and
-	// Drain never wait out a request the reconnect lost.
+	// subscriptionsMu guards subscriptions, stopMode and drainCollected. It is held to read and
+	// write them, never across a bind's request to the server, so a reconnect's restore, the health
+	// reads and Drain never wait out a request the reconnect lost.
 	subscriptionsMu sync.Mutex
 	subscriptions   [subscriptionCount]recoverableSubscription
+	// stopMode distinguishes Close from Drain. A bind that completes during Drain's collection is
+	// installed for the next pass, while a Close never installs its late bind.
+	stopMode clientStopMode
 	// drainCollected is set once Drain has taken the last of the subscriptions it drains itself,
-	// just before it drains the connection. A bind that ends before then installs its subscription
-	// for Drain to take, and one that ends after drains what it bound (endBind).
+	// just before it drains the connection. A bind that ends after it drains what it bound
+	// (endBind).
 	drainCollected bool
 
 	reconnectHooksMu sync.Mutex
@@ -323,6 +334,8 @@ func newClient(urls []string, ownsStream bool, options []ConnectOption) (*Client
 }
 
 func (c *Client) JS() nats.JetStreamContext {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.js
 }
 
@@ -419,25 +432,34 @@ func bind(registration recoverableSubscription, conn *nats.Conn, js nats.JetStre
 	return conn.QueueSubscribe(registration.subject, registration.queue, registration.handler)
 }
 
-// endBind ends the bind in flight of the registration subscription holds, installing sub unless
-// the bind failed. A bind that ends after Drain stopped the client still installs sub while Drain
-// is taking the subscriptions it drains, so the deliveries the server already routed to it finish
-// with the rest's; one that ends once Drain has taken its last drains sub itself, which the
-// connection's drain then waits for, so none of them is discarded.
+// endBind ends the bind in flight of the registration subscription holds. A bind that ends during
+// Drain's collection installs for the next pass; after that collection it drains itself. A Close
+// never installs a bind that finishes after it stopped the client.
 func (c *Client) endBind(subscription *recoverableSubscription, sub *nats.Subscription, err error) error {
 	c.subscriptionsMu.Lock()
 	close(subscription.binding)
 	subscription.binding = nil
-	late := err == nil && c.drainCollected
-	if err == nil && !late {
+	mode := c.stopMode
+	lateDrain := err == nil && mode == clientDraining && c.drainCollected
+	if err == nil && (mode == clientRunning || (mode == clientDraining && !c.drainCollected)) {
 		subscription.active = sub
 	}
 	c.subscriptionsMu.Unlock()
-	if late {
-		_ = sub.Drain()
+
+	if err != nil {
+		return err
+	}
+	switch mode {
+	case clientDraining:
+		if lateDrain {
+			_ = sub.Drain()
+			return errStopped
+		}
+	case clientClosed:
+		_ = sub.Unsubscribe()
 		return errStopped
 	}
-	return err
+	return nil
 }
 
 // SubOK reports whether the durable listener subscription is active on a live connection.
@@ -472,6 +494,11 @@ func (c *Client) stopped() bool {
 
 // Close stops any recovery goroutine and closes the underlying NATS connection.
 func (c *Client) Close() {
+	c.subscriptionsMu.Lock()
+	if c.stopMode == clientRunning {
+		c.stopMode = clientClosed
+	}
+	c.subscriptionsMu.Unlock()
 	c.stop()
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -494,6 +521,11 @@ func (c *Client) Close() {
 // own, which the connection's drain takes (endBind). The close ends one still in flight.
 func (c *Client) Drain(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	c.subscriptionsMu.Lock()
+	if c.stopMode == clientRunning {
+		c.stopMode = clientDraining
+	}
+	c.subscriptionsMu.Unlock()
 	c.stop()
 	c.mu.Lock()
 	conn := c.Conn
@@ -672,8 +704,11 @@ func validSubject(subject string) bool {
 // would.
 func (c *Client) refused(err error, size int) error {
 	if errors.Is(err, nats.ErrMaxPayload) {
+		c.mu.Lock()
+		conn := c.Conn
+		c.mu.Unlock()
 		return fmt.Errorf("%w: an envelope of %d bytes against the server's max payload of %d bytes",
-			ErrTooLarge, size, c.Conn.MaxPayload())
+			ErrTooLarge, size, conn.MaxPayload())
 	}
 	return err
 }
@@ -726,12 +761,13 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
 		options = append(options, nats.MsgId(item.DedupeKey+":"+item.Topic))
 	}
-	ack, err := c.js.Publish(item.Topic, data, options...)
+	js := c.JS()
+	ack, err := js.Publish(item.Topic, data, options...)
 	if err != nil && errors.Is(err, nats.ErrConnectionClosed) {
 		if err := c.ensureConnWithContext(ctx); err != nil {
 			return false, err
 		}
-		ack, err = c.js.Publish(item.Topic, data, options...)
+		ack, err = c.JS().Publish(item.Topic, data, options...)
 	}
 	if err != nil {
 		return false, c.refused(err, len(data))
