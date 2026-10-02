@@ -132,10 +132,52 @@ func New(ctx context.Context, rc *rest.Config, opts Options) (*Runtime, error) {
 	if err := r.start(ctx, dyn, kube); err != nil {
 		return nil, err
 	}
+	if !opts.SkipLegacyLayoutCensusForTest {
+		if err := r.rejectLegacyIssueSandboxes(ctx); err != nil {
+			return nil, err
+		}
+	}
 	if listener, ok := opts.Conns.(*stream.Listener); ok {
 		listener.SetLauncherResolver(r.LauncherResolver())
 	}
 	return r, nil
+}
+
+// rejectLegacyIssueSandboxes is the Kubernetes half of the issue-pod layout fence. It runs before
+// a launcher resolver is registered: a legacy claim/object pair must never be adopted, suspended
+// or deleted as though it belonged to the new shared-pod layout. Image probes are explicit
+// non-issue Sandboxes and are excluded.
+func (r *Runtime) rejectLegacyIssueSandboxes(ctx context.Context) error {
+	reading, cancel := call(ctx)
+	defer cancel()
+	list, err := r.sandboxClient().List(reading, metav1.ListOptions{LabelSelector: labelProject + "=" + r.project})
+	if err != nil {
+		return fmt.Errorf("sandbox runtime: census existing issue Sandboxes before layout migration: %w", err)
+	}
+	for _, object := range list.Items {
+		if object.GetLabels()[labelProbe] != "" {
+			continue
+		}
+		containers, found, err := unstructured.NestedSlice(object.Object, "spec", "podTemplate", "spec", "containers")
+		if err != nil || !found {
+			return fmt.Errorf("sandbox runtime: legacy issue Sandbox %s has no issue-pod container shape; migrate or remove it before enabling issue pods", object.GetName())
+		}
+		names := map[string]bool{}
+		for _, raw := range containers {
+			container, ok := raw.(map[string]any)
+			if !ok {
+				return fmt.Errorf("sandbox runtime: legacy issue Sandbox %s has an unreadable container shape; migrate or remove it before enabling issue pods", object.GetName())
+			}
+			name, _ := container["name"].(string)
+			names[name] = true
+		}
+		for _, role := range claim.Roles {
+			if !names[string(role)] {
+				return fmt.Errorf("sandbox runtime: legacy issue Sandbox %s has no %s launcher container; migrate or remove it before enabling issue pods", object.GetName(), role)
+			}
+		}
+	}
+	return nil
 }
 
 // configure checks opts and fills their defaults, touching no cluster.
