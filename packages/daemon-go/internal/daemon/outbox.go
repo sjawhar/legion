@@ -431,6 +431,12 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	if err != nil {
 		return err
 	}
+	// A close row naming a tree other than its issue's never reserves it; the checks below decide it.
+	if payload.Op == "tree_close" && payload.Tree == issue.Tree {
+		if handled, err := r.reservedTreeClose(ctx, row, payload); handled || err != nil {
+			return err
+		}
+	}
 	if payload.Generation != issue.Generation {
 		r.log.Info("outbox supervise row serves an earlier generation; finished without acting", "row", row.ID, "issue", issue.Key,
 			"generation", payload.Generation, "current", issue.Generation, "op", payload.Op, "role", payload.Role)
@@ -592,28 +598,48 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				"tree", issue.Tree, "role", payload.Role, "linger", payload.Linger)
 			return nil
 		}
-		cleaner, ok := r.supervisor.deps.Runtime.(runtime.TreeLifecycleCleaner)
-		var treeEpoch uint64
-		if ok {
-			var fresh bool
-			treeEpoch, fresh, err = cleaner.ReserveWorkflowTreeCleanup(ctx, r.project, issue.Tree, payload.Linger)
-			if err != nil {
-				return fmt.Errorf("reserve cleanup of workflow tree %s: %w", issue.Tree, err)
-			}
-			if !fresh {
-				return nil
-			}
-		}
+		// A runtime with shared tree resources ran this close through reservedTreeClose already
+		// when it reserved, or resumed, the tree's cleanup; reaching here, it holds none to drive.
 		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
 			return fmt.Errorf("close the tree of claim %s: %w", token, err)
 		}
-		if !ok {
-			return nil
-		}
-		return r.cleanupTreeResources(ctx, issue.Tree, treeEpoch)
+		return nil
 	default:
 		return fmt.Errorf("outbox row %d has unknown supervise operation %q", row.ID, payload.Op)
 	}
+}
+
+// reservedTreeClose runs a workflow tree close through its tree's durable cleanup reservation, and
+// does so before any stale-close fence. A close reserves only while the root still lingers at the
+// close's generation. Once it has, a re-admission that ends that linger cannot open the tree's next
+// epoch until the cleanup confirms, so every close row of the tree, however stale its own or its
+// root's generation has become, still retires its claim and drives the cleanup; were the fences to
+// finish those rows without acting, the reservation would never confirm and the re-admitted tree
+// would wait forever. It reports false, acting on nothing, when the runtime has no shared tree
+// resources, or when the tree holds no unconfirmed reservation and this close could not take one;
+// the ordinary fences then decide.
+func (r *outbox) reservedTreeClose(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest) (bool, error) {
+	cleaner, ok := r.supervisor.deps.Runtime.(runtime.TreeLifecycleCleaner)
+	if !ok {
+		return false, nil
+	}
+	treeEpoch, reserved, err := cleaner.ReserveWorkflowTreeCleanup(ctx, r.project, payload.Tree, payload.Linger)
+	if err != nil {
+		return true, fmt.Errorf("reserve cleanup of workflow tree %s: %w", payload.Tree, err)
+	}
+	if !reserved {
+		return false, nil
+	}
+	token, err := claim.NewToken(r.project, row.Issue, payload.Role)
+	if err != nil {
+		return true, fmt.Errorf("derive claim for outbox row %d: %w", row.ID, err)
+	}
+	if machine, found := r.supervisor.Machine(token); found {
+		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
+			return true, fmt.Errorf("close the tree of claim %s: %w", token, err)
+		}
+	}
+	return true, r.cleanupTreeResources(ctx, payload.Tree, treeEpoch)
 }
 
 // cleanupTreeResources runs only after a durable tree reservation. The runtime's cleanup censuses

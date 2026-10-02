@@ -32,8 +32,11 @@ const selectIssueResources = `select project, issue, tree, sandbox_name, generat
 	cleanup_generation, cleanup_confirmed_at from issue_resources`
 
 // ErrIssueCleanupInProgress refuses a launch while its issue's resources, or its tree root's, are
-// being deleted. The issue is admitted again once that cleanup is confirmed.
-var ErrIssueCleanupInProgress = errors.New("issue resources are being cleaned up")
+// being deleted. Resource cleanup only ever runs under its tree's lifecycle reservation, so this is
+// that reservation's wait: it wraps treelifecycle.ErrCleanupReserved, which the supervision machine
+// matches without importing the store. The issue is admitted again once a fresh admission opens
+// the tree's next epoch.
+var ErrIssueCleanupInProgress = fmt.Errorf("issue resources are being cleaned up: %w", treelifecycle.ErrCleanupReserved)
 
 // ErrTreeChildrenPending refuses to begin a tree root's cleanup while a child issue of the tree
 // holds resources whose deletion is not confirmed: the root Sandbox owns the tree PVC, and
@@ -109,18 +112,21 @@ func (s *Store) EnsureIssueResources(ctx context.Context, project, issue, tree, 
 }
 
 // BeginIssueCleanup begins one issue's physical cleanup only under a prior explicit reservation of
-// its tree lifecycle epoch. Workflow and operator authority reserve through different validated
-// entry points; zero is never authority. A retry of an unconfirmed issue cleanup returns it.
+// its tree lifecycle epoch, checked in the same transaction. Workflow and operator authority
+// reserve through different validated entry points; zero is never authority. A retry of an
+// unconfirmed issue cleanup returns it. Like every lifecycle operation it takes the shared
+// serializer before any lifecycle or resource row, so it cannot lock in the opposite order from an
+// admission.
 func (s *Store) BeginIssueCleanup(ctx context.Context, project, issue, tree string, treeEpoch uint64) (IssueResources, bool, error) {
 	if tree == "" || treeEpoch == 0 {
 		return IssueResources{}, false, fmt.Errorf("begin issue cleanup %s: missing tree lifecycle epoch", issue)
 	}
-	if err := s.CheckTreeCleanupReservation(ctx, project, tree, treeEpoch); err != nil {
-		return IssueResources{}, false, err
-	}
 	var resources IssueResources
 	began := false
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		if err := treelifecycle.CheckReservation(ctx, tx, project, tree, treeEpoch); err != nil {
+			return err
+		}
 		own, err := scanIssueResources(tx.QueryRow(ctx, selectIssueResources+` where project = $1 and issue = $2 for update`, project, issue))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -202,11 +208,15 @@ func (s *Store) IssueResources(ctx context.Context, project, issue string) (Issu
 
 // ConfirmRootCleanup atomically confirms the root resource and its tree reservation after
 // foreground Sandbox deletion is API-confirmed. Neither confirmation may admit a new epoch alone.
+// The shared serializer comes first, before the resource row, as in every lifecycle operation.
 func (s *Store) ConfirmRootCleanup(ctx context.Context, project, issue, tree string, resourceGeneration, treeEpoch uint64) error {
 	if resourceGeneration == 0 || treeEpoch == 0 {
 		return fmt.Errorf("confirm root cleanup %s: missing resource or tree epoch", issue)
 	}
 	return s.Tx(ctx, func(tx pgx.Tx) error {
+		if err := treelifecycle.Serialize(ctx, tx); err != nil {
+			return err
+		}
 		tag, err := tx.Exec(ctx, `update issue_resources set cleanup_confirmed_at = now(), updated_at = now()
 			where project = $1 and issue = $2 and generation = $3 and cleanup_started = true and cleanup_generation = $3`,
 			project, issue, int64(resourceGeneration))

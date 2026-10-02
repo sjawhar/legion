@@ -8,6 +8,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 // lifecycleRuntime is the fake runtime with the durable tree-lifecycle capability, so the machine
@@ -122,4 +123,26 @@ func TestADeathDuringAReservedCleanupRelaunchesNothingAndChargesNoBudget(t *test
 	}
 	h.wantCalls("Resume", 0)
 	h.wantBudgets(Budgets{})
+}
+
+// The reservation can commit after the machine's own check passed and before the runtime's
+// resource recheck. That refusal from the runtime is the same uncharged wait: one start attempt,
+// no launch failure, no retry loop spending the budget until the claim fails, and a claim brought
+// back from rest rests again.
+func TestARuntimeRecheckMeetingAReservationIsAnUnchargedWait(t *testing.T) {
+	store := &epochStore{epoch: 2}
+	h := lifecycleHarness(t, store, retiredOfEpoch(1))
+	refusal := fmt.Errorf("launch: record its durable issue resources: %w", treelifecycle.ErrCleanupReserved)
+	h.rt.ScriptResume(fake.SpawnResult{Err: refusal})
+	h.rt.ScriptSpawn(fake.SpawnResult{Err: refusal})
+	if err := h.handle(RequestRetry{Claim: h.token}); !errors.Is(err, treelifecycle.ErrCleanupReserved) {
+		t.Fatalf("retry refused by the runtime's recheck = %v, want the reservation's wait", err)
+	}
+	if calls := len(h.rt.CallsOf("Resume")) + len(h.rt.CallsOf("Spawn")); calls != 1 {
+		t.Fatalf("runtime starts = %d, want exactly the one refused attempt", calls)
+	}
+	stored := h.store.load(h.token)
+	if stored.Budgets.LaunchFailures != 0 || stored.State != StateRetired {
+		t.Fatalf("stored claim = %s with %d launch failures, want retired with none", stored.State, stored.Budgets.LaunchFailures)
+	}
 }
