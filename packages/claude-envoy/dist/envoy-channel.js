@@ -36898,7 +36898,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_request_approval",
     example: { issue: "DSP-1", summary: "Proposes a live sync in place of the nightly export." },
-    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a later version moves it to that version and " + "parks it as waiting on you; calling this again hands it back to the human with the new summary, in the same Inbox row. " + "Call it once per revision, when the revision is complete, never after each edit. An approval goes stale when the document changes after it; " + "request again only when the change proposes something the human has not settled. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
+    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a later version moves it to that version and " + "parks it as waiting on you; call this again with a new summary to hand the same Inbox row back to the human. " + "A repeat with unchanged wording leaves the request unchanged. Call it once per revision, when the revision is complete, never after each edit. " + "An approval goes stale when the document changes after it; request again only when the change proposes something the human has not settled. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -40570,7 +40570,7 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
     return;
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
   throw new Error([
-    `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request.`,
+    `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, so an existing approval request would move to that version.`,
     ...open.map((line) => `- ${line}`),
     "Do not request approval over an open block, even when a human asked for it. " + "Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold " + "the answer into the text with dispatch_doc_edit and call dispatch_request_approval once to hand the " + "request back. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as " + "the reason), write their decision into the text with dispatch_doc_edit, and call dispatch_request_approval " + "once to hand the request back."
   ].join(`
@@ -41091,7 +41091,7 @@ ${followsAsk(askOwner)}`,
         replyToOwnAsk: replyToAsk !== undefined && (comment.advice?.your_open_asks?.some((ask) => ask.id === replyToAsk) ?? false)
       });
       if (replyToAsk !== undefined) {
-        const askState = comment.turn === null ? "" : `; ask now waiting on ${comment.turn}`;
+        const askState = comment.waiting_on === undefined ? "" : `; ask now waiting on ${comment.waiting_on}`;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner2)}`,
@@ -41102,7 +41102,7 @@ ${followsAsk(askOwner)}`,
             ...commentDetails,
             ask: replyToAsk,
             follows: { ask: replyToAsk },
-            ...comment.turn === null ? {} : { ask_waiting_on: comment.turn },
+            ...comment.waiting_on === undefined ? {} : { ask_waiting_on: comment.waiting_on },
             ...comment.advice === undefined ? {} : { advice: comment.advice }
           }
         };

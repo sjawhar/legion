@@ -102,11 +102,11 @@ func (t commentThreadTarget) replyTurn(actor model.Actor, requested *string) *st
 }
 
 // eventThread is what a comment event says about the thread the comment joined, given the
-// turn replyTurn settled on.
-func (t commentThreadTarget) eventThread(turn *string) commentEventThread {
+// derived ask turn after this comment is its newest reply.
+func (t commentThreadTarget) eventThread(waitingOn string) commentEventThread {
 	thread := commentEventThread{AskQuestion: t.AskQuestion, AskState: t.AskState}
-	if turn != nil {
-		thread.AskWaitingOn = *turn
+	if waitingOn != "" {
+		thread.AskWaitingOn = waitingOn
 	}
 	if t.ReplyTo != nil {
 		thread.ThreadRootID = *t.ReplyTo
@@ -490,6 +490,13 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	comment.Suggestion = suggestion
 	comment.Mentions = mentions
 	comment.Deliveries = []model.CommentDelivery{}
+	if comment.AskID != nil && threadTarget.AskState == "open" {
+		comment.WaitingOn, err = askWaitingOn(r.Context(), tx, *comment.AskID)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	if comment.Anchor != nil {
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil, projectionKind), actor); err != nil {
 			s.writeHandlerError(w, err)
@@ -596,7 +603,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		events = append(events, event)
 	}
 	payload, err := s.commentEventPayload(
-		r.Context(), tx, comment, artifactName, threadTarget.eventThread(turn), referenceChanges,
+		r.Context(), tx, comment, artifactName, threadTarget.eventThread(comment.WaitingOn), referenceChanges,
 	)
 	if err != nil {
 		s.writeHandlerError(w, err)

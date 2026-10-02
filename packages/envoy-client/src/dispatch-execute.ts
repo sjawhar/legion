@@ -1711,7 +1711,7 @@ async function refuseOpenDecisionBlocks(
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
   throw new Error(
     [
-      `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request.`,
+      `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, so an existing approval request would move to that version.`,
       ...open.map((line) => `- ${line}`),
       "Do not request approval over an open block, even when a human asked for it. " +
         "Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold " +
@@ -2486,9 +2486,10 @@ export async function executeDispatchTool(
           (comment.advice?.your_open_asks?.some((ask) => ask.id === replyToAsk) ?? false),
       });
       if (replyToAsk !== undefined) {
-        // The server records turn only on a reply to an open ask, so a non-null turn is exactly
-        // "the ask is open and now waits on <turn>"; a reply under a closed ask reports no state.
-        const askState = comment.turn === null ? "" : `; ask now waiting on ${comment.turn}`;
+        // The server computes waiting_on from the ask after inserting this comment. It differs
+        // from this comment's turn for an agent reply on a moved approval request.
+        const askState =
+          comment.waiting_on === undefined ? "" : `; ask now waiting on ${comment.waiting_on}`;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner)}`,
@@ -2498,7 +2499,7 @@ export async function executeDispatchTool(
             ...commentDetails,
             ask: replyToAsk,
             follows: { ask: replyToAsk },
-            ...(comment.turn === null ? {} : { ask_waiting_on: comment.turn }),
+            ...(comment.waiting_on === undefined ? {} : { ask_waiting_on: comment.waiting_on }),
             ...(comment.advice === undefined ? {} : { advice: comment.advice }),
           },
         };

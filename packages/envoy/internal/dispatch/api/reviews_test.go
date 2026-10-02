@@ -45,6 +45,20 @@ func readApproval(t *testing.T, handler http.Handler, artifactID string) approva
 	return decodeBody[approvalRead](t, response)
 }
 
+type reviewEvent struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+func issueEvents(t *testing.T, handler http.Handler, issueKey string) []reviewEvent {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issueKey+"/events", nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("read events: status=%d body=%s", response.Code, response.Body.String())
+	}
+	return decodeBody[[]reviewEvent](t, response)
+}
+
 func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -112,14 +126,7 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 	if got.Approval.State != "approved" || got.Approval.Version == nil || *got.Approval.Version != 1 || got.Approval.By == nil || got.Approval.By.ID != "alice" || got.Approval.AskID == nil || *got.Approval.AskID != request.Ask.ID {
 		t.Fatalf("approval after answer = %#v, want approved at v1 by alice via the ask", got.Approval)
 	}
-	log := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
-	var events []struct {
-		Type    string          `json:"type"`
-		Payload json.RawMessage `json:"payload"`
-	}
-	if err := json.NewDecoder(log.Body).Decode(&events); err != nil {
-		t.Fatalf("decode events: %v", err)
-	}
+	events := issueEvents(t, handler, issue.Key)
 	var approvedPayload map[string]any
 	for _, event := range events {
 		if event.Type == "artifact.approved" {
@@ -219,22 +226,15 @@ func TestApprovalRequestFollowsDocumentVersions(t *testing.T) {
 		}](t, response).Ask
 	}
 	askEvents := func() map[string]int {
-		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
-		if response.Code != http.StatusOK {
-			t.Fatalf("read events: status=%d body=%s", response.Code, response.Body.String())
-		}
-		var events []struct {
-			Type    string `json:"type"`
-			Payload struct {
-				ID string `json:"id"`
-			} `json:"payload"`
-		}
-		if err := json.NewDecoder(response.Body).Decode(&events); err != nil {
-			t.Fatalf("decode events: %v", err)
-		}
 		counts := map[string]int{}
-		for _, event := range events {
-			if event.Payload.ID == askID {
+		for _, event := range issueEvents(t, handler, issue.Key) {
+			var payload struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("decode event payload: %v", err)
+			}
+			if payload.ID == askID {
 				counts[event.Type]++
 			}
 		}
@@ -308,6 +308,178 @@ func TestApprovalRequestFollowsDocumentVersions(t *testing.T) {
 	}
 }
 
+func TestApprovalHandBackWaitsOnTheHuman(t *testing.T) {
+	for _, flow := range []struct {
+		name     string
+		move     bool
+		progress bool
+	}{
+		{name: "after a human comment and version move", move: true},
+		{name: "after a human comment at the same version"},
+		{name: "after a human comment and agent progress before a version move", move: true, progress: true},
+	} {
+		t.Run(flow.name, func(t *testing.T) {
+			var documentService *docs.Service
+			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+				return documentService
+			})
+			issue := createInteractionIssue(t, handler, "TEST", "Hand-back turn", "A spec")
+			request := func(summary string) *httptest.ResponseRecorder {
+				return sessionRequest(t, handler, http.MethodPost,
+					"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
+					map[string]any{"actor": sessionActor(), "summary": summary})
+			}
+			first := request("Names the existing proposal.")
+			if first.Code != http.StatusCreated {
+				t.Fatalf("request approval: status=%d body=%s", first.Code, first.Body.String())
+			}
+			askID := decodeBody[struct {
+				Ask struct {
+					ID string `json:"id"`
+				} `json:"ask"`
+			}](t, first).Ask.ID
+			human := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
+				map[string]any{"ask_id": askID, "body": "Please clarify the rollout."}, "alice")
+			if human.Code != http.StatusCreated {
+				t.Fatalf("human comment: status=%d body=%s", human.Code, human.Body.String())
+			}
+			if flow.progress {
+				progress := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
+					map[string]any{
+						"actor": sessionActor(), "ask_id": askID, "body": "Checking the rollout.",
+						"turn": "agent",
+					})
+				if progress.Code != http.StatusCreated {
+					t.Fatalf("agent progress: status=%d body=%s", progress.Code, progress.Body.String())
+				}
+			}
+			if flow.move {
+				if _, err := documentService.ReplaceText(
+					context.Background(), issue.PrimaryArtifactID, "A revised spec",
+					model.Actor{Kind: "session", ID: sessionActor()["id"].(string)},
+				); err != nil {
+					t.Fatalf("revise document: %v", err)
+				}
+				if named := dispatchRequest(t, handler, http.MethodPost,
+					"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
+					map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
+					t.Fatalf("name revised version: status=%d body=%s", named.Code, named.Body.String())
+				}
+			}
+			handedBack := request("Clarifies the rollout.")
+			if handedBack.Code != http.StatusOK {
+				t.Fatalf("hand approval back: status=%d body=%s", handedBack.Code, handedBack.Body.String())
+			}
+			for _, read := range []struct {
+				name string
+				ask  turnAskRow
+			}{
+				{name: "ask detail", ask: readAskDetail(t, handler, askID)},
+				{name: "Inbox", ask: readInboxRow(t, handler, askID)},
+			} {
+				if read.ask.WaitingOn != "human" {
+					t.Fatalf("%s waiting_on = %q, want human", read.name, read.ask.WaitingOn)
+				}
+			}
+			issueAsks := sessionRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks?state=open", nil)
+			if issueAsks.Code != http.StatusOK {
+				t.Fatalf("list issue asks: status=%d body=%s", issueAsks.Code, issueAsks.Body.String())
+			}
+			if asks := decodeBody[[]turnAskRow](t, issueAsks); len(asks) != 1 || asks[0].WaitingOn != "human" {
+				t.Fatalf("issue asks = %#v, want the handed-back ask waiting on human", asks)
+			}
+			openAsks := sessionRequest(t, handler, http.MethodGet, "/api/v1/asks/open?project=TEST", nil)
+			if openAsks.Code != http.StatusOK {
+				t.Fatalf("list open asks: status=%d body=%s", openAsks.Code, openAsks.Body.String())
+			}
+			if response := decodeBody[struct {
+				Asks []turnAskRow `json:"asks"`
+			}](t, openAsks); len(response.Asks) != 1 || response.Asks[0].WaitingOn != "human" {
+				t.Fatalf("open asks = %#v, want the handed-back ask waiting on human", response)
+			}
+		})
+	}
+}
+
+func TestCommentOnMovedApprovalAskReportsItsDerivedWaitingOn(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Moved approval comment", "A spec")
+	requested := sessionRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
+		map[string]any{"actor": sessionActor(), "summary": "Names the initial proposal."})
+	if requested.Code != http.StatusCreated {
+		t.Fatalf("request approval: status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	askID := decodeBody[struct {
+		Ask struct {
+			ID string `json:"id"`
+		} `json:"ask"`
+	}](t, requested).Ask.ID
+	if _, err := documentService.ReplaceText(
+		context.Background(), issue.PrimaryArtifactID, "A revised spec",
+		model.Actor{Kind: "session", ID: sessionActor()["id"].(string)},
+	); err != nil {
+		t.Fatalf("revise document: %v", err)
+	}
+	if named := dispatchRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
+		map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
+		t.Fatalf("name revised version: status=%d body=%s", named.Code, named.Body.String())
+	}
+	comment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
+		map[string]any{"actor": sessionActor(), "ask_id": askID, "body": "The revision is ready."})
+	if comment.Code != http.StatusCreated {
+		t.Fatalf("comment on moved approval: status=%d body=%s", comment.Code, comment.Body.String())
+	}
+	if response := decodeBody[map[string]any](t, comment); response["waiting_on"] != "agent" {
+		t.Fatalf("comment waiting_on = %#v, want agent", response["waiting_on"])
+	}
+	if event := latestCommentCreatedPayload(t, handler, issue.Key); event["ask_waiting_on"] != "agent" {
+		t.Fatalf("comment.created ask_waiting_on = %#v, want agent", event["ask_waiting_on"])
+	}
+	if detail := readAskDetail(t, handler, askID); detail.WaitingOn != "agent" {
+		t.Fatalf("ask detail waiting_on = %q, want agent", detail.WaitingOn)
+	}
+	if inbox := readInboxRow(t, handler, askID); inbox.WaitingOn != "agent" {
+		t.Fatalf("Inbox waiting_on = %q, want agent", inbox.WaitingOn)
+	}
+}
+
+func TestApprovalWaitingOnSupportsTheMigrationMaximumVersion(t *testing.T) {
+	handler, database := newInteractionHandler(t, nil)
+	issue := createInteractionIssue(t, handler, "TEST", "Large approval version", "A spec")
+	requested := sessionRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
+		map[string]any{"actor": sessionActor(), "summary": "Names the large version."})
+	if requested.Code != http.StatusCreated {
+		t.Fatalf("request approval: status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	askID := decodeBody[struct {
+		Ask struct {
+			ID string `json:"id"`
+		} `json:"ask"`
+	}](t, requested).Ask.ID
+	if _, err := database.Pool.Exec(context.Background(), `
+		update asks
+		set approval = $2::jsonb
+		where id = $1
+	`, askID,
+		`{"artifact_id":"`+issue.PrimaryArtifactID+`","name":"spec.md","version":3000000000,"requested_version":3000000000}`,
+	); err != nil {
+		t.Fatalf("set maximum approval version: %v", err)
+	}
+	if inbox := readInboxRow(t, handler, askID); inbox.WaitingOn != "human" {
+		t.Fatalf("Inbox waiting_on = %q, want human", inbox.WaitingOn)
+	}
+}
+
 // A human can still use the document header while the card has moved to a newer version but has
 // not been handed back. The action answers that same open card and pins its review to the version
 // the human saw, rather than resolving the card and losing its thread.
@@ -364,21 +536,18 @@ func TestHeaderReviewAnswersMovedApprovalAskBeforeTheAgentHandsItBack(t *testing
 			if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval == nil || got.Approval.State != review.state || got.Approval.Version == nil || *got.Approval.Version != 2 || got.Approval.AskID == nil || *got.Approval.AskID != askID {
 				t.Fatalf("header review approval = %#v, want %s at v2 through %s", got.Approval, review.state, askID)
 			}
-			response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
-			var events []struct {
-				Type    string `json:"type"`
-				Payload struct {
-					AskID *string `json:"ask_id"`
-				} `json:"payload"`
-			}
-			if err := json.NewDecoder(response.Body).Decode(&events); err != nil {
-				t.Fatalf("decode events: %v", err)
-			}
+			events := issueEvents(t, handler, issue.Key)
 			var reviewAskID *string
 			resolved := 0
 			for _, event := range events {
+				var payload struct {
+					AskID *string `json:"ask_id"`
+				}
+				if err := json.Unmarshal(event.Payload, &payload); err != nil {
+					t.Fatalf("decode event payload: %v", err)
+				}
 				if event.Type == review.event {
-					reviewAskID = event.Payload.AskID
+					reviewAskID = payload.AskID
 				}
 				if event.Type == "ask.resolved" {
 					resolved++
@@ -395,7 +564,7 @@ func TestHeaderReviewAnswersMovedApprovalAskBeforeTheAgentHandsItBack(t *testing
 // within the ask cap. Repeating the request updates the existing row and never opens another.
 func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {
 	var documentService *docs.Service
-	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
@@ -472,147 +641,17 @@ func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {
 		t.Fatalf("summary over the cap on a repeat at the same version: status=%d body=%s", refused.Code, refused.Body.String())
 	}
 
-	// A legacy server can leave an old version on an open request. The next hand-back adopts the
-	// same row at the latest version rather than retracting it and opening another.
-	writeVersionAsAnOlderServer(t, database, issue.PrimaryArtifactID)
-	revised := "Adds the retry budget."
-	second := request(issue.PrimaryArtifactID, &revised)
-	if second.Code != http.StatusOK {
-		t.Fatalf("hand back after a legacy version: status=%d body=%s", second.Code, second.Body.String())
-	}
-	secondResponse := decodeBody[requestResponse](t, second)
-	handedBack := secondResponse.Ask
-	if handedBack.ID != opened.ID || secondResponse.Version != 2 || handedBack.Approval.Version != 2 || handedBack.Approval.RequestedVersion != 2 || handedBack.Question != "Approve spec.md (version 2)? Adds the retry budget." {
-		t.Fatalf("approval ask after a legacy version = %#v", handedBack)
-	}
-	persisted := decodeBody[requestResponse](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+opened.ID, nil, "alice")).Ask
-	if persisted.State != "open" || persisted.ID != opened.ID {
-		t.Fatalf("adopted approval ask = %#v, want the original open row", persisted)
-	}
-	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State != "awaiting" || got.Approval.AskID == nil || *got.Approval.AskID != opened.ID {
-		t.Fatalf("approval after the hand-back = %#v, want awaiting on ask %s", got.Approval, opened.ID)
-	}
-	log := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
-	if log.Code != http.StatusOK {
-		t.Fatalf("read events: status=%d body=%s", log.Code, log.Body.String())
-	}
-	var events []struct {
-		Type    string `json:"type"`
-		Payload struct {
-			ID string `json:"id"`
-		} `json:"payload"`
-	}
-	if err := json.NewDecoder(log.Body).Decode(&events); err != nil {
-		t.Fatalf("decode events: %v", err)
-	}
-	openedEvents, editedEvents, resolvedEvents := 0, 0, 0
-	for _, event := range events {
-		if event.Payload.ID != opened.ID {
-			continue
-		}
-		switch event.Type {
-		case "ask.opened":
-			openedEvents++
-		case "ask.edited":
-			editedEvents++
-		case "ask.resolved":
-			resolvedEvents++
-		}
-	}
-	if openedEvents != 1 || editedEvents != 2 || resolvedEvents != 0 {
-		t.Fatalf("approval events: opened=%d edited=%d resolved=%d, want one row with two edits", openedEvents, editedEvents, resolvedEvents)
-	}
-
 	// Once the latest version is approved a request opens nothing, and its summary is still checked.
-	if approved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+handedBack.ID+"/answer", map[string]any{
-		"selected": []string{"Approve"}, "expected_edited_at": handedBack.EditedAt,
+	if approved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+updated.ID+"/answer", map[string]any{
+		"selected": []string{"Approve"}, "expected_edited_at": updated.EditedAt,
 	}, "alice"); approved.Code != http.StatusOK {
-		t.Fatalf("approve version 2: status=%d body=%s", approved.Code, approved.Body.String())
+		t.Fatalf("approve version 1: status=%d body=%s", approved.Code, approved.Body.String())
 	}
 	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) {
 		t.Fatalf("summary over the cap on an approved document: status=%d body=%s", refused.Code, refused.Body.String())
 	}
-	if satisfied := request(issue.PrimaryArtifactID, &revised); satisfied.Code != http.StatusOK || !strings.Contains(satisfied.Body.String(), `"ask":null`) || !strings.Contains(satisfied.Body.String(), `"state":"approved"`) {
+	if satisfied := request(issue.PrimaryArtifactID, &other); satisfied.Code != http.StatusOK || !strings.Contains(satisfied.Body.String(), `"ask":null`) || !strings.Contains(satisfied.Body.String(), `"state":"approved"`) {
 		t.Fatalf("request on an approved document: status=%d body=%s", satisfied.Code, satisfied.Body.String())
-	}
-}
-
-// writeVersionAsAnOlderServer writes version 2 straight into the table, modeling a deployment
-// that predates moving approval requests with document versions.
-func writeVersionAsAnOlderServer(t *testing.T, database *store.Store, artifactID string) {
-	t.Helper()
-	if _, err := database.Pool.Exec(context.Background(), `
-		insert into artifact_versions (artifact_id, number, markdown, authors)
-		select $1, max(number) + 1, 'A revised spec', '[{"kind":"user","id":"alice"}]'
-		from artifact_versions where artifact_id = $1
-	`, artifactID); err != nil {
-		t.Fatalf("write a version as an older server: %v", err)
-	}
-}
-
-// A card that an older server left at a version the document no longer has is a true race: the
-// human reloads it rather than approving wording that no longer describes the review. The header
-// can still review the latest version and absorbs that legacy card into the review record.
-func TestAnsweringAnApprovalAskThatNamesAnOlderVersionIsRefused(t *testing.T) {
-	var documentService *docs.Service
-	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
-		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
-		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-		return documentService
-	})
-	issue := createInteractionIssue(t, handler, "TEST", "Stale approval", "A spec")
-	requested := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests", map[string]any{
-		"actor":   sessionActor(),
-		"summary": "Caps retries at three attempts.",
-	})
-	if requested.Code != http.StatusCreated {
-		t.Fatalf("request approval: status=%d body=%s", requested.Code, requested.Body.String())
-	}
-	askID := decodeBody[struct {
-		Ask struct {
-			ID string `json:"id"`
-		} `json:"ask"`
-	}](t, requested).Ask.ID
-
-	// The document moves on to version 2 on an older server, and nobody asks again.
-	writeVersionAsAnOlderServer(t, database, issue.PrimaryArtifactID)
-	for _, answer := range []map[string]any{
-		{"selected": []string{"Approve"}},
-		{"selected": []string{"Request changes"}, "text": "Keep the old budget."},
-	} {
-		refused := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", answer, "alice")
-		body := refused.Body.String()
-		if refused.Code != http.StatusConflict || !strings.Contains(body, `"code":"APPROVAL_ASK_STALE"`) || !strings.Contains(body, "document changed since this request was shown") || !strings.Contains(body, "reload it and answer again") {
-			t.Fatalf("answer %v to the ask naming version 1: status=%d body=%s", answer["selected"], refused.Code, body)
-		}
-	}
-	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State == "approved" || got.Approval.Version != nil {
-		t.Fatalf("approval after the refused answers = %#v, want no review", got.Approval)
-	}
-	stillOpen := decodeBody[struct {
-		Ask struct {
-			State string `json:"state"`
-		} `json:"ask"`
-	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+askID, nil, "alice")).Ask
-	if stillOpen.State != "open" {
-		t.Fatalf("ask after the refused answers = %#v, want open", stillOpen)
-	}
-
-	// Approving from the document header reviews the latest version and answers the legacy card
-	// after moving its metadata forward, so the review retains that request's thread.
-	if header := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/reviews", map[string]any{"state": "approved"}, "alice"); header.Code != http.StatusCreated {
-		t.Fatalf("header approve: status=%d body=%s", header.Code, header.Body.String())
-	}
-	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State != "approved" || got.Approval.Version == nil || *got.Approval.Version != 2 || got.Approval.AskID == nil || *got.Approval.AskID != askID {
-		t.Fatalf("approval after the header approve = %#v, want approved at version 2 through %s", got.Approval, askID)
-	}
-	answered := decodeBody[struct {
-		Ask struct {
-			State string `json:"state"`
-		} `json:"ask"`
-	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+askID, nil, "alice")).Ask
-	if answered.State != "answered" {
-		t.Fatalf("the legacy ask after the header approve = %#v, want answered", answered)
 	}
 }
 

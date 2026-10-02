@@ -388,8 +388,9 @@ A Legion root spec under an armed design gate always goes to approval once its b
 
 Request it once, when the spec is ready for the human to read. A request is one row in the Inbox
 for the life of the document: a later version moves that row to the new version and files it under
-Waiting on agents until you call `dispatch_request_approval` again, which hands the same row back
-with a new `summary`. Revise freely, and hand it back once per revision, when you are done. A
+Waiting on agents. Calling `dispatch_request_approval` again hands the same row back with a new
+`summary`; its hand-back edit returns it to Waiting on you even if the prior thread reply left it
+Waiting on agents. A later reply again follows its own `turn`; hand it back once per revision, when you are done. A
 human who comments on the request instead of answering it is continuing the design conversation:
 reply in the thread; when the comment raises a choice that is theirs, write it into the spec as a
 decision block (the request waits on you while the block is open); when it changes the design,

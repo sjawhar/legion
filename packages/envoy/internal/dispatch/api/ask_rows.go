@@ -34,18 +34,32 @@ const lastReplyJoin = `
 		) lr on true`
 
 // waitingOnExpression puts a moved approval request with its agent until that agent hands its
-// current version back. All other open asks follow their newest thread turn.
+// current version back. A hand-back is newer than the thread reply it follows, so it hands the
+// turn to the human before ordinary replies again decide it.
 const waitingOnExpression = `case
 	when a.kind = 'approval'
-		and (a.approval->>'requested_version')::integer < (a.approval->>'version')::integer
+		and (a.approval->>'requested_version')::bigint < (a.approval->>'version')::bigint
 	then 'agent'
+	when a.kind = 'approval' and a.edited_at >= lr.created_at
+	then 'human'
 	else coalesce(lr.turn, 'human')
 end`
 
-// askReadColumns are askRowColumns plus the newest comment in the ask's thread, which is
-// WaitingOn for an open ask and LastReply where a read carries one. Queries selecting them
-// read from askReadFrom. Event payloads are built from askRowColumns instead: they never
-// carry WaitingOn.
+func askWaitingOn(ctx context.Context, q queryer, askID string) (string, error) {
+	var waitingOn string
+	err := q.QueryRow(ctx, `select `+waitingOnExpression+`
+		from asks a`+lastReplyJoin+`
+		where a.id = $1 and a.state = 'open'`, askID).Scan(&waitingOn)
+	if err != nil {
+		return "", fmt.Errorf("read ask waiting_on: %w", err)
+	}
+	return waitingOn, nil
+}
+
+// askReadColumns are askRowColumns plus the newest comment in the ask's thread. WaitingOn derives
+// from that reply with the moved and newly handed-back approval-request overrides in
+// waitingOnExpression; LastReply still names the newest comment. Queries selecting them read from
+// askReadFrom. Event payloads are built from askRowColumns instead: they never carry WaitingOn.
 const askReadColumns = askRowColumns + `, lr.author, lr.created_at, ` + waitingOnExpression
 
 const askReadFrom = askRowFrom + lastReplyJoin
@@ -130,9 +144,9 @@ func (s *server) loadAskAnchorArtifact(
 	return &artifact, nil
 }
 
-// scanAskRead decodes one askReadColumns row; extra receives the columns after them. An
-// open ask gets WaitingOn from its newest reply ("human" when nobody has replied); the
-// reply itself is returned, nil when the thread is empty.
+// scanAskRead decodes one askReadColumns row; an open ask gets WaitingOn from
+// waitingOnExpression, and the newest reply is returned separately (nil when the thread is
+// empty).
 func scanAskRead(row pgx.Row, extra ...any) (model.Ask, *model.AskLastReply, error) {
 	var replyAuthor []byte
 	var repliedAt *time.Time

@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import type { Artifact } from "../web/src/api/types";
 
 import {
   createComment,
@@ -149,14 +150,15 @@ test("an approval request stays in one Inbox card while its document version mov
       { ops: [{ op: "replace", find: "The plan.", with: "The revised plan." }] },
       session
     );
+    let movedArtifact: Artifact | undefined;
     await expect
-      .poll(async () => (await getArtifact(artifactID, { login: "alice" })).versions.length)
+      .poll(async () => {
+        movedArtifact = await getArtifact(artifactID, { login: "alice" });
+        return movedArtifact.versions.length;
+      })
       .toBeGreaterThan(1);
-    const movedVersion = Math.max(
-      ...(await getArtifact(artifactID, { login: "alice" })).versions.map(
-        (version) => version.number
-      )
-    );
+    if (movedArtifact === undefined) throw new Error("the moved artifact was not read");
+    const movedVersion = Math.max(...movedArtifact.versions.map((version) => version.number));
 
     await page.reload();
     await expect(
@@ -187,6 +189,46 @@ test("an approval request stays in one Inbox card while its document version mov
     await expect
       .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval)
       .toMatchObject({ state: "approved", version: movedVersion, ask_id: requested.ask.id });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a human comment, revision, and hand-back return an approval card to Waiting on you", async ({
+  browser,
+}) => {
+  await createProject({ key: "TURN", name: "Approval turn" });
+  const issue = await createIssue({
+    project: "TURN",
+    spec: "The plan.",
+    title: "Hand-back turn",
+  });
+  const requested = await requestApproval(
+    issue.primary_artifact_id,
+    { summary: "Names the initial proposal." },
+    session
+  );
+  await createComment(
+    issue.key,
+    { ask_id: requested.ask.id, body: "Please clarify the rollout." },
+    { login: "alice" }
+  );
+  await editArtifact(
+    issue.primary_artifact_id,
+    { ops: [{ op: "replace", find: "The plan.", with: "The revised plan." }] },
+    session
+  );
+  await requestApproval(issue.primary_artifact_id, { summary: "Clarifies the rollout." }, session);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    await expect(
+      page.locator('[data-inbox-section="human"]').getByTestId(`ask-${requested.ask.id}`)
+    ).toBeVisible();
+    await page.goto(`/issues/${issue.key}`);
+    await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (1)");
   } finally {
     await alice.close();
   }

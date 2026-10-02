@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
 
+const library = fileURLToPath(new URL(".", import.meta.url));
 const program = fileURLToPath(new URL("./design-gate-verdict.jq", import.meta.url));
 
 interface Verdict {
@@ -15,16 +16,56 @@ interface Version {
   markdown: string;
 }
 
+interface ApprovalAskFixture {
+  id?: string;
+  kind?: string;
+  state?: string;
+  created_at?: string;
+  approval?: {
+    artifact_id: string;
+    name: string;
+    version: number;
+    requested_version?: number;
+  };
+}
+
+function approvalEvents(asks: unknown[]): unknown[] {
+  return asks.flatMap((value, index) => {
+    const ask = value as ApprovalAskFixture;
+    if (ask.kind !== "approval" || ask.approval === undefined) return [];
+    const payload = {
+      ...ask,
+      id: ask.id ?? `approval-${index}`,
+      approval: {
+        ...ask.approval,
+        requested_version: ask.approval.requested_version ?? ask.approval.version,
+      },
+    };
+    const events: unknown[] = [{ type: "ask.opened", created_at: ask.created_at, payload }];
+    if (ask.state === "answered") {
+      events.push({ type: "ask.answered", created_at: ask.created_at, payload });
+    }
+    return events;
+  });
+}
+
 /**
  * Runs the stage 4b design-gate verdict as the driver does: the issue's asks, approval lifecycle
  * events, then each spec version that an approval ask was handed back at, slurped.
  */
-function verdict(asks: unknown[], versions: Version[], approved = 5, events: unknown[] = []): Verdict {
+function verdict(
+  asks: unknown[],
+  versions: Version[],
+  approved = 5,
+  events = approvalEvents(asks)
+): Verdict {
   const run = Bun.spawnSync(
     [
       "jq",
       "-c",
       "-s",
+      "-L",
+      library,
       "--arg",
       "artifact",
       "spec-1",
@@ -93,12 +134,18 @@ describe("design-gate-verdict.jq", () => {
     });
   });
 
-  test("counts each version an approval row was handed back at from its edit history", () => {
+  test("counts each version an approval row was handed back at from its event history", () => {
     const current = {
       ...approval(2, "2026-09-30T10:06:00Z", "answered"),
       id: "approval-1",
       approval: { artifact_id: "spec-1", name: "spec.md", version: 2, requested_version: 2 },
       question: "Approve spec.md (version 2)? Adds the rollback budget.",
+    };
+    const previous = {
+      question: "Approve spec.md (version 1)? Proposes the file under docs/smoke/.",
+      options: [],
+      multiple: false,
+      urgency: "high",
     };
     const events = [
       {
@@ -126,31 +173,14 @@ describe("design-gate-verdict.jq", () => {
             version: 2,
             requested_version: 1,
           },
-          previous: {
-            approval: {
-              artifact_id: "spec-1",
-              name: "spec.md",
-              version: 1,
-              requested_version: 1,
-            },
-          },
+          previous,
           question: "Approve spec.md (version 2)? Proposes the file under docs/smoke/.",
         },
       },
       {
         type: "ask.edited",
         created_at: "2026-09-30T10:06:00Z",
-        payload: {
-          ...current,
-          previous: {
-            approval: {
-              artifact_id: "spec-1",
-              name: "spec.md",
-              version: 2,
-              requested_version: 1,
-            },
-          },
-        },
+        payload: { ...current, previous },
       },
       {
         type: "ask.answered",
@@ -158,14 +188,14 @@ describe("design-gate-verdict.jq", () => {
         payload: current,
       },
     ];
-    expect(verdict([block, current], [specAt(1, "open"), specAt(2, "answered")], 2, events)).toEqual(
-      {
-        request: "Approve spec.md (version 2)? Adds the rollback budget.",
-        summarized: true,
-        blocks: 1,
-        early: ["version 1: Where does the smoke file go?"],
-      }
-    );
+    expect(
+      verdict([block, current], [specAt(1, "open"), specAt(2, "answered")], 2, events)
+    ).toEqual({
+      request: "Approve spec.md (version 2)? Adds the rollback budget.",
+      summarized: true,
+      blocks: 1,
+      early: ["version 1: Where does the smoke file go?"],
+    });
   });
 
   // The version-3 request was retracted when the block's answer wrote version 4, and the approved

@@ -554,10 +554,10 @@ type Ask struct {
 	EditedAt          *string `json:"edited_at"`
 	// Approval names the document an approval ask is about; nil for questions.
 	Approval *AskApproval `json:"approval,omitempty"`
-	// WaitingOn is whose reply an open ask needs next: "human" or "agent". It is the
-	// Turn of the newest comment in the ask's thread, "human" when nobody has replied.
-	// Set on ask reads only (inbox rows, ask lists, the ask detail), never on the
-	// ask.* event payloads; empty for answered and resolved asks.
+	// WaitingOn is whose reply an open ask needs next: a moved approval request stays with its
+	// agent while RequestedVersion is below Version, and a later hand-back's edit returns it to
+	// the human until the newest reply decides it. Set on ask reads only (inbox rows, ask lists,
+	// the ask detail), never on the ask.* event payloads; empty for answered and resolved asks.
 	WaitingOn string `json:"waiting_on,omitempty"`
 }
 
@@ -618,9 +618,9 @@ type AskFollowerEventPayload struct {
 	By        Actor  `json:"by"`
 }
 
-// AskLastReply is the newest comment in an ask's thread, carried on inbox rows and
-// on the issue detail's open asks so a human can see who spoke last. Whose turn it
-// is comes from that comment's Turn (Ask.WaitingOn), not from its author.
+// AskLastReply is the newest comment in an ask's thread, carried on inbox rows and on the issue
+// detail's open asks so a human can see who spoke last. Its Turn decides an ordinary ask's
+// WaitingOn; moved and newly handed-back approval asks have their stored-version overrides.
 type AskLastReply struct {
 	Author    Actor  `json:"author"`
 	CreatedAt string `json:"created_at"`
@@ -789,12 +789,11 @@ type Comment struct {
 	AnchorPosition
 	ReplyTo *string `json:"reply_to"`
 	AskID   *string `json:"ask_id"`
-	// Turn is set on a reply to an open ask (AskID non-nil) and names who holds the
-	// turn after this comment: "human" when the human needs to act, "agent" when the
-	// comment is a progress note and the asking agent still owes the next move. A
-	// human's reply always hands the turn to the agent. Nil on replies under a closed
-	// ask (nothing is waiting) and on every other comment.
+	// Turn records the reply's own turn. WaitingOn is the open ask's derived turn once this
+	// comment becomes its newest reply, so a moved approval request remains agent-owned even
+	// when the replying session's default turn would otherwise be human.
 	Turn       *string           `json:"turn"`
+	WaitingOn  string            `json:"waiting_on,omitempty"`
 	Resolved   bool              `json:"resolved"`
 	ResolvedBy *Actor            `json:"resolved_by"`
 	ResolvedAt *string           `json:"resolved_at"`

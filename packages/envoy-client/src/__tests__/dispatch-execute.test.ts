@@ -3697,9 +3697,9 @@ describe("executeDispatchTool", () => {
     expect(dispatchFollowNotice(result.details)).toBeNull();
   });
 
-  // A request names the latest version, and a new version retracts it: a request made over an
-  // open block goes stale the moment the human answers it, and an answer reaches a version only
-  // when the document settles or the agent folds it into the text.
+  // A request names the latest version, and a new version moves an open request to that version
+  // and leaves it waiting on the agent until a hand-back. A request made over an open block cannot
+  // be handed back until the human's answer reaches the document or the agent folds it into the text.
   describe("dispatch_request_approval with decision blocks in the document", () => {
     const opening = (block: string, state: string) =>
       `:::ask{#${block} urgency="med" multiple="false" state="${state}"}\nQuestion of ${block}?\n:::`;
@@ -3781,7 +3781,7 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n").slice(0, 5)).toEqual([
-        "dispatch_request_approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, which would move this request.",
+        "dispatch_request_approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, so an existing approval request would move to that version.",
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
         "- block b-2, whose ask Dispatch has not opened yet",
         "- block b-3, which version 4 does not hold yet",
@@ -3824,7 +3824,7 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n").slice(0, 2)).toEqual([
-        "dispatch_request_approval was not called: spec.md (version 4) has 1 open decision block. Answering one writes a new version, which would move this request.",
+        "dispatch_request_approval was not called: spec.md (version 4) has 1 open decision block. Answering one writes a new version, so an existing approval request would move to that version.",
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
       ]);
       expect(posts).toEqual([]);
@@ -5483,6 +5483,7 @@ describe("executeDispatchTool", () => {
         reply_to: null,
         ask_id: askID,
         turn: "human",
+        waiting_on: "human",
         resolved: false,
         suggestion: null,
         created_at: "2026-09-09T00:00:00Z",
@@ -5576,6 +5577,7 @@ describe("executeDispatchTool", () => {
         reply_to: null,
         ask_id: askID,
         turn: "agent",
+        waiting_on: "agent",
         resolved: false,
         suggestion: null,
         created_at: "2026-09-09T00:00:00Z",
@@ -5610,6 +5612,30 @@ describe("executeDispatchTool", () => {
         body: expect.objectContaining({ ask_id: askID, turn: "agent" }),
       },
     ]);
+  });
+
+  test("reports a moved approval ask's derived turn instead of the replying agent's turn", async () => {
+    const askID = "01234567-0000-4000-8000-000000000045";
+    const result = await executeDispatchTool({
+      tool: "dispatch_comment",
+      args: { issue: "DSP-42", body: "The revision is ready.", reply_to_ask: askID },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: (async () =>
+        response({
+          id: "comment-3",
+          issue_key: "DSP-42",
+          ask_id: askID,
+          turn: "human",
+          waiting_on: "agent",
+        })) as unknown as typeof fetch,
+    });
+
+    expect(result.text).toContain("ask now waiting on agent");
+    expect(result.details).toMatchObject({ ask_waiting_on: "agent" });
   });
 
   test("rejects a comment turn without reply_to_ask before calling the server", async () => {

@@ -831,9 +831,9 @@ export const dispatchToolSpecs = [
       "Request changes) in the human's Inbox whose question names the document and version, " +
       "followed by the summary; the answer pins a review to that version and arrives as " +
       "artifact.approved or artifact.changes_requested. An open request follows the document: a later version moves it to that version and " +
-      "parks it as waiting on you; calling this again hands it back to the human with the new summary, in the same Inbox row. " +
-      "Call it once per revision, when the revision is complete, never after each edit. An approval goes stale when the document changes after it; " +
-      "request again only when the change proposes something the human has not settled. " +
+      "parks it as waiting on you; call this again with a new summary to hand the same Inbox row back to the human. " +
+      "A repeat with unchanged wording leaves the request unchanged. Call it once per revision, when the revision is complete, never after each edit. " +
+      "An approval goes stale when the document changes after it; request again only when the change proposes something the human has not settled. " +
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +

@@ -362,12 +362,13 @@ func (s *server) storeArtifact(
 	if !created && kind == "doc" {
 		// This route writes its version itself rather than through the document service, so its
 		// open approval request follows that version just as every other version write does.
-		moved, err := docs.MoveApprovalAsks(r.Context(), tx, s.deps.Events, artifact.ID, version, s.deps.ServerURL)
+		movedEvents, err = docs.MoveApprovalAsks(
+			r.Context(), tx, s.deps.Events, artifact.ID, version, s.deps.ServerURL,
+		)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		movedEvents = append(movedEvents, moved...)
 		diff, err = s.namedVersionDiff(r.Context(), tx, artifact.ID, version)
 		if err != nil {
 			s.writeHandlerError(w, err)

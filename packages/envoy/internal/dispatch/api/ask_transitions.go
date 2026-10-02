@@ -62,9 +62,6 @@ func answerTransition(
 				if _, _, err := reviewFromAnswer(selected, text); err != nil {
 					return model.Ask{}, err
 				}
-				if err := refuseStaleApprovalAsk(ctx, tx, ask); err != nil {
-					return model.Ask{}, err
-				}
 			default:
 				if !ask.Multiple && len(selected) > 1 {
 					return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "single-select asks accept at most one selected answer")
