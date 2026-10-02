@@ -1,6 +1,16 @@
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { parseArgs } from "node:util";
+import type {
+  ArtifactReviewEventPayload,
+  Ask,
+  AskApproval,
+  DispatchEvent,
+  Issue,
+} from "../../packages/contracts/src/dispatch-api";
+import {
+  type ActiveDispatchConfig,
+  activeDispatchConfig,
+} from "../../packages/envoy-client/src/dispatch-config";
 
 const DEFAULT_PROJECTS = ["AGENTC", "LEGION", "OPS"] as const;
 const CODES = ["to-do", "design", "may-I-proceed", "operations"] as const;
@@ -8,37 +18,39 @@ const EVENT_PAGE_SIZE = 200;
 
 type Code = (typeof CODES)[number];
 
-type UnknownRecord = Record<string, unknown>;
+type DispatchConfig = Pick<ActiveDispatchConfig, "url" | "token">;
 
-interface CensusAuthor {
-  readonly kind?: string;
-  readonly id?: string;
-  readonly origin?: {
-    readonly machine?: string;
-    readonly session_title?: string;
+/** The fields of an ask the census reads. */
+export type CensusAsk = Pick<
+  Ask,
+  "id" | "created_at" | "kind" | "block_id" | "question" | "author"
+>;
+
+/** An approval as an `ask.*` event recorded it; events written before F1 carry no
+ * `requested_version`. */
+type RecordedApproval = Pick<AskApproval, "artifact_id" | "version"> &
+  Partial<Pick<AskApproval, "requested_version">>;
+
+/**
+ * The fields of a recorded Dispatch event the approval count reads. The history it reads predates
+ * parts of today's contract, so each payload field is optional and checked before use.
+ */
+export interface CensusEvent {
+  readonly id: DispatchEvent["id"];
+  readonly type: string;
+  readonly actor?: { readonly kind: string; readonly id: string };
+  readonly payload: {
+    /** The ask an `ask.*` event carries. */
+    readonly id?: Ask["id"];
+    readonly kind?: Ask["kind"];
+    /** The ask a comment replied to or a review answered. */
+    readonly ask_id?: ArtifactReviewEventPayload["ask_id"];
+    readonly approval?: RecordedApproval;
   };
 }
 
-export interface CensusAsk {
-  readonly id: string;
-  readonly created_at: string;
-  readonly kind: string;
-  readonly block_id?: string | null;
-  readonly question?: string;
-  readonly author?: CensusAuthor;
-}
-
-export interface CensusEvent {
-  readonly id: number | string;
-  readonly type: string;
-  readonly actor?: CensusAuthor;
-  readonly created_at?: string;
-  readonly payload: unknown;
-}
-
-interface PagedCensusEvent extends CensusEvent {
-  readonly seq: number;
-}
+/** An event as `GET /api/v1/issues/{key}/events` returns it. */
+type RecordedEvent = CensusEvent & Pick<DispatchEvent, "seq" | "created_at">;
 
 interface ApprovalRound {
   readonly artifactId: string;
@@ -72,30 +84,18 @@ interface CensusOptions {
   readonly codesPath?: string;
 }
 
-export interface DispatchConfig {
-  readonly url: string;
-  readonly token: string;
-}
-
-interface IssueSummary {
-  readonly key: string;
-  readonly title?: string;
-}
-
 interface MutableApprovalRound {
   inboxRows: number;
   handbacks: number;
   humanTurnKeys: Set<string>;
 }
 
-function record(value: unknown): UnknownRecord | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as UnknownRecord)
-    : undefined;
-}
-
-function string(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
+/** What one issue adds to each table. */
+interface IssueCensus {
+  readonly windowAsks: readonly CensusAsk[];
+  readonly issueRow: (AskSummary & { issue: string }) | undefined;
+  readonly approvalRounds: Array<ApprovalRound & { issue: string }>;
+  readonly standaloneQuestions: Array<CensusAsk & { issue: string }>;
 }
 
 function date(value: string, name: string): number {
@@ -109,7 +109,23 @@ function inWindow(timestamp: string, from: number, to: number): boolean {
   return value >= from && value < to;
 }
 
-export function filterAsksInWindow<T extends CensusAsk>(
+/** Text a session or the server chose, with control characters escaped, so a printed table
+ * carries no terminal escape sequence. */
+function printable(text: string): string {
+  return text.replace(
+    /\p{Cc}/gu,
+    (character) => `\\u${(character.codePointAt(0) ?? 0).toString(16).padStart(4, "0")}`
+  );
+}
+
+function fromExcludedSession(
+  actor: { readonly kind: string; readonly id: string } | undefined,
+  excludedSessionIds: ReadonlySet<string>
+): boolean {
+  return actor?.kind === "session" && excludedSessionIds.has(actor.id);
+}
+
+export function filterAsksInWindow<T extends Pick<CensusAsk, "created_at">>(
   asks: readonly T[],
   from: string,
   to: string
@@ -119,23 +135,18 @@ export function filterAsksInWindow<T extends CensusAsk>(
   return asks.filter((ask) => inWindow(ask.created_at, fromTime, toTime));
 }
 
-export function excludeSessionAsks<T extends CensusAsk>(
+export function excludeSessionAsks<T extends Pick<CensusAsk, "author">>(
   asks: readonly T[],
   excludedSessionIds: ReadonlySet<string>
 ): T[] {
-  return asks.filter(
-    (ask) =>
-      ask.author?.kind !== "session" ||
-      ask.author.id === undefined ||
-      !excludedSessionIds.has(ask.author.id)
-  );
+  return asks.filter((ask) => !fromExcludedSession(ask.author, excludedSessionIds));
 }
 
-function isStandaloneQuestion(ask: CensusAsk): boolean {
+function isStandaloneQuestion(ask: Pick<CensusAsk, "kind" | "block_id">): boolean {
   return ask.kind === "question" && ask.block_id === null;
 }
 
-export function summarizeAsks(asks: readonly CensusAsk[]): AskSummary {
+export function summarizeAsks(asks: readonly Pick<CensusAsk, "kind" | "block_id">[]): AskSummary {
   let decisionBlocks = 0;
   let standaloneQuestions = 0;
   let approvalRequests = 0;
@@ -147,73 +158,47 @@ export function summarizeAsks(asks: readonly CensusAsk[]): AskSummary {
   return { asks: asks.length, decisionBlocks, standaloneQuestions, approvalRequests };
 }
 
-function approval(payload: unknown):
-  | {
-      artifactId: string;
-      version?: number;
-      requestedVersion?: number;
-      askId?: string;
-      kind?: string;
-    }
-  | undefined {
-  const payloadRecord = record(payload);
-  if (payloadRecord === undefined) return undefined;
-  const approvalRecord = record(payloadRecord.approval);
-  if (approvalRecord === undefined) return undefined;
-  const artifactId = string(approvalRecord.artifact_id);
-  if (artifactId === undefined) return undefined;
-  return {
-    artifactId,
-    version: typeof approvalRecord.version === "number" ? approvalRecord.version : undefined,
-    requestedVersion:
-      typeof approvalRecord.requested_version === "number"
-        ? approvalRecord.requested_version
-        : undefined,
-    askId: string(payloadRecord.id),
-    kind: string(payloadRecord.kind),
-  };
-}
-
 function approvalRound(
-  rounds: Record<string, MutableApprovalRound>,
+  rounds: Map<string, MutableApprovalRound>,
   artifactId: string
 ): MutableApprovalRound {
-  const existing = rounds[artifactId];
+  const existing = rounds.get(artifactId);
   if (existing !== undefined) return existing;
   const created = { inboxRows: 0, handbacks: 0, humanTurnKeys: new Set<string>() };
-  rounds[artifactId] = created;
+  rounds.set(artifactId, created);
   return created;
 }
 
+/**
+ * Counts, per document, every time an approval request reached the human's Inbox (`handbacks`):
+ * the request's opening `ask.opened`, and each hand-back, an `ask.edited` that sets
+ * `requested_version` to `version`. A move, the `ask.edited` a new version writes, leaves
+ * `requested_version` below `version` and reaches nobody. Before F1 every request opened its own
+ * row, so the same rule counts each one. A round with more arrivals than human turns plus one is
+ * flagged.
+ */
 export function summarizeApprovalRounds(events: readonly CensusEvent[]): ApprovalRound[] {
-  const rounds: Record<string, MutableApprovalRound> = {};
-  const approvalAskArtifacts: Record<string, string> = {};
+  const rounds = new Map<string, MutableApprovalRound>();
+  const approvalAskArtifacts = new Map<string, string>();
 
-  for (const event of events) {
-    const details = approval(event.payload);
-    if (details?.kind !== "approval" || details.askId === undefined) continue;
-    approvalAskArtifacts[details.askId] = details.artifactId;
-    const round = approvalRound(rounds, details.artifactId);
-    if (event.type === "ask.opened") {
-      round.inboxRows += 1;
-      if (details.requestedVersion === undefined) round.handbacks += 1;
+  for (const { type, payload } of events) {
+    if (payload.kind !== "approval" || payload.id === undefined || payload.approval === undefined) {
+      continue;
     }
-    if (
-      event.type === "ask.edited" &&
-      details.requestedVersion !== undefined &&
-      details.version === details.requestedVersion
-    ) {
+    const { artifact_id: artifactId, version, requested_version } = payload.approval;
+    approvalAskArtifacts.set(payload.id, artifactId);
+    const round = approvalRound(rounds, artifactId);
+    if (type === "ask.opened") round.inboxRows += 1;
+    if (type === "ask.opened" || (type === "ask.edited" && requested_version === version)) {
       round.handbacks += 1;
     }
   }
 
   for (const event of events) {
     if (event.actor?.kind !== "user") continue;
-    const payload = record(event.payload);
-    if (payload === undefined) continue;
-    const askId = string(payload.ask_id) ?? string(payload.id);
+    const askId = event.payload.ask_id ?? event.payload.id;
     if (askId === undefined) continue;
-    const artifactId = approvalAskArtifacts[askId];
+    const artifactId = approvalAskArtifacts.get(askId);
     if (artifactId === undefined) continue;
     if (event.type === "comment.created") {
       approvalRound(rounds, artifactId).humanTurnKeys.add(`comment:${event.id}`);
@@ -227,7 +212,7 @@ export function summarizeApprovalRounds(events: readonly CensusEvent[]): Approva
     }
   }
 
-  return Object.entries(rounds)
+  return [...rounds]
     .map(([artifactId, round]) => ({
       artifactId,
       inboxRows: round.inboxRows,
@@ -239,7 +224,7 @@ export function summarizeApprovalRounds(events: readonly CensusEvent[]): Approva
 }
 
 export function applyCodes(
-  asks: readonly CensusAsk[],
+  asks: readonly Pick<CensusAsk, "id" | "kind" | "block_id">[],
   codes: Readonly<Record<string, Code>>
 ): Record<Code | "uncoded", number> {
   const totals: Record<Code | "uncoded", number> = {
@@ -257,41 +242,40 @@ export function applyCodes(
 }
 
 export function summarizeSessions(
-  asks: readonly CensusAsk[],
+  asks: readonly Pick<CensusAsk, "created_at" | "author">[],
   excludedSessionIds: ReadonlySet<string>
 ): { dropped: number; sessions: SessionSummary[] } {
-  const sessions: Record<string, SessionSummary> = {};
+  const sessions = new Map<string, SessionSummary>();
   let dropped = 0;
-  for (const ask of asks) {
-    if (ask.author?.kind !== "session" || ask.author.id === undefined) continue;
-    if (excludedSessionIds.has(ask.author.id)) {
+  for (const { author, created_at } of asks) {
+    if (author.kind !== "session") continue;
+    if (fromExcludedSession(author, excludedSessionIds)) {
       dropped += 1;
       continue;
     }
-    const current = sessions[ask.author.id];
-    const machine = ask.author.origin?.machine ?? "unknown";
-    const title = ask.author.origin?.session_title ?? "unknown";
-    if (current === undefined) {
-      sessions[ask.author.id] = {
-        sessionId: ask.author.id,
-        machine,
-        title,
-        firstAsk: ask.created_at,
-        lastAsk: ask.created_at,
-        asks: 1,
-      };
-      continue;
-    }
-    sessions[ask.author.id] = {
-      ...current,
-      firstAsk: current.firstAsk < ask.created_at ? current.firstAsk : ask.created_at,
-      lastAsk: current.lastAsk > ask.created_at ? current.lastAsk : ask.created_at,
-      asks: current.asks + 1,
-    };
+    const current = sessions.get(author.id);
+    sessions.set(
+      author.id,
+      current === undefined
+        ? {
+            sessionId: author.id,
+            machine: author.origin?.machine ?? "unknown",
+            title: author.origin?.session_title ?? "unknown",
+            firstAsk: created_at,
+            lastAsk: created_at,
+            asks: 1,
+          }
+        : {
+            ...current,
+            firstAsk: current.firstAsk < created_at ? current.firstAsk : created_at,
+            lastAsk: current.lastAsk > created_at ? current.lastAsk : created_at,
+            asks: current.asks + 1,
+          }
+    );
   }
   return {
     dropped,
-    sessions: Object.values(sessions).sort(
+    sessions: [...sessions.values()].sort(
       (left, right) => right.asks - left.asks || left.sessionId.localeCompare(right.sessionId)
     ),
   };
@@ -317,28 +301,23 @@ export function parseCodes(source: string): Record<string, Code> {
 }
 
 function parseArguments(argv: readonly string[]): CensusOptions {
-  let from: string | undefined;
-  let to: string | undefined;
-  const projects: string[] = [];
-  const excludedSessionIds = new Set<string>();
-  let codesPath: string | undefined;
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index];
-    const value = argv[index + 1];
-    if (argument === "--from") from = value;
-    else if (argument === "--to") to = value;
-    else if (argument === "--project") projects.push(value ?? "");
-    else if (argument === "--exclude-session") excludedSessionIds.add(value ?? "");
-    else if (argument === "--codes") codesPath = value;
-    else throw new Error(`unknown argument: ${argument}`);
-    index += 1;
-  }
-
+  const { values } = parseArgs({
+    args: [...argv],
+    options: {
+      from: { type: "string" },
+      to: { type: "string" },
+      project: { type: "string", multiple: true },
+      "exclude-session": { type: "string", multiple: true },
+      codes: { type: "string" },
+    },
+    strict: true,
+  });
+  const { from, to, codes: codesPath } = values;
+  const projects = values.project ?? [];
+  const excludedSessionIds = new Set(values["exclude-session"]);
   if (from === undefined || to === undefined) throw new Error("--from and --to are required");
   if (date(from, "from") >= date(to, "to")) throw new Error("--from must be before --to");
-  if (projects.some((project) => project === ""))
-    throw new Error("--project requires a project key");
+  if (projects.includes("")) throw new Error("--project requires a project key");
   if (excludedSessionIds.has("")) throw new Error("--exclude-session requires a session id");
   if (codesPath === "") throw new Error("--codes requires a file path");
   return {
@@ -348,27 +327,6 @@ function parseArguments(argv: readonly string[]): CensusOptions {
     excludedSessionIds,
     ...(codesPath === undefined ? {} : { codesPath }),
   };
-}
-
-export async function dispatchConfig(
-  env: Readonly<Record<string, string | undefined>> = process.env,
-  home = homedir()
-): Promise<DispatchConfig> {
-  let url = env.DISPATCH_URL;
-  let token = env.DISPATCH_TOKEN;
-  if (url === undefined || token === undefined) {
-    const path = join(home, ".config", "opencode", "envoy.json");
-    const configured = record(JSON.parse(await readFile(path, "utf8")));
-    const dispatch = configured === undefined ? undefined : record(configured.dispatch);
-    url ??= dispatch === undefined ? undefined : string(dispatch.serverUrl);
-    token ??= dispatch === undefined ? undefined : string(dispatch.token);
-  }
-  if (url === undefined || token === undefined) {
-    throw new Error(
-      "set DISPATCH_URL and DISPATCH_TOKEN, or configure dispatch.serverUrl and dispatch.token"
-    );
-  }
-  return { url: url.replace(/\/+$/, ""), token };
 }
 
 async function get<T>(
@@ -387,11 +345,11 @@ export async function fetchIssueEvents(
   config: DispatchConfig,
   issueKey: string,
   fetchImpl: typeof fetch = fetch
-): Promise<PagedCensusEvent[]> {
-  const events: PagedCensusEvent[] = [];
+): Promise<RecordedEvent[]> {
+  const events: RecordedEvent[] = [];
   let after = 0;
   while (true) {
-    const page = await get<PagedCensusEvent[]>(
+    const page = await get<RecordedEvent[]>(
       config,
       `/api/v1/issues/${encodeURIComponent(issueKey)}/events?limit=${EVENT_PAGE_SIZE}&after=${after}`,
       fetchImpl
@@ -406,47 +364,67 @@ export async function fetchIssueEvents(
   }
 }
 
-async function run(options: CensusOptions): Promise<void> {
-  const config = await dispatchConfig();
+async function censusIssue(
+  config: DispatchConfig,
+  issue: string,
+  options: CensusOptions
+): Promise<IssueCensus> {
   const fromTime = date(options.from, "from");
   const toTime = date(options.to, "to");
+  const issueAsks = await get<CensusAsk[]>(
+    config,
+    `/api/v1/issues/${encodeURIComponent(issue)}/asks`
+  );
+  const windowAsks = filterAsksInWindow(issueAsks, options.from, options.to);
+  const asks = excludeSessionAsks(windowAsks, options.excludedSessionIds);
+  // One approval row follows its document from the first request until a human answers it (F1),
+  // so a request opened before the window can be handed back inside it. Approval rounds come from
+  // the in-window events of every issue that carries an approval ask, whenever it was opened.
+  const events = issueAsks.some((ask) => ask.kind === "approval")
+    ? (await fetchIssueEvents(config, issue)).filter(
+        (event) =>
+          inWindow(event.created_at, fromTime, toTime) &&
+          !fromExcludedSession(event.actor, options.excludedSessionIds)
+      )
+    : [];
+  return {
+    windowAsks,
+    issueRow: asks.length === 0 ? undefined : { issue, ...summarizeAsks(asks) },
+    approvalRounds: summarizeApprovalRounds(events).map((round) => ({ issue, ...round })),
+    standaloneQuestions: asks.filter(isStandaloneQuestion).map((ask) => ({ ...ask, issue })),
+  };
+}
+
+async function run(options: CensusOptions): Promise<void> {
+  const config = activeDispatchConfig(process.env);
+  if (config === null) {
+    throw new Error(
+      "Dispatch is not configured: set DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or enable dispatch in ~/.config/opencode/envoy.json"
+    );
+  }
   const codes =
     options.codesPath === undefined ? {} : parseCodes(await readFile(options.codesPath, "utf8"));
-  const issueRows: Array<AskSummary & { issue: string }> = [];
-  const approvalRounds: Array<ApprovalRound & { issue: string }> = [];
-  const standaloneQuestions: Array<CensusAsk & { issue: string }> = [];
-  const allWindowAsks: CensusAsk[] = [];
-
-  for (const project of options.projects) {
-    const issues = await get<IssueSummary[]>(
-      config,
-      `/api/v1/issues?project=${encodeURIComponent(project)}&updated_since=${encodeURIComponent(options.from)}`
-    );
-    for (const issue of issues) {
-      const windowAsks = filterAsksInWindow(
-        await get<CensusAsk[]>(config, `/api/v1/issues/${encodeURIComponent(issue.key)}/asks`),
-        options.from,
-        options.to
-      );
-      allWindowAsks.push(...windowAsks);
-      const asks = excludeSessionAsks(windowAsks, options.excludedSessionIds);
-      if (asks.length === 0) continue;
-      const events = (await fetchIssueEvents(config, issue.key)).filter(
-        (event) =>
-          (event.created_at === undefined || inWindow(event.created_at, fromTime, toTime)) &&
-          (event.actor?.kind !== "session" ||
-            event.actor.id === undefined ||
-            !options.excludedSessionIds.has(event.actor.id))
-      );
-      issueRows.push({ issue: issue.key, ...summarizeAsks(asks) });
-      approvalRounds.push(
-        ...summarizeApprovalRounds(events).map((round) => ({ issue: issue.key, ...round }))
-      );
-      standaloneQuestions.push(
-        ...asks.filter(isStandaloneQuestion).map((ask) => ({ ...ask, issue: issue.key }))
-      );
-    }
-  }
+  // Without limit or offset the issues route answers every matching issue in one array, so this
+  // read is deliberately unpaged. Every event bumps an issue's updated_at, so the list holds every
+  // issue with activity in the window.
+  const projectIssues = await Promise.all(
+    options.projects.map((project) =>
+      get<Pick<Issue, "key">[]>(
+        config,
+        `/api/v1/issues?project=${encodeURIComponent(project)}&updated_since=${encodeURIComponent(options.from)}`
+      )
+    )
+  );
+  // Each issue is read concurrently; the results keep project and issue order, which the approval
+  // rounds table prints in.
+  const census = await Promise.all(
+    projectIssues.flat().map((issue) => censusIssue(config, issue.key, options))
+  );
+  const issueRows = census.flatMap((issue) =>
+    issue.issueRow === undefined ? [] : [issue.issueRow]
+  );
+  const approvalRounds = census.flatMap((issue) => issue.approvalRounds);
+  const standaloneQuestions = census.flatMap((issue) => issue.standaloneQuestions);
 
   const totals = issueRows.reduce(
     (sum, row) => ({
@@ -457,7 +435,10 @@ async function run(options: CensusOptions): Promise<void> {
     }),
     { asks: 0, decisionBlocks: 0, standaloneQuestions: 0, approvalRequests: 0 }
   );
-  const sessions = summarizeSessions(allWindowAsks, options.excludedSessionIds);
+  const sessions = summarizeSessions(
+    census.flatMap((issue) => issue.windowAsks),
+    options.excludedSessionIds
+  );
   console.log("Ask totals");
   console.table([totals]);
   console.log("Issue counts");
@@ -474,14 +455,21 @@ async function run(options: CensusOptions): Promise<void> {
         issue: ask.issue,
         ask: ask.id,
         code: codes[ask.id] ?? "",
-        question: ask.question ?? "",
+        question: printable(ask.question),
       }))
   );
   console.log("Coding totals");
   console.table([applyCodes(standaloneQuestions, codes)]);
   console.log(`Excluded asks from old-plugin sessions: ${sessions.dropped}`);
   console.log("Sessions");
-  console.table(sessions.sessions);
+  console.table(
+    sessions.sessions.map((session) => ({
+      ...session,
+      sessionId: printable(session.sessionId),
+      machine: printable(session.machine),
+      title: printable(session.title),
+    }))
+  );
   const flagged = approvalRounds.filter((round) => round.exceedsHumanTurnBudget);
   if (flagged.length > 0) {
     console.log("Approval rounds above the human-turn budget");

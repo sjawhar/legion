@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import fixture from "../__fixtures__/ask-census.json";
+import fixtureJson from "../__fixtures__/ask-census.json";
 import {
   applyCodes,
+  type CensusAsk,
   type CensusEvent,
-  dispatchConfig,
   excludeSessionAsks,
   fetchIssueEvents,
   filterAsksInWindow,
@@ -13,8 +13,18 @@ import {
   summarizeSessions,
 } from "../ask-census.ts";
 
+// The snapshots are the server's JSON, whose literal fields a JSON import widens to `string`.
+const fixture = fixtureJson as unknown as {
+  readonly issues: ReadonlyArray<{
+    readonly key: string;
+    readonly asks: ReadonlyArray<Pick<CensusAsk, "id" | "created_at" | "kind" | "block_id">>;
+    readonly events: readonly CensusEvent[];
+  }>;
+};
+
 const from = "2026-10-01T00:00:00.000Z";
 const to = "2026-10-02T00:00:00.000Z";
+const human = { kind: "user", id: "alice" } as const;
 
 const asks = [
   {
@@ -22,6 +32,7 @@ const asks = [
     created_at: "2026-09-30T23:59:59.999Z",
     kind: "question",
     block_id: null,
+    author: human,
   },
   {
     id: "decision-block",
@@ -50,12 +61,14 @@ const asks = [
     created_at: "2026-10-01T03:00:00.000Z",
     kind: "approval",
     block_id: null,
+    author: human,
   },
   {
     id: "at-window-end",
     created_at: "2026-10-02T00:00:00.000Z",
     kind: "question",
     block_id: null,
+    author: human,
   },
 ] as const;
 
@@ -119,7 +132,7 @@ describe("ask census", () => {
     ]);
   });
 
-  test("counts approval hand-backs after F1 separately from human turns", () => {
+  test("counts the opening request and each hand-back, separately from human turns", () => {
     expect(
       summarizeApprovalRounds([
         {
@@ -172,49 +185,16 @@ describe("ask census", () => {
           id: 6,
           type: "artifact.approved",
           actor: { kind: "user", id: "alice" },
-          payload: { ask_id: "approval-1", artifact_id: "artifact-1", version: 2 },
+          payload: { ask_id: "approval-1" },
         },
       ])
     ).toEqual([
       {
         artifactId: "artifact-1",
         inboxRows: 1,
-        handbacks: 1,
+        handbacks: 2,
         humanTurns: 2,
         exceedsHumanTurnBudget: false,
-      },
-    ]);
-
-    expect(
-      summarizeApprovalRounds([
-        {
-          id: 7,
-          type: "ask.opened",
-          actor: { kind: "session", id: "session-a" },
-          payload: {
-            id: "approval-2",
-            kind: "approval",
-            approval: { artifact_id: "artifact-2", version: 1 },
-          },
-        },
-        {
-          id: 8,
-          type: "ask.opened",
-          actor: { kind: "session", id: "session-a" },
-          payload: {
-            id: "approval-3",
-            kind: "approval",
-            approval: { artifact_id: "artifact-2", version: 2 },
-          },
-        },
-      ])
-    ).toEqual([
-      {
-        artifactId: "artifact-2",
-        inboxRows: 2,
-        handbacks: 2,
-        humanTurns: 0,
-        exceedsHumanTurnBudget: true,
       },
     ]);
   });
@@ -270,20 +250,11 @@ describe("ask census", () => {
       {
         artifactId: "artifact-1",
         inboxRows: 1,
-        handbacks: 0,
+        handbacks: 1,
         humanTurns: 1,
         exceedsHumanTurnBudget: false,
       },
     ]);
-  });
-
-  test("uses environment Dispatch credentials without reading the config file", async () => {
-    expect(
-      await dispatchConfig(
-        { DISPATCH_URL: "https://dispatch.example/", DISPATCH_TOKEN: "token" },
-        "/nonexistent-ask-census-home"
-      )
-    ).toEqual({ url: "https://dispatch.example", token: "token" });
   });
 
   test("totals supplied judgment codes and excludes known old-plugin sessions", () => {

@@ -3,8 +3,9 @@
 ## Ask census
 
 `ask-census.ts` reproduces the question and approval-request counting used for LEGION-470. It
-reads every issue updated in the selected window, then each issue's asks and every page of its
-events.
+reads every issue updated since the window opened and each issue's asks, then every page of the
+events of each issue that carries an approval ask, whenever that ask was opened. Each issue is
+read concurrently.
 
 ```bash
 bun scripts/dispatch/ask-census.ts \
@@ -15,10 +16,12 @@ bun scripts/dispatch/ask-census.ts \
   --project OPS
 ```
 
-The script reads `DISPATCH_URL` and `DISPATCH_TOKEN` when set. Otherwise it reads
-`dispatch.serverUrl` and `dispatch.token` from `~/.config/opencode/envoy.json`. It prints total
-asks, decision blocks, standalone question asks, approval requests, per-issue counts, approval
-rounds, every standalone question with a blank `code` column, and a per-session table.
+The script resolves Dispatch as the Envoy client does (`activeDispatchConfig` in
+`packages/envoy-client/src/dispatch-config.ts`): the URL from `DISPATCH_URL`, else
+`dispatch.serverUrl` in `~/.config/opencode/envoy.json` with `dispatch.enabled`; the token from
+`DISPATCH_TOKEN_FILE`, else `DISPATCH_TOKEN`, else `dispatch.token`. It prints total asks, decision
+blocks, standalone question asks, approval requests, per-issue counts, approval rounds, every
+standalone question with a blank `code` column, and a per-session table.
 
 A session still running an old plugin can be removed from the measurement with a repeated
 `--exclude-session <id>`. The summary prints how many asks were excluded.
@@ -36,7 +39,7 @@ action or permission only a human can complete. `design` is a decision about the
 `may-I-proceed` asks permission for work already requested. `operations` is a people or operations
 decision with no design document. The script reports uncoded standalone questions separately.
 
-For every document with approval activity, **Approval rounds** shows Inbox rows, hand-backs, and
-human turns. A hand-back above human turns plus one is flagged. Before F1, the script uses each
-approval `ask.opened` event as a hand-back; after F1, it uses an `ask.edited` event whose
-`requested_version` catches up to `version`.
+For every document with approval activity in the window, **Approval rounds** shows Inbox rows,
+hand-backs, and human turns. A hand-back is every arrival of the request in the human's Inbox: its
+opening `ask.opened`, and each `ask.edited` that sets `requested_version` to `version`. A round
+with more hand-backs than human turns plus one is flagged.

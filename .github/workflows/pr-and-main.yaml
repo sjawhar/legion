@@ -44,6 +44,9 @@ jobs:
         run: bunx biome check --error-on-warnings src/
         working-directory: packages/workspace
 
+      - name: Lint the Dispatch census script
+        run: bunx biome check --error-on-warnings scripts/dispatch
+
 
   typecheck:
     runs-on: ubuntu-24.04
@@ -64,6 +67,12 @@ jobs:
       - name: Typecheck workspace
         run: bunx tsc --noEmit
         working-directory: packages/workspace
+
+      # scripts/dispatch is no workspace, so it borrows the envoy-client package's TypeScript and
+      # Bun types (its tsconfig's typeRoots).
+      - name: Typecheck the Dispatch census script
+        run: bunx tsc --noEmit -p ../../scripts/dispatch
+        working-directory: packages/envoy-client
 
 
   test:
@@ -113,6 +122,9 @@ jobs:
 
       - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command, the design-gate verdict)
         run: bun test scripts/e2e/lib
+
+      - name: Test the Dispatch census script
+        run: bun test scripts/dispatch
 
       - name: Pre-pull daemon E2E NATS image
         run: docker pull nats:2.10
