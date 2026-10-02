@@ -173,7 +173,7 @@ function commentThreads(comments: Comment[]): Thread[] {
 }
 
 /** The ask or comment a card shows. */
-function marginItemRecord(item: MarginItem): Ask | ThreadComment {
+export function marginItemRecord(item: MarginItem): Ask | ThreadComment {
   return item.kind === "ask" ? item.ask : item.comment;
 }
 

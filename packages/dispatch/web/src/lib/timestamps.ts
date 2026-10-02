@@ -25,8 +25,9 @@ function instant(value: string): Instant {
 
 /**
  * Orders two timestamps by the instants they name: negative when `left` is earlier, positive when
- * it is later, and zero for one instant however it is written. Throws on a value that is not
- * RFC 3339, since an order built around it would be a guess.
+ * it is later, and zero for one instant however it is written. It parses the server's
+ * `time.RFC3339Nano` output and throws when JavaScript cannot parse a value, since an order built
+ * around it would be a guess.
  */
 export function compareTimestamps(left: string, right: string): number {
   const a = instant(left);

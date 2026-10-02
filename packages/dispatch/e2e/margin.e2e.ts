@@ -2,16 +2,13 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
   acceptSuggestion,
-  createArtifactComment,
   createAsk,
   createComment,
   createIssue,
   createProject,
-  createProjectDocument,
   getArtifact,
   getArtifactText,
   getAsk,
-  listArtifactComments,
   listComments,
 } from "./api";
 import {
@@ -24,9 +21,11 @@ import {
   expectMark,
   marginCard,
   markSpan,
+  openedThreadCard,
   selectEditorText,
+  setSheet,
 } from "./editor";
-import { resetDatabase, setCommentAuthorService, setCreatedAt } from "./seed";
+import { resetDatabase, setCommentAuthorService } from "./seed";
 import { asUser } from "./users";
 
 const session = {
@@ -35,36 +34,11 @@ const session = {
 };
 const initialMarkdown = "The quick brown fox";
 
-// On the phone layout the margin is a bottom sheet over the document. Acting on a selection
-// opens it; close it again before selecting another range, as a person would.
-async function setSheet(page: Page, project: string, open: boolean): Promise<void> {
-  if (project !== "iphone") {
-    return;
-  }
-  const sheet = page.getByTestId("margin-sheet");
-  if ((await sheet.getAttribute("data-expanded")) !== String(open)) {
-    if (open) {
-      await page.getByRole("button", { name: /Open review panel/ }).click();
-    } else {
-      await page.mouse.click(1, 1);
-    }
-  }
-  await expect(sheet).toHaveAttribute("data-expanded", String(open));
-}
-
 async function expandedConversationThread(page: Page, rootId: string): Promise<Locator> {
   const turn = page.locator(`[data-turn="comment:${rootId}"]`);
   await turn.getByRole("button", { name: "Expand thread" }).click();
   const phoneThread = page.getByRole("dialog", { name: "Thread" });
   return (await phoneThread.count()) === 0 ? turn : phoneThread;
-}
-
-/** The card of a margin thread the reader opened: in the Thread dialog on the phone layout, in
- *  the margin beside the document everywhere else. */
-function openedThreadCard(page: Page, project: string, rootId: string): Locator {
-  return project === "iphone"
-    ? page.getByRole("dialog", { name: "Thread" }).getByTestId(`margin-comment-${rootId}`)
-    : marginCard(page, rootId);
 }
 
 async function commentWithBody(issueKey: string, artifactId: string | undefined, body: string) {
@@ -575,108 +549,6 @@ test("a document mark opens its thread in the margin and stays on the document",
       await expect(deepLinked).toHaveAttribute("aria-current", "true");
       await expect(deepLinked).toContainText("focus this");
     }
-  } finally {
-    await alice.close();
-  }
-});
-
-// The server writes RFC 3339 and drops trailing fractional zeros, so two replies in one second come
-// back as strings of different widths, and as text `…01.12Z` sorts after `…01.123456Z`, the later
-// time. The margin lists the replies in the order they were written.
-test("the margin lists replies written in the same second in the order they were written", async ({
-  browser,
-}, testInfo) => {
-  await createProject({ key: "ORDER", name: "Reply order" });
-  const issue = await createIssue({
-    project: "ORDER",
-    spec: initialMarkdown,
-    title: "Reply order",
-  });
-  const root = await createComment(
-    issue.key,
-    { anchor: { artifact: "spec", quote: "brown" }, body: "root of the thread" },
-    session
-  );
-  if (root.anchor === null) {
-    throw new Error("The thread root has no anchor.");
-  }
-  const second = await createComment(
-    issue.key,
-    { body: "written second", reply_to: root.id },
-    session
-  );
-  const first = await createComment(
-    issue.key,
-    { body: "written first", reply_to: root.id },
-    session
-  );
-  await setCreatedAt("comments", first.id, "2026-10-02T00:00:01.12Z");
-  await setCreatedAt("comments", second.id, "2026-10-02T00:00:01.123456Z");
-  // The fixture holds only if the server hands back the two widths the trap needs.
-  const stamped = new Map(
-    (await listComments(issue.key)).map((item) => [item.id, item.created_at])
-  );
-  expect([stamped.get(first.id), stamped.get(second.id)]).toEqual([
-    "2026-10-02T00:00:01.12Z",
-    "2026-10-02T00:00:01.123456Z",
-  ]);
-  const alice = await asUser(browser, "alice");
-
-  try {
-    const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/spec`);
-    await expect(connectedDot(page)).toHaveText("connected");
-    await expectMark(page, root.anchor.mark_id, "brown");
-    await markSpan(page, root.anchor.mark_id).click();
-    const card = openedThreadCard(page, testInfo.project.name, root.id);
-    await expect(card.getByRole("list", { name: "Replies" }).getByRole("listitem")).toHaveText([
-      /written first/,
-      /written second/,
-    ]);
-  } finally {
-    await alice.close();
-  }
-});
-
-// A standalone document's document-level threads have no mark, so none of them is placed, and the
-// margin lists them newest first: by time, where two written in one second are the trap above.
-test("the margin lists unplaced threads written in the same second newest first", async ({
-  browser,
-}, testInfo) => {
-  await createProject({ key: "UNPL", name: "Unplaced order" });
-  const document = await createProjectDocument("UNPL", {
-    content: "The astrolabe handbook is a project document.",
-    name: "handbook.md",
-  });
-  // Posted in the reverse of the times they are given, so creation order cannot pass the check.
-  const newer = await createArtifactComment(document.artifact.id, { body: "root written second" });
-  const older = await createArtifactComment(document.artifact.id, { body: "root written first" });
-  await setCreatedAt("comments", older.id, "2026-10-02T00:00:01.12Z");
-  await setCreatedAt("comments", newer.id, "2026-10-02T00:00:01.123456Z");
-  const stamped = new Map(
-    (await listArtifactComments(document.artifact.id)).map((item) => [item.id, item])
-  );
-  expect(
-    [older.id, newer.id].map((id) => [stamped.get(id)?.anchor, stamped.get(id)?.created_at])
-  ).toEqual([
-    [null, "2026-10-02T00:00:01.12Z"],
-    [null, "2026-10-02T00:00:01.123456Z"],
-  ]);
-  const alice = await asUser(browser, "alice");
-
-  try {
-    const page = await alice.newPage();
-    await page.goto(`/projects/UNPL/documents/${document.artifact.slug}`);
-    await expect(connectedDot(page)).toHaveText("connected");
-    await setSheet(page, testInfo.project.name, true);
-    const cards = page.getByTestId("margin-sheet").locator('[data-testid^="margin-comment-"]');
-    await expect(cards).toHaveText([/root written second/, /root written first/]);
-    // The list's order is the order on screen: the newer card sits above the older one.
-    const [upper, lower] = await Promise.all([
-      cards.nth(0).boundingBox(),
-      cards.nth(1).boundingBox(),
-    ]);
-    expect(upper?.y ?? Number.POSITIVE_INFINITY).toBeLessThan(lower?.y ?? Number.NEGATIVE_INFINITY);
   } finally {
     await alice.close();
   }
