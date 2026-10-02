@@ -49,11 +49,11 @@ not share this session's vocabulary, and is often on a phone. Write for that per
 - Expand every identifier the first time it appears: an issue key gets its title, a PR number its
   title, a file what it is for, a session id who it is. Link a URL rather than pasting a bare id.
 - A question lives in the spec or discussion it came from, placed as
-  [Decision blocks](#decision-blocks) says, never as a compressed standalone ask. Start with the
-  problem the reader recognises and why it matters now, then say what constrains the answer, the
-  genuinely different options and what each costs, and your recommendation with its reason. Ask
-  how to solve the problem or which outcome the reader wants, never whether to apply a solution
-  you already chose.
+  [Decision blocks](#decision-blocks) says, never as a compressed standalone ask. The question
+  carries the problem the reader recognises and why it matters now, what constrains the answer, and
+  the recommendation with its reason. It asks how to solve the problem or which outcome is wanted;
+  never enumerate choices in the question. The options carry the genuinely different approaches.
+  Each option has a label, and its description says what that approach costs.
 - Describe a change by what its reader stands to lose, not by what the system does. The
   engineering sentence names the change; the reader's sentence names who can do what today, what
   they will not be able to do after it, what still works, and what you cannot tell. It is a
@@ -270,11 +270,11 @@ It returns `details` `{ issue, ask, follows: { ask } }` for an issue or `{ proje
 
 References belong in the question text; `ref` is sugar that appends its `dispatch://` value to the question as a rendered link.
 
-An ask is read on a phone by someone who has not read the code. Start with the problem that person
-recognises and why it matters now, then state what constrains the answer. Each genuinely different
-option is a button with a label and one sentence saying what it costs; never enumerate choices in
-prose. Put the recommendation and its reason last in `question`. The question asks how to solve
-the problem or which outcome is wanted, never whether to apply a solution you already chose.
+An ask is read on a phone by someone who has not read the code. The question carries the problem
+the reader recognises and why it matters now, what constrains the answer, and the recommendation
+with its reason. It asks how to solve the problem or which outcome is wanted; never enumerate
+choices in the question. The options carry the genuinely different approaches. Each option has a
+label, and its description says what that approach costs.
 Never put file paths, line numbers, sequence numbers, document versions, or role tokens in the
 question; if the human needs that detail, anchor the ask to the document passage instead. Apply
 the phone test from "Writing for the human" before posting. Anchor a document question with

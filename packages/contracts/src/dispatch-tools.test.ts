@@ -69,19 +69,33 @@ const validCalls = {
   dispatch_ask: {
     issue: "DSP-1",
     question:
-      "The release is ready, but the revised plan has not been reviewed. How should we proceed? Recommendation: review the revised plan before release to keep the review gate.",
+      "The release cannot pass its review gate because the revised plan is unreviewed. " +
+      "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
     options: [
-      { label: "Review the revised plan", description: "Keeps the review gate in place." },
-      { label: "Release without review", description: "Delivers now but skips review." },
+      {
+        label: "Review the revised plan",
+        description: "Delays release for review but keeps the release gate.",
+      },
+      {
+        label: "Release without review",
+        description: "Ships sooner but bypasses the review gate.",
+      },
     ],
   },
   dispatch_edit_ask: {
     ask: "ask-1",
     question:
-      "The revised plan changes the release, but it has not been reviewed. How should we proceed? Recommendation: review it before release to keep the review gate.",
+      "The release cannot pass its review gate because the revised plan is unreviewed. " +
+      "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
     options: [
-      { label: "Review the revised plan", description: "Keeps the review gate in place." },
-      { label: "Release without review", description: "Delivers now but skips review." },
+      {
+        label: "Review the revised plan",
+        description: "Delays release for review but keeps the release gate.",
+      },
+      {
+        label: "Release without review",
+        description: "Ships sooner but bypasses the review gate.",
+      },
     ],
     multiple: false,
     urgency: "high",
@@ -204,6 +218,23 @@ describe("dispatchToolSpecs", () => {
     expect(argumentsSchema.ref.unwrap().description).toBe(
       "Optional dispatch:// reference (issue, document, message, or ask); appended to the question and rendered as a link."
     );
+  });
+
+  test("keeps the question and options contracts on optional ask fields", () => {
+    for (const name of ["dispatch_ask", "dispatch_edit_ask"] as const) {
+      const tool = dispatchToolSpecs.find((candidate) => candidate.name === name);
+      if (tool === undefined) throw new Error(`${name} spec is missing`);
+      const argumentsSchema = tool.arguments(schemaApi) as unknown as {
+        question: z.ZodType;
+        options: z.ZodType;
+      };
+      expect(argumentsSchema.question.description, name).toContain(
+        "never enumerate choices in the question"
+      );
+      expect(argumentsSchema.options.description, name).toContain(
+        "description says what that approach costs"
+      );
+    }
   });
 
   test("dispatch_search rejects a one-character query and a limit above 50", () => {

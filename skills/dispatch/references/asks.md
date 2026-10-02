@@ -15,20 +15,22 @@ It returns `details` `{ session, owner, service }`: `owner` is the lowercase log
 
 ## Handing a human a to-do, editing, resolving, and replying
 
-A to-do handed to a human starts with the problem they need to solve and why it matters, then what
-constrains the answer. State what the action changes and risks, give genuinely different outcomes
-as options with their costs, and recommend one. Ask how to solve the problem or which outcome to
-choose, not whether to perform the to-do. There is no fixed vocabulary and the server treats no
-label specially. If an outcome needs a reason, say so in that option's description, and the
-human's free-text answer carries it:
+A to-do handed to a human still follows the same contract. The question carries the problem the
+reader recognises and why it matters now, what constrains the answer, and the recommendation with
+its reason. It asks how to solve the problem or which outcome is wanted; never enumerate choices
+in the question. The options carry the genuinely different approaches. Each option has a label,
+and its description says what that approach costs. For a human-only action, what it changes and
+risks constrains the answer. There is no fixed vocabulary and the server treats no label specially.
+If an outcome needs a reason, say so in that option's description, and the human's free-text answer
+carries it:
 ```ts
 dispatch_ask({
   issue: "DSP-42",
   question:
-    "The verified fix remains unavailable because production deployment is pending. How should we proceed? The deployment changes production. Recommendation: deploy the verified fix now.",
+    "The verified fix remains unavailable in production because deployment is pending. Deploying changes production and could expose a deployment problem. How should we proceed? Recommendation: deploy the verified fix now because it restores the intended behavior.",
   options: [
-    { label: "Deploy the verified fix", description: "Makes the fix available in production." },
-    { label: "Hold the deploy", description: "Keeps production unchanged until the blocker is resolved." },
+    { label: "Deploy the verified fix", description: "Restores the fix but can expose a deployment problem." },
+    { label: "Hold the deploy", description: "Avoids a production change now but leaves production without the fix." },
   ],
 })
 ```

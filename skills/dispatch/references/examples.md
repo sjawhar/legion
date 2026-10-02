@@ -19,10 +19,10 @@ After — state the problem and make each genuinely different option a button:
 dispatch_ask({
   issue: "LEGION-815",
   question:
-    "Release notes are unreviewed, so the release cannot pass its review gate before tomorrow's customer demo. How should we proceed? Recommendation: review the notes, then ship, to keep the release complete and reviewed.",
+    "Release notes are unreviewed, and tomorrow's customer demo means the release cannot wait for a later review. How should we proceed? Recommendation: review the notes, then ship, to keep the release complete and reviewed.",
   options: [
-    { label: "Review notes, then ship", description: "Keeps the release intact and reviewed." },
-    { label: "Ship now", description: "Meets the demo deadline; release notes follow later." },
+    { label: "Review notes, then ship", description: "Delays release for review but keeps the release complete and reviewed." },
+    { label: "Ship now", description: "Meets the demo deadline but leaves the release notes unreviewed." },
   ],
   urgency: "high",
   anchor: { artifact: "spec", quote: "Release requires reviewed operator instructions before deployment." },
@@ -56,10 +56,10 @@ dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
 dispatch_ask({
   issue: "OPS-52",
   question:
-    "Customers need an update today, but the draft is only in a separate file. How should we proceed? Recommendation: put the draft in the spec before sending it.",
+    "Customers need an update today, but the draft is only in a separate file, so the reader cannot review it in context. How should we proceed? Recommendation: put the draft in the spec before sending it.",
   options: [
-    { label: "Put the draft in the spec", description: "Lets the reader review the update in context." },
-    { label: "Keep the separate file", description: "Leaves the reader to find the draft themselves." },
+    { label: "Put the draft in the spec", description: "Adds a spec edit before sending but lets the reader review it in context." },
+    { label: "Keep the separate file", description: "Saves the spec edit but leaves the reader to find the draft." },
   ],
 })
 ```
@@ -74,10 +74,10 @@ dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
 dispatch_ask({
   issue: "OPS-52",
   question:
-    "Customers need an update today, and the draft is ready in the spec. How should we proceed? Sending it reaches customers. Recommendation: send the reviewed update.",
+    "Customers need an update today, and the reviewed text is ready in the spec. Sending it cannot be recalled. How should we proceed? Recommendation: send the reviewed update.",
   options: [
-    { label: "Send the reviewed update", description: "Delivers the update to customers today." },
-    { label: "Hold the update", description: "Leaves customers without the update until it is revised." },
+    { label: "Send the reviewed update", description: "Delivers the update today but makes its text external." },
+    { label: "Hold the update", description: "Avoids sending now but leaves customers without the update." },
   ],
   anchor: { artifact: "spec", quote: "Hi team," },
 })
@@ -88,10 +88,10 @@ dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
 dispatch_ask({
   issue: "OPS-52",
   question:
-    "Customers need an update today, and its reviewed text is in dispatch://OPS-52/artifact/cu-update-2026-09-15-md. How should we proceed? Recommendation: send the reviewed update.",
+    "Customers need an update today, and its reviewed text is linked from the spec. Sending it cannot be recalled. How should we proceed? Recommendation: send the reviewed update.",
   options: [
-    { label: "Send the reviewed update", description: "Delivers the linked update to customers today." },
-    { label: "Hold the update", description: "Leaves customers without the update until it is revised." },
+    { label: "Send the reviewed update", description: "Delivers the linked update today but makes its text external." },
+    { label: "Hold the update", description: "Avoids sending now but leaves customers without the update." },
   ],
 })
 ```
