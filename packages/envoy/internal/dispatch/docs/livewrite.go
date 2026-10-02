@@ -74,8 +74,9 @@ type liveWrite struct {
 	// projection, an anchor refresh - leaves the earlier batch's record in place.
 	loss *lossCheck
 	// lost names the operations whose text the room did not hold once this write was published,
-	// and lostVerdict says the check ran at all: a publish that failed reaches no verdict, which
-	// is reported as undetermined rather than as survival.
+	// and lostVerdict says the check ran at all: a publish that failed, or a room holding a tree
+	// too deep to read, reaches no verdict, which is reported as undetermined rather than as
+	// survival.
 	lost        []int
 	lostVerdict bool
 	done        chan struct{}

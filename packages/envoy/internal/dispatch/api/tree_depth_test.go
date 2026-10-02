@@ -27,8 +27,8 @@ func TestEveryReadServesATreeAtTheDepthBound(t *testing.T) {
 		status   int
 		versions int
 	}{
-		{name: "at the bound", depth: pmdoc.MaxTreeDepth(), status: http.StatusOK, versions: 2},
-		{name: "past the bound", depth: pmdoc.MaxTreeDepth() + 1, status: http.StatusInternalServerError, versions: 1},
+		{name: "at the bound", depth: pmdoc.MaxTreeDepth, status: http.StatusOK, versions: 2},
+		{name: "past the bound", depth: pmdoc.MaxTreeDepth + 1, status: http.StatusInternalServerError, versions: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			documentService, handler, database := browserDocumentService(t)

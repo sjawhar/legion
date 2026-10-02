@@ -17,19 +17,66 @@ import (
 
 // lazyAwareTable is goldmark's table extension with its paragraph transformer held off lazy
 // continuation lines and off a header line holding one pipe alone (lazyTableRows), and without its
-// AST transformer, which withLineStarts runs itself (tableCodeSpans).
+// AST transformer, whose work parseSource does itself (unescapeTablePipes).
 type lazyAwareTable struct{}
 
 // tableTransformer is goldmark's table paragraph transformer, which lazyTableRows runs where
 // findTableRows reads a table the budget pays for.
 var tableTransformer = extension.NewTableParagraphTransformer()
 
-// tableCodeSpans is goldmark's table AST transformer, which takes the backslash out of an escaped
-// pipe in a cell's code span. It walks the whole of every cell holding a backtick before an escaped
-// pipe, recursing once per level of the cell's marks, and goldmark runs a registered AST
-// transformer inside its parse, before the nesting bounds are checked; withLineStarts runs it once
-// they hold.
-var tableCodeSpans = extension.NewTableASTTransformer()
+// unescapeTablePipes takes the backslash out of every escaped pipe in a table cell's code span, as
+// goldmark's table AST transformer does (extension/table.go:299-342 at v1.8.6). pmdoc does not
+// register that transformer: goldmark runs it inside its parse, before parseSource checks the
+// nesting bounds, and it recurses through every cell holding a backtick before an escaped pipe and
+// checks each code span text it meets against every escaped pipe in the document, time quadratic
+// in a table of them. In a cell every `|` is one a backslash escapes, since any other ends the
+// cell, and a code span opens with a backtick, which goldmark's row reader needs before an escaped
+// pipe to record it (parseRow): so the escaped pipes it records inside a code span's text are
+// exactly the `\|` that text holds. Each text is split around the backslash of each one, which it
+// drops, as goldmark splits it. Run once the bounds hold, it walks the blocks and each cell once.
+func unescapeTablePipes(root ast.Node, source []byte) {
+	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		switch {
+		case !entering:
+			return ast.WalkContinue, nil
+		case node.Kind() == extensionast.KindTableCell:
+			_ = ast.Walk(node, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+				if entering && node.Kind() == ast.KindCodeSpan {
+					unescapeCodeSpanPipes(node, source)
+					return ast.WalkSkipChildren, nil
+				}
+				return ast.WalkContinue, nil
+			})
+			return ast.WalkSkipChildren, nil
+		case node.Type() == ast.TypeInline:
+			return ast.WalkSkipChildren, nil
+		}
+		return ast.WalkContinue, nil
+	})
+}
+
+// unescapeCodeSpanPipes splits each text of span around the backslash of every `\|` it holds,
+// dropping the backslash, with the nodes goldmark's transformer makes.
+func unescapeCodeSpanPipes(span ast.Node, source []byte) {
+	for child := span.FirstChild(); child != nil; {
+		next := child.NextSibling()
+		if text, ok := child.(*ast.Text); ok {
+			rest := text
+			for index := text.Segment.Start + 1; index < text.Segment.Stop; index++ {
+				if source[index] != '|' || source[index-1] != '\\' {
+					continue
+				}
+				before := ast.NewRawTextSegment(rest.Segment.WithStop(index - 1))
+				after := ast.NewRawTextSegment(rest.Segment.WithStart(index))
+				span.InsertAfter(span, rest, before)
+				span.InsertAfter(span, before, after)
+				span.RemoveChild(span, rest)
+				rest = after
+			}
+		}
+		child = next
+	}
+}
 
 // maxTablePaddingCells is how many empty cells the tables in the markdown one caller write sends
 // - a document, the operations of an edit batch, an accepted suggestion - may have added to their

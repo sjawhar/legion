@@ -89,7 +89,12 @@ type Service struct {
 	// the publish decides whether to fail that room. Nil outside tests; tests use it to let the
 	// refused room's recovery finish in that window.
 	afterPublishRefused func(room string)
-	settleWG            sync.WaitGroup
+	// inServiceTransaction runs first in every transaction a service mutation makes through
+	// Server.Apply (serviceTransact). Nil outside tests; tests use it to change the live document
+	// between the mutation's read of it and its write, where a peer's update can land: Apply runs
+	// the mutation outside the document's lock and takes the lock for each transaction alone.
+	inServiceTransaction func(txn *crdt.Transaction)
+	settleWG             sync.WaitGroup
 	// evictWG counts the forced evictions failRoomLocked spawns. They flush the room through
 	// the store, so shutdown joins them before it closes.
 	evictWG sync.WaitGroup

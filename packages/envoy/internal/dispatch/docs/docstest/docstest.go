@@ -71,8 +71,8 @@ func Transact(document *crdt.Doc, change func(*crdt.Transaction)) []byte {
 	return update
 }
 
-// transactOrigin tags Transact's own transaction. ygo compares origins by interface equality, so
-// it is not zero sized: two pointers to zero-sized values may be equal.
+// transactOrigin tags Transact's own transaction. Transact tells its update from others by
+// comparing origins with ==, so it is not zero sized: two pointers to zero-sized values may be equal.
 type transactOrigin struct{ _ byte }
 
 // WriteDeepChain writes, as the fragment's first child, blockquotes nested one inside another

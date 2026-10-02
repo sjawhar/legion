@@ -2,7 +2,6 @@ package docs
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -108,9 +107,9 @@ func recordInsertedText(
 	if err := write(); err != nil {
 		return err
 	}
-	inserted, err := authoredText(fragment, live.clientID, since, nil)
+	inserted, err := pmdoc.AuthoredTextRuns(fragment, live.clientID, since, nil)
 	if err != nil {
-		return err
+		return docSchema(err)
 	}
 	if len(inserted) == 0 {
 		return nil
@@ -170,9 +169,9 @@ func (c *lossCheck) lost(doc *crdt.Doc) ([]int, error) {
 	for block := range c.inserted {
 		written[block] = struct{}{}
 	}
-	held, err := authoredText(doc.GetXmlFragment(fragmentName), c.client, c.since, written)
+	held, err := pmdoc.AuthoredTextRuns(doc.GetXmlFragment(fragmentName), c.client, c.since, written)
 	if err != nil {
-		return nil, err
+		return nil, docSchema(err)
 	}
 	missing := c.inserted.Missing(held)
 	if len(missing) == 0 {
@@ -189,19 +188,6 @@ func (c *lossCheck) lost(doc *crdt.Doc) ([]int, error) {
 	}
 	sort.Ints(lost)
 	return lost, nil
-}
-
-// authoredText is pmdoc.AuthoredTextRuns of fragment, its refusal of a tree past the schema's
-// depth bound told as the live document outside the schema (ErrDocSchema), as treeOf tells it.
-func authoredText(fragment *crdt.YXmlFragment, client crdt.ClientID, since uint64, only map[string]struct{}) (pmdoc.AuthoredText, error) {
-	runs, err := pmdoc.AuthoredTextRuns(fragment, client, since, only)
-	if err != nil {
-		if errors.Is(err, pmdoc.ErrSchema) {
-			return nil, fmt.Errorf("%w: %v", ErrDocSchema, err)
-		}
-		return nil, err
-	}
-	return runs, nil
 }
 
 // ErrEditLost refuses a write whose text a concurrent change removed before the write's version

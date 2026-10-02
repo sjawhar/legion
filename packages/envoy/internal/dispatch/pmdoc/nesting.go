@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"iter"
+	"maps"
+	"slices"
 
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/parser"
@@ -27,7 +30,8 @@ type nestingGuard struct {
 	withChild bool
 }
 
-// nestingRefusalKey holds the nestingError for the first block nestingGuard refused.
+// nestingRefusalKey holds the nestingError for the first block nestingGuard refused, or, where none
+// was, for the first textblock whose image imageNesting refused.
 var nestingRefusalKey = parser.NewContextKey()
 
 // Open asks the parser first, so only a block it opens is held to the bound: goldmark offers a line
@@ -73,17 +77,18 @@ func opensPastBound(parent ast.Node, opens int) bool {
 const maxInlineNesting = 100
 
 // inlineNesting is the refusal of the first textblock in root whose inline markdown nests past
-// maxInlineNesting, or nil. It walks the parsed tree without recursing, and withLineStarts runs it
-// before any walk that recurses through inline nodes - goldmark's table transformer
-// (tableCodeSpans), footnoteLabels, the conversion's parseInlineMarks - so each of those meets at
-// most that many.
-func inlineNesting(root ast.Node, source []byte) error {
+// maxInlineNesting, and true, or false when none does. It walks the parsed tree without recursing,
+// and parseSource runs it before any walk that recurses through inline nodes - the conversion's
+// parseInlineMarks, footnoteLabels, unescapeTablePipes - so each of those meets at most that many.
+// The one walk goldmark itself recurses through inline nodes with, its link parser's, meets each
+// image imageNesting measured.
+func inlineNesting(root ast.Node, source []byte) (nestingError, bool) {
 	depth := 0 // how many inline nodes currently enclose node
 	for node := root; node != nil; {
 		if child := node.FirstChild(); child != nil {
 			if node.Type() == ast.TypeInline {
 				if depth++; depth > maxInlineNesting {
-					return nestingError{line: textblockLine(node, source), inline: true}
+					return nestingError{line: textblockLine(node, source), inline: true}, true
 				}
 			}
 			node = child
@@ -96,9 +101,107 @@ func inlineNesting(root ast.Node, source []byte) error {
 			}
 		}
 		if node == root {
-			return nil
+			return nestingError{}, false
 		}
 		node = node.NextSibling()
+	}
+	return nestingError{}, false
+}
+
+// imageNesting is goldmark's link parser measuring every image it makes. Goldmark checks the label
+// of each link it closes for a link inside it by recursing through the label's nodes
+// (containsLink, parser/link.go:218-231 at v1.8.6), and an image closed inside that label already
+// holds its marks nested, so that walk takes a frame per level of them while goldmark parses,
+// before parseSource checks either bound. An image whose marks nest past maxInlineNesting refuses
+// its textblock as soon as it is made: the refusal is recorded (nestingRefusalKey) and the image's
+// children dropped, so no later walk enters them, since the parse is refused anyway.
+type imageNesting struct{ goldmarkLinkParser }
+
+// goldmarkLinkParser is goldmark's link parser: an inline parser that also closes the labels a
+// block leaves open.
+type goldmarkLinkParser interface {
+	parser.InlineParser
+	parser.CloseBlocker
+}
+
+// imageNestingKey holds, while a document parses, how deeply each image imageNesting made nests
+// its marks (markNesting).
+var imageNestingKey = parser.NewContextKey()
+
+func (p imageNesting) Parse(parent ast.Node, block gmtext.Reader, pc parser.Context) ast.Node {
+	node := p.goldmarkLinkParser.Parse(parent, block, pc)
+	image, ok := node.(*ast.Image)
+	if !ok {
+		return node
+	}
+	measured, _ := pc.Get(imageNestingKey).(map[*ast.Image]int)
+	if measured == nil {
+		measured = make(map[*ast.Image]int)
+		pc.Set(imageNestingKey, measured)
+	}
+	nesting := markNesting(image, measured)
+	if nesting > maxInlineNesting {
+		image.RemoveChildren(image)
+		refuseImage(pc, nestingError{line: textblockLine(parent, block.Source()), inline: true})
+	}
+	measured[image] = nesting
+	return node
+}
+
+// markNesting is how many inline marks image's markdown opens one inside another, image among
+// them, as inlineNesting counts them, or a count past maxInlineNesting once it passes that. It
+// walks without recursing and takes an image inside image at the nesting measured when that image
+// was made, so images nested one inside another have each node walked once.
+func markNesting(image *ast.Image, measured map[*ast.Image]int) int {
+	root := ast.Node(image)
+	deepest, depth := 0, 0 // depth: how many nodes with children enclose node, image among them
+	for node := root; ; {
+		if inner, ok := node.(*ast.Image); ok && node != root {
+			deepest = max(deepest, depth+measured[inner])
+		} else if child := node.FirstChild(); child != nil {
+			if depth++; depth > maxInlineNesting {
+				return depth
+			}
+			deepest = max(deepest, depth)
+			node = child
+			continue
+		}
+		for node != root && node.NextSibling() == nil {
+			node = node.Parent()
+			depth--
+		}
+		if node == root {
+			return deepest
+		}
+		node = node.NextSibling()
+	}
+}
+
+// refuseImage records refusal, a textblock whose image nests its marks past maxInlineNesting,
+// unless a block's refusal, or a textblock's on the same line or an earlier one, is recorded
+// already: goldmark reads inline markdown block by block, every footnote definition's first, since
+// the list it gathers them in stands ahead of the rest while it parses (footnoteDefinitionParser).
+func refuseImage(pc parser.Context, refusal nestingError) {
+	if recorded, ok := pc.Get(nestingRefusalKey).(nestingError); ok && (!recorded.inline || recorded.line <= refusal.line) {
+		return
+	}
+	pc.Set(nestingRefusalKey, refusal)
+}
+
+// nestingRefusal is the refusal of root, parsed from source with pc, for markdown nested past a
+// bound, or nil: the block nestingGuard refused, since goldmark opens every block before it reads
+// any inline markdown, and otherwise the first textblock whose inline marks nest past
+// maxInlineNesting, which either inlineNesting finds or imageNesting refused while goldmark parsed.
+func nestingRefusal(root ast.Node, source []byte, pc parser.Context) error {
+	recorded, refused := pc.Get(nestingRefusalKey).(nestingError)
+	if refused && !recorded.inline {
+		return recorded
+	}
+	if found, ok := inlineNesting(root, source); ok && (!refused || found.line < recorded.line) {
+		return found
+	}
+	if refused {
+		return recorded
 	}
 	return nil
 }
@@ -135,10 +238,10 @@ func (nestingError) Unwrap() error { return ErrSchema }
 // blockBound is what maxNesting allows, as a refusal names it.
 var blockBound = fmt.Sprintf("a document nests at most %d blocks (quotes, lists and their items, typed blocks and footnote definitions)", maxNesting)
 
-// renderedNesting is err, the parser's refusal of rendered, the markdown of doc, with a refusal of
-// blocks nested past maxNesting told by how many blocks doc nests: its line counts lines of the
-// rendering, which nobody wrote. A write whose own markdown nests within the bound can land deep
-// enough in a document that the result nests past it.
+// renderedNesting is err, the parser's refusal of the markdown doc renders to, with a refusal of
+// blocks nested past maxNesting told instead by how many blocks doc nests: the line such a refusal
+// names counts lines of a rendering nobody wrote. A write whose own markdown nests within the bound
+// can land deep enough in a document that the result nests past it.
 func renderedNesting(doc *Node, err error) error {
 	if nesting := (nestingError{}); errors.As(err, &nesting) && !nesting.inline {
 		return fmt.Errorf("%w: the result nests %d blocks inside one another; %s", ErrSchema, blockNesting(doc), blockBound)
@@ -148,7 +251,8 @@ func renderedNesting(doc *Node, err error) error {
 
 // blockNesting is how many blocks node's markdown nests one inside another to write its deepest
 // block, counted as maxNesting counts them: a quote, a list, a list item, a typed block and a
-// footnote definition each count one. It recurses once per level of node, as rendering it does.
+// footnote definition each count one. It recurses once per level of node, as rendering does, and
+// renderedNesting calls it only on a tree that rendered, which Validate holds within MaxTreeDepth.
 func blockNesting(node *Node) int {
 	deepest := 0
 	for _, child := range node.Children {
@@ -165,7 +269,7 @@ func blockNesting(node *Node) int {
 	return deepest
 }
 
-// maxTreeDepth is how many levels below the document a node may stand: the document is level 0 and
+// MaxTreeDepth is how many levels below the document a node may stand: the document is level 0 and
 // each node one level below its parent. It bounds the recursive walks over browser-authored CRDT
 // trees as well as schema validation and parsing, and it sits where every reader of a valid tree
 // serves it with room to spare. The tightest is the document token (Node.TokenJSON): encoding/json
@@ -175,20 +279,15 @@ func blockNesting(node *Node) int {
 // maxAttrNesting more: 2,104 at this bound. The next is GET /blocks, which hashes each block's
 // subtree apart from the others, so its work grows with the square of the depth. Markdown, at most
 // maxNesting blocks deep, makes trees about a tenth as deep.
-const maxTreeDepth = 1_000
-
-// MaxTreeDepth is how many levels below the document a node may stand (maxTreeDepth).
-func MaxTreeDepth() int {
-	return maxTreeDepth
-}
+const MaxTreeDepth = 1_000
 
 // treeDepthError is the refusal of a node depth levels below the document, or nil when it stands
-// within maxTreeDepth.
+// within MaxTreeDepth.
 func treeDepthError(depth int) error {
-	if depth <= maxTreeDepth {
+	if depth <= MaxTreeDepth {
 		return nil
 	}
-	return fmt.Errorf("%w: a node %d levels deep; a document nests at most %d levels", ErrSchema, depth, maxTreeDepth)
+	return fmt.Errorf("%w: a node %d levels deep; a document nests at most %d levels", ErrSchema, depth, MaxTreeDepth)
 }
 
 // maxAttrNesting is how many arrays and objects a node's or a mark's attribute value may nest
@@ -211,25 +310,22 @@ func attrNestingError(kind, typ string, attrs Attrs) error {
 // nestsPast reports whether value holds arrays and objects nested more than limit deep. It
 // recurses at most limit+1 times.
 func nestsPast(value any, limit int) bool {
+	past := func(items iter.Seq[any]) bool {
+		if limit < 1 {
+			return true
+		}
+		for item := range items {
+			if nestsPast(item, limit-1) {
+				return true
+			}
+		}
+		return false
+	}
 	switch v := value.(type) {
 	case []any:
-		if limit < 1 {
-			return true
-		}
-		for _, item := range v {
-			if nestsPast(item, limit-1) {
-				return true
-			}
-		}
+		return past(slices.Values(v))
 	case map[string]any:
-		if limit < 1 {
-			return true
-		}
-		for _, item := range v {
-			if nestsPast(item, limit-1) {
-				return true
-			}
-		}
+		return past(maps.Values(v))
 	case Attrs:
 		return nestsPast(map[string]any(v), limit)
 	case []string:

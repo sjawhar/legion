@@ -285,7 +285,7 @@ func parseInlineWithDefinitions(markdown string, labels []string, reader inlineR
 		full.WriteString("\n\n[^" + escapeFootnoteLabel(label) + "]: x")
 	}
 	source := []byte(full.String())
-	root, err := withLineStarts(reader.withDefinitions, source, parser.NewContext())
+	root, err := parseSource(reader.withDefinitions, source, parser.NewContext())
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +326,7 @@ func ParseInline(markdown string) (nodes []*Node, err error) {
 func readInline(markdown string, inline parser.Parser) (nodes []*Node, err error) {
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
 	source := []byte(LineFeeds(markdown))
-	root, err := withLineStarts(inline, source, parser.NewContext())
+	root, err := parseSource(inline, source, parser.NewContext())
 	if err != nil {
 		return nil, err
 	}

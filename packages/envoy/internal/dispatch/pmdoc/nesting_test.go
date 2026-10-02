@@ -195,37 +195,57 @@ func blockMarkdownReaders() []callerReader {
 
 // A textblock's inline markdown opens at most 100 marks inside one another. Every reader of
 // caller markdown refuses the same run: an upload, an edit fragment and an accepted suggestion
-// through the document readers, and a replacement's inline markdown through ParseInline.
+// through the document readers, and a replacement's inline markdown through ParseInline. A link
+// and an image are marks too, and an image whose own marks pass the bound, which goldmark's parse
+// refuses as it makes the image, is refused for the same line as any other run: the first one past
+// the bound, wherever goldmark meets it first.
 func TestParseRefusesInlineMarksNestedPastTheBound(t *testing.T) {
+	// Two `*` either side open one mark.
+	nested := func(marks int) string { return strings.Repeat("**", marks) + "x" + strings.Repeat("**", marks) }
+	imageInLink := func(marks int) string { return "[![" + nested(marks) + "](u)](v)" }
 	for _, reader := range inlineMarkReaders() {
 		t.Run(reader.name, func(t *testing.T) {
-			// Two `*` either side open one mark, so a run of twice the bound is the deepest
-			// markdown that reads.
-			deepest := strings.Repeat("*", 2*expectedMaxInlineNesting)
-			if _, err := reader.parse(deepest + "x" + deepest); err != nil {
-				t.Fatalf("%d nested inline marks: %v, want them read", expectedMaxInlineNesting, err)
+			for _, markdown := range []string{nested(expectedMaxInlineNesting), imageInLink(expectedMaxInlineNesting - 2)} {
+				if _, err := reader.parse(markdown); err != nil {
+					t.Fatalf("%.40q…, nested %d marks deep: %v, want it read", markdown, expectedMaxInlineNesting, err)
+				}
 			}
-			over := strings.Repeat("*", 2*expectedMaxInlineNesting+2)
-			_, err := reader.parse(over + "x" + over)
-			if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "line 1") || !strings.Contains(err.Error(), "100 inline marks") {
-				t.Fatalf("%d nested inline marks: %v, want ErrSchema naming line 1 and the bound", expectedMaxInlineNesting+1, err)
+			for _, test := range []struct {
+				markdown string
+				line     int
+			}{
+				{markdown: nested(expectedMaxInlineNesting + 1), line: 1},
+				{markdown: imageInLink(expectedMaxInlineNesting - 1), line: 1},
+				{markdown: imageInLink(expectedMaxInlineNesting), line: 1},
+				{markdown: "a\n\n" + imageInLink(10_000), line: 3},
+				{markdown: imageInLink(10_000) + "\n\n" + nested(expectedMaxInlineNesting+1), line: 1},
+				{markdown: nested(expectedMaxInlineNesting+1) + "\n\n" + imageInLink(10_000), line: 1},
+				// goldmark reads a footnote definition's text before the rest.
+				{markdown: nested(expectedMaxInlineNesting+1) + "\n\n[^a]: " + imageInLink(10_000), line: 1},
+				{markdown: imageInLink(10_000) + "\n\n[^a]: " + imageInLink(10_000), line: 1},
+			} {
+				_, err := reader.parse(test.markdown)
+				if want := fmt.Sprintf("line %d starts text nested inside more than 100 inline marks", test.line); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), want) {
+					t.Errorf("%.40q…: %v, want ErrSchema saying %q", test.markdown, err, want)
+				}
 			}
 		})
 	}
 }
 
 // The inline bound is what keeps the readers' recursion off a stack that grows with the caller's
-// nesting: every walk through a textblock's marks takes a frame per level. That includes
-// goldmark's table transformer, which walks the whole of every cell holding a backtick before an
-// escaped pipe while goldmark is still parsing. Under a stack far below the default, a run that
-// nests ten thousand times past the bound is refused rather than recursed into, in a paragraph
-// and in such a cell.
+// nesting: every walk through a textblock's marks takes a frame per level, the one through a table
+// cell's code spans among them, and so does goldmark's own walk through a link's label while it
+// parses, which enters every image the label holds. Under a stack far below the default, a run
+// that nests ten thousand times past the bound is refused rather than recursed into: in a
+// paragraph, in a cell holding an escaped pipe after a backtick, and in an image inside a link.
 func TestInlineMarksNestNoDeeperThanTheBoundUnderASmallStack(t *testing.T) {
 	stacktest.Under(t, 16<<20, func(t *testing.T) {
 		run := strings.Repeat("*", 2_000_000)
 		for _, shape := range []struct{ name, markdown string }{
 			{name: "paragraph", markdown: run + "x" + run},
 			{name: "table cell", markdown: "| a |\n| --- |\n| `x\\| " + run + "x" + run + " |\n"},
+			{name: "image in a link", markdown: "[![" + run + "x" + run + "](u)](v)"},
 		} {
 			for _, reader := range inlineMarkReaders() {
 				t.Run(shape.name+"/"+reader.name, func(t *testing.T) {
@@ -304,7 +324,7 @@ func TestParseRefusesAMebibyteOfQuotesInBoundedTime(t *testing.T) {
 // the schema allows, the document token is JSON encoding/json still reads, which it is not past
 // 10,000 nested arrays and objects.
 func TestTreesDeeperThanTheBoundAreOutsideTheSchema(t *testing.T) {
-	// Both halves count a tree's depth as its text's level, the unit maxTreeDepth bounds and
+	// Both halves count a tree's depth as its text's level, the unit MaxTreeDepth bounds and
 	// docstest.WriteDeepChain writes: the document is level 0, the blockquotes levels 1 through
 	// textLevel-2, and the paragraph level textLevel-1.
 	chain := func(textLevel int) *Node {
@@ -375,9 +395,10 @@ func TestReadRefusesAMillionLevelCRDTTreeWithoutOverflow(t *testing.T) {
 }
 
 // The walks over a live tree that do not read it through Read first - the text a mark covers
-// (MarkRange, Unmark) and the text a client wrote (AuthoredTextRuns) - meet the same depth bound:
-// under a stack far below the default, a tree a peer wrote far past it is refused rather than
-// recursed through, and one at the bound is walked.
+// (MarkRange, Unmark) and the text a client wrote (AuthoredTextRuns) - meet the depth bound where
+// Read does: a tree at the bound is walked, one whose text alone stands one level past it is
+// refused, and under a stack far below the default, a tree a peer wrote far past it is refused
+// rather than recursed through.
 func TestLiveTreeWalksStopAtTheDepthBoundUnderASmallStack(t *testing.T) {
 	stacktest.Under(t, 16<<20, func(t *testing.T) {
 		for _, test := range []struct {
@@ -386,6 +407,7 @@ func TestLiveTreeWalksStopAtTheDepthBoundUnderASmallStack(t *testing.T) {
 			refused   bool
 		}{
 			{name: "at the bound", textLevel: expectedMaxTreeDepth},
+			{name: "its text one past the bound", textLevel: expectedMaxTreeDepth + 1, refused: true},
 			{name: "far past the bound", textLevel: 300_000, refused: true},
 		} {
 			t.Run(test.name, func(t *testing.T) {
@@ -403,11 +425,12 @@ func TestLiveTreeWalksStopAtTheDepthBoundUnderASmallStack(t *testing.T) {
 					unmarked = Unmark(txn, fragment, comment.Type, "c1")
 				})
 				_, authored := AuthoredTextRuns(fragment, ydoc.ClientID(), 0, nil)
+				_, read := Read(fragment)
 				past := fmt.Sprintf("a node %d levels deep", expectedMaxTreeDepth+1)
 				for _, walk := range []struct {
 					name string
 					err  error
-				}{{"MarkRange", marked}, {"Unmark", unmarked}, {"AuthoredTextRuns", authored}} {
+				}{{"Read", read}, {"MarkRange", marked}, {"Unmark", unmarked}, {"AuthoredTextRuns", authored}} {
 					if test.refused && (!errors.Is(walk.err, ErrSchema) || !strings.Contains(walk.err.Error(), past)) {
 						t.Errorf("%s of a chain %d deep: %v, want ErrSchema saying %q", walk.name, test.textLevel, walk.err, past)
 					}

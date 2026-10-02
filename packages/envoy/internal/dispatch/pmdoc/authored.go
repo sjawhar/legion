@@ -33,8 +33,8 @@ type AuthoredText map[string][]ClockRun
 // The walk is lock-free - Children, GetAttributeValue and the text item list each are - so it runs
 // inside the caller's Yjs transaction, which holds the document mutex and would deadlock on a
 // locking read. since, which the caller takes from the document's state vector, does not: it is
-// read before the transaction opens. It refuses an element past maxTreeDepth, as Read does, since
-// frag can hold a tree a peer wrote that no read has bounded.
+// read before the transaction opens. It refuses a node past MaxTreeDepth as Read does - an element,
+// or a text holding anything - since frag can hold a tree a peer wrote that no read has bounded.
 func AuthoredTextRuns(frag *crdt.YXmlFragment, client crdt.ClientID, since uint64, only map[string]struct{}) (AuthoredText, error) {
 	authored := AuthoredText{}
 	if err := authored.collect(frag, client, "", since, only, 1); err != nil {
@@ -46,7 +46,7 @@ func AuthoredTextRuns(frag *crdt.YXmlFragment, client crdt.ClientID, since uint6
 	return authored, nil
 }
 
-// collect gathers the runs under frag, whose elements stand depth levels below the document.
+// collect gathers the runs under frag, whose children stand depth levels below the document.
 func (a AuthoredText) collect(frag *crdt.YXmlFragment, client crdt.ClientID, block string, since uint64, only map[string]struct{}, depth int) error {
 	for _, child := range frag.Children() {
 		switch node := child.(type) {
@@ -64,6 +64,11 @@ func (a AuthoredText) collect(frag *crdt.YXmlFragment, client crdt.ClientID, blo
 				return err
 			}
 		case *crdt.YXmlText:
+			if node.Len() > 0 {
+				if err := treeDepthError(depth); err != nil {
+					return err
+				}
+			}
 			if only != nil {
 				if _, wanted := only[block]; !wanted {
 					continue
