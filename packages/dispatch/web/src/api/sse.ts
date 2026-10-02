@@ -641,7 +641,10 @@ export function useEventStream({
     let controller: AbortController | null = null;
     let forced = false;
     let attempt = 0;
-    let hasOpenedOnce = false;
+    // Whether any attempt has ended, by dropping after it opened or by failing before. Only the
+    // page's first attempt opens with nothing to refresh, since the page made its own reads
+    // alongside it; every later open follows a gap in which no stream carried what committed.
+    let anAttemptEnded = false;
     let lastEventId = 0;
     let watchdog: number | undefined;
     let reconnect: number | undefined;
@@ -666,16 +669,16 @@ export function useEventStream({
       }
       setConnectionState("connected");
       armWatchdog();
-      if (hasOpenedOnce) {
-        // A reconnect may have missed events the stream never saw, so every query the app holds
-        // refreshes; TanStack matches all of them when no filter is given. Nothing is excluded:
+      if (anAttemptEnded) {
+        // Events may have committed in that gap - since the page's own reads, when the first
+        // attempt failed - so every query the app holds refreshes; TanStack matches all of them
+        // when no filter is given. Nothing is excluded:
         // the one query that looks expensive to refresh, `["block-schema"]` with an infinite
         // `staleTime`, resolves from a module-level per-session cache (`features/doc/schema.ts`),
         // so its refetch issues no request. A genuine reconnect after a gap refreshes on the
         // leading edge; `visibilitychange` reopening the stream repeatedly does not.
         refreshEverything();
       }
-      hasOpenedOnce = true;
       attempt = 0;
     };
 
@@ -780,6 +783,7 @@ export function useEventStream({
       window.clearTimeout(watchdog);
       watchdog = undefined;
       controller = null;
+      anAttemptEnded = true;
       if (!current.signal.aborted && error instanceof EventStreamHttpError) {
         if (error.status === 401 || error.status === 403) {
           setConnectionState("signed-out");
