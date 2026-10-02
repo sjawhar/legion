@@ -625,6 +625,109 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	return nil
 }
 
+// CleanupIssue is the sole whole-issue delete capability. Outbox calls it only after its complete
+// persisted sibling-claim census says every claim of issue is retired for generation. BeginCleanup
+// repeats the generation/cleanup fence transactionally, so a re-admission that recorded a newer
+// resource generation turns an old close into a no-op. The root's tree PVC is deleted only after a
+// Get confirms its root Sandbox is gone.
+func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string, generation uint64) error {
+	if project != r.project {
+		return fmt.Errorf("cleanup issue %s: project %s is not runtime project %s", issue, project, r.project)
+	}
+	r.mu.Lock()
+	resources := r.resourceStore
+	r.mu.Unlock()
+	if resources == nil {
+		return errors.New("cleanup issue resources: no durable issue resource store")
+	}
+	resource, began, err := resources.BeginIssueCleanup(ctx, project, issue, generation)
+	if err != nil {
+		return err
+	}
+	if !began {
+		return nil
+	}
+	deleting, cancel := call(ctx)
+	sandbox, err := r.sandboxClient().Get(deleting, resource.Sandbox, metav1.GetOptions{})
+	cancel()
+	switch {
+	case apierrors.IsNotFound(err):
+	case err != nil:
+		return fmt.Errorf("cleanup issue %s: read Sandbox %s: %w", issue, resource.Sandbox, err)
+	default:
+		uid := sandbox.GetUID()
+		deleting, cancel = call(ctx)
+		err = r.sandboxClient().Delete(deleting, resource.Sandbox, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
+		cancel()
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("cleanup issue %s: delete Sandbox %s: %w", issue, resource.Sandbox, err)
+		}
+	}
+	if err := r.awaitSandboxDeleted(ctx, resource.Sandbox); err != nil {
+		return err
+	}
+	if err := resources.ConfirmIssueCleanup(ctx, project, issue, generation); err != nil {
+		return err
+	}
+	if issue != tree {
+		return nil
+	}
+	pvc := TreeClaimName(claim.Token("legion-" + project + "-" + tree + "-architect"))
+	deleting, cancel = call(ctx)
+	err = r.kube.CoreV1().PersistentVolumeClaims(r.namespace).Delete(deleting, pvc, metav1.DeleteOptions{})
+	cancel()
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("cleanup root issue %s: delete tree PVC %s after Sandbox confirmation: %w", issue, pvc, err)
+	}
+	return r.awaitPVCDeleted(ctx, pvc)
+}
+
+func (r *Runtime) awaitSandboxDeleted(ctx context.Context, name string) error {
+	deadline := time.NewTimer(r.bootTimeout)
+	defer deadline.Stop()
+	for {
+		reading, cancel := call(ctx)
+		_, err := r.sandboxClient().Get(reading, name, metav1.GetOptions{})
+		cancel()
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("confirm Sandbox %s deletion: %w", name, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("confirm Sandbox %s deletion: timed out after %s", name, r.bootTimeout)
+		case <-time.After(recheckInterval):
+		}
+	}
+}
+
+func (r *Runtime) awaitPVCDeleted(ctx context.Context, name string) error {
+	deadline := time.NewTimer(r.bootTimeout)
+	defer deadline.Stop()
+	for {
+		reading, cancel := call(ctx)
+		_, err := r.kube.CoreV1().PersistentVolumeClaims(r.namespace).Get(reading, name, metav1.GetOptions{})
+		cancel()
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("confirm tree PVC %s deletion: %w", name, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("confirm tree PVC %s deletion: timed out after %s", name, r.bootTimeout)
+		case <-time.After(recheckInterval):
+		}
+	}
+}
+
 // AdoptWorkingCopy has the agent's shim set its working copy's author (the shared `jj metaedit
 // --update-author`, run in the pod's own workspace on the tree volume) over the claim's
 // connection. The recorded process must still be the claim's running pod: the connection is its.
