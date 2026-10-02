@@ -1,0 +1,59 @@
+{
+  "checks": {
+    "citations": "awk body of TestRealTmuxObserveReportsGoneOnce contains LEGION-274 and LEGION-370: both-cited",
+    "diffStat": "jj diff --stat at fec3927b65fc: 1 file changed, 13 insertions(+), 8 deletions(-), tmux_real_test.go alone",
+    "gofmt": "gofmt -l internal/runtime/tmux/tmux_real_test.go printed nothing",
+    "vet": "go vet ./internal/runtime/tmux/ exit 0"
+  },
+  "completed": "2026-10-02T16:37:56.325053277Z",
+  "environment": "Implementer's worker pod (worker image, Debian 13 trixie, uid 1000, 8 CPUs, gVisor: /proc/loadavg reads 0.00 throughout); user-space go1.26.1 linux/amd64 and tmux 3.5a provisioned per plan T2 under $HOME (bun downloader, dpkg -x, tmux wrapper on PATH binding LD_LIBRARY_PATH; env.sh sets PATH, GOTOOLCHAIN=local, GOWORK=off). Load = 8 nice-10 busy loops + one nice-10 fsync dd writer ($HOME/proof/loaded-run.sh, the plan's script verbatim). Output files under $HOME/proof: before-idle-1.txt, before-load-40.txt, after-idle-200.txt, after-load-200.txt, nc1.txt, nc2.txt.",
+  "filesChanged": [
+    "packages/daemon-go/internal/runtime/tmux/tmux_real_test.go"
+  ],
+  "notes": [
+    "The spec's current version is v3 (approved by sjawhar 2026-10-02T16:07:22Z): the loop ends on either final verdict, Gone or NotRecordedProcess.",
+    "NC-3 (noServerStderr matching nothing) was not run: the plan marks it informative; NC-1 and NC-2 are the discriminating controls and both ran 5/5.",
+    "ce-simplify-code is not yet run: pr-body.md places the one pass after the last review round closes and before the reviewer's final pass; the Thermo line says pending.",
+    "The CI daemon-go job runs go test -count=1 ./... without -v, so the job log carries the package's 'ok ... 21.024s' rather than per-test PASS lines; the job installs tmux before the tests (envoy-and-contracts.yaml:656-657), so the real-tmux tests ran rather than skipped."
+  ],
+  "phase": "implement",
+  "pr": {
+    "branch": "legion/LEGION-370",
+    "codeHead": "fec3927b65fc",
+    "number": 1678,
+    "url": "https://github.com/sjawhar/legion/pull/1678"
+  },
+  "proof": [
+    {
+      "command": "legion gh -- run view 37033524383 --repo sjawhar/legion --json jobs; job 110926104184 (https://github.com/sjawhar/legion/actions/runs/37033524383/job/110926104184)",
+      "criterion": "Passes across the tmux teardown window (CI, the surface the flake was seen on)",
+      "headSha": "fec3927b65fc",
+      "negativeControl": "NC-1 in the pod at the same head: sed -i '299s/runtime.Gone/runtime.Alive/; 305s/runtime.NotRecordedProcess/runtime.Alive/' verify.go (a gone pane read as alive, and the straddling probe too) -\u003e 5/5 runs FAIL at tmux_real_test.go:1317 'the sweep never reported the killed pane gone' after 15.23s, 10.20s, 10.19s, 10.22s, 10.21s (the 10 s deadline).",
+      "observed": "daemon-go: completed success; log shows 'go version go1.26.1 linux/amd64' and 'ok github.com/sjawhar/legion/daemon/internal/runtime/tmux 21.024s'. Also run 37033524444 (Tests: lint, typecheck, test all success), 37033524477 (PR Title success), 37033524483 (Worker Image success).",
+      "surface": "GitHub Actions: workflow 'Legion Envoy and Contracts' job daemon-go on PR #1678 (installs tmux, go test -count=1 ./...)"
+    },
+    {
+      "command": ". $HOME/proof/env.sh \u0026\u0026 cd $LEGION_WORKSPACE/packages/daemon-go \u0026\u0026 go test ./internal/runtime/tmux/ -run 'TestRealTmuxObserveReportsGoneOnce$' -count=200 -timeout 90m -v \u003e $HOME/proof/after-idle-200.txt 2\u003e\u00261",
+      "criterion": "Passes across the tmux teardown window (repetition at idle)",
+      "headSha": "fec3927b65fc",
+      "negativeControl": "NC-2 in the pod at the same head: sed -i '58s/if obs.Kind == runtime.Gone || obs.Kind == runtime.NotRecordedProcess {/if false {/' observe.go (a sweep that never untracks after a final verdict) -\u003e 5/5 runs FAIL at tmux_real_test.go:1322 'the sweep reported a final verdict again: {... Kind:gone ... Detail:pane %1 is gone ...}' (the 1 s silence check).",
+      "observed": "PASS=200 FAIL=0 SKIP=0 wall=258s exit=0; 'ok github.com/sjawhar/legion/daemon/internal/runtime/tmux 256.921s'",
+      "surface": "Implementer's pod, real tmux 3.5a server and go1.26.1, the workspace package"
+    },
+    {
+      "command": "$HOME/proof/loaded-run.sh $LEGION_WORKSPACE/packages/daemon-go 200 8 $HOME/proof/after-load-200.txt",
+      "criterion": "Race closed, not moved: passes under load where the unchanged test fails with both failure kinds",
+      "headSha": "fec3927b65fc",
+      "negativeControl": "Surface D, the unchanged test (main@origin's tmux_real_test.go over a copy of the same package) under the same recipe: $HOME/proof/loaded-run.sh $HOME/scratch/before/daemon-go 40 8 $HOME/proof/before-load-40.txt -\u003e RESULT: 28 pass, 12 fail of 40 (busy=8, wall=111s, go test exit=1): 7x tmux_real_test.go:1309 sweep reported Kind:uncertain Detail:'cannot verify pane %N: list-panes -t %N exited 1: no current target', 3x Kind:not_recorded_process 'pane %N pid N has no readable /proc stat (recorded pid N start T)', 2x Kind:not_recorded_process 'pane %N pid N is not running OMP (recorded pid N start T)'. The unchanged test at idle, 1 run: --- PASS (29.39s, first-run stand-in build included).",
+      "observed": "RESULT: 200 pass, 0 fail of 200 (busy=8, wall=432s, go test exit=0); no tmux_real_test.go failure line in the output",
+      "surface": "Implementer's pod under the plan's load recipe (8 nice-10 busy loops + 1 nice-10 fsync writer), real tmux 3.5a server"
+    }
+  ],
+  "schemaVersion": 1,
+  "summary": "TestRealTmuxObserveReportsGoneOnce's post-kill loop now waits through Alive and Uncertain and ends on the sweep's final verdict, Gone or NotRecordedProcess; the 10 s deadline and the 1 s post-final silence check are unchanged; verify.go and observe.go are untouched. One file changed (packages/daemon-go/internal/runtime/tmux/tmux_real_test.go, +13/-8), commit fec3927b65fc, PR https://github.com/sjawhar/legion/pull/1678.",
+  "tasksDone": [
+    "T1",
+    "T2",
+    "T3"
+  ]
+}
