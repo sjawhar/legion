@@ -63,6 +63,9 @@
 
 ### Changed
 
+- A blank approval-request `summary` is refused (`400 SUMMARY_INPUT`) with text that asks for what
+  the human is approving, rather than for what the version proposes that the human has not agreed
+  to (LEGION-475).
 - A markdown document uploaded as an artifact is at most 1 MiB, the bound an issue's spec and
   every edit already have; other artifacts keep the 25 MiB limit. The dashboard shows the
   server's message for a refused upload (LEGION-465).

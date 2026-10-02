@@ -4,6 +4,9 @@
 
 ### Changed
 
+- `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary
+  and no question, and an approval is requested only once the human has agreed to every point in
+  the document (LEGION-475).
 - `dispatch_request_approval` requires `summary`, the proposals in the document's latest version
   the human hasn't already agreed to (LEGION-387). `SPEC_SECTIONS` is removed: `dispatch_issue`'s
   `spec` and `dispatch_doc_edit` point at the dispatch skill's "Writing a spec" instead of listing

@@ -390,7 +390,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	if input.Summary != nil {
 		summary = strings.TrimSpace(*input.Summary)
 		if summary == "" {
-			writeError(w, "SUMMARY_INPUT", http.StatusBadRequest, "summary is blank; say what this version proposes that the human hasn't already agreed to, or omit it")
+			writeError(w, "SUMMARY_INPUT", http.StatusBadRequest, "summary is blank; say what the human is approving, or omit it")
 			return
 		}
 	}

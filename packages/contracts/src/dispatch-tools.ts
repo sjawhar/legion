@@ -844,7 +844,7 @@ export const dispatchToolSpecs = [
       summary: z
         .string({ min: 1 })
         .describe(
-          "The proposals in this version the human hasn't already agreed to, in one to three sentences."
+          "What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question. Request approval only once the human has agreed to every point in the document."
         ),
     }),
     validation: documentOwnerValidation(true),

@@ -102,7 +102,7 @@ dispatch_doc_edit({ issue: "<root issue>", ... })   // extend the primary docume
 // then settle its decision blocks (below)
 result = dispatch_request_approval({
   issue: "<root issue>",                             // the primary document by default
-  summary: "<what the tree will do that the human hasn't already agreed to>",
+  summary: "<what the human is approving>",
 })
 legion({
   op: "register_gate",
@@ -115,8 +115,10 @@ legion({
 The decision blocks come first: settle every one as
 [Approval of a spec](../dispatch/SKILL.md#approval-of-a-spec) says before you request approval;
 `dispatch_request_approval` refuses while one is open. Each answer reaches you, since you follow
-every ask you open. `summary` says in one to three sentences what the tree will do that the human
-hasn't already agreed to.
+every ask you open. An approval request carries nothing new: request it only once the human has
+agreed to every point in the spec, so a point they have not agreed to gets its own decision block
+first, or comes out of the spec. `summary` says in one to three sentences what the human is
+approving and nothing else: no commentary and no open question.
 
 `dispatch_request_approval` opens a system question on the document with the fixed options
 `Approve` and `Request changes`; a human answers it from the Inbox or approves from the
