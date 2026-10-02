@@ -4,33 +4,36 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 )
 
-// Saving a document or an issue title takes time linear in a pathological run, up to the route's
-// own cap (LEGION-465). Before the fix Postgres's search indexing read a run of `a_` or `q_` in
-// quadratic time, and pmdoc parsed `a_b*` in nearly quadratic time. On one loaded machine, before
-// the fix and after it at the same moment, 64 KiB of `a_` saved in 46 s and 0.3 s, 128 KiB of
-// `a_b*` in 33 s and 1.3-2.1 s, an issue titled with 32 KiB of `q_` in 12 s and 0.06-0.17 s, and
-// the duplicate check against a 16 KiB title took 18-21 s and 0.12-0.31 s. Times after the fix
-// follow the runner's load, so no wall-clock bound holds on every runner; each save is timed at
-// growing sizes instead, and its growth is bounded (growsLinearly).
+// Saving a document or an issue title takes time linear in a pathological run over the tested
+// ladder sizes (LEGION-465). Before the fix Postgres's search indexing read a run of `a_` or `q_`
+// in quadratic time, and pmdoc parsed `a_b*` in nearly quadratic time. On one loaded machine,
+// before the fix and after it at the same moment, 64 KiB of `a_` saved in 46 s and 0.3 s, 128 KiB
+// of `a_b*` in 33 s and 1.3-2.1 s, an issue titled with 32 KiB of `q_` in 12 s and 0.06-0.17 s,
+// and the duplicate check against a 16 KiB title took 18-21 s and 0.12-0.31 s. Times after the
+// fix follow the runner's load, so no wall-clock bound holds on every runner; each save is timed
+// at growing sizes instead, and its growth is bounded (growsLinearly).
 //
 // A ladder's first size is small enough that the request's own cost is most of its time, about
 // the same before the fix and after (1 KiB of `a_`: 39-48 ms before, 51-61 ms after); its second
 // is where the code before the fix is many times slower, so that code fails the first step by
 // several times the bound. The duplicate check's own cost is about 2 ms, which the title's
-// passes at a few hundred bytes, so its ladder starts at 64 B. Each ladder ends at the route's
-// cap: a document's 1 MiB, and 256 KiB for `)_`, whose 1 MiB is more items than one document
-// update can hold (TestUploadRefusesADocumentTooLargeToStore); a title has no cap of its own, and
-// 512 KiB stands for the request's 1 MiB. `)_` saved in linear time before the fix too and is held
-// to the same growth.
+// passes at a few hundred bytes, so its ladder starts at 64 B. The `)_` ladder deliberately stops
+// at 256 KiB: `)_` documents up to 1,048,574 bytes are accepted, while exactly 1 MiB reaches the
+// 1,048,576-item cap (TestUploadRefusesADocumentTooLargeToStore). A cap-sized `)_` save costs
+// about 1.1 GB of memory, so LEGION-481 measures it in a dedicated RSS harness instead. A title
+// has no cap of its own, and 512 KiB stands for the request's 1 MiB. `)_` saved in linear time
+// before the fix too and is held to the same growth.
 //
-// Comments and messages cap their text at 2,000 characters and an ask's question at 800, which
-// bounds their cost: a comment of 2,000 characters of `a_` took 51 ms before the fix and 56 ms
-// after, so no route under such a cap is timed.
+// Comment and message text is capped at 2,000 characters and an ask question at 800. Their
+// removed timings measured a 2,000-character `a_` comment at 51 ms before the fix and 56 ms after,
+// so their 5 s limit could only catch the settlement wait.
 //
 // Settlement is held off. A document's settlement holds its issue's row while it renders, so a
 // save timed while one ran would count the wait for it; and the test server's shutdown, which
@@ -109,47 +112,91 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 	})
 }
 
-// growthAllowance is how many times faster than its input a save's time may grow from one size to
-// the next. Linear time grows at most as fast as the input, less while the request's own cost
-// counts, and quadratic time as the input's square. Four times the input's growth lets a runner's
-// load quadruple between two saves, and still refuses a quadratic save at any step over four;
-// every step here is eight or more.
+// TestGrowsLinearlyRejectsQuadraticFinalRung proves the final-rung bound stays anchored to the
+// first rung, even when a prior rung fills the permitted per-step growth. The helper must fail for
+// both an ordinary first sample and one artificial slow first sample.
+func TestGrowsLinearlyRejectsQuadraticFinalRung(t *testing.T) {
+	for _, slowFirstSample := range []bool{false, true} {
+		t.Run(fmt.Sprintf("slow first sample %t", slowFirstSample), func(t *testing.T) {
+			command := exec.Command(os.Args[0], "-test.run=^TestGrowsLinearlyRejectsQuadraticFinalRungHelper$")
+			command.Env = append(os.Environ(), fmt.Sprintf("GROWS_LINEARLY_SLOW_FIRST=%t", slowFirstSample))
+			output, err := command.CombinedOutput()
+			if err == nil {
+				t.Fatalf("quadratic final rung passed:\n%s", output)
+			}
+			if !strings.Contains(string(output), "at 64 B") {
+				t.Fatalf("quadratic final rung failed unexpectedly:\n%s", output)
+			}
+		})
+	}
+}
+
+func TestGrowsLinearlyRejectsQuadraticFinalRungHelper(t *testing.T) {
+	slowFirstValue, helper := os.LookupEnv("GROWS_LINEARLY_SLOW_FIRST")
+	if !helper {
+		t.Skip("subprocess helper")
+	}
+	slowFirstSample := slowFirstValue == "true"
+	firstSamples := 0
+	growsLinearly(t, "a quadratic final rung", []int{1, 8, 64}, func(size int) time.Duration {
+		switch size {
+		case 1:
+			firstSamples++
+			if slowFirstSample && firstSamples == 1 {
+				return 50 * time.Millisecond
+			}
+			return time.Millisecond
+		case 8:
+			return 32 * time.Millisecond
+		case 64:
+			return time.Duration(size*size/4) * time.Millisecond
+		default:
+			t.Fatalf("unexpected size %d", size)
+			return 0
+		}
+	})
+}
+
+// growthAllowance is the permitted variation in time per input byte from the first rung. A linear
+// save takes no more time per input byte as it grows, so each later rung may take four times the
+// first rung's time per byte. Quadratic growth exceeds that headroom across this ladder's input
+// ratios.
 const growthAllowance = 4
 
-// growsLinearly times what at each size in turn and fails t at the first size whose time grew
-// more than growthAllowance times faster than the size did. The first size, where the request's
-// own cost is most of the time, is timed three times before the second size and three times after
-// it, and the fastest of the six kept: the first save's warm-up does not count as that cost, and a
-// load spike inflates it only if it lasts the whole of the second size's save. A step over the
-// bound times the larger size again and keeps the faster time, so a load spike during one save is
-// not read as growth; after the first step it also times the smaller size again and keeps the
-// slower, so load that rose between two saves is not either.
+// growsLinearly times a three-rung ladder and compares each later rung with the first. The first
+// size, where the request's own cost is most of the time, is timed three times before the second
+// size and three times after it, and the fastest of the six kept: the first save's warm-up does
+// not count as that cost, and a load spike inflates it only if it lasts all six first-rung saves.
+// A rung over the bound is timed again and keeps the faster time, so a one-save load spike is not
+// read as growth.
 func growsLinearly(t *testing.T, what string, sizes []int, timed func(size int) time.Duration) {
 	t.Helper()
-	first := func() time.Duration { return min(timed(sizes[0]), timed(sizes[0]), timed(sizes[0])) }
-	before := first()
-	for i := 1; i < len(sizes); i++ {
-		smaller, size := sizes[i-1], sizes[i]
-		growth := size / smaller
-		took := timed(size)
-		if i == 1 {
-			before = min(before, first())
-		}
-		if took > time.Duration(growthAllowance*growth)*before {
-			t.Logf("%s: %s at %s against %s at %s is over the bound; timing it again", what, took.Round(time.Millisecond), sizeText(size), before.Round(time.Millisecond), sizeText(smaller))
-			took = min(took, timed(size))
-			if i > 1 {
-				before = max(before, timed(smaller))
-			}
-		}
-		ratio := float64(took) / float64(before)
-		if took > time.Duration(growthAllowance*growth)*before {
-			t.Fatalf("%s took %s at %s, %.0f times the %s it took at %s: the input grew %d times, and a save linear in it may grow %d times at most (growthAllowance)",
-				what, took.Round(time.Millisecond), sizeText(size), ratio, before.Round(time.Millisecond), sizeText(smaller), growth, growthAllowance*growth)
-		}
-		t.Logf("%s: %s at %s, %s at %s, %.1f times for an input %d times larger (at most %d)", what, before.Round(time.Millisecond), sizeText(smaller), took.Round(time.Millisecond), sizeText(size), ratio, growth, growthAllowance*growth)
-		before = took
+	firstSize, secondSize, thirdSize := sizes[0], sizes[1], sizes[2]
+	first := func() time.Duration { return min(timed(firstSize), timed(firstSize), timed(firstSize)) }
+	firstTook := first()
+
+	secondTook := timed(secondSize)
+	firstTook = min(firstTook, first())
+	checkLinearGrowth(t, what, firstSize, firstTook, secondSize, secondTook, timed)
+
+	thirdTook := timed(thirdSize)
+	checkLinearGrowth(t, what, firstSize, firstTook, thirdSize, thirdTook, timed)
+}
+
+func checkLinearGrowth(t *testing.T, what string, firstSize int, firstTook time.Duration, size int, took time.Duration, timed func(size int) time.Duration) {
+	t.Helper()
+	growth := size / firstSize
+	bound := time.Duration(growthAllowance*growth) * firstTook
+	if took > bound {
+		t.Logf("%s: %s at %s against %s at %s is over the bound; timing it again", what, took.Round(time.Millisecond), sizeText(size), firstTook.Round(time.Millisecond), sizeText(firstSize))
+		took = min(took, timed(size))
 	}
+	ratio := float64(took) / float64(firstTook)
+	if took > bound {
+		t.Fatalf("%s took %s at %s, %.0f times the %s it took at %s: the input grew %d times, and a save linear in it may grow %d times at most (growthAllowance)",
+			what, took.Round(time.Millisecond), sizeText(size), ratio, firstTook.Round(time.Millisecond), sizeText(firstSize), growth, growthAllowance*growth)
+	}
+	t.Logf("%s: %s at %s, %s at %s, %.1f times for an input %d times larger (at most %d)", what, firstTook.Round(time.Millisecond), sizeText(firstSize), took.Round(time.Millisecond), sizeText(size), ratio, growth, growthAllowance*growth)
 }
 
 func sizeText(size int) string {

@@ -89,8 +89,7 @@ type Service struct {
 	// the publish decides whether to fail that room. Nil outside tests; tests use it to let the
 	// refused room's recovery finish in that window.
 	afterPublishRefused func(room string)
-	// now is the clock the unrecorded-mark sweep ages marks by (sweepUnrecordedMarks). Nil
-	// outside tests, where the sweep reads time.Now; tests set it to age a mark without waiting.
+	// now is the clock the unrecorded-mark sweep ages marks by (sweepUnrecordedMarks).
 	now      func() time.Time
 	settleWG sync.WaitGroup
 	// evictWG counts the forced evictions failRoomLocked spawns. They flush the room through
@@ -390,6 +389,7 @@ func New(deps Deps) *Service {
 		serverURL:         strings.TrimSuffix(deps.ServerURL, "/"),
 		settle:            settle,
 		markWait:          markWait,
+		now:               time.Now,
 		timers:            make(map[uint64]*time.Timer),
 		unrecordedMarkTTL: unrecordedMarkTTL,
 	}

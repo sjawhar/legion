@@ -379,8 +379,9 @@ func TestVersionWriteRefreshesAnchorsByMark(t *testing.T) {
 // first settlement that saw it is UnrecordedMarkTTL old, and the first settlement after that
 // sweeps it; a recorded mark, resolved or not, and a proof-authored mark stay. The sweep ages
 // marks by the service's clock, which the test holds and moves, so a mark's age is what the test
-// sets and never how long a loaded runner took; settlement timers are an hour away, so the only
-// settlements are the ones the test runs.
+// sets and never how long a loaded runner took. The sweep re-arms settlement for the mark's
+// remaining TTL in real time; any such settlement reads the held clock and cannot change the
+// result this test asserts.
 func TestSettleSweepsUnrecordedMarksAfterTTL(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "")
