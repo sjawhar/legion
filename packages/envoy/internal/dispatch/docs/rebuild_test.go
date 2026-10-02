@@ -69,8 +69,9 @@ func TestRebuildDocumentRestoresDocumentThatCannotLoad(t *testing.T) {
 			t.Errorf("shutdown rebuilt service: %v", err)
 		}
 	})
-	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrServiceUnavailable) {
-		t.Fatalf("read over-cap history: %v, want ErrServiceUnavailable", err)
+	// The read meets the history that does not decode itself, the state a rebuild repairs.
+	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrDocumentUnloadable) {
+		t.Fatalf("read over-cap history: %v, want ErrDocumentUnloadable", err)
 	}
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)
