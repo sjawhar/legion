@@ -4,18 +4,41 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const library = fileURLToPath(new URL(".", import.meta.url));
-const selector = `include "design-gate-approval-requests"; approval_requested_versions($artifact)`;
+const root = fileURLToPath(new URL("../../..", import.meta.url));
 const script = readFileSync(
   fileURLToPath(new URL("../stage4b-sandbox-tree.sh", import.meta.url)),
   "utf8"
 );
 
+// drive_gated_spec's own requested-versions command, from its `requested_versions=$(jq` line to the
+// line that feeds it the events.
+const requestedVersionsCommand = (() => {
+  const lines = script.split("\n");
+  const start = lines.findIndex((text) => /^\s*requested_versions=\$\(jq /.test(text));
+  const end = lines.findIndex((text, index) => index > start && /<<<"\$events"\)\s*$/.test(text));
+  if (start < 0 || end < 0) {
+    throw new Error(
+      "drive_gated_spec's requested_versions command is not in stage4b-sandbox-tree.sh"
+    );
+  }
+  return lines.slice(start, end + 1).join("\n");
+})();
+
+// The versions drive_gated_spec reads as handed back, by its own command run through bash from a
+// directory that is not lib/, as the driver runs it.
 function handedBackVersions(events: unknown[]): string {
-  const run = Bun.spawnSync(["jq", "-r", "-L", library, "--arg", "artifact", "spec-1", selector], {
-    stdin: new TextEncoder().encode(JSON.stringify(events)),
-  });
-  if (run.exitCode !== 0) throw new Error(`jq exited ${run.exitCode}: ${run.stderr.toString()}`);
+  const run = Bun.spawnSync(
+    [
+      "bash",
+      "-c",
+      `set -euo pipefail\n${requestedVersionsCommand}\nprintf '%s\\n' "$requested_versions"`,
+    ],
+    {
+      cwd: tmpdir(),
+      env: { ...process.env, root, artifact: "spec-1", events: JSON.stringify(events) },
+    }
+  );
+  if (run.exitCode !== 0) throw new Error(`bash exited ${run.exitCode}: ${run.stderr.toString()}`);
   return run.stdout.toString();
 }
 
@@ -35,11 +58,6 @@ const previous = {
 };
 
 describe("drive_gated_spec's hand-back versions", () => {
-  test("uses the shared approval-event selector", () => {
-    expect(script).toContain('include "design-gate-approval-requests"');
-    expect(script).not.toContain("previous.approval");
-  });
-
   test("a request at v1, the move to v2 a block answer caused, and the reworded hand-back at v2 read versions 1 and 2", () => {
     const events = [
       { type: "ask.opened", payload: { id: "a", kind: "approval", approval: approval(1, 1) } },
@@ -121,7 +139,7 @@ describe("drive_gated_spec's verdict", () => {
           cwd: evidence,
           env: {
             ...process.env,
-            root: fileURLToPath(new URL("../../..", import.meta.url)),
+            root,
             artifact: "spec-1",
             approved: "2",
             evidence,

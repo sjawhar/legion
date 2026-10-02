@@ -304,7 +304,15 @@ test("a hand-back is an activity line in the issue's Conversation, live and afte
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    // A cold event stream starts at the server's head, and the client refetches nothing on its first
+    // open, so an event committed before the stream subscribes never arrives live. The server
+    // subscribes before it answers the stream's headers (streamEvents, api/events.go), so once the
+    // response arrives the hand-back below reaches this tab.
+    const streaming = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/events"
+    );
     await page.goto(`/issues/${issue.key}/conversation`);
+    await streaming;
     const askTurn = page.locator(`[data-turn="ask:${requested.ask.id}"]`);
     await expect(askTurn).toHaveCount(1);
     const handBackLine = page.locator('[data-kind="activity"]', {
@@ -383,15 +391,16 @@ test("an approval ask's Inbox card shows a question carrying a long summary whol
 }, testInfo) => {
   await createProject({ key: "GATE", name: "Gate" });
   const issue = await createIssue({ project: "GATE", spec: "The plan.", title: "Design gate" });
-  // Nearly as long as the ask cap leaves a summary after "Approve spec.md (version 1)? ": 771
-  // units, cut at a word so the text still reads as a sentence.
+  // Nearly as long as the ask cap leaves a summary: 762 units, budgeted against the longest version
+  // a request can reach ("Approve spec.md (version 9999999999)? "), cut at a word so the text still
+  // reads as a sentence.
   const opening =
     "Retries a failed push at most three times, one minute apart, and then stops and names the push that failed. ";
   const ending = "Nothing else in the retry path changes.";
-  const filler = opening.repeat(8).slice(0, 771 - ending.length);
+  const filler = opening.repeat(8).slice(0, 762 - ending.length);
   const summary = filler.slice(0, filler.lastIndexOf(" ") + 1) + ending;
-  expect(summary.length).toBeGreaterThan(750);
-  expect(summary.length).toBeLessThanOrEqual(771);
+  expect(summary.length).toBeGreaterThan(740);
+  expect(summary.length).toBeLessThanOrEqual(762);
   const requested = await requestApproval(issue.primary_artifact_id, { summary }, session);
   expect(requested.ask.question).toBe(`Approve spec.md (version 1)? ${summary}`);
 
