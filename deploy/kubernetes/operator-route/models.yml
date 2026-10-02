@@ -1,16 +1,20 @@
-# One operator's model route (pod.yml mounts this file into the image's Oh My Pi profile):
+# An example of the operator's models.yml, the Oh My Pi provider file every Legion pod reads
+# (pod.yml mounts it into the image's Oh My Pi profile). The operator copies it into their own
+# directory with overlay.yml, puts the model endpoint's base URL in place of the baseUrl
+# placeholder, and applies both with apply.sh (README.md beside this file).
+#
 # anthropic through the Hawk model gateway (middleman), keyed by the pod's projected
 # ServiceAccount token. The gateway reads the key from x-api-key; Oh My Pi caches the command's
 # value for the process and runs it again on a 401, so the token the kubelet rotated is read on
-# the first refusal. `auth: apiKey` makes these custom models plain API-key callers: without it Oh
-# My Pi sends an anthropic-messages custom model in its Claude Code OAuth shape.
+# the first refusal. `auth: apiKey` makes these models plain API-key callers: without it Oh My Pi
+# sends an anthropic-messages custom model in its Claude Code OAuth shape.
 #
-# The model ids are the ones the operator's endpoint serves. Oh My Pi finds no catalog entry for
-# them, so each carries its model's catalog metadata.
+# The models carry the names every other agent uses. Each entry replaces Oh My Pi's catalog entry
+# of the same id and carries that model's metadata, so the route does not rest on the catalog of
+# the image's Oh My Pi build; overlay.yml chooses each role's.
 #
-# baseUrl is the operator's own gateway, so this file carries a placeholder instead: apply.sh
-# substitutes the base URL it is given, and the live harnesses substitute
-# LEGION_E2E_MODEL_GATEWAY_URL, before either creates the ConfigMap.
+# The live harnesses run on this file, each putting LEGION_E2E_MODEL_GATEWAY_URL in place of the
+# placeholder in its own copy.
 providers:
   anthropic:
     baseUrl: ${MODEL_BASE_URL}
@@ -20,36 +24,36 @@ providers:
     headers:
       X-Api-Key: "!cat /var/run/operator/token"
     models:
-      - id: claude-fable-5-1-legion
-        name: Claude Fable 5.1 (Legion gateway)
+      - id: claude-fable-5-1
+        name: Claude Fable 5.1
         reasoning: true
         input: [text, image]
         contextWindow: 1000000
         maxTokens: 128000
         cost: {input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5}
-      - id: claude-fable-5-legion
-        name: Claude Fable 5 (Legion gateway)
+      - id: claude-fable-5
+        name: Claude Fable 5
         reasoning: true
         input: [text, image]
         contextWindow: 1000000
         maxTokens: 128000
         cost: {input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5}
-      - id: claude-opus-5-legion
-        name: Claude Opus 5 (Legion gateway)
+      - id: claude-opus-5
+        name: Claude Opus 5
         reasoning: true
         input: [text, image]
         contextWindow: 1000000
         maxTokens: 128000
         cost: {input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25}
-      - id: claude-opus-4-8-legion
-        name: Claude Opus 4.8 (Legion gateway)
+      - id: claude-opus-4-8
+        name: Claude Opus 4.8
         reasoning: true
         input: [text, image]
         contextWindow: 1000000
         maxTokens: 128000
         cost: {input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25}
-      - id: claude-sonnet-5-legion
-        name: Claude Sonnet 5 (Legion gateway)
+      - id: claude-sonnet-5
+        name: Claude Sonnet 5
         reasoning: true
         input: [text, image]
         contextWindow: 1000000
