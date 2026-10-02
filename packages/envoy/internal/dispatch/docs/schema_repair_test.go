@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -26,12 +27,7 @@ func newSchemaRepairService(database *store.Store) *Service {
 
 func writeSchemaInvalidElement(t *testing.T, service *Service, artifactID string) {
 	t.Helper()
-	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		fragment := doc.GetXmlFragment(fragmentName)
-		transact(func(transaction *crdt.Transaction) {
-			fragment.InsertElement(transaction, 0, crdt.NewYXmlElement("callout"))
-		})
-	}); err != nil {
+	if err := service.InjectSchemaInvalidForTest(context.Background(), artifactID); err != nil {
 		t.Fatalf("write crafted element: %v", err)
 	}
 }
@@ -121,5 +117,46 @@ func TestSchemaRepairKeepsOpenAskBlocks(t *testing.T) {
 	}
 	if state != "open" {
 		t.Fatalf("retained ask state = %q, want open", state)
+	}
+}
+
+// A stored task item can pass the tree validator while the renderer rejects it: a checked task
+// whose empty first paragraph precedes a heading has no markdown representation the browser reads
+// back as a task. It remains repairable instead of failing room creation.
+func TestStoredRenderOnlySchemaViolationLoadsForRepair(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "")
+	doc := crdt.New()
+	fragment := doc.GetXmlFragment(fragmentName)
+	tree := &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{{
+		Type: "bullet_list",
+		Children: []*pmdoc.Node{{
+			Type:  "list_item",
+			Attrs: pmdoc.Attrs{"checked": true},
+			Children: []*pmdoc.Node{
+				{Type: "paragraph"},
+				{Type: "heading", Attrs: pmdoc.Attrs{"level": float64(2)}, Children: []*pmdoc.Node{{Type: "text", Text: "Unreadable task"}}},
+			},
+		}},
+	}}}
+	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
+		return pmdoc.Update(transaction, fragment, tree)
+	}); err != nil {
+		t.Fatalf("write render-only violation: %v", err)
+	}
+	if _, err := NewPgVersioned(database).AppendUpdate(context.Background(), artifactID, crdt.EncodeStateAsUpdateV1(doc, nil)); err != nil {
+		t.Fatalf("persist render-only violation: %v", err)
+	}
+	service := newSchemaRepairService(database)
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown render-only service: %v", err)
+		}
+	})
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load render-only violation for repair: %v", err)
+	}
+	if _, _, err := service.TextWithBlocks(context.Background(), artifactID); !errors.Is(err, ErrDocOutsideSchema) {
+		t.Fatalf("read render-only violation: %v, want ErrDocOutsideSchema", err)
 	}
 }

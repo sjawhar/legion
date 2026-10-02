@@ -21,6 +21,9 @@ var (
 )
 
 func repairableSchemaError(err error) error {
+	if errors.Is(err, pmdoc.ErrSchema) && !errors.Is(err, ErrDocSchema) {
+		err = fmt.Errorf("%w: %v", ErrDocSchema, err)
+	}
 	if errors.Is(err, ErrDocSchema) && !errors.Is(err, ErrDocOutsideSchema) {
 		return fmt.Errorf("%w: %v", ErrDocOutsideSchema, err)
 	}
@@ -76,6 +79,20 @@ func asUploaded(tree *pmdoc.Node) *pmdoc.Node {
 	out := pmdoc.StripAnchorMarks(tree)
 	pmdoc.StripServerOwnedAttrs(out)
 	return out
+}
+
+// encodeDocumentTree writes tree into a fresh document and returns the first durable update for
+// callers that create or rebuild a document outside a live room.
+func encodeDocumentTree(tree *pmdoc.Node) ([]byte, error) {
+	doc := crdt.New()
+	fragment := doc.GetXmlFragment(fragmentName)
+	doc.GetMap(marksMapName)
+	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
+		return pmdoc.Update(transaction, fragment, tree)
+	}); err != nil {
+		return nil, err
+	}
+	return crdt.EncodeStateAsUpdateV1(doc, nil), nil
 }
 
 // errDocUnloaded is returned for a room whose live document is not resident (evicted, or never

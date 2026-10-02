@@ -466,11 +466,7 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
-	markdown := ""
-	if input.Markdown != nil {
-		markdown = *input.Markdown
-	}
-	report, err := s.deps.Docs.RebuildDocument(r.Context(), artifact.ID, markdown, actor)
+	report, err := s.deps.Docs.RebuildDocument(r.Context(), artifact.ID, input.Markdown, actor)
 	if errors.Is(err, docs.ErrDocumentLive) {
 		writeError(w, "DOCUMENT_LIVE", http.StatusConflict, err.Error())
 		return
@@ -483,6 +479,48 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	var published []model.Event
+	if input.Markdown != nil {
+		tx, err := s.begin(r.Context())
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		defer tx.Rollback(r.Context())
+		owner := ownerForArtifact(artifact)
+		if err := s.requireOpenOwner(r.Context(), tx, owner); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+		defer ledger.Discard()
+		written, err := s.deps.Docs.SnapshotVersion(documentCtx, artifact.ID, actor)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if written.Wrote {
+			event, err := s.appendEvent(r.Context(), tx, owner.event(
+				"artifact.version",
+				actor,
+				docs.ArtifactVersionEventPayload(artifact.ID, artifact.Name, written.Version, nil, written.Changes),
+			))
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			if err := refs.Stamp(r.Context(), tx, "artifact", artifact.ID, event.ID); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			published = append(published, event)
+		}
+		if err := ledger.Commit(r.Context()); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	s.publish(published...)
 	WriteJSON(w, http.StatusOK, report)
 }
 

@@ -202,15 +202,11 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if err != nil {
 		return "", err
 	}
-	doc := crdt.New()
-	fragment := doc.GetXmlFragment(fragmentName)
-	doc.GetMap(marksMapName)
-	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
-		return pmdoc.Update(transaction, fragment, tree)
-	}); err != nil {
+	update, err := encodeDocumentTree(tree)
+	if err != nil {
 		return "", fmt.Errorf("seed live document tree: %w", err)
 	}
-	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil), true); err != nil {
+	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, true); err != nil {
 		return "", fmt.Errorf("seed live document: %w", err)
 	}
 	// The seeding actor is the caller's own first version author (written directly by the
@@ -246,7 +242,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			return err
 		}
 		if repairing {
-			if err := s.openAskBlocksKept(ctx, artifactID, target); err != nil {
+			if err := s.refuseDroppedAskBlocks(ctx, artifactID, target); err != nil {
 				return &ErrInvalidAskBlock{Reason: err}
 			}
 		} else if err := refuseChangedAsks(current, target, pmdoc.AskContentError, newAskMarkdown()); err != nil {
@@ -318,7 +314,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	return canonical, nil
 }
 
-func (s *Service) openAskBlocksKept(ctx context.Context, artifactID string, target *pmdoc.Node) error {
+func (s *Service) refuseDroppedAskBlocks(ctx context.Context, artifactID string, target *pmdoc.Node) error {
 	rows, err := s.queryFrom(ctx).Query(ctx, `
 		select block_id from asks
 		where block_artifact_id = $1 and state = 'open' and block_id is not null
@@ -451,15 +447,15 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 	}
 	tableDescendants, err := pmdoc.TableDescendantIDs(tree)
 	if err != nil {
-		return "", nil, err
+		return "", nil, repairableSchemaError(err)
 	}
 	tokens, err := blockTokens(tree)
 	if err != nil {
-		return "", nil, err
+		return "", nil, repairableSchemaError(err)
 	}
 	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 	if err != nil {
-		return "", nil, err
+		return "", nil, repairableSchemaError(err)
 	}
 	blocks := make([]model.ArtifactBlock, len(offsets))
 	for index, offset := range offsets {

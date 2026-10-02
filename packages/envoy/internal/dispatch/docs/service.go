@@ -54,9 +54,11 @@ type Deps struct {
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
 // store. Document writes that join an API transaction use AppendUpdateTx, classifying
 // the update as content or not the way the room's update observer classifies a live one.
+// Rebuild replaces an unreadable history through the same persistence boundary as its preflight.
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error)
+	Rebuild(ctx context.Context, room string, seed []byte) (RebuildReport, error)
 }
 
 // Service owns live Yjs documents and their durable Dispatch versions.
@@ -137,7 +139,6 @@ type roomState struct {
 	// contentMarkdown is the live document's rendered markdown when the room's update observer
 	// last saw it change, nil until the room loads.
 	contentMarkdown *string
-	outsideSchema   error
 	updateClasses   []documentUpdateClass
 	pendingUpdates  int
 	settle          *time.Timer

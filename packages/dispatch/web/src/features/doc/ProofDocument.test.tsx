@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
@@ -7,7 +7,7 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { type FakeDocumentRuntime, fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { ApiError, api } from "../../api/client";
-import type { Artifact, Ask, IssueDetails } from "../../api/types";
+import type { Artifact, ArtifactText, Ask, IssueDetails } from "../../api/types";
 import { MarginProvider, useMargin } from "../margin/margin-context";
 import type { MarkPlacement } from "../margin/useMarginItems";
 import { RefPreviewHost } from "../refs/RefPreview";
@@ -48,6 +48,23 @@ function createQueryClient(): QueryClient {
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
 }
+
+let defaultText = "";
+let restoreDefaultTextRead: (() => void) | undefined;
+
+function ensureDefaultTextRead(markdown: string): void {
+  defaultText = markdown;
+  if ("mock" in api.getArtifactText) {
+    return;
+  }
+  const getArtifactText = spyOn(api, "getArtifactText").mockImplementation(async () => ({
+    markdown: defaultText,
+    version: null,
+  }));
+  restoreDefaultTextRead = () => getArtifactText.mockRestore();
+}
+
+afterAll(() => restoreDefaultTextRead?.());
 
 function CurrentRoute() {
   const location = useLocation();
@@ -130,6 +147,12 @@ function renderProofDocument({
       </QueryClientProvider>
     </MemoryRouter>
   );
+  const cachedText = queryClient.getQueryData<Partial<ArtifactText>>([
+    "artifact",
+    document.id,
+    "text",
+  ]);
+  ensureDefaultTextRead(cachedText?.markdown ?? fake.text);
   const view = render(renderDocument());
   return {
     ...fake,
@@ -207,6 +230,35 @@ test("ProofDocument offers a markdown upload when the stored tree is outside the
     uploadArtifact.mockRestore();
   }
 });
+
+test("ProofDocument waits for a fresh text read before reconnecting from cached text", async () => {
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(["artifact", artifact.id, "text"], {
+    markdown: "cached document",
+    version: null,
+  });
+  let resolveText: (value: ArtifactText) => void;
+  const textRead = new Promise<ArtifactText>((resolve) => {
+    resolveText = resolve;
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockImplementation(() => textRead);
+  try {
+    const { connections, view } = renderProofDocument({ queryClient });
+
+    await waitFor(() => expect(getArtifactText).toHaveBeenCalledTimes(1));
+    expect(connections).toHaveLength(0);
+
+    await act(async () => {
+      resolveText({ markdown: "fresh document", version: null });
+      await textRead;
+    });
+    await waitFor(() => expect(connections).toHaveLength(1));
+    view.unmount();
+  } finally {
+    getArtifactText.mockRestore();
+  }
+});
+
 test("ProofDocument creates the editor on the synced document as the signed-in user", async () => {
   const { connections, editors, sync, toolbar, view } = renderProofDocument();
 
@@ -949,12 +1001,6 @@ test("ProofDocument hands its decision blocks the indexed ask; the hosted card a
       "ask-1",
       { expected_edited_at: null, selected: ["Ship"], text: "Go." },
     ]);
-    // The server writes the outcome into the block, so the document's own reads go stale.
-    await waitFor(() =>
-      expect(queryClient.getQueryState(["artifact", "artifact-1", "text"])?.isInvalidated).toBe(
-        true
-      )
-    );
     act(() => askView?.destroy());
     await waitFor(() => expect(section.querySelector("[data-dispatch-ask-pill]")).toBeNull());
   } finally {

@@ -40,6 +40,7 @@ export interface FakeDocumentRuntime {
   runtime: DocumentRuntimeValue;
   status(state: ConnectionState): void;
   sync(): void;
+  text: string;
 }
 
 const blockSchema = {
@@ -158,5 +159,6 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         callback.onSynced();
       }
     },
+    text: seed.text ?? "",
   };
 }

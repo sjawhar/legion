@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -50,7 +51,7 @@ func TestRebuildDocumentRestoresDocumentThatCannotLoad(t *testing.T) {
 	service.afterRebuildMark = func(room string) {
 		loadDuringRebuild = service.warmLiveDocument(context.Background(), room)
 	}
-	report, err := service.RebuildDocument(context.Background(), artifactID, "", model.Actor{Kind: "user", ID: "alice"})
+	report, err := service.RebuildDocument(context.Background(), artifactID, nil, model.Actor{Kind: "user", ID: "alice"})
 	if err != nil {
 		t.Fatalf("rebuild document: %v", err)
 	}
@@ -87,7 +88,7 @@ func TestRebuildDocumentRefusesALiveRoom(t *testing.T) {
 	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&before); err != nil {
 		t.Fatalf("count updates before rebuild: %v", err)
 	}
-	if _, err := service.RebuildDocument(context.Background(), artifactID, "", model.Actor{Kind: "user", ID: "alice"}); !errors.Is(err, ErrDocumentLive) {
+	if _, err := service.RebuildDocument(context.Background(), artifactID, nil, model.Actor{Kind: "user", ID: "alice"}); !errors.Is(err, ErrDocumentLive) {
 		t.Fatalf("rebuild resident room: %v, want ErrDocumentLive", err)
 	}
 	var after int
@@ -96,5 +97,41 @@ func TestRebuildDocumentRefusesALiveRoom(t *testing.T) {
 	}
 	if after != before {
 		t.Fatalf("resident-room rebuild changed doc_updates from %d to %d", before, after)
+	}
+}
+
+type rebuildCaptureStore struct {
+	VersionedStore
+	invalid  bool
+	rebuilds int
+}
+
+func (s *rebuildCaptureStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
+	if s.invalid {
+		s.invalid = false
+		return persistence.LoadResult{Update: []byte{0xff}}, nil
+	}
+	return s.VersionedStore.Load(ctx, room)
+}
+
+func (s *rebuildCaptureStore) Rebuild(ctx context.Context, room string, seed []byte) (RebuildReport, error) {
+	s.rebuilds++
+	return s.VersionedStore.Rebuild(ctx, room, seed)
+}
+
+func TestRebuildDocumentWritesThroughItsInjectedPersistence(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before\n")
+	persist := &rebuildCaptureStore{
+		VersionedStore: NewPgVersioned(database),
+		invalid:        true,
+	}
+	service := New(Deps{Store: database, Persistence: persist})
+	replacement := "replacement\n"
+	if _, err := service.RebuildDocument(context.Background(), artifactID, &replacement, model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("rebuild document: %v", err)
+	}
+	if persist.rebuilds != 1 {
+		t.Fatalf("injected persistence rebuild calls = %d, want 1", persist.rebuilds)
 	}
 }

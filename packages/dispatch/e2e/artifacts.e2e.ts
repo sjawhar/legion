@@ -322,3 +322,45 @@ test("an out-of-schema document names its repair and uploads replacement markdow
   await confirmUpload(page);
   await expect(documentEditor(page)).toContainText("repaired");
 });
+
+test("an out-of-schema document does not reconnect from cached text", async ({ page }) => {
+  const sockets = countDocumentSockets(page);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Do not reconnect from stale text" });
+  const upload = await createIssueArtifact(issue.key, {
+    content: "before\n",
+    name: "cached-repair.md",
+  });
+
+  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await expect(documentEditor(page)).toContainText("before");
+  await expect.poll(sockets).toBe(1);
+
+  await page.goto(`/issues/${issue.key}`);
+  const corrupted = await page.request.post(
+    `/api/v1/artifacts/${upload.artifact.id}/_test/outside-schema`
+  );
+  expect(corrupted.status()).toBe(204);
+  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+
+  await expect(page.getByText("replace the document from markdown to repair it")).toBeVisible();
+  await expect.poll(sockets).toBe(1);
+});
+
+test("a live document refuses a rebuild", async ({ page }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Refuse live rebuild" });
+  const upload = await createIssueArtifact(issue.key, {
+    content: "before\n",
+    name: "live-rebuild.md",
+  });
+
+  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await expect(documentEditor(page)).toContainText("before");
+  const rebuilt = await page.request.post(`/api/v1/artifacts/${upload.artifact.id}/rebuild`, {
+    data: {},
+  });
+  expect(rebuilt.status()).toBe(409);
+  await expect(rebuilt.text()).resolves.toContain(`"code":"DOCUMENT_LIVE"`);
+  await expect(documentEditor(page)).toContainText("before");
+});

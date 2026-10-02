@@ -174,6 +174,7 @@ export function ProofDocument({
   const liveTextQuery = useQuery({
     queryKey: ["artifact", artifact.id, "text"],
     queryFn: () => api.getArtifactText(artifact.id),
+    refetchOnMount: "always",
   });
   const repairUpload = useArtifactUpload(
     owner.kind === "issue" ? { issue: owner.key } : { project: owner.project }
@@ -308,13 +309,21 @@ export function ProofDocument({
   useEffect(() => {
     if (repairError !== undefined || rebuildError !== undefined) {
       setConnection("failed");
-      setLoadError((repairError ?? rebuildError)?.message);
       return;
     }
-    // The first live read decides whether the editor may open the room. A browser editor
-    // normalizes a tree it cannot represent, so connecting before a DOC_SCHEMA answer can
-    // silently rewrite the document the page is about to offer to repair.
-    if (liveTextQuery.isPending || blockSchema === undefined) {
+    if (liveTextQuery.isError) {
+      setConnection("failed");
+      setLoadError(
+        liveTextQuery.error instanceof Error
+          ? liveTextQuery.error.message
+          : String(liveTextQuery.error)
+      );
+      return;
+    }
+    // The text read is forced for every mount, even when React Query has a warm result. A browser
+    // editor normalizes a tree it cannot represent, so a reconnect stays closed until that mount's
+    // read settles successfully and a concurrent refetch closes any existing provider again.
+    if (liveTextQuery.isFetching || !liveTextQuery.isSuccess || blockSchema === undefined) {
       return;
     }
     const parent = root.current;
@@ -482,7 +491,10 @@ export function ProofDocument({
     artifact.id,
     blockSchema,
     createEditor,
-    liveTextQuery.isPending,
+    liveTextQuery.error,
+    liveTextQuery.isError,
+    liveTextQuery.isFetching,
+    liveTextQuery.isSuccess,
     loadTransport,
     rebuildError,
     repairError,

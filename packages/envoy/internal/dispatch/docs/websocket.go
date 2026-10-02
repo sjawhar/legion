@@ -331,26 +331,24 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	tree, err := treeOf(doc)
 	var contentMarkdown *string
-	var outsideSchema error
+	if err == nil {
+		markdown, renderErr := renderTree(tree)
+		if renderErr != nil {
+			err = renderErr
+		} else {
+			contentMarkdown = &markdown
+		}
+	}
 	switch {
 	case errors.Is(err, ErrDocSchema):
-		outsideSchema = repairableSchemaError(err)
 		slog.Warn("dispatch: loaded document outside Proof schema; a replacement from markdown repairs it", "room", room, "error", err)
 	case err != nil:
 		return err
-	default:
-		markdown, err := renderTree(tree)
-		if err != nil {
-			slog.Error("dispatch: render loaded document", "room", room, "error", err)
-			return err
-		}
-		contentMarkdown = &markdown
 	}
 	state := s.room(room)
 	state.mu.Lock()
 	state.closed = !open
 	state.contentMarkdown = contentMarkdown
-	state.outsideSchema = outsideSchema
 	// A failure dropped this document's settlement (failRoomLocked). This state is the
 	// replacement it left the mark for, so it settles once rather than waiting for an edit to
 	// arm one. A room that failed again while this load ran leaves the mark for its own
@@ -381,32 +379,30 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 // content change.
 func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
 	tree, err := treeOf(doc)
-	if err != nil {
-		if errors.Is(err, ErrDocSchema) {
+	if err == nil {
+		markdown, renderErr := renderTree(tree)
+		if renderErr != nil {
+			err = renderErr
+		} else {
 			state := s.room(room)
 			state.mu.Lock()
-			state.contentMarkdown = nil
-			state.outsideSchema = repairableSchemaError(err)
-			state.mu.Unlock()
-			slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
-		} else {
-			slog.Error("dispatch: read updated document", "room", room, "error", err)
+			defer state.mu.Unlock()
+			if state.contentMarkdown != nil && *state.contentMarkdown == markdown {
+				return false
+			}
+			state.contentMarkdown = &markdown
+			return true
 		}
-		return true
-	}
-	markdown, err := renderTree(tree)
-	if err != nil {
-		slog.Error("dispatch: render updated document", "room", room, "error", err)
-		return true
 	}
 	state := s.room(room)
 	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.contentMarkdown != nil && *state.contentMarkdown == markdown {
-		return false
+	state.contentMarkdown = nil
+	state.mu.Unlock()
+	if errors.Is(err, ErrDocSchema) {
+		slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
+	} else {
+		slog.Error("dispatch: read updated document", "room", room, "error", err)
 	}
-	state.contentMarkdown = &markdown
-	state.outsideSchema = nil
 	return true
 }
 
