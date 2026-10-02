@@ -244,11 +244,9 @@ func reviewFromAnswer(selected []string, text *string) (string, *string, error) 
 	}
 }
 
-// refuseStaleApprovalAsk refuses an answer to an approval ask that names an older version than
-// the document's latest settled one, since its question never named what the review would pin.
-// Every version this server writes retracts such an ask (docs.RetractStaleApprovalAsks), so this
-// guards one an older server left open. The caller holds the document owner's row, which every
-// version write takes first, so the version cannot move between this read and the review.
+// refuseStaleApprovalAsk catches a document version written after a human read an approval ask
+// but before they answered it. Normal writes move the open ask with the document, so this is a
+// race rather than an ordinary revision.
 func refuseStaleApprovalAsk(ctx context.Context, q queryer, ask model.Ask) error {
 	version, err := settledVersionNumber(ctx, q, ask.Approval.ArtifactID)
 	if err != nil {
@@ -260,8 +258,7 @@ func refuseStaleApprovalAsk(ctx context.Context, q queryer, ask model.Ask) error
 	return errorf(
 		http.StatusConflict,
 		"APPROVAL_ASK_STALE",
-		"this approval ask names %s version %d, and the document is at version %d; review version %d from the document header, or wait for a new approval request",
-		ask.Approval.Name, ask.Approval.Version, version, version,
+		"the document changed since this request was shown; reload it and answer again",
 	)
 }
 
@@ -339,15 +336,33 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NO_VERSION", http.StatusConflict, "the document has no settled version to review yet")
 		return
 	}
-	// An open ask naming an older version is retracted, so the review cites no ask about another
-	// version; one at this version is answered by it.
-	open, events, err := docs.ApprovalAskAt(r.Context(), tx, s.deps.Events, artifact.ID, version, actor, "that version was reviewed from the document header instead")
+	// A moved approval ask names this latest version and is answered by the header action, keeping
+	// its thread as the review's provenance.
+	open, err := docs.ApprovalAskAt(r.Context(), tx, artifact.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	events := []model.Event{}
 	var askID *string
 	if open != nil {
+		if open.Approval.Version != version {
+			summary, err := approvalAskSummary(*open)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			updated, moved, err := s.updateApprovalAsk(
+				r.Context(), tx, ownerForArtifact(artifact), *open, actor, version,
+				approvalQuestionUnchecked(artifact.Name, version, summary),
+			)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			open = &updated
+			events = append(events, moved)
+		}
 		selected := approvalOptionApprove
 		if state == "changes_requested" {
 			selected = approvalOptionRequestChanges
@@ -386,8 +401,9 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	hasSummary := input.Summary != nil
 	var summary string
-	if input.Summary != nil {
+	if hasSummary {
 		summary = strings.TrimSpace(*input.Summary)
 		if summary == "" {
 			writeError(w, "SUMMARY_INPUT", http.StatusBadRequest, "summary is blank; say what this version proposes that the human hasn't already agreed to, or omit it")
@@ -427,11 +443,12 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		writeError(w, "NO_VERSION", http.StatusConflict, "the document has no settled version to approve yet")
 		return
 	}
-	// The summary is checked on every path a request takes, including those that open nothing.
-	question, err := approvalQuestion(artifact.Name, version, summary)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+	// A supplied summary is validated even when this request opens no row.
+	if hasSummary {
+		if _, err := approvalQuestion(artifact.Name, version, summary); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	type response struct {
 		Ask        *model.Ask             `json:"ask"`
@@ -439,23 +456,40 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		Version    int                    `json:"version"`
 		Approval   model.ArtifactApproval `json:"approval"`
 	}
-	// An approval at the current version needs no request: return it as it stands.
 	if err := s.attachApproval(r.Context(), tx, &artifact); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// An approval at the current version needs no request: return it as it stands.
 	if artifact.Approval != nil && artifact.Approval.State == "approved" {
 		WriteJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
 		return
 	}
-	// An open ask naming a version the document has moved past, which no answer can approve any
-	// more (APPROVAL_ASK_STALE), is replaced by this request; one at this version is returned.
-	open, events, err := docs.ApprovalAskAt(r.Context(), tx, s.deps.Events, artifact.ID, version, actor, "approval is requested for that version instead")
+
+	open, err := docs.ApprovalAskAt(r.Context(), tx, artifact.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	events := []model.Event{}
 	if open != nil {
+		if !hasSummary {
+			summary, err = approvalAskSummary(*open)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+		}
+		question := approvalQuestionUnchecked(artifact.Name, version, summary)
+		if open.Approval.Version != version || open.Approval.RequestedVersion != version || open.Question != question {
+			updated, event, err := s.updateApprovalAsk(r.Context(), tx, owner, *open, actor, version, question)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			open = &updated
+			events = append(events, event)
+		}
 		if err := s.attachOpenedEventIDs(r.Context(), tx, []*model.Ask{open}); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -465,7 +499,17 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		s.publish(events...)
-		WriteJSON(w, http.StatusOK, response{Ask: open, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
+		awaiting := *artifact.Approval
+		awaiting.State = "awaiting"
+		awaiting.RequestedBy = &actor
+		awaiting.AskID = &open.ID
+		WriteJSON(w, http.StatusOK, response{Ask: open, ArtifactID: artifact.ID, Version: version, Approval: awaiting})
+		return
+	}
+
+	question, err := approvalQuestion(artifact.Name, version, summary)
+	if err != nil {
+		s.writeHandlerError(w, err)
 		return
 	}
 	var rowID string
@@ -485,7 +529,9 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		Urgency:    "high",
 		Anchor:     nil,
 		State:      "open",
-		Approval:   &model.AskApproval{ArtifactID: artifact.ID, Name: artifact.Name, Version: version},
+		Approval: &model.AskApproval{
+			ArtifactID: artifact.ID, Name: artifact.Name, Version: version, RequestedVersion: version,
+		},
 	}
 	options, err := encodeJSON(ask.Options)
 	if err != nil {
@@ -542,6 +588,67 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	awaiting.RequestedBy = &actor
 	awaiting.AskID = &ask.ID
 	WriteJSON(w, http.StatusCreated, response{Ask: &ask, ArtifactID: artifact.ID, Version: version, Approval: awaiting})
+}
+
+// updateApprovalAsk hands an open request to a human at version. Unlike a general ask edit, this
+// is server-owned approval metadata and preserves its fixed options and thread.
+func (s *server) updateApprovalAsk(ctx context.Context, tx pgx.Tx, owner owner, ask model.Ask, actor model.Actor, version int, question string) (model.Ask, model.Event, error) {
+	previous := model.AskEditPrevious{
+		Question: ask.Question,
+		Options:  ask.Options,
+		Multiple: ask.Multiple,
+		Urgency:  ask.Urgency,
+	}
+	ask.Question = question
+	ask.Approval.Version = version
+	ask.Approval.RequestedVersion = version
+	approval, err := encodeJSON(ask.Approval)
+	if err != nil {
+		return model.Ask{}, model.Event{}, err
+	}
+	var editedAt time.Time
+	if err := tx.QueryRow(ctx, `
+		update asks
+		set question = $2, approval = $3, edited_at = now()
+		where id = $1
+		returning edited_at
+	`, ask.ID, ask.Question, approval).Scan(&editedAt); err != nil {
+		return model.Ask{}, model.Event{}, err
+	}
+	ask.EditedAt = timestampPtr(&editedAt)
+	changes, err := s.replaceReferences(ctx, tx, "ask", ask.ID, ask.Question)
+	if err != nil {
+		return model.Ask{}, model.Event{}, err
+	}
+	event, err := s.appendEvent(ctx, tx, owner.event(
+		"ask.edited", actor, model.NewAskEditEventPayload(ask, previous, actor, changes),
+	))
+	if err != nil {
+		return model.Ask{}, model.Event{}, err
+	}
+	if err := refs.Stamp(ctx, tx, "ask", ask.ID, event.ID); err != nil {
+		return model.Ask{}, model.Event{}, err
+	}
+	return ask, event, nil
+}
+
+func approvalAskSummary(ask model.Ask) (string, error) {
+	prefix := approvalQuestionUnchecked(ask.Approval.Name, ask.Approval.Version, "")
+	if ask.Question == prefix {
+		return "", nil
+	}
+	if summary, ok := strings.CutPrefix(ask.Question, prefix+" "); ok && summary != "" {
+		return summary, nil
+	}
+	return "", fmt.Errorf("approval ask %s has a question not written by the approval route", ask.ID)
+}
+
+func approvalQuestionUnchecked(name string, version int, summary string) string {
+	question := fmt.Sprintf("Approve %s (version %d)?", name, version)
+	if summary == "" {
+		return question
+	}
+	return question + " " + summary
 }
 
 // approvalQuestion is an approval ask's question: the document and version it names, then the

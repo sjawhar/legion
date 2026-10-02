@@ -1642,10 +1642,10 @@ gate_open() {
 # approve the version the architect asked about, then checks what the architect did
 # (lib/design-gate-verdict.jq): its approval request at the approved version carries a summary after
 # "Approve <name> (version N)?", a human answered at least one of the spec's decision blocks, and no
-# approval request it made on the spec, retracted ones included, named a version holding one open or
-# came before a human answered one.
+# approval request it made on the spec named a version holding one open or came before a human
+# answered one.
 drive_gated_spec() {
-  local issue=$1 artifact approved asks version verdict request early blocks
+  local issue=$1 artifact approved asks events version verdict request early blocks requested_versions
   local -a requested=()
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   wait_for_worker "$issue" architect
@@ -1653,14 +1653,34 @@ drive_gated_spec() {
   until_true 43200 "a human to approve the $issue spec in Dispatch, opening its design gate" gate_open "$issue" "$artifact"
   approved=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.approvedVersion')
   asks=$(dispatch_get "issues/$issue/asks")
+  events=$(dispatch_get "issues/$issue/events")
   jq . <<<"$asks" >"$evidence/$issue-asks.json"
-  # Each version of the spec an approval request named, as the human was asked to approve it.
-  for version in $(jq -r --arg artifact "$artifact" '[.[] | select(.kind == "approval" and .approval.artifact_id == $artifact) | .approval.version] | unique | .[]' <<<"$asks"); do
+  jq . <<<"$events" >"$evidence/$issue-events.json"
+  # An approval row follows versions. ask.opened records its first hand-back and ask.edited records
+  # each later one whose requested_version advanced; old events use version as that value.
+  requested_versions=$(jq -r --arg artifact "$artifact" '
+    (
+      [.[] | select(.type == "ask.opened" and .payload.kind == "approval" and .payload.approval.artifact_id == $artifact)
+       | (.payload.approval.requested_version // .payload.approval.version)]
+      +
+      [.[] | select(
+        .type == "ask.edited"
+        and .payload.kind == "approval"
+        and .payload.approval.artifact_id == $artifact
+        and ((.payload.approval.requested_version // .payload.approval.version)
+          > (.payload.previous.approval.requested_version // .payload.previous.approval.version // 0)
+      ) | (.payload.approval.requested_version // .payload.approval.version)]
+    ) | unique | .[]
+  ' <<<"$events")
+  if [ -z "$requested_versions" ]; then
+    requested_versions=$(jq -r --arg artifact "$artifact" '[.[] | select(.kind == "approval" and .approval.artifact_id == $artifact) | (.approval.requested_version // .approval.version)] | unique | .[]' <<<"$asks")
+  fi
+  for version in $requested_versions; do
     dispatch_get "artifacts/$artifact/versions/$version" >"$evidence/$issue-spec-v$version.json" ||
       fail "$issue: version $version of its spec could not be read"
     requested+=("$evidence/$issue-spec-v$version.json")
   done
-  verdict=$(jq -c -s --arg artifact "$artifact" --argjson version "$approved" -f "$root/scripts/e2e/lib/design-gate-verdict.jq" "$evidence/$issue-asks.json" "${requested[@]}")
+  verdict=$(jq -c -s --arg artifact "$artifact" --argjson version "$approved" -f "$root/scripts/e2e/lib/design-gate-verdict.jq" "$evidence/$issue-asks.json" "$evidence/$issue-events.json" "${requested[@]}")
   printf '%s\n' "$verdict" >"$evidence/$issue-gate-verdict.json"
   request=$(jq -r '.request // empty' <<<"$verdict")
   [ -n "$request" ] || fail "$issue: no approval request names version $approved of its spec ($evidence/$issue-asks.json)"
@@ -1669,7 +1689,7 @@ drive_gated_spec() {
   [ "$early" = "[]" ] || fail "$issue: approval was requested before the spec's decision blocks were settled: $early"
   blocks=$(jq .blocks <<<"$verdict")
   [ "$blocks" -gt 0 ] || fail "$issue: a human answered none of the spec's decision blocks, so its open choice was never settled as one ($evidence/$issue-asks.json)"
-  note "$issue: a human answered $blocks of the spec's decision blocks, and every approval request came after those answers on a version with none open"
+  note "$issue: a human answered $blocks of the spec's decision blocks, and every approval hand-back came after those answers on a version with none open"
   note "$issue: the approval request at version $approved asked: $request"
   wait_for_phase "$issue" planning
 }

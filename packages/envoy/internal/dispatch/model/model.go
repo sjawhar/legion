@@ -576,12 +576,14 @@ type AskBlockArtifact struct {
 	Primary bool   `json:"primary"`
 }
 
-// AskApproval is the document an approval ask asks about, at the version the
-// request was made for.
+// AskApproval is the document an approval ask names. Version follows the document's latest
+// settled version while the ask remains open. RequestedVersion is the version the agent most
+// recently handed to a human, so a lower value means the agent is revising the moved request.
 type AskApproval struct {
-	ArtifactID string `json:"artifact_id"`
-	Name       string `json:"name"`
-	Version    int    `json:"version"`
+	ArtifactID       string `json:"artifact_id"`
+	Name             string `json:"name"`
+	Version          int    `json:"version"`
+	RequestedVersion int    `json:"requested_version"`
 }
 
 // AskEditPrevious is the mutable content of an ask before an edit.

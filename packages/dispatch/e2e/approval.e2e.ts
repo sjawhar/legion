@@ -120,6 +120,78 @@ test("a spec's approval is a human review pinned to its version: requested by th
   }
 });
 
+test("an approval request stays in one Inbox card while its document version moves", async ({
+  browser,
+}) => {
+  await createProject({ key: "FOLLOW", name: "Approval follow" });
+  const issue = await createIssue({
+    project: "FOLLOW",
+    spec: "The plan.",
+    title: "Follow approval",
+  });
+  const artifactID = issue.primary_artifact_id;
+  const requested = await requestApproval(
+    artifactID,
+    { summary: "Caps retries at three attempts." },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${requested.ask.id}`);
+    await expect(
+      page.locator('[data-inbox-section="human"]').getByTestId(`ask-${requested.ask.id}`)
+    ).toBeVisible();
+
+    await editArtifact(
+      artifactID,
+      { ops: [{ op: "replace", find: "The plan.", with: "The revised plan." }] },
+      session
+    );
+    await expect
+      .poll(async () => (await getArtifact(artifactID, { login: "alice" })).versions.length)
+      .toBeGreaterThan(1);
+    const movedVersion = Math.max(
+      ...(await getArtifact(artifactID, { login: "alice" })).versions.map(
+        (version) => version.number
+      )
+    );
+
+    await page.reload();
+    await expect(
+      page.locator('[data-inbox-section="agent"]').getByTestId(`ask-${requested.ask.id}`)
+    ).toBeVisible();
+    await expect(card).toContainText(
+      `Approve spec.md (version ${movedVersion})? Caps retries at three attempts.`
+    );
+    await page.goto(`/issues/${issue.key}`);
+    await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on agents (1)");
+
+    const handedBack = await requestApproval(
+      artifactID,
+      { summary: "Adds the rollback budget." },
+      session
+    );
+    expect(handedBack.ask.id).toBe(requested.ask.id);
+    await page.goto("/");
+    await expect(
+      page.locator('[data-inbox-section="human"]').getByTestId(`ask-${requested.ask.id}`)
+    ).toBeVisible();
+    await expect(card).toContainText(
+      `Approve spec.md (version ${movedVersion})? Adds the rollback budget.`
+    );
+    await card.getByRole("radio", { name: /^Approve/ }).check();
+    await card.getByRole("button", { name: "Answer" }).click();
+    await expect(card).toHaveCount(0);
+    await expect
+      .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval)
+      .toMatchObject({ state: "approved", version: movedVersion, ask_id: requested.ask.id });
+  } finally {
+    await alice.close();
+  }
+});
+
 test("an approval ask's Inbox card shows a question carrying a long summary whole", async ({
   browser,
 }, testInfo) => {

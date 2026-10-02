@@ -642,19 +642,22 @@ the smoke file goes) to the human. `admitted-issue-cap` prints `SKIPPED`, and `s
 to 12 hours for a human to answer the architect's decision block and approve the spec in Dispatch.
 It then fails unless the architect's approval request at the approved version carries a summary
 after `Approve spec.md (version N)?`, a human answered at least one of the spec's decision blocks,
-and no approval request on the spec, retracted ones included, was early by either of two rules
+and no approval request on the spec was early by either of two rules
 ([`lib/design-gate-verdict.jq`](lib/design-gate-verdict.jq), tested by `bun test scripts/e2e/lib`).
-The version rule judges every request: the version it named must hold none of the spec's blocks
-open, read from the version itself by the block ids of the spec's block asks, because Dispatch
-indexes a block as an ask only when it settles the document, after the edit that wrote it. The
-answer-time rule judges a request no human answered: it must not come before a human answered one
-of the spec's blocks, which catches a request made while the choice was still prose or sent in
+The version rule judges every hand-back: the version its event records in `requested_version` must
+hold none of the spec's blocks open, read from the version itself by the block ids of the spec's
+block asks, because Dispatch indexes a block as an ask only when it settles the document, after
+the edit that wrote it. An approval row follows versions in place, so `ask.opened` records its
+first hand-back and only `ask.edited` events that advance `requested_version` record later ones.
+The answer-time rule judges a hand-back no human answered: it must not come before a human answered
+one of the spec's blocks, which catches a request made while the choice was still prose or sent in
 parallel with the edit that wrote the block. A request the human answered is left to the version
 rule, so the flow `legion-architect` prescribes after Request changes (the revision raises a block,
-the human answers it, the architect requests again) passes; the trade-off is that a premature
-request the human answered with Request changes no longer fails the run, since the human caught it.
-It keeps the issue's asks as `<issue>-asks.json`, each requested version as
-`<issue>-spec-v<N>.json`, and the verdict as `<issue>-gate-verdict.json`.
+the human answers it, the architect hands the request back) passes; the trade-off is that a
+premature request the human answered with Request changes no longer fails the run, since the human
+caught it. It keeps the issue's asks as `<issue>-asks.json`, approval events as
+`<issue>-events.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as
+`<issue>-gate-verdict.json`.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.

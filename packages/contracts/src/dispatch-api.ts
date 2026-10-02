@@ -541,6 +541,15 @@ export interface Version {
 
 export type AskKind = "question" | "approval";
 
+/** The document and version an approval ask names. `requested_version` is the version the agent
+ *  last handed to the human; a lower value means the agent is revising the moved request. */
+export interface AskApproval {
+  readonly artifact_id: string;
+  readonly name: string;
+  readonly version: number;
+  readonly requested_version: number;
+}
+
 export interface Ask extends AnchorPosition {
   readonly id: string;
   readonly issue_key: string | null;
@@ -578,6 +587,8 @@ export interface Ask extends AnchorPosition {
    *  issue detail's `open_asks`); absent on closed asks and on `ask.*` event payloads. */
   readonly waiting_on?: AskTurn;
   readonly edited_at: string | null;
+  /** Present only on a server-created approval ask. */
+  readonly approval?: AskApproval;
 }
 
 /** Who holds the turn on an open ask after a reply: `human` when the human needs to act,

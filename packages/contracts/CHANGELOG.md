@@ -4,6 +4,9 @@
 
 ### Changed
 
+- Added `AskApproval.requested_version`. An open approval ask now follows a document's latest
+  version in the same row, and `requested_version < version` marks the interval while the agent
+  is revising before handing that row back to a human (LEGION-470).
 - `dispatch_request_approval` requires `summary`, the proposals in the document's latest version
   the human hasn't already agreed to (LEGION-387). `SPEC_SECTIONS` is removed: `dispatch_issue`'s
   `spec` and `dispatch_doc_edit` point at the dispatch skill's "Writing a spec" instead of listing

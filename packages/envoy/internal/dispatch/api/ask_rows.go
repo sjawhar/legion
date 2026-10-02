@@ -33,11 +33,20 @@ const lastReplyJoin = `
 			limit 1
 		) lr on true`
 
+// waitingOnExpression puts a moved approval request with its agent until that agent hands its
+// current version back. All other open asks follow their newest thread turn.
+const waitingOnExpression = `case
+	when a.kind = 'approval'
+		and (a.approval->>'requested_version')::integer < (a.approval->>'version')::integer
+	then 'agent'
+	else coalesce(lr.turn, 'human')
+end`
+
 // askReadColumns are askRowColumns plus the newest comment in the ask's thread, which is
 // WaitingOn for an open ask and LastReply where a read carries one. Queries selecting them
 // read from askReadFrom. Event payloads are built from askRowColumns instead: they never
 // carry WaitingOn.
-const askReadColumns = askRowColumns + `, lr.author, lr.created_at, coalesce(lr.turn, 'human')`
+const askReadColumns = askRowColumns + `, lr.author, lr.created_at, ` + waitingOnExpression
 
 const askReadFrom = askRowFrom + lastReplyJoin
 

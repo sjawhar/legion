@@ -16,10 +16,10 @@ interface Version {
 }
 
 /**
- * Runs the stage 4b design-gate verdict as the driver does: the issue's asks, then each spec
- * version an approval request named, slurped.
+ * Runs the stage 4b design-gate verdict as the driver does: the issue's asks, approval lifecycle
+ * events, then each spec version that an approval ask was handed back at, slurped.
  */
-function verdict(asks: unknown[], versions: Version[], approved = 5): Verdict {
+function verdict(asks: unknown[], versions: Version[], approved = 5, events: unknown[] = []): Verdict {
   const run = Bun.spawnSync(
     [
       "jq",
@@ -36,7 +36,7 @@ function verdict(asks: unknown[], versions: Version[], approved = 5): Verdict {
     ],
     {
       stdin: new TextEncoder().encode(
-        [asks, ...versions].map((value) => JSON.stringify(value)).join("\n")
+        [asks, events, ...versions].map((value) => JSON.stringify(value)).join("\n")
       ),
     }
   );
@@ -91,6 +91,81 @@ describe("design-gate-verdict.jq", () => {
       blocks: 1,
       early: [],
     });
+  });
+
+  test("counts each version an approval row was handed back at from its edit history", () => {
+    const current = {
+      ...approval(2, "2026-09-30T10:06:00Z", "answered"),
+      id: "approval-1",
+      approval: { artifact_id: "spec-1", name: "spec.md", version: 2, requested_version: 2 },
+      question: "Approve spec.md (version 2)? Adds the rollback budget.",
+    };
+    const events = [
+      {
+        type: "ask.opened",
+        created_at: "2026-09-30T10:00:00Z",
+        payload: {
+          ...current,
+          approval: {
+            artifact_id: "spec-1",
+            name: "spec.md",
+            version: 1,
+            requested_version: 1,
+          },
+          question: "Approve spec.md (version 1)? Proposes the file under docs/smoke/.",
+        },
+      },
+      {
+        type: "ask.edited",
+        created_at: "2026-09-30T10:01:00Z",
+        payload: {
+          ...current,
+          approval: {
+            artifact_id: "spec-1",
+            name: "spec.md",
+            version: 2,
+            requested_version: 1,
+          },
+          previous: {
+            approval: {
+              artifact_id: "spec-1",
+              name: "spec.md",
+              version: 1,
+              requested_version: 1,
+            },
+          },
+          question: "Approve spec.md (version 2)? Proposes the file under docs/smoke/.",
+        },
+      },
+      {
+        type: "ask.edited",
+        created_at: "2026-09-30T10:06:00Z",
+        payload: {
+          ...current,
+          previous: {
+            approval: {
+              artifact_id: "spec-1",
+              name: "spec.md",
+              version: 2,
+              requested_version: 1,
+            },
+          },
+        },
+      },
+      {
+        type: "ask.answered",
+        created_at: "2026-09-30T10:07:00Z",
+        payload: current,
+      },
+    ];
+    expect(verdict([block, current], [specAt(1, "open"), specAt(2, "answered")], 2, events)).toEqual(
+      {
+        request: "Approve spec.md (version 2)? Adds the rollback budget.",
+        summarized: true,
+        blocks: 1,
+        early: ["version 1: Where does the smoke file go?"],
+      }
+    );
   });
 
   // The version-3 request was retracted when the block's answer wrote version 4, and the approved

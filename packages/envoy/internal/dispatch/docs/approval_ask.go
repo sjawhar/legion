@@ -2,23 +2,43 @@ package docs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-// ApprovalAskAt is the approval ask open on the document artifactID at version, or nil. An open
-// approval ask naming any other version names one the document has moved past, which no answer
-// can review any more (APPROVAL_ASK_STALE), so ApprovalAskAt retracts it in actor's name, with a
-// reason naming version followed by instead, what takes the ask's place. Each retraction appends
-// its ask.resolved, which reaches the ask's followers as any resolve does, and ApprovalAskAt
-// returns those events for the caller to publish once its transaction commits. The caller holds
-// the document owner's row, which every version write takes first, so no version is written
-// between the version the caller read and the retraction.
-func ApprovalAskAt(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version int, actor model.Actor, instead string) (*model.Ask, []model.Event, error) {
+// ApprovalAskAt returns the newest open approval ask on artifactID, or nil. The caller holds the
+// document owner's row, so it observes the same version the review and approval routes use.
+func ApprovalAskAt(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
+	row := tx.QueryRow(ctx, `
+		select `+AskColumns+`
+		from asks a
+		where a.kind = 'approval' and a.state = 'open' and a.approval->>'artifact_id' = $1
+		order by a.created_at desc, a.id desc
+		limit 1
+		for no key update
+	`, artifactID)
+	ask, err := ScanAsk(row)
+	if err == nil {
+		return &ask, nil
+	}
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("read open approval ask: %w", err)
+}
+
+// MoveApprovalAsks advances every open approval ask on the document to a new settled version. The
+// same rows and their threads stay open; requested_version records that the agent must hand each
+// moved request back before a human sees it in Waiting on you again.
+func MoveApprovalAsks(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, serverURL string) ([]model.Event, error) {
 	rows, err := tx.Query(ctx, `
 		select `+AskColumns+`
 		from asks a
@@ -27,55 +47,83 @@ func ApprovalAskAt(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifa
 		for no key update
 	`, artifactID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("lock open approval asks: %w", err)
+		return nil, fmt.Errorf("lock open approval asks: %w", err)
 	}
 	open, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.Ask, error) { return ScanAsk(row) })
 	if err != nil {
-		return nil, nil, fmt.Errorf("read open approval asks: %w", err)
+		return nil, fmt.Errorf("read open approval asks: %w", err)
 	}
-	var current *model.Ask
-	var retractions []model.Event
-	for index := range open {
-		ask := open[index]
-		if ask.Approval.Version == version {
-			if current == nil {
-				current = &open[index]
-			}
-			continue
-		}
-		// The reason opens with the document, never with a caller's text, so it is never one of
-		// the reasons only settlement writes (SettlementRetractionReason).
-		ask, err := WriteAskResolution(ctx, tx, ask, "retracted", fmt.Sprintf("the document moved on to version %d; %s", version, instead), actor)
-		if err != nil {
-			return nil, nil, fmt.Errorf("retract stale approval ask: %w", err)
-		}
-		// A retraction writes no question text, so it moves no references and says so.
-		event, err := broker.Append(ctx, tx, model.Event{
-			IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
-			Type: "ask.resolved", Actor: actor,
-			Payload: model.NewAskEventPayload(ask, model.ReferenceChanges{}),
-		})
-		if err != nil {
-			return nil, nil, fmt.Errorf("append approval ask retraction: %w", err)
-		}
-		retractions = append(retractions, event)
-	}
-	return current, retractions, nil
-}
-
-// RetractStaleApprovalAsks is ApprovalAskAt for a version just written: every approval ask open on
-// the document names an older version, and each is retracted. Every route that writes a version
-// calls it in the version's transaction. The retraction is in the name of the version's writer
-// when exactly one is credited with it, and otherwise SettlementActor's. A version credits several
-// when a browser edit arrives with several peers connected, since the room cannot tell which sent
-// it, or when an agent's write and a human's typing share it. Naming one of them could name the
-// ask's own author, and the outbox sends no event to its own actor, so the author would never
-// hear that it has to request approval again.
-func RetractStaleApprovalAsks(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version) ([]model.Event, error) {
 	actor := SettlementActor
 	if len(version.Authors) == 1 {
 		actor = version.Authors[0]
 	}
-	_, retractions, err := ApprovalAskAt(ctx, tx, broker, artifactID, version.Number, actor, "request approval of that version to ask again")
-	return retractions, err
+	events := make([]model.Event, 0, len(open))
+	for index := range open {
+		ask := open[index]
+		if ask.Approval.Version == version.Number {
+			continue
+		}
+		summary, err := approvalAskSummary(ask)
+		if err != nil {
+			return nil, err
+		}
+		previous := model.AskEditPrevious{
+			Question: ask.Question,
+			Options:  ask.Options,
+			Multiple: ask.Multiple,
+			Urgency:  ask.Urgency,
+		}
+		ask.Question = approvalQuestion(ask.Approval.Name, version.Number, summary)
+		ask.Approval.Version = version.Number
+		approval, err := json.Marshal(ask.Approval)
+		if err != nil {
+			return nil, fmt.Errorf("encode moved approval ask: %w", err)
+		}
+		var editedAt time.Time
+		if err := tx.QueryRow(ctx, `
+			update asks
+			set question = $2, approval = $3, edited_at = now()
+			where id = $1
+			returning edited_at
+		`, ask.ID, ask.Question, approval).Scan(&editedAt); err != nil {
+			return nil, fmt.Errorf("move approval ask: %w", err)
+		}
+		ask.EditedAt = askTimestamp(&editedAt)
+		changes, err := refs.ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, serverURL)
+		if err != nil {
+			return nil, fmt.Errorf("index moved approval ask: %w", err)
+		}
+		event, err := broker.Append(ctx, tx, model.Event{
+			IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
+			Type: "ask.edited", Actor: actor,
+			Payload: model.NewAskEditEventPayload(ask, previous, actor, changes),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("append moved approval ask: %w", err)
+		}
+		if err := refs.Stamp(ctx, tx, "ask", ask.ID, event.ID); err != nil {
+			return nil, fmt.Errorf("stamp moved approval ask references: %w", err)
+		}
+		events = append(events, event)
+	}
+	return events, nil
+}
+
+func approvalQuestion(name string, version int, summary string) string {
+	question := fmt.Sprintf("Approve %s (version %d)?", name, version)
+	if summary == "" {
+		return question
+	}
+	return question + " " + summary
+}
+
+func approvalAskSummary(ask model.Ask) (string, error) {
+	prefix := approvalQuestion(ask.Approval.Name, ask.Approval.Version, "")
+	if ask.Question == prefix {
+		return "", nil
+	}
+	if summary, ok := strings.CutPrefix(ask.Question, prefix+" "); ok && summary != "" {
+		return summary, nil
+	}
+	return "", fmt.Errorf("approval ask %s has a question not written by the approval route", ask.ID)
 }

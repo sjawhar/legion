@@ -885,13 +885,12 @@ func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 	}
 }
 
-// 0053 pairs an ask's kind with its approval: an approval ask carries an approval whose known keys
-// hold the types model.AskApproval decodes and name a document version, and no other kind carries
-// one, not even the JSON null. A hand-written row that breaks the pairing either way is refused at
-// insert, and an approval the route writes is stored at every version a document can have. The
-// rows named in residual are shapes 0053 admits and ScanAsk still fails on. They are
-// skipped, which go test reports only under -v, and dispatch://LEGION-429 deletes their entries
-// when it adds the check that refuses them.
+// 0053 pairs an ask's kind with its approval; 0056 adds requested_version to that approval. An
+// approval ask carries the fields model.AskApproval decodes and no other kind carries approval,
+// not even JSON null. A hand-written row that breaks the pairing either way is refused at insert.
+// The rows named in residual are shapes 0053 admits and ScanAsk still fails on. They are skipped,
+// which go test reports only under -v, and dispatch://LEGION-429 deletes their entries when it
+// adds the check that refuses them.
 func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -905,7 +904,7 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 	`); err != nil {
 		t.Fatalf("seed issue: %v", err)
 	}
-	const approval = `{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1}`
+	const approval = `{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1,"requested_version":1}`
 	residual := map[string]bool{
 		"an approval ask repeating version under another case as a fraction":     true,
 		"an approval ask repeating name under another case as a number":          true,
@@ -977,8 +976,8 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		// The route writes every version a document has, and a check that admitted too few would
 		// refuse its own insert. artifact_versions.number is an integer: 10 is the first version
 		// with two digits, and 2147483647 the highest it holds.
-		{"an approval ask at version 10", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":10}`), false},
-		{"an approval ask at the highest version a document can have", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":2147483647}`), false},
+		{"an approval ask at version 10", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":10,"requested_version":10}`), false},
+		{"an approval ask at the highest version a document can have", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":2147483647,"requested_version":2147483647}`), false},
 		{"a question naming none", "question", nil, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -1001,6 +1000,74 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 				t.Fatalf("insert error = %v, want SQLSTATE 23514 naming asks_approval_kind_check", err)
 			}
 		})
+	}
+}
+
+// 0056 backfills the version every existing approval request was shown to, then requires every
+// approval row to carry it. A moved request may advance version while preserving this value, which
+// is how ask reads distinguish a human-ready request from one an agent still owns.
+func TestMigrate0056BackfillsAndRequiresApprovalRequestedVersion(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 55)
+	if _, err := store.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into issues (key, project_key, number, title, created_by, rank)
+			values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"session","id":"s"}', 'U');
+		insert into asks (issue_key, author, question, options, kind, approval)
+			values ('CORE-1', '{"kind":"session","id":"s"}', 'Approve spec.md (version 7)?',
+				'[{"label":"Approve"},{"label":"Request changes"}]', 'approval',
+				'{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":7}');
+	`); err != nil {
+		t.Fatalf("seed pre-0056 approval ask: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	var requestedVersion *int
+	if err := store.Pool.QueryRow(ctx, `
+		select (approval->>'requested_version')::integer
+		from asks where kind = 'approval'
+	`).Scan(&requestedVersion); err != nil {
+		t.Fatalf("read migrated requested version: %v", err)
+	}
+	if requestedVersion == nil || *requestedVersion != 7 {
+		t.Fatalf("migrated requested_version = %v, want 7", requestedVersion)
+	}
+	_, err := store.Pool.Exec(ctx, `
+		insert into asks (issue_key, author, question, options, kind, approval)
+		values ('CORE-1', '{"kind":"session","id":"s"}', 'Approve spec.md (version 8)?',
+			'[{"label":"Approve"},{"label":"Request changes"}]', 'approval',
+			'{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":8}')
+	`)
+	var refusal *pgconn.PgError
+	if !errors.As(err, &refusal) || refusal.Code != "23514" || refusal.ConstraintName != "asks_approval_kind_check" {
+		t.Fatalf("approval without requested_version error = %v, want asks_approval_kind_check", err)
+	}
+	for _, requested := range []string{"0", "8.5", `"8"`, "10000000000"} {
+		_, err := store.Pool.Exec(ctx, `
+			insert into asks (issue_key, author, question, options, kind, approval)
+			values ('CORE-1', '{"kind":"session","id":"s"}', 'Approve spec.md (version 8)?',
+				'[{"label":"Approve"},{"label":"Request changes"}]', 'approval',
+				jsonb_build_object(
+					'artifact_id', '7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b',
+					'name', 'spec.md',
+					'version', 8,
+					'requested_version', $1::jsonb
+				)
+			)
+		`, requested)
+		if !errors.As(err, &refusal) || refusal.Code != "23514" || refusal.ConstraintName != "asks_approval_kind_check" {
+			t.Fatalf("requested_version %s error = %v, want asks_approval_kind_check", requested, err)
+		}
+	}
+	if _, err := store.Pool.Exec(ctx, `
+		insert into asks (issue_key, author, question, options, kind, approval)
+		values ('CORE-1', '{"kind":"session","id":"s"}', 'Approve spec.md (version 8)?',
+			'[{"label":"Approve"},{"label":"Request changes"}]', 'approval',
+			'{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":8,"requested_version":8}')
+	`); err != nil {
+		t.Fatalf("approval with requested_version: %v", err)
 	}
 }
 
