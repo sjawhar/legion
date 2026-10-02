@@ -1,18 +1,19 @@
-// Whether any pod of a run carried a value of its Sandbox's Secrets in a container's command, args
-// or environment, judged against every value those Secrets held for the whole run. A pod's -boot
-// Secret gets the next generation's token at each relaunch, and the pod watch records no Secret
-// value, so a check made after the fact reads the wrong values or none. This watches the run's
-// Secrets from the start and keeps each value it sees in memory only: no value is printed or
-// written anywhere. On SIGTERM it reads the pod watch the driver recorded and writes the verdict.
+// Whether any pod of a run carried a value of its Sandbox-owned provisioning or role Secrets in a
+// container's command, args or environment, judged against every value those Secrets held for the
+// whole run. The provisioning Secret and six role-private `-boot` Secrets can change between
+// generations, while the pod watch records no Secret value, so a check made after the fact reads
+// the wrong values or none. This watches the run's Secrets from the start and keeps each value in
+// memory only: no value is printed or written anywhere. On SIGTERM it reads the pod watch the
+// driver recorded and writes the verdict.
 //
 //   bun scripts/e2e/lib/secret-leaks.ts <context> <namespace> <label-selector> <pod-watch> <verdict>
 //     watches the namespace's Secrets that carry the label selector until SIGTERM, then writes to
 //     <verdict> one JSON line, {"pods","secrets","values","leaks","unseen","unreadable"}: leaks is
-//     each pod in <pod-watch> (one watch event a line) whose worker ever ran ready and one of whose
-//     containers carries a value <pod>-boot held, as {"uid","pod","secret"}; unseen is each such
-//     pod whose <pod>-boot the watch never saw, since its check would have judged nothing;
-//     unreadable counts the lines of <pod-watch> before its last that do not parse (the last may be
-//     one the watch is still writing, and is skipped). It exits 0, or 2 when it cannot start
+//     each pod in <pod-watch> whose six role launchers were ready and one of whose containers carries
+//     a value a Sandbox-owned Secret held, as {"uid","pod","secret"}; unseen is each such pod/Secret
+//     pair the watch never saw, since its check would have judged nothing; unreadable counts the
+//     lines of <pod-watch> before its last that do not parse (the last may be one the watch is still
+//     writing, and is skipped). It exits 0, or 2 when it cannot start.
 //
 // Each watch asks the server to end it within 300 s, and resumes from the last resourceVersion it
 // saw; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends
@@ -133,6 +134,7 @@ interface PodEvent {
 }
 
 function judge(): void {
+  const roles = ["architect", "planner", "implementer", "tester", "reviewer", "merger"];
   const pods = new Map<string, { name: string; words: Set<string> }>();
   const lines = readFileSync(podWatch, "utf8").split("\n");
   let unreadable = 0;
@@ -152,7 +154,8 @@ function judge(): void {
     if (pod?.kind !== "Pod" || !uid || !name) continue;
     const labels = pod.metadata?.labels ?? {};
     if (labels["legion.dev/probe"] || labels["legion.dev/e2e-control"]) continue;
-    if (!pod.status?.containerStatuses?.some((c) => c.name === "worker" && c.ready)) continue;
+    const statuses = pod.status?.containerStatuses ?? [];
+    if (!roles.every((role) => statuses.some((status) => status.name === role && status.ready))) continue;
     const entry = pods.get(uid) ?? { name, words: new Set<string>() };
     for (const c of [...(pod.spec?.initContainers ?? []), ...(pod.spec?.containers ?? [])]) {
       for (const word of [
@@ -170,11 +173,12 @@ function judge(): void {
   let values = 0;
   for (const set of seen.values()) values += set.size;
   for (const [uid, { name, words }] of pods) {
-    const secret = `${name}-boot`;
-    const held = seen.get(secret) ?? new Set<string>();
-    if (held.size === 0) unseen.push({ uid, pod: name, secret });
-    if ([...held].some((value) => [...words].some((word) => word.includes(value)))) {
-      leaks.push({ uid, pod: name, secret });
+    for (const secret of [`${name}-boot`, ...roles.map((role) => `${name}-${role}-boot`)]) {
+      const held = seen.get(secret) ?? new Set<string>();
+      if (held.size === 0) unseen.push({ uid, pod: name, secret });
+      if ([...held].some((value) => [...words].some((word) => word.includes(value)))) {
+        leaks.push({ uid, pod: name, secret });
+      }
     }
   }
   writeFileSync(

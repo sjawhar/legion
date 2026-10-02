@@ -996,16 +996,16 @@ pod_shape_verdict() {
       | select(($status | map(.name) | sort) == ($roles | sort) and all($status[]; .ready))' "$watch" |
     jq -s -r 'group_by(.metadata.uid)[] | last | "\(.metadata.uid)\t\(tojson)"')
 }
-# stream_missing WATCH prints each Sandbox pod uid the run knows from another source that the watch
-# never recorded: a pod the shape watcher read, a pod the driver ended, and every incarnation the
-# daemon launched. A watch that went silent partway through the run fails here, naming what it
+# stream_missing WATCH prints each Sandbox pod UID the run knows from another source that the watch
+# never recorded: a pod the shape watcher read, a pod the driver ended, and every pod in a daemon
+# process incarnation. A watch that went silent partway through the run fails here, naming what it
 # missed, rather than leaving later pods unjudged.
 stream_missing() {
   local watch=$1
   comm -23 \
     <({ awk '{print $2}' "$evidence/pods-checked.txt" 2>/dev/null
         awk '{print $2}' "$evidence/driver-actions.txt" 2>/dev/null
-        jq -R -r 'fromjson? | select(.msg == "supervise: launched") | .incarnation // empty' "$daemon_log"
+        jq -R -r 'fromjson? | select(.msg == "supervise: launched") | (.incarnation // "" | split("/")[0])' "$daemon_log"
       } | { grep -E '^[0-9a-f]{8}-' || true; } | sort -u) \
     <(jq -r 'select(.object.kind == "Pod") | .object.metadata.uid' "$watch" | sort -u)
 }

@@ -7,7 +7,6 @@
 package sandbox
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -477,8 +476,8 @@ func (r *liveRig) checkStaleIncarnation() error {
 	return nil
 }
 
-// respawn-before-register: a claim suspended before its first hello spawns again over its
-// existing Sandbox, as a new incarnation on a rotated Secret.
+// respawn-before-register: a role stopped before its first hello starts again in the existing issue
+// pod at a new process generation. The new hello carries only the second generation's boot token.
 func (r *liveRig) checkRespawnBeforeRegister() error {
 	fresh := r.claim("fresh")
 	if err := r.ensureRunning(r.claim("root")); err != nil {
@@ -488,7 +487,6 @@ func (r *liveRig) checkRespawnBeforeRegister() error {
 	if err != nil {
 		return err
 	}
-	firstHash := tokenHash(fresh.bootToken)
 	if err := r.suspend(fresh); err != nil {
 		return err
 	}
@@ -500,34 +498,19 @@ func (r *liveRig) checkRespawnBeforeRegister() error {
 	since := time.Now()
 	second, err := r.spawn(fresh, true)
 	if err != nil {
-		return fmt.Errorf("the second Spawn over the existing Sandbox: %w", err)
+		return fmt.Errorf("the second Spawn in the existing issue pod: %w", err)
 	}
 	reg, err := r.awaitRunning(fresh, since)
 	if err != nil {
 		return err
 	}
-	if second.Incarnation == first.Incarnation {
-		return errors.New("the second Spawn returned the first incarnation")
+	if second.Incarnation == first.Incarnation || second.Sandbox.PodUID != first.Sandbox.PodUID || second.Sandbox.Container != first.Sandbox.Container {
+		return fmt.Errorf("the second Spawn returned %+v after %+v, want a new role process in the same issue pod and container", second.Sandbox, first.Sandbox)
 	}
-	out, err := r.kubectl("get", "secret", secretName(SandboxName(fresh.token)), "-o", "jsonpath={.data."+bootTokenKey+"}")
-	if err != nil {
-		return err
+	if reg.hash != tokenHash(fresh.bootToken) || reg.gen != 2 {
+		return fmt.Errorf("registered at generation %d with %s, want 2 with the second generation token %s", reg.gen, short(reg.hash), short(tokenHash(fresh.bootToken)))
 	}
-	stored, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
-	if err != nil {
-		return err
-	}
-	storedHash := tokenHash(string(stored))
-	switch {
-	case storedHash == firstHash:
-		return errors.New("the Secret still holds the first generation's boot token")
-	case storedHash != tokenHash(fresh.bootToken):
-		return errors.New("the Secret's boot token is neither generation's")
-	case reg.hash != storedHash || reg.gen != 2:
-		return fmt.Errorf("registered at generation %d with %s, want 2 with the Secret's %s", reg.gen, short(reg.hash), short(storedHash))
-	}
-	note("runtime", "second Spawn returned %s (new uid)", short(second.Incarnation))
-	note("operator", "Secret %s: boot token sha256 %s… (generation 2's; generation 1's was %s…)", secretName(SandboxName(fresh.token)), storedHash[:12], firstHash[:12])
+	note("runtime", "second Spawn returned %s in the same issue pod %s", short(second.Incarnation), second.Sandbox.PodUID)
 	note("harness", "hello registered at generation 2 with that token")
 	return nil
 }
@@ -632,10 +615,10 @@ func (r *liveRig) checkConcurrentProvision() error {
 }
 
 // re-adopt: a fresh runtime and listener take over every live claim, with nothing relaunched; a
-// pod killed while no runtime ran is reported Gone with its recorded incarnation.
+// separate issue pod killed while no runtime ran is reported Gone with its recorded incarnation.
 func (r *liveRig) checkReAdopt() error {
-	victim := r.claim("fresh")
-	for _, name := range []string{"root", "worker", "fresh", "root2", "child2"} {
+	victim := r.claim("orphan")
+	for _, name := range []string{"root", "worker", "fresh", "root2", "child2", "orphan"} {
 		if err := r.ensureRunning(r.claim(name)); err != nil {
 			return err
 		}
@@ -654,16 +637,16 @@ func (r *liveRig) checkReAdopt() error {
 	r.stopRuntime()
 	note("runtime", "listener and runtime closed")
 	name := SandboxName(victim.token)
-	if _, err := r.exec(victim, "sh", "-c", "kill 1"); err != nil {
+	if _, err := r.kubectl("delete", "pod", name, "--wait=false"); err != nil {
 		return err
 	}
-	if err := r.poll(liveGoneLimit, "pod "+name+" to end", func() (bool, error) {
-		phase, err := r.kubectl("get", "pod", name, "-o", "jsonpath={.status.phase}")
-		return phase == string(corev1.PodFailed) || phase == string(corev1.PodSucceeded), err
+	if err := r.poll(liveGoneLimit, "orphan issue pod "+name+" to end", func() (bool, error) {
+		_, err := r.getPod(name)
+		return apierrors.IsNotFound(err), ignoreNotFound(err)
 	}); err != nil {
 		return err
 	}
-	note("operator", "exec %s -- sh -c 'kill 1' while no runtime ran; the pod ended", name)
+	note("operator", "deleted pod %s while no runtime ran", name)
 
 	restarted := time.Now()
 	mark := r.obs.mark()
@@ -703,8 +686,8 @@ func (r *liveRig) checkReAdopt() error {
 		if err != nil {
 			return err
 		}
-		if uid != loc.Incarnation || s.Generation != generations[c.name] {
-			return fmt.Errorf("%s was relaunched: pod uid %s (recorded %s), Sandbox generation %d → %d", c.name, uid, loc.Incarnation, generations[c.name], s.Generation)
+		if uid != loc.Sandbox.PodUID || s.Generation != generations[c.name] {
+			return fmt.Errorf("%s was relaunched: pod uid %s (recorded %s), Sandbox generation %d → %d", c.name, uid, loc.Sandbox.PodUID, generations[c.name], s.Generation)
 		}
 		note("runtime", "%s: alive with recorded %s; Sandbox generation %d unchanged", c.name, short(loc.Incarnation), s.Generation)
 		note("harness", "%s: hello again at generation %d, token sha256 %s…", c.name, reg.gen, reg.hash[:12])
