@@ -1,0 +1,43 @@
+{
+  "codeHead": "fec3927b65fc",
+  "completed": "2026-10-02T17:20:04.579406177Z",
+  "critical": 0,
+  "important": 1,
+  "keyFindings": [
+    {
+      "description": "The deadline fatal names no observation. The old loop's t.Fatalf(\"sweep reported %+v\", obs) printed the Kind and Detail of the wrong verdict, which is how LEGION-370 was diagnosed (Kind:uncertain Detail:... no current target, from CI). The new loop discards every pre-final observation and the deadline path's t.Fatal carries nothing, so a classifier stuck on Uncertain, one stuck on Alive, and a silent sweep all print one identical line; CI runs go test without -v (.github/workflows/envoy-and-contracts.yaml:672), so that line is the whole evidence a triager gets. Every other fatal in this file names its observation (:620, :1278, :1300). Fix: keep `var last runtime.Observation`, assign it in the observations arm, and fail with t.Fatalf(\"the sweep never reported the killed pane gone; last = %+v\", last). The leading substring stays, so the recorded NC-1/NC-3 proof strings stay valid.",
+      "file": "packages/daemon-go/internal/runtime/tmux/tmux_real_test.go:1311-1317",
+      "severity": "important"
+    },
+    {
+      "description": "Comment precision, same push: (a) `(machine.go)` is not a file of this package; cite internal/supervise/machine.go:806, and cite observe.go:58-60 for 'reports either once' (the package's other cross-file references carry path and lines, e.g. verify.go:24, spawn.go:161); (b) Alive is 'a probe that read /proc before the process died', not 'a probe whose list-panes ran before the kill' (verifyPane reads /proc after the listing, verify.go:141-174, so the latter is also the straddle the comment describes at :1308-1309); (c) 'or a client killed by its timeout' is not a state the kill leaves, and with CommandTimeout 10 s (:499) equal to the loop's deadline it cannot be waited through in this rig; drop the clause.",
+      "file": "packages/daemon-go/internal/runtime/tmux/tmux_real_test.go:1303-1310",
+      "severity": "minor"
+    },
+    {
+      "description": "Fast-follow: '(the supervisor's one death)' in the doc comment restates :1310; the loop comment is where the fact and its citation belong.",
+      "file": "packages/daemon-go/internal/runtime/tmux/tmux_real_test.go:1285-1286",
+      "severity": "minor"
+    }
+  ],
+  "minor": 3,
+  "phase": "review",
+  "reviewedHead": "c757032bc6d797871bdb0d410a1095c98685265d",
+  "round": 1,
+  "schemaVersion": 1,
+  "security": "no sensitive surface in this diff",
+  "thermo": {
+    "head": "c757032bc6d797871bdb0d410a1095c98685265d",
+    "note": "The thermonuclear-deep-review and thermonuclear-code-quality agents both exited at once with a provider credit_balance_exhausted error; the same two skills were run through default-model reviewer agents following each skill's prompt. Both: overall correct, no blocker; both name the lost observation in the deadline fatal as the one substantive item; code quality: simplify pass would apply nothing in the 13-line diff.",
+    "simplify": "ce-simplify-code not run by the implementer (deferred to a window after the last review round; this round requests changes, so it runs before the next review)."
+  },
+  "verdict": "changes_requested",
+  "verified": {
+    "ci": "All cited runs success on GitHub at aa02c6d2e90a (Tests 37035270811: lint, typecheck, test; PR Title 37035270813; Legion Envoy and Contracts 37035270804 job daemon-go, whose log shows the tmux install, go1.26.1, go test -count=1 ./... and 'ok .../internal/runtime/tmux 23.120s'; Worker Image 37035270816) and at fec3927b65fc (37033524383 daemon-go success). c757032b carries the skip-checks trailer (test.json only) and the daemon record shows checksVerdict green at it.",
+    "diff": "main@origin..@- touches tmux_real_test.go (+13/-8) and the three .legion handoffs; verify.go and observe.go unchanged; nothing under docs/.",
+    "e2e": "Both E2E (implementer) and E2E (tester) lines present with surface, command or run id, observation, head SHA and negative control; the tester's names its own re-run of every surface.",
+    "secrets": "No private infrastructure name or secret in .legion/*.json (grep for ts.net, arn:aws, tailscale, .internal, amazonaws, token prefixes: no match).",
+    "spec": "Spec v3 approved by sjawhar (design gate currentVersion 3 = approvedVersion 3): the loop ends on Gone or NotRecordedProcess; the code at :1315 does so.",
+    "threads": "reviewThreads: none; reviews: none (gh api graphql)."
+  }
+}
