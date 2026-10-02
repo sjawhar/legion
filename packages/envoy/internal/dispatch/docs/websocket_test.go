@@ -4,15 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
+	ygws "github.com/reearth/ygo/provider/websocket"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -413,6 +417,122 @@ func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 		t.Fatalf("the probe made %d rounds of reads and versions and %d sockets, too few to say anything", reads, sockets)
 	}
 	t.Logf("%d rounds of reads, unjoined reads and versions and %d sockets on a room under writes, none refused", reads, sockets)
+}
+
+// The room's update observer renders a copy of the room brought up to date under the room's lock
+// (renderedReplica), never the live tree. ygo fires the observer once the transaction has released
+// the document's lock, so another writer can be integrating into the live tree while a render walks
+// it: the torn walk reads a healthy document as one outside the schema, logs a false "updated
+// document outside Proof schema" WARN, and counts the update as a content change it may not have
+// been. Two writers stand in for two browser peers (ygo applies a peer's update in that peer's
+// goroutine and fires the observer there), and a third is the service projecting comment records.
+// Under -race the walk of the live tree is a data race with the other writers.
+func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	logs := &lockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	var trees []*pmdoc.Node
+	for _, body := range []string{
+		"- one\n- two\n  - nested\n\n> quoted\n",
+		"> a quote\n>\n> - with a list\n\n1. first\n2. second\n",
+		"# Title\n\n- [ ] task\n- [x] done\n\nTail.\n",
+	} {
+		tree, err := parseInput(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		trees = append(trees, tree)
+	}
+	ctx := context.Background()
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	deadline := time.Now().Add(2 * time.Second)
+	failures := make(chan error, 3)
+	var writes, projections atomic.Int64
+	var writers sync.WaitGroup
+	peer := func(first int) {
+		defer writers.Done()
+		for round := first; time.Now().Before(deadline); round++ {
+			tree := trees[round%len(trees)]
+			var updateErr error
+			err := service.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+				fragment := doc.GetXmlFragment(fragmentName)
+				transact(func(txn *crdt.Transaction) { updateErr = pmdoc.Update(txn, fragment, tree) })
+			})
+			if err = errors.Join(updateErr, err); err != nil && !errors.Is(err, ygws.ErrNoChanges) {
+				failures <- fmt.Errorf("peer write %d: %w", round, err)
+				return
+			}
+			writes.Add(1)
+		}
+	}
+	writers.Add(3)
+	go peer(0)
+	go peer(1)
+	go func() {
+		defer writers.Done()
+		for round := 0; time.Now().Before(deadline); round++ {
+			if err := service.ProjectMark(ctx, artifactID, fmt.Sprintf("projection-%d", round), MarkRecord{
+				Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
+			}, bob); err != nil {
+				failures <- fmt.Errorf("projection %d: %w", round, err)
+				return
+			}
+			projections.Add(1)
+		}
+	}()
+	writers.Wait()
+	close(failures)
+	for err := range failures {
+		t.Fatal(err)
+	}
+	if writes.Load() < 20 || projections.Load() < 5 {
+		t.Fatalf("%d peer writes and %d projections, too few to say anything", writes.Load(), projections.Load())
+	}
+
+	if logged := logs.String(); logged != "" {
+		t.Errorf("a healthy room under concurrent writes logged:\n%s", logged)
+	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	content := state.contentMarkdown
+	state.mu.Unlock()
+	live, err := snapshotDocument(service.srv.GetDoc(artifactID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := renderDocument(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content == nil {
+		t.Errorf("the observer's last rendering is unset, want the room's %q", want)
+	} else if *content != want {
+		t.Errorf("the observer's last rendering = %q, want the room's %q", *content, want)
+	}
+	t.Logf("%d peer writes and %d projections", writes.Load(), projections.Load())
+}
+
+// lockedLog collects what every goroutine logs.
+type lockedLog struct {
+	mu      sync.Mutex
+	written strings.Builder
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.written.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.written.String()
 }
 
 func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {

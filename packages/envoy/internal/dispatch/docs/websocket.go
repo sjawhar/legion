@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -429,11 +430,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		s.scheduleSettleLocked(room, state)
 	}
 	state.mu.Unlock()
+	replica := &renderedReplica{}
 	doc.OnUpdate(func(update []byte, origin any) {
 		if _, identityRepair := origin.(*identityClosureOrigin); identityRepair {
 			return
 		}
-		contentChanged := s.updateChangesMarkdown(room, doc)
+		replica.mu.Lock()
+		replica.catchUp(room, doc)
+		contentChanged := s.updateChangesMarkdown(room, replica.doc)
+		replica.mu.Unlock()
 		s.recordUpdateClass(room, update, contentChanged, true)
 		if contentChanged {
 			s.creditContentChange(room, origin)
@@ -443,12 +448,51 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	return nil
 }
 
+// renderedReplica is the copy of a room's document its update observer renders. ygo fires the
+// observer after the transaction has released the document's lock (reearth/ygo v1.49.5,
+// crdt/doc.go:638-642), and a walk of the live tree takes no lock (crdt/yxml.go:195-211), so a
+// render of the live tree there can walk it while another transaction writes it: a torn walk reads
+// a healthy document as one outside the schema, logs a false WARN and counts the update as a content
+// change. Only the observer, holding mu, writes or renders the replica, and it brings the replica
+// up to date under the live document's lock, so each render is of the room as of one moment.
+//
+// The update the observer is handed cannot stand in for that: observers of two transactions run
+// concurrently and in either order, and each update carries the room's whole delete set, so the
+// later update applied first deletes what the earlier one replaced while its own insertions wait
+// for the earlier one's - a tree no transaction left. Copying the whole room for every update would
+// encode and decode the whole document per keystroke. The room's first update copies it once, so a
+// room that is only read holds no replica.
+type renderedReplica struct {
+	mu  sync.Mutex
+	doc *crdt.Doc
+}
+
+// catchUp brings the replica up to date with live: what live gained since the replica's state
+// vector, encoded under live's lock, as forkLive brings a transaction's fork up to date. Without a
+// replica - the room's first update, or one after an update the replica could not take, which
+// leaves it in an unknown state - it copies live whole; a copy that fails leaves no replica, which
+// the next update copies again.
+func (r *renderedReplica) catchUp(room string, live *crdt.Doc) {
+	if r.doc != nil {
+		err := crdt.ApplyUpdateV1(r.doc, crdt.EncodeStateAsUpdateV1(live, r.doc.StateVector()), nil)
+		if err == nil {
+			return
+		}
+		slog.Error("dispatch: bring the document's rendered copy up to date; copying it again", "room", room, "error", err)
+	}
+	copied, err := snapshotDocument(live)
+	if err != nil {
+		slog.Error("dispatch: copy updated document for its update observer", "room", room, "error", err)
+	}
+	r.doc = copied
+}
+
 // updateChangesMarkdown reports whether the room's latest update changed its rendered markdown,
-// the only document content a version stores. An update that changes only what no rendering
-// carries - an anchor mark, or a heading id or list item label the browser editor derives - is no
-// content change.
-func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
-	markdown, err := renderDocument(doc)
+// the only document content a version stores, rendering replica, the room's document as of that
+// update (renderedReplica). An update that changes only what no rendering carries - an anchor
+// mark, or a heading id or list item label the browser editor derives - is no content change.
+func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {
+	markdown, err := renderDocument(replica)
 	if err != nil {
 		state := s.room(room)
 		state.mu.Lock()

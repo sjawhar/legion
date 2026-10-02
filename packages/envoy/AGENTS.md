@@ -250,7 +250,20 @@ can read a write halfway through as a tree outside the schema and answer a healt
 the repair. A version's capture holds the room's state lock across the copy and the authors it
 captures, so an author the update observer credits is captured only with that update's text; the
 order - state lock, then document lock - is never reversed, since only a Yjs transaction's own
-function holds a document's lock and none takes a room's state lock.
+function holds a document's lock and none takes a room's state lock. A read that may load its room
+(a version's capture, `docView`, `VerifyMark`'s subscription) takes what it reads inside the
+`Server.Apply` that loads and holds the room: a room looked up again with `GetDoc` once that Apply
+returned can have been evicted in between.
+
+The room's update observer (`updateChangesMarkdown`) renders a replica of the room, not the live
+tree, since ygo fires it after the transaction has released the document's lock and another write
+can be integrating meanwhile (`renderedReplica`). The replica is copied from the room on its first
+update and then brought up to date under the room's lock with what the room gained since its state
+vector, as `forkLive` brings a fork up to date. The update the observer is handed cannot stand in:
+two transactions' observers run concurrently in either order, and each update carries the room's
+whole delete set. On a 1 MiB document a catch-up after one typed character took about 8 ms where the
+render took about 160 ms and a whole copy about 420 ms, and the replica holds about 80 MiB of heap
+while its room is resident.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
