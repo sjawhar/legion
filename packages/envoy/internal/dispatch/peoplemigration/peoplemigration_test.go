@@ -33,6 +33,9 @@ var examplePeople = Map{"ada-example": ada, "bob-example": bob}
 // casing the GitHub sign-in recorded.
 const specMarkdown = ":::ask{#decision urgency=\"high\" multiple=\"false\" state=\"answered\" answered_by=\"Ada-Example\" answered_at=\"2026-09-15T17:37:34Z\" selected=\"[&#x22;REST&#x22;]\"}\nWhich transport?\n:::\n"
 
+// notesMarkdown is CORE-2's notes: one ask Bob answered under his GitHub login.
+const notesMarkdown = ":::ask{#when urgency=\"low\" multiple=\"false\" state=\"answered\" answered_by=\"Bob-Example\" answered_at=\"2026-09-16T10:00:00Z\" selected=\"[&#x22;Later&#x22;]\"}\nWhen?\n:::\n"
+
 // seedEveryPersonField writes a database as Dispatch left it under GitHub sign-in: every field
 // that names a person, holding the login in the casings its writers stored (the display casing
 // the sign-in returned, and the lowercase the per-person tables canonicalise to), beside values
@@ -61,7 +64,7 @@ func seedEveryPersonField(t *testing.T, database *store.Store) string {
 	`).Scan(&spec); err != nil {
 		t.Fatalf("seed artifacts: %v", err)
 	}
-	seedSpecDocument(t, database, spec)
+	seedDocument(t, database, spec, specMarkdown)
 	exec(`
 		insert into asks (issue_key, block_id, block_artifact_id, author, question, options, multiple, urgency, state, answer)
 		values ('CORE-1', 'decision', $1, '{"kind":"user","id":"Ada-Example"}', 'Which transport?', '[]', false, 'high', 'answered',
@@ -133,44 +136,44 @@ func seedEveryPersonField(t *testing.T, database *store.Store) string {
 	return spec
 }
 
-// seedSpecDocument writes the spec's live state and its first version as a server write leaves
+// seedDocument writes a document's live state and its first version as a server write leaves
 // them: the version records the state's update, so settling the document versions nothing new.
-func seedSpecDocument(t *testing.T, database *store.Store, artifactID string) {
+func seedDocument(t *testing.T, database *store.Store, artifactID, markdown string) {
 	t.Helper()
-	tree, err := pmdoc.Parse(specMarkdown)
+	tree, err := pmdoc.Parse(markdown)
 	if err != nil {
-		t.Fatalf("parse the spec: %v", err)
+		t.Fatalf("parse the document: %v", err)
 	}
 	pmdoc.EnsureBlockIDsCount(tree)
-	markdown, err := pmdoc.Render(tree)
+	rendered, err := pmdoc.Render(tree)
 	if err != nil {
-		t.Fatalf("render the spec: %v", err)
+		t.Fatalf("render the document: %v", err)
 	}
 	doc := crdt.New()
 	fragment := doc.GetXmlFragment("prosemirror")
 	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
 		return pmdoc.Update(transaction, fragment, tree)
 	}); err != nil {
-		t.Fatalf("write the spec's state: %v", err)
+		t.Fatalf("write the document's state: %v", err)
 	}
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)
 	if err != nil {
-		t.Fatalf("begin the spec: %v", err)
+		t.Fatalf("begin the document: %v", err)
 	}
 	defer tx.Rollback(ctx)
 	version, err := docs.NewPgVersioned(database).AppendUpdateTx(ctx, tx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil), true)
 	if err != nil {
-		t.Fatalf("append the spec's state: %v", err)
+		t.Fatalf("append the document's state: %v", err)
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into artifact_versions (artifact_id, number, markdown, authors, doc_update_version)
 		values ($1, 1, $2, '[{"kind":"user","id":"Ada-Example"}]', $3)
-	`, artifactID, markdown, int64(version)); err != nil {
-		t.Fatalf("seed the spec's version: %v", err)
+	`, artifactID, rendered, int64(version)); err != nil {
+		t.Fatalf("seed the document's version: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit the spec: %v", err)
+		t.Fatalf("commit the document: %v", err)
 	}
 }
 
@@ -329,14 +332,8 @@ func TestRunMovesEveryPersonFieldToEmail(t *testing.T) {
 	if got := readJSON(t, database, `select jsonb_agg(to_jsonb(v) order by number) from artifact_versions v`); !reflect.DeepEqual(got, versionsBefore) {
 		t.Errorf("the spec's versions changed: %#v, want %#v", got, versionsBefore)
 	}
-	reader := docs.New(docs.Deps{Store: database, Events: events.NewBroker()})
-	t.Cleanup(func() { _ = reader.Shutdown(context.Background()) })
-	markdown, err := reader.Text(context.Background(), spec)
-	if err != nil {
-		t.Fatalf("render the spec: %v", err)
-	}
-	if want := strings.Replace(specMarkdown, "Ada-Example", ada, 1); markdown != want {
-		t.Errorf("the spec renders %q, want %q", markdown, want)
+	if got, want := documentText(t, database, spec), strings.Replace(specMarkdown, "Ada-Example", ada, 1); got != want {
+		t.Errorf("the spec renders %q, want %q", got, want)
 	}
 
 	for _, line := range []string{
@@ -417,6 +414,89 @@ func TestRunRefusesALoginTheMapLacks(t *testing.T) {
 			t.Errorf("the refused run changed %s:\nbefore %s\nafter  %s", table, rows, after[table])
 		}
 	}
+}
+
+// A document whose state cannot be read holds nothing else back: the database moves, the run
+// names that document and exits non-zero, and once the document can be read a second run renames
+// the asks answered in it.
+func TestRunMovesTheDatabaseAndNamesADocumentItCouldNotRead(t *testing.T) {
+	database := storetest.Open(t)
+	spec := seedEveryPersonField(t, database)
+	ctx := context.Background()
+	var notes string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
+		values ('CORE-2', 'CORE', 'notes', 'notes.md', 'doc', true, '{"kind":"user","id":"Bob-Example"}')
+		returning id::text
+	`).Scan(&notes); err != nil {
+		t.Fatalf("seed the notes: %v", err)
+	}
+	seedDocument(t, database, notes, notesMarkdown)
+	if _, err := database.Pool.Exec(ctx, `
+		insert into asks (issue_key, block_id, block_artifact_id, author, question, options, multiple, urgency, state, answer)
+		values ('CORE-2', 'when', $1, '{"kind":"user","id":"Bob-Example"}', 'When?', '[]', false, 'low', 'answered',
+			'{"user":"Bob-Example","selected":["Later"],"text":null,"at":"2026-09-16T10:00:00Z"}')
+	`, notes); err != nil {
+		t.Fatalf("seed the notes' ask: %v", err)
+	}
+	// The notes' state gains an update no reader can decode.
+	if _, err := database.Pool.Exec(ctx, `
+		insert into doc_updates (artifact_id, version, update, content_changed)
+		select $1, max(version) + 1, $2, false from doc_updates where artifact_id = $1
+	`, notes, []byte{0xff, 0xff, 0xff, 0xff}); err != nil {
+		t.Fatalf("corrupt the notes' state: %v", err)
+	}
+
+	out, err := migrate(t, database, examplePeople)
+	if err == nil {
+		t.Fatalf("a run that could not read the notes succeeded:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), notes) {
+		t.Errorf("the run's error %q does not name the notes %s", err, notes)
+	}
+	if strings.Contains(err.Error(), spec) {
+		t.Errorf("the run's error %q names the spec %s, which it renamed", err, spec)
+	}
+	if want := "migrate-people: document " + notes + " could not be read"; !strings.Contains(out, want) {
+		t.Errorf("output lacks %q:\n%s", want, out)
+	}
+	for _, login := range []string{"ada-example", "bob-example"} {
+		if holders := loginHolders(t, database, login); len(holders) != 0 {
+			t.Errorf("tables still holding %s after the database moved: %v\n%s", login, holders, out)
+		}
+	}
+	if got, want := documentText(t, database, spec), strings.Replace(specMarkdown, "Ada-Example", ada, 1); got != want {
+		t.Errorf("the spec, readable beside the notes, renders %q, want %q", got, want)
+	}
+
+	if _, err := database.Pool.Exec(ctx, `
+		delete from doc_updates where artifact_id = $1 and version = (select max(version) from doc_updates where artifact_id = $1)
+	`, notes); err != nil {
+		t.Fatalf("drop the notes' bad update: %v", err)
+	}
+	out, err = migrate(t, database, examplePeople)
+	if err != nil {
+		t.Fatalf("the second run, with the notes readable: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "migrate-people: before documents.answered_by=1\n") ||
+		!strings.Contains(out, "migrate-people: after documents.answered_by=0\n") {
+		t.Errorf("the second run did not rename the notes' one answered ask:\n%s", out)
+	}
+	if got, want := documentText(t, database, notes), strings.Replace(notesMarkdown, "Bob-Example", bob, 1); got != want {
+		t.Errorf("the notes render %q, want %q", got, want)
+	}
+}
+
+// documentText renders artifactID's live state as a reader of the migrated database sees it.
+func documentText(t *testing.T, database *store.Store, artifactID string) string {
+	t.Helper()
+	reader := docs.New(docs.Deps{Store: database, Events: events.NewBroker()})
+	defer func() { _ = reader.Shutdown(context.Background()) }()
+	markdown, err := reader.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("render %s: %v", artifactID, err)
+	}
+	return markdown
 }
 
 func TestParseMap(t *testing.T) {

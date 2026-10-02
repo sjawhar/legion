@@ -398,15 +398,18 @@ func Run(ctx context.Context, database *store.Store, documents *docs.Service, pe
 			renaming = append(renaming, answerer.ArtifactID)
 		}
 	}
-	failed := len(unreadable)
+	var failed []string
+	for _, document := range unreadable {
+		failed = append(failed, document.ArtifactID)
+	}
 	for _, renamed := range documents.RenameAskAnswerers(ctx, renaming, people.rename) {
 		switch {
 		case renamed.Err != nil:
 			fmt.Fprintf(out, "migrate-people: document %s not renamed: %v\n", renamed.ArtifactID, renamed.Err)
-			failed++
+			failed = append(failed, renamed.ArtifactID)
 		case renamed.Skipped != "":
 			fmt.Fprintf(out, "migrate-people: document %s not renamed: %s\n", renamed.ArtifactID, renamed.Skipped)
-			failed++
+			failed = append(failed, renamed.ArtifactID)
 		}
 	}
 	answerers, _, err = documents.AskAnswerers(ctx)
@@ -416,9 +419,15 @@ func Run(ctx context.Context, database *store.Store, documents *docs.Service, pe
 	after.addDocuments(answerers)
 	after.write(out, "after")
 	fmt.Fprintf(out, "migrate-people: people recorded=%d\n", recorded.RowsAffected())
-	if failed > 0 || after.counts[documentsField] > 0 {
-		return fmt.Errorf("the database moved, but %d documents could not be read or renamed and %d answered asks still name a login; run it again once they can be",
-			failed, after.counts[documentsField])
+	var left []string
+	if len(failed) > 0 {
+		left = append(left, "these documents could not be read or renamed: "+strings.Join(failed, ", "))
+	}
+	if asks := after.counts[documentsField]; asks > 0 {
+		left = append(left, fmt.Sprintf("%d answered asks still name a login", asks))
+	}
+	if len(left) > 0 {
+		return fmt.Errorf("the database moved, but %s; run it again once they can be", strings.Join(left, "; "))
 	}
 	return nil
 }
