@@ -80,11 +80,8 @@ evidence for it, in plain words: what goes wrong, for whom, and the counts or ca
 It grows in place as the conversation goes. It is the issue's one primary document: extend it with
 a new version that keeps the human's own text, never a second "spec" artifact beside it.
 
-- **Each open question is a decision block**, placed as [Decision blocks](#decision-blocks) says.
-  It asks how to solve a recognizable problem, not whether to apply a chosen change: the problem
-  and why now; measured, known and unknown constraints; genuinely different ways and their costs;
-  then your recommendation. Because it is an ask, it reaches the human's Inbox, and the answer
-  lands next to its context.
+- **Each open question is a decision block**, shaped and placed as [Decision blocks](#decision-blocks)
+  says. Because it is an ask, it reaches the human's Inbox, and the answer lands next to its context.
 - **A settled point records the human's own words and the date**, quoted, so no reader mistakes
   it for your inference; an answer that is only a chosen option is recorded in the form
   `Sami chose "Commit author" on the question below`. A point you inferred says so, with the
@@ -385,20 +382,19 @@ version has not been approved. A Legion root spec under an armed design gate alw
 once all three hold (`skill://legion-architect`).
 
 When all three hold, request it in the pass that finishes the spec: a design waiting with nothing in
-the human's Inbox waits on nobody. A choice you can make yourself
-([Before you ask](#before-you-ask), gate 1) does not ride in on the approval either: leave it out
-of the spec and make it where the work happens, or, when the human will want a say in it, put it
-to them first as its own decision block with your recommendation. When a human asks for approval
-while a block is open, do not request it and do not hold it silently: name each open block and ask
-them to answer it or waive it. For a waiver, close the block with `dispatch_resolve_ask`
-(`kind: "resolved"`, their words as `reason`), then write their decision into the text in their
-words and request. `dispatch_request_approval` refuses while any block is open.
+the human's Inbox waits on nobody. When a human asks for approval while a block is open, do not
+request it and do not hold it silently: name each open block and ask them to answer it or waive
+it. For a waiver, close the block with `dispatch_resolve_ask` (`kind: "resolved"`, their words as
+`reason`), then write their decision into the text in their words and request.
+`dispatch_request_approval` refuses while any block is open.
 
 An approval request carries nothing new: a point the human has not agreed to gets its own decision
-block first, or comes out of the spec. `summary` says in one to three sentences what the human is
-approving and nothing else: no commentary on itself or on the conversation, and no open question.
-The Inbox shows it after "Approve spec.md (version N)?". Never write "Approve" options into an
-ordinary `dispatch_ask`; only humans approve. The call, its result and its answer:
+block first, with your recommendation, or, when it is a choice you can make yourself
+([Before you ask](#before-you-ask), gate 1) and the human will not want a say in it, comes out of
+the spec and is made where the work happens. `summary` says in one to three sentences what the
+human is approving and nothing else: no commentary on itself or on the conversation, and no open
+question. The Inbox shows it after "Approve spec.md (version N)?". Never write "Approve" options
+into an ordinary `dispatch_ask`; only humans approve. The call, its result and its answer:
 [Approval requests](skill://dispatch/references/documents.md#approval-requests).
 
 ## The Spec

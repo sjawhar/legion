@@ -1,24 +1,18 @@
 # Brainstorming in the spec: each turn, from the first version to approval
 
-`skill://dispatch` sends you here before you write the first version of a spec for a design change
-that needs the human's choices, and again before each next turn. Each version is written as
-"Writing a spec" in `skill://dispatch` says; this file is the order the conversation goes in.
-
 This overrides the brainstorming skill's pace: no design question goes to chat, there is no limit
 of one question per message, and there is no approval after each section, only the one at the end.
 Its stages still shape what you ask (clarifying questions, then two or three approaches with a
 recommendation, then the design section by section), but a question that depends on no open answer
-goes out at once, whatever its stage. A finished spec dropped after a chat-only design is not the
-conversation, and neither is a whole design written in one version.
+goes out at once, whatever its stage.
 
 ## Each turn
 
 1. **Start with what is established.** The first version holds only what the conversation has
    established: the problem and its evidence, what the human has said in their own words, the
    facts the next questions need, and each question that is ready, as a decision block at the end
-   of the section that sets it up. It asks how to solve the recognizable problem, not whether to
-   apply a chosen change: why now, measured/known/unknown constraints, different ways and costs,
-   then your recommendation. Write nothing past those questions.
+   of the section that sets it up, shaped as "Decision blocks" in `skill://dispatch` says. Write
+   nothing past those questions.
 2. **The human answers or comments.** Reply to each human comment in its thread
    (`dispatch_comment` with `reply_to`), then rewrite the passage the answer or the comment changes.
 3. **Each next version folds the answers in and adds what they open.** Keep each answered

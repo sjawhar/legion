@@ -167,13 +167,13 @@ is a human approving the root issue's spec document at a version in Dispatch: on
 decision blocks are settled and the human has agreed to every point in it, the architect requests
 it with `dispatch_request_approval` and a summary of what the human is approving, and registers
 the document id and version with the daemon, and the daemon opens the gate on the
-`artifact.approved` event for that document at its
-current version — or at registration itself, when Dispatch already shows the human approved that
-version before the architect registered (the daemon reads the approval; it never writes one). A
-later spec version closes the gate until someone approves the new version, and
-a `changes_requested` review closes it with the reviewer's reason. `gates.design: off` is the only
-way past the gate without a human review — Legion has no operator approve command; with `off` the
-root architect is told so in its system prompt and adds no approval step. Whether a human must
+`artifact.approved` event for that document at its current version — or at registration itself,
+when Dispatch already shows the human approved that version before the architect registered (the
+daemon reads the approval; it never writes one). A later spec version closes the gate until
+someone approves the new version, and a `changes_requested` review closes it with the reviewer's
+reason. `gates.design: off` is the only way past the gate without a human review — Legion has no
+operator approve command; with `off` the root architect is told so in its system prompt and adds
+no approval step. Whether a human must
 approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS
 rule: Legion neither reads nor writes it. The merger posts `READY` on the Dispatch issue and, when
 the project's `projects.<KEY>.merge_queue_role` names one, publishes it to that role; a human merges
