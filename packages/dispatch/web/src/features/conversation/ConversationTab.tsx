@@ -647,6 +647,15 @@ function CommentTurn({
     }
     setExpanded(!expanded);
   };
+  // Resolving the comment, or accepting or rejecting its suggestion, from inside its thread is the
+  // reader closing the thread with it: it leaves the list as any resolved comment does, since the
+  // tab keeps only a thread the reader has open (`shown`). One whose own reply is out stays.
+  const act = (id: string, kind: "accept" | "reject" | "resolve" | "reopen") => {
+    onAction(id, kind);
+    if (kind === "reopen" || id !== item.event.payload.id || replySendingNow()) return;
+    if (forceExpanded) onPhoneThreadToggle?.();
+    else setExpanded(false);
+  };
   return (
     <li
       aria-current={current ? "true" : undefined}
@@ -665,7 +674,7 @@ function CommentTurn({
         isClosed={isClosed}
         editingCommentId={editingCommentId}
         savingCommentEditId={savingCommentEditId}
-        onAction={onAction}
+        onAction={act}
         onEdit={editComment}
         onEditingChange={setEditingCommentId}
         onRetryAction={onRetryAction}
