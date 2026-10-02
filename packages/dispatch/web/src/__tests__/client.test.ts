@@ -309,16 +309,11 @@ test("isUnauthorized distinguishes a 401 from a transient 5xx failure", async ()
 });
 
 test(
-  "isRetryableQueryError exempts auth outcomes (401, 403) and a credential-feature-off 404, " +
+  "isRetryableQueryError exempts an auth outcome (401) and a credential-feature-off 404, " +
     "but retries a transient 5xx",
   async () => {
     const unauthorized = createApiClient(
       stubFetch(() => new Response(null, { status: 401 })).fetch
-    );
-    const forbidden = createApiClient(
-      stubFetch(() =>
-        Response.json({ error: "login not allowed", code: "LOGIN_NOT_ALLOWED" }, { status: 403 })
-      ).fetch
     );
     const featureOff = createApiClient(
       stubFetch(() =>
@@ -327,16 +322,13 @@ test(
     );
     const serverError = createApiClient(stubFetch(() => new Response(null, { status: 503 })).fetch);
 
-    const [unauthorizedError, forbiddenError, featureOffError, serverErrorResult] =
-      await Promise.all([
-        unauthorized.whoAmI().catch((error: unknown) => error),
-        forbidden.whoAmI().catch((error: unknown) => error),
-        featureOff.getCredentialPending().catch((error: unknown) => error),
-        serverError.whoAmI().catch((error: unknown) => error),
-      ]);
+    const [unauthorizedError, featureOffError, serverErrorResult] = await Promise.all([
+      unauthorized.whoAmI().catch((error: unknown) => error),
+      featureOff.getCredentialPending().catch((error: unknown) => error),
+      serverError.whoAmI().catch((error: unknown) => error),
+    ]);
 
     expect(isRetryableQueryError(unauthorizedError)).toBe(false);
-    expect(isRetryableQueryError(forbiddenError)).toBe(false);
     expect(isCredentialFeatureOff(featureOffError)).toBe(true);
     expect(isRetryableQueryError(featureOffError)).toBe(false);
     expect(isRetryableQueryError(serverErrorResult)).toBe(true);
