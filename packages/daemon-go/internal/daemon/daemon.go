@@ -148,6 +148,17 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if err != nil {
 		return err
 	}
+	if cfg.Runtime.Name == "kubernetes" {
+		legacy, err := st.HasLegacySandboxClaims(boot, plan.project)
+		if err != nil {
+			st.Close()
+			return err
+		}
+		if legacy {
+			st.Close()
+			return fmt.Errorf("refuse the Kubernetes runtime before any schema write: project %s still has legacy per-claim Sandbox locators", plan.project)
+		}
+	}
 	applied, err := st.Migrate(boot)
 	if err != nil {
 		st.Close()
@@ -534,15 +545,6 @@ type supervision struct {
 // workflow): every step of supervision that can refuse, so a daemon that cannot supervise refuses
 // before its boot is recorded.
 func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, p plan, st *store.Store, apps appauth.Tokens) (*supervision, error) {
-	if cfg.Runtime.Name == "kubernetes" {
-		legacy, err := st.HasLegacySandboxClaims(boot, p.project)
-		if err != nil {
-			return nil, err
-		}
-		if legacy {
-			return nil, fmt.Errorf("refuse the Kubernetes runtime before an issue-pod layout migration: project %s still has legacy per-claim Sandbox locators", p.project)
-		}
-	}
 	claims, err := st.Claims(boot)
 	if err != nil {
 		return nil, err
