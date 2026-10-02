@@ -670,9 +670,9 @@ export function useEventStream({
       setConnectionState("connected");
       armWatchdog();
       if (anAttemptEnded) {
-        // Events may have committed in that gap - since the page's own reads, when the first
-        // attempt failed - so every query the app holds refreshes; TanStack matches all of them
-        // when no filter is given. Nothing is excluded:
+        // Events may have committed since the prior attempt ended - or, when the first attempt
+        // failed, since the page's own reads - so every query the app holds refreshes. TanStack
+        // matches all of them when no filter is given. Nothing is excluded:
         // the one query that looks expensive to refresh, `["block-schema"]` with an infinite
         // `staleTime`, resolves from a module-level per-session cache (`features/doc/schema.ts`),
         // so its refetch issues no request. A genuine reconnect after a gap refreshes on the
@@ -769,6 +769,7 @@ export function useEventStream({
       reconnect = undefined;
       const current = new AbortController();
       controller = current;
+      armWatchdog();
       const url = lastEventId > 0 ? `/api/v1/events?since=${lastEventId}` : "/api/v1/events";
       void readEventStream(url, { onChunk, onEvent, onOpen, signal: current.signal }).then(
         () => settle(current, undefined),

@@ -21,6 +21,7 @@ import { asUser } from "./users";
 // the counterparty ("bob") is an autonomous session acting through the bearer API —
 // only alice's browser needs to be real, since that is what proves the live update.
 const bob = { actor: { kind: "session" as const, id: "bob" }, as: "agent" as const };
+const eventStreamUrl = /\/api\/v1\/events(\?|$)/;
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -346,7 +347,7 @@ test("live: a forced server disconnect reconnects from the last event id, not fr
   const page = await alice.newPage();
   const streamRequestUrls: string[] = [];
   page.on("request", (request) => {
-    if (/\/api\/v1\/events(\?|$)/.test(request.url())) {
+    if (eventStreamUrl.test(request.url())) {
       streamRequestUrls.push(request.url());
     }
   });
@@ -408,7 +409,7 @@ test("live: an event committed while the stream's first attempt fails shows once
         readLanded = true;
       }
     });
-    await page.route(/\/api\/v1\/events(\?|$)/, async (route) => {
+    await page.route(eventStreamUrl, async (route) => {
       if (!readLanded) {
         attemptFailed = true;
         await route.abort("failed");
@@ -427,9 +428,7 @@ test("live: an event committed while the stream's first attempt fails shows once
       { body: "Committed before the retry opened" },
       bob
     );
-    const opened = page.waitForResponse((response) =>
-      /\/api\/v1\/events(\?|$)/.test(response.url())
-    );
+    const opened = page.waitForResponse((response) => eventStreamUrl.test(response.url()));
     release();
     await opened;
 
@@ -463,7 +462,7 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   await page.goto(`/issues/${issue.key}/conversation`);
   await expect(page.getByText("Backlog message 4")).toBeVisible();
 
-  const streamRequest = apiRequestUrls.find((url) => /\/api\/v1\/events(\?|$)/.test(url));
+  const streamRequest = apiRequestUrls.find((url) => eventStreamUrl.test(url));
   expect(streamRequest).toBeDefined();
 
   // The very first connection ever omits since entirely — the server resolves
@@ -554,7 +553,7 @@ test("live: an event during a project list's first load beats the response that 
     const { promise: inFlight, resolve: reachedServer } = Promise.withResolvers<void>();
     const { promise: streaming, resolve: streamOpened } = Promise.withResolvers<void>();
     page.on("request", (request) => {
-      if (/\/api\/v1\/events(\?|$)/.test(request.url())) {
+      if (eventStreamUrl.test(request.url())) {
         streamOpened();
       }
     });
