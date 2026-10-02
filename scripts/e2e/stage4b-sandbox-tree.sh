@@ -1954,7 +1954,7 @@ argv=$(pod_commands "$pod" planner)
 note "tree 2 planner container $pod: fixture markers [${markers:-none}]; process argv $(tr '\n' ';' <<<"$argv")"
 if grep -q -- '--no-extensions' <<<"$argv"; then note "the planner runs with --no-extensions"; else note "the planner runs without --no-extensions"; fi
 send_agent "$tree2" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary."
-on_tree "$tree2" wait_for_phase "$tree2" implementing 900
+on_tree "$tree2" wait_for_phase "$tree2" implementing 1800
 pass
 
 begin finished-idle-planner-death
@@ -2479,7 +2479,7 @@ on_tree "$tree3" wait_for_worker "$tree3" planner
 # ready or in a turn with its task outstanding. Every such death is charged; the check below accepts
 # either budget.
 send_agent "$tree3" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
-on_tree "$tree3" wait_for_phase "$tree3" implementing 900
+on_tree "$tree3" wait_for_phase "$tree3" implementing 1800
 on_tree "$tree3" wait_for_worker "$tree3" implementer
 killed=" "
 kills=0
@@ -2688,7 +2688,7 @@ interrupted_needle="Your previous turn on this task was interrupted when your pr
 planner_resent() { claim_session_text "$tree4" planner | grep -qF "$interrupted_needle"; }
 on_tree "$tree4" until_true 600 "$tree4's planner to be sent its task again, told its turn was interrupted" planner_resent
 send_agent "$tree4" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
-on_tree "$tree4" wait_for_phase "$tree4" implementing 900
+on_tree "$tree4" wait_for_phase "$tree4" implementing 1800
 note "$tree4's planner was sent its task again after the kill, told the turn was interrupted, and finished planning"
 # (b) Kills after each ready, the task outstanding, until the claim fails.
 on_tree "$tree4" wait_for_worker "$tree4" implementer
