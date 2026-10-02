@@ -16,7 +16,9 @@ conversation, and neither is a whole design written in one version.
 1. **Start with what is established.** The first version holds only what the conversation has
    established: the problem and its evidence, what the human has said in their own words, the
    facts the next questions need, and each question that is ready, as a decision block at the end
-   of the section that sets it up. Write nothing past those questions.
+   of the section that sets it up. It asks how to solve the recognizable problem, not whether to
+   apply a chosen change: why now, measured/known/unknown constraints, different ways and costs,
+   then your recommendation. Write nothing past those questions.
 2. **The human answers or comments.** Reply to each human comment in its thread
    (`dispatch_comment` with `reply_to`), then rewrite the passage the answer or the comment changes.
 3. **Each next version folds the answers in and adds what they open.** Keep each answered

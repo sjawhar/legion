@@ -81,7 +81,10 @@ It grows in place as the conversation goes. It is the issue's one primary docume
 a new version that keeps the human's own text, never a second "spec" artifact beside it.
 
 - **Each open question is a decision block**, placed as [Decision blocks](#decision-blocks) says.
-  Because it is an ask, it reaches the human's Inbox, and the answer lands next to its context.
+  It asks how to solve a recognizable problem, not whether to apply a chosen change: the problem
+  and why now; measured, known and unknown constraints; genuinely different ways and their costs;
+  then your recommendation. Because it is an ask, it reaches the human's Inbox, and the answer
+  lands next to its context.
 - **A settled point records the human's own words and the date**, quoted, so no reader mistakes
   it for your inference; an answer that is only a chosen option is recorded in the form
   `Sami chose "Commit author" on the question below`. A point you inferred says so, with the
@@ -111,10 +114,11 @@ after the section on models.
 
 ## Decision blocks
 
-A decision a human must make is an `:::ask` block at the end of the section that discusses it,
-carrying the options, what each costs, and your recommendation. Never gather decisions into a
-list, at the top, at the bottom or in an "open questions" section, and never ask one as a
-standalone `dispatch_ask` that points at the spec.
+A decision a human must make is an `:::ask` block at the end of the section that discusses it. It
+asks how to solve a recognizable problem, never whether to apply a chosen change: the problem and
+why now; measured, known and unknown constraints; genuinely different ways and their costs; then
+your recommendation. Never gather decisions into a list, at the top, at the bottom or in an "open
+questions" section, and never ask one as a standalone `dispatch_ask` that points at the spec.
 
 The block is what reaches the human's Inbox. A question phrased as prose in the spec reaches
 nobody. A spec with no ask blocks is fine only when the issue genuinely needs no human decision.
