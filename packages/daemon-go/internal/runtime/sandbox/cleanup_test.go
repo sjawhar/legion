@@ -17,7 +17,10 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 const childIssue = "LEGION-209"
@@ -106,15 +109,18 @@ func newCleanupRig(t *testing.T, childLive bool) *cleanupRig {
 	c.rig = newRig(t, objects, withoutController())
 	c.r.SetIssueResourceStore(st)
 	ctx := context.Background()
+	if _, err := st.OpenTreeLifecycle(ctx, testProject, testTree, treelifecycle.AuthorityWorkflow); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.Pool().Exec(ctx, `insert into issues
 		(key, tree, project, title, phase, generation, status, rank, linger_until, last_dispatch_seq)
-		values ($1, $1, $2, 'root', 'done', 1, 'done', 'A', now() + interval '1 hour', 1)`, testTree, testProject); err != nil {
+		values ($1, $1, upper($2), 'root', 'done', 1, 'done', 'A', now() + interval '1 hour', 1)`, testTree, testProject); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.EnsureIssueResources(ctx, testProject, testTree, testTree, c.root); err != nil {
+	if err := st.EnsureIssueResources(ctx, testProject, testTree, testTree, c.root, 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.EnsureIssueResources(ctx, testProject, childIssue, testTree, c.child); err != nil {
+	if err := st.EnsureIssueResources(ctx, testProject, childIssue, testTree, c.child, 1); err != nil {
 		t.Fatal(err)
 	}
 	c.dyn.PrependReactor("delete", "sandboxes", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
@@ -151,7 +157,11 @@ func newCleanupRig(t *testing.T, childLive bool) *cleanupRig {
 func (c *cleanupRig) confirmChildRecord(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	child, began, err := c.st.BeginIssueCleanup(ctx, testProject, childIssue, testTree, 1)
+	epoch, reserved, err := c.r.ReserveWorkflowTreeCleanup(ctx, testProject, testTree, 1)
+	if err != nil || !reserved {
+		t.Fatalf("reserve the child cleanup: epoch %d, reserved %t, err %v", epoch, reserved, err)
+	}
+	child, began, err := c.st.BeginIssueCleanup(ctx, testProject, childIssue, testTree, epoch)
 	if err != nil || !began {
 		t.Fatalf("begin the child's cleanup: began %t, err %v", began, err)
 	}
@@ -179,6 +189,17 @@ func (c *cleanupRig) rootRecord(t *testing.T) store.IssueResources {
 	return root
 }
 
+func (c *cleanupRig) cleanupWorkflow(ctx context.Context, issue string) error {
+	epoch, reserved, err := c.r.ReserveWorkflowTreeCleanup(ctx, testProject, testTree, 1)
+	if err != nil {
+		return err
+	}
+	if !reserved {
+		return nil
+	}
+	return c.r.CleanupIssue(ctx, testProject, issue, testTree, epoch)
+}
+
 func (c *cleanupRig) rootIntact(t *testing.T) {
 	t.Helper()
 	if deletes := c.deletes(); len(deletes) != 0 {
@@ -199,7 +220,7 @@ func (c *cleanupRig) rootIntact(t *testing.T) {
 // and the root's record is not taken, so a re-admitted root still launches.
 func TestARootCleanupDeletesNothingWhileAChildRecordIsUnconfirmed(t *testing.T) {
 	c := newCleanupRig(t, false)
-	err := c.r.CleanupIssue(c.ctx, testProject, testTree, testTree, 1)
+	err := c.cleanupWorkflow(c.ctx, testTree)
 	if !errors.Is(err, store.ErrTreeChildrenPending) {
 		t.Fatalf("root cleanup = %v, want ErrTreeChildrenPending", err)
 	}
@@ -214,12 +235,12 @@ func TestARootCleanupDeletesNothingWhileAChildRecordIsUnconfirmed(t *testing.T) 
 func TestARootCleanupDeletesNothingWhileTheAPIListsAChildSandbox(t *testing.T) {
 	c := newCleanupRig(t, true)
 	c.confirmChildRecord(t)
-	err := c.r.CleanupIssue(c.ctx, testProject, testTree, testTree, 1)
+	err := c.cleanupWorkflow(c.ctx, testTree)
 	if err == nil || !strings.Contains(err.Error(), c.child) {
 		t.Fatalf("root cleanup = %v, want a refusal naming the child Sandbox %s", err, c.child)
 	}
 	c.rootIntact(t)
-	if err := c.st.EnsureIssueResources(c.ctx, testProject, "LEGION-210", testTree, "legion-legion-legion-210"); !errors.Is(err, store.ErrIssueCleanupInProgress) {
+	if err := c.st.EnsureIssueResources(c.ctx, testProject, "LEGION-210", testTree, "legion-legion-legion-210", 1); !errors.Is(err, store.ErrIssueCleanupInProgress) {
 		t.Fatalf("a new child admitted during the root's cleanup: %v", err)
 	}
 }
@@ -230,10 +251,10 @@ func TestARootCleanupDeletesNothingWhileTheAPIListsAChildSandbox(t *testing.T) {
 // makes a PVC API call itself.
 func TestARootIsCleanedAfterItsChildrenByForegroundGarbageCollection(t *testing.T) {
 	c := newCleanupRig(t, true)
-	if err := c.r.CleanupIssue(c.ctx, testProject, childIssue, testTree, 1); err != nil {
+	if err := c.cleanupWorkflow(c.ctx, childIssue); err != nil {
 		t.Fatalf("child cleanup: %v", err)
 	}
-	if err := c.r.CleanupIssue(c.ctx, testProject, testTree, testTree, 1); err != nil {
+	if err := c.cleanupWorkflow(c.ctx, testTree); err != nil {
 		t.Fatalf("root cleanup: %v", err)
 	}
 	want := []string{"sandboxes " + c.child, "sandboxes " + c.root}
@@ -259,10 +280,10 @@ func TestARootIsCleanedAfterItsChildrenByForegroundGarbageCollection(t *testing.
 // dependency through foreground garbage collection rather than using a PVC grant.
 func TestCleanupSandboxDeletesCarryIdentityAndRootIsForeground(t *testing.T) {
 	c := newCleanupRig(t, true)
-	if err := c.r.CleanupIssue(c.ctx, testProject, childIssue, testTree, 1); err != nil {
+	if err := c.cleanupWorkflow(c.ctx, childIssue); err != nil {
 		t.Fatalf("child cleanup: %v", err)
 	}
-	if err := c.r.CleanupIssue(c.ctx, testProject, testTree, testTree, 1); err != nil {
+	if err := c.cleanupWorkflow(c.ctx, testTree); err != nil {
 		t.Fatalf("root cleanup: %v", err)
 	}
 	for name, want := range map[string]struct{ uid, version string }{
@@ -291,7 +312,14 @@ func TestDirectTreeCleanupRequiresNoWorkflowRecord(t *testing.T) {
 	if _, err := c.st.Pool().Exec(c.ctx, `delete from issues where key = $1`, testTree); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.r.CleanupTree(c.ctx, testProject, testTree); err != nil {
+	if _, err := c.st.Pool().Exec(c.ctx, `update tree_lifecycles set authority = 'operator' where project = $1 and tree = $2`, testProject, testTree); err != nil {
+		t.Fatal(err)
+	}
+	epoch, reserved, err := c.r.ReserveOperatorTreeCleanup(c.ctx, testProject, testTree)
+	if err != nil || !reserved {
+		t.Fatalf("reserve operator cleanup: reserved %t, err %v", reserved, err)
+	}
+	if err := c.r.CleanupTree(c.ctx, testProject, testTree, epoch); err != nil {
 		t.Fatalf("direct tree cleanup: %v", err)
 	}
 	if got, want := c.deletes(), []string{"sandboxes " + c.child, "sandboxes " + c.root}; strings.Join(got, ", ") != strings.Join(want, ", ") {
@@ -307,7 +335,7 @@ func TestDirectTreeCleanupRequiresNoWorkflowRecord(t *testing.T) {
 // confirmation admits the next resource epoch; no failure clears the fence.
 func TestForegroundRootDeleteFailureKeepsTheAdmissionFenceUntilRetryConfirms(t *testing.T) {
 	c := newCleanupRig(t, true)
-	if err := c.r.CleanupIssue(c.ctx, testProject, childIssue, testTree, 1); err != nil {
+	if err := c.cleanupWorkflow(c.ctx, childIssue); err != nil {
 		t.Fatalf("child cleanup: %v", err)
 	}
 	failed := true
@@ -319,22 +347,94 @@ func TestForegroundRootDeleteFailureKeepsTheAdmissionFenceUntilRetryConfirms(t *
 		}
 		return false, nil, nil
 	})
-	if err := c.r.CleanupIssue(c.ctx, testProject, testTree, testTree, 1); err == nil || !strings.Contains(err.Error(), "transient Sandbox API failure") {
+	if err := c.cleanupWorkflow(c.ctx, testTree); err == nil || !strings.Contains(err.Error(), "transient Sandbox API failure") {
 		t.Fatalf("first root cleanup = %v, want its transient delete failure", err)
 	}
 	if root := c.rootRecord(t); !root.CleanupStarted || !root.CleanupConfirmedAt.IsZero() {
 		t.Fatalf("root after transient delete = %+v, want begun and unconfirmed", root)
 	}
-	if err := c.st.EnsureIssueResources(c.ctx, testProject, testTree, testTree, c.root); !errors.Is(err, store.ErrIssueCleanupInProgress) {
+	if err := c.st.EnsureIssueResources(c.ctx, testProject, testTree, testTree, c.root, 1); !errors.Is(err, store.ErrIssueCleanupInProgress) {
 		t.Fatalf("new root admission during foreground cleanup retry = %v, want ErrIssueCleanupInProgress", err)
 	}
-	if err := c.r.CleanupIssue(c.ctx, testProject, testTree, testTree, 1); err != nil {
+	if err := c.cleanupWorkflow(c.ctx, testTree); err != nil {
 		t.Fatalf("root cleanup retry: %v", err)
 	}
 	if root := c.rootRecord(t); root.CleanupConfirmedAt.IsZero() {
 		t.Fatalf("root after retry = %+v, want confirmed", root)
 	}
-	if err := c.st.EnsureIssueResources(c.ctx, testProject, testTree, testTree, c.root); err != nil {
+	if _, err := c.st.OpenTreeLifecycle(c.ctx, testProject, testTree, treelifecycle.AuthorityWorkflow); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.st.EnsureIssueResources(c.ctx, testProject, testTree, testTree, c.root, 2); err != nil {
 		t.Fatalf("new root admission after confirmation: %v", err)
+	}
+}
+
+// A child claim that won its admission before the reservation but has not reached resource
+// admission has no resource row, so a resource-row census misses it. The tree cleanup censuses the
+// stored claims after the reservation: it deletes nothing while that child is unretired, and runs
+// child-first, root-last once it retired.
+func TestATreeCleanupWaitsForAPreResourceChildClaim(t *testing.T) {
+	c := newCleanupRig(t, true)
+	pre := supervise.Claim{
+		Token: claim.Token("legion-legion-legion-210-tester"), Project: testProject, Tree: testTree, Issue: "LEGION-210",
+		Role: claim.RoleTester, State: supervise.StateLaunching,
+	}
+	pre, err := c.st.AdmitClaim(c.ctx, pre)
+	if err != nil {
+		t.Fatalf("admit the child before the reservation: %v", err)
+	}
+	epoch, reserved, err := c.r.ReserveWorkflowTreeCleanup(c.ctx, testProject, testTree, 1)
+	if err != nil || !reserved {
+		t.Fatalf("reserve: epoch %d, reserved %t, err %v", epoch, reserved, err)
+	}
+	if err := c.r.CleanupTree(c.ctx, testProject, testTree, epoch); !errors.Is(err, store.ErrIssueCleanupInProgress) || !strings.Contains(err.Error(), string(pre.Token)) {
+		t.Fatalf("cleanup with a pre-resource child = %v, want the named wait naming %s", err, pre.Token)
+	}
+	if deletes := c.deletes(); len(deletes) != 0 {
+		t.Fatalf("the cleanup deleted %v while a child claim of the tree was unretired", deletes)
+	}
+	pre.State = supervise.StateRetired
+	if err := c.st.PutClaim(c.ctx, pre); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.r.CleanupTree(c.ctx, testProject, testTree, epoch); err != nil {
+		t.Fatalf("cleanup once the child retired: %v", err)
+	}
+	want := []string{"sandboxes " + c.child, "sandboxes " + c.root}
+	if got := c.deletes(); strings.Join(got, ", ") != strings.Join(want, ", ") {
+		t.Fatalf("deletes = %v, want %v", got, want)
+	}
+}
+
+// A close that reserved before the tree's first resource record deletes nothing and confirms the
+// reservation, so the next explicit admission opens a new epoch instead of waiting forever.
+func TestATreeCleanupBeforeAnyResourceConfirmsItsReservation(t *testing.T) {
+	st := resourceStore(t)
+	g := newRig(t, nil, withoutController())
+	g.r.SetIssueResourceStore(st)
+	ctx := context.Background()
+	if _, err := st.OpenTreeLifecycle(ctx, testProject, testTree, treelifecycle.AuthorityWorkflow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool().Exec(ctx, `insert into issues
+		(key, tree, project, title, phase, generation, status, rank, linger_until, last_dispatch_seq)
+		values ($1, $1, upper($2), 'root', 'done', 1, 'done', 'A', now() + interval '1 hour', 1)`, testTree, testProject); err != nil {
+		t.Fatal(err)
+	}
+	epoch, reserved, err := g.r.ReserveWorkflowTreeCleanup(ctx, testProject, testTree, 1)
+	if err != nil || !reserved {
+		t.Fatalf("reserve: epoch %d, reserved %t, err %v", epoch, reserved, err)
+	}
+	g.clearActions()
+	if err := g.r.CleanupTree(ctx, testProject, testTree, epoch); err != nil {
+		t.Fatalf("cleanup of a tree with no resources: %v", err)
+	}
+	if writes := g.writes(); len(writes) != 0 {
+		t.Fatalf("a tree with no resources wrote %+v", writes)
+	}
+	opened, err := st.OpenTreeLifecycle(ctx, testProject, testTree, treelifecycle.AuthorityWorkflow)
+	if err != nil || opened.Epoch != epoch+1 {
+		t.Fatalf("next admission = %+v, err %v; want epoch %d", opened, err, epoch+1)
 	}
 }

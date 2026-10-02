@@ -27,11 +27,13 @@ import (
 // slow-header client holds a listener slot for as long as it likes.
 const readHeaderTimeout = 10 * time.Second
 
-// TreeResourceCleaner deletes the durable resources of a tree with no workflow record after the
-// operator successfully closed every one of its claims. It is deliberately separate from
-// Supervisor: claim routes decide lifecycle, while this capability owns a shared issue pod.
+// TreeResourceCleaner owns explicit operator tree cleanup. Reservation precedes the claim snapshot
+// so a child start cannot persist outside its deletion population. It is separate from Supervisor:
+// claim routes decide lifecycle, while this capability owns shared issue resources.
 type TreeResourceCleaner interface {
-	CleanupTree(ctx context.Context, project, tree string) error
+	OpenOperatorTree(ctx context.Context, project, tree string) (treeEpoch uint64, err error)
+	ReserveOperatorTreeCleanup(ctx context.Context, project, tree string) (treeEpoch uint64, reserved bool, err error)
+	CleanupTree(ctx context.Context, project, tree string, treeEpoch uint64) error
 }
 
 // Options are what the routes answer from.

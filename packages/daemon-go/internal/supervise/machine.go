@@ -71,7 +71,9 @@ type Claim struct {
 	Issue      string
 	Role       claim.Role
 	Generation uint64
-	// Session is the Oh My Pi session id the agent registered as; SessionFile is the transcript it
+	// TreeEpoch is the durable lifecycle epoch this claim bound to before its first persistence.
+	// A cleanup reservation closes that epoch before a later claim/launch can write or run.
+	TreeEpoch uint64
 	// reported, the one value `--resume` takes. Both are written by the registration, and a claim
 	// that has them resumes that session on every relaunch and refuses any other.
 	Session     string
@@ -125,6 +127,12 @@ type Event interface{ isEvent() }
 // Store is the persistence a machine writes through. A claim and its pending delivery are
 // written separately: the delivery changes on every send, the claim far less often.
 type Store interface {
+	// AdmitClaim binds a new or reactivated claim to an open durable tree lifecycle and writes it
+	// in that same short transaction. A cleanup reservation refuses before runnable work exists.
+	AdmitClaim(ctx context.Context, c Claim) (Claim, error)
+	// CheckLaunch rechecks the bound lifecycle before a claim persists StateLaunching or calls the
+	// runtime; it returns the named cleanup wait without charging a launch failure.
+	CheckLaunch(ctx context.Context, c Claim) error
 	PutClaim(ctx context.Context, c Claim) error
 	PutDelivery(ctx context.Context, token claim.Token, d Delivery) error
 	// PutClaimAndDelivery writes both in one transaction: a confirmation records the claim and
@@ -639,11 +647,17 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 // failure and is tried again at once, waiting out the same process, until the budget runs out;
 // only a start that succeeds forgets it.
 func (m *Machine) launch(ctx context.Context) error {
+	if _, lifecycle := m.deps.Runtime.(runtime.TreeLifecycleCleaner); lifecycle {
+		if err := m.deps.Store.CheckLaunch(ctx, m.claim); err != nil {
+			return err
+		}
+	}
 	m.letGo()
 	for {
 		m.claim.Generation++
 		token := rand.Text()
 		m.claim.BootTokenHash = HashBootToken(token)
+
 		m.claim.State = StateLaunching
 		if err := m.persist(ctx); err != nil {
 			return err
@@ -666,13 +680,29 @@ func (m *Machine) launch(ctx context.Context) error {
 	}
 }
 
+// revive is the launch of a claim brought back by a spawn, resume or retry: it binds the claim to
+// its tree's open lifecycle epoch in one short transaction before launching. A claim retired by a
+// confirmed cleanup comes back only once a fresh root admission opened the next epoch; a reserved
+// cleanup refuses with the named wait and changes no state, so the start retries without charging
+// a launch failure. In-lifetime relaunches go through launch, which only rechecks the bound epoch.
+func (m *Machine) revive(ctx context.Context) error {
+	if _, lifecycle := m.deps.Runtime.(runtime.TreeLifecycleCleaner); lifecycle {
+		bound, err := m.deps.Store.AdmitClaim(ctx, m.claim)
+		if err != nil {
+			return err
+		}
+		m.claim.TreeEpoch = bound.TreeEpoch
+	}
+	return m.launch(ctx)
+}
+
 func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, error) {
 	spec, err := m.deps.Specs.SpawnSpec(ctx, m.claim)
 	if err != nil {
 		return runtime.Locator{}, fmt.Errorf("build the launch of %s: %w", m.claim.Token, err)
 	}
 	spec.Claim, spec.Project, spec.Tree, spec.Issue, spec.Role = m.claim.Token, m.claim.Project, m.claim.Tree, m.claim.Issue, m.claim.Role
-	spec.Generation, spec.BootToken, spec.ResumeSessionFile = m.claim.Generation, token, ""
+	spec.Generation, spec.TreeEpoch, spec.BootToken, spec.ResumeSessionFile = m.claim.Generation, m.claim.TreeEpoch, token, ""
 	if m.claim.SessionFile == "" {
 		return m.deps.Runtime.Spawn(ctx, spec)
 	}

@@ -40,6 +40,15 @@ func (s pruningStore) PutClaim(ctx context.Context, c supervise.Claim) error {
 	return nil
 }
 
+func (s pruningStore) AdmitClaim(ctx context.Context, c supervise.Claim) (supervise.Claim, error) {
+	bound, err := s.Store.AdmitClaim(ctx, c)
+	if err != nil {
+		return supervise.Claim{}, err
+	}
+	s.written(bound)
+	return bound, nil
+}
+
 func (s pruningStore) PutClaimAndDelivery(ctx context.Context, c supervise.Claim, d supervise.Delivery) error {
 	if err := s.Store.PutClaimAndDelivery(ctx, c, d); err != nil {
 		return err

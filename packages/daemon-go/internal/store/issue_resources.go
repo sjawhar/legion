@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"math"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 // IssueResources is the durable ownership record for one issue's shared Sandbox resources. A
@@ -45,7 +46,7 @@ var ErrTreeChildrenPending = errors.New("a child issue of the tree still holds r
 // locked for share, so a root's BeginIssueCleanup, which locks that record for update, either sees
 // the child's record or is seen by it: once the root's cleanup has begun, a new child admission (no
 // record, or a confirmed one) is refused.
-func (s *Store) EnsureIssueResources(ctx context.Context, project, issue, tree, sandbox string) error {
+func (s *Store) EnsureIssueResources(ctx context.Context, project, issue, tree, sandbox string, treeEpoch uint64) error {
 	switch {
 	case project == "":
 		return errors.New("issue resources have no project")
@@ -55,8 +56,13 @@ func (s *Store) EnsureIssueResources(ctx context.Context, project, issue, tree, 
 		return fmt.Errorf("issue resources %s have no tree", issue)
 	case sandbox == "":
 		return fmt.Errorf("issue resources %s have no Sandbox name", issue)
+	case treeEpoch == 0:
+		return fmt.Errorf("issue resources %s have no tree lifecycle epoch", issue)
 	}
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
+		if err := treelifecycle.CheckWork(ctx, tx, project, tree, treeEpoch); err != nil {
+			return err
+		}
 		rootCleaning := false
 		if issue != tree {
 			err := tx.QueryRow(ctx, `select cleanup_started from issue_resources where project = $1 and issue = $2 for share`,
@@ -94,40 +100,27 @@ func (s *Store) EnsureIssueResources(ctx context.Context, project, issue, tree, 
 		return err
 	})
 	if err != nil {
+		if errors.Is(err, treelifecycle.ErrCleanupReserved) {
+			return fmt.Errorf("ensure issue resources %s: %w", issue, errors.Join(ErrIssueCleanupInProgress, err))
+		}
 		return fmt.Errorf("ensure issue resources %s: %w", issue, err)
 	}
 	return nil
 }
 
-// BeginIssueCleanup takes the issue's resources into cleanup once. A nonzero treeGeneration is a
-// workflow linger close: the tree root is locked and must still linger at that generation, no
-// claim of the issue is anything but retired, and, for a tree root, every child record of the tree
-// is cleanup-confirmed (ErrTreeChildrenPending otherwise, which takes nothing). A re-admission
-// updates that root and enqueues its start in one transaction before the start creates a claim;
-// locking and testing the root therefore makes an old close wait for that transaction, then finish
-// without deleting its new run's resources. A zero generation is the explicit operator-close
-// authority for a tree with no workflow root record. A cleanup begun and not confirmed resumes, so
-// a retried close finishes it; an issue with no record, a confirmed cleanup, or a live claim begins
-// nothing.
-func (s *Store) BeginIssueCleanup(ctx context.Context, project, issue, tree string, treeGeneration uint64) (IssueResources, bool, error) {
-	if tree == "" || treeGeneration > math.MaxInt64 {
-		return IssueResources{}, false, fmt.Errorf("begin issue cleanup %s: invalid tree close %s generation %d", issue, tree, treeGeneration)
+// BeginIssueCleanup begins one issue's physical cleanup only under a prior explicit reservation of
+// its tree lifecycle epoch. Workflow and operator authority reserve through different validated
+// entry points; zero is never authority. A retry of an unconfirmed issue cleanup returns it.
+func (s *Store) BeginIssueCleanup(ctx context.Context, project, issue, tree string, treeEpoch uint64) (IssueResources, bool, error) {
+	if tree == "" || treeEpoch == 0 {
+		return IssueResources{}, false, fmt.Errorf("begin issue cleanup %s: missing tree lifecycle epoch", issue)
+	}
+	if err := s.CheckTreeCleanupReservation(ctx, project, tree, treeEpoch); err != nil {
+		return IssueResources{}, false, err
 	}
 	var resources IssueResources
 	began := false
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
-		var currentGeneration int64
-		var lingering bool
-		if treeGeneration != 0 {
-			err := tx.QueryRow(ctx, `select generation, linger_until is not null from issues
-				where key = $1 and project = $2 for update`, tree, project).Scan(&currentGeneration, &lingering)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("tree root %s has no workflow record", tree)
-			}
-			if err != nil {
-				return fmt.Errorf("read tree root %s: %w", tree, err)
-			}
-		}
 		own, err := scanIssueResources(tx.QueryRow(ctx, selectIssueResources+` where project = $1 and issue = $2 for update`, project, issue))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -142,13 +135,6 @@ func (s *Store) BeginIssueCleanup(ctx context.Context, project, issue, tree stri
 			if own.CleanupConfirmedAt.IsZero() {
 				resources, began = own, true
 			}
-			return nil
-		}
-		// A root that re-admitted first has a different generation and no linger. It already
-		// committed the new generation's pending starts, which appear in claims only later. This
-		// fence applies only to beginning deletion: an existing unconfirmed cleanup must resume
-		// and confirm before its marker can admit that new start.
-		if treeGeneration != 0 && (uint64(currentGeneration) != treeGeneration || !lingering) {
 			return nil
 		}
 		var live bool
@@ -212,6 +198,26 @@ func (s *Store) IssueResources(ctx context.Context, project, issue string) (Issu
 		return IssueResources{}, false, fmt.Errorf("read issue resources %s: %w", issue, err)
 	}
 	return resources, true, nil
+}
+
+// ConfirmRootCleanup atomically confirms the root resource and its tree reservation after
+// foreground Sandbox deletion is API-confirmed. Neither confirmation may admit a new epoch alone.
+func (s *Store) ConfirmRootCleanup(ctx context.Context, project, issue, tree string, resourceGeneration, treeEpoch uint64) error {
+	if resourceGeneration == 0 || treeEpoch == 0 {
+		return fmt.Errorf("confirm root cleanup %s: missing resource or tree epoch", issue)
+	}
+	return s.Tx(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `update issue_resources set cleanup_confirmed_at = now(), updated_at = now()
+			where project = $1 and issue = $2 and generation = $3 and cleanup_started = true and cleanup_generation = $3`,
+			project, issue, int64(resourceGeneration))
+		if err != nil {
+			return fmt.Errorf("confirm root cleanup %s: %w", issue, err)
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("confirm root cleanup %s: its generation is not cleaning", issue)
+		}
+		return treelifecycle.ConfirmCleanup(ctx, tx, project, tree, treeEpoch)
+	})
 }
 
 // TreeIssueResources lists a tree's durable resources in the only deletion order that preserves

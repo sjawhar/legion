@@ -3,6 +3,7 @@ package admit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -16,6 +17,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -618,6 +620,21 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			a.mu.Unlock()
 			if held {
 				continue
+			}
+		}
+		if candidate.Key == candidate.Tree {
+			// Claims, issue resources and the runtime key a tree by the normalized project token,
+			// not the Dispatch project key the issue record carries.
+			project, err := claim.ProjectToken(a.project)
+			if err != nil {
+				return admitted, fmt.Errorf("open admission lifecycle of %s: %w", candidate.Key, err)
+			}
+			if _, err := a.store.OpenTreeLifecycle(ctx, tx, project, candidate.Tree, treelifecycle.AuthorityWorkflow); err != nil {
+				if errors.Is(err, treelifecycle.ErrCleanupReserved) {
+					a.log.Info("admission waits for tree cleanup", "issue", candidate.Key, "tree", candidate.Tree)
+					continue
+				}
+				return admitted, fmt.Errorf("open admission lifecycle of %s: %w", candidate.Key, err)
 			}
 		}
 		now := a.now()
