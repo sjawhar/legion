@@ -370,9 +370,10 @@ test("a mounted editor does not reconnect into a document made unreadable while 
   await expect(documentEditor(page)).toContainText("before");
   await expect.poll(sockets).toBe(1);
 
+  // The reconnect the drop starts is held, so it reaches the server only after the tree is made
+  // invalid. A held socket opens no network connection, so it is counted once it is released.
   transport.hold();
   await transport.sever();
-  await expect.poll(sockets).toBe(2);
   const corrupted = await page.request.post(
     `/api/v1/artifacts/${upload.artifact.id}/_test/outside-schema`
   );
