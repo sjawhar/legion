@@ -23,8 +23,8 @@ func TestIssueResourcesFenceCleanupAndReadmission(t *testing.T) {
 	if resources, began, err := store.BeginIssueCleanup(ctx, first.Project, first.Issue, 1); err != nil || !began || !resources.CleanupStarted || resources.CleanupGeneration != 1 {
 		t.Fatalf("first cleanup = %+v, %t, %v", resources, began, err)
 	}
-	if _, began, err := store.BeginIssueCleanup(ctx, first.Project, first.Issue, 1); err != nil || began {
-		t.Fatalf("second cleanup = began %t, err %v", began, err)
+	if retry, began, err := store.BeginIssueCleanup(ctx, first.Project, first.Issue, 1); err != nil || !began || retry.CleanupGeneration != 1 {
+		t.Fatalf("cleanup retry = %+v, began %t, err %v", retry, began, err)
 	}
 	if err := store.ConfirmIssueCleanup(ctx, first.Project, first.Issue, 1); err != nil {
 		t.Fatal(err)

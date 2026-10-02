@@ -55,11 +55,25 @@ func (s *Store) BeginIssueCleanup(ctx context.Context, project, issue string, ge
 		updated_at = now() where project = $1 and issue = $2 and generation = $3 and cleanup_started = false
 		returning project, issue, tree, sandbox_name, generation, cleanup_started, cleanup_generation, cleanup_confirmed_at`, project, issue, int64(generation))
 	resources, err := scanIssueResources(row)
+	if err == nil {
+		return resources, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return IssueResources{}, false, fmt.Errorf("begin issue cleanup %s: %w", issue, err)
+	}
+	// A previous attempt began the durable effect but failed before confirmation. The outbox row
+	// retries with the same close generation; it must resume this cleanup rather than silently
+	// leave cleanup_started true forever. Rows of another generation or a confirmed cleanup remain
+	// no-ops.
+	resources, err = scanIssueResources(s.pool.QueryRow(ctx, `select project, issue, tree, sandbox_name,
+		generation, cleanup_started, cleanup_generation, cleanup_confirmed_at from issue_resources
+		where project = $1 and issue = $2 and generation = $3 and cleanup_started = true
+			and cleanup_generation = $3 and cleanup_confirmed_at is null`, project, issue, int64(generation)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return IssueResources{}, false, nil
 	}
 	if err != nil {
-		return IssueResources{}, false, fmt.Errorf("begin issue cleanup %s: %w", issue, err)
+		return IssueResources{}, false, fmt.Errorf("resume issue cleanup %s: %w", issue, err)
 	}
 	return resources, true, nil
 }
