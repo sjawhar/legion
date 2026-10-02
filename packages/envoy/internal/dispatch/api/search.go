@@ -72,9 +72,9 @@ select r.kind, case when r.owner_artifact_id is null then 'issue' else 'document
        r.owner_project, r.owner_slug, r.owner_artifact_id::text, r.owner_name,
        ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, r.rank,
        ts_headline('english',
-         case when q.term <> '' and strpos(lower(r.text), lower(q.term)) > 0
+         search_text(case when q.term <> '' and strpos(lower(r.text), lower(q.term)) > 0
               then substr(r.text, greatest(1, strpos(lower(r.text), lower(q.term)) - 1500), 4000)
-              else left(r.text, 4000) end,
+              else left(r.text, 4000) end),
          q.tsq, $5) as headline
   from ranked r left join artifacts ar on ar.id = r.artifact_id, q
  order by r.rank desc, r.updated_at desc, r.kind, r.id
