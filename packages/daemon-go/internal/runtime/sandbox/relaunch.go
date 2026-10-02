@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/store"
 )
 
 // Spawn starts a fresh agent for spec's claim, over whatever the claim's Sandbox already holds
@@ -61,6 +62,18 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	}
 	r.forget(spec.Claim)
 	r.own(spec.Claim)
+	r.mu.Lock()
+	resources, testOnly := r.resourceStore, r.testLayoutCensusSkipped
+	r.mu.Unlock()
+	if resources == nil {
+		if !testOnly {
+			return fail("load the durable issue resources capability", errors.New("no issue resource store"))
+		}
+	} else if err := resources.EnsureIssueResources(ctx, store.IssueResources{
+		Project: r.project, Issue: spec.Issue, Tree: spec.Tree, Sandbox: l.name, Generation: spec.Generation,
+	}); err != nil {
+		return fail("record its durable issue resources", err)
+	}
 	release, err := r.lockIssue(ctx, spec.Issue)
 	if err != nil {
 		return fail("take its issue pod launch turn", err)

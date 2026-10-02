@@ -603,6 +603,9 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			Stop:                  cfg.WorkerStopTimeout,
 		},
 	}
+	if setter, ok := rt.(interface{ SetIssueResourceStore(*store.Store) }); ok {
+		setter.SetIssueResourceStore(st)
+	}
 	return &supervision{
 		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,
 		cancel: cancel, cancelStream: cancelStream,
