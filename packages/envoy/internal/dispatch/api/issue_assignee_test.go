@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 type assigneeIssue struct {
@@ -272,6 +274,19 @@ func TestListUsersReturnsSignedInPeopleForHumansOnly(t *testing.T) {
 	denied := agentRequest(t, handler, http.MethodGet, "/api/v1/users", nil, "agent-token")
 	if denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), `"code":"HUMAN_ONLY"`) {
 		t.Fatalf("bearer lists users: status=%d body=%s", denied.Code, denied.Body.String())
+	}
+}
+
+// With nobody in `people`, GET /users is an empty list, never null: the picker maps over it.
+func TestListUsersAnswersAnEmptyListWhenNobodyHasSignedIn(t *testing.T) {
+	mux := http.NewServeMux()
+	Register(mux, Deps{
+		Store:    storetest.Open(t),
+		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: unrecordedPeople{}},
+	})
+	response := dispatchRequest(t, mux, http.MethodGet, "/api/v1/users", nil, "alice")
+	if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != `{"users":[]}` {
+		t.Fatalf("list users with nobody signed in: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

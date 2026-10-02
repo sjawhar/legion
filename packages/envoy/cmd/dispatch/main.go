@@ -220,9 +220,7 @@ func main() {
 	var requestIdentity identity.Identity
 	if boot.IdentityHeader == "" {
 		cookieIdentity := identity.CookieIdentity{SigningKey: signingKey, Sessions: sessions}
-		// The dev sign-in server signs people in without the pool, so it has no membership to
-		// confirm; every other cookie server confirms it hourly (resolveBootConfig requires sign-in).
-		if !boot.DevSignIn {
+		if signIn != nil {
 			cookieIdentity.Membership = &identity.Membership{People: people, Sessions: sessions, SignIn: signIn, Group: boot.SignInGroup}
 		}
 		requestIdentity = cookieIdentity
@@ -472,18 +470,18 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.ListenAddr = listenAddr
-	signIn := map[string]string{
-		"DISPATCH_SIGNIN_ISSUER":        boot.SignInIssuer,
-		"DISPATCH_SIGNIN_CLIENT_ID":     boot.SignInClientID,
-		"DISPATCH_SIGNIN_CLIENT_SECRET": boot.SignInClientSecret,
-		"DISPATCH_SIGNIN_GROUP":         boot.SignInGroup,
+	signInSettings := []struct{ name, value string }{
+		{"DISPATCH_SIGNIN_ISSUER", boot.SignInIssuer},
+		{"DISPATCH_SIGNIN_CLIENT_ID", boot.SignInClientID},
+		{"DISPATCH_SIGNIN_CLIENT_SECRET", boot.SignInClientSecret},
+		{"DISPATCH_SIGNIN_GROUP", boot.SignInGroup},
 	}
 	var missing, set []string
-	for _, name := range []string{"DISPATCH_SIGNIN_ISSUER", "DISPATCH_SIGNIN_CLIENT_ID", "DISPATCH_SIGNIN_CLIENT_SECRET", "DISPATCH_SIGNIN_GROUP"} {
-		if signIn[name] == "" {
-			missing = append(missing, name)
+	for _, setting := range signInSettings {
+		if setting.value == "" {
+			missing = append(missing, setting.name)
 		} else {
-			set = append(set, name)
+			set = append(set, setting.name)
 		}
 	}
 	if len(set) > 0 && len(missing) > 0 {
