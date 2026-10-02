@@ -870,11 +870,14 @@ claim's pod and the image probe's.
   refused at load.
 - **Settings order.** Oh My Pi reads `PI_CONFIG_FILES` in order, each overlay outranking the ones
   before it and all of them outranking a repository's `.omp/config.yml`. Legion writes the pod
-  baseline's overlay (remote compaction, memory backends, image URLs and dev auto-QA off) and names
-  it first, ahead of the operator's, so the operator's overlay outranks it. The baseline also sets
-  `OTEL_SDK_DISABLED=true` and `PI_AUTO_QA=0` unless the pod sets them, and keeps the operator's value
-  when it does. It sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file`, which an operator's pod
-  may not set, since they decide where Oh My Pi keeps the session a resume reads.
+  baseline's overlay (remote compaction, memory backends, image URLs and dev auto-QA off; Python
+  eval off) and names it first, ahead of the operator's, so the operator's overlay outranks it.
+  The worker image supplies no Oh My Pi Python kernel: JavaScript eval stays enabled by OMP's
+  default, while an operator whose image supplies a compatible kernel may set `eval.py: true`.
+  The baseline also sets `OTEL_SDK_DISABLED=true` and `PI_AUTO_QA=0` unless the pod sets them, and
+  keeps the operator's value when it does. It sets `PI_CONFIG_DIR=.omp` and
+  `OMP_SESSION_STORAGE=file`, which an operator's pod may not set, since they decide where Oh My
+  Pi keeps the session a resume reads.
 - **Model roles.** Legion's shipped agents dispatch by role alias: `oracle` and the planner's
   `plan-gap-analyst` as `@oracle`; both review agents and the planner's `plan-reviewer` as
   `@review`; and `deep-worker`, which writes the implementer's code, as `@deep`. The boot gate

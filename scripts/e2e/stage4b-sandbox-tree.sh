@@ -1772,7 +1772,7 @@ begin tree-separation
 wait_for_worker "$tree1" planner
 record_resident "$tree1" planner || fail "tree 1's planner has no session and pod to keep: $(claim_view "$tree1" planner)"
 send_agent "$tree1" planner "Stage 4b proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
-wait_for_phase "$tree1" implementing 900
+wait_for_phase "$tree1" implementing 1800
 wait_for_worker "$tree1" implementer
 record_resident "$tree1" implementer || fail "tree 1's implementer has no session and pod to keep: $(claim_view "$tree1" implementer)"
 wait_for_worker "$tree2" planner

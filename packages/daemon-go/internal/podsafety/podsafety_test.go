@@ -27,6 +27,7 @@ func TestThePinsHoldTheSelfPostingEndpointsOff(t *testing.T) {
 		"memory.backend":            "off",
 		"images.urls.enabled":       false,
 		"dev.autoqa":                false,
+		"eval.py":                   false,
 	} {
 		var got any = pins
 		for _, key := range strings.Split(path, ".") {
@@ -180,6 +181,65 @@ func TestTheBaselineHoldsARepositoryOffAndTheOperatorOverridesIt(t *testing.T) {
 			}
 			if setting.Value != tc.want {
 				t.Errorf("compaction.remoteEndpoint reads %q, want %q", setting.Value, tc.want)
+			}
+		})
+	}
+}
+
+// The worker image deliberately carries no OMP Python kernel. The baseline must therefore remove
+// Python from OMP's effective eval setting while preserving JavaScript (OMP's default); a later
+// operator overlay may deliberately put Python back for an image that supplies that kernel.
+func TestTheBaselineDisablesPythonEvalAndTheOperatorMayEnableIt(t *testing.T) {
+	omp := testbin.OMP(t)
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	testbin.OMPHome(t, omp, home)
+	repo := filepath.Join(dir, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".omp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".omp", "config.yml"), []byte("eval:\n  py: true\n  js: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	operator := filepath.Join(dir, "operator.yml")
+	if err := os.WriteFile(operator, []byte("eval:\n  py: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		pod     []string
+		noApply bool
+		wantPy  bool
+	}{
+		"without the baseline, Python is enabled": {noApply: true, wantPy: true},
+		"the baseline advertises JavaScript only": {wantPy: false},
+		"the operator may re-enable Python":       {pod: []string{"PI_CONFIG_FILES=" + operator}, wantPy: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := append([]string{"HOME=" + home, "PATH=/usr/bin:/bin"}, tc.pod...)
+			if !tc.noApply {
+				var err error
+				if env, err = Apply(env, t.TempDir()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			get := func(path string) bool {
+				cmd := exec.Command(omp, "config", "get", path, "--json")
+				cmd.Dir, cmd.Env = repo, env
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("omp config get %s: %v", path, err)
+				}
+				var setting struct{ Value bool }
+				if err := json.Unmarshal(out, &setting); err != nil {
+					t.Fatalf("omp config get %s printed %q: %v", path, out, err)
+				}
+				return setting.Value
+			}
+			if got := get("eval.py"); got != tc.wantPy {
+				t.Errorf("eval.py reads %t, want %t", got, tc.wantPy)
+			}
+			if got := get("eval.js"); !got {
+				t.Error("eval.js is disabled, want the JavaScript backend the worker image supports")
 			}
 		})
 	}
