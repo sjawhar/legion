@@ -1,6 +1,6 @@
 // Package record implements the credential-request record: its canonical body and content-addressed
 // id, who may decide it, and verification of the requester's signed request object (AGENTC-393
-// design v4, contract v9).
+// design v4, and the shared broker contract at dispatch://AGENTC-393/artifact/plan-overview-md).
 package record
 
 import (
