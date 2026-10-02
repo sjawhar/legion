@@ -139,7 +139,9 @@ test("a conversation send holds Reply and refuses Ctrl+K from the same task", as
       const field = node.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]');
       if (sendButton === null || field === null) throw new Error("expected conversation controls");
       sendButton.click();
-      field.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, ctrlKey: true, key: "k" }));
+      field.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ctrlKey: true, key: "k" })
+      );
     });
 
     await expect(reply).toBeDisabled();

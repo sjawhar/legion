@@ -196,7 +196,9 @@ test("an Escape in Send's task cannot open a margin Discard prompt", async ({ br
       const send = node.querySelector<HTMLButtonElement>('button[type="submit"]');
       if (send === null) throw new Error("expected Send");
       send.click();
-      node.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }));
+      node.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" })
+      );
     });
 
     await expect(form.getByRole("button", { name: "Discard" })).toHaveCount(0);
