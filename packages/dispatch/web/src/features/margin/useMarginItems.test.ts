@@ -10,7 +10,9 @@ import type { Artifact, Comment, Event } from "../../api/types";
 import {
   anchoredThreadComments,
   fetchPinnedEvents,
+  type MarginItem,
   marginItemId,
+  type Thread,
   useMarginItems,
 } from "./useMarginItems";
 
@@ -242,6 +244,104 @@ test("useMarginItems groups replies flat under their root and separates resolved
     view.unmount();
   }
 });
+
+/** The two orders a margin renders: its cards, and its comment threads. */
+interface MarginOrder {
+  items: MarginItem[];
+  threads: Thread[];
+}
+
+function MarginProbe({ read }: { read: (margin: MarginOrder) => string }) {
+  const margin = useMarginItems(
+    { artifactId: artifact.id, kind: "document", project: "CORE", slug: "design-notes" },
+    "comments",
+    { ...artifact, issue_key: null, primary: false, slug: "design-notes" },
+    new Map(),
+    new Map(),
+    undefined
+  );
+  return createElement("output", { "aria-label": "Margin probe" }, read(margin));
+}
+
+/** What `read` makes of a standalone document's margin over `comments`, none of them placed. */
+function readDocumentMargin(comments: Comment[], read: (margin: MarginOrder) => string): string {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  queryClient.setQueryData(["artifact", artifact.id, "comments"], comments);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["user-state"], {});
+  const view = render(
+    createElement(
+      MemoryRouter,
+      { initialEntries: ["/projects/CORE/documents/design-notes"] },
+      createElement(
+        QueryClientProvider,
+        { client: queryClient },
+        createElement(MarginProbe, { read })
+      )
+    )
+  );
+  try {
+    return screen.getByLabelText("Margin probe").textContent ?? "";
+  } finally {
+    view.unmount();
+  }
+}
+
+// The server writes RFC 3339 and drops trailing fractional zeros, so two times in one second are
+// strings of different widths: as text `…01.12Z` sorts after `…01.123456Z`, the later time.
+const sameSecondEarlier = "2026-10-02T00:00:01.12Z";
+const sameSecondLater = "2026-10-02T00:00:01.123456Z";
+
+test("replies written in the same second follow their times, not their timestamp strings", () => {
+  const root = comment("root", "mark-root", "2026-10-02T00:00:00Z");
+  const early = { ...comment("early", null, sameSecondEarlier), reply_to: root.id };
+  const late = { ...comment("late", null, sameSecondLater), reply_to: root.id };
+
+  expect(
+    readDocumentMargin([root, late, early], ({ threads }) =>
+      threads
+        .map(
+          (thread) =>
+            `${thread.key}:${thread.replies.map((reply) => reply.id).join(",")} last ${thread.lastReplyAt}`
+        )
+        .join("|")
+    )
+  ).toBe(`root:early,late last ${sameSecondLater}`);
+});
+
+test("unplaced threads written in the same second list newest first by time", () => {
+  const older = comment("older", "m-older", sameSecondEarlier);
+  const newer = comment("newer", "m-newer", sameSecondLater);
+
+  expect(
+    readDocumentMargin(
+      [older, newer],
+      ({ items, threads }) =>
+        `${items.map(marginItemId).join(",")} | ${threads.map((thread) => thread.key).join(",")}`
+    )
+  ).toBe("newer,older | newer,older");
+});
+
+test("comments written at the same instant are ordered by id", () => {
+  const at = "2026-10-02T00:00:00.5Z";
+  const rootB = comment("b", "m-b", at);
+  const rootA = comment("a", "m-a", at);
+  const replyY = { ...comment("y", null, at), reply_to: rootA.id };
+  const replyX = { ...comment("x", null, at), reply_to: rootA.id };
+
+  expect(
+    readDocumentMargin(
+      [rootB, rootA, replyY, replyX],
+      ({ items, threads }) =>
+        `${items.map(marginItemId).join(",")} | ${threads
+          .map((thread) => `${thread.key}:${thread.replies.map((reply) => reply.id).join(",")}`)
+          .join(" ")}`
+    )
+  ).toBe("a,b | a:x,y b:");
+});
+
 function DocumentItems() {
   const items = useMarginItems(
     {

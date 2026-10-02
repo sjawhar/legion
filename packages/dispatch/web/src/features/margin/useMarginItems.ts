@@ -5,6 +5,7 @@ import { useLocation } from "react-router-dom";
 import { api } from "../../api/client";
 import { inboxQuery, userStateQuery } from "../../api/queries";
 import type { Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
+import { compareTimestamps } from "../../lib/timestamps";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import { pinnedEventIds } from "../issue/pins";
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
@@ -156,7 +157,10 @@ function commentThreads(comments: Comment[]): Thread[] {
     threads.set(rootId, entry);
   }
   return [...threads.values()].map(({ replies, root }) => {
-    replies.sort((left, right) => left.created_at.localeCompare(right.created_at));
+    replies.sort(
+      (left, right) =>
+        compareTimestamps(left.created_at, right.created_at) || left.id.localeCompare(right.id)
+    );
     return {
       anchor: root.anchor,
       key: root.id,
@@ -176,8 +180,10 @@ export function marginItemMarkId(item: MarginItem): string | undefined {
   return item.kind === "ask" ? item.ask.anchor?.mark_id : item.comment.anchor?.mark_id;
 }
 
-export function marginItemCreatedAt(item: MarginItem): string {
-  return item.kind === "ask" ? item.ask.created_at : item.comment.created_at;
+/** What a card's order reads when no placement decides it. */
+interface DatedRecord {
+  created_at: string;
+  id: string;
 }
 
 export function threadMarkId(thread: Thread): string | undefined {
@@ -215,12 +221,12 @@ function itemPlacement(
 }
 
 /** Document order for anchored cards: placed ones by position, unplaced ones after them, and
- *  among the unplaced the newest first. */
+ *  among the unplaced the newest first, by time and then by id. */
 function byPlacementThenNewest(
   leftPlacement: MarkPlacement | undefined,
   rightPlacement: MarkPlacement | undefined,
-  leftCreatedAt: string,
-  rightCreatedAt: string
+  left: DatedRecord,
+  right: DatedRecord
 ): number {
   if (leftPlacement !== undefined && rightPlacement !== undefined) {
     return leftPlacement.pos - rightPlacement.pos;
@@ -228,7 +234,7 @@ function byPlacementThenNewest(
   if (leftPlacement !== undefined || rightPlacement !== undefined) {
     return leftPlacement === undefined ? 1 : -1;
   }
-  return rightCreatedAt.localeCompare(leftCreatedAt);
+  return compareTimestamps(right.created_at, left.created_at) || left.id.localeCompare(right.id);
 }
 
 export function useMarginItems(
@@ -323,8 +329,8 @@ export function useMarginItems(
       byPlacementThenNewest(
         anchorPlacement(left.anchor, markPlacements, blockPlacements),
         anchorPlacement(right.anchor, markPlacements, blockPlacements),
-        left.root.comment.created_at,
-        right.root.comment.created_at
+        left.root.comment,
+        right.root.comment
       ),
     [blockPlacements, markPlacements]
   );
@@ -351,8 +357,8 @@ export function useMarginItems(
         byPlacementThenNewest(
           itemPlacement(left, markPlacements, blockPlacements),
           itemPlacement(right, markPlacements, blockPlacements),
-          marginItemCreatedAt(left),
-          marginItemCreatedAt(right)
+          left.kind === "ask" ? left.ask : left.comment,
+          right.kind === "ask" ? right.ask : right.comment
         )
     );
   }, [anchoredAsks, blockPlacements, markPlacements, sortedThreads]);

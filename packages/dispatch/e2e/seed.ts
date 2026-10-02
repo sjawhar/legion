@@ -68,6 +68,18 @@ export async function setEventCreatedAt(eventId: number, iso: string): Promise<v
   ]);
 }
 
+/** Dates a seeded comment: the server stamps `created_at` itself, so two comments in one second
+ *  with chosen fractions can only be fixtured on the row. */
+export async function setCommentCreatedAt(commentId: string, iso: string): Promise<void> {
+  await execFileAsync("psql", [
+    databaseUrl(),
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-c",
+    `UPDATE comments SET created_at = ${sqlLiteral(iso)}::timestamptz WHERE id = ${sqlLiteral(commentId)}::uuid`,
+  ]);
+}
+
 /** Stamps a verified service token's subject on a seeded comment's author. The API seeder posts
  *  its actor under the shared token and the server drops a body-supplied `service`, so the only
  *  way to fixture a service-authored write is the `comments.author` jsonb itself. */

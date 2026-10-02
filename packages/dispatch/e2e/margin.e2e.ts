@@ -23,7 +23,7 @@ import {
   markSpan,
   selectEditorText,
 } from "./editor";
-import { resetDatabase, setCommentAuthorService } from "./seed";
+import { resetDatabase, setCommentAuthorService, setCommentCreatedAt } from "./seed";
 import { asUser } from "./users";
 
 const session = {
@@ -567,6 +567,67 @@ test("a document mark opens its thread in the margin and stays on the document",
       await expect(deepLinked).toHaveAttribute("aria-current", "true");
       await expect(deepLinked).toContainText("focus this");
     }
+  } finally {
+    await alice.close();
+  }
+});
+
+// The server writes RFC 3339 and drops trailing fractional zeros, so two replies in one second come
+// back as strings of different widths, and as text `…01.12Z` sorts after `…01.123456Z`, the later
+// time. The margin lists the replies in the order they were written.
+test("the margin lists replies written in the same second in the order they were written", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "ORDER", name: "Reply order" });
+  const issue = await createIssue({
+    project: "ORDER",
+    spec: initialMarkdown,
+    title: "Reply order",
+  });
+  const root = await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "brown" }, body: "root of the thread" },
+    session
+  );
+  if (root.anchor === null) {
+    throw new Error("The thread root has no anchor.");
+  }
+  const second = await createComment(
+    issue.key,
+    { body: "written second", reply_to: root.id },
+    session
+  );
+  const first = await createComment(
+    issue.key,
+    { body: "written first", reply_to: root.id },
+    session
+  );
+  await setCommentCreatedAt(first.id, "2026-10-02T00:00:01.12Z");
+  await setCommentCreatedAt(second.id, "2026-10-02T00:00:01.123456Z");
+  // The fixture holds only if the server hands back the two widths the trap needs.
+  const stamped = new Map(
+    (await listComments(issue.key)).map((item) => [item.id, item.created_at])
+  );
+  expect([stamped.get(first.id), stamped.get(second.id)]).toEqual([
+    "2026-10-02T00:00:01.12Z",
+    "2026-10-02T00:00:01.123456Z",
+  ]);
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expectMark(page, root.anchor.mark_id, "brown");
+    await markSpan(page, root.anchor.mark_id).click();
+    const card =
+      testInfo.project.name === "iphone"
+        ? page.getByRole("dialog", { name: "Thread" }).getByTestId(`margin-comment-${root.id}`)
+        : marginCard(page, root.id);
+    await expect(card.getByRole("list", { name: "Replies" }).getByRole("listitem")).toHaveText([
+      /written first/,
+      /written second/,
+    ]);
   } finally {
     await alice.close();
   }
