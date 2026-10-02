@@ -442,6 +442,70 @@ func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, artifact)
 }
 
+// rebuildArtifact discards only a history ygo cannot load and replaces it with one seed update
+// from the latest saved markdown. It is human-only because a rebuild intentionally deletes durable
+// history; a document that loads is refused unchanged.
+func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		Markdown *string `json:"markdown"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	markdown := ""
+	if input.Markdown != nil {
+		markdown = *input.Markdown
+	}
+	report, err := s.deps.Docs.RebuildDocument(r.Context(), artifact.ID, markdown, actor)
+	if errors.Is(err, docs.ErrDocumentLive) {
+		writeError(w, "DOCUMENT_LIVE", http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, docs.ErrDocumentLoads) {
+		writeError(w, "DOCUMENT_LOADS", http.StatusConflict, err.Error())
+		return
+	}
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, report)
+}
+
+func (s *server) injectArtifactSchemaFailure(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	if err := s.deps.Docs.InjectSchemaInvalidForTest(r.Context(), artifact.ID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return

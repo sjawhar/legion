@@ -6,6 +6,7 @@ import type {
   ArchitectureTree,
   Artifact,
   ArtifactBlock,
+  ArtifactRebuildReport,
   ArtifactReview,
   ArtifactReviewState,
   ArtifactText,
@@ -553,6 +554,12 @@ export class DispatchApiClient {
 
   getArtifactText(id: string): Promise<ArtifactText> {
     return this.json<ArtifactText>(`/api/v1/artifacts/${pathSegment(id)}/text`);
+  }
+
+  rebuildArtifact(id: string, markdown?: string): Promise<ArtifactRebuildReport> {
+    return this.post<ArtifactRebuildReport>(`/api/v1/artifacts/${pathSegment(id)}/rebuild`, {
+      ...(markdown === undefined ? {} : { markdown }),
+    });
   }
 
   getArtifactBlocks(id: string): Promise<ArtifactBlock[]> {

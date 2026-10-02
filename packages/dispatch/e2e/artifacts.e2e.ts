@@ -297,3 +297,27 @@ test("the Artifacts badge counts the rows the tab lists, and a row's details are
     );
   }
 });
+
+test("an out-of-schema document names its repair and uploads replacement markdown", async ({
+  page,
+}) => {
+  const issue = await createIssue({ project: "CORE", title: "Repair an unreadable document" });
+  const upload = await createIssueArtifact(issue.key, {
+    content: "before\n",
+    name: "repair.md",
+  });
+  const corrupted = await page.request.post(
+    `/api/v1/artifacts/${upload.artifact.id}/_test/outside-schema`
+  );
+  expect(corrupted.status()).toBe(204);
+
+  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await expect(page.getByText("replace the document from markdown to repair it")).toBeVisible();
+  await page.getByLabel("Upload artifact").setInputFiles({
+    buffer: Buffer.from("repaired\n"),
+    mimeType: "text/markdown",
+    name: "repair.md",
+  });
+  await confirmUpload(page);
+  await expect(documentEditor(page)).toContainText("repaired");
+});

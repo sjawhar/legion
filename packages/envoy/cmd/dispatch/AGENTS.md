@@ -61,15 +61,15 @@ absolute `http` or `https` URL with no path, and is the exact browser origin
 used for GitHub OAuth. It must equal the URL humans type into the browser, with
 `<DISPATCH_SERVER_URL>/auth/callback` registered on the GitHub App. Host
 adapters can override their configured Dispatch base URL with `DISPATCH_URL`.
-`DISPATCH_TEST_HOOKS=1` mounts two test-only routes — unset in every real
-deployment. `POST /api/v1/events/_test/disconnect` closes every open SSE
-connection, as if the server had restarted; e2e's `run-server.sh` sets the flag
-so the web client's reconnect-from-lastId path can be exercised without seeding
-thousands of events to trip the SSE replay cap. `POST
-/api/v1/artifacts/_test/quiesce` closes every live document, flushing each
-through the store, and waits for the settlements in flight, leaving the service
-able to load documents again; `e2e/seed.ts` calls it before truncating so its
-`TRUNCATE` cannot cross lock order with a settlement.
+`DISPATCH_TEST_HOOKS=1` mounts test-only routes — unset in every real deployment. `POST
+/api/v1/events/_test/disconnect` closes every open SSE connection, as if the server had restarted;
+e2e's `run-server.sh` sets the flag so the web client's reconnect-from-lastId path can be exercised
+without seeding thousands of events to trip the SSE replay cap. `POST
+/api/v1/artifacts/_test/quiesce` closes every live document, flushing each through the store, and
+waits for the settlements in flight, leaving the service able to load documents again; `e2e/seed.ts`
+calls it before truncating so its `TRUNCATE` cannot cross lock order with a settlement. `POST
+/api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed tree the document-repair
+browser test uses.
 
 With NATS configured and the GitHub App private key loaded, startup also runs the webhook
 redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redeliver.go`). Every

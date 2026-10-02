@@ -394,8 +394,14 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		return
 	}
 	if documentCode == codeDocSchema {
-		writeError(w, documentCode, http.StatusInternalServerError, err.Error())
-		slog.Error("dispatch: API document outside Proof schema", "error", err)
+		status := http.StatusInternalServerError
+		log := slog.Error
+		if errors.Is(err, docs.ErrDocOutsideSchema) {
+			status = http.StatusConflict
+			log = slog.Warn
+		}
+		writeError(w, documentCode, status, err.Error())
+		log("dispatch: API document outside Proof schema", "error", err)
 		return
 	}
 	if errors.Is(err, docs.ErrIssueClosed) {

@@ -88,7 +88,10 @@ type Service struct {
 	// the publish decides whether to fail that room. Nil outside tests; tests use it to let the
 	// refused room's recovery finish in that window.
 	afterPublishRefused func(room string)
-	settleWG            sync.WaitGroup
+	// afterRebuildMark runs once a rebuild excludes loads and before it checks room residency.
+	// Nil outside tests; tests use it to race a load against the rebuild.
+	afterRebuildMark func(room string)
+	settleWG         sync.WaitGroup
 	// evictWG counts the forced evictions failRoomLocked spawns. They flush the room through
 	// the store, so shutdown joins them before it closes.
 	evictWG sync.WaitGroup
@@ -114,6 +117,7 @@ type Service struct {
 	// write's (liveWriteOrigin), is a connected peer.
 	serviceOrigins   sync.Map
 	conditionalGates sync.Map
+	rebuilding       sync.Map
 	// settleAfterReload names the rooms whose failure dropped their settlement, so the load
 	// of the room that replaces one settles it once (failRoomLocked, onLoadDocument). A
 	// failed room's state is discarded with the room, so the mark cannot live on the state.
@@ -133,6 +137,7 @@ type roomState struct {
 	// contentMarkdown is the live document's rendered markdown when the room's update observer
 	// last saw it change, nil until the room loads.
 	contentMarkdown *string
+	outsideSchema   error
 	updateClasses   []documentUpdateClass
 	pendingUpdates  int
 	settle          *time.Timer

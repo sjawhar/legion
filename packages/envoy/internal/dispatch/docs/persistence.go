@@ -452,6 +452,59 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 	return deleted, err
 }
 
+// Rebuild replaces a room's durable history with one fresh update at the next version. Its
+// caller has already proved that ygo cannot load the old merged history; this method never makes
+// that destructive decision itself.
+func (p *PgVersioned) Rebuild(ctx context.Context, room string, seed []byte) (RebuildReport, error) {
+	if err := crdt.ApplyUpdateV1(crdt.New(), seed, nil); err != nil {
+		return RebuildReport{}, fmt.Errorf("validate rebuilt document seed: %w", err)
+	}
+	var report RebuildReport
+	err := p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin rebuild document: %w", err)
+		}
+		defer tx.Rollback(ctx)
+		if err := p.recoverPruneTx(ctx, tx, room); err != nil {
+			return err
+		}
+		head, err := p.head(ctx, tx, room)
+		if err != nil {
+			return err
+		}
+		for _, deletion := range []struct {
+			query string
+			count *int64
+		}{
+			{`delete from doc_updates where artifact_id = $1`, &report.RemovedUpdates},
+			{`delete from doc_checkpoints where artifact_id = $1`, &report.RemovedCheckpoints},
+			{`delete from doc_snapshots where artifact_id = $1`, &report.RemovedSnapshots},
+		} {
+			result, err := tx.Exec(ctx, deletion.query, room)
+			if err != nil {
+				return fmt.Errorf("delete rebuilt document data: %w", err)
+			}
+			*deletion.count = result.RowsAffected()
+		}
+		report.Head = int64(head) + 1
+		if _, err := tx.Exec(ctx, `
+			insert into doc_updates (artifact_id, version, update, content_changed)
+			values ($1, $2, $3, true)
+		`, room, report.Head, seed); err != nil {
+			return fmt.Errorf("seed rebuilt document: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit rebuild document: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return RebuildReport{}, err
+	}
+	return report, nil
+}
+
 // Delete removes all persisted Yjs data for a document room.
 func (p *PgVersioned) Delete(ctx context.Context, room string) error {
 	return p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {

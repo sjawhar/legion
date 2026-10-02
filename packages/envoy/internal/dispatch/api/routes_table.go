@@ -125,6 +125,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/artifacts/{id}/subscribers", authHuman, "Sessions subscribed to a document's topics.", s.listArtifactSubscribers},
 		{http.MethodDelete, "/api/v1/artifacts/{id}/subscribers/{session_id}", authHuman, "Unsubscribe a session from a document.", s.unsubscribeArtifactSession},
 		{http.MethodGet, "/api/v1/artifacts/{id}", authAny, "Read a document's metadata and current version.", s.getArtifact},
+		{http.MethodPost, "/api/v1/artifacts/{id}/rebuild", authHuman, "Rebuild a document history ygo cannot load from its latest saved markdown; a live document is 409 DOCUMENT_LIVE and one that loads is 409 DOCUMENT_LOADS.", s.rebuildArtifact},
 		{http.MethodGet, "/api/v1/artifacts/{id}/reviews", authAny, "List a document's approval reviews.", s.listArtifactReviews},
 		{http.MethodPost, "/api/v1/artifacts/{id}/reviews", authHuman, "Approve or request changes on a document's latest settled version; answers the approval ask open at that version, and retracts one naming an older version.", s.createArtifactReview},
 		{http.MethodPost, "/api/v1/artifacts/{id}/approval-requests", authAny, "Open the approval ask for a document's latest version, with an optional summary; a repeated request returns the ask open at that version and replaces a stale one, which names an older version.", s.requestArtifactApproval},
@@ -165,6 +166,7 @@ func (s *server) routes() []apiRoute {
 		routes = append(routes,
 			apiRoute{http.MethodPost, "/api/v1/events/_test/disconnect", authAny, "Test hook: drop every open event stream.", s.disconnectAllStreams},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},
+			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
 			apiRoute{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
 		)
 	}

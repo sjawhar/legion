@@ -10,7 +10,7 @@ import {
 } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { Artifact, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
 import { TruncatedText } from "../../components/TruncatedText";
 import { copyText } from "../../lib/clipboard";
@@ -24,6 +24,11 @@ import {
   secondaryButtonText,
 } from "../../theme/classes";
 import { versionsNewestFirst } from "../artifacts/ArtifactHeader";
+import {
+  ArtifactDropZone,
+  ArtifactUploadRow,
+  useArtifactUpload,
+} from "../artifacts/ArtifactUpload";
 import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
 import {
@@ -170,6 +175,18 @@ export function ProofDocument({
     queryKey: ["artifact", artifact.id, "text"],
     queryFn: () => api.getArtifactText(artifact.id),
   });
+  const repairUpload = useArtifactUpload(
+    owner.kind === "issue" ? { issue: owner.key } : { project: owner.project }
+  );
+  const repairError =
+    liveTextQuery.error instanceof ApiError && liveTextQuery.error.code === "DOC_SCHEMA"
+      ? liveTextQuery.error
+      : undefined;
+  const rebuildError =
+    liveTextQuery.error instanceof ApiError &&
+    liveTextQuery.error.code === "DOC_SERVICE_UNAVAILABLE"
+      ? liveTextQuery.error
+      : undefined;
   const blockReferencesQuery = useQuery({
     enabled: version === undefined,
     queryKey: ["artifact", artifact.id, "blocks"],
@@ -209,6 +226,12 @@ export function ProofDocument({
       });
       onVersionChange(created.number);
       setIsNameDialogOpen(false);
+    },
+  });
+  const rebuild = useMutation({
+    mutationFn: () => api.rebuildArtifact(artifact.id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id] });
     },
   });
   const liveMarkdown = liveTextQuery.data?.markdown ?? "";
@@ -283,6 +306,11 @@ export function ProofDocument({
   }, [onToolbarChange]);
 
   useEffect(() => {
+    if (repairError !== undefined || rebuildError !== undefined) {
+      setConnection("failed");
+      setLoadError((repairError ?? rebuildError)?.message);
+      return;
+    }
     if (blockSchema === undefined) {
       return;
     }
@@ -447,7 +475,7 @@ export function ProofDocument({
         editorRef.current = undefined;
       }
     };
-  }, [artifact.id, blockSchema, createEditor, loadTransport]);
+  }, [artifact.id, blockSchema, createEditor, loadTransport, rebuildError, repairError]);
 
   useEffect(() => {
     editorRef.current?.setReadOnly(isClosed || schemaReadOnlyRef.current);
@@ -483,6 +511,47 @@ export function ProofDocument({
         saving={nameVersion.isPending}
       />
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
+      {repairError === undefined ? null : (
+        <div className="space-y-3" role="alert">
+          <p className={dangerText}>{repairError.message}</p>
+          <p>Upload markdown to replace and repair this document.</p>
+          <ArtifactDropZone upload={repairUpload}>
+            <ArtifactUploadRow upload={repairUpload} />
+          </ArtifactDropZone>
+        </div>
+      )}
+      {rebuildError === undefined ? null : (
+        <div className="space-y-3" role="alert">
+          <p className={dangerText}>{rebuildError.message}</p>
+          <p>
+            Rebuilding discards the unreadable document history and restores its latest saved
+            version.
+          </p>
+          <button
+            className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+            disabled={rebuild.isPending}
+            onClick={() => {
+              if (
+                window.confirm(
+                  "Rebuild this document from its latest version? This discards its unreadable history."
+                )
+              ) {
+                rebuild.mutate();
+              }
+            }}
+            type="button"
+          >
+            {rebuild.isPending ? "Rebuilding…" : "Rebuild from the latest version"}
+          </button>
+          {rebuild.isError ? (
+            <p className={dangerText}>
+              {rebuild.error instanceof Error
+                ? rebuild.error.message
+                : "Could not rebuild this document."}
+            </p>
+          ) : null}
+        </div>
+      )}
       {blockSchemaQuery.isError || schemaReadOnly ? <p>Reload to edit.</p> : null}
       {version === undefined && openDecision !== undefined ? (
         <nav
@@ -528,7 +597,7 @@ export function ProofDocument({
           ) : null}
         </nav>
       ) : null}
-      {loadError === undefined ? null : (
+      {loadError === undefined || repairError !== undefined || rebuildError !== undefined ? null : (
         <p className={dangerText} role="alert">
           This document could not load: {loadError}
         </p>
@@ -539,7 +608,7 @@ export function ProofDocument({
         aria-label="Document"
         className="dispatch-doc relative"
         data-read-only={isClosed || schemaReadOnly}
-        hidden={version !== undefined}
+        hidden={version !== undefined || repairError !== undefined || rebuildError !== undefined}
         onClick={(event) => {
           // A modifier click (open in new tab/window) or a drag-selection that happens to end
           // on the link should reach the browser/editor's own handling, not steal the click.

@@ -18,6 +18,8 @@ import (
 type API interface {
 	SeedText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error)
 	ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error)
+	RebuildDocument(ctx context.Context, artifactID, markdown string, actor model.Actor) (RebuildReport, error)
+	InjectSchemaInvalidForTest(ctx context.Context, artifactID string) error
 	Text(ctx context.Context, artifactID string) (string, error)
 	TextWithToken(ctx context.Context, artifactID string) (string, string, error)
 	Blocks(ctx context.Context, artifactID string) ([]model.ArtifactBlock, error)

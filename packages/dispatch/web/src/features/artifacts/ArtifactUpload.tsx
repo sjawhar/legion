@@ -90,9 +90,10 @@ export function useArtifactUpload(
   const upload = useMutation({
     mutationFn: (file: File) =>
       uploadFile(owner, file, { summary: summary.trim() === "" ? undefined : summary.trim() }),
-    onSuccess: () => {
+    onSuccess: (result) => {
       setPendingFile(null);
       setSummary("");
+      void queryClient.invalidateQueries({ queryKey: ["artifact", result.artifact.id] });
       if ("issue" in owner) {
         void queryClient.invalidateQueries({ queryKey: ["artifacts", owner.issue] });
         void queryClient.invalidateQueries({ queryKey: ["issue", owner.issue] });

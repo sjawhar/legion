@@ -6,7 +6,7 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { type FakeDocumentRuntime, fakeDocumentRuntime } from "../../__tests__/document-runtime";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { Artifact, Ask, IssueDetails } from "../../api/types";
 import { MarginProvider, useMargin } from "../margin/margin-context";
 import type { MarkPlacement } from "../margin/useMarginItems";
@@ -168,6 +168,44 @@ async function flushLoadFailure(rejection: Promise<unknown>): Promise<void> {
   });
 }
 
+test("ProofDocument offers a markdown upload when the stored tree is outside the schema", async () => {
+  const getArtifactText = spyOn(api, "getArtifactText").mockRejectedValue(
+    new ApiError(409, {
+      code: "DOC_SCHEMA",
+      error:
+        "document is outside the Proof schema; replace the document from markdown to repair it",
+    })
+  );
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockResolvedValue({
+    artifact,
+    version: {
+      authors: [{ id: "alice", kind: "user" }],
+      created_at: "2026-10-02T00:00:00Z",
+      named: true,
+      number: 2,
+      summary: null,
+    },
+  });
+  try {
+    const { view } = renderProofDocument();
+
+    expect(
+      await screen.findByText(
+        "document is outside the Proof schema; replace the document from markdown to repair it"
+      )
+    ).not.toBeNull();
+    fireEvent.change(screen.getByLabelText("Upload artifact"), {
+      target: { files: [new File(["repaired\n"], "spec.md", { type: "text/markdown" })] },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Upload" }));
+    await waitFor(() => expect(uploadArtifact).toHaveBeenCalledTimes(1));
+    expect(uploadArtifact.mock.calls[0]?.[0]).toEqual({ issue: "CORE-1" });
+    view.unmount();
+  } finally {
+    getArtifactText.mockRestore();
+    uploadArtifact.mockRestore();
+  }
+});
 test("ProofDocument creates the editor on the synced document as the signed-in user", async () => {
   const { connections, editors, sync, toolbar, view } = renderProofDocument();
 

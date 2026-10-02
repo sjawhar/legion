@@ -1870,6 +1870,15 @@ export interface ArtifactText {
   readonly token?: string;
 }
 
+export interface ArtifactRebuildReport {
+  readonly head: number;
+  readonly removed_checkpoints: number;
+  readonly removed_snapshots: number;
+  readonly removed_updates: number;
+  readonly source_version: number;
+  readonly validation_error: string;
+}
+
 export interface ArtifactVersionText extends Version {
   readonly markdown: string;
 }

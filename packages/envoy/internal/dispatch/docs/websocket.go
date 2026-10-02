@@ -275,6 +275,9 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 // placeholder for a connection-holder to park on, so nothing holding a connection is waiting
 // on this read. A vendored reordering of those two calls puts it back in the cycle.
 func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) error {
+	if _, rebuilding := s.rebuilding.Load(info.Room); rebuilding {
+		return fmt.Errorf("%w: the document is being rebuilt; retry", ErrServiceUnavailable)
+	}
 	if s.shuttingDown(info.Room) {
 		return ErrServiceUnavailable
 	}
@@ -308,6 +311,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// failed until the process restarted (LEGION-282). A failed room refuses the load
 	// instead: ygo fails the load, closes the barrier with this error and removes the room,
 	// which lets the eviction finish, and the next access loads the replacement.
+	if _, rebuilding := s.rebuilding.Load(room); rebuilding {
+		return fmt.Errorf("%w: the document is being rebuilt; retry", ErrServiceUnavailable)
+	}
 	if err := s.roomFailure(room); err != nil {
 		return err
 	}
@@ -324,19 +330,27 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		return err
 	}
 	tree, err := treeOf(doc)
-	if err != nil {
-		slog.Error("dispatch: loaded document outside Proof schema", "room", room, "error", err)
+	var contentMarkdown *string
+	var outsideSchema error
+	switch {
+	case errors.Is(err, ErrDocSchema):
+		outsideSchema = repairableSchemaError(err)
+		slog.Warn("dispatch: loaded document outside Proof schema; a replacement from markdown repairs it", "room", room, "error", err)
+	case err != nil:
 		return err
-	}
-	markdown, err := renderTree(tree)
-	if err != nil {
-		slog.Error("dispatch: render loaded document", "room", room, "error", err)
-		return err
+	default:
+		markdown, err := renderTree(tree)
+		if err != nil {
+			slog.Error("dispatch: render loaded document", "room", room, "error", err)
+			return err
+		}
+		contentMarkdown = &markdown
 	}
 	state := s.room(room)
 	state.mu.Lock()
 	state.closed = !open
-	state.contentMarkdown = &markdown
+	state.contentMarkdown = contentMarkdown
+	state.outsideSchema = outsideSchema
 	// A failure dropped this document's settlement (failRoomLocked). This state is the
 	// replacement it left the mark for, so it settles once rather than waiting for an edit to
 	// arm one. A room that failed again while this load ran leaves the mark for its own
@@ -368,7 +382,16 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
 	tree, err := treeOf(doc)
 	if err != nil {
-		slog.Error("dispatch: read updated document", "room", room, "error", err)
+		if errors.Is(err, ErrDocSchema) {
+			state := s.room(room)
+			state.mu.Lock()
+			state.contentMarkdown = nil
+			state.outsideSchema = repairableSchemaError(err)
+			state.mu.Unlock()
+			slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
+		} else {
+			slog.Error("dispatch: read updated document", "room", room, "error", err)
+		}
 		return true
 	}
 	markdown, err := renderTree(tree)
@@ -383,6 +406,7 @@ func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
 		return false
 	}
 	state.contentMarkdown = &markdown
+	state.outsideSchema = nil
 	return true
 }
 

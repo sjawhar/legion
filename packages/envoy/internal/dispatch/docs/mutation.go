@@ -98,7 +98,8 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 		}
 	}()
 	before, err := treeOf(fork)
-	if err != nil {
+	repairing := errors.Is(err, ErrDocSchema)
+	if err != nil && !repairing {
 		return err
 	}
 	unsubscribe := fork.OnUpdate(func(update []byte, _ any) {
@@ -127,14 +128,16 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 	if err != nil {
 		return err
 	}
-	// The measure the room's update observer classifies a live update by (updateChangesMarkdown):
-	// a write that leaves the rendered markdown alone - an anchor mark, a mark record's projection,
-	// an attribute no rendering carries - changes nothing a version stores.
-	beforeMarkdown, err := renderTree(before)
-	if err != nil {
-		return err
+	// A repair replaces a tree that cannot render, so its write necessarily changes the content
+	// a version stores. Other writes compare the markdown before and after as usual.
+	contentChanged := true
+	if !repairing {
+		beforeMarkdown, err := renderTree(before)
+		if err != nil {
+			return err
+		}
+		contentChanged = beforeMarkdown != markdown
 	}
-	contentChanged := beforeMarkdown != markdown
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, contentChanged); err != nil {
 		return fmt.Errorf("append transactional live document update: %w", err)
 	}
@@ -231,27 +234,38 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		current, err := treeOf(doc)
-		if err != nil {
+		repairing := errors.Is(err, ErrDocSchema)
+		if err != nil && !repairing {
 			return err
+		}
+		if repairing {
+			current = nil
 		}
 		target, err := parseReplacing(current, markdown)
 		if err != nil {
 			return err
 		}
-		if err := refuseChangedAsks(current, target, pmdoc.AskContentError, newAskMarkdown()); err != nil {
+		if repairing {
+			if err := s.openAskBlocksKept(ctx, artifactID, target); err != nil {
+				return &ErrInvalidAskBlock{Reason: err}
+			}
+		} else if err := refuseChangedAsks(current, target, pmdoc.AskContentError, newAskMarkdown()); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
-		currentMarkdown, err := renderTree(current)
-		if err != nil {
+		if !repairing {
+			currentMarkdown, err := renderTree(current)
+			if err != nil {
+				return err
+			}
+			if canonical, err = renderTree(target); err != nil {
+				return err
+			}
+			if currentMarkdown == canonical {
+				unchanged = true
+				return nil
+			}
+		} else if canonical, err = renderTree(target); err != nil {
 			return err
-		}
-		canonical, err = renderTree(target)
-		if err != nil {
-			return err
-		}
-		if currentMarkdown == canonical {
-			unchanged = true
-			return nil
 		}
 		type reanchor struct {
 			mark   anchoredMark
@@ -259,16 +273,18 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			attrs  pmdoc.Attrs
 		}
 		reanchors := make([]reanchor, 0, len(anchors))
-		for _, mark := range anchors {
-			range_, _, found := pmdoc.FindMark(current, mark.markType, mark.anchor.MarkID)
-			if !found {
-				continue
+		if !repairing {
+			for _, mark := range anchors {
+				range_, _, found := pmdoc.FindMark(current, mark.markType, mark.anchor.MarkID)
+				if !found {
+					continue
+				}
+				attrs, found := pmdoc.MarkAttrs(current, mark.markType, mark.anchor.MarkID)
+				if !found {
+					return fmt.Errorf("%w: mark %q is missing attributes", ErrDocSchema, mark.anchor.MarkID)
+				}
+				reanchors = append(reanchors, reanchor{mark: mark, range_: range_, attrs: attrs})
 			}
-			attrs, found := pmdoc.MarkAttrs(current, mark.markType, mark.anchor.MarkID)
-			if !found {
-				return fmt.Errorf("%w: mark %q is missing attributes", ErrDocSchema, mark.anchor.MarkID)
-			}
-			reanchors = append(reanchors, reanchor{mark: mark, range_: range_, attrs: attrs})
 		}
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
@@ -302,6 +318,45 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	return canonical, nil
 }
 
+func (s *Service) openAskBlocksKept(ctx context.Context, artifactID string, target *pmdoc.Node) error {
+	rows, err := s.queryFrom(ctx).Query(ctx, `
+		select block_id from asks
+		where block_artifact_id = $1 and state = 'open' and block_id is not null
+	`, artifactID)
+	if err != nil {
+		return fmt.Errorf("read open ask blocks: %w", err)
+	}
+	defer rows.Close()
+	open := map[string]struct{}{}
+	for rows.Next() {
+		var blockID string
+		if err := rows.Scan(&blockID); err != nil {
+			return fmt.Errorf("scan open ask block: %w", err)
+		}
+		open[blockID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read open ask blocks: %w", err)
+	}
+	pmdoc.Walk(target, func(node *pmdoc.Node) bool {
+		if node.Type == "ask" {
+			if blockID, ok := node.Attrs[pmdoc.BlockIDAttr].(string); ok {
+				delete(open, blockID)
+			}
+		}
+		return true
+	})
+	if len(open) == 0 {
+		return nil
+	}
+	blockIDs := make([]string, 0, len(open))
+	for blockID := range open {
+		blockIDs = append(blockIDs, blockID)
+	}
+	sort.Strings(blockIDs)
+	return fmt.Errorf("replacement removes open ask blocks %s", strings.Join(blockIDs, ", "))
+}
+
 // Text returns the rendered document the caller sees (readDocument).
 func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 	doc, err := s.readDocument(ctx, artifactID)
@@ -310,9 +365,10 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 	}
 	tree, err := treeOf(doc)
 	if err != nil {
-		return "", err
+		return "", repairableSchemaError(err)
 	}
-	return renderTree(tree)
+	markdown, err := renderTree(tree)
+	return markdown, repairableSchemaError(err)
 }
 
 // TextWithToken returns canonical markdown and a token over its full Proof tree,
@@ -322,7 +378,8 @@ func (s *Service) TextWithToken(ctx context.Context, artifactID string) (string,
 	if err != nil || doc == nil {
 		return "", "", err
 	}
-	return renderTokenTree(doc)
+	markdown, token, err := renderTokenTree(doc)
+	return markdown, token, repairableSchemaError(err)
 }
 
 // readDocument returns the document the caller sees without loading or writing its room, so it
@@ -390,7 +447,7 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 	}
 	tree, err := treeOf(doc)
 	if err != nil {
-		return "", nil, err
+		return "", nil, repairableSchemaError(err)
 	}
 	tableDescendants, err := pmdoc.TableDescendantIDs(tree)
 	if err != nil {
@@ -431,7 +488,7 @@ func (s *Service) BlockPath(ctx context.Context, artifactID, blockID string) (mo
 	}
 	tree, err := treeOf(doc)
 	if err != nil {
-		return model.BlockPath{}, err
+		return model.BlockPath{}, repairableSchemaError(err)
 	}
 	path, err := pmdoc.BlockPathOf(tree, blockID)
 	if err != nil {

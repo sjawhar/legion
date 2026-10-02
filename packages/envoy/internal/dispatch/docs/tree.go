@@ -12,8 +12,20 @@ import (
 const fragmentName = "prosemirror"
 const marksMapName = "marks"
 
-var ErrInvalidMarkdown = errors.New("markdown is not a Proof document")
-var ErrDocSchema = errors.New("document is outside the Proof schema")
+var (
+	ErrInvalidMarkdown  = errors.New("markdown is not a Proof document")
+	ErrDocSchema        = errors.New("document is outside the Proof schema")
+	ErrDocOutsideSchema = fmt.Errorf("%w; replace the document from markdown to repair it", ErrDocSchema)
+	ErrDocumentLive     = errors.New("document is live")
+	ErrDocumentLoads    = errors.New("this document loads; nothing to rebuild — if it is outside the schema, replace it from markdown to repair it")
+)
+
+func repairableSchemaError(err error) error {
+	if errors.Is(err, ErrDocSchema) && !errors.Is(err, ErrDocOutsideSchema) {
+		return fmt.Errorf("%w: %v", ErrDocOutsideSchema, err)
+	}
+	return err
+}
 
 // parseInput parses markdown a caller writes that replaces no live document: a new document's
 // first text, or the empty text a delete splices. Text an insert or an accept writes into a

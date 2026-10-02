@@ -61,7 +61,7 @@ func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
 // The table is the registration: every row is mounted, every row is described, and the
 // count only moves when a route is deliberately added or removed.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 113
+	const registeredRoutes = 114
 	routes := (&server{}).routes()
 	if len(routes) != registeredRoutes {
 		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)
@@ -85,8 +85,8 @@ func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
 			t.Fatalf("route %q has auth %q", key, route.Auth)
 		}
 	}
-	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != registeredRoutes+3 {
-		t.Fatalf("test hooks add three routes: got %d, want %d", got, registeredRoutes+3)
+	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != registeredRoutes+4 {
+		t.Fatalf("test hooks add four routes: got %d, want %d", got, registeredRoutes+4)
 	}
 }
 
