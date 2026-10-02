@@ -458,6 +458,52 @@ export interface ArtifactBlock {
   };
 }
 
+/** One node on a block's path from the document's top-level block down to the block: its type,
+ *  its block id ("" for a node the live document has not stamped yet) and its index among its
+ *  parent's children. */
+export interface BlockPathEntry {
+  readonly type: string;
+  readonly id: string;
+  readonly index: number;
+}
+
+/** Where a block stands in the table holding it. `row` is the row's index (0 is the header row)
+ *  and `column` the cell's index in its row — the indexes `delete_row` and `delete_column` take.
+ *  `row` is null for the table block itself; `column` and `header` are null for the table and for
+ *  a row block. `header` is the text of the header cell drawn above the cell's column once colspans
+ *  and rowspans take their places, "" where no header cell covers it. `cells` is each cell of the
+ *  row as its opening words, by child index; null for the table block. */
+export interface TablePosition {
+  readonly id: string;
+  readonly row: number | null;
+  readonly column: number | null;
+  readonly header: string | null;
+  readonly cells: readonly string[] | null;
+}
+
+/** Where a block stands in its document: `GET /api/v1/artifacts/{id}/blocks/{block_id}`'s answer,
+ *  and a comment's or ask's `anchor_block`. `table` is present for a table block and for every
+ *  block inside one. */
+export interface BlockPath {
+  readonly id: string;
+  readonly type: string;
+  readonly path: readonly BlockPathEntry[];
+  readonly table?: TablePosition;
+}
+
+/** Where a comment's or an ask's anchor's block stands in the live document. Set on the
+ *  single-record reads alone (`GET /api/v1/comments/{id}`, `GET /api/v1/asks/{id}`); lists and
+ *  events never carry it. */
+export interface AnchorPosition {
+  /** Absent when the anchor names no block, the block has left the document, the document could
+   *  not be read (`anchor_block_error` then says why), or the server predates it. */
+  readonly anchor_block?: BlockPath;
+  /** Why `anchor_block` is absent although the anchor names a block: the read could not read its
+   *  document, named by the code the API answers that error with elsewhere. The read itself still
+   *  answers. */
+  readonly anchor_block_error?: "DOC_SERVICE_UNAVAILABLE" | "DOC_SCHEMA" | "INTERNAL";
+}
+
 /** An opaque SHA-256 token for one stable block's full Proof state, including inline marks. */
 export interface EditBlockPrecondition {
   readonly id: string;
@@ -495,7 +541,7 @@ export interface Version {
 
 export type AskKind = "question" | "approval";
 
-export interface Ask {
+export interface Ask extends AnchorPosition {
   readonly id: string;
   readonly issue_key: string | null;
   readonly artifact_id?: string | null;
@@ -694,9 +740,10 @@ export interface CommentDelivery {
   readonly delivery: DeliveryCapability;
   readonly session_id: string | null;
   readonly envelope_id: string | null;
-  /** The stream already held this message when the attempt was sent, so the mentioned session
-   *  gained nothing from it; `envelope_id` is then null. Absent on a row written before the
-   *  field existed, which reads as false. */
+  /** The stream already held this message when the attempt was sent: an earlier attempt landed,
+   *  so this one is recognised as a repeat and not handed to the mentioned session again
+   *  (`DELIVERY_DUPLICATE_WINDOW_MS` states where, and the limits). `envelope_id` is then null.
+   *  Absent on a row written before the field existed, which reads as false. */
   readonly duplicate?: boolean;
   readonly state: "pending" | "sent" | "failed";
   readonly error: string | null;
@@ -720,13 +767,14 @@ export interface CommentDeliveryEventPayload {
    *  the attempt's claim, and both reply handlers settle the row in the statement that appends
    *  theirs. The attempt row itself reads `pending` between its commit and that outcome. */
   readonly state: "sent" | "failed";
-  /** The stream already held this message, so the mentioned session gained nothing from this
-   *  attempt. Absent means false. */
+  /** The stream already held this message: an earlier attempt landed, so this one is recognised as
+   *  a repeat and not handed to the mentioned session again (`DELIVERY_DUPLICATE_WINDOW_MS`).
+   *  Absent means false. */
   readonly duplicate?: boolean;
   readonly error?: string;
   readonly reply_id: string | null;
 }
-export interface Comment {
+export interface Comment extends AnchorPosition {
   readonly id: string;
   readonly issue_key: string | null;
   readonly artifact_id?: string | null;
@@ -813,19 +861,51 @@ export const MAX_BROADCAST_RECIPIENTS = 100;
 export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
 
 /**
- * How long the notification stream recognises a repeated delivery as a duplicate, in
- * milliseconds. This is the single source for that window: `bus/stream.go`'s
- * `streamDuplicateWindow` is generated from it (`scripts/gen-go.ts` emits
- * `contracts.DeliveryDuplicateWindow`), and the SPA reads it to decide whether re-sending a
- * failed attempt in its own mode can still be promised not to deliver twice.
+ * How long a repeated delivery is recognised, in milliseconds: the window behind the dashboard's
+ * promise that a same-mode Retry "won't deliver it twice". This comment is where that promise is
+ * stated; every other place that relies on it points here.
  *
- * It equals the stream's retention: past it the stream holds neither the message nor its
- * MsgId, so a same-mode retry publishes a second frame and the agent is handed the same
- * instruction again.
+ * Dispatch keys a send by message and mode (`<message>:<mode>`, `<comment>:<target>:<mode>`), the
+ * same for every attempt, and the listener makes that key, scoped to the recipient
+ * (`agent.<session>.<key>`), the envelope's `dedupe_key`. A same-mode Retry of a send that already
+ * landed therefore repeats that frame's dedupe key, and only that: the listener mints a new
+ * `event_id` for every send. Two things recognise the repeat inside this window, both only for a
+ * key that names its event (`dedupeKeyNamesItsEvent` in `envelope.ts`, which every Dispatch key
+ * does), and a recipient is protected by whichever of them sits between it and the bus:
  *
- * It also bounds webhook redelivery dedupe: a GitHub, Slack or Ghost Wispr envelope publishes
+ * - The notification stream stores such a frame under a MsgId of its dedupe key and topic, so it
+ *   keeps one copy and answers the repeat as a duplicate, which the attempt records as
+ *   `duplicate`. That protects a session the listener pushes to from the stream. It does not
+ *   protect a session that subscribes over core NATS: JetStream's check applies to the stream's
+ *   copy only, and a core subscriber is handed every publish, repeats included.
+ * - Each host that subscribes over core NATS (the Oh My Pi extension, the Claude Code channel)
+ *   hands its agent at most one frame per such key inside this window, through
+ *   `createDeliveryDedupe` in `@legion/envoy-client/delivery`. A frame the host answered with an
+ *   error instead (a BTW whose side turn failed) was never handed over, so the host releases its
+ *   key and a same-mode re-send of it reaches the agent.
+ *
+ * It fails in three places. A host holds its keys in memory, so one that restarts after the first
+ * frame landed has forgotten it and a Retry reaches that agent a second time; that is ordinary,
+ * not rare: `claude --resume` starts a new channel process on the same conversation, and a
+ * Sandbox pod resumes its session in a new process. The stream stores a re-send of an attempt the
+ * session answered with an error no more than any other repeat, so a session the listener pushes
+ * to never receives it, and its attempt reads as a duplicate. The dashboard therefore offers no
+ * same-mode Retry for such an attempt and points at a mode change, which is a new key; sending
+ * that Retry under a new key is LEGION-431. And a host keeps at most `DELIVERY_DEDUPE_KEY_LIMIT`
+ * keys, forgetting the oldest past it, so a re-send of a key it was handed before that many later
+ * ones reaches the agent again. The limit is two and a half times what the whole stream stored in
+ * one window when it was set, so a host reaches it only once traffic grows past that or a
+ * producer floods a topic it follows.
+ *
+ * Past the window neither remembers the key, and a same-mode retry is a second delivery, so the
+ * dashboard makes the promise only inside it, and names the restart
+ * (`packages/dispatch/web/src/features/conversation/delivery.ts`). `scripts/gen-go.ts` emits this
+ * as `contracts.DeliveryDuplicateWindow`, which `bus/stream.go` uses for both the stream's
+ * duplicate window and its retention.
+ *
+ * It also bounds webhook redelivery dedupe: a GitHub, Slack or Ghost Wispr envelope is stored
  * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a
- * window shorter than that lets a GitHub redelivery publish a second copy.
+ * window shorter than that lets a GitHub redelivery be stored, and handed to a host, twice.
  *
  * This window bounds a *delivery* retry, not a broadcast *create*:
  * `CreateBroadcastInput.idempotency_key` is a database row that lives as long as its broadcast,
@@ -855,10 +935,12 @@ export interface MessageDelivery {
   readonly session_id: string;
   readonly envelope_id: string | null;
   /**
-   * The stream already held this message when the attempt was sent, so the recipient gained
-   * nothing from it. The attempt is still `sent` - it reached the listener - but `envelope_id`
-   * is null, because the envelope this send minted is the one the stream discarded. Absent on a
-   * row written before the field existed, which reads as false.
+   * The stream already held this message when the attempt was sent: an earlier attempt landed,
+   * so this one is recognised as a repeat and not handed to the recipient again
+   * (`DELIVERY_DUPLICATE_WINDOW_MS` states where, and the limits). The attempt is still `sent` -
+   * it reached the listener - but `envelope_id` is null, because the stream discarded the
+   * envelope this send minted. Absent on a row written before the field existed, which reads as
+   * false.
    */
   readonly duplicate?: boolean;
   /**
@@ -946,8 +1028,9 @@ export interface MessageDeliveryEventPayload {
   readonly target?: string;
   readonly title: string;
   readonly state: "sent" | "failed";
-  /** The stream already held this message, so the recipient gained nothing from this attempt:
-   *  it reached the listener and put nothing new on the session's subject. Absent means false. */
+  /** The stream already held this message: an earlier attempt landed, so this one is recognised as
+   *  a repeat and not handed to the recipient again (`DELIVERY_DUPLICATE_WINDOW_MS`). Absent means
+   *  false. */
   readonly duplicate?: boolean;
   readonly error?: string;
 }

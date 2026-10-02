@@ -47,6 +47,8 @@
         "!packages/proof-editor/src/tests/harness.ts",
         "!packages/proof-editor/src/collab-cursor-plugin.ts",
         "!packages/proof-editor/src/trailing-newline-input.ts",
+        "!packages/proof-editor/src/record-mark-history.ts",
+        "!packages/proof-editor/src/record-mark-retype.ts",
         "packages/proof-editor/upstream/**"
       ],
       "assist": { "enabled": false },

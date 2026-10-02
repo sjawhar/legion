@@ -8,6 +8,7 @@ import { prependEventToLog } from "../../api/sse";
 import type { Actor, Artifact, Comment, Event, UserIssueState, UserState } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { ConversationTab } from "./ConversationTab";
+import { answeredWithErrorGuidance, safeRetryGuidance } from "./delivery";
 
 function message(
   id: number,
@@ -420,6 +421,159 @@ test("hides targeted-message retries on a closed issue", async () => {
 
     expect(screen.queryByRole("button", { name: "Use BTW instead" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Use Send instead" })).toBeNull();
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
+// The issue feed reads an attempt from its receipts. The session's error reply appends the
+// attempt's second receipt as that session, after Dispatch's own `sent` one; that attempt gets a
+// mode change, not a same-mode Retry whose repeated key the stream has already stored.
+test("a targeted message its session answered with an error offers a mode change, not Retry", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const question: Event = {
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-12T00:00:00Z",
+      id: 1,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        author: { id: "alice", kind: "user" },
+        body: "Can this ship?",
+        created_at: "2026-09-12T00:00:00Z",
+        deliveries: [],
+        id: "message-1",
+        in_reply_to: null,
+        issue_key: "CORE-1",
+        target: "session:s1",
+      },
+      seq: 1,
+      type: "message.created",
+    };
+    const receipt = (seq: number, actor: Actor, state: "sent" | "failed"): Event => ({
+      actor,
+      created_at: recentAttemptAt,
+      id: seq,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        attempt: 1,
+        delivery: "btw",
+        ...(state === "failed" ? { error: "side turn failed" } : {}),
+        message_id: "message-1",
+        session_id: "s1",
+        state,
+        title: actor.kind === "user" ? "planner" : "",
+      },
+      seq,
+      type: "message.delivery",
+    });
+    const sent = receipt(2, { id: "alice", kind: "user" }, "sent");
+    const answeredError = receipt(3, { id: "s1", kind: "session" }, "failed");
+    api.getIssueEvents = async () => [question, sent, answeredError];
+    api.listAgents = async () => [];
+
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText(`Failed: side turn failed. ${answeredWithErrorGuidance("card")}`);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Use Send instead" })).toBeTruthy();
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
+// A mention's receipt carries the same mark. The mention list has no mode-change action, so the
+// attempt gets no Retry and is pointed at a new comment; the failure Dispatch recorded for the
+// same attempt keeps its Retry.
+test("a mention its session answered with an error is pointed at a new comment, not Retry", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const comment = (target: string, session: string, seq: number): Event =>
+      ({
+        actor: { id: "alice", kind: "user" },
+        created_at: "2026-09-14T00:00:00Z",
+        id: seq,
+        issue_key: "CORE-1",
+        notify: false,
+        payload: {
+          anchor: null,
+          artifact_name: "",
+          ask_id: null,
+          author: { id: "alice", kind: "user" },
+          body: `@${session} take a look`,
+          created_at: "2026-09-14T00:00:00Z",
+          deliveries: [],
+          edited_at: null,
+          id: `comment-${seq}`,
+          issue_key: "CORE-1",
+          mentions: [{ delivery: "btw", session_id: session, target }],
+          reply_to: null,
+          resolved: false,
+          resolved_at: null,
+          resolved_by: null,
+          suggestion: null,
+          turn: null,
+        },
+        seq,
+        type: "comment.created",
+      }) as Event;
+    const failed = (seq: number, commentSeq: number, session: string, actor: Actor): Event =>
+      ({
+        actor,
+        created_at: recentAttemptAt,
+        id: seq,
+        issue_key: "CORE-1",
+        notify: false,
+        payload: {
+          attempt: 1,
+          comment_id: `comment-${commentSeq}`,
+          delivery: "btw",
+          error: `${session} failed`,
+          reply_id: null,
+          session_id: session,
+          state: "failed",
+          target: `session:${session}`,
+        },
+        seq,
+        type: "comment.delivery",
+      }) as Event;
+    api.getIssueEvents = async () => [
+      comment("session:worker", "worker", 1),
+      failed(2, 1, "worker", { id: "worker", kind: "session" }),
+      comment("session:reviewer", "reviewer", 3),
+      failed(4, 3, "reviewer", { id: "alice", kind: "user" }),
+    ];
+    api.listAgents = async () => [];
+
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText(
+      `session:worker · failed · worker failed. ${answeredWithErrorGuidance("mention")}`
+    );
+    screen.getByText(
+      `session:reviewer · failed · reviewer failed. ${safeRetryGuidance("mention", "reviewer failed")}`
+    );
+    expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
+    unmount();
+
+    // A closed issue shows no Retry and takes no new comment, so neither sentence is said: the
+    // same rule the card follows, where each sentence names a control in the retry row.
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient, true)).unmount;
+    await screen.findByText("session:worker · failed · worker failed");
+    screen.getByText("session:reviewer · failed · reviewer failed");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   } finally {
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;

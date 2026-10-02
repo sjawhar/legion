@@ -15,6 +15,15 @@
 
 ### Added
 
+- `BlockPath`, `BlockPathEntry` and `TablePosition`, the shape of
+  `GET /api/v1/artifacts/{id}/blocks/{block_id}`: a block's path from the top-level block down
+  and, in a table, the row and column indexes `delete_row` and `delete_column` take, the text of
+  the header cell drawn above the cell and the row's cells. `AnchorPosition`, which `Comment` and
+  `Ask` extend, carries the same for the anchor's block on the single-record reads as
+  `anchor_block`, and `anchor_block_error` says why `anchor_block` is absent when the read could
+  not read the anchor's document, as the code the API answers that error with elsewhere
+  (`DOC_SERVICE_UNAVAILABLE`, `DOC_SCHEMA`, `INTERNAL`). `dispatch_read`'s description names the
+  `Position:` line it prints (LEGION-460).
 - `CreateBroadcastInput.idempotency_key` (required): names one send, so the server answers a
   repeat of it with the broadcast the first request made and refuses the key's reuse for a
   different request with `409 BROADCAST_KEY_REUSED` (LEGION-446).
@@ -41,6 +50,10 @@
 - Added `MAX_BROADCAST_RECIPIENTS`, the most sessions one `POST /api/v1/broadcasts` sends to, generated into Go as `contracts.MaxBroadcastRecipients`.
 - Added `SEARCH_QUERY_MAX`, the longest `dispatch_search` query (`GET /api/v1/search`'s `q`), generated into Go as `contracts.SearchQueryMax`; `dispatch_search`'s `query` now refuses a longer one before any request (LEGION-386).
 - Added `SEARCH_QUERY_HINT`, the sentence a refusal over `SEARCH_QUERY_MAX` adds, generated into Go as `contracts.SearchQueryHint`.
+- Added `dedupeKeyNamesItsEvent`, the one rule for whether an envelope's dedupe key names its event
+  (every Dispatch key, a webhook key of its delivery id, and a key minted once for its message,
+  `MINTED_DEDUPE_KEY_PATTERN`), which both core-NATS hosts' dedupe asks; the pattern is generated
+  into Go as `contracts.MintedDedupeKeyPattern` for the stream's MsgId rule.
 - Added `PROJECT_KEY_PATTERN`, a whole project key as the Dispatch server creates them; `dispatch_search`'s `project` must now be empty or match it (`project must be a project key such as CORE`), where any other value was sent and answered with no results.
 - Added `maxHint` to `SchemaApi.string`'s options: text appended to the over-cap message, saying what to send instead.
 - Added `LegionGoChildRequest`, the body of the Go daemon's `POST /legion/v1/children/park` and `/rerun` (an architect's `park_child` and `rerun_child`), whose answers are `LegionGoEmptyResponse`.

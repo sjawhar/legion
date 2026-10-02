@@ -1,7 +1,16 @@
 import { expect, test } from "bun:test";
 import { DELIVERY_DUPLICATE_WINDOW_MS, RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
 
-import { type DeliveryOutcome, isSafeRetry, safeRetryGuidance, withGuidance } from "./delivery";
+import {
+  type DeliveryOutcome,
+  duplicateText,
+  isSafeRetry,
+  receiptAnsweredWithError,
+  rowAnsweredWithError,
+  safeRetryGuidance,
+  strandedRetryGuidance,
+  withGuidance,
+} from "./delivery";
 
 const now = Date.parse("2026-09-25T12:00:00Z");
 
@@ -9,9 +18,9 @@ function attempt(overrides: Partial<DeliveryOutcome> = {}): DeliveryOutcome {
   return { state: "failed", createdAt: new Date(now - 60_000).toISOString(), ...overrides };
 }
 
-// LEGION-271. The promise "Retry won't deliver it twice" is only true while the stream still
-// recognises the repeat. Past its duplicate window the retry publishes a second frame — the
-// defect this issue exists to close, reached by acting on a promise that outlived its truth.
+// LEGION-271. The promise "Retry won't deliver it twice" is only true while a repeat is still
+// recognised (`DELIVERY_DUPLICATE_WINDOW_MS`). Past that window the retry is a second delivery —
+// the defect this issue exists to close, reached by acting on a promise that outlived its truth.
 test("a fresh failed attempt can still be promised a safe retry", () => {
   expect(isSafeRetry(attempt(), now)).toBe(true);
 });
@@ -42,6 +51,35 @@ test("a delivered attempt has no failure to retry", () => {
 test("an attempt the stream already had is not a safe retry either", () => {
   expect(isSafeRetry(attempt({ state: "sent", duplicate: true }), now)).toBe(false);
   expect(isSafeRetry(attempt({ duplicate: true }), now)).toBe(false);
+});
+
+// A same-mode Retry repeats the key the stream stored the answered frame under, so a session the
+// listener pushes to from the stream would never be handed it. A promise that cannot be kept is
+// not made, however young the attempt.
+test("an attempt the session answered with an error is not offered a same-mode retry", () => {
+  expect(isSafeRetry(attempt({ answeredWithError: true }), now)).toBe(false);
+  expect(isSafeRetry(attempt({ answeredWithError: false }), now)).toBe(true);
+});
+
+// Every failure Dispatch records itself leaves the envelope id null; only the session's own error
+// reply fails a row whose send the listener accepted.
+test("a row reads as answered with an error only when a send that reached the listener failed", () => {
+  expect(rowAnsweredWithError({ state: "failed", envelope_id: "envelope-1" })).toBe(true);
+  expect(rowAnsweredWithError({ state: "failed", envelope_id: null })).toBe(false);
+  expect(rowAnsweredWithError({ state: "sent", envelope_id: "envelope-1" })).toBe(false);
+});
+
+// The session's error reply appends the receipt as that session. A receipt appended by whoever
+// sent the attempt, a person or another session, is Dispatch recording the send's own failure.
+test("a receipt reads as answered with an error only when the attempt's own session failed it", () => {
+  const receipt = (actor: { kind: string; id: string }, state = "failed") => ({
+    actor,
+    payload: { state, session_id: "s1" },
+  });
+  expect(receiptAnsweredWithError(receipt({ kind: "session", id: "s1" }))).toBe(true);
+  expect(receiptAnsweredWithError(receipt({ kind: "user", id: "alice" }))).toBe(false);
+  expect(receiptAnsweredWithError(receipt({ kind: "session", id: "sender" }))).toBe(false);
+  expect(receiptAnsweredWithError(receipt({ kind: "session", id: "s1" }, "sent"))).toBe(false);
 });
 
 // The browser's clock is not the server's. `createdAt` is Postgres-stamped and `now` defaults to
@@ -80,10 +118,25 @@ test("the guidance is separated from a cause that has no trailing punctuation", 
 // reached the recipient. For a failure that never got there, nothing was delivered to deliver
 // "again"; and the mention surface has no mode-change button to name at all.
 test("the mode-change clause is offered only for a receipt timeout, and never on a mention", () => {
-  expect(safeRetryGuidance("card", RECEIPT_TIMEOUT_CAUSE)).toBe(
-    "Retry won't deliver it twice; sending in a different mode delivers it again."
-  );
-  expect(safeRetryGuidance("card", "no live session s1")).toBe("Retry won't deliver it twice.");
-  expect(safeRetryGuidance("card", null)).toBe("Retry won't deliver it twice.");
-  expect(safeRetryGuidance("mention", RECEIPT_TIMEOUT_CAUSE)).toBe("Retry won't deliver it twice.");
+  const modeChange = "sending in a different mode delivers it again";
+  expect(safeRetryGuidance("card", RECEIPT_TIMEOUT_CAUSE)).toContain(modeChange);
+  expect(safeRetryGuidance("card", "no live session s1")).not.toContain(modeChange);
+  expect(safeRetryGuidance("card", null)).not.toContain(modeChange);
+  expect(safeRetryGuidance("mention", RECEIPT_TIMEOUT_CAUSE)).not.toContain(modeChange);
+});
+
+// A host holds the keys it was handed in memory, so a session that restarted after the first
+// send (`claude --resume`, a resumed pod) is handed the repeat again. No sentence that promises a
+// single delivery may leave that case out (`DELIVERY_DUPLICATE_WINDOW_MS`).
+test("every single-delivery promise names the restart it does not survive", () => {
+  const inWindow = new Date(now - 60_000).toISOString();
+  for (const promise of [
+    safeRetryGuidance("card", RECEIPT_TIMEOUT_CAUSE),
+    safeRetryGuidance("mention", null),
+    duplicateText,
+    strandedRetryGuidance("aside", inWindow, now),
+    strandedRetryGuidance("aside", undefined, now),
+  ]) {
+    expect(promise).toContain("unless the session restarted since it was sent");
+  }
 });

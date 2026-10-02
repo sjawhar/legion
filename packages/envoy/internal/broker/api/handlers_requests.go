@@ -12,9 +12,10 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/rules"
 )
 
-// createRequestBody is POST /v1/requests's exact contract v9 shape: a signed request object plus
-// an optional, unsigned session_id (wake-only). The v8 "secrets"/"reason"/"issue" top-level fields
-// are gone — they now live inside the signed request object itself.
+// createRequestBody is POST /v1/requests's exact shape in the shared broker contract
+// (dispatch://AGENTC-393/artifact/plan-overview-md): a signed request object plus an optional,
+// unsigned session_id (wake-only). The v8 "secrets"/"reason"/"issue" top-level fields are gone —
+// they now live inside the signed request object itself.
 type createRequestBody struct {
 	Request   string  `json:"request"`
 	SessionID *string `json:"session_id"`
@@ -179,9 +180,9 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	})
 }
 
-// revokeGrant ends a grant for the session that holds it — session proof only, per contract v9
-// (human revocation is the UI's revoke-by-approver route, which Dispatch's server calls with the
-// human's login).
+// revokeGrant ends a grant for the session that holds it — session proof only, per the shared
+// broker contract (human revocation is the UI's revoke-by-approver route, which Dispatch's server
+// calls with the human's login).
 func (s *server) revokeGrant(w http.ResponseWriter, r *http.Request, enrollmentID string) {
 	id, ok := pathUUID(w, r, "id", "GRANT_ID_INPUT", "grant")
 	if !ok {

@@ -79,20 +79,23 @@ import {
   marksPlugins,
   setDefaultMarkdownParser,
   applyRemoteMarks as applyRemoteMarksMutation,
-  deleteMark,
   type StoredMark,
 } from 'proof-sdk-upstream/src/editor/plugins/marks';
 
-import { dispatchMarkPlugins, remarkDispatchMarksPlugin, dispatchMarkHandler, removeAskMark } from './dispatch-marks';
-import type { MarkAction } from './dispatch-marks';
+import { dispatchMarkPlugins, remarkDispatchMarksPlugin, dispatchMarkHandler } from './dispatch-marks';
+import type { MarkAction, SelectionBarActionKind } from './dispatch-marks';
 import { dispatchActionBarPlugin } from './dispatch-action-bar';
 import { registerPopoverHookInstance } from './dispatch-popover-hook';
 import { dispatchMarkEventsPlugin } from './dispatch-mark-events';
 import { remarkSoftBreakAsSpace } from './dispatch-soft-breaks';
 import { configureDispatchLinks } from './dispatch-links';
 import { trailingNewlineInputPlugin } from './trailing-newline-input';
+import { recordMarkHistoryPlugin, setComposerMark as setComposerRecordMark } from './record-mark-history';
+import { removeRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
+import type { RetypeOutcome } from './record-mark-retype';
 
 export type { MarkAction, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
+export type { RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
 export type {
   BlockAttributeKind,
   BlockAttributeSchema,
@@ -163,9 +166,17 @@ export interface ProofEditorHandle extends TypedBlockCommands {
    *  ./dispatch-marks.ts's module doc for why dispatchAsk marks are outside
    *  this system. */
   applyRemoteMarks(metadata: Record<string, StoredMark>, options?: { hydrateAnchors?: boolean }): void;
-  /** Removes a mark by id, trying the unified marks system first and falling
-   *  back to a dispatchAsk mark. */
+  /** Removes the margin composer's provisional record mark - a comment, suggestion or ask - from
+   *  every span it covers, text and inline atoms alike. The removal is the composer's own, so it
+   *  is never an undo step, and it leaves no tombstone and touches no metadata the way upstream's
+   *  `deleteMark` does; it is not for a recorded mark. See ./record-mark-retype.ts. */
   removeMark(markId: string): void;
+  /** Replaces a provisional record mark with a fresh one of `kind` over the same text, as the
+   *  margin composer's kind switch needs; a refusal names why nothing changed. */
+  retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome;
+  /** Names the record mark the open margin composer holds, or null when none is open; a write
+   *  that cuts into it is the composer's own (./record-mark-history.ts). */
+  setComposerMark(markId: string | null): void;
   /** Scrolls a mark's anchor into view and pulses it. Works for both the
    *  unified marks system and dispatchAsk marks: both render `data-id`. */
   focusMark(markId: string): void;
@@ -304,6 +315,8 @@ export async function createProofEditor(
     .use(tableKeyboardPlugin)
     // Firefox puts text typed over a code block's last line before its newline
     .use(trailingNewlineInputPlugin)
+    // The composer's own record-mark writes are never undo steps
+    .use(recordMarkHistoryPlugin)
     .use(placeholderPlugin)
     .config((ctx) => {
       ctx.update(remarkStringifyOptionsCtx, (prev) => ({
@@ -399,8 +412,13 @@ export async function createProofEditor(
       applyRemoteMarksMutation(view, metadata, options);
     },
     removeMark(markId: string): void {
-      if (deleteMark(view, markId)) return;
-      removeAskMark(view, markId);
+      removeRecordMark(view, markId);
+    },
+    retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome {
+      return retypeRecordMark(view, markId, kind, opts.user.name);
+    },
+    setComposerMark(markId: string | null): void {
+      setComposerRecordMark(view, markId);
     },
     focusMark(markId: string): void {
       const escaped = cssEscapeAttrValue(markId);

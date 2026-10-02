@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.6.1]
+
+### Fixed
+
+- A Dispatch Retry no longer reaches a Claude Code session twice. The channel recognised a repeat
+  by its `event_id`, and the listener mints a new one for every send, so a same-mode Retry of a
+  message that had already reached the session arrived as a new event and was notified again, while the
+  dashboard promised "Retry won't deliver it twice". The channel now recognises a repeat by its
+  `dedupe_key`, which a Retry shares with the send before it, through the same
+  `createDeliveryDedupe` the Oh My Pi extension uses, for the 72-hour duplicate window and only for
+  a key that names its event (`dedupeKeyNamesItsEvent` in `@legion/contracts`): every Dispatch key,
+  a webhook key of its delivery id, and a key the listener or the shared transport minted once for
+  its message. Any other key is never dropped, so two distinct events that share one (the MCP
+  bridge's, the Go daemon's outbox row id) both arrive. A second copy of one publish, which a
+  session that follows overlapping topics (a pull request's whole thread and its checks) receives
+  once per subscription, is still recognised by the `event_id` the copies share, whatever its key,
+  so a CI settlement reaches Claude once. A send whose notification failed, or a Dispatch frame
+  the channel answered with an error instead of showing it, is released, so its re-send still
+  arrives; the release undoes only what that frame's own claim recorded, so a frame that merely
+  carries a recorded Dispatch key cannot unclaim it. Keys live in memory, at most 250,000 of them
+  with the oldest forgotten first; a restarted channel server (`claude --resume` included)
+  forgets them.
+
 ## [0.6.0]
 
 ### Changed

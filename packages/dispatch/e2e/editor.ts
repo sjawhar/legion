@@ -54,6 +54,13 @@ export function markSpan(page: Page, markId: string): Locator {
   return documentEditor(page).locator(`[data-id="${markId}"]`);
 }
 
+/** Waits until `page`'s editor shows the mark `markId` over exactly `quote`. */
+export async function expectMark(page: Page, markId: string, quote: string): Promise<void> {
+  const mark = markSpan(page, markId);
+  await expect(mark).toBeVisible();
+  await expect(mark).toHaveText(quote);
+}
+
 export function cursorLabel(page: Page, name: string): Locator {
   return page.locator(".proof-collab-cursor__label", { hasText: name });
 }

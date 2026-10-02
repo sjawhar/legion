@@ -138,10 +138,11 @@ func deliveryErrorText(err error) string {
 // rather than two senders driving one.
 //
 // What a retry beside a lapsed claim does depends on its mode. In the attempt's own mode it
-// resumes that attempt under its original number, and so its original idempotency key, which
-// the stream deduplicates if the send did land. In a different mode it may not: that key is
-// mode-scoped, so riding the same row would publish a second frame under one attempt number.
-// It settles the stranded attempt instead and opens an attempt of its own.
+// resumes that attempt under its original number, and so its original idempotency key, whose
+// repeat of a send that did land is recognised and dropped (DELIVERY_DUPLICATE_WINDOW_MS in
+// packages/contracts). In a different mode it may not: that key is mode-scoped, so riding the
+// same row would publish a second frame under one attempt number. It settles the stranded
+// attempt instead and opens an attempt of its own.
 //
 // Postgres judges it, against the claimed_at Postgres itself wrote. A Dispatch task whose clock
 // ran ahead of the database would otherwise read every live claim as lapsed, and one that ran
