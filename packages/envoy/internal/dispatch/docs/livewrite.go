@@ -357,8 +357,8 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 // A write that inserted no text reaches the verdict too, an empty one: a delete, a replace that
 // only shortens, a retype, an operation that changed nothing - none of them wrote anything a
 // concurrent change could remove, so "nothing was lost" is a statement this can make without
-// reading the room, and it is the one those edits deserve. Only a publish that failed leaves no
-// verdict, which the caller reports as undetermined.
+// reading the room, and it is the one those edits deserve. Only a publish that failed, or a room
+// holding a tree too deep to read, leaves no verdict, which the caller reports as undetermined.
 //
 // The read is a point-in-time statement, as the spec says it must be: srv.Apply holds no room
 // lock across its callback, so a deletion landing after it is not reported, and a deletion
@@ -374,7 +374,12 @@ func (s *Service) recordPublishedLoss(write *liveWrite) {
 	if doc == nil {
 		return
 	}
-	write.lost, write.lostVerdict = write.loss.lost(doc), true
+	lost, err := write.loss.lost(doc)
+	if err != nil {
+		slog.Warn("dispatch: read a published write's text back from its room", "room", write.artifactID, "error", err)
+		return
+	}
+	write.lost, write.lostVerdict = lost, true
 }
 
 // publishLiveUpdate applies one committed update to the room and broadcasts it. It reads nothing

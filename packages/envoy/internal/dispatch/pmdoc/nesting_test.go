@@ -142,6 +142,39 @@ func TestParseRefusesAListWithNoRoomForItsItem(t *testing.T) {
 	}
 }
 
+// An unsupported directive opens a leaf, which the block bound does not count: in the deepest quote
+// the bound allows it is refused for what it is, as it is anywhere else.
+func TestParseRefusesAnUnsupportedDirectiveInTheDeepestQuoteForWhatItIs(t *testing.T) {
+	deepest := strings.Repeat("> ", expectedMaxNesting)
+	for _, test := range []struct{ directive, reason string }{
+		{directive: ":::bogus", reason: malformedDirectiveReason},
+		{directive: "::leaf", reason: "leaf directives (::name) are not supported"},
+		{directive: ":text{a}", reason: "text directives (:name{...}) are not supported"},
+	} {
+		for _, reader := range blockMarkdownReaders() {
+			_, err := reader.parse(deepest + test.directive)
+			if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), test.reason) {
+				t.Errorf("%s of %q in the %dth quote: %v, want ErrSchema saying %q", reader.name, test.directive, expectedMaxNesting, err, test.reason)
+			}
+		}
+	}
+}
+
+// The renderer reads a run back with footnote definitions after it (parseInlineWithDefinitions),
+// through a parser whose definition parser holds the block bound. Definitions nested past it are
+// refused there, as every other reader refuses them, rather than read as the paragraph's text.
+func TestInlineReadBackRefusesDefinitionsNestedPastTheBound(t *testing.T) {
+	definitions := func(depth int) string { return "a\n\n" + strings.Repeat("[^a]: ", depth) + "x" }
+	if _, err := parseInlineWithDefinitions(definitions(expectedMaxNesting), []string{"a"}, inlineMarkdown); err != nil {
+		t.Fatalf("a run before %d nested definitions: %v, want it read", expectedMaxNesting, err)
+	}
+	_, err := parseInlineWithDefinitions(definitions(expectedMaxNesting+1), []string{"a"}, inlineMarkdown)
+	refusal := fmt.Sprintf("line 3 opens a block inside %d blocks", expectedMaxNesting)
+	if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), refusal) {
+		t.Fatalf("a run before %d nested definitions: %v, want ErrSchema saying %q", expectedMaxNesting+1, err, refusal)
+	}
+}
+
 // callerReader is one reader of caller markdown, by name.
 type callerReader struct {
 	name  string
@@ -182,18 +215,25 @@ func TestParseRefusesInlineMarksNestedPastTheBound(t *testing.T) {
 }
 
 // The inline bound is what keeps the readers' recursion off a stack that grows with the caller's
-// nesting: each of them walks a textblock's marks once per level. Under a stack far below the
-// default, a run that nests two thousand times past the bound is refused rather than recursed
-// into.
+// nesting: every walk through a textblock's marks takes a frame per level. That includes
+// goldmark's table transformer, which walks the whole of every cell holding a backtick before an
+// escaped pipe while goldmark is still parsing. Under a stack far below the default, a run that
+// nests ten thousand times past the bound is refused rather than recursed into, in a paragraph
+// and in such a cell.
 func TestInlineMarksNestNoDeeperThanTheBoundUnderASmallStack(t *testing.T) {
-	stacktest.Under(t, 64<<20, func(t *testing.T) {
-		run := strings.Repeat("*", 200_000)
-		for _, reader := range inlineMarkReaders() {
-			t.Run(reader.name, func(t *testing.T) {
-				if _, err := reader.parse(run + "x" + run); !errors.Is(err, ErrSchema) {
-					t.Fatalf("200,000 nested inline marks: %v, want ErrSchema", err)
-				}
-			})
+	stacktest.Under(t, 16<<20, func(t *testing.T) {
+		run := strings.Repeat("*", 2_000_000)
+		for _, shape := range []struct{ name, markdown string }{
+			{name: "paragraph", markdown: run + "x" + run},
+			{name: "table cell", markdown: "| a |\n| --- |\n| `x\\| " + run + "x" + run + " |\n"},
+		} {
+			for _, reader := range inlineMarkReaders() {
+				t.Run(shape.name+"/"+reader.name, func(t *testing.T) {
+					if _, err := reader.parse(shape.markdown); !errors.Is(err, ErrSchema) {
+						t.Fatalf("a million nested inline marks: %v, want ErrSchema", err)
+					}
+				})
+			}
 		}
 	})
 }
@@ -242,8 +282,9 @@ func nestedCallouts(depth int) string {
 	return markdown.String()
 }
 
-// A megabyte of bare quote markers previously built a tree deep enough to overflow the process
-// stack. Refusal must happen before the parser enters the document pipeline's recursive walks.
+// A megabyte of bare quote markers is a million nested quotes, a tree deep enough to overflow the
+// process stack in the document pipeline's recursive walks. It is refused in bounded time, before
+// the parser builds that tree for them to enter.
 func TestParseRefusesAMebibyteOfQuotesInBoundedTime(t *testing.T) {
 	started := time.Now()
 	_, err := Parse(strings.Repeat(">", 1<<20))
@@ -331,6 +372,52 @@ func TestReadRefusesAMillionLevelCRDTTreeWithoutOverflow(t *testing.T) {
 	if past := fmt.Sprintf("a node %d levels deep", expectedMaxTreeDepth+1); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), past) {
 		t.Fatalf("read a million-level CRDT tree: %v, want ErrSchema at level %d", err, expectedMaxTreeDepth+1)
 	}
+}
+
+// The walks over a live tree that do not read it through Read first - the text a mark covers
+// (MarkRange, Unmark) and the text a client wrote (AuthoredTextRuns) - meet the same depth bound:
+// under a stack far below the default, a tree a peer wrote far past it is refused rather than
+// recursed through, and one at the bound is walked.
+func TestLiveTreeWalksStopAtTheDepthBoundUnderASmallStack(t *testing.T) {
+	stacktest.Under(t, 16<<20, func(t *testing.T) {
+		for _, test := range []struct {
+			name      string
+			textLevel int
+			refused   bool
+		}{
+			{name: "at the bound", textLevel: expectedMaxTreeDepth},
+			{name: "far past the bound", textLevel: 300_000, refused: true},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				ydoc := crdt.New()
+				fragment := ydoc.GetXmlFragment("prosemirror")
+				ydoc.Transact(func(txn *crdt.Transaction) {
+					docstest.WriteDeepChain(txn, fragment, test.textLevel, "a")
+				})
+				// The chain's text follows the openings of the textLevel-1 elements holding it.
+				text := Range{From: test.textLevel - 1, To: test.textLevel}
+				comment := Mark{Type: "proofComment", Attrs: Attrs{"id": "c1"}}
+				var marked, unmarked error
+				ydoc.Transact(func(txn *crdt.Transaction) {
+					marked = MarkRange(txn, fragment, text, comment)
+					unmarked = Unmark(txn, fragment, comment.Type, "c1")
+				})
+				_, authored := AuthoredTextRuns(fragment, ydoc.ClientID(), 0, nil)
+				past := fmt.Sprintf("a node %d levels deep", expectedMaxTreeDepth+1)
+				for _, walk := range []struct {
+					name string
+					err  error
+				}{{"MarkRange", marked}, {"Unmark", unmarked}, {"AuthoredTextRuns", authored}} {
+					if test.refused && (!errors.Is(walk.err, ErrSchema) || !strings.Contains(walk.err.Error(), past)) {
+						t.Errorf("%s of a chain %d deep: %v, want ErrSchema saying %q", walk.name, test.textLevel, walk.err, past)
+					}
+					if !test.refused && walk.err != nil {
+						t.Errorf("%s of a chain %d deep: %v, want it walked", walk.name, test.textLevel, walk.err)
+					}
+				}
+			})
+		}
+	})
 }
 
 // An attribute's value nests at most 100 arrays and objects, on a node or a mark. A crafted client

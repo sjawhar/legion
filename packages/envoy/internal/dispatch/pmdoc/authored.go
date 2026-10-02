@@ -33,27 +33,36 @@ type AuthoredText map[string][]ClockRun
 // The walk is lock-free - Children, GetAttributeValue and the text item list each are - so it runs
 // inside the caller's Yjs transaction, which holds the document mutex and would deadlock on a
 // locking read. since, which the caller takes from the document's state vector, does not: it is
-// read before the transaction opens.
-func AuthoredTextRuns(frag *crdt.YXmlFragment, client crdt.ClientID, since uint64, only map[string]struct{}) AuthoredText {
+// read before the transaction opens. It refuses an element past maxTreeDepth, as Read does, since
+// frag can hold a tree a peer wrote that no read has bounded.
+func AuthoredTextRuns(frag *crdt.YXmlFragment, client crdt.ClientID, since uint64, only map[string]struct{}) (AuthoredText, error) {
 	authored := AuthoredText{}
-	authored.collect(frag, client, "", since, only)
+	if err := authored.collect(frag, client, "", since, only, 1); err != nil {
+		return nil, err
+	}
 	for block, runs := range authored {
 		authored[block] = normalizeRuns(runs)
 	}
-	return authored
+	return authored, nil
 }
 
-func (a AuthoredText) collect(frag *crdt.YXmlFragment, client crdt.ClientID, block string, since uint64, only map[string]struct{}) {
+// collect gathers the runs under frag, whose elements stand depth levels below the document.
+func (a AuthoredText) collect(frag *crdt.YXmlFragment, client crdt.ClientID, block string, since uint64, only map[string]struct{}, depth int) error {
 	for _, child := range frag.Children() {
 		switch node := child.(type) {
 		case *crdt.YXmlElement:
+			if err := treeDepthError(depth); err != nil {
+				return err
+			}
 			inner := block
 			if value, ok := node.GetAttributeValue(BlockIDAttr); ok {
 				if id, ok := value.(string); ok && id != "" {
 					inner = id
 				}
 			}
-			a.collect(&node.YXmlFragment, client, inner, since, only)
+			if err := a.collect(&node.YXmlFragment, client, inner, since, only, depth+1); err != nil {
+				return err
+			}
 		case *crdt.YXmlText:
 			if only != nil {
 				if _, wanted := only[block]; !wanted {
@@ -72,6 +81,7 @@ func (a AuthoredText) collect(frag *crdt.YXmlFragment, client crdt.ClientID, blo
 			}
 		}
 	}
+	return nil
 }
 
 // Missing names the blocks of want whose text is no longer all live inside an element carrying

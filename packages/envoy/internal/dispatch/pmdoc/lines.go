@@ -38,11 +38,8 @@ func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budg
 		pc.Set(unclosedFrontmatterKey, true)
 	}
 	pc.Set(tablePaddingBudgetKey, budget)
-	root := withLineStarts(reader.md.Parser(), source, pc)
-	if err, _ := pc.Get(nestingRefusalKey).(error); err != nil {
-		return nil, err
-	}
-	if err := inlineNesting(root, source); err != nil {
+	root, err := withLineStarts(reader.md.Parser(), source, pc)
+	if err != nil {
 		return nil, err
 	}
 	if err, _ := pc.Get(tablePaddingErrorKey).(error); err != nil {
@@ -572,13 +569,25 @@ func recordLine(line gmtext.Segment, source []byte, pc parser.Context) {
 
 // withLineStarts parses source with context, with each footnote definition where it is written
 // (definitionsInPlace), and leaves the lines lineRecordingParagraph recorded on the document root.
-func withLineStarts(p parser.Parser, source []byte, context parser.Context) ast.Node {
-	root := p.Parse(gmtext.NewReader(source), parser.WithContext(context))
+// It refuses markdown nested past either bound - a block nestingGuard refused, or a textblock's
+// inline marks past maxInlineNesting (inlineNesting) - before anything walks the tree. Goldmark
+// runs an AST transformer inside its parse, so pmdoc registers none: the table's (tableCodeSpans)
+// walks a cell once per level of its marks, and runs here once the bounds hold.
+func withLineStarts(p parser.Parser, source []byte, context parser.Context) (ast.Node, error) {
+	reader := gmtext.NewReader(source)
+	root := p.Parse(reader, parser.WithContext(context))
 	definitionsInPlace(root, context)
 	if recorded := context.Get(untrimmedLinesKey); recorded != nil {
 		root.SetAttribute(untrimmedLinesAttr, recorded)
 	}
-	return root
+	if err, _ := context.Get(nestingRefusalKey).(error); err != nil {
+		return nil, err
+	}
+	if err := inlineNesting(root, source); err != nil {
+		return nil, err
+	}
+	tableCodeSpans.Transform(root.(*ast.Document), reader, context)
+	return root, nil
 }
 
 // multilineCodeSpanText is the text of a code span that runs over more than one line, as the

@@ -935,7 +935,7 @@ func yTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 	})
 
 	var texts []yTextNode
-	if err := collectYTexts(frag, "", &texts); err != nil {
+	if err := collectYTexts(frag, "", 1, &texts); err != nil {
 		return nil, err
 	}
 	ranges := make([]yTextRange, 0, len(texts))
@@ -973,18 +973,24 @@ func yTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 	return ranges, nil
 }
 
-func collectYTexts(frag *crdt.YXmlFragment, textblock string, out *[]yTextNode) error {
+// collectYTexts appends each Yjs text under frag, whose elements stand depth levels below the
+// document, with the textblock holding it. It refuses an element past maxTreeDepth, as Read does,
+// rather than recurse once per level of a tree a peer wrote.
+func collectYTexts(frag *crdt.YXmlFragment, textblock string, depth int, out *[]yTextNode) error {
 	for _, child := range frag.Children() {
 		switch current := child.(type) {
 		case *crdt.YXmlText:
 			*out = append(*out, yTextNode{text: current, textblock: textblock})
 		case *crdt.YXmlElement:
+			if err := treeDepthError(depth); err != nil {
+				return err
+			}
 			next := textblock
 			switch current.NodeName {
 			case "paragraph", "heading", "code_block":
 				next = current.NodeName
 			}
-			if err := collectYTexts(&current.YXmlFragment, next, out); err != nil {
+			if err := collectYTexts(&current.YXmlFragment, next, depth+1, out); err != nil {
 				return err
 			}
 		default:
@@ -995,14 +1001,16 @@ func collectYTexts(frag *crdt.YXmlFragment, textblock string, out *[]yTextNode) 
 }
 
 func yFragmentShape(frag *crdt.YXmlFragment) (*Node, error) {
-	children, err := yFragmentShapeChildren(frag)
+	children, err := yFragmentShapeChildren(frag, 1)
 	if err != nil {
 		return nil, err
 	}
 	return &Node{Type: "doc", Children: children}, nil
 }
 
-func yFragmentShapeChildren(frag *crdt.YXmlFragment) ([]*Node, error) {
+// yFragmentShapeChildren is the shape of frag's children, which stand depth levels below the
+// document. It refuses an element past maxTreeDepth, as Read does.
+func yFragmentShapeChildren(frag *crdt.YXmlFragment, depth int) ([]*Node, error) {
 	var children []*Node
 	for _, child := range frag.Children() {
 		switch current := child.(type) {
@@ -1019,7 +1027,10 @@ func yFragmentShapeChildren(frag *crdt.YXmlFragment) ([]*Node, error) {
 				children = append(children, &Node{Type: "text", Text: value})
 			}
 		case *crdt.YXmlElement:
-			grandchildren, err := yFragmentShapeChildren(&current.YXmlFragment)
+			if err := treeDepthError(depth); err != nil {
+				return nil, err
+			}
+			grandchildren, err := yFragmentShapeChildren(&current.YXmlFragment, depth+1)
 			if err != nil {
 				return nil, err
 			}

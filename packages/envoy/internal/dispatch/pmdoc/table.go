@@ -16,12 +16,20 @@ import (
 )
 
 // lazyAwareTable is goldmark's table extension with its paragraph transformer held off lazy
-// continuation lines and off a header line holding one pipe alone (lazyTableRows).
+// continuation lines and off a header line holding one pipe alone (lazyTableRows), and without its
+// AST transformer, which withLineStarts runs itself (tableCodeSpans).
 type lazyAwareTable struct{}
 
 // tableTransformer is goldmark's table paragraph transformer, which lazyTableRows runs where
 // findTableRows reads a table the budget pays for.
 var tableTransformer = extension.NewTableParagraphTransformer()
+
+// tableCodeSpans is goldmark's table AST transformer, which takes the backslash out of an escaped
+// pipe in a cell's code span. It walks the whole of every cell holding a backtick before an escaped
+// pipe, recursing once per level of the cell's marks, and goldmark runs a registered AST
+// transformer inside its parse, before the nesting bounds are checked; withLineStarts runs it once
+// they hold.
+var tableCodeSpans = extension.NewTableASTTransformer()
 
 // maxTablePaddingCells is how many empty cells the tables in the markdown one caller write sends
 // - a document, the operations of an edit batch, an accepted suggestion - may have added to their
@@ -98,10 +106,7 @@ func recordTablePadding(pc parser.Context, padding tablePadding) bool {
 }
 
 func (lazyAwareTable) Extend(m goldmark.Markdown) {
-	m.Parser().AddOptions(
-		parser.WithParagraphTransformers(util.Prioritized(lazyTableRows{table: tableTransformer}, 200)),
-		parser.WithASTTransformers(util.Prioritized(extension.NewTableASTTransformer(), 0)),
-	)
+	m.Parser().AddOptions(parser.WithParagraphTransformers(util.Prioritized(lazyTableRows{table: tableTransformer}, 200)))
 }
 
 // lazyTableRows keeps a table's header and delimiter rows off lazy continuation lines, and opens

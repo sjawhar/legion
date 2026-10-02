@@ -60,8 +60,8 @@ func readChildren(frag *crdt.YXmlFragment, readDelta textDeltaReader, depth int)
 }
 
 func readElement(e *crdt.YXmlElement, readDelta textDeltaReader, depth int) (*Node, error) {
-	if depth > maxTreeDepth {
-		return nil, treeDepthError(depth)
+	if err := treeDepthError(depth); err != nil {
+		return nil, err
 	}
 	n := &Node{Type: e.NodeName}
 	if attrs := e.GetAttributeValues(); len(attrs) > 0 {

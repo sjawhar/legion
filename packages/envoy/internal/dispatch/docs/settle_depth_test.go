@@ -9,11 +9,8 @@ import (
 	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
-
-// documentDepthBound is how many levels below the document a node may stand (pmdoc's
-// maxTreeDepth), the document being level 0.
-const documentDepthBound = 1_000
 
 // A crafted client can write an over-deep tree through the room's CRDT without passing through
 // pmdoc.Update. Settlement skips that tree as it does every tree outside the schema: it writes no
@@ -26,7 +23,7 @@ func TestSettlementSkipsATreeOverTheDepthBound(t *testing.T) {
 	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		fragment := doc.GetXmlFragment(fragmentName)
 		transact(func(txn *crdt.Transaction) {
-			docstest.WriteDeepChain(txn, fragment, documentDepthBound+1, "a")
+			docstest.WriteDeepChain(txn, fragment, pmdoc.MaxTreeDepth()+1, "a")
 		})
 	}); err != nil {
 		t.Fatalf("write crafted CRDT tree: %v", err)

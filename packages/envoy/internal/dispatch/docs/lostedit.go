@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -107,7 +108,10 @@ func recordInsertedText(
 	if err := write(); err != nil {
 		return err
 	}
-	inserted := pmdoc.AuthoredTextRuns(fragment, live.clientID, since, nil)
+	inserted, err := authoredText(fragment, live.clientID, since, nil)
+	if err != nil {
+		return err
+	}
 	if len(inserted) == 0 {
 		return nil
 	}
@@ -131,7 +135,10 @@ func (s *Service) refuseLostWrite(ctx context.Context, room string, fork *crdt.D
 	if write == nil || write.loss == nil || fork == nil {
 		return nil
 	}
-	lost := write.loss.lost(fork)
+	lost, err := write.loss.lost(fork)
+	if err != nil {
+		return err
+	}
 	if len(lost) == 0 {
 		return nil
 	}
@@ -153,18 +160,23 @@ func (s *Service) refuseLostWrite(ctx context.Context, room string, fork *crdt.D
 // lost names the operations whose inserted text doc no longer holds in the block it was written
 // into: deleted, left under a deleted ancestor, or moved into a different block by a concurrent
 // browser move. It reads only the blocks the write inserted into, so an uncontended edit on a
-// large document pays for its own paragraph rather than for every one.
-func (c *lossCheck) lost(doc *crdt.Doc) []int {
+// large document pays for its own paragraph rather than for every one. A doc holding a tree past
+// the schema's depth bound is ErrDocSchema: what it holds cannot be read.
+func (c *lossCheck) lost(doc *crdt.Doc) ([]int, error) {
 	if c == nil || doc == nil {
-		return nil
+		return nil, nil
 	}
 	written := make(map[string]struct{}, len(c.inserted))
 	for block := range c.inserted {
 		written[block] = struct{}{}
 	}
-	missing := c.inserted.Missing(pmdoc.AuthoredTextRuns(doc.GetXmlFragment(fragmentName), c.client, c.since, written))
+	held, err := authoredText(doc.GetXmlFragment(fragmentName), c.client, c.since, written)
+	if err != nil {
+		return nil, err
+	}
+	missing := c.inserted.Missing(held)
 	if len(missing) == 0 {
-		return nil
+		return nil, nil
 	}
 	var lost []int
 	for index, blocks := range c.blocks {
@@ -176,7 +188,20 @@ func (c *lossCheck) lost(doc *crdt.Doc) []int {
 		}
 	}
 	sort.Ints(lost)
-	return lost
+	return lost, nil
+}
+
+// authoredText is pmdoc.AuthoredTextRuns of fragment, its refusal of a tree past the schema's
+// depth bound told as the live document outside the schema (ErrDocSchema), as treeOf tells it.
+func authoredText(fragment *crdt.YXmlFragment, client crdt.ClientID, since uint64, only map[string]struct{}) (pmdoc.AuthoredText, error) {
+	runs, err := pmdoc.AuthoredTextRuns(fragment, client, since, only)
+	if err != nil {
+		if errors.Is(err, pmdoc.ErrSchema) {
+			return nil, fmt.Errorf("%w: %v", ErrDocSchema, err)
+		}
+		return nil, err
+	}
+	return runs, nil
 }
 
 // ErrEditLost refuses a write whose text a concurrent change removed before the write's version

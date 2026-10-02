@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 
 	"github.com/yuin/goldmark/ast"
@@ -18,9 +19,9 @@ const maxNesting = 100
 // blocks. withChild says the parser opens the container with a child inside it on the same line,
 // as a list opens with its first item: the guard then refuses the container whose child would
 // stand past the bound, rather than leave the container without that child, which goldmark's list
-// parser does not expect and panics on at the next line. So a list's guard counts its first item,
-// and goldmark opens a list item only under a list, each at its first item's level: list items
-// need no guard of their own.
+// parser does not expect and panics on at the next line. So a list's guard counts its first item.
+// Goldmark opens a list item only directly inside a list, so every later item of that list stands
+// one level inside it, where the first item did, and list items need no guard of their own.
 type nestingGuard struct {
 	parser.BlockParser
 	withChild bool
@@ -72,9 +73,10 @@ func opensPastBound(parent ast.Node, opens int) bool {
 const maxInlineNesting = 100
 
 // inlineNesting is the refusal of the first textblock in root whose inline markdown nests past
-// maxInlineNesting, or nil. It walks the parsed tree without recursing, so it runs before any walk
-// that recurses through inline nodes - footnoteLabels, the conversion's parseInlineMarks - and each
-// of those meets at most that many.
+// maxInlineNesting, or nil. It walks the parsed tree without recursing, and withLineStarts runs it
+// before any walk that recurses through inline nodes - goldmark's table transformer
+// (tableCodeSpans), footnoteLabels, the conversion's parseInlineMarks - so each of those meets at
+// most that many.
 func inlineNesting(root ast.Node, source []byte) error {
 	depth := 0 // how many inline nodes currently enclose node
 	for node := root; node != nil; {
@@ -114,22 +116,53 @@ func textblockLine(node ast.Node, source []byte) int {
 
 // nestingError is markdown nested past a bound: a block opened inside maxNesting blocks
 // (nestingGuard), or a textblock's inline marks past maxInlineNesting (inlineNesting). line counts
-// from 0 in the source the parser read.
+// from 0 in the source the parser read, and parseUnstamped moves it to count from 0 in what the
+// caller wrote.
 type nestingError struct {
 	line   int
 	inline bool
 }
 
-func (e nestingError) Error() string { return e.at(1).Error() }
+func (e nestingError) Error() string {
+	if e.inline {
+		return fmt.Sprintf("%v: line %d starts text nested inside more than %d inline marks; a document nests at most %d inline marks (emphasis, strong, strikethrough, links, images and code)", ErrSchema, e.line+1, maxInlineNesting, maxInlineNesting)
+	}
+	return fmt.Sprintf("%v: line %d opens a block inside %d blocks; %s", ErrSchema, e.line+1, maxNesting, blockBound)
+}
 
 func (nestingError) Unwrap() error { return ErrSchema }
 
-// at is the refusal naming its line in what the caller wrote, whose first line is firstLine.
-func (e nestingError) at(firstLine int) error {
-	if e.inline {
-		return fmt.Errorf("%w: line %d starts text nested inside more than %d inline marks; a document nests at most %d inline marks (emphasis, strong, strikethrough, links, images and code)", ErrSchema, firstLine+e.line, maxInlineNesting, maxInlineNesting)
+// blockBound is what maxNesting allows, as a refusal names it.
+var blockBound = fmt.Sprintf("a document nests at most %d blocks (quotes, lists and their items, typed blocks and footnote definitions)", maxNesting)
+
+// renderedNesting is err, the parser's refusal of rendered, the markdown of doc, with a refusal of
+// blocks nested past maxNesting told by how many blocks doc nests: its line counts lines of the
+// rendering, which nobody wrote. A write whose own markdown nests within the bound can land deep
+// enough in a document that the result nests past it.
+func renderedNesting(doc *Node, err error) error {
+	if nesting := (nestingError{}); errors.As(err, &nesting) && !nesting.inline {
+		return fmt.Errorf("%w: the result nests %d blocks inside one another; %s", ErrSchema, blockNesting(doc), blockBound)
 	}
-	return fmt.Errorf("%w: line %d opens a block inside %d blocks; a document nests at most %d blocks (quotes, lists and their items, typed blocks and footnote definitions)", ErrSchema, firstLine+e.line, maxNesting, maxNesting)
+	return err
+}
+
+// blockNesting is how many blocks node's markdown nests one inside another to write its deepest
+// block, counted as maxNesting counts them: a quote, a list, a list item, a typed block and a
+// footnote definition each count one. It recurses once per level of node, as rendering it does.
+func blockNesting(node *Node) int {
+	deepest := 0
+	for _, child := range node.Children {
+		deepest = max(deepest, blockNesting(child))
+	}
+	switch node.Type {
+	case "blockquote", "bullet_list", "ordered_list", "list_item", "footnote_definition":
+		deepest++
+	default:
+		if IsTypedBlock(node.Type) {
+			deepest++
+		}
+	}
+	return deepest
 }
 
 // maxTreeDepth is how many levels below the document a node may stand: the document is level 0 and
@@ -144,7 +177,17 @@ func (e nestingError) at(firstLine int) error {
 // maxNesting blocks deep, makes trees about a tenth as deep.
 const maxTreeDepth = 1_000
 
+// MaxTreeDepth is how many levels below the document a node may stand (maxTreeDepth).
+func MaxTreeDepth() int {
+	return maxTreeDepth
+}
+
+// treeDepthError is the refusal of a node depth levels below the document, or nil when it stands
+// within maxTreeDepth.
 func treeDepthError(depth int) error {
+	if depth <= maxTreeDepth {
+		return nil
+	}
 	return fmt.Errorf("%w: a node %d levels deep; a document nests at most %d levels", ErrSchema, depth, maxTreeDepth)
 }
 

@@ -82,8 +82,8 @@ func validateNode(n *Node, depth int) error {
 	if n == nil {
 		return fmt.Errorf("%w: nil node", ErrSchema)
 	}
-	if depth > maxTreeDepth {
-		return treeDepthError(depth)
+	if err := treeDepthError(depth); err != nil {
+		return err
 	}
 	if !nodeTypes[n.Type] {
 		if _, typed := typedBlock(n.Type); !typed {

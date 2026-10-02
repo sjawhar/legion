@@ -37,14 +37,15 @@ var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
 			util.Prioritized(nestingGuard{BlockParser: &typedDirectiveParser{}}, 950),
-			util.Prioritized(nestingGuard{BlockParser: &unsupportedDirectiveParser{}}, 900),
+			util.Prioritized(&unsupportedDirectiveParser{}, 900),
 			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
 		),
 	),
 )}
 
 // blockParsers is goldmark's default block parsers with its list parser held off an empty item
-// that would interrupt a paragraph (emptyItemGuard), its list, list item, setext heading and
+// that would interrupt a paragraph (emptyItemGuard), its list and quote parsers opening no
+// container inside maxNesting blocks (nestingGuard), its list, list item, setext heading and
 // fenced code parsers reading a tab in a line's indentation as the columns it spans, its indented
 // code parser measuring a blank line's columns as a line of code's (codeColumns), its setext
 // heading parser opening no heading under a table (underlineAfterTable), its list, list item and
@@ -212,7 +213,8 @@ func parseUnstamped(markdown string, firstLine int, readFrontmatter bool, budget
 	}
 	root, err := blockReader.parse(source, unclosedFrontmatter, budget)
 	if nesting := (nestingError{}); errors.As(err, &nesting) {
-		return nil, nesting.at(firstLine)
+		nesting.line += firstLine - 1
+		return nil, nesting
 	}
 	if err != nil {
 		return nil, err
@@ -283,8 +285,8 @@ func parseInlineWithDefinitions(markdown string, labels []string, reader inlineR
 		full.WriteString("\n\n[^" + escapeFootnoteLabel(label) + "]: x")
 	}
 	source := []byte(full.String())
-	root := withLineStarts(reader.withDefinitions, source, parser.NewContext())
-	if err := inlineNesting(root, source); err != nil {
+	root, err := withLineStarts(reader.withDefinitions, source, parser.NewContext())
+	if err != nil {
 		return nil, err
 	}
 	first, ok := root.FirstChild().(*ast.Paragraph)
@@ -324,8 +326,8 @@ func ParseInline(markdown string) (nodes []*Node, err error) {
 func readInline(markdown string, inline parser.Parser) (nodes []*Node, err error) {
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
 	source := []byte(LineFeeds(markdown))
-	root := withLineStarts(inline, source, parser.NewContext())
-	if err := inlineNesting(root, source); err != nil {
+	root, err := withLineStarts(inline, source, parser.NewContext())
+	if err != nil {
 		return nil, err
 	}
 	if root.ChildCount() > 1 {
@@ -355,7 +357,7 @@ func BlockReadError(block *Node) error {
 		return err
 	}
 	_, err = ParseRendering(markdown)
-	return err
+	return renderedNesting(block, err)
 }
 
 // BlockShapeError says what a document-level block's markdown reads back as when that is not
@@ -373,7 +375,7 @@ func BlockShapeError(block *Node) error {
 	}
 	back, err := ParseRendering(markdown)
 	if err != nil {
-		return err
+		return renderedNesting(block, err)
 	}
 	if reason := readDifference(doc, back, shapeOnly); reason != "" {
 		return readsBackAs(reason)
@@ -576,8 +578,8 @@ func convert(node ast.Node, source []byte, firstLine int, footnotes map[int]stri
 }
 
 func parseBlock(node ast.Node, source []byte, footnotes map[int]string, depth int) (*Node, error) {
-	if depth > maxTreeDepth {
-		return nil, treeDepthError(depth)
+	if err := treeDepthError(depth); err != nil {
+		return nil, err
 	}
 	switch current := node.(type) {
 	case *ast.Document:

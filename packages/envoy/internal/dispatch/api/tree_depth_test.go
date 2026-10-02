@@ -11,11 +11,8 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
-
-// documentDepthBound is how many levels below the document a node may stand (pmdoc's
-// maxTreeDepth), the document being level 0.
-const documentDepthBound = 1_000
 
 // A live tree as deep as the schema allows is a document every read serves, and one level deeper
 // is outside the schema for every read alike. A crafted browser client writes either through the
@@ -30,8 +27,8 @@ func TestEveryReadServesATreeAtTheDepthBound(t *testing.T) {
 		status   int
 		versions int
 	}{
-		{name: "at the bound", depth: documentDepthBound, status: http.StatusOK, versions: 2},
-		{name: "past the bound", depth: documentDepthBound + 1, status: http.StatusInternalServerError, versions: 1},
+		{name: "at the bound", depth: pmdoc.MaxTreeDepth(), status: http.StatusOK, versions: 2},
+		{name: "past the bound", depth: pmdoc.MaxTreeDepth() + 1, status: http.StatusInternalServerError, versions: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			documentService, handler, database := browserDocumentService(t)
