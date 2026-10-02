@@ -927,7 +927,7 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		{"an approval ask whose document id is empty, as the JSON null reads back", "approval", new(`{"artifact_id":"","name":"","version":0}`), true},
 		// An id that is not a uuid fails the cast answering the ask makes on it (22P02), and one in
 		// capitals is never found by docs.ApprovalAskAt, which compares the id as text with the
-		// lowercase text Postgres writes, so a new version would never retract the ask.
+		// lowercase text Postgres writes, so a new version would never move the ask.
 		{"an approval ask whose document id is empty at a real version", "approval", new(`{"artifact_id":"","name":"spec.md","version":1}`), true},
 		{"an approval ask whose document id is in capitals", "approval", new(`{"artifact_id":"7C1E8A52-3F4B-4D6E-9A0B-1C2D3E4F5A6B","name":"spec.md","version":1}`), true},
 		// A character before or after the uuid, or a letter past f in it, also fails that cast, and
@@ -944,7 +944,7 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		// ScanAsk decodes the approval into model.AskApproval, whose version is an int and whose name
 		// is a string, so a number that is no int, or a name that is no string, fails every read of
 		// the ask: the ask itself, its issue, the inbox, answering it, and each new version of its
-		// document, which reads every open approval ask on the document to retract it.
+		// document, which reads the one open approval ask on the document to move it.
 		{"an approval ask whose version is not a whole number", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1.5}`), true},
 		{"an approval ask whose version is written with a fraction", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1.0}`), true},
 		{"an approval ask whose version is past what an int holds", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":9223372036854775808}`), true},
@@ -1003,9 +1003,10 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 	}
 }
 
-// 0056 backfills the version every existing approval request was shown to, then requires every
-// approval row to carry it. A moved request may advance version while preserving this value, which
-// is how ask reads distinguish a human-ready request from one an agent still owns.
+// 0056 backfills the version every existing approval request was shown to, then keeps an older
+// binary's approval insert valid by adding requested_version from version before the check runs. A
+// moved request may advance version while preserving this value, which is how ask reads distinguish
+// a human-ready request from one an agent still owns.
 func TestMigrate0056BackfillsAndRequiresApprovalRequestedVersion(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -1034,17 +1035,25 @@ func TestMigrate0056BackfillsAndRequiresApprovalRequestedVersion(t *testing.T) {
 	if requestedVersion == nil || *requestedVersion != 7 {
 		t.Fatalf("migrated requested_version = %v, want 7", requestedVersion)
 	}
-	_, err := store.Pool.Exec(ctx, `
+	if _, err := store.Pool.Exec(ctx, `
 		insert into asks (issue_key, author, question, options, kind, approval)
 		values ('CORE-1', '{"kind":"session","id":"s"}', 'Approve spec.md (version 8)?',
 			'[{"label":"Approve"},{"label":"Request changes"}]', 'approval',
 			'{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":8}')
-	`)
-	var refusal *pgconn.PgError
-	if !errors.As(err, &refusal) || refusal.Code != "23514" || refusal.ConstraintName != "asks_approval_kind_check" {
-		t.Fatalf("approval without requested_version error = %v, want asks_approval_kind_check", err)
+	`); err != nil {
+		t.Fatalf("older approval insert: %v", err)
 	}
-	for _, requested := range []string{"0", "8.5", `"8"`, "10000000000"} {
+	if err := store.Pool.QueryRow(ctx, `
+		select (approval->>'requested_version')::integer
+		from asks where question = 'Approve spec.md (version 8)?'
+	`).Scan(&requestedVersion); err != nil {
+		t.Fatalf("read older approval insert: %v", err)
+	}
+	if requestedVersion == nil || *requestedVersion != 8 {
+		t.Fatalf("older requested_version = %v, want 8", requestedVersion)
+	}
+	var refusal *pgconn.PgError
+	for _, requested := range []string{"0", "8.5", `"8"`, "9", "10000000000"} {
 		_, err := store.Pool.Exec(ctx, `
 			insert into asks (issue_key, author, question, options, kind, approval)
 			values ('CORE-1', '{"kind":"session","id":"s"}', 'Approve spec.md (version 8)?',
