@@ -285,6 +285,51 @@ test("an unchanged hand-back after a human comment and a progress note returns t
   }
 });
 
+test("a hand-back is an activity line in the issue's Conversation, live and after a reload", async ({
+  browser,
+}) => {
+  await createProject({ key: "LINE", name: "Hand-back line" });
+  const issue = await createIssue({ project: "LINE", spec: "The plan.", title: "Hand-back line" });
+  const requested = await requestApproval(
+    issue.primary_artifact_id,
+    { summary: "Names the existing proposal." },
+    session
+  );
+  await createComment(
+    issue.key,
+    { ask_id: requested.ask.id, body: "Please clarify the rollout." },
+    { login: "alice" }
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const askTurn = page.locator(`[data-turn="ask:${requested.ask.id}"]`);
+    await expect(askTurn).toHaveCount(1);
+    const handBackLine = page.locator('[data-kind="activity"]', {
+      hasText: `handed “${requested.ask.question}” back for approval`,
+    });
+    await expect(handBackLine).toHaveCount(0);
+
+    // The human's comment left the request waiting on its agent, so this call hands it back.
+    const handedBack = await requestApproval(issue.primary_artifact_id, {}, session);
+    expect(handedBack.ask.id).toBe(requested.ask.id);
+    await expect(handBackLine).toBeVisible();
+    // The hand-back rewords nothing: no edit line, and the ask is still one card.
+    await expect(
+      page.locator('[data-kind="activity"]', { hasText: "edited the question" })
+    ).toHaveCount(0);
+    await expect(askTurn).toHaveCount(1);
+
+    await page.reload();
+    await expect(handBackLine).toBeVisible();
+    await expect(askTurn).toHaveCount(1);
+  } finally {
+    await alice.close();
+  }
+});
+
 test("an answer started before a hand-back that rewords nothing is saved, and the card gains no edit history", async ({
   browser,
 }) => {
