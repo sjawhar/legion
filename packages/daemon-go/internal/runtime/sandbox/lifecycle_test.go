@@ -128,27 +128,11 @@ func TestSuspendWithAStaleLocator(t *testing.T) {
 	})
 }
 
-// Release ends one role's process. While a sibling role of the issue still runs a child, the issue
-// Sandbox stays and the sibling keeps running; once every role launcher reports no child, the
-// released role was the last and the issue Sandbox is deleted. A stale or absent locator's process
-// is not acted on, and a Sandbox already gone is released.
-func TestReleaseDeletesTheIssueSandboxOnlyAfterItsLastRole(t *testing.T) {
+// Release is claim-scoped. It stops at most the role process and MUST NOT delete, suspend or
+// otherwise change its issue Sandbox, even when this runtime sees no sibling role: durable
+// IssueResources owns issue cleanup after a complete store fence and the close/start ordering.
+func TestReleaseNeverDeletesTheIssueSandbox(t *testing.T) {
 	name := SandboxName(workerToken)
-	t.Run("a resident sibling keeps the issue pod", func(t *testing.T) {
-		g := newRig(t, nil)
-		g.issueLaunchers(workerToken)
-		root := g.spawn(rootSpec(t))
-		loc := g.spawn(workerSpec(t))
-		if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}); err != nil {
-			t.Fatal(err)
-		}
-		if g.sandbox(name) == nil {
-			t.Fatal("releasing the tester deleted the issue pod the architect still runs in")
-		}
-		if obs, err := g.r.Probe(g.ctx, root); err != nil || obs.Kind != runtime.Alive {
-			t.Fatalf("the architect after the tester's release: %s, %v", obs.Kind, err)
-		}
-	})
 	for label, locate := range map[string]func(runtime.Locator) *runtime.Locator{
 		"current": func(loc runtime.Locator) *runtime.Locator { return &loc },
 		"stale": func(runtime.Locator) *runtime.Locator {
@@ -157,7 +141,7 @@ func TestReleaseDeletesTheIssueSandboxOnlyAfterItsLastRole(t *testing.T) {
 		},
 		"no locator": func(runtime.Locator) *runtime.Locator { return nil },
 	} {
-		t.Run("the last role, "+label, func(t *testing.T) {
+		t.Run(label, func(t *testing.T) {
 			g := newRig(t, nil)
 			g.issueLaunchers(workerToken)
 			loc := g.spawn(workerSpec(t))
@@ -166,14 +150,20 @@ func TestReleaseDeletesTheIssueSandboxOnlyAfterItsLastRole(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			g.clearActions()
 			if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken, Locator: locate(loc)}); err != nil {
 				t.Fatal(err)
 			}
-			if g.sandbox(name) != nil {
-				t.Fatal("the issue sandbox survived its last role's release")
+			if g.sandbox(name) == nil || g.pod(name) == nil || g.sandbox(name).mode() != modeRunning {
+				t.Fatal("claim release changed the issue pod; only the durable issue-resource cleanup may do that")
+			}
+			for _, write := range g.writes() {
+				if write.resource == "sandboxes" {
+					t.Fatalf("claim release wrote the issue Sandbox: %+v", write)
+				}
 			}
 			if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken}); err != nil {
-				t.Fatalf("releasing a released claim: %v", err)
+				t.Fatalf("releasing an already released claim: %v", err)
 			}
 		})
 	}
@@ -204,36 +194,25 @@ func TestReleaseRefusesALocatorOfAnotherClaim(t *testing.T) {
 	}
 }
 
-// A Release whose issue-level delete failed is an error the daemon retries; once the daemon has
-// retired every claim of the issue, the orphan sweep takes the Sandbox. While a claim of the issue
-// is still known the Sandbox stays.
-func TestAFailedReleaseLeavesTheSandboxToTheSweep(t *testing.T) {
+// Claim release has no issue-Sandbox delete path. A durable IssueResources cleanup effect owns
+// that delete after a complete persisted sibling-claim and close/start fence; the runtime release
+// must succeed even when deleting a Sandbox would fail.
+func TestReleaseNeverAttemptsIssueSandboxCleanup(t *testing.T) {
 	g := newRig(t, nil)
-	g.issueLaunchers(workerToken)
 	loc := g.spawn(workerSpec(t))
-	name := SandboxName(workerToken)
-	failing := true
+	deletes := 0
 	g.dyn.PrependReactor("delete", "sandboxes", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
-		if failing {
-			return true, nil, errors.New("etcdserver: request timed out")
-		}
-		return false, nil, nil
+		deletes++
+		return true, nil, errors.New("claim release must not delete an issue Sandbox")
 	})
-	if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}); err == nil || !strings.Contains(err.Error(), "request timed out") {
-		t.Fatalf("Release: %v, want the delete's failure", err)
-	}
-	failing = false
-	if err := g.r.ReconcileOrphans(g.ctx, []runtime.Known{{Claim: workerToken}}, 0); err != nil {
+	if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}); err != nil {
 		t.Fatal(err)
 	}
-	if g.sandbox(name) == nil {
-		t.Fatal("the sweep deleted the sandbox of a claim still known")
+	if deletes != 0 {
+		t.Fatalf("claim release attempted %d issue Sandbox deletes", deletes)
 	}
-	if err := g.r.ReconcileOrphans(g.ctx, nil, 0); err != nil {
-		t.Fatal(err)
-	}
-	if g.sandbox(name) != nil {
-		t.Fatal("the retired claim's sandbox outlived the sweep")
+	if g.sandbox(SandboxName(workerToken)) == nil {
+		t.Fatal("claim release removed its issue Sandbox")
 	}
 }
 
