@@ -68,7 +68,8 @@ export function AgentMessageComposer({
   /** Whether this row's send is in flight (`sendKey`). The message is addressed by then, so the
    *  picker holds until it lands. */
   sending: boolean;
-  /** The row's synchronous send hold, shared with the composer and route controls. */
+  /** The row's synchronous send hold, shared with the composer, so the picker and Reply hold from
+   *  Send's own task, before `sending` renders. The send's request is frozen at Send either way. */
   submitGuard: SubmitGuard;
   /** The row's `useAgentSendKey`, which names the composer's send. */
   sendKey: MutationKey;
@@ -302,9 +303,7 @@ export function AgentMessageComposer({
         }
         mutationKey={sendKey}
         submitGuard={submitGuard}
-        onCancelReply={() => {
-          if (!submitGuard.held()) onCancelReply();
-        }}
+        onCancelReply={onCancelReply}
         onClose={() => {
           if (sentJustNow.current) {
             sentJustNow.current = false;

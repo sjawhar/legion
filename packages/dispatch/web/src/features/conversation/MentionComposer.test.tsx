@@ -1299,6 +1299,61 @@ test("a refused reply keeps the reply its send started with until the server ans
   }
 });
 
+// A send is the request it started as. TanStack calls `mutationFn` only once `onMutate` has
+// resolved, with the options of the latest render, so a host that re-addresses the composer in
+// Send's own task - before React re-renders, with no guard of its own - changes only what the
+// composer shows next. Here the owner, the kind, the anchor and a reply into a message thread all
+// change at once, and the comment still goes as it was sent, to where it was sent.
+test("a host that re-addresses the composer in Send's task cannot re-address the send", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(refused.promise);
+  const createMessage = spyOn(api, "createMessage").mockResolvedValue(createdMessage);
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(createdMessage);
+  const createAsk = spyOn(api, "createAsk").mockResolvedValue({} as never);
+  const { rerender, view } = renderComposer({
+    anchor: { artifact: "artifact-1", mark_id: "mark-1", quote: "brown" },
+  });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Status please" } });
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      rerender({
+        anchor: { artifact: "artifact-2", mark_id: "mark-2", quote: "fox" },
+        kind: "ask",
+        owner: { kind: "session", sessionId: "A" },
+        replyTo: {
+          author: "Planner",
+          excerpt: "Can this ship?",
+          id: "message-0",
+          parentKind: "message",
+          thread: { delivery: "btw", target: "session:A", title: "Planner" },
+        },
+      });
+    });
+
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    expect(createComment.mock.calls[0]).toEqual([
+      "CORE-1",
+      { anchor: { artifact: "artifact-1", mark_id: "mark-1" }, body: "Status please" },
+    ]);
+    expect(createMessage).not.toHaveBeenCalled();
+    expect(createAgentMessage).not.toHaveBeenCalled();
+    expect(createAsk).not.toHaveBeenCalled();
+
+    refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+    await screen.findByText("Couldn't send — the server is down");
+    expect(field.value).toBe("Status please");
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+    createMessage.mockRestore();
+    createAgentMessage.mockRestore();
+    createAsk.mockRestore();
+  }
+});
+
 test("the kind switch hands the pick to the host and shows why the host refused it", () => {
   const picks: string[] = [];
   const { view } = renderComposer({

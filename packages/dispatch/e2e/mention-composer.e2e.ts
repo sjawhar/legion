@@ -3,12 +3,14 @@ import {
   type FakeSession,
   getSentMessages,
   holdPosts,
+  refusePosts,
   setLiveSessions,
   setSessionSendStatus,
 } from "./agents";
 import {
   createComment,
   createIssue,
+  createMessage,
   createProject,
   createProjectDocument,
   retryCommentDelivery,
@@ -49,6 +51,46 @@ async function issueCommentPayload(page: Page, issueKey: string): Promise<Record
     .getByRole("button", { name: "Send" })
     .click();
   return (await response).request().postDataJSON() as Record<string, unknown>;
+}
+
+/** Types a comment, then clicks Send and the Reply on the turn reading `parent` in one task,
+ *  before React can re-render, and refuses the send. The comment goes as it was written - top
+ *  level, on the issue's comment route - and no reply starts: the draft stays on screen while the
+ *  send is out and comes back with the refusal, with nothing attached to it. */
+async function sendBesideReply(page: Page, issueKey: string, parent: string): Promise<void> {
+  const form = page.getByRole("form", { name: "Comment composer" });
+  const field = form.getByLabel("Comment");
+  const cancelReply = form.getByRole("button", { name: "Cancel reply" });
+  const refuse = await refusePosts(page, `**/api/v1/issues/${issueKey}/{comments,messages}`);
+  const sent = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      /^\/api\/v1\/issues\/[^/]+\/(comments|messages)$/.test(new URL(request.url()).pathname)
+  );
+  const reply = await page
+    .getByRole("list", { name: "Conversation turns" })
+    .locator(":scope > li")
+    .filter({ hasText: parent })
+    .getByRole("button", { name: "Reply" })
+    .elementHandle();
+  await field.fill("Status please");
+  await form.evaluate((node, replyButton) => {
+    const send = node.querySelector<HTMLButtonElement>('button[type="submit"]');
+    if (send === null || !(replyButton instanceof HTMLButtonElement))
+      throw new Error("expected Send and the turn's Reply");
+    send.click();
+    replyButton.click();
+  }, reply);
+
+  const request = await sent;
+  expect(new URL(request.url()).pathname).toBe(`/api/v1/issues/${issueKey}/comments`);
+  expect(request.postDataJSON()).toEqual({ body: "Status please" });
+  await expect(field).toHaveValue("Status please");
+  await expect(cancelReply).toHaveCount(0);
+  refuse();
+  await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+  await expect(field).toHaveValue("Status please");
+  await expect(cancelReply).toHaveCount(0);
 }
 
 test.beforeEach(async () => {
@@ -149,6 +191,47 @@ test("a conversation send holds Reply and refuses Ctrl+K from the same task", as
     send.release();
     await expect(field).toHaveValue("");
     await expect(page.getByRole("dialog", { name: "Reference picker" })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A send's address is fixed in the task that starts it. A Reply clicked in that same task, before
+// React disables it, must not turn the comment on its way into a reply.
+test("a same-task Reply cannot make a conversation comment a reply", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Held conversation" });
+  await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await sendBesideReply(page, issue.key, "Earlier comment");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A Reply on an agent's message thread answers on the issue's message route, to that agent. In
+// Send's task it must not move the comment on its way there.
+test("a same-task Reply cannot send a conversation comment to an agent's message thread", async ({
+  browser,
+}) => {
+  await setLiveSessions([planner]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Held conversation" });
+  await createMessage(issue.key, {
+    body: "Can this ship?",
+    delivery: "btw",
+    target: `session:${planner.session_id}`,
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await sendBesideReply(page, issue.key, "Can this ship?");
   } finally {
     await alice.close();
   }

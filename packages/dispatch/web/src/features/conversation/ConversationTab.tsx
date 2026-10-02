@@ -562,7 +562,8 @@ function CommentTurn({
   onAction: (id: string, kind: "accept" | "reject" | "resolve" | "reopen") => void;
   onPhoneThreadToggle?: () => void;
   onPin: () => void;
-  onReply: (target: ReplyTarget) => void;
+  /** Starts a reply, and says whether it did: a reply the composer holds opens no thread. */
+  onReply: (target: ReplyTarget) => boolean;
   onRetryAction: () => void;
   pendingAction: boolean;
   pinned: boolean;
@@ -687,12 +688,12 @@ function CommentTurn({
           <ReplyButton
             disabled={replyDisabled}
             onClick={() => {
+              if (!onReply(commentReplyTarget(item.event, agents, issueKey))) return;
               if (isPhone) {
                 onPhoneThreadToggle?.();
               } else {
                 setExpanded(true);
               }
-              onReply(commentReplyTarget(item.event, agents, issueKey));
             }}
           />
         )}
@@ -799,6 +800,13 @@ export function ConversationTab({
   const queryClient = useQueryClient();
   const sendKey = useMemo<MutationKey>(() => ["conversation-composer", issueKey], [issueKey]);
   const composerSending = useIsMutating({ mutationKey: sendKey }) > 0;
+  // Each composer's own submit guard, held from Send's task until the server answers.
+  // `composerSending` disables every Reply only once React renders, and a Reply in that gap would
+  // start a reply whose prefill replaces the draft on its way - and on a phone, a comment's Reply
+  // opens its thread, unmounting the composer that holds the send and its refusal. The request
+  // itself is frozen when Send starts (`MentionComposer`); these guards decide what the reader sees.
+  const dockedSendGuard = useSubmitGuard();
+  const threadSendGuard = useSubmitGuard();
   const [failedOps, setFailedOps] = useState<FailedStateOperations>();
   const viewer = useQuery(whoAmIQuery());
   const [retryingFailedOps, setRetryingFailedOps] = useState(false);
@@ -904,6 +912,11 @@ export function ConversationTab({
   });
   const [ownSendCount, setOwnSendCount] = useState(0);
   const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null);
+  const beginReply = (target: ReplyTarget): boolean => {
+    if (dockedSendGuard.held() || threadSendGuard.held()) return false;
+    setReplyTo(target);
+    return true;
+  };
   const phoneReplyTargetsThread =
     phoneThread !== undefined &&
     replyTo?.parentKind === "comment" &&
@@ -1211,6 +1224,7 @@ export function ConversationTab({
         <MentionComposer
           docked
           mutationKey={sendKey}
+          submitGuard={dockedSendGuard}
           onCancelReply={() => setReplyTo(null)}
           onClose={() => setReplyTo(null)}
           onSent={() => {
@@ -1300,7 +1314,7 @@ export function ConversationTab({
                 issueKey={issueKey}
                 item={item}
                 key={item.id}
-                onReply={setReplyTo}
+                onReply={beginReply}
                 register={registerObserved}
                 replyDisabled={composerSending}
                 titles={titles}
@@ -1320,7 +1334,7 @@ export function ConversationTab({
                 item={item}
                 key={item.id}
                 onPin={onPin}
-                onReply={setReplyTo}
+                onReply={beginReply}
                 pinned={pinned}
                 register={registerObserved}
                 replyDisabled={composerSending}
@@ -1353,7 +1367,7 @@ export function ConversationTab({
                 item={item}
                 key={item.id}
                 onPin={onPin}
-                onReply={setReplyTo}
+                onReply={beginReply}
                 pinned={pinned}
                 register={registerObserved}
                 replyDisabled={composerSending}
@@ -1470,7 +1484,7 @@ export function ConversationTab({
                   op: isPinnedEvent(dismissed, phoneThread.pinEventId) ? "unpin" : "pin",
                 }))
               }
-              onReply={setReplyTo}
+              onReply={beginReply}
               pinned={isPinnedEvent(issueState.dismissed, phoneThread.pinEventId)}
               replyDisabled={composerSending}
             />
@@ -1481,6 +1495,7 @@ export function ConversationTab({
             >
               <MentionComposer
                 mutationKey={sendKey}
+                submitGuard={threadSendGuard}
                 onCancelReply={() => setReplyTo(null)}
                 onClose={() => setReplyTo(null)}
                 onSent={() => {

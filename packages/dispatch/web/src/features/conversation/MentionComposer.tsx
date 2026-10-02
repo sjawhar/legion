@@ -499,6 +499,108 @@ function draftRefusal(
   return undefined;
 }
 
+/**
+ * A send, whole, as it stood when Send started it: where it goes (the owner, the reply it answers,
+ * its kind and anchor), what it carries (the draft and an ask's fields), and, for an edit, which
+ * comment it saves and how. TanStack gives a pending mutation each new render's options and calls
+ * `mutationFn` only once `onMutate` has resolved, so a request read from the latest render follows
+ * whatever changed in Send's own task - a host's Reply or issue pick, a kind switch, a newer
+ * anchor. Built from this value alone, the request is the one the reader sent, in every host,
+ * whether or not the host holds its own controls while the send is out.
+ */
+interface SentRequest {
+  readonly anchor: ComposerAnchor | undefined;
+  readonly ask: {
+    readonly multiple: boolean;
+    readonly options: AskOption[];
+    readonly urgency: AskUrgency;
+  };
+  readonly draft: SentDraft;
+  readonly edit:
+    | {
+        readonly id: string;
+        readonly save: ((id: string, body: string) => Promise<unknown>) | undefined;
+      }
+    | undefined;
+  readonly kind: ComposerKind;
+  readonly owner: ComposerOwner;
+  readonly replyTo: MentionReplyTarget | null;
+}
+
+/** Sends a `SentRequest`. It sits outside the component, so no later render's props or state can
+ *  reach the request it builds. */
+async function sendRequest({
+  anchor,
+  ask,
+  draft,
+  edit,
+  kind,
+  owner,
+  replyTo,
+}: SentRequest): Promise<unknown> {
+  const { body, mentions, replacement } = draft;
+  if (edit !== undefined) {
+    return edit.save === undefined
+      ? api.editComment(edit.id, { body: body.trim() })
+      : edit.save(edit.id, body.trim());
+  }
+  const selection =
+    anchor === undefined ? undefined : { artifact: anchor.artifact, mark_id: anchor.mark_id };
+  if (kind === "ask") {
+    if (owner.kind === "session")
+      throw new Error("The direct session channel does not support asks.");
+    const input = {
+      anchor: selection,
+      multiple: ask.multiple,
+      options: ask.options,
+      question: body.trim(),
+      urgency: ask.urgency,
+    };
+    return owner.kind === "issue"
+      ? api.createAsk(owner.issueKey, input)
+      : api.createArtifactAsk(owner.artifactId, input);
+  }
+  if (owner.kind === "session") {
+    const inheritedDelivery = replyTo?.thread?.delivery ?? "steer";
+    const plan = deliveryPlan(body, inheritedDelivery);
+    const reply = replyTo === null ? {} : { in_reply_to: replyTo.id };
+    return api.createAgentMessage(owner.sessionId, {
+      body: plan.body,
+      delivery: plan.delivery ?? inheritedDelivery,
+      ...reply,
+    });
+  }
+  if (replyTo?.parentKind === "message") {
+    if (owner.kind !== "issue") throw new Error("Legacy message replies belong to an issue.");
+    const plan = deliveryPlan(body, replyTo.thread?.delivery);
+    return api.createMessage(owner.issueKey, {
+      body: plan.body,
+      in_reply_to: replyTo.id,
+      ...(replyTo.thread === undefined
+        ? {}
+        : { delivery: plan.delivery, target: replyTo.thread.target }),
+    });
+  }
+  const targets = survivingMentions(body, mentions).map((mention) => mention.target);
+  const baseBody = kind === "suggestion" && body.trim() === "" ? "Suggested replacement." : body;
+  const plan = deliveryPlan(baseBody, targets.length === 0 ? undefined : "steer");
+  const comment: CreateCommentInput = {
+    body: plan.body,
+    ...(replyTo === null ? {} : { reply_to: replyTo.id }),
+    ...(kind === "suggestion" ? { suggestion: { replace_with: replacement } } : {}),
+    ...(targets.length === 0
+      ? {}
+      : {
+          delivery: plan.delivery ?? "steer",
+          mentions: targets.map((target) => ({ target })),
+        }),
+  };
+  const input = replyTo === null ? { ...comment, anchor: selection } : comment;
+  return owner.kind === "issue"
+    ? api.createComment(owner.issueKey, input)
+    : api.createArtifactComment(owner.artifactId, input);
+}
+
 interface MentionComposerProps {
   readonly agents?: readonly Agent[];
   readonly anchor?: ComposerAnchor;
@@ -512,7 +614,9 @@ interface MentionComposerProps {
   readonly kind?: ComposerKind;
   /** Names the send, so a host can read whether it is in flight (`useIsMutating`). */
   readonly mutationKey?: MutationKey;
-  /** A host can share its guard with controls outside this fieldset that change the send's route. */
+  /** Shared by a host whose own controls - a Reply, an issue picker - should hold from Send's task
+   *  until the answer, as this fieldset does. It decides what the reader sees: the request is
+   *  frozen when Send starts (`SentRequest`), whatever those controls do. */
   readonly submitGuard?: SubmitGuard;
   readonly onCancelReply?: () => void;
   readonly onClose: () => void;
@@ -677,108 +781,46 @@ export function MentionComposer({
     textarea.current?.focus();
   }, [replaceDraft, replyTo]);
 
-  const selection =
-    anchor === undefined ? undefined : { artifact: anchor.artifact, mark_id: anchor.mark_id };
-  const commentQueryKey =
-    owner.kind === "issue"
-      ? ["comments", owner.issueKey]
-      : owner.kind === "artifact"
-        ? ["artifact", owner.artifactId, "comments"]
-        : undefined;
   const save = useMutation({
-    mutationFn: async ({
-      body: draft,
-      mentions: sentMentions,
-      replacement: nextReplacement,
-    }: SentDraft) => {
-      if (edit !== undefined) {
-        return saveEdit === undefined
-          ? api.editComment(edit.id, { body: draft.trim() })
-          : saveEdit(edit.id, draft.trim());
-      }
-      if (kind === "ask") {
-        if (owner.kind === "session")
-          throw new Error("The direct session channel does not support asks.");
-        const input = {
-          anchor: selection,
-          multiple,
-          options: submittedAskOptions(askOptions),
-          question: draft.trim(),
-          urgency,
-        };
-        return owner.kind === "issue"
-          ? api.createAsk(owner.issueKey, input)
-          : api.createArtifactAsk(owner.artifactId, input);
-      }
-      if (owner.kind === "session") {
-        const inheritedDelivery = replyTo?.thread?.delivery ?? "steer";
-        const plan = deliveryPlan(draft, inheritedDelivery);
-        const reply = replyTo === null ? {} : { in_reply_to: replyTo.id };
-        return api.createAgentMessage(owner.sessionId, {
-          body: plan.body,
-          delivery: plan.delivery ?? inheritedDelivery,
-          ...reply,
-        });
-      }
-      if (replyTo?.parentKind === "message") {
-        if (owner.kind !== "issue") throw new Error("Legacy message replies belong to an issue.");
-        const plan = deliveryPlan(draft, replyTo.thread?.delivery);
-        return api.createMessage(owner.issueKey, {
-          body: plan.body,
-          in_reply_to: replyTo.id,
-          ...(replyTo.thread === undefined
-            ? {}
-            : { delivery: plan.delivery, target: replyTo.thread.target }),
-        });
-      }
-      const targets = survivingMentions(draft, sentMentions).map((mention) => mention.target);
-      const baseBody =
-        kind === "suggestion" && draft.trim() === "" ? "Suggested replacement." : draft;
-      const plan = deliveryPlan(baseBody, targets.length === 0 ? undefined : "steer");
-      const comment: CreateCommentInput = {
-        body: plan.body,
-        ...(replyTo === null ? {} : { reply_to: replyTo.id }),
-        ...(kind === "suggestion" ? { suggestion: { replace_with: nextReplacement } } : {}),
-        ...(targets.length === 0
-          ? {}
-          : {
-              delivery: plan.delivery ?? "steer",
-              mentions: targets.map((target) => ({ target })),
-            }),
-      };
-      const input = replyTo === null ? { ...comment, anchor: selection } : comment;
-      return owner.kind === "issue"
-        ? api.createComment(owner.issueKey, input)
-        : api.createArtifactComment(owner.artifactId, input);
-    },
+    mutationFn: sendRequest,
     mutationKey,
     // A refusal restores the complete draft the request turned down, not a later edit: its body,
     // accepted mentions, and suggestion replacement stay in step for Retry or further editing.
-    onError: (_error, sent) => replaceDraft(sent),
+    onError: (_error, sent) => replaceDraft(sent.draft),
     onSettled: () => submitGuard.release(),
-    onSuccess: () => {
+    // The caches refreshed are the ones the send wrote, named by its own request. The draft is
+    // the composer's own, so it clears to what the channel it addresses now seeds.
+    onSuccess: (_data, { anchor: sentAnchor, edit: sentEdit, owner: sentOwner }) => {
       clearDraft();
       onSent();
-      if (commentQueryKey !== undefined)
-        void queryClient.invalidateQueries({ queryKey: commentQueryKey });
-      if (owner.kind === "session") {
+      if (sentOwner.kind === "session") {
         void queryClient.invalidateQueries({
-          queryKey: agentMessagesQuery(owner.sessionId).queryKey,
+          queryKey: agentMessagesQuery(sentOwner.sessionId).queryKey,
         });
       } else {
+        void queryClient.invalidateQueries({
+          queryKey:
+            sentOwner.kind === "issue"
+              ? ["comments", sentOwner.issueKey]
+              : ["artifact", sentOwner.artifactId, "comments"],
+        });
         void queryClient.invalidateQueries({ queryKey: ["inbox"] });
-        if (anchor !== undefined) {
-          void queryClient.invalidateQueries({ queryKey: ["artifact", anchor.artifact, "blocks"] });
+        if (sentAnchor !== undefined) {
+          void queryClient.invalidateQueries({
+            queryKey: ["artifact", sentAnchor.artifact, "blocks"],
+          });
         }
-        if (owner.kind === "issue") {
-          void queryClient.invalidateQueries({ queryKey: ["events", owner.issueKey] });
-          void queryClient.invalidateQueries({ queryKey: ["issue", owner.issueKey] });
+        if (sentOwner.kind === "issue") {
+          void queryClient.invalidateQueries({ queryKey: ["events", sentOwner.issueKey] });
+          void queryClient.invalidateQueries({ queryKey: ["issue", sentOwner.issueKey] });
         } else {
-          void queryClient.invalidateQueries({ queryKey: ["artifact", owner.artifactId] });
-          void queryClient.invalidateQueries({ queryKey: ["project", owner.project, "artifacts"] });
+          void queryClient.invalidateQueries({ queryKey: ["artifact", sentOwner.artifactId] });
+          void queryClient.invalidateQueries({
+            queryKey: ["project", sentOwner.project, "artifacts"],
+          });
         }
       }
-      if (!inline && edit === undefined) onClose();
+      if (!inline && sentEdit === undefined) onClose();
     },
   });
   useEffect(() => {
@@ -942,10 +984,20 @@ export function MentionComposer({
     );
     setConfirmingDiscard(false);
   };
-  const currentDraft = (): SentDraft => ({
-    body: textarea.current?.value ?? body,
-    mentions,
-    replacement: replacementTextarea.current?.value ?? replacement,
+  /** The send as it stands, for `sendRequest`: the fields' own text, since a keystroke in Send's
+   *  task may not have rendered yet, and every prop and setting that addresses or shapes it. */
+  const sentRequest = (): SentRequest => ({
+    anchor,
+    ask: { multiple, options: submittedAskOptions(askOptions), urgency },
+    draft: {
+      body: textarea.current?.value ?? body,
+      mentions,
+      replacement: replacementTextarea.current?.value ?? replacement,
+    },
+    edit: edit === undefined ? undefined : { id: edit.id, save: saveEdit },
+    kind,
+    owner,
+    replyTo,
   });
   const activeMentions = useMemo(() => survivingMentions(body, mentions), [body, mentions]);
   const inheritedDelivery =
@@ -960,15 +1012,16 @@ export function MentionComposer({
   const submitReason = draftRefusal(kind, body, replacement, outbound);
   const footId = useId();
   const canSubmit = canSubmitComposer(submitReason, save.isPending, pendingUploads);
-  /** Sends the draft as it stands. Until the server answers, one fieldset holds every control that
-   *  could change or discard it; the submit guard covers that hold in this task before React can
-   *  disable the fieldset. */
+  /** Sends the draft as it stands, its whole request frozen here (`sentRequest`), so nothing done
+   *  after this call can change where it goes. Until the server answers, one fieldset holds every
+   *  control that could change or discard the draft; the submit guard covers that hold in this
+   *  task before React can disable the fieldset. */
   const send = () =>
     submitGuard.guard(() => {
       setConfirmingDiscard(false);
       setAutocomplete(undefined);
       setReferencePickerOpen(false);
-      save.mutate(currentDraft());
+      save.mutate(sentRequest());
     });
   const stopHeldComposerInput = (event: SyntheticEvent) => {
     if (!submitGuard.held()) return;
