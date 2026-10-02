@@ -1142,6 +1142,79 @@ func TestMigrate0064To0066RecordApprovalHandBacks(t *testing.T) {
 	}
 }
 
+// 0066 bounds its own lock wait below deadlock_timeout. A comment write that goes on to write asks
+// while 0066 waits for comments closes a cycle with it, and 0066 gives up first, applying nothing,
+// before Postgres's deadlock check runs on either side: the write commits, and the next run
+// applies 0066. Under the runner's five-second bound that cycle aborts one side with 40P01.
+func TestMigrate0066GivesUpBeforeACommentWriteThatWritesAsksDeadlocks(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 65)
+	var askID string
+	if _, err := store.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into issues (key, project_key, number, title, created_by, rank)
+			values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"session","id":"s"}', 'U');
+	`); err != nil {
+		t.Fatalf("seed an issue: %v", err)
+	}
+	if err := store.Pool.QueryRow(ctx, `
+		insert into asks (issue_key, author, question)
+		values ('CORE-1', '{"kind":"session","id":"s"}', 'Ship it?')
+		returning id::text
+	`).Scan(&askID); err != nil {
+		t.Fatalf("seed an ask: %v", err)
+	}
+	writer, err := store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the comment write: %v", err)
+	}
+	defer writer.Rollback(ctx)
+	if _, err := writer.Exec(ctx, `
+		insert into comments (issue_key, author, body, ask_id, turn)
+		values ('CORE-1', '{"kind":"user","id":"alice"}', 'Not yet.', $1, 'agent')
+	`, askID); err != nil {
+		t.Fatalf("insert the reply: %v", err)
+	}
+	migrated := make(chan error, 1)
+	go func() { migrated <- store.Migrate(ctx) }()
+	deadline := time.Now().Add(20 * time.Second)
+	waiting := false
+	for !waiting && time.Now().Before(deadline) {
+		if err := store.Pool.QueryRow(ctx, `
+			select exists(select 1 from pg_locks
+			              where relation = 'comments'::regclass and mode = 'ShareRowExclusiveLock' and not granted)
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("read pg_locks: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !waiting {
+		t.Fatal("0066 was never seen waiting for comments' SHARE ROW EXCLUSIVE lock")
+	}
+	if _, err := writer.Exec(ctx, `update asks set urgency = 'high' where id = $1`, askID); err != nil {
+		t.Fatalf("the comment write's ask update failed while 0066 waited for comments: %v", err)
+	}
+	if err := writer.Commit(ctx); err != nil {
+		t.Fatalf("commit the comment write: %v", err)
+	}
+	err = <-migrated
+	var lockTimeout *pgmigrate.LockTimeoutError
+	if !errors.As(err, &lockTimeout) || !strings.Contains(lockTimeout.Migration, "0066_asks_handed_back_reply_fkey") {
+		t.Fatalf("0066 should have given up at its own lock timeout, got: %v", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate once the comment write ended: %v", err)
+	}
+	var applied bool
+	if err := store.Pool.QueryRow(ctx, `select exists(select 1 from schema_migrations where version = 66)`).Scan(&applied); err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	if !applied {
+		t.Fatal("0066 was not applied by the run after the comment write ended")
+	}
+}
+
 // 0043 moves the callback replies that carried a bare reply_to into the ask thread they
 // belong to and gives them the turn 0028 gave every other ask reply. 0044 re-runs the same
 // statements, byte for byte, from a later release, for the rows a pre-0043 task wrote while

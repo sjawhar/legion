@@ -263,11 +263,19 @@ an older binary's approval row the same value; it locks `asks` alone. `0065` set
 `comments.created_at`'s default to `clock_timestamp()`, so a comment is stamped when its insert
 runs, after the owner row every comment insert takes, and an ask's newest reply is the one that
 committed last; it locks `comments` alone. `0066` adds `handed_back_reply_id`'s foreign key to
-`comments` `NOT VALID` and validates it in a second statement; adding it takes `SHARE ROW EXCLUSIVE`
-on both tables, which a write waits behind but a read does not. In one migration, the column's key
-held `asks` `ACCESS EXCLUSIVE` while it waited for `comments`, and a comment write that went on to
-read `asks` deadlocked with it. Every census answers `0`: 0053's check guarantees every approval
-ask a `version` to backfill from, and the other two change no row.
+`comments`, which takes `SHARE ROW EXCLUSIVE` on both tables, as adding any foreign key does: a
+write waits behind it, a read does not. In one migration, the column's key held `asks`
+`ACCESS EXCLUSIVE` while it waited for `comments`, and a comment write that went on to read `asks`
+deadlocked with it. A comment write that goes on to write `asks` (accepting a suggestion, or an
+edit under a comment's anchor, whose version moves the approval request) can still close a cycle
+with `0066` while it waits for `comments`, and under the five-second bound either side could lose
+it: Postgres checks a waiter once, `deadlock_timeout` (1 s by default) after it starts to wait, so
+a write that closes the cycle within that second fails `0066` and one that closes it later is
+itself the victim, answered `500`. `0066` therefore sets its own `lock_timeout` of 500 ms, shorter
+than `deadlock_timeout`: it gives up first (`55P03`, nothing applied), the write finishes, and the
+next boot applies it; the cost is that a comment write holding `comments` past half a second fails
+that boot too. Every census answers `0`: 0053's check guarantees every approval ask a `version` to
+backfill from, and the other two change no row.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
