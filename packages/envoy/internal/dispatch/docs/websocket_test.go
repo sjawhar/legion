@@ -318,31 +318,55 @@ func TestDocumentSocketRefusesARoomOutsideTheSchema(t *testing.T) {
 	}
 }
 
-// A room that only ever receives valid writes is never refused: the socket's admission check,
-// `/text`, a version's capture (`POST /versions`) and a read outside any transaction (docView)
-// read a copy of the resident room taken under its lock (snapshotDocument), never its live tree
-// halfway through a write, which they would read as a tree outside the schema - the socket closed
-// with documentSchemaCloseCode, the read or the version answered 409 with the repair. Under -race
-// the direct walk of the live tree is also a data race with the writer.
+// A room that only ever receives valid writes is never refused and never loses one while readers,
+// versions and peers come and go around it.
+//
+// Reads: the socket's admission check, `/text`, a version's capture (`POST /versions`) and a read
+// outside any transaction (docView) read a copy of the resident room taken under its lock
+// (snapshotDocument), never its live tree halfway through a write, which they would read as a tree
+// outside the schema - the socket closed with documentSchemaCloseCode, the read or the version
+// answered 409 with the repair. Under -race the direct walk of the live tree is also a data race
+// with the writer.
+//
+// Writes: a peer joins and leaves over and over, so the room's last peer leaves while the writer
+// is inside its Server.Apply. The room must not be evicted under that write (roomIdleTimeout):
+// eagerly evicted, the write lands on the evicted room, the next access loads the store without
+// it, and the next write is made from a document missing the first. The two writes then merge into
+// a document neither wrote, which reads back with no block at all once each kept a block the other
+// replaced. Every load of the room is checked against the writes its earlier instances took
+// (watchRoomLoads), and the document the store holds at the end is the last one written.
 func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
+	loads := watchRoomLoads(service)
 	seedServiceText(t, service, artifactID, "before")
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
-	// One peer stays connected for the whole probe, so the room stays resident between writes.
-	resident, response, err := gws.DefaultDialer.Dial(wsURL, headers)
-	if err != nil {
-		t.Fatalf("connect resident peer: response=%#v err=%v", response, err)
-	}
-	t.Cleanup(func() { _ = resident.Close() })
+
+	stop := make(chan struct{})
+	var peers sync.WaitGroup
+	peers.Add(1)
 	go func() {
+		defer peers.Done()
 		for {
-			if _, _, err := resident.ReadMessage(); err != nil {
+			select {
+			case <-stop:
 				return
+			default:
 			}
+			connection, _, err := gws.DefaultDialer.Dial(wsURL, headers)
+			if err != nil {
+				continue
+			}
+			connection.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			for {
+				if _, _, err := connection.ReadMessage(); err != nil {
+					break
+				}
+			}
+			_ = connection.Close()
 		}
 	}()
 
@@ -351,24 +375,33 @@ func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 		"> a quote\n>\n> - with a list\n\n1. first\n2. second\n",
 		"# Title\n\n- [ ] task\n- [x] done\n\nTail.\n",
 	}
-	stop := make(chan struct{})
-	written := make(chan error, 1)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	type writerResult struct {
+		writes int
+		last   string
+		err    error
+	}
+	written := make(chan writerResult, 1)
 	go func() {
+		var result writerResult
 		for round := 0; ; round++ {
 			select {
 			case <-stop:
-				written <- nil
+				written <- result
 				return
 			default:
 			}
-			if _, err := service.ReplaceText(context.Background(), artifactID, bodies[round%len(bodies)], model.Actor{Kind: "user", ID: "alice"}); err != nil {
-				written <- fmt.Errorf("write round %d: %w", round, err)
+			canonical, err := service.ReplaceText(context.Background(), artifactID, bodies[round%len(bodies)], alice)
+			if err != nil {
+				result.err = fmt.Errorf("write round %d: %w", round, err)
+				written <- result
 				return
 			}
+			result.writes++
+			result.last = canonical
 		}
 	}()
 
-	alice := model.Actor{Kind: "user", ID: "alice"}
 	version := func() error {
 		ctx := context.Background()
 		tx, err := service.store.Pool.Begin(ctx)
@@ -381,42 +414,249 @@ func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 		_, err = service.SnapshotVersion(joined, artifactID, alice)
 		return err
 	}
-	var reads, sockets int
+	var rounds, sockets atomic.Int64
+	var refusalsMu sync.Mutex
 	var refusals []string
-	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
-		if _, _, err := service.TextWithToken(context.Background(), artifactID); err != nil {
-			refusals = append(refusals, fmt.Sprintf("read %d: %v", reads, err))
-		}
-		if _, err := service.currentToken(context.Background(), artifactID); err != nil {
-			refusals = append(refusals, fmt.Sprintf("unjoined read %d: %v", reads, err))
-		}
-		if err := version(); err != nil {
-			refusals = append(refusals, fmt.Sprintf("version %d: %v", reads, err))
-		}
-		reads++
-		connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
-		if err != nil {
-			refusals = append(refusals, fmt.Sprintf("socket %d: response=%#v err=%v", sockets, response, err))
-			continue
-		}
-		connection.SetReadDeadline(time.Now().Add(time.Second))
-		if _, _, err := connection.ReadMessage(); err != nil {
-			refusals = append(refusals, fmt.Sprintf("socket %d: first frame %v", sockets, err))
-		}
-		_ = connection.Close()
-		sockets++
+	refuse := func(format string, args ...any) {
+		refusalsMu.Lock()
+		defer refusalsMu.Unlock()
+		refusals = append(refusals, fmt.Sprintf(format, args...))
 	}
+	// Three seconds and forty rounds, whichever comes later, within thirty seconds: a loaded machine
+	// takes longer over each round.
+	start := time.Now()
+	running := func() bool {
+		elapsed := time.Since(start)
+		return elapsed < 30*time.Second && (elapsed < 3*time.Second || rounds.Load() < 40)
+	}
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for running() {
+				round := rounds.Add(1)
+				if _, _, err := service.TextWithToken(context.Background(), artifactID); err != nil {
+					refuse("read %d: %v", round, err)
+				}
+				if _, err := service.currentToken(context.Background(), artifactID); err != nil {
+					refuse("unjoined read %d: %v", round, err)
+				}
+				if err := version(); err != nil {
+					refuse("version %d: %v", round, err)
+				}
+				connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
+				if err != nil {
+					refuse("socket %d: response=%#v err=%v", round, response, err)
+					continue
+				}
+				connection.SetReadDeadline(time.Now().Add(time.Second))
+				if _, _, err := connection.ReadMessage(); err != nil {
+					refuse("socket %d: first frame %v", round, err)
+				}
+				_ = connection.Close()
+				sockets.Add(1)
+			}
+		}()
+	}
+	readers.Wait()
 	close(stop)
-	if err := <-written; err != nil {
-		t.Fatal(err)
+	peers.Wait()
+	result := <-written
+	if result.err != nil {
+		t.Fatal(result.err)
 	}
 	if len(refusals) != 0 {
-		t.Fatalf("a healthy room under writes refused %d of %d reads, versions and sockets: %s", len(refusals), 3*reads+sockets, strings.Join(refusals, "; "))
+		t.Errorf("a healthy room under writes refused %d of its reads, versions and sockets: %s", len(refusals), strings.Join(refusals, "; "))
 	}
-	if reads < 20 {
-		t.Fatalf("the probe made %d rounds of reads and versions and %d sockets, too few to say anything", reads, sockets)
+	if missed := loads.missedWrites(); len(missed) != 0 {
+		t.Errorf("%d of %d loads of the room started without a write another instance of it had taken: %s", len(missed), loads.count(), strings.Join(missed, "; "))
 	}
-	t.Logf("%d rounds of reads, unjoined reads and versions and %d sockets on a room under writes, none refused", reads, sockets)
+	if rounds.Load() < 20 || result.writes < 20 {
+		t.Fatalf("%d rounds of reads and versions, %d sockets and %d writes, too few to say anything", rounds.Load(), sockets.Load(), result.writes)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
+		t.Fatalf("wait for the room's updates to reach persistence: %v", err)
+	}
+	if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
+		t.Fatalf("wait for the room's durable appends: %v", err)
+	}
+	stored, err := service.persistence.Load(ctx, artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := crdt.New()
+	if err := crdt.ApplyUpdateV1(durable, stored.Update, nil); err != nil {
+		t.Fatal(err)
+	}
+	if markdown, err := renderDocument(durable); err != nil || markdown != result.last {
+		t.Errorf("the stored document after %d writes = %q (%v), want the last one written, %q", result.writes, markdown, err, result.last)
+	}
+	t.Logf("%d rounds of reads, unjoined reads, versions and sockets and %d writes on a room whose peers came and went, over %d loads of it", rounds.Load(), result.writes, loads.count())
+}
+
+// A write inside a Server.Apply when the room's last peer leaves stays in the room the next write
+// is made against. Evicted eagerly under it, the room takes the write after its successor has
+// loaded the store without it; the next write is then a diff of the document the first replaced,
+// and the store holds both writes' text. The write here waits inside its Apply while the peer
+// leaves and a read loads the room again (roomIdleTimeout).
+func TestAWriteInsideApplyOutlivesTheRoomsLastPeer(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	peer, response, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpServer.URL, "http")+"/ws/doc/"+artifactID, http.Header{"X-Dispatch-User": []string{"alice"}})
+	if err != nil {
+		t.Fatalf("connect peer: response=%#v err=%v", response, err)
+	}
+	peer.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := peer.ReadMessage(); err != nil {
+		t.Fatalf("peer's first frame: %v", err)
+	}
+	write := func(markdown string, inside func()) error {
+		tree, err := parseInput(markdown)
+		if err != nil {
+			return err
+		}
+		var updateErr error
+		err = service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			inside()
+			fragment := doc.GetXmlFragment(fragmentName)
+			transact(func(txn *crdt.Transaction) { updateErr = pmdoc.Update(txn, fragment, tree) })
+		})
+		return errors.Join(updateErr, err)
+	}
+
+	entered, proceed := make(chan struct{}), make(chan struct{})
+	first := make(chan error, 1)
+	go func() {
+		first <- write("first", func() {
+			close(entered)
+			<-proceed
+		})
+	}()
+	<-entered
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The server has handled the departure, and whatever it does when a room's last peer leaves,
+	// once the socket's handler returns (Service.ServeHTTP removes the connection after that).
+	state := service.room(artifactID)
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		state.mu.Lock()
+		connected := len(state.connected)
+		state.mu.Unlock()
+		if connected == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the peer's departure was not handled")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := service.currentToken(context.Background(), artifactID); err != nil {
+		t.Fatalf("read the room while the write waits: %v", err)
+	}
+	close(proceed)
+	if err := <-first; err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	if err := write("second", func() {}); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
+		t.Fatalf("wait for the room's updates to reach persistence: %v", err)
+	}
+	if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
+		t.Fatalf("wait for the room's durable appends: %v", err)
+	}
+	if text, err := service.Text(ctx, artifactID); err != nil || text != "second\n" {
+		t.Errorf("the room after both writes = %q (%v), want \"second\\n\"", text, err)
+	}
+	stored, err := service.persistence.Load(ctx, artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := crdt.New()
+	if err := crdt.ApplyUpdateV1(durable, stored.Update, nil); err != nil {
+		t.Fatal(err)
+	}
+	if markdown, err := renderDocument(durable); err != nil || markdown != "second\n" {
+		t.Errorf("the stored document after both writes = %q (%v), want \"second\\n\"", markdown, err)
+	}
+}
+
+// roomLoads checks every load of one room's document against the writes its earlier instances
+// took: a load whose state lacks one of them started from a document another instance had
+// already moved past.
+type roomLoads struct {
+	mu     sync.Mutex
+	taken  map[crdt.ClientID]uint64 // past the highest clock any instance's update inserted
+	loads  int
+	missed []string
+}
+
+// watchRoomLoads records each document service loads from here on, and each update a loaded
+// document then takes.
+func watchRoomLoads(service *Service) *roomLoads {
+	watch := &roomLoads{taken: make(map[crdt.ClientID]uint64)}
+	load := service.srv.OnLoadDocument
+	service.srv.OnLoadDocument = func(ctx context.Context, room string, doc *crdt.Doc) error {
+		if err := load(ctx, room, doc); err != nil {
+			return err
+		}
+		watch.loaded(doc)
+		doc.OnUpdate(func(update []byte, _ any) { watch.took(update) })
+		return nil
+	}
+	return watch
+}
+
+func (w *roomLoads) loaded(doc *crdt.Doc) {
+	state := doc.StateVector()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.loads++
+	for client, end := range w.taken {
+		if state[client] < end {
+			w.missed = append(w.missed, fmt.Sprintf("load %d lacked clocks %d-%d of client %d", w.loads, state[client], end, client))
+		}
+	}
+}
+
+func (w *roomLoads) took(update []byte) {
+	ids, err := crdt.ContentIDsFromUpdateV1(update)
+	if err != nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, client := range ids.Inserts.Clients() {
+		for _, inserted := range ids.Inserts.Ranges(client) {
+			if end := inserted.Clock + inserted.Len; end > w.taken[client] {
+				w.taken[client] = end
+			}
+		}
+	}
+}
+
+func (w *roomLoads) missedWrites() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.missed...)
+}
+
+func (w *roomLoads) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.loads
 }
 
 // The room's update observer renders a copy of the room brought up to date under the room's lock

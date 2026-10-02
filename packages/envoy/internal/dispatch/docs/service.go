@@ -37,6 +37,9 @@ const maxSettleFailures = 3
 const (
 	maxLiveRooms       = 1_000
 	maxRoomConnections = 1_000
+	// roomIdleTimeout is how long a room stays resident after its last peer leaves (New). A peer
+	// that returns within it rejoins the warm room rather than reloading the document.
+	roomIdleTimeout = time.Minute
 )
 
 // Deps configures the live document service.
@@ -412,6 +415,17 @@ func New(deps Deps) *Service {
 	// append it inside the API transaction, so persistence stays per update.
 	srv.PersistCoalesceWindow = -1
 	srv.CompactEvery = 200
+	// A room whose last peer leaves stays resident until it has been idle for roomIdleTimeout.
+	// Eager eviction, ygo's default, evicts the room the moment its last peer leaves, even while
+	// a Server.Apply is inside its callback on that room (reearth/ygo v1.49.5,
+	// provider/websocket/peer.go:477-504 checks peers alone): the callback's write then lands on
+	// the evicted room and reaches the store only through its retiring persistence worker, while
+	// the next access has already loaded the store without it and serves, and takes, the next
+	// write on a state missing the first. The two writes, each made from the same document, merge
+	// into a document neither wrote, which can hold no block at all. Idle eviction refuses a
+	// room any Apply holds, or has touched since its last peer left (idle_sweep.go:185), so every
+	// write a room takes is durable before a successor can load.
+	srv.RoomIdleTimeout = roomIdleTimeout
 
 	service.srv = srv
 	srv.Authorize = service.authorize

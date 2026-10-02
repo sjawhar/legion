@@ -45,8 +45,10 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	ledgerFrom(ctx).holdRebuild(artifactID)
 	// A room still loading is not resident yet. It reads the same history the check below reads,
 	// so it can only fail on a history that cannot load, and its successor load is refused above.
+	// A room stays resident for roomIdleTimeout after its last editor leaves, and ygo's idle
+	// sweep that then evicts it runs every 30 seconds, so the refusal names two minutes.
 	if s.srv.GetDoc(artifactID) != nil {
-		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in this server; close its editors and retry, or replace it from markdown instead", ErrDocumentLive, artifactID)
+		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in this server; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
 	}
 	loaded, err := s.persistence.Load(ctx, artifactID)
 	if err != nil {

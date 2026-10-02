@@ -257,6 +257,20 @@ room's state lock. A read that may load its room (a version's capture, `docView`
 subscription) takes what it reads inside the `Server.Apply` that loads and holds the room: a room
 looked up again with `GetDoc` once that Apply returned can have been evicted in between.
 
+A room whose last peer leaves stays resident until it has been idle for a minute
+(`roomIdleTimeout`), when ygo's idle sweeper evicts it. ygo's default, eager eviction, evicts a room
+the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (reearth/ygo
+v1.49.5, `provider/websocket/peer.go` checks only the peers): the callback's write then lands on the
+evicted room and reaches the store only through its retiring persistence worker, while the next
+access has already loaded the store without it and serves, and takes, the next write on a document
+missing the first. Two such writes, each a diff of the same document, merge into a document neither
+wrote, and into one holding no block at all once each kept a block the other replaced: the
+healthy-room probe met it as a socket closed with `DOC_SCHEMA`. The idle sweeper evicts only a room
+no Apply holds or has touched since its last peer left (`provider/websocket/idle_sweep.go`), so every
+write a room takes is durable before another instance of it loads, and a peer that returns within
+the minute rejoins the warm room. `TestAHealthyRoomUnderWritesIsNeverRefused` checks every load of a
+room against the writes its earlier instances took.
+
 The room's update observer (`updateChangesMarkdown`) renders a replica of the room, not the live
 tree, since ygo fires it after the transaction has released the document's lock and another write
 can be integrating meanwhile (`renderedReplica`). The replica is copied from the room on its first
