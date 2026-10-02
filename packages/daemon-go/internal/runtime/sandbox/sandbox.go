@@ -548,10 +548,11 @@ func (r *Runtime) setMode(ctx context.Context, s *sandbox, mode string) error {
 	return err
 }
 
-// Release ends one claim's child process. The issue Sandbox (and with it its Secrets and, for a
-// root, the tree volume) is deleted only once every one of the issue's six role launchers is
-// connected and reports no child: a resident sibling, or a launcher whose state is unknown, keeps
-// the pod. A pod left behind that way is the orphan sweep's once no known claim names it.
+// Release is a claim-scoped operation: it ends at most the recorded role process and forgets the
+// claim from this runtime. It NEVER suspends or deletes the issue Sandbox, even if this runtime
+// currently sees no sibling role. The durable issue-resource lifecycle, fenced against complete
+// stored sibling claims and the issue's close/start generation, is the only owner of issue-pod,
+// Secret and root-PVC deletion.
 func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	if err := k.Validate(); err != nil {
 		return fmt.Errorf("sandbox runtime: release: %w", err)
@@ -563,33 +564,7 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	}
 	r.forget(k.Claim)
 	r.disown(k.Claim)
-	if !r.issueQuiet(k.Claim) {
-		return nil
-	}
-	name := SandboxName(k.Claim)
-	deleting, cancel := call(ctx)
-	defer cancel()
-	background := metav1.DeletePropagationBackground
-	if err := r.sandboxClient().Delete(deleting, name, metav1.DeleteOptions{PropagationPolicy: &background}); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("release %s: delete issue sandbox %s: %w", k.Claim, name, err)
-	}
 	return nil
-}
-
-// issueQuiet reports whether every role launcher of token's issue is connected and runs no child.
-func (r *Runtime) issueQuiet(token claim.Token) bool {
-	role, ok := roleContainer(token)
-	if !ok {
-		return false
-	}
-	issue := strings.TrimSuffix(string(token), "-"+role)
-	for _, sibling := range claim.Roles {
-		state, connected := r.launchers.state(claim.Token(issue + "-" + string(sibling)))
-		if !connected || state.Child != nil {
-			return false
-		}
-	}
-	return true
 }
 
 // AdoptWorkingCopy has the agent's shim set its working copy's author (the shared `jj metaedit
