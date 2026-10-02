@@ -76,6 +76,9 @@ type Config struct {
 	// AgentSecrets is the pod's enrollment with the secrets broker (agentsecrets.go); nil on a
 	// tmux pane, which is never enrolled.
 	AgentSecrets *AgentSecrets
+	// ModelTokenFile is the memory-backed file the shim updates from model-access-token frames.
+	// It is empty for tmux panes and Kubernetes deployments without model_login.
+	ModelTokenFile string
 	// Log receives the shim's own lines and its one-line frame summaries: what the pane shows.
 	Log io.Writer
 	// Grace is how long a SIGTERMed child has before it is killed; zero is DefaultGrace.
@@ -207,8 +210,15 @@ func (s *shim) connect() (acked bool, err error) {
 		// (cmdWorkerShimConnect's onLine before hello_ack, worker-shim.ts).
 		s.log.Printf("[worker-shim] ignoring a frame received before hello_ack: %.80s", line)
 	}
-	// Spawned here, before the next line is read: the daemon's first RPC frame may share a read
-	// with the ack, and it must find a child to go to (cmdWorkerShimConnect's ack, worker-shim.ts).
+	// A pod with model_login must write its first token before OMP starts: models.yml may read the
+	// file during OMP bootstrap. The listener writes it immediately after hello_ack and before the
+	// connection's Hello event lets supervision deliver any work.
+	if s.cfg.ModelTokenFile != "" {
+		if err := s.awaitInitialModelAccessToken(r); err != nil {
+			s.finish(1, err)
+			return true, err
+		}
+	}
 	if !s.spawnOnce() {
 		// The shim is ending — told to stop before any child, or unable to start one — and
 		// finish settles its status; nothing is left to bridge.
@@ -226,12 +236,36 @@ func (s *shim) connect() (acked bool, err error) {
 	}
 }
 
+// awaitInitialModelAccessToken consumes daemon frames between hello_ack and OMP's first spawn.
+// The daemon has no reason to send another frame first, but a malformed or unexpected one is
+// named and ignored rather than passed to a child that does not exist yet.
+func (s *shim) awaitInitialModelAccessToken(reader *shimwire.Reader) error {
+	for {
+		line, err := reader.ReadLine()
+		if err != nil {
+			return fmt.Errorf("stream closed before its initial model access token: %w", err)
+		}
+		frame, err := shimwire.Decode(line)
+		if err != nil {
+			s.log.Printf("[worker-shim] ignoring a malformed frame received before its initial model access token: %.80s", line)
+			continue
+		}
+		token, ok := frame.(shimwire.ModelAccessToken)
+		if !ok {
+			s.log.Printf("[worker-shim] ignoring a %s frame received before its initial model access token", frame.FrameType())
+			continue
+		}
+		return s.writeModelAccessToken(token)
+	}
+}
+
 // fromDaemon routes one daemon frame: the two the shim answers itself, a delivery the dedupe
 // answers, and everything else to OMP unchanged (createShimBridge's onLine, worker-shim.ts).
 func (s *shim) fromDaemon(line []byte) {
 	frame, err := shimwire.Decode(line)
 	if err != nil {
-		if typ := frameType(line); typ == shimwire.TypeAdoptWorkingCopy || typ == shimwire.TypeAgentSecretsEnrollment {
+		if typ := frameType(line); typ == shimwire.TypeAdoptWorkingCopy ||
+			typ == shimwire.TypeAgentSecretsEnrollment || typ == shimwire.TypeModelAccessToken {
 			// The daemon is its only sender, and it is never OMP's to read.
 			s.log.Printf("[worker-shim] refusing a malformed %s frame: %v", typ, err)
 			return
@@ -248,6 +282,11 @@ func (s *shim) fromDaemon(line []byte) {
 		return
 	case shimwire.AgentSecretsEnrollment:
 		s.enroll(f)
+		return
+	case shimwire.ModelAccessToken:
+		if err := s.writeModelAccessToken(f); err != nil {
+			s.log.Printf("[worker-shim] %v", err)
+		}
 		return
 	}
 	s.order.Lock()

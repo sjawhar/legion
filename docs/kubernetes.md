@@ -371,15 +371,15 @@ daemon_url: http://<the daemon host's own address>:13370
 - `session_store: postgres` until Stage 6, since a pod's session lives on the tree volume, and a
   `session_dsn_secret` under `pvc`.
 
-Legion holds no model route. `pod` is the operator's: `env`, `volumes` (each a `secret`,
+Legion holds no model names or route. `pod` is the operator's: `env`, `volumes` (each a `secret`,
 `config_map` or `projected` source), `volume_mounts` and `service_account`, added to every pod, the
 image probe's included, and refused where they name a path or variable of Legion's own or the
 worker image's. `provider_keys` names keys of the providers Secret, which every pod mounts, those
-keys alone, for the shim to export. `deploy/kubernetes/operator-route/` is an example of one: the
-Hawk model gateway, keyed by a projected ServiceAccount token, with a `models.yml`, a settings
-overlay, and the pod that mounts them; the operator keeps their own copies of the two files in a
-directory of their own ([Operator configuration](#operator-configuration)), and the Stage 4a and 4b
-proofs run on the example, each with its own copy of its ConfigMap.
+keys alone, for the shim to export. An optional `model_login` is distinct: the daemon alone reads
+the Cognito machine-login document, retains its password and refresh token, and sends current access
+tokens to connected worker shims. Its `token_file` lives on a worker's memory-backed state volume.
+`deploy/kubernetes/operator-route/` is an example route: `models.yml` reads that file, and the
+operator keeps the route files in a directory of their own ([Operator configuration](#operator-configuration)).
 
 Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
@@ -718,11 +718,9 @@ source), `volume_mounts` (read-only unless `read_only: false`), and `service_acc
 adds to every pod, the image probe's included, refusing any name or path of Legion's own or the
 worker image's; and the top-level `provider_keys` maps each variable Oh My Pi reads to a key of the
 providers Secret, of which every pod then mounts those keys alone, for the shim to export.
-Legion holds no model route: everything a pod's Oh My Pi needs to reach a model — a `models.yml`,
-a settings overlay in `PI_CONFIG_FILES`, a token — is the operator's, through `pod` and
-`provider_keys`. `deploy/kubernetes/operator-route/` is an example of one (the Go live
-harnesses': the Hawk model gateway, keyed by a projected ServiceAccount token). [Operator
-configuration](#operator-configuration) is what an operator gives it.
+`runtime.kubernetes.model_login` is daemon-held Cognito authentication: only its short-lived access
+token reaches a connected worker shim's configured file. `deploy/kubernetes/operator-route/` is the
+public route example. [Operator configuration](#operator-configuration) describes the boundary.
 
 `runtime` is either the scalar `tmux` (the default) or a mapping whose single key selects the
 Kubernetes runtime and carries its settings:
@@ -815,9 +813,10 @@ Four prerequisites and caveats the configuration cannot check for you:
 
 ### Operator configuration
 
-The Go coordinator's. Legion holds no model, provider or route. Everything a pod's Oh My Pi needs to
-reach a model is the operator's, and the daemon hands the same pieces to every pod it runs: each
-claim's pod and the image probe's.
+The Go coordinator's model configuration stays operator-owned: Legion has no model names, provider
+route, or gateway endpoint. The optional Cognito machine login is the one exception to where model
+credentials live: the daemon retains its password and refresh token, then worker shims receive only
+the current short-lived access token.
 
 - **`runtime.kubernetes.pod`** has four keys. `env` is variables set in the agent's container.
   `volumes` are each one `secret`, `config_map`, or `projected` source; a projected
@@ -830,8 +829,21 @@ claim's pod and the image probe's.
   Legion mounts, the image owns, or a tool runs from. `legion start --check-config` runs the same
   check. [`deploy/kubernetes/operator-route/`](../deploy/kubernetes/operator-route/README.md) is an
   example of one, the one the Go live harnesses run on: a `models.yml` and a settings overlay from a
-  ConfigMap, and a mounted token its key command reads. Its README lists what an operator supplies
-  and how `pod` and `provider_keys` compose.
+  ConfigMap. Its worker shim, not the pod block, writes the model access-token file.
+- **`runtime.kubernetes.model_login`** is optional daemon-held Cognito authentication. Operator
+  configuration has only `login_command` and `token_file`. The command prints one JSON login
+  document with non-empty `user_pool_id`, `region`, `username`, `password`, and `client_id`; the
+  daemon derives the Cognito endpoint and client from it. Its output is never logged or sent to a
+  pod. The daemon runs `USER_PASSWORD_AUTH`, keeps the password and refresh token in memory,
+  refreshes the access token with `REFRESH_TOKEN_AUTH` before expiry, and re-signs in after a
+  refresh failure. It sends the current access token as a worker-stream frame on connection and
+  after every refresh. A shim atomically replaces `token_file` mode `0600`; the path must be below
+  `/var/run/legion/state`, its memory-backed state volume. `legion start --check-config` validates
+  the entire section without running `login_command`. `GET /legion/v1/state` exposes
+  `modelLogin` (`pending`, `ready`, or `error`) but no credential value; an unobtainable login also
+  writes an error log. [`deploy/kubernetes/operator-route/`](../deploy/kubernetes/operator-route/README.md)
+  shows the matching `models.yml` `!cat` file. The generated pod has neither the machine password
+  nor the refresh token in its environment, arguments, or Secret.
 - **Each role's model** is the operator's: the `models.yml` and `overlay.yml` they keep in a
   directory of their own (for example `~/.local/state/legion-model-config`), which
   `deploy/kubernetes/operator-route/apply.sh --context <kube context> <directory>` writes into the
@@ -850,10 +862,10 @@ claim's pod and the image probe's.
   ("none", "pending", "issued", "denied", or "expired") are on `GET /legion/v1/state`'s
   `agentSecretsLogin` (daemon API contract 9); pod enrollment fails closed and retries until a human
   approves the code there. On expiry or revocation the daemon starts a fresh login and logs a new
-  code. `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
   `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, the cluster's admission cap)
-  shape the one projected token every pod carries for the broker, alone in its volume beside the
-  operator's middleman token. With the block, the worker container mounts that token read-only at
+  shape the one projected token every pod carries for the broker, separate from the model access
+  token file in the worker's memory-backed state volume. With the block, the worker container mounts
+  that token read-only at
   `/var/run/legion/agent-secrets-token/token`, a memory-backed key directory at
   `/var/run/legion/agent-secrets`, and is told `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR`; the
   shim generates the pod's key there before it dials, its `hello2` carries the key's thumbprint and

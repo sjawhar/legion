@@ -228,6 +228,37 @@ func TestPrepareDerivesTheWorkerStreamAddressFromWorkerStreamPort(t *testing.T) 
 	}
 }
 
+func TestSandboxOptionsCarryTheModelLoginTokenFile(t *testing.T) {
+	kubernetes := config.Kubernetes{
+		Namespace: "legion", Image: "ghcr.io/example/worker@sha256:" + strings.Repeat("a", 64),
+		StorageClass: "gp2", TreeVolume: "20Gi",
+		ModelLogin: &config.ModelLogin{TokenFile: sandbox.StateDir + "/model-token"},
+	}
+	options, err := sandboxOptions(config.Config{}, kubernetes, "legion", "tcp://127.0.0.1:13371", "", func(string) (string, bool) {
+		return "", false
+	}, quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions: %v", err)
+	}
+	if options.ModelTokenFile != sandbox.StateDir+"/model-token" {
+		t.Fatalf("ModelTokenFile = %q", options.ModelTokenFile)
+	}
+}
+
+func TestSandboxOptionsRefuseAModelTokenFileOutsideTheStateVolume(t *testing.T) {
+	kubernetes := config.Kubernetes{
+		Namespace: "legion", Image: "ghcr.io/example/worker@sha256:" + strings.Repeat("a", 64),
+		StorageClass: "gp2", TreeVolume: "20Gi",
+		ModelLogin: &config.ModelLogin{TokenFile: "/var/run/legion/model-token"},
+	}
+	_, err := sandboxOptions(config.Config{}, kubernetes, "legion", "tcp://127.0.0.1:13371", "", func(string) (string, bool) {
+		return "", false
+	}, quietLogger())
+	if err == nil || !strings.Contains(err.Error(), "memory-backed state volume") {
+		t.Fatalf("sandboxOptions = %v, want an out-of-state token-file refusal", err)
+	}
+}
+
 // prepare refuses what the cluster would refuse only later: a kubeconfig with no current context
 // when runtime.kubernetes.context names none, and a role's request above its limit.
 func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *testing.T) {

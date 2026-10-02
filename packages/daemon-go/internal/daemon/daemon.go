@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/modellogin"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -221,6 +222,9 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		st.Close()
 		return err
 	}
+	if plan.modelLogin != nil {
+		go plan.modelLogin.Run(ctx)
+	}
 	if plan.probe != nil {
 		if err := plan.probe(ctx, s.runtime); err != nil {
 			s.stop()
@@ -326,7 +330,7 @@ type plan struct {
 	instructions string
 	// dispatchToken is the Dispatch bearer dispatch_token_file names; "" without Dispatch.
 	dispatchToken string
-	prompts *prompts.Composer
+	prompts       *prompts.Composer
 	// roleReferences are the task agents and skills the state-local role prompt snapshot names
 	// (promptrefs.Roles), which the gate on either runtime resolves beside the plugin's own.
 	roleReferences promptrefs.Names
@@ -348,6 +352,9 @@ type plan struct {
 	// current status (source.State, agentsecrets.Client.LoginStatus); nil when the deployment
 	// enrolls no pod.
 	secretsLogin *agentsecrets.Client
+	// modelLogin is the optional daemon-held Cognito machine login. Its access token is delivered
+	// only over the worker stream; state reads its safe status only.
+	modelLogin *modellogin.Manager
 }
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
@@ -409,7 +416,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: references,
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep,
-		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin,
+		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin, modelLogin: newModelLogin(cfg, log),
 	}
 	if cfg.Runtime.Name == "kubernetes" {
 		err = prepareSandbox(cfg, o, reads.sandbox, &p)
@@ -545,7 +552,9 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	tokens := api.NewBootTokens(st)
 	sup := newSupervisor(supervising, st, p.project, cfg.StateDir, log)
 	listener, err := stream.Listen(streaming, p.stream,
-		sup.helloResolver(tokens, cfg.WorkerRPCTimeout), stream.Options{RPCTimeout: cfg.WorkerRPCTimeout, Log: log})
+		sup.helloResolver(tokens, cfg.WorkerRPCTimeout), stream.Options{
+			RPCTimeout: cfg.WorkerRPCTimeout, Log: log, ModelToken: p.modelLogin,
+		})
 	if err != nil {
 		cancel()
 		cancelStream()
@@ -790,6 +799,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			admissionCap: cfg.AdmissionCap,
 			startedAt:    startedAt,
 			secretsLogin: p.secretsLogin,
+			modelLogin:   p.modelLogin,
 		},
 		StateTransactions: st,
 		Supervisor:        s.supervisor,
@@ -889,6 +899,8 @@ type source struct {
 	// secretsLogin is the daemon's own agent-secrets machine login client (newSecretsLogin), read
 	// through LoginStatus for the state route; nil when the deployment enrolls no pod.
 	secretsLogin *agentsecrets.Client
+	// modelLogin holds the Cognito machine login's state but never its credential values on the API.
+	modelLogin *modellogin.Manager
 }
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
@@ -949,6 +961,10 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if s.secretsLogin != nil {
 		login := s.secretsLogin.LoginStatus()
 		state.AgentSecretsLogin = &api.AgentSecretsLoginView{State: login.State, Code: login.Code}
+	}
+	if s.modelLogin != nil {
+		login := s.modelLogin.Status()
+		state.ModelLogin = &api.ModelLoginView{State: login.State, Error: login.Error}
 	}
 	return state, nil
 }

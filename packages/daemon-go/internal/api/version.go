@@ -27,4 +27,6 @@ package api
 //
 // 11: LEGION-208 -- legionAppLogins on POST /legion/v1/gh-token, each Legion role App's login keyed by
 // its App role.
-const GoDaemonAPIVersion = 11
+//
+// 12: LEGION-478 -- model-access-token worker frames and modelLogin on GET /legion/v1/state.
+const GoDaemonAPIVersion = 12

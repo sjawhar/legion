@@ -1001,6 +1001,58 @@ func TestAnOverlongLineFromOMPEndsTheChild(t *testing.T) {
 	}
 }
 
+// A model access-token frame reaches the pod shim, not Oh My Pi: it replaces the existing token by
+// rename in the state volume, so a reader can observe only the old complete file or the new one.
+func TestTheShimWritesModelAccessTokenAtomicallyWithOwnerOnlyMode(t *testing.T) {
+	path := socketPath(t)
+	daemon := listen(t, path)
+	child := newOMP(t)
+	tokenFile := filepath.Join(t.TempDir(), "model-token")
+	if err := os.WriteFile(tokenFile, []byte("old-access-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(tokenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInode := before.Sys().(*syscall.Stat_t).Ino
+
+	cfg := config(t, path, child)
+	cfg.ModelTokenFile = tokenFile
+	run(t, cfg, newClock())
+	p := daemon.accept(t)
+	p.expectHello(t)
+	p.send(t, shimwire.HelloAck{})
+	time.Sleep(20 * time.Millisecond)
+	if child.started() {
+		t.Fatal("OMP started before the daemon delivered its model access token")
+	}
+	p.send(t, shimwire.ModelAccessToken{AccessToken: "new-access-token"})
+	p.expectRaw(t, "fake_ready")
+
+	deadline := time.Now().Add(waitLimit)
+	for {
+		body, readErr := os.ReadFile(tokenFile)
+		if readErr == nil && string(body) == "new-access-token" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("token file = %q, %v; want the new complete token", body, readErr)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	after, err := os.Stat(tokenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Mode().Perm() != 0o600 {
+		t.Fatalf("token file mode = %o, want 600", after.Mode().Perm())
+	}
+	if afterInode := after.Sys().(*syscall.Stat_t).Ino; afterInode == beforeInode {
+		t.Fatal("token file kept its inode; want an atomic replacement")
+	}
+}
+
 // The pod's log is the shim's one line per frame it summarizes, and an extension of Oh My Pi
 // failing is one of them: a Legion plugin whose session_start failed leaves an agent with no
 // legion tool, and the pod's log says why.

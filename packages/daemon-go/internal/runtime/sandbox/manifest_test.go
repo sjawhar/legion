@@ -561,6 +561,36 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	}
 }
 
+// A pod receives only the configured path where its shim writes the short-lived access token.
+// Neither the machine password nor its refresh token enters an environment variable, command, or
+// rendered Sandbox specification.
+func TestModelLoginTokenFileReachesOnlyTheWorkerShim(t *testing.T) {
+	opts := testOptions()
+	opts.ModelTokenFile = StateDir + "/model-token"
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod := podOf(t, r, workerSpec(t), false)
+	worker := containerNamed(t, pod, mainContainer)
+	want := []string{"--model-token-file", opts.ModelTokenFile}
+	at := slices.Index(worker.Command, want[0])
+	if at < 0 || at+1 >= len(worker.Command) || worker.Command[at+1] != want[1] {
+		t.Fatalf("worker command = %q, want %q", worker.Command, want)
+	}
+	for _, container := range slices.Concat(pod.InitContainers, pod.Containers) {
+		rendered := strings.Join(container.Command, "\x00")
+		for _, value := range envOf(container) {
+			rendered += "\x00" + value
+		}
+		for _, secret := range []string{"machine-password", "refresh-token", "access-token"} {
+			if strings.Contains(rendered, secret) {
+				t.Fatalf("%s carries %q in its command or environment: %q", container.Name, secret, rendered)
+			}
+		}
+	}
+}
+
 // runtimeOwned is exactly what the worker container is told by the runtime itself: every name
 // mainEnvironment sets with Env empty and no secret of the spec's, every optional value configured.
 // A name added to the environment and not to runtimeOwned is one a spec could override; a name left

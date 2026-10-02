@@ -304,6 +304,9 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 	helper := "!" + legion + " credential"
 	_, providersMounts := r.providers()
 	shim := []string{legion, "worker-shim", "--connect", r.streamURL, "--boot-token-file", BootDir + "/" + bootTokenKey, "--pod-safety"}
+	if r.modelTokenFile != "" {
+		shim = append(shim, "--model-token-file", r.modelTokenFile)
+	}
 	if len(providersMounts) > 0 {
 		shim = append(shim, "--provider-env-dir", ProvidersDir)
 	}

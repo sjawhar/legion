@@ -137,3 +137,13 @@ func ReadAgentSecretsFlags(set map[string]bool, keyDir, tokenFile, binary string
 	}
 	return &AgentSecrets{KeyDir: keyDir, TokenFile: tokenFile, Binary: binary}, nil
 }
+
+// ReadModelTokenFile validates --model-token-file without requiring it to exist. The shim creates
+// it only after the daemon sends an access token, and the Sandbox runtime already confines it to
+// the memory-backed state volume.
+func ReadModelTokenFile(path string) (string, error) {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return "", fmt.Errorf("--model-token-file must be a clean absolute path, got %q", path)
+	}
+	return path, nil
+}

@@ -46,6 +46,13 @@ var ErrListenerClosed = errors.New("worker stream listener closed")
 // one minted for a generation the claim has since left.
 type HelloResolver func(bootToken string) (c claim.Token, generation uint64, stale bool, ok bool)
 
+// ModelTokenSource is the daemon-held short-lived model token as the worker stream sees it. It
+// never exposes the machine password or refresh token to a shim or pod.
+type ModelTokenSource interface {
+	AccessToken() (string, bool)
+	Subscribe(func(string))
+}
+
 // Options are the listener's settings.
 type Options struct {
 	// RPCTimeout is worker_rpc_timeout_seconds: how long a connection has to complete its hello,
@@ -53,18 +60,22 @@ type Options struct {
 	RPCTimeout time.Duration
 	// Log receives the listener's lines; nil is slog.Default().
 	Log *slog.Logger
+	// ModelToken is the daemon-held access-token source for pod shims. Nil leaves the established
+	// tmux and Kubernetes worker stream unchanged.
+	ModelToken ModelTokenSource
 }
 
 // Listener accepts shim connections and keeps the live one for each claim. Its life is the
 // context Listen was given: when that ends it stops accepting, closes every connection — each
 // with its Closed event — and then closes Events().
 type Listener struct {
-	addr    string
-	ln      net.Listener
-	resolve HelloResolver
-	timeout time.Duration
-	log     *slog.Logger
-	events  *eventQueue
+	addr       string
+	ln         net.Listener
+	resolve    HelloResolver
+	timeout    time.Duration
+	log        *slog.Logger
+	events     *eventQueue
+	modelToken ModelTokenSource
 
 	mu    sync.Mutex
 	conns map[claim.Token]*Conn
@@ -109,9 +120,13 @@ func Listen(ctx context.Context, addr string, resolve HelloResolver, opts Option
 		timeout:    opts.RPCTimeout,
 		log:        log,
 		events:     newEventQueue(),
+		modelToken: opts.ModelToken,
 		conns:      map[claim.Token]*Conn{},
 		accepted:   map[net.Conn]struct{}{},
 		registered: make(chan struct{}),
+	}
+	if l.modelToken != nil {
+		l.modelToken.Subscribe(l.broadcastModelToken)
 	}
 	l.wg.Add(1)
 	go l.accept()
@@ -359,11 +374,36 @@ func (l *Listener) register(nc net.Conn, token claim.Token, generation uint64, i
 	if err := conn.writer.WriteFrame(shimwire.HelloAck{}); err != nil {
 		return nil, "connection closed before hello_ack"
 	}
+	if l.modelToken != nil {
+		if accessToken, ok := l.modelToken.AccessToken(); ok {
+			if err := conn.writer.WriteFrame(shimwire.ModelAccessToken{AccessToken: accessToken}); err != nil {
+				return nil, "connection closed before model-access-token"
+			}
+		}
+	}
 	l.conns[token] = conn
 	l.events.push(Hello{Claim: token, Generation: generation, AgentSecrets: identity})
 	close(l.registered)
 	l.registered = make(chan struct{})
 	return conn, ""
+}
+
+// broadcastModelToken sends one fresh access token to every connected shim. The listener holds
+// its registration lock through each bounded write, so a refresh cannot overtake a new connection's
+// initial token frame between hello_ack and registration.
+func (l *Listener) broadcastModelToken(accessToken string) {
+	frame := shimwire.ModelAccessToken{AccessToken: accessToken}
+	if err := frame.Validate(); err != nil {
+		l.log.Error("worker-stream: refusing an invalid model access-token update", "error", err)
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for token, conn := range l.conns {
+		if err := conn.writer.WriteFrame(frame); err != nil {
+			l.log.Warn("worker-stream: could not deliver a model access token", "claim", token, "error", err)
+		}
+	}
 }
 
 func (l *Listener) isClosed() bool {

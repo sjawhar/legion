@@ -73,6 +73,11 @@ func TestEveryExchangedFrameRoundTripsItsWireLine(t *testing.T) {
 			AdoptWorkingCopyResult{ID: "r4", OK: false, Error: "no workspace"},
 		},
 		{
+			"model-access-token",
+			`{"type":"model-access-token","accessToken":"access-token"}`,
+			ModelAccessToken{AccessToken: "access-token"},
+		},
+		{
 			"rpc_chunk",
 			`{"type":"rpc_chunk","chunkId":"agent-end-1","index":0,"count":2,"byteLength":1048577,"data":"eA=="}`,
 			RPCChunk{ChunkID: "agent-end-1", Index: 0, Count: 2, ByteLength: 1_048_577, Data: "eA=="},

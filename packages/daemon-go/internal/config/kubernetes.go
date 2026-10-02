@@ -43,6 +43,9 @@ type Kubernetes struct {
 	// AgentSecrets is the secrets broker every pod is enrolled with (runtime.kubernetes.agent_secrets);
 	// nil when the deployment enrolls none, in which case pods carry no token for it.
 	AgentSecrets *AgentSecretsConfig
+	// ModelLogin is the daemon-held Cognito machine login whose short-lived access token reaches
+	// worker shims. Nil leaves model authentication entirely to the operator's pod configuration.
+	ModelLogin *ModelLogin
 }
 
 // Scheduling is where the pods may run beyond the Legion pool, which the runtime selects itself.
@@ -155,6 +158,42 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 	return block, nil
 }
 
+// ModelLogin is `runtime.kubernetes.model_login`: the command that prints a Cognito machine-login
+// document, and the in-pod file the shim writes. Region, user-pool id, username, password, and
+// client id belong to that document so operator configuration never duplicates them.
+type ModelLogin struct {
+	LoginCommand string
+	TokenFile    string
+}
+
+const modelLoginKey = kubernetesKey + ".model_login"
+
+// readModelLogin validates the operator configuration without running LoginCommand. The command is
+// deliberately deferred to daemon boot, so `legion start --check-config` cannot request a secret.
+func readModelLogin(value *yaml.Node) (*ModelLogin, error) {
+	if value == nil {
+		return nil, nil
+	}
+	if value.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s must be a mapping", modelLoginKey)
+	}
+	fields, err := members(value, modelLoginKey, "login_command", "token_file")
+	if err != nil {
+		return nil, err
+	}
+	login := &ModelLogin{}
+	if login.LoginCommand, err = requiredString(fields["login_command"], modelLoginKey+".login_command", ""); err != nil {
+		return nil, err
+	}
+	if login.TokenFile, err = requiredString(fields["token_file"], modelLoginKey+".token_file", ""); err != nil {
+		return nil, err
+	}
+	if !path.IsAbs(login.TokenFile) || path.Clean(login.TokenFile) != login.TokenFile {
+		return nil, fmt.Errorf("%s.token_file must be a clean absolute path", modelLoginKey)
+	}
+	return login, nil
+}
+
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
@@ -172,7 +211,7 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	}
 	fields, err := members(value, kubernetesKey, "namespace", "image", "storage_class", "tree_volume",
 		"kubeconfig", "context", "scheduling", "resources", "gateway", "pod", "session_store", "session_dsn_secret",
-		"role_profiles", "agent_secrets")
+		"role_profiles", "agent_secrets", "model_login")
 	if err != nil {
 		return nil, err
 	}
@@ -225,6 +264,9 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 		return nil, err
 	}
 	if block.AgentSecrets, err = readAgentSecrets(fields["agent_secrets"]); err != nil {
+		return nil, err
+	}
+	if block.ModelLogin, err = readModelLogin(fields["model_login"]); err != nil {
 		return nil, err
 	}
 	return block, nil

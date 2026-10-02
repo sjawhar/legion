@@ -39,6 +39,9 @@ type State struct {
 	// (runtime.kubernetes.agent_secrets, AGENTC-393 Plan C), absent when the deployment configures
 	// no broker.
 	AgentSecretsLogin *AgentSecretsLoginView `json:"agentSecretsLogin,omitempty"`
+	// ModelLogin is the daemon-held Cognito machine login. It reports health only: access tokens,
+	// refresh tokens, passwords, and login-document output stay in process memory.
+	ModelLogin *ModelLoginView `json:"modelLogin,omitempty"`
 }
 
 // ControllerLocator is the external record of the project's controller (LEGION-206 Requirement
@@ -70,6 +73,13 @@ func ControllerLocatorOf(runtimeName string, record controller.Record) *Controll
 type AgentSecretsLoginView struct {
 	State string `json:"state"`
 	Code  string `json:"code"`
+}
+
+// ModelLoginView is the model login's current status. Error is absent while an access token is
+// current and names a login failure without echoing credential material.
+type ModelLoginView struct {
+	State string `json:"state"`
+	Error string `json:"error,omitempty"`
 }
 
 // MarshalJSON keeps `issues` an object on the wire: a nil Go map is `null`, which the plugin's

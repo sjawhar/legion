@@ -80,6 +80,9 @@ type Options struct {
 	Tools    Tools
 	// AgentSecrets enrolls every pod with the secrets broker; nil enrolls none. See AgentSecrets.
 	AgentSecrets *AgentSecrets
+	// ModelTokenFile is a clean path inside StateDir where the shim writes the daemon-delivered
+	// access token. It is empty when this deployment configures no machine model login.
+	ModelTokenFile string
 	// Pod is the operator's pod configuration, added to every worker pod and to the probe pod.
 	Pod Pod
 	// ProviderKeys maps each variable Oh My Pi reads to the key of the providers Secret

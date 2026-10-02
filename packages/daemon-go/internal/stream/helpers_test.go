@@ -93,10 +93,45 @@ type harness struct {
 	done     bool
 }
 
+// testModelTokenSource is the daemon-held token source as the listener sees it. Its updates make
+// the listener's registered shims prove the token crosses the worker stream, not merely a callback.
+type testModelTokenSource struct {
+	mu          sync.Mutex
+	token       string
+	subscribers []func(string)
+}
+
+func (s *testModelTokenSource) AccessToken() (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.token, s.token != ""
+}
+
+func (s *testModelTokenSource) Subscribe(callback func(string)) {
+	s.mu.Lock()
+	s.subscribers = append(s.subscribers, callback)
+	token := s.token
+	s.mu.Unlock()
+	if token != "" {
+		callback(token)
+	}
+}
+
+func (s *testModelTokenSource) publish(token string) {
+	s.mu.Lock()
+	s.token = token
+	subscribers := append([]func(string){}, s.subscribers...)
+	s.mu.Unlock()
+	for _, subscriber := range subscribers {
+		subscriber(token)
+	}
+}
+
 type harnessOptions struct {
 	addr       string
 	resolver   *resolver
 	rpcTimeout time.Duration
+	modelToken *testModelTokenSource
 }
 
 func startListener(t *testing.T, options harnessOptions) *harness {
@@ -112,10 +147,11 @@ func startListener(t *testing.T, options harnessOptions) *harness {
 	}
 	logs := &logRecorder{}
 	ctx, cancel := context.WithCancel(context.Background())
-	listener, err := Listen(ctx, options.addr, options.resolver.resolve, Options{
-		RPCTimeout: options.rpcTimeout,
-		Log:        slog.New(logs),
-	})
+	listenerOptions := Options{RPCTimeout: options.rpcTimeout, Log: slog.New(logs)}
+	if options.modelToken != nil {
+		listenerOptions.ModelToken = options.modelToken
+	}
+	listener, err := Listen(ctx, options.addr, options.resolver.resolve, listenerOptions)
 	if err != nil {
 		cancel()
 		t.Fatalf("Listen(%q): %v", options.addr, err)

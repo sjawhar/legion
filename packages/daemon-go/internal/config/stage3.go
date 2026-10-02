@@ -316,6 +316,13 @@ func executePrivateKeyCommand(command, field string) (string, error) {
 	return key, nil
 }
 
+// ExecuteKeyCommand runs a daemon-held credential command with the same environment and output
+// handling as github_apps.*.private_key_command. It returns trimmed stdout only; callers must not
+// log it because credential documents can contain passwords and refresh tokens.
+func ExecuteKeyCommand(command, field string) (string, error) {
+	return executePrivateKeyCommand(command, field)
+}
+
 func resolvePrivateKeySecret(name, field string) (string, error) {
 	statusText, err := runAppSecretsGet(name, "--no-request", field)
 	if err != nil {

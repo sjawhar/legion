@@ -69,6 +69,7 @@ type Runtime struct {
 	providersSecrets                        []string
 	natsUser                                string
 	agentSecrets                            *AgentSecrets
+	modelTokenFile                          string
 	agent                                   []string
 	bootTimeout                             time.Duration
 	bootIntervals                           int
@@ -184,6 +185,13 @@ func configure(opts Options) (*Runtime, error) {
 			return refuse("agent secrets: token expiry %s is not between %s and %s (the API server's floor and the cluster's admission cap)", a.TokenExpiry, 10*time.Minute, time.Hour)
 		}
 	}
+	if opts.ModelTokenFile != "" {
+		relative, underStateDir := strings.CutPrefix(opts.ModelTokenFile, StateDir+"/")
+		if !filepath.IsAbs(opts.ModelTokenFile) || filepath.Clean(opts.ModelTokenFile) != opts.ModelTokenFile ||
+			!underStateDir || relative == "" {
+			return refuse("model token file %q is not a clean path below %s, the memory-backed state volume", opts.ModelTokenFile, StateDir)
+		}
+	}
 	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets, opts.ProvidersSecrets); err != nil {
 		return refuse("%v", err)
 	}
@@ -197,7 +205,8 @@ func configure(opts Options) (*Runtime, error) {
 		treeVolume: opts.TreeVolume, scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
-		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
+		modelTokenFile: opts.ModelTokenFile,
+		pod:            opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, conns: opts.Conns, now: opts.Now, log: opts.Log,

@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -160,6 +162,14 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 	if a := k.AgentSecrets; a != nil {
 		agentSecrets = &sandbox.AgentSecrets{URL: a.URL, Audience: a.Audience, TokenExpiry: time.Duration(a.TokenExpirySeconds) * time.Second}
 	}
+	modelTokenFile := ""
+	if login := k.ModelLogin; login != nil {
+		modelTokenFile = login.TokenFile
+		relative, underStateDir := strings.CutPrefix(modelTokenFile, sandbox.StateDir+"/")
+		if !filepath.IsAbs(modelTokenFile) || filepath.Clean(modelTokenFile) != modelTokenFile || !underStateDir || relative == "" {
+			return sandbox.Options{}, fmt.Errorf("runtime.kubernetes.model_login.token_file %q must be a clean path below %s, the memory-backed state volume", modelTokenFile, sandbox.StateDir)
+		}
+	}
 	return sandbox.Options{
 		Namespace: k.Namespace, Project: project, Image: k.Image, StorageClass: k.StorageClass, TreeVolume: treeVolume,
 		Scheduling: sandbox.Scheduling{NodeSelector: k.Scheduling.NodeSelector, Tolerations: tolerations, PriorityClass: k.Scheduling.PriorityClass},
@@ -172,6 +182,7 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		ProviderKeys:     providerSecretKeys(cfg.ProviderKeys),
 		LaunchSecrets:    launchSecretNames(cfg, lookup),
 		ProvidersSecrets: providersSecrets(cfg, lookup),
+		ModelTokenFile:   modelTokenFile,
 		BootTimeout:      cfg.WorkerBootTimeout,
 		BootIntervals:    cfg.WorkerBootRegistrationDeadlineIntervals,
 		TerminationGrace: cfg.WorkerStopTimeout,

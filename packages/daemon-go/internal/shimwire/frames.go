@@ -39,6 +39,7 @@ const (
 	TypeHello2                       = "hello2"
 	TypeAgentSecretsEnrollment       = "agent-secrets-enrollment"
 	TypeAgentSecretsEnrollmentResult = "agent-secrets-enrollment-result"
+	TypeModelAccessToken             = "model-access-token"
 )
 
 // The protocol's sizes, verified against the shipped files: the largest plain line including its
@@ -104,6 +105,12 @@ type AgentSecretsEnrollmentResult struct {
 	ID    string `json:"id"`
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+}
+
+// ModelAccessToken is the short-lived Cognito access token the daemon sends to a pod shim. The
+// shim writes it to its configured memory-backed token file and never forwards it to Oh My Pi.
+type ModelAccessToken struct {
+	AccessToken string `json:"accessToken"`
 }
 
 // HelloAck accepts the hello. The shim spawns OMP only after it (worker-stream-listener.ts:14).
@@ -209,6 +216,7 @@ func (r Raw) FrameType() string                        { return r.Type }
 func (Hello2) FrameType() string                       { return TypeHello2 }
 func (AgentSecretsEnrollment) FrameType() string       { return TypeAgentSecretsEnrollment }
 func (AgentSecretsEnrollmentResult) FrameType() string { return TypeAgentSecretsEnrollmentResult }
+func (ModelAccessToken) FrameType() string             { return TypeModelAccessToken }
 
 func (f Hello) MarshalJSON() ([]byte, error) {
 	type plain Hello
@@ -278,6 +286,11 @@ func (f AgentSecretsEnrollmentResult) MarshalJSON() ([]byte, error) {
 	return marshalFrame(TypeAgentSecretsEnrollmentResult, plain(f))
 }
 
+func (f ModelAccessToken) MarshalJSON() ([]byte, error) {
+	type plain ModelAccessToken
+	return marshalFrame(TypeModelAccessToken, plain(f))
+}
+
 // Validate refuses a hello the listener would refuse (worker-stream-listener.ts:140-148).
 func (f Hello) Validate() error {
 	if f.BootToken == "" {
@@ -338,6 +351,15 @@ func (f AgentSecretsEnrollment) Validate() error {
 	return nil
 }
 
+// Validate refuses an empty access token. The daemon is the only sender, so an empty frame names
+// a daemon bug rather than becoming a silent empty credential file.
+func (f ModelAccessToken) Validate() error {
+	if f.AccessToken == "" {
+		return fmt.Errorf("%w: model-access-token carries no accessToken", ErrMalformedFrame)
+	}
+	return nil
+}
+
 // Decode reads one line as a frame. A type this package models decodes to its own Go type; any
 // other object — including one with no type at all — decodes to Raw, because the shim is a
 // bridge and a frame it does not understand still has somewhere to go. Only a line that is not a
@@ -386,6 +408,8 @@ func Decode(line []byte) (Frame, error) {
 		return decodeInto[AgentSecretsEnrollment](trimmed)
 	case TypeAgentSecretsEnrollmentResult:
 		return decodeInto[AgentSecretsEnrollmentResult](trimmed)
+	case TypeModelAccessToken:
+		return decodeInto[ModelAccessToken](trimmed)
 	default:
 		return Raw{Type: head.Type, JSON: bytes.Clone(trimmed)}, nil
 	}

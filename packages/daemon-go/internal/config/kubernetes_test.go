@@ -658,25 +658,16 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 	}
 }
 
-// operatorRouteAudience is the audience the tests fill into the operator route's placeholder, as an
-// operator and each live harness run fill in their gateway's.
-const operatorRouteAudience = "operator-audience"
-
-// operatorRoutePod is the operator route the Go live harnesses run on
-// (deploy/kubernetes/operator-route/pod.yml), its token audience filled in with audience when that
-// is not empty, indented to sit under `runtime.kubernetes.pod`.
-func operatorRoutePod(t *testing.T, audience string) string {
+// operatorRoutePod is the public model-route pod configuration, indented to sit below
+// runtime.kubernetes.pod.
+func operatorRoutePod(t *testing.T) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	pod := string(raw)
-	if audience != "" {
-		pod = strings.ReplaceAll(pod, "${MODEL_TOKEN_AUDIENCE}", audience)
-	}
 	var indented strings.Builder
-	for _, line := range strings.SplitAfter(pod, "\n") {
+	for _, line := range strings.SplitAfter(string(raw), "\n") {
 		if line != "" {
 			indented.WriteString("      " + line)
 		}
@@ -684,13 +675,11 @@ func operatorRoutePod(t *testing.T, audience string) string {
 	return indented.String()
 }
 
-// The operator route copied as it stands, its audience placeholder unfilled, is refused at config
-// load: nothing expands the placeholder, and a pod carrying a token for its text would have every
-// model call refused.
-func TestLoadForValidationRefusesTheOperatorRouteWithItsAudienceUnfilled(t *testing.T) {
-	_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    pod:\n"+operatorRoutePod(t, "")), noEnv)
-	if err == nil || !strings.Contains(err.Error(), `.service_account_token.audience "${MODEL_TOKEN_AUDIENCE}" is an unfilled placeholder`) {
-		t.Fatalf("LoadForValidation = %v, want the unfilled audience placeholder refused", err)
+// The operator route has only its ConfigMap and no credential projection. The daemon's optional
+// model_login, not this pod block, owns authentication material.
+func TestLoadForValidationAcceptsTheOperatorRouteWithoutPodCredential(t *testing.T) {
+	if _, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    pod:\n"+operatorRoutePod(t)), noEnv); err != nil {
+		t.Fatalf("LoadForValidation: %v", err)
 	}
 }
 
@@ -738,7 +727,7 @@ runtime:
     kubeconfig: /home/ubuntu/.kube/legion-daemon-production
     context: legion-daemon@example
     pod:
-`+operatorRoutePod(t, operatorRouteAudience))
+`+operatorRoutePod(t))
 
 	cfg, err := LoadForValidation(path, noEnv)
 	if err != nil {
@@ -753,9 +742,9 @@ runtime:
 	if block := cfg.Runtime.Kubernetes; block.Context != "legion-daemon@example" || block.Resources != nil || block.Scheduling.NodeSelector != nil {
 		t.Errorf("kubernetes block = %+v, want the restricted context, no requests, and no node selector", *block)
 	}
-	if pod := cfg.Runtime.Kubernetes.Pod; pod.ServiceAccount != "legion-worker" || len(pod.Volumes) != 2 || len(pod.VolumeMounts) != 3 ||
+	if pod := cfg.Runtime.Kubernetes.Pod; pod.ServiceAccount != "legion-worker" || len(pod.Volumes) != 1 || len(pod.VolumeMounts) != 2 ||
 		pod.Env["PI_CONFIG_FILES"] != "/etc/legion-operator/overlay.yml" {
-		t.Errorf("the operator pod settled as %+v, want the fixture's account, two volumes, three mounts, and its overlay", pod)
+		t.Errorf("the operator pod settled as %+v, want the fixture's account, one volume, two mounts, and its overlay", pod)
 	}
 }
 
@@ -820,5 +809,24 @@ func TestLoopbackBrokerMayBePlainHTTP(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// The machine-login command is deliberately not executed by --check-config: the operator can
+// validate the daemon's public shape on a host that cannot read the credential document.
+func TestLoadForValidationSettlesModelLoginWithoutRunningItsCommand(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+`    model_login:
+      login_command: exit 73
+      token_file: /var/run/legion/state/model-token
+`), noEnv)
+	if err != nil {
+		t.Fatalf("LoadForValidation: %v", err)
+	}
+	want := &ModelLogin{
+		LoginCommand: "exit 73",
+		TokenFile:    "/var/run/legion/state/model-token",
+	}
+	if got := cfg.Runtime.Kubernetes.ModelLogin; !reflect.DeepEqual(got, want) {
+		t.Fatalf("model_login = %#v, want %#v", got, want)
 	}
 }

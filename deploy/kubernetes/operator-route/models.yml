@@ -3,11 +3,11 @@
 # directory with overlay.yml, puts the model endpoint's base URL in place of the baseUrl
 # placeholder, and applies both with apply.sh (README.md beside this file).
 #
-# anthropic through the Hawk model gateway (middleman), keyed by the pod's projected
-# ServiceAccount token. The gateway reads the key from x-api-key; Oh My Pi caches the command's
-# value for the process and runs it again on a 401, so the token the kubelet rotated is read on
-# the first refusal. `auth: apiKey` makes these models plain API-key callers: without it Oh My Pi
-# sends an anthropic-messages custom model in its Claude Code OAuth shape.
+# anthropic through the Hawk model gateway (middleman), keyed by the daemon-delivered Cognito
+# access token. The worker shim writes that token to the memory-backed state volume; Oh My Pi
+# caches the command's value for the process and runs it again on a 401, so the token refreshed by
+# the daemon is read on the first refusal. `auth: apiKey` makes these models plain API-key callers:
+# without it Oh My Pi sends an anthropic-messages custom model in its Claude Code OAuth shape.
 #
 # The models carry the gateway's current names. Each entry gives Oh My Pi the metadata for the
 # model the gateway serves; overlay.yml chooses each role's.
@@ -19,9 +19,9 @@ providers:
     baseUrl: ${MODEL_BASE_URL}
     auth: apiKey
     api: anthropic-messages
-    apiKey: "!cat /var/run/operator/token"
+    apiKey: "!cat /var/run/legion/state/model-token"
     headers:
-      X-Api-Key: "!cat /var/run/operator/token"
+      X-Api-Key: "!cat /var/run/legion/state/model-token"
     models:
       - id: claude-fable-5-1-legion
         name: Claude Fable 5.1 (Legion gateway)

@@ -48,6 +48,28 @@ func TestListenAcceptsAHelloOverUnixAndTCP(t *testing.T) {
 	}
 }
 
+// A connected shim receives the current token after hello_ack, then every replacement as the
+// daemon refreshes it. The frame is never sent before the ack because a shim has no child or
+// token path to handle it before that point.
+func TestListenerDeliversTheCurrentModelAccessTokenToConnectedShims(t *testing.T) {
+	source := &testModelTokenSource{token: "access-1"}
+	h := startListener(t, harnessOptions{modelToken: source})
+	p := dial(t, h.listener.Addr())
+	p.hello(testToken)
+	p.expect(shimwire.TypeHelloAck)
+	if got := p.expect(shimwire.TypeModelAccessToken); got != (shimwire.ModelAccessToken{AccessToken: "access-1"}) {
+		t.Fatalf("initial model token frame = %#v", got)
+	}
+	if event := h.next(); event != (Hello{Claim: testClaim, Generation: testGeneration}) {
+		t.Fatalf("event = %#v, want the shim hello", event)
+	}
+
+	source.publish("access-2")
+	if got := p.expect(shimwire.TypeModelAccessToken); got != (shimwire.ModelAccessToken{AccessToken: "access-2"}) {
+		t.Fatalf("refreshed model token frame = %#v", got)
+	}
+}
+
 func TestListenRefusesAnAddressItDoesNotSpeak(t *testing.T) {
 	for _, addr := range []string{
 		"",

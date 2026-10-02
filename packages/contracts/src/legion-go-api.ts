@@ -193,9 +193,17 @@ const legionGoAgentSecretsLoginView = z.strictObject({
   code: z.string(),
 });
 
+/** `api.ModelLoginView` — the optional daemon-held Cognito machine login. Its state API view
+ * never exposes a password, refresh token, access token, or login-document output. */
+const legionGoModelLoginView = z.strictObject({
+  state: z.enum(["pending", "ready", "error"]),
+  error: z.string().optional(),
+});
+
 /** `api.State`, the body of `GET /legion/v1/state`. `controllerLocator` is absent until a session
  * registers with the capability `legion controller start` fetched; `agentSecretsLogin` is absent
- * when the deployment configures no broker (contract 9). */
+ * when the deployment configures no broker (contract 9), and `modelLogin` is absent when no
+ * Kubernetes machine login is configured (contract 12). */
 export const LegionGoStateResponse = z.strictObject({
   daemon: goDaemonInfo,
   admission: legionGoAdmission,
@@ -203,6 +211,7 @@ export const LegionGoStateResponse = z.strictObject({
   pendingStatusWrites: z.array(legionGoPendingStatusWrite),
   controllerLocator: legionGoControllerLocator.optional(),
   agentSecretsLogin: legionGoAgentSecretsLoginView.optional(),
+  modelLogin: legionGoModelLoginView.optional(),
 });
 
 export type LegionGoState = z.output<typeof LegionGoStateResponse>;

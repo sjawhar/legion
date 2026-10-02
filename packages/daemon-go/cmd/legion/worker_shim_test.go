@@ -89,6 +89,23 @@ func TestWorkerShimRefusesBeforeDialOrSpawn(t *testing.T) {
 	}
 }
 
+func TestWorkerShimConfigCarriesTheModelTokenFile(t *testing.T) {
+	bootTokenFile := filepath.Join(t.TempDir(), "boot-token")
+	if err := os.WriteFile(bootTokenFile, []byte("boot-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := workerShimConfig(
+		map[string]bool{"connect": true, "boot-token-file": true, "model-token-file": true},
+		"tcp://127.0.0.1:13371", bootTokenFile, "", "", "", "", "/var/run/legion/state/model-token", []string{"omp"},
+	)
+	if err != nil {
+		t.Fatalf("workerShimConfig: %v", err)
+	}
+	if cfg.ModelTokenFile != "/var/run/legion/state/model-token" {
+		t.Fatalf("ModelTokenFile = %q", cfg.ModelTokenFile)
+	}
+}
+
 // The command end to end: the hello carries the file's token, the providers directory reaches
 // the child's environment only, and the shim's exit status is the child's — which is what the
 // pane, and the runtime watching it, see.
