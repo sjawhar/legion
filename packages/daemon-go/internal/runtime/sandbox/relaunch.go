@@ -157,7 +157,7 @@ func (r *Runtime) admitIssueResources(ctx context.Context, resources *store.Stor
 	deadline := time.NewTimer(r.bootTimeout)
 	defer deadline.Stop()
 	for {
-		err := resources.EnsureIssueResources(ctx, r.project, spec.Issue, spec.Tree, sandbox)
+		err := resources.EnsureIssueResources(ctx, r.project, spec.Issue, spec.Tree, sandbox, spec.TreeEpoch)
 		if !errors.Is(err, store.ErrIssueCleanupInProgress) {
 			return err
 		}

@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 // AttemptRun is the latest check-run id the daemon observed for one check name.
@@ -251,6 +252,10 @@ type Store interface {
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error
+	// OpenTreeLifecycle binds an admission fact's root start rows to one durable tree epoch before
+	// the fact commits. A reserved cleanup returns treelifecycle.ErrCleanupReserved without
+	// admitting work.
+	OpenTreeLifecycle(ctx context.Context, tx pgx.Tx, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error)
 	// ControllerRegistered says whether a session holds the current controller registration of the
 	// Dispatch project key project (controller.Record.Registered's rule), reading the controllers
 	// table under the project token (claim.ProjectToken) `legion controller start` mints under.

@@ -47,6 +47,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 var _ runtime.Runtime = (*Runtime)(nil)
@@ -629,18 +630,11 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	return nil
 }
 
-// CleanupIssue is the sole whole-issue delete capability. The outbox calls it for a workflow
-// linger close, and CleanupTree calls it for explicit operator authority over a non-workflow tree.
-// BeginIssueCleanup locks and checks the root linger generation for the first case, so a committed
-// re-admission and its pending start fence an old close even before the start creates a claim. A
-// child issue's Sandbox is deleted and its absence confirmed through the API before its record is
-// confirmed. A tree root is cleaned last, because its Sandbox owns the tree PVC: BeginIssueCleanup
-// refuses the root while any child record is unconfirmed and, once begun, refuses every new child
-// admission; then the API must list no child Sandbox of the tree either. Its UID/resourceVersion-
-// fenced foreground Sandbox deletion remains visible until Kubernetes garbage collection deleted
-// the root PVC's blocking owner-dependent. Sandbox NotFound is therefore the restricted runtime's
-// complete cleanup confirmation: it has no PVC API grant and never deletes a PVC itself.
-func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string, treeGeneration uint64) error {
+// CleanupIssue deletes one issue only under a prior tree lifecycle reservation. Workflow and
+// authenticated operator entry points reserve that epoch before claim/resource snapshots; a child
+// is confirmed first, while the root's foreground Sandbox deletion confirms its controller-owned
+// blocking PVC dependent under the restricted grant.
+func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string, treeEpoch uint64) error {
 	if project != r.project {
 		return fmt.Errorf("cleanup issue %s: project %s is not runtime project %s", issue, project, r.project)
 	}
@@ -650,7 +644,7 @@ func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string,
 	if resources == nil {
 		return errors.New("cleanup issue resources: no durable issue resource store")
 	}
-	resource, began, err := resources.BeginIssueCleanup(ctx, project, issue, tree, treeGeneration)
+	resource, began, err := resources.BeginIssueCleanup(ctx, project, issue, tree, treeEpoch)
 	if err != nil {
 		return fmt.Errorf("cleanup issue %s: %w", issue, err)
 	}
@@ -691,13 +685,18 @@ func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string,
 	if err := r.awaitSandboxDeleted(ctx, resource.Sandbox); err != nil {
 		return err
 	}
+	if root {
+		return resources.ConfirmRootCleanup(ctx, project, issue, tree, resource.CleanupGeneration, treeEpoch)
+	}
 	return resources.ConfirmIssueCleanup(ctx, project, issue, resource.CleanupGeneration)
 }
 
-// CleanupTree is the operator-close capability for a tree that has no workflow record. It reads
-// only the runtime's durable resource rows, cleans every child then its root, and passes a zero
-// tree generation to mark this as explicit operator authority rather than a workflow linger close.
-func (r *Runtime) CleanupTree(ctx context.Context, project, tree string) error {
+// CleanupTree runs only under its caller's current reservation of treeEpoch. It first censuses every
+// stored claim of the tree, which after the reservation is the complete population, and is a named
+// wait while any has not retired; then it cleans children before the root. A tree with no root
+// resource record of this epoch confirms its reservation too, so a close before the first root
+// resource cannot leave a barrier that blocks the next explicit admission.
+func (r *Runtime) CleanupTree(ctx context.Context, project, tree string, treeEpoch uint64) error {
 	if project != r.project {
 		return fmt.Errorf("cleanup tree %s: project %s is not runtime project %s", tree, project, r.project)
 	}
@@ -707,16 +706,75 @@ func (r *Runtime) CleanupTree(ctx context.Context, project, tree string) error {
 	if resources == nil {
 		return errors.New("cleanup tree resources: no durable issue resource store")
 	}
+	if err := resources.CheckTreeCleanupReservation(ctx, project, tree, treeEpoch); err != nil {
+		return fmt.Errorf("cleanup tree %s: %w", tree, err)
+	}
+	// The census reads the whole stored population after the reservation committed, so it
+	// includes a claim that persisted before the reservation but has not admitted resources yet;
+	// such a claim must stop before anything of its tree is deleted.
+	pending, err := resources.PendingTreeClaims(ctx, project, tree)
+	if err != nil {
+		return err
+	}
+	if len(pending) > 0 {
+		return fmt.Errorf("cleanup tree %s: %w: its claims %s have not retired", tree, store.ErrIssueCleanupInProgress, strings.Join(pending, ", "))
+	}
 	issues, err := resources.TreeIssueResources(ctx, project, tree)
 	if err != nil {
 		return err
 	}
+	rootCleaning := false
 	for _, issue := range issues {
-		if err := r.CleanupIssue(ctx, project, issue.Issue, tree, 0); err != nil {
+		// A root record whose cleanup an earlier epoch confirmed was not admitted again in this
+		// one: re-admission resets it. Only a root record of this epoch confirms the reservation.
+		if issue.Issue == tree && issue.CleanupConfirmedAt.IsZero() {
+			rootCleaning = true
+		}
+		if err := r.CleanupIssue(ctx, project, issue.Issue, tree, treeEpoch); err != nil {
 			return err
 		}
 	}
+	if !rootCleaning {
+		return resources.ConfirmTreeCleanup(ctx, project, tree, treeEpoch)
+	}
 	return nil
+}
+
+// OpenOperatorTree is the authenticated operator root-start authority. It opens the next durable
+// epoch only after a confirmed cleanup; child operator starts bind the existing epoch instead.
+func (r *Runtime) OpenOperatorTree(ctx context.Context, project, tree string) (uint64, error) {
+	if project != r.project {
+		return 0, fmt.Errorf("open operator tree %s: project %s is not runtime project %s", tree, project, r.project)
+	}
+	r.mu.Lock()
+	resources := r.resourceStore
+	r.mu.Unlock()
+	if resources == nil {
+		return 0, errors.New("open operator tree: no durable issue resource store")
+	}
+	lifecycle, err := resources.OpenTreeLifecycle(ctx, project, tree, treelifecycle.AuthorityOperator)
+	return lifecycle.Epoch, err
+}
+
+// ReserveWorkflowTreeCleanup validates a lingering workflow close before durable cleanup begins.
+func (r *Runtime) ReserveWorkflowTreeCleanup(ctx context.Context, project, tree string, generation uint64) (uint64, bool, error) {
+	resources := r.resourceStore
+	if resources == nil {
+		return 0, false, errors.New("reserve workflow tree cleanup: no durable issue resource store")
+	}
+	lifecycle, reserved, err := resources.ReserveWorkflowTreeCleanup(ctx, project, tree, generation)
+	return lifecycle.Epoch, reserved, err
+}
+
+// ReserveOperatorTreeCleanup is explicit authenticated operator authority, never an overloaded
+// workflow generation value. It reports false, reserving nothing, once that cleanup confirmed.
+func (r *Runtime) ReserveOperatorTreeCleanup(ctx context.Context, project, tree string) (uint64, bool, error) {
+	resources := r.resourceStore
+	if resources == nil {
+		return 0, false, errors.New("reserve operator tree cleanup: no durable issue resource store")
+	}
+	lifecycle, reserved, err := resources.ReserveOperatorTreeCleanup(ctx, project, tree)
+	return lifecycle.Epoch, reserved, err
 }
 
 // refuseTreeChildSandboxes is the API half of the root-last fence: the root's cleanup has begun,

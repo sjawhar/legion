@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -152,6 +153,12 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 				// is a wait: the row is asked again on its backoff and goes on once that turn is over.
 				if row.Attempts == 0 {
 					r.log.Info("outbox start is held for the turn of the role it takes the phase from", "row", row.ID, "issue", row.Issue, "error", err)
+				}
+			} else if errors.Is(err, store.ErrIssueCleanupInProgress) {
+				// A start or cleanup meeting its tree's durable cleanup reservation is a wait: the
+				// row keeps its work and runs again on its backoff, charging no launch failure.
+				if row.Attempts == 0 {
+					r.log.Info("outbox row waits for its tree's durable cleanup", "row", row.ID, "kind", row.Kind, "issue", row.Issue, "error", err)
 				}
 			} else if errors.Is(err, supervise.ErrDeliveryPending) {
 				// A task meeting the claim's own pending delivery is a wait, not a failure: the row
@@ -585,47 +592,42 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				"tree", issue.Tree, "role", payload.Role, "linger", payload.Linger)
 			return nil
 		}
+		cleaner, ok := r.supervisor.deps.Runtime.(runtime.TreeLifecycleCleaner)
+		var treeEpoch uint64
+		if ok {
+			var fresh bool
+			treeEpoch, fresh, err = cleaner.ReserveWorkflowTreeCleanup(ctx, r.project, issue.Tree, payload.Linger)
+			if err != nil {
+				return fmt.Errorf("reserve cleanup of workflow tree %s: %w", issue.Tree, err)
+			}
+			if !fresh {
+				return nil
+			}
+		}
 		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
 			return fmt.Errorf("close the tree of claim %s: %w", token, err)
 		}
-		if err := r.cleanupIssueResources(ctx, issue, payload.Linger); err != nil {
-			return err
+		if !ok {
+			return nil
 		}
-		return nil
+		return r.cleanupTreeResources(ctx, issue.Tree, treeEpoch)
 	default:
 		return fmt.Errorf("outbox row %d has unknown supervise operation %q", row.ID, payload.Op)
 	}
 }
 
-// cleanupIssueResources is the durable whole-issue effect after a tree-close row retired one
-// claim. It acts only once every persisted sibling claim of this exact issue is retired; the
-// runtime then atomically checks that the root still lingers at treeGeneration, so a committed
-// re-admission start that has not yet made a claim fences the old close before deletion. Runtime
-// Release remains role-scoped.
-func (r *outbox) cleanupIssueResources(ctx context.Context, issue record.Issue, treeGeneration uint64) error {
-	cleaner, ok := r.supervisor.deps.Runtime.(runtime.IssueResourceCleaner)
+// cleanupTreeResources runs only after a durable tree reservation. The runtime's cleanup censuses
+// the complete stored claim population, not the runtime watch: a launching child whose resource
+// admission has not yet run is a named wait, so this row retries until every claim of the tree
+// retired before anything is deleted. The reservation gates later claim persistence without
+// consuming their launch budgets.
+func (r *outbox) cleanupTreeResources(ctx context.Context, tree string, treeEpoch uint64) error {
+	cleaner, ok := r.supervisor.deps.Runtime.(runtime.TreeLifecycleCleaner)
 	if !ok {
 		return nil
 	}
-	claims, err := r.supervisor.Claims(ctx)
-	if err != nil {
-		return fmt.Errorf("read sibling claims before cleanup of %s: %w", issue.Key, err)
-	}
-	found := false
-	for _, sibling := range claims {
-		if sibling.Project != r.project || sibling.Issue != issue.Key {
-			continue
-		}
-		found = true
-		if sibling.State != supervise.StateRetired {
-			return nil
-		}
-	}
-	if !found {
-		return nil
-	}
-	if err := cleaner.CleanupIssue(ctx, r.project, issue.Key, issue.Tree, treeGeneration); err != nil {
-		return fmt.Errorf("cleanup resources of closed issue %s: %w", issue.Key, err)
+	if err := cleaner.CleanupTree(ctx, r.project, tree, treeEpoch); err != nil {
+		return fmt.Errorf("cleanup resources of closed tree %s: %w", tree, err)
 	}
 	return nil
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 const maxInt64 = uint64(^uint64(0) >> 1)
@@ -93,6 +94,12 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 		return fmt.Errorf("put issue %s: %w", issue.Key, err)
 	}
 	return nil
+}
+
+// OpenTreeLifecycle is the admission fact's transactional entry point into the shared lifecycle
+// barrier.
+func (s *Postgres) OpenTreeLifecycle(ctx context.Context, tx pgx.Tx, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error) {
+	return treelifecycle.Open(ctx, tx, project, tree, authority)
 }
 
 func scanIssue(row scanner) (*Issue, error) {

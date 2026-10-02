@@ -1405,6 +1405,12 @@ func (s *outboxClaimStore) PutClaim(_ context.Context, c supervise.Claim) error 
 	return nil
 }
 
+func (s *outboxClaimStore) AdmitClaim(ctx context.Context, c supervise.Claim) (supervise.Claim, error) {
+	return c, s.PutClaim(ctx, c)
+}
+
+func (s *outboxClaimStore) CheckLaunch(context.Context, supervise.Claim) error { return nil }
+
 func (s *outboxClaimStore) PutDelivery(_ context.Context, token claim.Token, delivery supervise.Delivery) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

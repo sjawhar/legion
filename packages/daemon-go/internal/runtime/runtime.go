@@ -84,13 +84,14 @@ type Runtime interface {
 	ProvisionsWorkspaces() bool
 }
 
-// IssueResourceCleaner is an optional whole-issue capability. Per-role Release and Suspend never
-// delete a shared issue pod; after an issue's close retired every claim of it, the outbox invokes
-// this cleanup with the root linger generation that authorises the close. The runtime fences it
-// atomically against a re-admission of that root and, for a tree root, against every child of the
-// tree. A runtime without shared issue resources simply does not implement it.
-type IssueResourceCleaner interface {
-	CleanupIssue(ctx context.Context, project, issue, tree string, treeGeneration uint64) error
+// TreeLifecycleCleaner is the optional whole-tree capability. Its explicit workflow and operator
+// reservation entry points fence claim persistence before any resource census; per-role Release
+// and Suspend never delete a shared issue pod. A runtime without shared issue resources simply does
+// not implement it.
+type TreeLifecycleCleaner interface {
+	ReserveWorkflowTreeCleanup(ctx context.Context, project, tree string, rootGeneration uint64) (treeEpoch uint64, reserved bool, err error)
+	ReserveOperatorTreeCleanup(ctx context.Context, project, tree string) (treeEpoch uint64, reserved bool, err error)
+	CleanupTree(ctx context.Context, project, tree string, treeEpoch uint64) error
 }
 
 // Known is one claim as a runtime is told of it — each entry of the orphan sweep's known set, and
@@ -135,12 +136,15 @@ func (k Known) Validate() error {
 // names the transcript the same agent continues from. WorkspaceRecoveredFrom names the ref a
 // workspace recreated after its volume was lost is recovered from; "" for every other launch.
 type SpawnSpec struct {
-	Claim                  claim.Token
-	Project                string
-	Tree                   string
-	Issue                  string
-	Role                   claim.Role
-	Generation             uint64
+	Claim      claim.Token
+	Project    string
+	Tree       string
+	Issue      string
+	Role       claim.Role
+	Generation uint64
+	// TreeEpoch is the durable admission epoch the claim bound before its first persistence.
+	// Sandbox resource admission rechecks it before any pod or Secret operation.
+	TreeEpoch              uint64
 	BootToken              string
 	Env                    map[string]string
 	Secrets                map[string]string
