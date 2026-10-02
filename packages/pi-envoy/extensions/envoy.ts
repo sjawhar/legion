@@ -10,6 +10,7 @@ import {
   type DeliveryCapability,
   dispatchToolSchema,
   dispatchToolSpecs,
+  type EditOp,
   type OpenAsk,
   type OpenAsksResponse,
   ROLE_TOPIC_PREFIX,
@@ -247,19 +248,20 @@ const UNASKED_WAIT_REMINDER =
   "Open it now: a decision block in the document it concerns (dispatch_doc_edit with an ask block), or " +
   "dispatch_ask for a to-do only a human can do, naming exactly what you need and from whom.";
 
-/** Actions whose success means the agent opened the ask itself, so the nudge has nothing to say. */
-const ASK_OPENING_TOOLS: readonly string[] = ["dispatch_ask", "dispatch_request_approval"];
-
-function writesDecisionBlock(
-  { toolName, input }: Pick<ToolResultEvent, "toolName" | "input">
-): boolean {
+/**
+ * Whether a successful call opened the ask itself, so the nudge has nothing to say: `dispatch_ask`,
+ * `dispatch_request_approval`, or a `dispatch_doc_edit` that writes a decision block, by inserting
+ * an `ask` block or by retyping a block into one.
+ */
+function opensAsk({ toolName, input }: Pick<ToolResultEvent, "toolName" | "input">): boolean {
+  if (toolName === "dispatch_ask" || toolName === "dispatch_request_approval") return true;
   if (toolName !== "dispatch_doc_edit" || !Array.isArray(input.ops)) return false;
-  return input.ops.some((operation) => {
-    if (typeof operation !== "object" || operation === null) return false;
-    const documentEdit = operation as Record<string, unknown>;
-    const markdown = documentEdit.markdown;
-    return typeof markdown === "string" && /^\s*:::ask\{/mu.test(markdown);
-  });
+  // A successful edit's operations passed the tool's schema.
+  return (input.ops as readonly EditOp[]).some(
+    ({ op, markdown, type }) =>
+      (op === "insert" && markdown !== undefined && /^\s*:::ask\{/mu.test(markdown)) ||
+      (op === "retype" && type === "ask")
+  );
 }
 
 /** Name prefix of every native Dispatch tool: talking to the humans, not the work itself. */
@@ -1885,7 +1887,7 @@ export default function envoyExtension(pi: PiApi): void {
       askAwareness.session_id === context.sessionManager.getSessionId() &&
       askAwareness.period > 0
     ) {
-      if (ASK_OPENING_TOOLS.includes(event.toolName) || writesDecisionBlock(event)) {
+      if (opensAsk(event)) {
         // The agent asked the humans itself, so this stop has nothing left for the nudge to
         // say: it spends the check the period owed rather than ending the period, and aborts a
         // check in flight before its verdict can be used. Later real work can re-arm a fresh

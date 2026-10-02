@@ -2121,7 +2121,8 @@ describe("envoy OMP extension", () => {
         ops: [
           {
             op: "insert",
-            markdown: "## Rollout\n\n:::ask{#deployment urgency=\"high\"}\nWhich deployment window?\n:::",
+            markdown:
+              '## Rollout\n\n:::ask{#deployment urgency="high"}\nWhich deployment window?\n:::',
           },
         ],
       },
@@ -2136,6 +2137,36 @@ describe("envoy OMP extension", () => {
       toolName: "dispatch_doc_edit",
       toolCallId: "call-plain-edit",
       input: { ops: [{ op: "insert", markdown: "A plain revision." }] },
+      details: {},
+      isError: false,
+    });
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([
+      expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
+    ]);
+  });
+
+  test("a retype into an ask block spends the check, unlike a retype into another type", async () => {
+    // The query creates a fresh extension module with isolated module-level awareness state.
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-document-retype");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_document_retype", () => ({}));
+
+    await session.userTurn();
+    await session.toolResult({
+      toolName: "dispatch_doc_edit",
+      toolCallId: "call-retype-ask",
+      input: { ops: [{ op: "retype", block: "para-1", type: "ask" }] },
+      details: {},
+      isError: false,
+    });
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+
+    await session.userTurn();
+    await session.toolResult({
+      toolName: "dispatch_doc_edit",
+      toolCallId: "call-retype-callout",
+      input: { ops: [{ op: "retype", block: "para-2", type: "callout" }] },
       details: {},
       isError: false,
     });
