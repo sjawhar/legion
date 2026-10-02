@@ -1,15 +1,13 @@
 # Brainstorming in the spec: each turn, from the first version to approval
 
 `skill://dispatch` sends you here before you write the first version of a spec for a major design
-change, and at each answer after it. Each version is written as "Writing a spec" in
+change, and again before each next turn. Each version is written as "Writing a spec" in
 `skill://dispatch` says; this file is the order the conversation goes in.
 
-When a session has Dispatch, this replaces the brainstorming skill's chat questions and its spec
-file: ask the design questions in the spec, and write no design document into the repository. The
-brainstorming skill's stages still run, in the same order, in the spec: clarifying questions, then
-two or three approaches with a recommendation, then the design section by section. A finished spec
-dropped after a chat-only design is not the conversation, and neither is a whole design written in
-one version.
+The brainstorming skill's stages still run, in the same order, in the spec: clarifying questions,
+then two or three approaches with a recommendation, then the design section by section. A finished
+spec dropped after a chat-only design is not the conversation, and neither is a whole design
+written in one version.
 
 ## Each turn
 

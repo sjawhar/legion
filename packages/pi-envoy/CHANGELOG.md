@@ -12,8 +12,8 @@
   carries nothing new: it goes out only once the human has agreed to every point in the spec, a
   point they have not agreed to getting its own decision block first or leaving the spec, and its
   `summary` says only what the human is approving, with no commentary. A lane's technical decisions
-  are made in the plan or the code, not the spec. The `legion-architect` skill and
-  `dispatch_request_approval`'s `summary` description say the same.
+  are made in the plan or the code, not the spec. The `legion-architect` skill, both root architect
+  role prompts and `dispatch_request_approval`'s `summary` description say the same.
 - A spec is the design conversation (LEGION-387). The `dispatch` skill's "Writing a spec" drops
   the eight required headings: a spec starts as the problem and its evidence, puts each open
   question in a decision block at the end of the section that discusses it, records a settled

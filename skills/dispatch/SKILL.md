@@ -41,8 +41,10 @@ chat and write no design document into the repository. The first version holds o
 conversation has established and every question that is ready, each a decision block at the end of
 the section that sets it up; a question waits only when it depends on an answer still open. Each
 next version folds the answers in, in the human's words with the date, and adds the questions they
-open. Approval is requested once, when nothing in the spec is new to the human. Each step, and a
-worked example, is in [Brainstorming in the spec](skill://dispatch/references/brainstorming.md).
+open. Approval is requested once, when nothing in the spec is new to the human. Before you write a
+spec's first version, and again before each next turn, read
+[Brainstorming in the spec](skill://dispatch/references/brainstorming.md): each step, and a worked
+example.
 
 ## Writing for the human
 
