@@ -44,33 +44,46 @@ const pendingPod = (name: string, uid: string, tree: string, since: string) => (
   status: {
     phase: "Pending",
     conditions: [
-      { type: "PodScheduled", status: "False", reason: "Unschedulable", lastTransitionTime: since },
+      {
+        type: "PodScheduled",
+        status: "False",
+        reason: "Unschedulable",
+        message: "0/16 nodes are available: 16 node(s) didn't match Pod's node affinity/selector.",
+        lastTransitionTime: since,
+      },
     ],
   },
 });
-// schedulingEvent is a FailedScheduling event from COMPONENT for pod NAME with UID, last seen AT.
-const schedulingEvent =
-  (component: string, message: string) => (name: string, uid: string, at: string) => ({
+// podEvent is an event REASON from COMPONENT for pod NAME with UID, last seen AT.
+const podEvent =
+  (component: string, reason: string, message: string) =>
+  (name: string, uid: string, at: string) => ({
     involvedObject: { kind: "Pod", name, uid },
     source: { component },
+    reason,
     lastTimestamp: at,
     message,
   });
+const limitMessage =
+  'Failed to schedule pod, incompatible with nodepool "other"; all available instance types exceed limits for nodepool (NodePool=legion)';
 // limitEvent is Karpenter's verdict that every instance type exceeds the legion pool's limits.
-const limitEvent = schedulingEvent(
-  "karpenter",
-  'Failed to schedule pod, incompatible with nodepool "other"; all available instance types exceed limits for nodepool (NodePool=legion)'
-);
+const limitEvent = podEvent("karpenter", "FailedScheduling", limitMessage);
 // affinityEvent is Karpenter's verdict for a genuine scheduling reason, the tree's affinity.
-const affinityEvent = schedulingEvent(
+const affinityEvent = podEvent(
   "karpenter",
+  "FailedScheduling",
   "Failed to schedule pod, unsatisfiable topology constraint for pod affinity, key=kubernetes.io/hostname"
 );
-// schedulerEvent is the default scheduler's FailedScheduling, which every Pending pod gets.
-const schedulerEvent = schedulingEvent(
-  "default-scheduler",
-  "0/16 nodes are available: 14 node(s) didn't match Pod's node affinity/selector."
+// nominatedEvent is Karpenter's word once room frees: it expects the pod to schedule.
+const nominatedEvent = podEvent(
+  "karpenter",
+  "Nominated",
+  "Pod should schedule on: nodeclaim/legion-abcde"
 );
+// schedulerEvent is the default scheduler's FailedScheduling, which every Pending pod gets.
+const schedulerMessage =
+  "0/17 nodes are available: 17 node(s) didn't match Pod's node affinity/selector.";
+const schedulerEvent = podEvent("default-scheduler", "FailedScheduling", schedulerMessage);
 interface Capacity {
   subject?: string;
   pods?: object[];
@@ -201,21 +214,28 @@ describe("stage 4b's verdict line", () => {
   });
 
   const starvedPod = pendingPod("legion-x-t1", "uid-now", "T1", "2026-10-02T10:00:00Z");
-  for (const [name, events] of [
-    ["Karpenter's limit verdict", [limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z")]],
+  for (const [name, events, scheduler] of [
+    [
+      "Karpenter's limit verdict",
+      [limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z")],
+      "none",
+    ],
     [
       "Karpenter's limit verdict, with the default scheduler's own event newer",
       [
         limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z"),
         schedulerEvent("legion-x-t1", "uid-now", "2026-10-02T10:05:00Z"),
       ],
+      JSON.stringify(schedulerMessage),
     ],
-  ] as [string, object[]][]) {
-    test(`says BLOCKED on capacity for a wait its own tree's pod starved, on ${name}`, () => {
+  ] as [string, object[], string][]) {
+    test(`says BLOCKED on capacity for a wait its own tree's pod starved, on ${name}, with its evidence`, () => {
       const starved = controllerRun("[]", "timeout", { subject: "T1", pods: [starvedPod], events });
       expect(starved.code).toBe(1);
+      // The line carries the limit event's time and message, the pod's PodScheduled condition and
+      // the default scheduler's newest word, so a misclassification can be read off it.
       expect(starved.stdout).toContain(
-        "CHECK controller: BLOCKED: capacity: the legion pool is at its limits, so the scheduler cannot place pod legion-x-t1 (uid uid-now; Karpenter: all available instance types exceed limits for nodepool legion)"
+        `CHECK controller: BLOCKED: capacity: the legion pool is at its limits, so the scheduler cannot place pod legion-x-t1 (uid uid-now): Karpenter at 2026-10-02T10:00:05Z: ${JSON.stringify(limitMessage)}; PodScheduled Unschedulable since 2026-10-02T10:00:00Z: ${JSON.stringify("0/16 nodes are available: 16 node(s) didn't match Pod's node affinity/selector.")}; default scheduler: ${scheduler}`
       );
       expect(starved.stdout).toContain("stage 4b e2e: BLOCKED (check controller)");
       expect(starved.stdout).not.toContain("CHECK controller: FAIL");
@@ -264,6 +284,17 @@ describe("stage 4b's verdict line", () => {
         events: [
           limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z"),
           affinityEvent("legion-x-t1", "uid-now", "2026-10-02T10:05:00Z"),
+        ],
+      },
+    ],
+    [
+      "a limit verdict Karpenter has since replaced with a nomination",
+      {
+        subject: "T1",
+        pods: [starvedPod],
+        events: [
+          limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z"),
+          nominatedEvent("legion-x-t1", "uid-now", "2026-10-02T10:05:00Z"),
         ],
       },
     ],
