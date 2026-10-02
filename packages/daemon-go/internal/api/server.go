@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"log/slog"
@@ -25,6 +26,13 @@ import (
 // readHeaderTimeout bounds how long a client may take to send its request headers; without it a
 // slow-header client holds a listener slot for as long as it likes.
 const readHeaderTimeout = 10 * time.Second
+
+// TreeResourceCleaner deletes the durable resources of a tree with no workflow record after the
+// operator successfully closed every one of its claims. It is deliberately separate from
+// Supervisor: claim routes decide lifecycle, while this capability owns a shared issue pod.
+type TreeResourceCleaner interface {
+	CleanupTree(ctx context.Context, project, tree string) error
+}
 
 // Options are what the routes answer from.
 type Options struct {
@@ -53,6 +61,9 @@ type Options struct {
 	// GitHubOwner is the configured repository's owner: the account both Apps are installed on,
 	// whose installation every credential route mints for.
 	GitHubOwner string
+	// TreeCleaner runs an explicit operator close's durable resource cleanup after every claim of
+	// the tree stopped. Nil for runtimes with no shared issue resources.
+	TreeCleaner TreeResourceCleaner
 	// Grants mints and redeems the daemon-local one-command credential handles.
 	Grants   *credential.Grants
 	Pool     *pgxpool.Pool
@@ -82,6 +93,7 @@ type server struct {
 	tokens       appauth.Tokens
 	githubOwner  string
 	grants       *credential.Grants
+	treeCleaner  TreeResourceCleaner
 	pool         *pgxpool.Pool
 	handlers     []intake.Handler
 	records      record.Store
@@ -112,6 +124,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		designGate:        opts.DesignGate,
 		tokens:            opts.Tokens,
 		githubOwner:       opts.GitHubOwner,
+		treeCleaner:       opts.TreeCleaner,
 		grants:            opts.Grants,
 		pool:              opts.Pool,
 		handlers:          opts.Handlers,

@@ -99,17 +99,18 @@ func (s *Store) EnsureIssueResources(ctx context.Context, project, issue, tree, 
 	return nil
 }
 
-// BeginIssueCleanup takes the issue's resources into cleanup once, atomically with the close fact
-// that authorises it: the tree root is locked and must still linger at treeGeneration, no claim of
-// the issue is anything but retired, and, for a tree root, every child record of the tree is
-// cleanup-confirmed (ErrTreeChildrenPending otherwise, which takes nothing). A re-admission updates
-// that root and enqueues its start in one transaction before the start creates a claim; locking and
-// testing the root here therefore makes the old close wait for that committed transaction, then
-// finish without deleting its new run's resources. A cleanup begun and not confirmed resumes, so a
-// retried close finishes it; an issue with no record, a confirmed cleanup, or a live claim begins
+// BeginIssueCleanup takes the issue's resources into cleanup once. A nonzero treeGeneration is a
+// workflow linger close: the tree root is locked and must still linger at that generation, no
+// claim of the issue is anything but retired, and, for a tree root, every child record of the tree
+// is cleanup-confirmed (ErrTreeChildrenPending otherwise, which takes nothing). A re-admission
+// updates that root and enqueues its start in one transaction before the start creates a claim;
+// locking and testing the root therefore makes an old close wait for that transaction, then finish
+// without deleting its new run's resources. A zero generation is the explicit operator-close
+// authority for a tree with no workflow root record. A cleanup begun and not confirmed resumes, so
+// a retried close finishes it; an issue with no record, a confirmed cleanup, or a live claim begins
 // nothing.
 func (s *Store) BeginIssueCleanup(ctx context.Context, project, issue, tree string, treeGeneration uint64) (IssueResources, bool, error) {
-	if tree == "" || treeGeneration == 0 || treeGeneration > math.MaxInt64 {
+	if tree == "" || treeGeneration > math.MaxInt64 {
 		return IssueResources{}, false, fmt.Errorf("begin issue cleanup %s: invalid tree close %s generation %d", issue, tree, treeGeneration)
 	}
 	var resources IssueResources
@@ -117,13 +118,15 @@ func (s *Store) BeginIssueCleanup(ctx context.Context, project, issue, tree stri
 	err := s.Tx(ctx, func(tx pgx.Tx) error {
 		var currentGeneration int64
 		var lingering bool
-		err := tx.QueryRow(ctx, `select generation, linger_until is not null from issues
-			where key = $1 and project = $2 for update`, tree, project).Scan(&currentGeneration, &lingering)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("tree root %s has no workflow record", tree)
-		}
-		if err != nil {
-			return fmt.Errorf("read tree root %s: %w", tree, err)
+		if treeGeneration != 0 {
+			err := tx.QueryRow(ctx, `select generation, linger_until is not null from issues
+				where key = $1 and project = $2 for update`, tree, project).Scan(&currentGeneration, &lingering)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("tree root %s has no workflow record", tree)
+			}
+			if err != nil {
+				return fmt.Errorf("read tree root %s: %w", tree, err)
+			}
 		}
 		own, err := scanIssueResources(tx.QueryRow(ctx, selectIssueResources+` where project = $1 and issue = $2 for update`, project, issue))
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -145,7 +148,7 @@ func (s *Store) BeginIssueCleanup(ctx context.Context, project, issue, tree stri
 		// committed the new generation's pending starts, which appear in claims only later. This
 		// fence applies only to beginning deletion: an existing unconfirmed cleanup must resume
 		// and confirm before its marker can admit that new start.
-		if uint64(currentGeneration) != treeGeneration || !lingering {
+		if treeGeneration != 0 && (uint64(currentGeneration) != treeGeneration || !lingering) {
 			return nil
 		}
 		var live bool
@@ -209,6 +212,30 @@ func (s *Store) IssueResources(ctx context.Context, project, issue string) (Issu
 		return IssueResources{}, false, fmt.Errorf("read issue resources %s: %w", issue, err)
 	}
 	return resources, true, nil
+}
+
+// TreeIssueResources lists a tree's durable resources in the only deletion order that preserves
+// its root-owned volume: every child issue before the root. It is the explicit operator-close
+// capability for a tree no workflow `issues` row backs.
+func (s *Store) TreeIssueResources(ctx context.Context, project, tree string) ([]IssueResources, error) {
+	rows, err := s.pool.Query(ctx, selectIssueResources+` where project = $1 and tree = $2
+		order by issue = $2, issue`, project, tree)
+	if err != nil {
+		return nil, fmt.Errorf("list issue resources of tree %s: %w", tree, err)
+	}
+	defer rows.Close()
+	var resources []IssueResources
+	for rows.Next() {
+		resource, err := scanIssueResources(rows)
+		if err != nil {
+			return nil, fmt.Errorf("read issue resources of tree %s: %w", tree, err)
+		}
+		resources = append(resources, resource)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list issue resources of tree %s: %w", tree, err)
+	}
+	return resources, nil
 }
 
 // EnsureIssuePodLayout atomically installs the issue-pod marker once boot's legacy censuses (the
