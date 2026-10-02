@@ -58,6 +58,7 @@ import {
   onEnvoyRoleRegained,
   type RoleRegainReason,
 } from "../src/legion/role-claim-bridge";
+import { applySessionTitle, legionSessionTitle } from "../src/legion/session-title";
 import { createLegionTool } from "../src/legion/tools";
 import type {
   CommandContext,
@@ -872,11 +873,23 @@ export default function legionExtension(pi: PiApi): void {
     }
   };
 
+  /**
+   * Names the session by its Legion identity (`src/legion/session-title.ts`), so every Dispatch
+   * write stamps it as `origin.session_title` and the Envoy listener lists it. Runs before the
+   * session claims its Envoy role: that claim registers the session, and the registration carries
+   * the title then rather than at the next heartbeat.
+   */
+  const titleSession = async (context: SessionContext): Promise<void> => {
+    const title = legionSessionTitle(classifySession(process.env), process.env.LEGION_PROJECT);
+    if (title !== undefined) await applySessionTitle(pi, context, title);
+  };
+
   pi.on("session_start", async (_event, context) => {
     // A `task`-spawned subagent session loads a fresh instance of this whole module: bail out
     // before classification, or the inherited LEGION_* environment would look like a fresh
     // root/worker boot and its failure would exit the parent process. See isSubagentSession.
     if (await checkSubagentSession(context)) return;
+    await titleSession(context);
     // A worker the daemon relaunched with --resume keeps its phase: its next turn may start from
     // an Envoy notice rather than a new assignment, and must find the phase still open.
     phaseStall = restorePhaseStall(context.sessionManager.getBranch?.() ?? []);
@@ -928,13 +941,20 @@ export default function legionExtension(pi: PiApi): void {
 
   // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree
   // navigation carries no reason, and every one of them can leave the pane on a new session id.
-  pi.on("session_switch", (_event, context) =>
-    controllerSession.reclaimAfterSessionChange(context)
-  );
-  pi.on("session_branch", (_event, context) =>
-    controllerSession.reclaimAfterSessionChange(context)
-  );
-  pi.on("session_tree", (_event, context) => controllerSession.reclaimAfterSessionChange(context));
+  // The controller re-claims whatever session the pane is left on, so that session takes the
+  // controller's title first; a session that keeps its id keeps its title.
+  const afterSessionChange = async (context: SessionContext): Promise<void> => {
+    if (
+      classifySession(process.env).kind === "controller" &&
+      !(await checkSubagentSession(context))
+    ) {
+      await titleSession(context);
+    }
+    await controllerSession.reclaimAfterSessionChange(context);
+  };
+  pi.on("session_switch", (_event, context) => afterSessionChange(context));
+  pi.on("session_branch", (_event, context) => afterSessionChange(context));
+  pi.on("session_tree", (_event, context) => afterSessionChange(context));
 
   pi.on("tool_call", async (toolCall, context): Promise<ToolCallEventResult | undefined> => {
     logger.debug("legion tool_call hook", {

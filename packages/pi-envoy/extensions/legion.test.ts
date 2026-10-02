@@ -151,6 +151,7 @@ type TestPi = {
   readonly sendMessage: PiApi["sendMessage"];
   readonly sendUserMessage: PiApi["sendUserMessage"];
   readonly appendEntry: PiApi["appendEntry"];
+  readonly setSessionName: PiApi["setSessionName"];
   readonly getActiveTools: () => readonly string[];
   readonly setActiveTools: (tools: string[]) => Promise<void>;
   readonly on: (
@@ -262,6 +263,12 @@ type AppendedEntry = {
   readonly data: unknown;
 };
 
+/** The session's title as the pinned host's session manager holds it: `pi.setSessionName` stores
+ * the name with `titleSource: "user"` (oh-my-pi `modes/runtime-init.ts`), a rename does the same,
+ * and OMP's title model stores `auto`. A fixture holds one, since OMP keeps one session manager per
+ * process and a `/new` clears its title in place. `set` records each `pi.setSessionName` call. */
+type HostTitle = { name?: string; source?: "auto" | "user"; readonly set: string[] };
+
 function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   readonly commands: RegisteredCommand[];
   readonly handlers: Map<string, Handler>;
@@ -269,6 +276,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   readonly sentMessages: SentMessage[];
   readonly entries: AppendedEntry[];
   readonly activeTools: string[];
+  readonly title: HostTitle;
   readonly pi: TestPi;
 } {
   const commands: RegisteredCommand[] = [];
@@ -277,6 +285,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   const tools: RegisteredTool[] = [];
   const sentMessages: SentMessage[] = [];
   const entries: AppendedEntry[] = [];
+  const title: HostTitle = { set: [] };
   const activeTools = ["read", "task", "hub"];
   const property = (): ZodNumberProperty => ({
     optional: property,
@@ -307,6 +316,11 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
     appendEntry: (customType, data) => {
       entries.push({ type: "custom", customType, data });
     },
+    setSessionName: async (name) => {
+      title.set.push(name);
+      title.name = name;
+      title.source = "user";
+    },
     on: (eventName, handler) => {
       const eventHandlers = registeredHandlers.get(eventName);
       if (eventHandlers === undefined) registeredHandlers.set(eventName, [handler]);
@@ -331,7 +345,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   // `bindEnvoy: false` lets a test bind legion.ts before envoy.ts, so the two extensions'
   // handlers for one session event run in the opposite order to the manifest's.
   if (options.bindEnvoy !== false) envoyExtension(pi as never);
-  return { commands, handlers, tools, sentMessages, entries, activeTools, pi };
+  return { commands, handlers, tools, sentMessages, entries, activeTools, title, pi };
 }
 
 /** A real zod-backed `pi.zod`, unlike `createPi()`'s identity-passthrough fake: lets a test parse
@@ -457,7 +471,8 @@ function controllerPaneListener(token: string): {
 function sessionContext(
   sessionID: string,
   sessionFile = "/tmp/session.jsonl",
-  ensureOnDisk: () => Promise<void> = async () => undefined
+  ensureOnDisk: () => Promise<void> = async () => undefined,
+  title?: HostTitle
 ): SessionContext {
   return {
     cwd: "/tmp/legion-workspace",
@@ -468,10 +483,24 @@ function sessionContext(
       getSessionFile: () => sessionFile,
       ensureOnDisk,
       getEntries: () => [],
+      ...(title === undefined ? {} : hostTitleReader(title)),
     },
     setInterval: () => undefined,
     setTimeout: () => undefined,
     ui: { notify: () => undefined },
+  };
+}
+
+/** The session manager's title reads, answered from `title` as OMP's are from its own state. */
+function hostTitleReader(
+  title: HostTitle
+): Pick<SessionContext["sessionManager"], "getSessionName" | "getHeader"> {
+  return {
+    getSessionName: () => title.name,
+    getHeader: () => ({
+      ...(title.name === undefined ? {} : { title: title.name }),
+      ...(title.source === undefined ? {} : { titleSource: title.source }),
+    }),
   };
 }
 
@@ -542,7 +571,8 @@ async function grantFileContents(file: string): Promise<{ grant: string; mode: n
 }
 
 /** Boots a phase-worker session and returns its tool_call handler bound to that session. `branch`
- * is what the session's `getBranch()` returns: a resumed session's transcript entries. */
+ * is what the session's `getBranch()` returns: a resumed session's transcript entries. `title` is
+ * the title the session already carries when it starts. */
 async function bootWorker(options: {
   readonly role: LegionRole;
   readonly tree?: IssueKey;
@@ -553,6 +583,7 @@ async function bootWorker(options: {
   readonly extraRoutes?: (url: URL, body: unknown) => Response | undefined;
   readonly intervals?: (() => void)[];
   readonly branch?: readonly unknown[];
+  readonly title?: { readonly name: string; readonly source: "auto" | "user" };
 }): Promise<{
   readonly toolCall: Handler;
   readonly context: SessionContext;
@@ -563,6 +594,7 @@ async function bootWorker(options: {
   readonly handlers: Map<string, Handler>;
   readonly entries: AppendedEntry[];
   readonly tools: RegisteredTool[];
+  readonly title: HostTitle;
 }> {
   const tree = options.tree ?? "REPO-42";
   const issue = options.issue ?? "REPO-43";
@@ -604,6 +636,10 @@ async function bootWorker(options: {
     });
   }) as typeof fetch;
   const fixture = createPi();
+  if (options.title !== undefined) {
+    fixture.title.name = options.title.name;
+    fixture.title.source = options.title.source;
+  }
   legionExtension(fixture.pi);
   const sessionStart = fixture.handlers.get("session_start");
   const toolCall = fixture.handlers.get("tool_call");
@@ -611,9 +647,9 @@ async function bootWorker(options: {
     throw new Error("worker lifecycle handlers were not registered");
   }
   const context: SessionContext = {
-    ...sessionContext(sessionId),
+    ...sessionContext(sessionId, undefined, undefined, fixture.title),
     sessionManager: {
-      ...sessionContext(sessionId).sessionManager,
+      ...sessionContext(sessionId, undefined, undefined, fixture.title).sessionManager,
       getBranch: () => options.branch ?? [],
     },
     cwd: options.workspace,
@@ -631,6 +667,7 @@ async function bootWorker(options: {
     handlers: fixture.handlers,
     entries: fixture.entries,
     tools: fixture.tools,
+    title: fixture.title,
   };
 }
 
@@ -1628,6 +1665,7 @@ describe("Legion OMP extension", () => {
     expect(requests.some((request) => request.path.startsWith("/legion/"))).toBe(false);
     expect(requests.some((request) => request.path === "/v1/roles/set")).toBe(false);
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+    expect(fixture.title.set).toEqual([]);
   });
   test("never bootstraps, claims a role, or exits for a subagent session, even with root-architect environment", async () => {
     const requests: { readonly path: string }[] = [];
@@ -1669,6 +1707,7 @@ describe("Legion OMP extension", () => {
     expect(requests.some((request) => request.path === "/v1/roles/set")).toBe(false);
     expect(exits).toEqual([]);
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+    expect(fixture.title.set).toEqual([]);
 
     // No tool gate was installed for this session either: a plain bash call, which an
     // unregistered root/phase worker would otherwise have blocked, passes through untouched.
@@ -1720,6 +1759,7 @@ describe("Legion OMP extension", () => {
     expect(requests.some((request) => request.path === "/v1/roles/set")).toBe(false);
     expect(exits).toEqual([]);
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+    expect(fixture.title.set).toEqual([]);
 
     await expect(
       toolCall(
@@ -3307,6 +3347,7 @@ describe("Legion OMP extension", () => {
     const subagentSwitch = subagent.handlers.get("session_switch");
     if (subagentSwitch === undefined) throw new Error("subagent switch handler missing");
     await subagentSwitch({ reason: "new" }, sessionContext("ses_subagent", childFile));
+    expect(subagent.title.set).toEqual([]);
     expect(listener.requests.filter((r) => r.path === "/legion/v1/controller/ready")).toEqual([
       controllerReadyBody("ses_pane_first", "/tmp/first.jsonl"),
     ]);
@@ -5083,6 +5124,7 @@ async function goPane(options: {
   readonly errors: string[];
   readonly intervals: (() => void)[];
   readonly tools: RegisteredTool[];
+  readonly title: HostTitle;
   readonly handlers: Map<string, Handler>;
   readonly context: SessionContext;
   readonly start: () => Promise<unknown>;
@@ -5169,7 +5211,12 @@ async function goPane(options: {
   const sessionStart = fixture.handlers.get("session_start");
   if (sessionStart === undefined) throw new Error("session_start handler was not registered");
   const context: SessionContext = {
-    ...sessionContext(options.sessionId, `/tmp/${options.sessionId}.jsonl`),
+    ...sessionContext(
+      options.sessionId,
+      `/tmp/${options.sessionId}.jsonl`,
+      undefined,
+      fixture.title
+    ),
     setInterval: (callback) => {
       intervals.push(callback);
     },
@@ -5184,6 +5231,7 @@ async function goPane(options: {
     errors,
     intervals,
     tools: fixture.tools,
+    title: fixture.title,
     handlers: fixture.handlers,
     context,
     start: async () => {
@@ -5675,6 +5723,7 @@ async function goController(options: {
   readonly requests: { readonly path: string; readonly body: unknown }[];
   readonly exits: number[];
   readonly tools: RegisteredTool[];
+  readonly title: HostTitle;
   readonly handlers: Map<string, Handler>;
   readonly context: (sessionId: string, sessionFile?: string) => SessionContext;
 }> {
@@ -5783,9 +5832,10 @@ async function goController(options: {
     requests,
     exits,
     tools: fixture.tools,
+    title: fixture.title,
     handlers: fixture.handlers,
     context: (sessionId, sessionFile = `/tmp/${sessionId}.jsonl`) =>
-      sessionContext(sessionId, sessionFile),
+      sessionContext(sessionId, sessionFile, undefined, fixture.title),
   };
 }
 
@@ -6367,5 +6417,119 @@ describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LE
       "[legion] claims/register for the controller failed (403): Invalid boot token"
     );
     expect(controller.requests.map((request) => request.path)).not.toContain("/v1/roles/set");
+  });
+});
+
+/** The Envoy registration a role claim sends: the last `/v1/interests/subscribe` before the
+ * `/v1/roles/set` claiming `role` (envoy.ts registers the session, then claims). The listener lists
+ * a session under the title its latest registration carried. */
+function registrationBeforeClaim(
+  requests: readonly { readonly path: string; readonly body: unknown }[],
+  role: string
+): unknown {
+  const claim = requests.findIndex(
+    ({ path, body }) =>
+      path === "/v1/roles/set" &&
+      typeof body === "object" &&
+      body !== null &&
+      "role" in body &&
+      body.role === role
+  );
+  if (claim === -1) throw new Error(`no role claim for ${role}`);
+  const registration = requests
+    .slice(0, claim)
+    .findLast((request) => request.path === "/v1/interests/subscribe");
+  if (registration === undefined) throw new Error(`no registration before the claim of ${role}`);
+  return registration.body;
+}
+
+describe("a Legion session's title", () => {
+  test("a phase worker is titled by its role and issue before its role claim registers it with Envoy", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const worker = await bootWorker({
+      role: "implementer",
+      tree: "REPO-42",
+      issue: "REPO-43",
+      workspace: await createJjWorkspace(),
+      requests,
+    });
+
+    expect(worker.title.set).toEqual(["Legion implementer · REPO-43"]);
+    expect(registrationBeforeClaim(requests, worker.token)).toMatchObject({
+      title: "Legion implementer · REPO-43",
+    });
+  });
+
+  test("a root architect under the Go daemon is titled by its tree's issue", async () => {
+    const pane = await goPane({
+      role: "architect",
+      tree: "REPO-42",
+      issue: "REPO-42",
+      sessionId: "ses_go_root_title",
+    });
+    await pane.start();
+
+    expect(pane.title.set).toEqual(["Legion architect · REPO-42"]);
+    expect(registrationBeforeClaim(pane.requests, pane.claimToken)).toMatchObject({
+      title: "Legion architect · REPO-42",
+    });
+  });
+
+  test("the controller is titled by its project, and so is the session a /new leaves it on", async () => {
+    const controller = await goController({ sessionId: "ses_go_controller_title" });
+    await controller.handlers.get("session_start")?.(
+      {},
+      controller.context("ses_go_controller_title")
+    );
+
+    expect(controller.title.set).toEqual(["Legion controller · omp"]);
+    expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
+      title: "Legion controller · omp",
+    });
+
+    // `/new` clears the session manager's title in place and moves it to a fresh session.
+    delete controller.title.name;
+    delete controller.title.source;
+    controller.requests.splice(0);
+    await controller.handlers.get("session_switch")?.(
+      { reason: "new" },
+      controller.context("ses_go_controller_title_new")
+    );
+
+    expect(controller.title.set).toEqual(["Legion controller · omp", "Legion controller · omp"]);
+    expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
+      session_id: "ses_go_controller_title_new",
+      title: "Legion controller · omp",
+    });
+  });
+
+  test("a title a person chose is kept, and Envoy lists the session under it", async () => {
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const worker = await bootWorker({
+      role: "reviewer",
+      workspace: await createJjWorkspace(),
+      requests,
+      title: { name: "Reviewing the flaky e2e", source: "user" },
+    });
+
+    expect(worker.title.set).toEqual([]);
+    expect(registrationBeforeClaim(requests, worker.token)).toMatchObject({
+      title: "Reviewing the flaky e2e",
+    });
+  });
+
+  test("a title Oh My Pi generated from the first message gives way to the Legion title", async () => {
+    const controller = await goController({ sessionId: "ses_go_controller_auto_title" });
+    controller.title.name = "Legion Controller Start Procedure";
+    controller.title.source = "auto";
+    await controller.handlers.get("session_start")?.(
+      {},
+      controller.context("ses_go_controller_auto_title")
+    );
+
+    expect(controller.title.set).toEqual(["Legion controller · omp"]);
+    expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
+      title: "Legion controller · omp",
+    });
   });
 });

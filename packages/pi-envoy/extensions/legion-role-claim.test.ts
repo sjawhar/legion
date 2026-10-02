@@ -141,6 +141,7 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
     },
     sendMessage: () => undefined,
     appendEntry: () => undefined,
+    setSessionName: async () => undefined,
     getActiveTools: () => activeTools,
     setActiveTools: async (tools: string[]) => {
       activeTools.splice(0, activeTools.length, ...tools);
