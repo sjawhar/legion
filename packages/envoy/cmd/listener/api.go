@@ -532,8 +532,14 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
 // instead) and publishes the envelope to NATS. An explicit dedupe_key is used
 // verbatim (a re-send a receiver's own dedupe recognises); it is mutually
-// exclusive with idempotency_key and may not begin with roleForwardDedupePrefix,
-// the mark the role arbiter drops on sight.
+// exclusive with idempotency_key, may not begin with roleForwardDedupePrefix,
+// the mark the role arbiter drops on sight, and may not ride a dispatch
+// envelope. Every host drops a repeat of any dispatch key
+// (contracts.DedupeKeyNamesTheUpstreamEvent), and Dispatch's outbox keys are
+// sequential (dispatch-<event id>), so a caller that chose one could make a
+// host drop the real event it names. Dispatch itself never needs this route's
+// key: its outbox publishes to the bus directly and its sends go through
+// /v1/messages/send, whose key is the listener's.
 func publishHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -570,6 +576,10 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		if strings.HasPrefix(request.DedupeKey, roleForwardDedupePrefix) {
 			writeJSONError(w, http.StatusBadRequest, "dedupe_key must not begin with the reserved prefix "+roleForwardDedupePrefix, "dedupe_key")
+			return
+		}
+		if request.DedupeKey != "" && request.Source == "dispatch" {
+			writeJSONError(w, http.StatusBadRequest, "dedupe_key cannot be chosen for a dispatch envelope", "dedupe_key")
 			return
 		}
 		dedupeKey := "publish." + id.New()

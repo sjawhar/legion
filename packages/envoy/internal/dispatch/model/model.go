@@ -463,6 +463,52 @@ type BlockReferences struct {
 	Asks     int `json:"asks"`
 }
 
+// BlockPath is where a block stands in its document: GET /api/v1/artifacts/{id}/blocks/{block_id}'s
+// answer, and the anchor_block a comment's or ask's single read carries for its anchor's block.
+// Derived from the live document at read time; nothing stores it.
+type BlockPath struct {
+	ID    string           `json:"id"`
+	Type  string           `json:"type"`
+	Path  []BlockPathEntry `json:"path"`
+	Table *TablePosition   `json:"table,omitempty"`
+}
+
+// BlockPathEntry is one node on a block's path from the document's top-level block down to the
+// block: its type, block id ("" for a node the live document has not stamped yet) and index
+// among its parent's children.
+type BlockPathEntry struct {
+	Type  string `json:"type"`
+	ID    string `json:"id"`
+	Index int    `json:"index"`
+}
+
+// TablePosition places a block in the table holding it. Row is the row's index (0 the header row)
+// and Column the cell's index in its row, the indexes delete_row and delete_column take; Row is
+// nil for the table block, Column and Header for the table and a row block. Header is the text of
+// the header cell drawn above the cell's column once colspans and rowspans take their places, ""
+// where no header cell covers it. Cells is each cell of the row as its opening words; nil for the
+// table block.
+type TablePosition struct {
+	ID     string   `json:"id"`
+	Row    *int     `json:"row"`
+	Column *int     `json:"column"`
+	Header *string  `json:"header"`
+	Cells  []string `json:"cells"`
+}
+
+// AnchorPosition is where a comment's or an ask's anchor's block stands in the live document. Set
+// by the single-record reads alone (GET /api/v1/comments/{id}, GET /api/v1/asks/{id}), never by
+// lists or events.
+type AnchorPosition struct {
+	// AnchorBlock is nil when there is no anchor, the anchor names no block, the block has left
+	// the document, or the document could not be read, which AnchorBlockError then names.
+	AnchorBlock *BlockPath `json:"anchor_block,omitempty"`
+	// AnchorBlockError is why AnchorBlock is absent when the document could not be read: the code
+	// the API answers that error with elsewhere (DOC_SERVICE_UNAVAILABLE, DOC_SCHEMA, INTERNAL);
+	// empty otherwise.
+	AnchorBlockError string `json:"anchor_block_error,omitempty"`
+}
+
 // Version is an immutable artifact version.
 type Version struct {
 	Number    int       `json:"number"`
@@ -490,12 +536,13 @@ type Ask struct {
 	Author          Actor              `json:"author"`
 	// Kind is "question" for ordinary asks, whose asker chooses the options, and
 	// "approval" for server-created document reviews.
-	Kind          string         `json:"kind"`
-	Question      string         `json:"question"`
-	Options       []AskOption    `json:"options"`
-	Multiple      bool           `json:"multiple"`
-	Urgency       string         `json:"urgency"`
-	Anchor        *Anchor        `json:"anchor"`
+	Kind     string      `json:"kind"`
+	Question string      `json:"question"`
+	Options  []AskOption `json:"options"`
+	Multiple bool        `json:"multiple"`
+	Urgency  string      `json:"urgency"`
+	Anchor   *Anchor     `json:"anchor"`
+	AnchorPosition
 	State         string         `json:"state"`
 	Answer        *AskAnswer     `json:"answer"`
 	Resolution    *AskResolution `json:"resolution,omitempty"`
@@ -700,8 +747,9 @@ type CommentDelivery struct {
 	Delivery   string  `json:"delivery"`
 	SessionID  *string `json:"session_id"`
 	EnvelopeID *string `json:"envelope_id"`
-	// Duplicate reports that the stream already held this message when the attempt was sent,
-	// so the recipient gained nothing from it. EnvelopeID is then nil.
+	// Duplicate reports that the stream already held this message when the attempt was sent: an
+	// earlier attempt landed, so this one is a repeat the recipient is not handed again
+	// (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). EnvelopeID is then nil.
 	Duplicate    bool      `json:"duplicate"`
 	State        string    `json:"state"`
 	Error        *string   `json:"error"`
@@ -722,8 +770,8 @@ type CommentDeliveryEventPayload struct {
 	Delivery  string  `json:"delivery"`
 	SessionID *string `json:"session_id"`
 	State     string  `json:"state"`
-	// Duplicate reports that the stream already held this message, so the mentioned session
-	// gained nothing from this attempt.
+	// Duplicate reports that the stream already held this message: an earlier attempt landed, so
+	// this one is a repeat the mentioned session is not handed again.
 	Duplicate bool    `json:"duplicate,omitempty"`
 	Error     string  `json:"error,omitempty"`
 	ReplyID   *string `json:"reply_id"`
@@ -736,8 +784,9 @@ type Comment struct {
 	Author     Actor   `json:"author"`
 	Body       string  `json:"body"`
 	Anchor     *Anchor `json:"anchor"`
-	ReplyTo    *string `json:"reply_to"`
-	AskID      *string `json:"ask_id"`
+	AnchorPosition
+	ReplyTo *string `json:"reply_to"`
+	AskID   *string `json:"ask_id"`
 	// Turn is set on a reply to an open ask (AskID non-nil) and names who holds the
 	// turn after this comment: "human" when the human needs to act, "agent" when the
 	// comment is a progress note and the asking agent still owes the next move. A
@@ -872,9 +921,10 @@ type MessageDelivery struct {
 	Delivery   string  `json:"delivery"`
 	SessionID  string  `json:"session_id"`
 	EnvelopeID *string `json:"envelope_id"`
-	// Duplicate reports that the stream already held this message when the attempt was sent,
-	// so the recipient gained nothing from it. EnvelopeID is then nil: the envelope this send
-	// minted is the one JetStream discarded.
+	// Duplicate reports that the stream already held this message when the attempt was sent: an
+	// earlier attempt landed, so this one is a repeat the recipient is not handed again
+	// (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). EnvelopeID is then nil: the envelope
+	// this send minted is the one JetStream discarded.
 	Duplicate bool      `json:"duplicate"`
 	State     string    `json:"state"`
 	Error     *string   `json:"error"`

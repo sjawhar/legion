@@ -684,6 +684,11 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	ask.AnchorPosition, err = s.anchorBlock(r.Context(), ask.Anchor)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	replies, err := s.loadReplyChain(r.Context(), s.deps.Store.Pool, "ask_id", ask.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)

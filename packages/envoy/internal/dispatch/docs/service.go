@@ -1484,7 +1484,8 @@ func (s *Service) roomFailed(room string) bool {
 // ErrServiceUnavailable, and the transaction rolls back. The eviction flushes and
 // compacts the document under its advisory lock, which the transaction may hold,
 // or which a transaction waiting on one of its locks may hold; Postgres cannot see
-// a wait here, so it would never break the cycle.
+// a wait here, so it would never break the cycle. Neither does a read whose context
+// WithoutRecoveryWait marked.
 //
 // A room's own load never calls this: the eviction it would wait for waits for that load
 // (onLoadDocument).
@@ -1509,12 +1510,28 @@ func (s *Service) awaitRoomRecovery(ctx context.Context, room string) error {
 			"room", room, "error", failure)
 		return fmt.Errorf("%w: %w", ErrServiceUnavailable, failure)
 	}
+	if ctx.Value(withoutRecoveryWait{}) != nil {
+		// The caller logs what it went without, which says more than the room alone.
+		return fmt.Errorf("%w: %w", ErrServiceUnavailable, failure)
+	}
 	select {
 	case <-done:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+type withoutRecoveryWait struct{}
+
+// WithoutRecoveryWait marks ctx so that a document read under it fails with ErrServiceUnavailable
+// on a failed room instead of waiting for the room's eviction, as an operation inside a
+// transaction does (awaitRoomRecovery). It is for a read whose answer only decorates the response
+// it is part of - a comment's or ask's anchor_block - since the eviction compacts under the
+// document's advisory lock, which any transaction can hold, and a request's context carries no
+// deadline to end the wait.
+func WithoutRecoveryWait(ctx context.Context) context.Context {
+	return context.WithValue(ctx, withoutRecoveryWait{}, true)
 }
 
 func (s *Service) roomClosed(room string) bool {

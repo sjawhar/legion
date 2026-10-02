@@ -44,9 +44,45 @@
   `packages/envoy/scripts/listener-deploy-probe.sh` watches a listener deploy from a client's
   seat, at every address the listener's name resolves to, and exits 1 when a task refused `/v1`
   while it answered `/healthz` (LEGION-456).
+- `GET /api/v1/artifacts/{id}/blocks/{block_id}` says where one block stands in a Dispatch
+  document: its path from the top-level block down (each node's type, block id and child index)
+  and, for a table block, row or cell, the table's id, the row index (0 is the header row), the
+  cell's column index (the indexes `delete_row` and `delete_column` take), the text of the header
+  cell drawn above it (in a table with colspans or rowspans, the column the cell is drawn in) and
+  the row's cells. An id the live document does not hold is `404 TARGET_NOT_FOUND`.
+  `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}` carry the same answer for their
+  anchor's block as `anchor_block`, derived from the live document at read time and absent when
+  the anchor names no block or the block has left the document; lists and events do not carry
+  it. When the anchor's document cannot be read, those two reads still answer `200`, without
+  `anchor_block` and with `anchor_block_error` (`DOC_SERVICE_UNAVAILABLE`, `DOC_SCHEMA` or
+  `INTERNAL`, the codes the API answers those errors with elsewhere), logged at WARN, and they do
+  not wait for a failed document room's recovery; only a request that has itself gone away fails
+  them (LEGION-460).
 
 ### Changed
 
+- The stream stores an envelope under a MsgId, and so recognises its repeat, when its dedupe key was
+  minted once for its message: the listener's own `publish.<id>` and `agent.<session>.<id>`, and the
+  same around the shared transport's UUID idempotency key (`contracts.MintedDedupeKeyPattern`,
+  generated from `MINTED_DEDUPE_KEY_PATTERN` in `packages/contracts`). Only a re-send of that
+  message repeats such a key: the transport's retry of a send whose answer was lost, which now
+  answers `duplicate: true` and is stored once, and the Legion daemon's copy of a role-lane notice
+  (LEGION-108). Before, only Dispatch and webhook delivery-id keys earned a MsgId. The same rule,
+  `dedupeKeyNamesItsEvent`, now decides what a core-NATS host drops.
+- The Dispatch dashboard no longer offers a same-mode **Retry** for a targeted message or comment
+  mention its session answered with an error (a BTW whose side turn failed, a frame its host
+  refused). The stream already stored that attempt's frame under the Retry's key, so a session the
+  listener pushes to from the stream was never handed the Retry, and the attempt then read
+  "Delivered by an earlier attempt". The card now says the session answered with an error and
+  points at its mode-change actions; the mention list points at a new comment. Sending that Retry
+  under a new key is LEGION-431. On a closed issue the mention list, like the card, no longer
+  promises "Retry won't deliver it twice" beside a failure it offers no Retry for.
+- `POST /v1/messages/publish` refuses a `dedupe_key` on a `source: "dispatch"` envelope with a 400
+  naming `dedupe_key`. Every host drops a repeat of a Dispatch key, and Dispatch's outbox numbers
+  its keys in sequence (`dispatch-<event id>`), so any holder of the listener bearer could publish
+  `dispatch-<next id>` on a topic someone follows and make that host drop the real event when it
+  arrived. Dispatch never set one there: its outbox publishes to the bus directly, and its sends
+  go through `/v1/messages/send`, whose key the listener makes.
 - Dispatch's conversation view (`/agents/<id>/live`) sends as Send by default wherever the
   session advertises steer, and as Aside otherwise, and names the modes Send, Aside and BTW. A
   person's message that an Oh My Pi session took as its own user turn shows once, where the
@@ -122,6 +158,13 @@
 - Dispatch exits with status 1 when it cannot bind its listen address. It logged
   `dispatch: listen … bind: address already in use` and exited 0, so a supervisor read a port
   clash as a clean stop.
+
+- A Dispatch request refused because its document room failed answers
+  `503 DOC_SERVICE_UNAVAILABLE` whatever failed the room, as a comment's or ask's
+  `anchor_block_error` names it: both name a document error through one classification
+  (`api.documentErrorCode`), which takes a failed room before any cause the room carries. A room
+  failed by settlement's schema refusal answered `500 DOC_SCHEMA`, though the request had not met
+  that refusal itself; a retry once the room is evicted meets the document (LEGION-460).
 
 - A search that contains only stop words now returns `200` with no results, so every consumer
   can show an empty result rather than a retryable failure.

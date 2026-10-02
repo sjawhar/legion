@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -415,16 +416,19 @@ function commandContext(notifications: string[]): CommandContext {
   };
 }
 
-function forwardedRoleEnvelope(role: string, summary: string, dedupeKey: string) {
+// The role arbiter forwards an envelope under its original key behind the forward mark, and a
+// publish the daemon makes carries a key the listener minted, 32 hex digits: `label` stands for it.
+function forwardedRoleEnvelope(role: string, summary: string, label: string) {
+  const minted = createHash("sha256").update(label).digest("hex").slice(0, 32);
   return JSON.stringify({
-    event_id: `evt-${dedupeKey}`,
+    event_id: `evt-${label}`,
     source: "envoy",
-    source_event_id: `source-${dedupeKey}`,
+    source_event_id: `source-${label}`,
     topic: `notifications.role.${role}`,
-    dedupe_key: `envoy.role.forward.${dedupeKey}`,
+    dedupe_key: `envoy.role.forward.publish.${minted}`,
     issued_at: 1,
     payload_summary: summary,
-    trace_id: `trace-${dedupeKey}`,
+    trace_id: `trace-${label}`,
   });
 }
 
@@ -3516,7 +3520,7 @@ describe("envoy OMP extension", () => {
       summary: "note to self",
     });
   });
-  test("deduplicates a dispatch event without suppressing a later envelope", async () => {
+  test("deduplicates a webhook redelivery without suppressing a later envelope", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?dispatch-echo");
     const fixture = createPi();
     const afterEcho = Promise.withResolvers<void>();
@@ -3531,32 +3535,22 @@ describe("envoy OMP extension", () => {
     const agent = natsState.controls.get("notifications.agent.ses_omp");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
 
-    agent.push(
-      JSON.stringify({
-        event_id: "evt-dispatch-echo",
-        source: "github",
-        source_event_id: "github-dispatch-echo",
-        topic: "notifications.agent.ses_omp",
-        dedupe_key: "github.dispatch.echo",
-        issued_at: 1,
-        payload_summary: "Keep the thread open?",
-        payload: JSON.stringify({}),
-        trace_id: "trace-dispatch-echo",
-      })
-    );
-    agent.push(
-      JSON.stringify({
-        event_id: "evt-dispatch-later-copy",
-        source: "github",
-        source_event_id: "github-dispatch-later-copy",
-        topic: "notifications.agent.ses_omp",
-        dedupe_key: "github.dispatch.echo",
-        issued_at: 1,
-        payload_summary: "Keep the thread open?",
-        payload: JSON.stringify({}),
-        trace_id: "trace-dispatch-later-copy",
-      })
-    );
+    // GitHub redelivers one delivery id under a new event id: the key names the delivery.
+    for (const eventID of ["evt-webhook-echo", "evt-webhook-redelivery"]) {
+      agent.push(
+        JSON.stringify({
+          event_id: eventID,
+          source: "github",
+          source_event_id: "webhook-echo",
+          topic: "notifications.agent.ses_omp",
+          dedupe_key: "github.webhook-echo",
+          issued_at: 1,
+          payload_summary: "Keep the thread open?",
+          payload: JSON.stringify({}),
+          trace_id: `trace-${eventID}`,
+        })
+      );
+    }
     agent.push(
       JSON.stringify({
         event_id: "evt-after-dispatch-echo",
@@ -5072,6 +5066,59 @@ describe("envoy OMP extension", () => {
       },
     ]);
     expect(fixture.deliveries).toEqual([]);
+  });
+
+  // Dispatch records a BTW answered with an error as failed, and a same-mode re-send of it
+  // repeats the attempt's dedupe key. The agent never answered the first, so the re-send has to
+  // run the side turn again; a repeat of one that was answered is still dropped.
+  test("runs a BTW side turn again for a Retry of one whose side turn failed", async () => {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const replies: unknown[] = [];
+    let posted = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      if (
+        new URL(input.toString()).pathname ===
+        "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply"
+      ) {
+        replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
+        posted.resolve();
+      }
+      return response({});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-retry");
+    const fixture = createPi();
+    let sideTurns = 0;
+    envoyExtension({
+      ...fixture.pi,
+      askEphemeral: async () => {
+        sideTurns += 1;
+        if (sideTurns === 1) throw new Error("No API key for provider: openai");
+        return { replyText: `Answer ${sideTurns}` };
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+    const agent = natsState.controls.get("notifications.agent.ses_delivery");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    const send = async (dedupeKey: string): Promise<void> => {
+      posted = Promise.withResolvers<void>();
+      agent.push(targetedDispatchEnvelope("btw", dedupeKey));
+      await posted.promise;
+    };
+
+    await send("targeted-btw-retry");
+    await send("targeted-btw-retry");
+    // Answered now: a third copy is a repeat and runs nothing, so the next reply is the sentinel's.
+    agent.push(targetedDispatchEnvelope("btw", "targeted-btw-retry"));
+    await send("targeted-btw-sentinel");
+
+    expect(sideTurns).toBe(3);
+    const actor = { id: "ses_delivery", kind: "session" };
+    expect(replies).toEqual([
+      { actor, attempt: 1, error: "No API key for provider: openai" },
+      { actor, attempt: 1, body: "Answer 2" },
+      { actor, attempt: 1, body: "Answer 3" },
+    ]);
   });
 
   test("answers a targeted BTW through the session context's runEphemeralTurn in the /btw prompt", async () => {
@@ -6746,6 +6793,55 @@ describe("envoy OMP extension", () => {
       "_INBOX.duplicate",
       "_INBOX.next",
     ]);
+  });
+
+  // Following a pull request's thread and its checks holds two subscriptions for the checks
+  // subject, so one CI settlement arrives on both. Its key does not name its event, so only the
+  // event id the two copies share makes the second one the first again.
+  test("injects one publish once when two followed subscriptions both carry it", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+    // Query isolation gives this stateful extension its own NATS subscription.
+    const { default: envoyExtension } = await import("./envoy.ts?deliver-overlapping-copies");
+    const fixture = createPi();
+    const following = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        if (message.content.includes("the next publish proves the copy was skipped")) {
+          following.resolve();
+        }
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_overlap"));
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("subscription tool was not registered");
+    const pr = "notifications.github.acme.widgets.pr.7.>";
+    const checks = "notifications.github.acme.widgets.pr.7.checks";
+    await subscribeTool.execute("", { topics: [pr, checks] });
+    const wildcard = natsState.controls.get(pr);
+    const exact = natsState.controls.get(checks);
+    if (wildcard === undefined || exact === undefined) throw new Error("topics were not followed");
+
+    const settlement = (eventID: string, summary: string) =>
+      JSON.stringify({
+        event_id: eventID,
+        source: "github",
+        source_event_id: `ci-${eventID}`,
+        topic: checks,
+        dedupe_key: "github.checks.acme.widgets.pr.7.0a1b2c3.g1",
+        issued_at: 1,
+        payload_summary: summary,
+        trace_id: `trace-${eventID}`,
+      });
+    wildcard.push(settlement("evt-checks-1", "checks settled once"));
+    exact.push(settlement("evt-checks-1", "checks settled once"));
+    exact.push(settlement("evt-checks-2", "the next publish proves the copy was skipped"));
+    await following.promise;
+
+    expect(
+      fixture.messages.filter((message) => message.includes("checks settled once"))
+    ).toHaveLength(1);
   });
 
   test("inbound envoy messages deliver as steering so they interrupt an in-flight turn", async () => {

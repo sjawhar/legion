@@ -6,6 +6,7 @@ import type {
   Ask,
   AskRead,
   AskUrgency,
+  BlockPath,
   Comment,
   CommentRead,
   CreateAskInput,
@@ -59,7 +60,12 @@ import {
   resolveCwdRepo,
   resolveOrigin,
 } from "./dispatch-cwd";
-import { DispatchClient, DispatchServiceError, type GraphReferencesQuery } from "./dispatch-http";
+import {
+  DispatchClient,
+  DispatchGatewayError,
+  DispatchServiceError,
+  type GraphReferencesQuery,
+} from "./dispatch-http";
 import {
   dispatchChildRef,
   dispatchDocumentRef,
@@ -1033,7 +1039,7 @@ async function resolveArtifact(
     const routed = await client
       .getProjectArtifact(owner.project, artifactReference)
       .catch((error: unknown) => {
-        if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
+        if (!dispatchAnswered(error, 404)) throw error;
         return undefined;
       });
     if (canonical && routed !== undefined) return { owner, artifact: routed };
@@ -1329,11 +1335,12 @@ function referenceLines(edges: readonly GraphEdge[] | string): string[] {
   });
 }
 
-/** How a read degrades a graph or closure section the server cannot serve. */
+/**
+ * How a read degrades a graph or closure section the server cannot serve. Dispatch's own 404 is a
+ * server without the route; any other failure, a gateway's 404 page included, is named.
+ */
 function unavailableReason(error: unknown): string {
-  return error instanceof DispatchServiceError && error.status === 404
-    ? "unavailable"
-    : `unavailable: ${messageFor(error)}`;
+  return dispatchAnswered(error, 404) ? "unavailable" : `unavailable: ${messageFor(error)}`;
 }
 
 async function graphEdges(
@@ -1449,6 +1456,7 @@ function askSummary({ ask, replies }: AskRead, graph: readonly string[]): string
   ]);
   return [
     `Question: ${ask.question}`,
+    ...anchorLines(ask),
     "Options:",
     ...(ask.options.length === 0
       ? ["- none"]
@@ -1521,12 +1529,12 @@ export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: strin
 function commentSummary({ comment, replies }: CommentRead, graph: readonly string[]): string {
   const root = [
     `${comment.id} · ${actorText(comment.author)}`,
-    ...(comment.anchor?.quote === undefined ? [] : [`> ${comment.anchor.quote}`]),
+    ...anchorLines(comment),
     `Body: ${comment.body}`,
   ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} · ${actorText(reply.author)}`,
-    ...(reply.anchor?.quote === undefined ? [] : [`> ${reply.anchor.quote}`]),
+    ...anchorLines(reply),
     `Body: ${reply.body}`,
   ]);
   return [
@@ -1536,6 +1544,45 @@ function commentSummary({ comment, replies }: CommentRead, graph: readonly strin
     ...(chain.length === 0 ? ["- none"] : chain),
     ...graph,
   ].join("\n");
+}
+
+/** An anchored record's quote, then where its block stands: the position, or why the read could
+ *  not place it. A record without an anchor prints neither. */
+function anchorLines(
+  record: Pick<Comment, "anchor" | "anchor_block" | "anchor_block_error">
+): string[] {
+  return [
+    ...(record.anchor?.quote === undefined ? [] : [`> ${record.anchor.quote}`]),
+    ...(record.anchor_block === undefined
+      ? []
+      : [`Position: ${positionText(record.anchor_block)}`]),
+    ...(record.anchor_block_error === undefined
+      ? []
+      : [`Position: unavailable (${record.anchor_block_error})`]),
+  ];
+}
+
+/** Where an anchor's block stands. Every node from the top-level block down reads `type[index]`;
+ *  in a table the row and cell read instead as `row 5 (Red-teamer loop), column Due`: the row's
+ *  index (0 is the header), labelled by its cells before the anchored column — blank cells and
+ *  bare numbers dropped, since a `#` column repeats the index — and the column's header, or its
+ *  index where no header cell covers it. */
+export function positionText(block: BlockPath): string {
+  const { table, path } = block;
+  const segments = path.map((entry) => `${entry.type}[${entry.index}]`);
+  if (table === undefined || table.row === null) return segments.join(" › ");
+  const tableAt = path.findIndex((entry) => entry.type === "table");
+  const cells = table.cells ?? [];
+  const label = (table.column === null ? cells : cells.slice(0, table.column))
+    .map((cell) => cell.trim())
+    .filter((cell) => cell !== "" && !/^\d+$/.test(cell))
+    .join(" · ");
+  const row = label === "" ? `row ${table.row}` : `row ${table.row} (${label})`;
+  const header = table.header === null || table.header === "" ? String(table.column) : table.header;
+  return [
+    ...segments.slice(0, tableAt + 1),
+    table.column === null ? row : `${row}, column ${header}`,
+  ].join(" › ");
 }
 
 function messageSummary({ message, replies }: MessageRead, graph: readonly string[]): string {
@@ -1577,12 +1624,7 @@ async function openArtifactMarks(
     .map((ask) => `ask ${ask.id}`);
   const commentsResult = await commentsResultPromise;
   if (commentsResult.status === "rejected") {
-    if (
-      commentsResult.reason instanceof DispatchServiceError &&
-      commentsResult.reason.status === 404
-    ) {
-      return marks;
-    }
+    if (dispatchAnswered(commentsResult.reason, 404)) return marks;
     throw commentsResult.reason;
   }
   return [
@@ -1747,8 +1789,29 @@ async function refuseRemovingOpenDecisionBlocks(
  * `throw refusalWithCode(error)` rethrows it untouched. This returns rather than throws: a
  * helper that never returns leaves its switch case with no visible terminator, which Biome's
  * noFallthroughSwitchClause rejects.
+ *
+ * A gateway's answer stays a `DispatchGatewayError`, and `suffix`, the caller's account of what
+ * its call did, joins it in one sentence. Where the request may have reached Dispatch
+ * (`mayHaveReachedDispatch`), the client's advice could judge only from the method (a write is
+ * told to check whether it took effect), so a suffix, which knows what its call did, takes its
+ * place and must say what to do; otherwise the request never reached Dispatch, and the suffix
+ * follows the client's advice.
  */
 function refusalWithCode(error: unknown, suffix = ""): unknown {
+  if (error instanceof DispatchGatewayError) {
+    let told = error.message;
+    if (suffix !== "") {
+      told = error.mayHaveReachedDispatch
+        ? `${error.answer}${suffix}`
+        : `${error.answer}, so ${error.advice}${suffix}`;
+    }
+    return new DispatchGatewayError(
+      error.status,
+      error.answer,
+      error.advice,
+      `${error.code}: ${told}`
+    );
+  }
   if (!(error instanceof DispatchServiceError)) return error;
   return new DispatchServiceError(
     error.code,
@@ -1758,6 +1821,35 @@ function refusalWithCode(error: unknown, suffix = ""): unknown {
     error.current,
     error.mismatches
   );
+}
+
+/** Whether Dispatch itself answered `status`; a gateway's answer of that status says nothing it decided. */
+function dispatchAnswered(error: unknown, status: number): error is DispatchServiceError {
+  return error instanceof DispatchServiceError && error.fromDispatch && error.status === status;
+}
+
+/**
+ * Whether a write that failed with `error` may have taken effect anyway. Only an answer sent
+ * before the write could apply proves it did not: Dispatch's own refusal (a 4xx), or a gateway's
+ * answer that never reached Dispatch (`mayHaveReachedDispatch`). Dispatch's own 5xx can come after
+ * it committed, and a timeout or a transport error says nothing either way.
+ */
+function writeMayHaveLanded(error: unknown): boolean {
+  if (error instanceof DispatchGatewayError) return error.mayHaveReachedDispatch;
+  return !(error instanceof DispatchServiceError) || error.status >= 500;
+}
+
+/**
+ * An error that is no refusal (a timeout, a transport error) with `account`, the caller's clause
+ * on what its call did, after its message: joined to it with "; ", or as a sentence of its own
+ * after a message that ends one ("The operation timed out.", "… able to access the url?").
+ */
+function withAccount(error: unknown, account: string): Error {
+  const message = messageFor(error);
+  const told = /[.!?]$/.test(message)
+    ? `${message} ${account.charAt(0).toUpperCase()}${account.slice(1)}`
+    : `${message}; ${account}`;
+  return new Error(told, { cause: error });
 }
 
 /** Validate and execute one native Dispatch tool against the JSON HTTP API. */
@@ -1987,7 +2079,13 @@ export async function executeDispatchTool(
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id),
           };
         } catch (error) {
-          throw refusalWithCode(error, "; the reason was not posted, so the close was not sent");
+          // The close's PATCH below follows the same rule: only an answer sent before the reason
+          // could be stored proves it was not posted.
+          const told = writeMayHaveLanded(error)
+            ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again"
+            : "the reason was not posted, so the close was not sent";
+          if (error instanceof DispatchServiceError) throw refusalWithCode(error, `; ${told}`);
+          throw withAccount(error, told);
         }
       }
       // The server replaces the whole link set; the common call is "link the pull request
@@ -2011,24 +2109,27 @@ export async function executeDispatchTool(
         });
       } catch (error) {
         // A URL links exactly one issue. A server from before EXTERNAL_LINK_TAKEN answers the
-        // unique-index violation with 500 INTERNAL, which names nothing; say what it means.
+        // unique-index violation with 500 INTERNAL, which names nothing; say what it means. A
+        // gateway's 500 page is not that answer, and gets no such reading.
         const taken =
-          error instanceof DispatchServiceError && error.status === 500 && newLinks.length > 0
+          dispatchAnswered(error, 500) && newLinks.length > 0
             ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)`
             : "";
         if (closingNote === undefined) throw refusalWithCode(error, taken);
         // The reason is on the issue, so a blind retry would post it a second time: the error
-        // says where the first one is. Only a 4xx is a refusal that proves the issue is still
-        // open; after a 5xx, a timeout, or a transport error the close may have landed anyway.
-        const refused = error instanceof DispatchServiceError && error.status < 500;
-        const posted = `; the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
-        const landed = refused
-          ? `${posted} but the issue did not close. Retrying this call posts its reason again, so fix what refused the close, then retry with a reason that points at message ${closingNote.id}`
-          : `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`;
-        if (error instanceof DispatchServiceError) throw refusalWithCode(error, taken + landed);
-        throw new Error(`${error instanceof Error ? error.message : String(error)}${landed}`, {
-          cause: error,
-        });
+        // says where the first one is, and whether the close may have landed anyway. A gateway's
+        // timeout or rate limit refused nothing there is to fix.
+        const posted = `the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
+        const fix =
+          error instanceof DispatchGatewayError && error.transient
+            ? ""
+            : "fix what refused the close, then ";
+        const landed = writeMayHaveLanded(error)
+          ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`
+          : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
+        if (error instanceof DispatchServiceError)
+          throw refusalWithCode(error, `${taken}; ${landed}`);
+        throw withAccount(error, landed);
       }
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
       const changes = [
@@ -2865,7 +2966,7 @@ async function resolveExistingIssue(
   try {
     return await client.resolveIssue(issueReference);
   } catch (error) {
-    if (error instanceof DispatchServiceError && error.status === 404) {
+    if (dispatchAnswered(error, 404)) {
       throw new Error(
         `no Dispatch issue is linked to ${issueReference}; create it first with ` +
           `dispatch_issue({ external: "${issueReference}", ... })`
