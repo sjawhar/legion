@@ -144,25 +144,25 @@ export function isDocumentSchemaError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "DOC_SCHEMA";
 }
 
-// A document whose room or store could not serve it. Its stored history may be one the server
-// cannot load at all, which a rebuild from the latest saved version restores.
-export function isDocumentServiceUnavailable(error: unknown): boolean {
-  return (
-    error instanceof ApiError && error.status === 503 && error.code === "DOC_SERVICE_UNAVAILABLE"
-  );
+// A document whose stored history cannot load at all: the state a rebuild from its latest saved
+// version repairs, and retrying the read cannot.
+export function isDocumentUnloadable(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.code === "DOCUMENT_UNLOADABLE";
 }
 
 // The retry policy every query in the app shares: an auth outcome (401/403), a missing
-// architecture source, an unconfigured credential broker, or a stored document outside Proof's
-// schema is definitive and retrying it changes nothing; any other failure (dropped connection,
-// 5xx) is worth a couple of automatic attempts before surfacing a Retry affordance to the user.
+// architecture source, an unconfigured credential broker, a stored document outside Proof's
+// schema, or a stored history that cannot load is definitive and retrying it changes nothing; any
+// other failure (dropped connection, 5xx) is worth a couple of automatic attempts before surfacing
+// a Retry affordance to the user.
 export function isRetryableQueryError(error: unknown): boolean {
   return (
     !isUnauthorized(error) &&
     !isForbidden(error) &&
     !isSourceNotFound(error) &&
     !isCredentialFeatureOff(error) &&
-    !isDocumentSchemaError(error)
+    !isDocumentSchemaError(error) &&
+    !isDocumentUnloadable(error)
   );
 }
 

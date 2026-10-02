@@ -17,6 +17,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -65,6 +66,9 @@ type classifiedUpdateStore interface {
 }
 
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
+	if update, ok := a.service.takePreload(room); ok {
+		return update, nil
+	}
 	result, err := a.store.Load(context.Background(), room)
 	if err == nil {
 		err = validateUpdate(result.Update)
@@ -142,32 +146,34 @@ func validateUpdate(update []byte) error {
 	return crdt.ApplyUpdateV1(crdt.New(), update, nil)
 }
 
-// roomDocument is the document a connection to room would sync: the resident room's, or else the
-// durable one its load would decode, nil when nothing is persisted. A durable history that does
-// not decode fails the room, as ygo's own load of it would.
-func (s *Service) roomDocument(ctx context.Context, room string) (*crdt.Doc, error) {
-	if doc := s.srv.GetDoc(room); doc != nil {
-		return doc, nil
-	}
-	result, err := s.persistence.Load(ctx, room)
-	var doc *crdt.Doc
-	if err == nil && len(result.Update) > 0 {
-		doc = crdt.New()
-		err = crdt.ApplyUpdateV1(doc, result.Update, nil)
-	}
-	if err != nil {
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			s.failRoom(room, err)
-		}
-		return nil, err
-	}
-	return doc, nil
+// preloadedDocument is the durable state a document socket's admission check decoded, kept for the
+// load ygo makes of the room next (servicePersistenceAdapter.LoadDoc), so a cold connection reads
+// and decodes the history once.
+type preloadedDocument struct {
+	loaded persistence.LoadResult
 }
 
-// documentSchemaCloseCode closes a document websocket whose room is outside the Proof schema. It
-// is in the private 4000-4999 range beside Hocuspocus's own 4401 and 4403, and the dashboard reads
-// it as the document's repair state rather than as a dropped connection to retry.
-const documentSchemaCloseCode = 4409
+// takePreload is the update a socket's admission check loaded for room, while the durable head is
+// still the one it loaded: every write that changes a document's stored state raises its head (an
+// append, a rebuild), and compaction keeps both the head and the state. A stale or absent preload
+// is no answer, and the caller loads the room itself.
+func (s *Service) takePreload(room string) ([]byte, bool) {
+	value, ok := s.preloads.LoadAndDelete(room)
+	if !ok {
+		return nil, false
+	}
+	preload := value.(*preloadedDocument)
+	head, err := s.persistence.Head(context.Background(), room)
+	if err != nil || head != preload.loaded.Version {
+		return nil, false
+	}
+	return preload.loaded.Update, true
+}
+
+// documentSchemaCloseCode closes a document websocket whose room is outside the Proof schema
+// (DOCUMENT_SCHEMA_CLOSE_CODE in packages/contracts), which the dashboard reads as the document's
+// repair state rather than as a dropped connection to retry.
+const documentSchemaCloseCode = contracts.DocumentSchemaCloseCode
 
 // refuseOutsideSchema completes the upgrade only to close it with documentSchemaCloseCode before
 // anything of the document is sent: a browser reads a close code, never the status of a refused
@@ -182,7 +188,7 @@ func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, ca
 	}
 	defer connection.Close()
 	deadline := time.Now().Add(time.Second)
-	if err := connection.WriteControl(gws.CloseMessage, gws.FormatCloseMessage(documentSchemaCloseCode, "DOC_SCHEMA"), deadline); err != nil {
+	if err := connection.WriteControl(gws.CloseMessage, gws.FormatCloseMessage(documentSchemaCloseCode, contracts.DocumentSchemaCloseReason), deadline); err != nil {
 		return
 	}
 	// The client's close in reply completes the handshake; whatever it sent before that is
@@ -221,19 +227,26 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	doc, err := s.roomDocument(r.Context(), room)
+	// A browser editor normalizes a tree it cannot represent and writes the result back, so no
+	// connection - a first one, or a provider's reconnect - joins a room outside the Proof schema
+	// until it is replaced from markdown. The server decides it here, for every client at once, by
+	// the read and the rendering `/text` answers with (readDocument), so a socket is refused exactly
+	// when that read is ErrDocOutsideSchema.
+	doc, loaded, err := s.loadDocument(r.Context(), room)
 	if err != nil {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	// A browser editor normalizes a tree it cannot represent and writes the result back, so no
-	// connection - a first one, or a provider's reconnect - joins a room outside the Proof schema
-	// until it is replaced from markdown. The server decides it here, for every client at once.
 	if doc != nil {
-		if _, err := renderDocument(doc); outsideSchema(err) {
+		if _, err := renderDocument(doc); errors.Is(err, ErrDocOutsideSchema) {
 			refuseOutsideSchema(w, r, room, err)
 			return
 		}
+	}
+	if loaded != nil {
+		preload := &preloadedDocument{loaded: *loaded}
+		s.preloads.Store(room, preload)
+		defer s.preloads.CompareAndDelete(room, preload)
 	}
 	connection := &connectionState{}
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
@@ -396,7 +409,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	markdown, err := renderDocument(doc)
 	var contentMarkdown *string
 	switch {
-	case outsideSchema(err):
+	case errors.Is(err, ErrDocOutsideSchema):
 		slog.Warn("dispatch: loaded document outside Proof schema; a replacement from markdown repairs it", "room", room, "error", err)
 	case err != nil:
 		return err
@@ -441,7 +454,7 @@ func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
 		state.mu.Lock()
 		state.contentMarkdown = nil
 		state.mu.Unlock()
-		if outsideSchema(err) {
+		if errors.Is(err, ErrDocOutsideSchema) {
 			slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
 		} else {
 			slog.Error("dispatch: read updated document", "room", room, "error", err)

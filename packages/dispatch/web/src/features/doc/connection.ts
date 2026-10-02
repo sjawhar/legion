@@ -1,4 +1,5 @@
 import type { HocuspocusProvider } from "@hocuspocus/provider";
+import { DOCUMENT_SCHEMA_CLOSE_CODE } from "@legion/contracts";
 import type { Awareness } from "y-protocols/awareness";
 import type { Doc } from "yjs";
 
@@ -55,10 +56,6 @@ export function isSchemaReadOnly(scope: string | undefined): boolean {
   return scope === "readonly";
 }
 
-/** The close code the server refuses a document socket with when its room is outside the Proof
- * schema (`documentSchemaCloseCode`, packages/envoy/internal/dispatch/docs/websocket.go). */
-const documentSchemaCloseCode = 4409;
-
 export function wsUrl(artifactId: string): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}/ws/doc/${encodeURIComponent(artifactId)}`;
@@ -93,8 +90,9 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
       },
       onClose: ({ event }) => {
         // Hocuspocus answers every other close by reconnecting. This one is the server's decision
-        // about the stored document, so the provider stops here and the host reads it again.
-        if (event.code === documentSchemaCloseCode) {
+        // about the stored document (`DOCUMENT_SCHEMA_CLOSE_CODE`), so the provider stops here and
+        // the host reads it again.
+        if (event.code === DOCUMENT_SCHEMA_CLOSE_CODE) {
           provider.disconnect();
           callbacks.onOutsideSchema();
         }

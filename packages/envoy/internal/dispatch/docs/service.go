@@ -56,11 +56,13 @@ type Deps struct {
 // store. Document writes that join an API transaction use AppendUpdateTx, classifying
 // the update as content or not the way the room's update observer classifies a live one.
 // RebuildTx replaces an unreadable history inside the rebuild's transaction, through the same
-// persistence boundary as its preflight load.
+// persistence boundary as its preflight load. Head is the version Load would fold up to now, which
+// says whether a state loaded earlier is still the stored one.
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error)
 	RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error)
+	Head(ctx context.Context, room string) (persistence.Version, error)
 }
 
 // Service owns live Yjs documents and their durable Dispatch versions.
@@ -121,6 +123,9 @@ type Service struct {
 	// rebuilding names the documents a rebuild holds (RebuildDocument): their rooms refuse
 	// loads and injections until the rebuild's transaction ends (Ledger.endRebuilds).
 	rebuilding sync.Map
+	// preloads holds, per room, the durable state a document socket's admission check decoded
+	// (*preloadedDocument), for the room load that socket makes next (takePreload).
+	preloads sync.Map
 }
 
 type roomState struct {

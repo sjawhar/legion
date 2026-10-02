@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -97,9 +98,23 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 			write.dropRendering()
 		}
 	}()
-	before, beforeErr := treeOf(fork)
-	if beforeErr != nil && !outsideSchema(beforeErr) {
-		return beforeErr
+	// The tree the operation starts from. One outside the Proof schema - the reader refuses it, or
+	// only the renderer does - is the document's own refusal (OutsideSchemaError), which every
+	// schema refusal this operation meets is then answered with, unless the operation repairs it.
+	// Its rendering is taken only when something needs it: a failure to classify, or the content
+	// comparison of a write that changed the fork.
+	before, startErr := treeOf(fork)
+	if startErr != nil && !errors.Is(startErr, ErrDocOutsideSchema) {
+		return startErr
+	}
+	var beforeMarkdown string
+	rendered := startErr != nil
+	start := func() error {
+		if !rendered {
+			beforeMarkdown, startErr = documentMarkdown(before)
+			rendered = true
+		}
+		return startErr
 	}
 	unsubscribe := fork.OnUpdate(func(update []byte, _ any) {
 		updates = append(updates, append([]byte(nil), update...))
@@ -110,33 +125,31 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 	}()
 	unsubscribe()
 	if mutateErr != nil {
-		return mutateErr
+		return joinedSchemaError(mutateErr, start)
 	}
 	if len(updates) == 0 {
 		return websocket.ErrNoChanges
 	}
 	tree, err := treeOf(fork)
-	if err != nil {
-		return err
+	var markdown string
+	if err == nil {
+		markdown, err = documentMarkdown(tree)
 	}
-	markdown, err := renderTree(tree)
 	if err != nil {
-		return err
+		return joinedSchemaError(err, start)
 	}
 	update, err := mergeUpdates(updates)
 	if err != nil {
 		return err
 	}
-	// A write over a tree outside the Proof schema - one treeOf refuses, or one it reads that does
-	// not render (outsideSchema) - is a repair, so it necessarily changes the content a version
-	// stores. Other writes compare the markdown before and after as usual.
+	// A write over a tree outside the Proof schema that leaves it readable is a repair, so it
+	// necessarily changes the content a version stores. Other writes compare the markdown before
+	// and after as usual.
 	contentChanged := true
-	if beforeErr == nil {
-		beforeMarkdown, err := renderTree(before)
-		if err != nil && !outsideSchema(err) {
-			return err
-		}
-		contentChanged = err != nil || beforeMarkdown != markdown
+	if err := start(); err == nil {
+		contentChanged = beforeMarkdown != markdown
+	} else if !errors.Is(err, ErrDocOutsideSchema) {
+		return err
 	}
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, contentChanged); err != nil {
 		return fmt.Errorf("append transactional live document update: %w", err)
@@ -167,6 +180,23 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 		s.creditLiveWrite(write, actor)
 	}
 	return nil
+}
+
+// joinedSchemaError is the error a joined operation answers for err, a failure it met after it
+// read the tree it started from (start). A schema refusal is that tree's own when the tree is
+// outside the schema - start's OutsideSchemaError, the same one every route answers - and
+// otherwise the operation's fault, since the tree it started from was readable. A refusal of the
+// caller's own ask block keeps its reason, which writeHandlerError answers before any schema
+// refusal.
+func joinedSchemaError(err error, start func() error) error {
+	var invalidAsk *ErrInvalidAskBlock
+	if !errors.Is(err, ErrDocSchema) || errors.As(err, &invalidAsk) {
+		return err
+	}
+	if startErr := start(); errors.Is(startErr, ErrDocOutsideSchema) {
+		return startErr
+	}
+	return producedSchemaError(err)
 }
 
 func mergeUpdates(updates [][]byte) ([]byte, error) {
@@ -232,11 +262,11 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		current, err := treeOf(doc)
 		var currentMarkdown string
 		if err == nil {
-			currentMarkdown, err = renderTree(current)
+			currentMarkdown, err = documentMarkdown(current)
 		}
 		// A tree outside the Proof schema - one treeOf refuses, or one it reads that does not
 		// render - has no readable text to compare or reanchor against: this replacement repairs it.
-		repairing := outsideSchema(err)
+		repairing := errors.Is(err, ErrDocOutsideSchema)
 		if err != nil && !repairing {
 			return err
 		}
@@ -282,6 +312,12 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		}
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
+			// A repair keeps nothing of the unreadable tree, which pmdoc.Update would otherwise
+			// diff against node by node, reading text content - an embed a crafted client wrote
+			// into a paragraph, say - that it refuses.
+			if length := fragment.Len(); repairing && length > 0 {
+				fragment.Delete(transaction, 0, length)
+			}
 			if updateErr = pmdoc.Update(transaction, fragment, target); updateErr != nil {
 				return
 			}
@@ -357,12 +393,7 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 	if err != nil || doc == nil {
 		return "", err
 	}
-	tree, err := treeOf(doc)
-	if err != nil {
-		return "", repairableSchemaError(err)
-	}
-	markdown, err := renderTree(tree)
-	return markdown, repairableSchemaError(err)
+	return renderDocument(doc)
 }
 
 // TextWithToken returns canonical markdown and a token over its full Proof tree,
@@ -372,42 +403,53 @@ func (s *Service) TextWithToken(ctx context.Context, artifactID string) (string,
 	if err != nil || doc == nil {
 		return "", "", err
 	}
-	markdown, token, err := renderTokenTree(doc)
-	return markdown, token, repairableSchemaError(err)
+	return renderTokenTree(doc)
 }
 
 // readDocument returns the document the caller sees without loading or writing its room, so it
 // also reads a closed issue's document: the calling transaction's fork when it has one
-// (joinRead), else the resident room, else the persisted document. A document with no persisted
-// state is nil.
+// (joinRead), else a snapshot of the resident room, else the persisted document. A document with
+// no persisted state is nil.
 func (s *Service) readDocument(ctx context.Context, artifactID string) (*crdt.Doc, error) {
+	doc, _, err := s.loadDocument(ctx, artifactID)
+	return doc, err
+}
+
+// loadDocument is readDocument with the durable state it decoded the document from, nil when it
+// read a fork or the resident room. A resident room is read through snapshotDocument, since its
+// peers and the service write it concurrently. A durable history that does not decode is
+// ErrDocumentUnloadable and fails the room, as ygo's own load of it would.
+func (s *Service) loadDocument(ctx context.Context, artifactID string) (*crdt.Doc, *persistence.LoadResult, error) {
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	fork, err := s.joinRead(ctx, artifactID)
 	if err != nil || fork != nil {
-		return fork, err
+		return fork, nil, err
 	}
 	if doc := s.srv.GetDoc(artifactID); doc != nil {
-		return doc, nil
+		snapshot, err := snapshotDocument(doc)
+		return snapshot, nil, err
 	}
 	loaded, err := s.persistence.Load(ctx, artifactID)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
+			return nil, nil, err
 		}
 		s.failRoom(artifactID, err)
-		return nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
 	}
 	if len(loaded.Update) == 0 {
-		return nil, nil
+		return nil, &loaded, nil
 	}
 	doc := crdt.New()
 	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+		// The room carries the decode failure as its cause, which a reader that meets the
+		// failed room answers as DOC_SERVICE_UNAVAILABLE; this read met the history itself.
 		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
-		return nil, fmt.Errorf("%w: decode live document: %w", ErrServiceUnavailable, err)
+		return nil, nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
 	}
-	return doc, nil
+	return doc, &loaded, nil
 }
 
 func renderTokenTree(doc *crdt.Doc) (string, string, error) {
@@ -415,7 +457,7 @@ func renderTokenTree(doc *crdt.Doc) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	markdown, err := renderTree(tree)
+	markdown, err := documentMarkdown(tree)
 	if err != nil {
 		return "", "", err
 	}
@@ -441,19 +483,19 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 	}
 	tree, err := treeOf(doc)
 	if err != nil {
-		return "", nil, repairableSchemaError(err)
+		return "", nil, err
 	}
 	tableDescendants, err := pmdoc.TableDescendantIDs(tree)
 	if err != nil {
-		return "", nil, repairableSchemaError(err)
+		return "", nil, documentSchemaError(err)
 	}
 	tokens, err := blockTokens(tree)
 	if err != nil {
-		return "", nil, repairableSchemaError(err)
+		return "", nil, documentSchemaError(err)
 	}
 	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 	if err != nil {
-		return "", nil, repairableSchemaError(err)
+		return "", nil, documentSchemaError(err)
 	}
 	blocks := make([]model.ArtifactBlock, len(offsets))
 	for index, offset := range offsets {
@@ -482,7 +524,7 @@ func (s *Service) BlockPath(ctx context.Context, artifactID, blockID string) (mo
 	}
 	tree, err := treeOf(doc)
 	if err != nil {
-		return model.BlockPath{}, repairableSchemaError(err)
+		return model.BlockPath{}, err
 	}
 	path, err := pmdoc.BlockPathOf(tree, blockID)
 	if err != nil {
@@ -1070,7 +1112,7 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	if err != nil {
 		return nil, "", versionPending{}, nil, err
 	}
-	markdown, err := renderTree(tree)
+	markdown, err := documentMarkdown(tree)
 	if err != nil {
 		return nil, "", versionPending{}, nil, err
 	}

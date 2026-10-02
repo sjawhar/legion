@@ -10,12 +10,7 @@ import {
 } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import {
-  ApiError,
-  api,
-  isDocumentSchemaError,
-  isDocumentServiceUnavailable,
-} from "../../api/client";
+import { api, isDocumentSchemaError, isDocumentUnloadable } from "../../api/client";
 import type { Artifact, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
 import { TruncatedText } from "../../components/TruncatedText";
 import { copyText } from "../../lib/clipboard";
@@ -72,6 +67,31 @@ const liveTextQueryOptions = (artifactId: string) =>
     queryKey: ["artifact", artifactId, "text"],
     queryFn: () => api.getArtifactText(artifactId),
   });
+
+/** Why an admission left the live editor closed, from its own `/text` read: a tree outside the
+ * Proof schema the page offers to repair from markdown, a stored history that cannot load the page
+ * offers to rebuild, or any other failure. */
+interface AdmissionBlock {
+  readonly kind: "repair" | "rebuild" | "failed";
+  readonly message: string;
+}
+
+function admissionBlock(error: unknown): AdmissionBlock {
+  const message = error instanceof Error ? error.message : String(error);
+  if (isDocumentSchemaError(error)) {
+    return { kind: "repair", message };
+  }
+  if (isDocumentUnloadable(error)) {
+    return { kind: "rebuild", message };
+  }
+  return { kind: "failed", message };
+}
+
+/** How long a socket the server refused as outside the Proof schema waits before its admission
+ * reads `/text` again, by how many refusals in a row precede it. Past the last the editor stops
+ * reconnecting: the server refuses a socket exactly when that read answers `409 DOC_SCHEMA`, so a
+ * refusal is normally followed by the repair message, never by an endless reconnect. */
+const SCHEMA_REFUSAL_DELAYS_MS = [0, 1_000, 2_000, 4_000, 8_000] as const;
 
 /** The document chrome reports its state upward so an issue can place its controls in the active
  * Spec tab row. Project document pages retain their artifact-header toolbar. */
@@ -185,12 +205,18 @@ export function ProofDocument({
     queryFn: () => api.getArtifact(artifact.id),
   });
   const liveTextQuery = useQuery(liveTextQueryOptions(artifact.id));
+  // The repair replaces this document, so it uploads under the document's own name whatever the
+  // picked file is called.
   const repairUpload = useArtifactUpload(
-    owner.kind === "issue" ? { issue: owner.key } : { project: owner.project }
+    owner.kind === "issue" ? { issue: owner.key } : { project: owner.project },
+    { name: artifact.name }
   );
-  const textError = liveTextQuery.error instanceof ApiError ? liveTextQuery.error : undefined;
-  const repairError = isDocumentSchemaError(textError) ? textError : undefined;
-  const rebuildError = isDocumentServiceUnavailable(textError) ? textError : undefined;
+  const [admission, setAdmission] = useState<AdmissionBlock | undefined>(undefined);
+  // Set while an admission is blocked: admits again, once the next read of the text succeeds.
+  const readmitRef = useRef<(() => void) | undefined>(undefined);
+  const repairError = admission?.kind === "repair" ? admission : undefined;
+  const rebuildError = admission?.kind === "rebuild" ? admission : undefined;
+  const shownLoadError = admission?.kind === "failed" ? admission.message : loadError;
   const blockReferencesQuery = useQuery({
     enabled: version === undefined,
     queryKey: ["artifact", artifact.id, "blocks"],
@@ -310,19 +336,6 @@ export function ProofDocument({
   }, [onToolbarChange]);
 
   useEffect(() => {
-    if (repairError !== undefined || rebuildError !== undefined) {
-      setConnection("failed");
-      return;
-    }
-    if (liveTextQuery.isError) {
-      setConnection("failed");
-      setLoadError(
-        liveTextQuery.error instanceof Error
-          ? liveTextQuery.error.message
-          : String(liveTextQuery.error)
-      );
-      return;
-    }
     if (blockSchema === undefined) {
       return;
     }
@@ -335,8 +348,12 @@ export function ProofDocument({
     let document: DocumentConnection | undefined;
     let editor: EditorHandle | undefined;
     let disposeEditorBindings: (() => void) | undefined;
+    // Sockets the server refused in a row, since this editor last synced or a repair re-admitted it.
+    let refusals = 0;
+    let refusalTimer: number | undefined;
     setConnection("connecting");
     setLoadError(undefined);
+    setAdmission(undefined);
     schemaReadOnlyRef.current = false;
     setSchemaReadOnly(false);
     // A transport or editor chunk that fails while online (after `DeploymentResilience` has
@@ -362,22 +379,93 @@ export function ProofDocument({
       editor = undefined;
       document = undefined;
     };
-    // Each admission - this mount, and every socket the server refuses as outside the Proof
-    // schema - connects only after a `/text` read it started itself succeeds. A browser editor
-    // normalizes a tree it cannot represent and writes the result back, and a cached result, or a
-    // read from before the refusal, can predate that tree. A failed read shows through the query's
-    // error, which ends this effect. Later refetches - an artifact event's invalidation - leave a
-    // connected editor alone.
+    // The editor's place in the page - its typed blocks, the margin, search highlights, a block
+    // link - for as long as it is this effect's editor. It returns what undoes it.
+    const bindEditor = (handle: EditorHandle, connection: DocumentConnection) => {
+      installTypedBlocks(handle.view, blockSchema, setAskBlockHosts);
+      const blockLink = window.location.hash;
+      if (blockLink.startsWith("#b-")) {
+        handle.focusBlock(decodeURIComponent(blockLink.slice(3)));
+      }
+      setSearchHighlights(handle.view.dom, highlightTermRef.current);
+      marginRef.current.registerDocument({
+        focusBlock: (blockId) => {
+          requestAnimationFrame(() => handle.focusBlock(blockId));
+        },
+        focusMark: (markId) => handle.focusMark(markId),
+        removeMark: (markId) => handle.removeMark(markId),
+        retypeMark: (markId, kind) => handle.retypeMark(markId, selectionBarKindFor(kind)),
+        setComposerMark: (markId) => handle.setComposerMark(markId),
+        setActiveBlocks: (blockIds) => setActiveBlockClass(handle.view.dom, blockIds),
+        setActiveMarks: (markIds) => setActiveMarkClass(handle.view.dom, markIds),
+      });
+      const unbindRemoteMarks = bindRemoteMarks(connection.doc, handle);
+      const fragment = connection.doc.getXmlFragment("prosemirror");
+      let searchFrame = 0;
+      const refreshSearchHighlights = () => {
+        cancelAnimationFrame(searchFrame);
+        searchFrame = requestAnimationFrame(() => {
+          setSearchHighlights(handle.view.dom, highlightTermRef.current);
+        });
+      };
+      refreshSearchHighlights();
+      fragment.observeDeep(refreshSearchHighlights);
+      let frame = 0;
+      const publishPlacements = () => {
+        cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(() => {
+          marginRef.current.setMarkPlacements(
+            markPlacements(handle.view.state.doc, handle.markOffsets())
+          );
+          marginRef.current.setBlockPlacements(
+            collectBlockPlacements(handle.view.state.doc, blockOffsets(handle.view.dom))
+          );
+        });
+      };
+      const resizeObserver = new ResizeObserver(publishPlacements);
+      resizeObserver.observe(handle.view.dom);
+      publishPlacements();
+      fragment.observeDeep(publishPlacements);
+      return () => {
+        cancelAnimationFrame(frame);
+        cancelAnimationFrame(searchFrame);
+        resizeObserver.disconnect();
+        unbindRemoteMarks();
+        fragment.unobserveDeep(publishPlacements);
+        fragment.unobserveDeep(refreshSearchHighlights);
+        marginRef.current.registerDocument(undefined);
+      };
+    };
+    // Each admission - this mount, a socket the server refused as outside the Proof schema, and a
+    // blocked admission's re-admission - opens a connection only once its own fresh `/text` read
+    // succeeds, and that read alone decides: a browser editor normalizes a tree it cannot
+    // represent and writes the result back. A read that fails closes nothing already open, since
+    // only an admission opens anything, so a later refetch that fails - an outage during an
+    // artifact event's invalidation, say - leaves a connected editor and its unsent edits alone.
+    // A blocked admission waits for the next successful read of the text, which a repair upload
+    // or a rebuild brings about, and is admitted again (`readmitRef`).
     const admit = () => {
       const textRead = queryClient
         .fetchQuery({ ...liveTextQueryOptions(artifact.id), staleTime: 0 })
         .then(
-          () => true,
-          () => false
+          () => undefined,
+          (error: unknown) => admissionBlock(error)
         );
       void Promise.all([textRead, loadTransport()])
-        .then(([readable, connect]) => {
-          if (!mounted || !readable) {
+        .then(([block, connect]) => {
+          if (!mounted) {
+            return;
+          }
+          if (block !== undefined) {
+            setConnection("failed");
+            setAdmission(block);
+            readmitRef.current = () => {
+              readmitRef.current = undefined;
+              refusals = 0;
+              setAdmission(undefined);
+              setConnection("connecting");
+              admit();
+            };
             return;
           }
           const connection = connect(artifact.id, {
@@ -392,8 +480,18 @@ export function ProofDocument({
                 return;
               }
               teardown();
+              const delay = SCHEMA_REFUSAL_DELAYS_MS[refusals];
+              refusals += 1;
+              if (delay === undefined) {
+                reportLoadFailure(
+                  new Error(
+                    "the server keeps refusing its connection; reload the page to try again"
+                  )
+                );
+                return;
+              }
               setConnection("connecting");
-              admit();
+              refusalTimer = window.setTimeout(admit, delay);
             },
             onStatus: (status) => {
               if (!failed) {
@@ -401,6 +499,7 @@ export function ProofDocument({
               }
             },
             onSynced: () => {
+              refusals = 0;
               void createEditor(parent, {
                 // Cursor labels are outside the compact acceptance bar. Even with inline labels,
                 // yCursor's edge widget disrupts the mobile browser's post-update text selection.
@@ -442,66 +541,15 @@ export function ProofDocument({
                 ydoc: connection.doc,
               })
                 .then((handle) => {
+                  // An editor created for a connection a refusal has since torn down, or for an
+                  // unmounted page, belongs to nothing.
                   if (!mounted || document !== connection) {
                     handle.destroy();
                     return;
                   }
                   editor = handle;
                   editorRef.current = handle;
-                  installTypedBlocks(handle.view, blockSchema, setAskBlockHosts);
-                  const blockLink = window.location.hash;
-                  if (blockLink.startsWith("#b-")) {
-                    handle.focusBlock(decodeURIComponent(blockLink.slice(3)));
-                  }
-                  setSearchHighlights(handle.view.dom, highlightTermRef.current);
-                  marginRef.current.registerDocument({
-                    focusBlock: (blockId) => {
-                      requestAnimationFrame(() => handle.focusBlock(blockId));
-                    },
-                    focusMark: (markId) => handle.focusMark(markId),
-                    removeMark: (markId) => handle.removeMark(markId),
-                    retypeMark: (markId, kind) =>
-                      handle.retypeMark(markId, selectionBarKindFor(kind)),
-                    setComposerMark: (markId) => handle.setComposerMark(markId),
-                    setActiveBlocks: (blockIds) => setActiveBlockClass(handle.view.dom, blockIds),
-                    setActiveMarks: (markIds) => setActiveMarkClass(handle.view.dom, markIds),
-                  });
-                  const unbindRemoteMarks = bindRemoteMarks(connection.doc, handle);
-                  const fragment = connection.doc.getXmlFragment("prosemirror");
-                  let searchFrame = 0;
-                  const refreshSearchHighlights = () => {
-                    cancelAnimationFrame(searchFrame);
-                    searchFrame = requestAnimationFrame(() => {
-                      setSearchHighlights(handle.view.dom, highlightTermRef.current);
-                    });
-                  };
-                  refreshSearchHighlights();
-                  fragment.observeDeep(refreshSearchHighlights);
-                  let frame = 0;
-                  const publishPlacements = () => {
-                    cancelAnimationFrame(frame);
-                    frame = requestAnimationFrame(() => {
-                      marginRef.current.setMarkPlacements(
-                        markPlacements(handle.view.state.doc, handle.markOffsets())
-                      );
-                      marginRef.current.setBlockPlacements(
-                        collectBlockPlacements(handle.view.state.doc, blockOffsets(handle.view.dom))
-                      );
-                    });
-                  };
-                  const resizeObserver = new ResizeObserver(publishPlacements);
-                  resizeObserver.observe(handle.view.dom);
-                  publishPlacements();
-                  fragment.observeDeep(publishPlacements);
-                  disposeEditorBindings = () => {
-                    cancelAnimationFrame(frame);
-                    cancelAnimationFrame(searchFrame);
-                    resizeObserver.disconnect();
-                    unbindRemoteMarks();
-                    fragment.unobserveDeep(publishPlacements);
-                    fragment.unobserveDeep(refreshSearchHighlights);
-                    marginRef.current.registerDocument(undefined);
-                  };
+                  disposeEditorBindings = bindEditor(handle, connection);
                 })
                 .catch(reportLoadFailure);
             },
@@ -514,19 +562,21 @@ export function ProofDocument({
 
     return () => {
       mounted = false;
+      window.clearTimeout(refusalTimer);
+      readmitRef.current = undefined;
       teardown();
     };
-  }, [
-    artifact.id,
-    blockSchema,
-    createEditor,
-    liveTextQuery.error,
-    liveTextQuery.isError,
-    loadTransport,
-    queryClient,
-    rebuildError,
-    repairError,
-  ]);
+  }, [artifact.id, blockSchema, createEditor, loadTransport, queryClient]);
+
+  // A blocked admission is admitted again by the next successful read of the document's text: the
+  // refetch a repair upload's or a rebuild's invalidation makes, or any other. Each successful read
+  // moves `dataUpdatedAt`, which is what reruns this.
+  const textReadAt = liveTextQuery.isSuccess ? liveTextQuery.dataUpdatedAt : undefined;
+  useEffect(() => {
+    if (textReadAt !== undefined) {
+      readmitRef.current?.();
+    }
+  }, [textReadAt]);
 
   useEffect(() => {
     editorRef.current?.setReadOnly(isClosed || schemaReadOnlyRef.current);
@@ -648,9 +698,11 @@ export function ProofDocument({
           ) : null}
         </nav>
       ) : null}
-      {loadError === undefined || repairError !== undefined || rebuildError !== undefined ? null : (
+      {shownLoadError === undefined ||
+      repairError !== undefined ||
+      rebuildError !== undefined ? null : (
         <p className={dangerText} role="alert">
-          This document could not load: {loadError}
+          This document could not load: {shownLoadError}
         </p>
       )}
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: dispatch:// link clicks bubble here; the

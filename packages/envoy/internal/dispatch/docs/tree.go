@@ -13,26 +13,58 @@ const fragmentName = "prosemirror"
 const marksMapName = "marks"
 
 var (
-	ErrInvalidMarkdown  = errors.New("markdown is not a Proof document")
-	ErrDocSchema        = errors.New("document is outside the Proof schema")
-	ErrDocOutsideSchema = fmt.Errorf("%w; replace the document from markdown to repair it", ErrDocSchema)
-	ErrDocumentLive     = errors.New("document is live")
-	ErrDocumentLoads    = errors.New("this document loads; nothing to rebuild — if it is outside the schema, replace it from markdown to repair it")
+	ErrInvalidMarkdown = errors.New("markdown is not a Proof document")
+	ErrDocSchema       = errors.New("document is outside the Proof schema")
+	// ErrDocOutsideSchema is the tree a document holds - not one an operation just produced -
+	// refused by the Proof schema's reader or renderer. A replacement from markdown repairs it, so
+	// every route answers it alike (OutsideSchemaError).
+	ErrDocOutsideSchema = errors.New("document is outside the Proof schema; replace the document from markdown to repair it")
+	// ErrDocumentUnloadable is a document whose stored history does not decode, so nothing can read
+	// or open it. A rebuild from its latest saved version restores it (RebuildDocument).
+	ErrDocumentUnloadable = errors.New("the document's stored history cannot load; rebuild it from its latest saved version")
+	ErrDocumentLive       = errors.New("document is live")
+	ErrDocumentLoads      = errors.New("this document loads; nothing to rebuild — if it is outside the schema, replace it from markdown to repair it")
 )
 
-// outsideSchema reports whether err says a stored tree is outside the Proof schema: treeOf refused
-// it, or it read and did not render. A replacement from markdown repairs that state, so reads
-// answer it as ErrDocOutsideSchema (repairableSchemaError), a write takes it as a repair, and the
-// document websocket refuses a browser that would normalize it.
-func outsideSchema(err error) bool {
-	return errors.Is(err, ErrDocSchema) || errors.Is(err, pmdoc.ErrSchema)
+// OutsideSchemaError is ErrDocOutsideSchema with the refusal that names what is wrong. treeOf and
+// documentMarkdown classify a document's tree by it where they read or render it, so an operation
+// that starts from that tree - a read, an edit, a version - fails with it whatever route called
+// the operation and whatever the route wrapped it in, and its message is the same on every route.
+type OutsideSchemaError struct{ Cause error }
+
+func (e *OutsideSchemaError) Error() string {
+	return ErrDocOutsideSchema.Error() + ": " + e.Cause.Error()
 }
 
-func repairableSchemaError(err error) error {
-	if !outsideSchema(err) || errors.Is(err, ErrDocOutsideSchema) {
+// Is makes it ErrDocOutsideSchema and ErrDocSchema both: a check that a tree is outside the
+// schema holds whoever classified it.
+func (e *OutsideSchemaError) Is(target error) bool {
+	return target == ErrDocOutsideSchema || target == ErrDocSchema
+}
+
+func (e *OutsideSchemaError) Unwrap() error { return e.Cause }
+
+// documentSchemaError classifies err from reading or rendering the tree a document holds: a schema
+// refusal is an OutsideSchemaError, and any other error is returned as it is.
+func documentSchemaError(err error) error {
+	if err == nil || errors.Is(err, ErrDocOutsideSchema) {
 		return err
 	}
-	return fmt.Errorf("%w: %v", ErrDocOutsideSchema, err)
+	if errors.Is(err, ErrDocSchema) || errors.Is(err, pmdoc.ErrSchema) {
+		return &OutsideSchemaError{Cause: err}
+	}
+	return err
+}
+
+// producedSchemaError is err from reading or rendering a tree an operation has just written: a
+// schema refusal there is the operation's fault, not the stored document's, so it is a plain
+// ErrDocSchema that no route answers as a repair.
+func producedSchemaError(err error) error {
+	var outside *OutsideSchemaError
+	if errors.As(err, &outside) {
+		return fmt.Errorf("%w: the write left it outside: %v", ErrDocSchema, outside.Cause)
+	}
+	return err
 }
 
 // ErrDocumentTooLarge is a document whose tree encodes to more items than one document update can
@@ -109,16 +141,15 @@ func encodeDocumentTree(tree *pmdoc.Node) ([]byte, error) {
 // warmed). Callers that can reload do so; nothing dereferences a nil document.
 var errDocUnloaded = errors.New("document is not loaded")
 
+// treeOf reads the tree doc holds. A tree outside the Proof schema is an OutsideSchemaError: an
+// operation that reads a tree it has just written takes that back with producedSchemaError.
 func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 	if doc == nil {
 		return nil, errDocUnloaded
 	}
 	tree, err := pmdoc.Read(doc.GetXmlFragment(fragmentName))
 	if err != nil {
-		if errors.Is(err, pmdoc.ErrSchema) {
-			return nil, fmt.Errorf("%w: %v", ErrDocSchema, err)
-		}
-		return nil, err
+		return nil, documentSchemaError(err)
 	}
 	return tree, nil
 }
@@ -129,10 +160,7 @@ func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmd
 	}
 	tree, err := pmdoc.ReadInTransaction(txn, fragment)
 	if err != nil {
-		if errors.Is(err, pmdoc.ErrSchema) {
-			return nil, fmt.Errorf("%w: %v", ErrDocSchema, err)
-		}
-		return nil, err
+		return nil, documentSchemaError(err)
 	}
 	return tree, nil
 }
@@ -148,13 +176,32 @@ func renderTree(tree *pmdoc.Node) (string, error) {
 	return markdown, nil
 }
 
+// documentMarkdown renders a tree treeOf read from a document, so a tree only the renderer refuses
+// is that document's OutsideSchemaError, as treeOf makes one the reader refuses.
+func documentMarkdown(tree *pmdoc.Node) (string, error) {
+	markdown, err := pmdoc.Render(tree)
+	return markdown, documentSchemaError(err)
+}
+
 // renderDocument is what doc renders now, or the error that stopped it being read or rendered.
 func renderDocument(doc *crdt.Doc) (string, error) {
 	tree, err := treeOf(doc)
 	if err != nil {
 		return "", err
 	}
-	return renderTree(tree)
+	return documentMarkdown(tree)
+}
+
+// snapshotDocument copies doc's state as of one moment. Encoding it takes the document's lock, which
+// every peer update and service write holds while it applies, so the copy is never a tree half
+// way through a write - which a direct walk of a resident room's live tree can read, since the
+// walk takes no lock (reearth/ygo v1.49.5, crdt/yxml.go:195-211) - and nothing writes the copy.
+func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
+	snapshot := crdt.New()
+	if err := crdt.ApplyUpdateV1(snapshot, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
+		return nil, fmt.Errorf("copy live document: %w", err)
+	}
+	return snapshot, nil
 }
 
 // closureChangedMarkdown reports whether a document closure that produced after changed the

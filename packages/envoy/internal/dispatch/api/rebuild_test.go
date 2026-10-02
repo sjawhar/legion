@@ -85,6 +85,41 @@ func (s *invalidLoadOnceStore) Load(ctx context.Context, room string) (persisten
 	return s.VersionedStore.Load(ctx, room)
 }
 
+// A stored history that does not decode is the one state a rebuild repairs, so a read of it says
+// so with a code of its own, DOCUMENT_UNLOADABLE, rather than the 503 any failed room or store
+// answers; the dashboard offers its rebuild on that code alone. The room it failed recovers, and
+// once the history loads the same read answers the document.
+func TestAHistoryThatCannotLoadReadsAsDocumentUnloadable(t *testing.T) {
+	var broken *invalidLoadOnceStore
+	handler, _, _ := newTestServer(t, testServerOptions{
+		settle: time.Hour,
+		persistence: func(database *store.Store) docs.VersionedStore {
+			broken = &invalidLoadOnceStore{VersionedStore: docs.NewPgVersioned(database), invalid: make(map[string]bool)}
+			return broken
+		},
+	})
+	issue := createArtifactIssue(t, handler)
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "unloadable.md", "content": "before\n",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create document: status=%d body=%s", created.Code, created.Body.String())
+	}
+	artifact := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, created).Artifact
+	path := "/api/v1/artifacts/" + artifact.ID + "/text"
+	broken.failNextLoad(artifact.ID)
+	unloadable := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")
+	if unloadable.Code != http.StatusConflict || !strings.Contains(unloadable.Body.String(), `"code":"DOCUMENT_UNLOADABLE"`) || !strings.Contains(unloadable.Body.String(), "rebuild it from its latest saved version") {
+		t.Fatalf("read a history that cannot load: status=%d body=%s, want 409 DOCUMENT_UNLOADABLE naming the rebuild", unloadable.Code, unloadable.Body.String())
+	}
+	loads := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")
+	if loads.Code != http.StatusOK || !strings.Contains(loads.Body.String(), `"markdown":"before\n"`) {
+		t.Fatalf("read once the history loads: status=%d body=%s, want the document", loads.Code, loads.Body.String())
+	}
+}
+
 // A caller-supplied rebuild source is a document change: it writes the next immutable version,
 // emits its artifact.version event, and retracts the approval ask pinned to the prior version.
 // Omitting markdown intentionally keeps the latest-version rebuild behavior, including its
@@ -155,8 +190,8 @@ func TestRebuildArtifactVersionsSuppliedMarkdownButNotTheLatestVersionSource(t *
 	rebuilt = dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+supplied.ID+"/rebuild", map[string]any{
 		"markdown": "",
 	}, "alice")
-	if rebuilt.Code != http.StatusOK || !strings.Contains(rebuilt.Body.String(), `"source_version":0`) {
-		t.Fatalf("rebuild from supplied empty markdown: status=%d body=%s", rebuilt.Code, rebuilt.Body.String())
+	if rebuilt.Code != http.StatusOK || !strings.Contains(rebuilt.Body.String(), `"source_version":2`) {
+		t.Fatalf("rebuild from supplied empty markdown: status=%d body=%s, want source_version 2, the version it wrote", rebuilt.Code, rebuilt.Body.String())
 	}
 	if versions := count(t, `select count(*) from artifact_versions where artifact_id = $1`, supplied.ID); versions != 2 {
 		t.Fatalf("supplied rebuild versions = %d, want a new immutable version", versions)

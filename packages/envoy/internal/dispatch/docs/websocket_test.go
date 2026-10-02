@@ -195,7 +195,9 @@ func TestLoadFailureMakesDocumentServiceUnavailable(t *testing.T) {
 	}
 }
 
-func TestCorruptLoadMakesDocumentServiceUnavailable(t *testing.T) {
+// A history that does not decode refuses the socket before any upgrade, and a read of it is the
+// state a rebuild repairs (ErrDocumentUnloadable) rather than any failed room's ErrServiceUnavailable.
+func TestCorruptLoadRefusesTheSocketAndReadsAsUnloadable(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
@@ -217,8 +219,57 @@ func TestCorruptLoadMakesDocumentServiceUnavailable(t *testing.T) {
 	if err == nil || response == nil || response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("corrupt-room connection: response=%#v err=%v, want HTTP 503", response, err)
 	}
-	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrServiceUnavailable) {
-		t.Fatalf("corrupt load = %v, want ErrServiceUnavailable", err)
+	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrDocumentUnloadable) || errors.Is(err, ErrServiceUnavailable) {
+		t.Fatalf("corrupt load = %v, want ErrDocumentUnloadable", err)
+	}
+}
+
+// A cold socket's admission check hands the room's load the history it decoded, so the history
+// is read once - but only while it is still the stored one. An update appended in between raises
+// the head, and the load reads the store again rather than open the room without that update.
+func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "before")
+	adapter := &servicePersistenceAdapter{store: service.persistence, service: service}
+	preload := func(t *testing.T) []byte {
+		t.Helper()
+		_, loaded, err := service.loadDocument(context.Background(), artifactID)
+		if err != nil || loaded == nil || len(loaded.Update) == 0 {
+			t.Fatalf("load cold document: loaded=%v err=%v, want its durable history", loaded, err)
+		}
+		service.preloads.Store(artifactID, &preloadedDocument{loaded: *loaded})
+		return loaded.Update
+	}
+
+	held := preload(t)
+	served, err := adapter.LoadDoc(artifactID)
+	if err != nil || &served[0] != &held[0] {
+		t.Fatalf("load with a current preload served %d bytes (%v), want the preloaded history itself", len(served), err)
+	}
+	if _, kept := service.preloads.Load(artifactID); kept {
+		t.Fatal("a served preload stayed behind for a later load")
+	}
+
+	preload(t)
+	moved, err := encodeDocumentTree(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{{
+		Type: "paragraph", Children: []*pmdoc.Node{{Type: "text", Text: "appended"}},
+	}}})
+	if err != nil {
+		t.Fatalf("encode appended update: %v", err)
+	}
+	if _, err := service.persistence.AppendUpdate(context.Background(), artifactID, moved); err != nil {
+		t.Fatalf("append update after the check: %v", err)
+	}
+	served, err = adapter.LoadDoc(artifactID)
+	if err != nil {
+		t.Fatalf("load after the history moved: %v", err)
+	}
+	doc := crdt.New()
+	if err := crdt.ApplyUpdateV1(doc, served, nil); err != nil {
+		t.Fatalf("decode the loaded history: %v", err)
+	}
+	if markdown, err := renderDocument(doc); err != nil || !strings.Contains(markdown, "appended") {
+		t.Fatalf("load after the history moved served %q (%v), want the appended update", markdown, err)
 	}
 }
 
@@ -261,6 +312,87 @@ func TestDocumentSocketRefusesARoomOutsideTheSchema(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A room that only ever receives valid writes is never refused: the socket's admission check and
+// `/text` read a copy of the resident room taken under its lock (snapshotDocument), never its live
+// tree halfway through a write, which they would read as a tree outside the schema - the socket
+// closed with documentSchemaCloseCode, the read answered 409 with the repair. Under -race the
+// direct walk of the live tree is also a data race with the writer.
+func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
+	// One peer stays connected for the whole probe, so the room stays resident between writes.
+	resident, response, err := gws.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("connect resident peer: response=%#v err=%v", response, err)
+	}
+	t.Cleanup(func() { _ = resident.Close() })
+	go func() {
+		for {
+			if _, _, err := resident.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	bodies := []string{
+		"- one\n- two\n  - nested\n\n> quoted\n",
+		"> a quote\n>\n> - with a list\n\n1. first\n2. second\n",
+		"# Title\n\n- [ ] task\n- [x] done\n\nTail.\n",
+	}
+	stop := make(chan struct{})
+	written := make(chan error, 1)
+	go func() {
+		for round := 0; ; round++ {
+			select {
+			case <-stop:
+				written <- nil
+				return
+			default:
+			}
+			if _, err := service.ReplaceText(context.Background(), artifactID, bodies[round%len(bodies)], model.Actor{Kind: "user", ID: "alice"}); err != nil {
+				written <- fmt.Errorf("write round %d: %w", round, err)
+				return
+			}
+		}
+	}()
+
+	var reads, sockets int
+	var refusals []string
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		if _, _, err := service.TextWithToken(context.Background(), artifactID); err != nil {
+			refusals = append(refusals, fmt.Sprintf("read %d: %v", reads, err))
+		}
+		reads++
+		connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
+		if err != nil {
+			refusals = append(refusals, fmt.Sprintf("socket %d: response=%#v err=%v", sockets, response, err))
+			continue
+		}
+		connection.SetReadDeadline(time.Now().Add(time.Second))
+		if _, _, err := connection.ReadMessage(); err != nil {
+			refusals = append(refusals, fmt.Sprintf("socket %d: first frame %v", sockets, err))
+		}
+		_ = connection.Close()
+		sockets++
+	}
+	close(stop)
+	if err := <-written; err != nil {
+		t.Fatal(err)
+	}
+	if len(refusals) != 0 {
+		t.Fatalf("a healthy room under writes refused %d of %d reads and sockets: %s", len(refusals), reads+sockets, strings.Join(refusals, "; "))
+	}
+	if reads < 20 {
+		t.Fatalf("the probe made %d reads and %d sockets, too few to say anything", reads, sockets)
+	}
+	t.Logf("%d reads and %d sockets on a room under writes, none refused", reads, sockets)
 }
 
 func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {

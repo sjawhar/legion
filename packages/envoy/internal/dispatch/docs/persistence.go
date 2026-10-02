@@ -58,6 +58,16 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	return persistence.LoadResult{Update: update, Version: head}, nil
 }
 
+// Head is the version Load folds the room up to now, read through the pool that owns loads, as
+// Load reads it: a room load (servicePersistenceAdapter.LoadDoc) asks it.
+func (p *PgVersioned) Head(ctx context.Context, room string) (persistence.Version, error) {
+	rooms, err := p.store.Pool.Rooms()
+	if err != nil {
+		return 0, err
+	}
+	return p.head(ctx, rooms, room)
+}
+
 // AppendUpdate validates and stores one incremental V1 update as content.
 func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
 	return p.appendUpdate(ctx, room, update, true)

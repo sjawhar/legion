@@ -9,7 +9,9 @@ import (
 )
 
 // RebuildReport describes the durable history a rebuild replaced. SourceVersion is the artifact
-// version whose markdown became the fresh document state; Head is the new monotonic update version.
+// version whose markdown the fresh document state holds - the latest saved one, or the one a
+// rebuild from supplied markdown that changed the document wrote; Head is the new monotonic update
+// version.
 type RebuildReport struct {
 	Head               int64  `json:"head"`
 	RemovedCheckpoints int64  `json:"removed_checkpoints"`
@@ -65,12 +67,12 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
-	source, sourceVersion := latest.markdown, latest.Number
+	source := latest.markdown
 	if markdown != nil {
 		if !open {
 			return RebuildReport{}, VersionResult{}, ErrIssueClosed
 		}
-		source, sourceVersion = *markdown, 0
+		source = *markdown
 	}
 	tree, err := parseInput(source)
 	if err != nil {
@@ -95,7 +97,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
-	report.SourceVersion = sourceVersion
+	report.SourceVersion = latest.Number
 	report.ValidationError = validationErr.Error()
 	if markdown == nil || canonical == latest.markdown {
 		return report, VersionResult{Version: latest.Version}, nil
@@ -111,5 +113,6 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
+	report.SourceVersion = written.version.Number
 	return report, VersionResult{Version: written.version, Wrote: true, Changes: written.changes}, nil
 }
