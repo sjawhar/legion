@@ -143,6 +143,15 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 
 	boot, cancelBoot := context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 	defer cancelBoot()
+	// The cluster's refusals run before the store opens, so before any schema write, image probe or
+	// reconcile: Agent Sandbox must be installed, and no per-claim Sandbox of the layout before issue
+	// pods may remain. The claims' half of that layout fence runs once the store opens, before it
+	// migrates.
+	if plan.clusterCheck != nil {
+		if err := plan.clusterCheck(boot); err != nil {
+			return err
+		}
+	}
 
 	st, err := store.Open(boot, cfg.PostgresDSN)
 	if err != nil {
@@ -349,9 +358,13 @@ type plan struct {
 	gate func(ctx context.Context) error
 	// probe proves the runtime's worker image once the runtime is built and before the boot is
 	// recorded; nil under tmux, and for a replaced runtime without one.
-	probe       func(ctx context.Context, rt runtime.Runtime) error
-	clock       supervise.Clock
-	orphanSweep time.Duration
+	probe func(ctx context.Context, rt runtime.Runtime) error
+	// clusterCheck is the Kubernetes runtime's refusals before the store opens: Agent Sandbox's
+	// install check, then the census of per-claim Sandboxes (sandbox.CensusLegacyIssueSandboxes).
+	// Nil under tmux, and for a replaced runtime.
+	clusterCheck func(ctx context.Context) error
+	clock        supervise.Clock
+	orphanSweep  time.Duration
 	// secretsEnroller is the daemon's agent-secrets machine login as the machines' Enroller
 	// (newSecretsLogin); nil when the deployment enrolls no pod.
 	secretsEnroller supervise.Enroller
@@ -569,7 +582,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
 	}
 	if cfg.Runtime.Name == "kubernetes" {
-		if err := st.EnsureIssuePodLayout(boot, p.project, false); err != nil {
+		if err := st.EnsureIssuePodLayout(boot, p.project); err != nil {
 			cancel()
 			cancelStream()
 			return nil, fmt.Errorf("record the issue-pod runtime layout: %w", err)

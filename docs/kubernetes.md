@@ -349,10 +349,27 @@ process is addressed by the pod's uid, its
 container and its generation (the incarnation `<pod uid>/<generation>`): starting, suspending or
 recovering one role never restarts the pod or touches another role, and a new generation of a role
 in a running pod is a new child of its launcher. The pod itself is replaced only when it dies or
-was not made by this runtime, and the Sandbox is deleted once the last of its roles is released
-(`packages/daemon-go/internal/runtime/sandbox`). The daemon runs on a host its pods can reach and
-serves the worker stream they dial. The controller is `legion controller start` on the operator's
-machine ([Operator-launched controller](#operator-launched-controller)).
+was not made by this runtime (`packages/daemon-go/internal/runtime/sandbox`).
+
+Releasing a role ends only its process. The issue owns its Sandbox, its role Secrets and, for a
+root, the tree PVC, recorded in the daemon's store (`issue_resources`) before any role of it starts.
+Once an issue's close has retired every claim of it, the outbox cleans its resources, and the store
+begins that cleanup only in the same transaction that finds no claim of the issue but retired, so a
+re-admitted issue is never cleaned; a launch that arrives during a cleanup waits for it to be
+confirmed. A child issue's Sandbox is deleted and its absence confirmed through the API. A root is
+cleaned last, because its Sandbox owns the tree PVC and its deletion lets garbage collection take
+the volume every pod of the tree mounts: the root's cleanup begins only when every child record of
+the tree is confirmed, refuses every new child from then on, and deletes nothing while the API still
+lists a child Sandbox of the tree. Then the root Sandbox is deleted and awaited, then the PVC, and
+the root is confirmed, and so admitted again, only once both are gone.
+
+Before the daemon opens its store, so before any schema write, image probe or reconcile, it checks
+that Agent Sandbox is installed and refuses a namespace that still holds a per-claim Sandbox of the
+layout before issue pods, naming it; once the store opens and before it migrates, it refuses a
+claim that still records such a Sandbox. Migrate or remove those first. The daemon runs on a host
+its pods can reach and serves the worker stream they dial. The controller is
+`legion controller start` on the operator's machine
+([Operator-launched controller](#operator-launched-controller)).
 
 ### Configuration
 

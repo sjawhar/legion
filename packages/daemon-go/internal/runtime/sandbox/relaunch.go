@@ -63,15 +63,13 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	r.forget(spec.Claim)
 	r.own(spec.Claim)
 	r.mu.Lock()
-	resources, testOnly := r.resourceStore, r.testLayoutCensusSkipped
+	resources, testOnly := r.resourceStore, r.withoutResourceStoreTest
 	r.mu.Unlock()
 	if resources == nil {
 		if !testOnly {
 			return fail("load the durable issue resources capability", errors.New("no issue resource store"))
 		}
-	} else if err := resources.EnsureIssueResources(ctx, store.IssueResources{
-		Project: r.project, Issue: spec.Issue, Tree: spec.Tree, Sandbox: l.name, Generation: spec.Generation,
-	}); err != nil {
+	} else if err := r.admitIssueResources(ctx, resources, spec, l.name); err != nil {
 		return fail("record its durable issue resources", err)
 	}
 	release, err := r.lockIssue(ctx, spec.Issue)
@@ -149,6 +147,28 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	}
 	r.join(loc)
 	return loc, nil
+}
+
+// admitIssueResources records the issue's resources before its pod is touched. A launch that
+// arrives while the issue's previous resources, or its tree root's, are still being deleted waits
+// for that cleanup to be confirmed, within the boot deadline, rather than spending the claim's
+// launch budget on refusals; past it, the refusal names the cleanup.
+func (r *Runtime) admitIssueResources(ctx context.Context, resources *store.Store, spec runtime.SpawnSpec, sandbox string) error {
+	deadline := time.NewTimer(r.bootTimeout)
+	defer deadline.Stop()
+	for {
+		err := resources.EnsureIssueResources(ctx, r.project, spec.Issue, spec.Tree, sandbox)
+		if !errors.Is(err, store.ErrIssueCleanupInProgress) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("waited %s: %w", r.bootTimeout, err)
+		case <-time.After(recheckInterval):
+		}
+	}
 }
 
 // suspendFailedLaunch sets the Sandbox of a launch that failed once its Running patch was sent
