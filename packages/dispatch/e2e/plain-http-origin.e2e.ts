@@ -1,10 +1,16 @@
-import { expect, type Page, test } from "@playwright/test";
+import { type Browser, type BrowserContext, expect, type Page, test } from "@playwright/test";
 
-import { createComment, createIssue, createProject, getArtifactText } from "./api";
+import {
+  createComment,
+  createIssue,
+  createProject,
+  devSignInError,
+  devSignInPath,
+  getArtifactText,
+} from "./api";
 import { connectedDot, documentEditor, typeAtEnd } from "./editor";
 import { plainHttpHost } from "./plain-http-origin";
 import { resetDatabase } from "./seed";
-import { asUser } from "./users";
 
 // Runs only in the `chromium-plain-http` project (e2e/playwright.config.ts, e2e/plain-http-origin.ts):
 // the page's origin is a plain-HTTP host name that is not loopback, so it is no secure context and
@@ -36,13 +42,31 @@ async function expectPlainHttpOrigin(page: Page): Promise<void> {
   expect(await page.evaluate(() => typeof crypto.getRandomValues)).toBe("function");
 }
 
+async function asPlainHttpUser(browser: Browser, login: string): Promise<BrowserContext> {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const landed = await page.goto(devSignInPath(login));
+  const signInRequest = landed?.request().redirectedFrom();
+  const signIn =
+    signInRequest === null || signInRequest === undefined ? null : await signInRequest.response();
+  if (signIn?.status() !== 302) {
+    throw devSignInError(
+      login,
+      signIn?.status() ?? landed?.status() ?? 0,
+      signIn === null ? "" : await signIn.text()
+    );
+  }
+  await page.close();
+  return context;
+}
+
 test("a document opens and takes a new paragraph with no page error", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue(
     { project: "CORE", spec: "## Plan\n\nShip it.\n", title: "Plain-HTTP document" },
     agent
   );
-  const alice = await asUser(browser, "alice");
+  const alice = await asPlainHttpUser(browser, "alice");
   try {
     const page = await alice.newPage();
     const errors: string[] = [];
@@ -68,7 +92,7 @@ test("a comment body renders formatted rather than as literal Markdown", async (
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Plain-HTTP comment" });
   await createComment(issue.key, { body: "A **formatted** comment." }, agent);
-  const alice = await asUser(browser, "alice");
+  const alice = await asPlainHttpUser(browser, "alice");
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);

@@ -1,28 +1,35 @@
 import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
-import { dispatchPort, fakeEnvoyPort, fakeGithubPort, harnessPorts } from "./harness-ports";
+import {
+  dispatchPort,
+  fakeEnvoyPort,
+  fakeGithubPort,
+  harnessPorts,
+  plainHttpPort,
+} from "./harness-ports";
 import { plainHttpHost } from "./plain-http-origin";
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${dispatchPort}`;
-// The plain-HTTP project's origin: the harness `baseURL` names, by a host name Chromium maps back
-// to that harness's host, so the page is a non-loopback plain-HTTP origin while every request still
-// reaches the same listener. `plainHttpSpec` is the one file that project runs; `chromium` and
-// `iphone` ignore it, since its first assertion (no secure context) fails on loopback by design.
-const harness = new URL(baseURL);
-const plainHttpOrigin = new URL(baseURL);
-plainHttpOrigin.hostname = plainHttpHost;
+// The plain-HTTP project's origin is a proxy on PLAIN_HTTP_PORT, reached by a host name Chromium
+// maps to loopback. The page is a non-loopback plain-HTTP origin, while the proxy forwards to the
+// dev sign-in server under its own loopback origin. `plainHttpSpec` is the one file that project
+// runs; `chromium` and `iphone` ignore it, since its first assertion fails on loopback by design.
+const plainHttpOrigin = `http://${plainHttpHost}:${plainHttpPort}`;
 const plainHttpSpec = /plain-http-origin\.e2e\.ts/;
 const startsOwnServers = !process.env.PLAYWRIGHT_BASE_URL;
 const startedHarnessPorts = startsOwnServers
   ? harnessPorts
-  : harnessPorts.filter(({ variable }) => variable === "FAKE_ENVOY_PORT");
+  : harnessPorts.filter(
+      ({ variable }) => variable === "FAKE_ENVOY_PORT" || variable === "PLAIN_HTTP_PORT"
+    );
 const fakeEnvoy = fileURLToPath(new URL("./fake-envoy.ts", import.meta.url));
 const fakeGithub = fileURLToPath(new URL("./fake-github.ts", import.meta.url));
+const plainHttpProxy = fileURLToPath(new URL("./plain-http-proxy.ts", import.meta.url));
 const runServer = fileURLToPath(new URL("./run-server.sh", import.meta.url));
 
 // `DISPATCH_E2E_REUSE_SERVERS=1` runs the suite against a harness the caller started and left
-// listening on the three harness ports. Unset or empty starts this run's own servers and refuses a
+// listening on the four harness ports. Unset or empty starts this run's own servers and refuses a
 // port already taken, because reusing a server this run did not start points `e2e/seed.ts`'s
 // truncation at whatever database that server holds — another lane's. Any other value is refused
 // rather than quietly read as "no".
@@ -105,7 +112,8 @@ if (!reuseServers && typeof process.send !== "function" && !isListMode(process.a
     throw new Error(
       `The Dispatch e2e harness cannot start: ${ports} already in use. Stop whatever listens ` +
         "there, or move this run to free ports with DISPATCH_E2E_PORT/FAKE_ENVOY_PORT/" +
-        "FAKE_GITHUB_PORT and to its own DATABASE_URL, since the server already listening still " +
+        "FAKE_GITHUB_PORT/PLAIN_HTTP_PORT and to its own DATABASE_URL, since the server already " +
+        "listening still " +
         "holds the database you named. To run against a harness you started yourself, set " +
         "DISPATCH_E2E_REUSE_SERVERS=1."
     );
@@ -134,6 +142,11 @@ export default defineConfig({
     {
       command: `bun ${fakeEnvoy}`,
       port: fakeEnvoyPort,
+      reuseExistingServer: reuseServers,
+    },
+    {
+      command: `bun ${plainHttpProxy}`,
+      port: plainHttpPort,
       reuseExistingServer: reuseServers,
     },
     ...(startsOwnServers
@@ -187,8 +200,8 @@ export default defineConfig({
       testMatch: plainHttpSpec,
       use: {
         ...devices["Desktop Chrome"],
-        baseURL: plainHttpOrigin.origin,
-        launchOptions: { args: [`--host-resolver-rules=MAP ${plainHttpHost} ${harness.hostname}`] },
+        baseURL: plainHttpOrigin,
+        launchOptions: { args: [`--host-resolver-rules=MAP ${plainHttpHost} 127.0.0.1`] },
       },
     },
   ],

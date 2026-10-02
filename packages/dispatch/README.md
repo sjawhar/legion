@@ -60,17 +60,18 @@ variable, so neither a shell setting nor `~/.config/opencode/envoy.json` /
 default, and the dev sign-in flag refuses a non-loopback host. psql runs without
 `PGHOSTADDR` (`e2e/psql.ts`), which would otherwise send it somewhere the server
 never checked. The harness ports `DISPATCH_E2E_PORT` (default `8777`),
-`FAKE_ENVOY_PORT` (default `9021`) and `FAKE_GITHUB_PORT` (default `9022`) are
-its other inputs, resolved for the whole suite by `e2e/harness-ports.ts`. A run
-starts its own servers on those three ports and refuses before any of them
-starts if one is taken, so it never truncates the database behind a server it
-did not start;
+`FAKE_ENVOY_PORT` (default `9021`), `FAKE_GITHUB_PORT` (default `9022`) and
+`PLAIN_HTTP_PORT` (default `9023`) are its other inputs, resolved for the whole
+suite by `e2e/harness-ports.ts`. A local run starts its own servers on those four
+ports and refuses before any of them starts if one is taken, so it never
+truncates the database behind a server it did not start;
 `DISPATCH_E2E_REUSE_SERVERS=1` is the opt-in for running against a harness you
 started yourself. `AGENTS.md`'s end-to-end section states that rule in full —
 the accepted values, what a bad or duplicated port does, and which invocations
 skip the probe. The harness starts `e2e/fake-envoy.ts` on `FAKE_ENVOY_PORT`
 and that listener is the only Envoy the server ever talks to; tests seed its
-live sessions with `setLiveSessions` from `e2e/agents.ts`.
+live sessions with `setLiveSessions` from `e2e/agents.ts`. It also starts
+`e2e/plain-http-proxy.ts` on `PLAIN_HTTP_PORT` for the plain-HTTP project.
 
 Run the local harness with its isolated database available:
 
@@ -87,7 +88,8 @@ image with its own Postgres volume and database. It signs `alice` and `bob` in t
 sign-in route, as the local harness does, so the image must be built from a tree that has the route.
 It also uses an acceptance-only agent token, disabled NATS, and a private loopback fake Envoy with
 no token. `FAKE_ENVOY_PORT` is the required shared input: the acceptance service derives its
-`ENVOY_URL` from it, and `e2e:deployed` starts the fake listener on it. The fake Envoy makes
+`ENVOY_URL` from it, and `e2e:deployed` starts the fake listener on it. `e2e:deployed` also starts
+the plain-HTTP proxy on `PLAIN_HTTP_PORT`. The fake Envoy makes
 subscriber, Agents-page, and fixture-hook rows exercise the deployed server instead of a real
 session. Fake GitHub rows still skip because the acceptance service does not configure that
 listener. The production Compose file has no acceptance-only variables; it still requires five
@@ -97,6 +99,7 @@ production placeholders to build the image.
 cd packages/envoy/deploy/compose
 unused=(DATABASE_URL=unused DISPATCH_AGENT_TOKEN=unused DISPATCH_ALLOWED_LOGINS=unused DISPATCH_SERVER_URL=unused NATS_URLS=unused)
 acceptance_envoy_port=19061
+acceptance_plain_http_port=19062
 acceptance_dispatch_port=18767
 acceptance_pg_port=55660
 acceptance_image_tag=dispatch-acceptance-local
@@ -105,6 +108,7 @@ env "${unused[@]}" ENVOY_IMAGE_TAG="$acceptance_image_tag" docker compose -f dis
 FAKE_ENVOY_PORT="$acceptance_envoy_port" DISPATCH_ACCEPTANCE_PORT="$acceptance_dispatch_port" DISPATCH_ACCEPTANCE_PG_PORT="$acceptance_pg_port" ENVOY_IMAGE_TAG="$acceptance_image_tag" docker compose -p "$acceptance_compose_project" -f dispatch.acceptance.compose.yml up -d dispatch-acceptance
 cd ../../../dispatch
 FAKE_ENVOY_PORT="$acceptance_envoy_port" \
+PLAIN_HTTP_PORT="$acceptance_plain_http_port" \
 PLAYWRIGHT_BASE_URL="http://127.0.0.1:${acceptance_dispatch_port}" \
 PLAYWRIGHT_DATABASE_URL="postgres://postgres:dispatch@127.0.0.1:${acceptance_pg_port}/dispatch_acceptance?sslmode=disable" \
 E2E_AGENT_TOKEN=acceptance-token \
@@ -116,17 +120,18 @@ docker rmi "ghcr.io/sjawhar/legion/envoy:${acceptance_image_tag}"
 
 `e2e/seed.ts` truncates its database before each scenario. Always set
 `PLAYWRIGHT_DATABASE_URL` to an isolated test database when using a deployed URL.
-The suite has five projects. `chromium` and `iphone` run every spec; the iPhone project uses
-Chromium with iPhone 13 viewport, touch, and user-agent emulation. `webkit` runs
-`e2e/collab-cursor.e2e.ts`, since where a caret lands beside a collaborator's cursor differs by
+The suite has six projects. `chromium` and `iphone` run every spec except the plain-HTTP spec;
+the iPhone project uses Chromium with iPhone 13 viewport, touch, and user-agent emulation. `webkit`
+runs `e2e/collab-cursor.e2e.ts`, since where a caret lands beside a collaborator's cursor differs by
 engine, and `firefox` runs `e2e/code-line-replace.e2e.ts`, since Firefox's own editing
 mishandles text typed over what follows a block's last line break; both also run
 `e2e/keyboard-agents-picker.e2e.ts`, whose keyboard rule rests on each engine's select dispatch.
 `webkit-iphone` runs the live view's two phone-layout rows of `e2e/agent-view.e2e.ts` in WebKit
 with the iPhone 13 profile, since iOS Safari is the engine its keyboard cap exists for.
 `chromium-plain-http` runs `e2e/plain-http-origin.e2e.ts` alone, with the page opened at
-`http://dispatch-e2e.test:<port>` (Chromium maps that name to the harness host), a plain-HTTP origin
-that is not loopback and so not a secure context: it proves a document takes a new paragraph and a
+`http://dispatch-e2e.test:<PLAIN_HTTP_PORT>` (Chromium maps that name to the local proxy), a
+plain-HTTP origin that is not loopback and so not a secure context. The proxy forwards to the dev
+sign-in server at its loopback origin. The project proves a document takes a new paragraph and a
 comment renders formatted there, where `crypto.randomUUID` does not exist.
 `bun run e2e:install` installs all three browsers.
 
