@@ -3,8 +3,15 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { createAsk, createComment, createIssue, createIssueArtifact, createProject } from "./api";
-import { countDocumentSockets, documentEditor, documentTransport } from "./editor";
+import {
+  createAsk,
+  createComment,
+  createIssue,
+  createIssueArtifact,
+  createProject,
+  getArtifactText,
+} from "./api";
+import { countDocumentSockets, documentEditor, documentTransport, typeAtEnd } from "./editor";
 import { resetDatabase } from "./seed";
 
 const fixtureDirectory = fileURLToPath(new URL("./fixtures", import.meta.url));
@@ -298,6 +305,8 @@ test("the Artifacts badge counts the rows the tab lists, and a row's details are
   }
 });
 
+// The repair replaces the unreadable document whatever the picked file is called: a second
+// document beside the broken one would leave it unreadable.
 test("an out-of-schema document names its repair and uploads replacement markdown", async ({
   page,
 }) => {
@@ -317,10 +326,11 @@ test("an out-of-schema document names its repair and uploads replacement markdow
   await page.getByLabel("Upload artifact").setInputFiles({
     buffer: Buffer.from("repaired\n"),
     mimeType: "text/markdown",
-    name: "repair.md",
+    name: "repair (1).md",
   });
   await confirmUpload(page);
   await expect(documentEditor(page)).toContainText("repaired");
+  expect((await getArtifactText(upload.artifact.id)).markdown).toBe("repaired\n");
 });
 
 test("an out-of-schema document does not reconnect from cached text", async ({ page }) => {
@@ -386,6 +396,61 @@ test("a mounted editor does not reconnect into a document made unreadable while 
   expect(text.status()).toBe(409);
   await expect(text.text()).resolves.toContain(`"code":"DOC_SCHEMA"`);
   expect(sockets()).toBe(2);
+});
+
+// A refetch of the document's text that fails says nothing about the editor already connected:
+// an edit typed while its socket was down lives only in the editor, so an outage that answers the
+// refetch 503 leaves the editor, and the edit reaches the server once the socket is back.
+test("an edit typed while the socket was down survives a text refetch the server answers 503", async ({
+  page,
+}) => {
+  const transport = await documentTransport(page);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Keep an offline edit" });
+  const upload = await createIssueArtifact(issue.key, {
+    content: "before\n",
+    name: "offline-edit.md",
+  });
+
+  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await expect(documentEditor(page)).toContainText("before");
+
+  transport.hold();
+  await transport.sever();
+  await typeAtEnd(page, "offline edit");
+  let refused = 0;
+  const textRoute = `**/api/v1/artifacts/${upload.artifact.id}/text`;
+  await page.route(textRoute, async (route) => {
+    refused += 1;
+    await route.fulfill({
+      body: JSON.stringify({
+        code: "DOC_SERVICE_UNAVAILABLE",
+        error: "document service is unavailable",
+      }),
+      contentType: "application/json",
+      status: 503,
+    });
+  });
+  // A tab that becomes visible reopens the event stream, which refreshes every query the page
+  // holds, the document's text among them; the app retries a 5xx twice before it fails the read.
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect.poll(() => refused).toBeGreaterThanOrEqual(3);
+  // The third answer fails the read; nothing on a page that keeps its editor marks that moment, so
+  // the page is given a moment to render the failure before what it shows is read.
+  await page.waitForTimeout(500);
+  await expect(documentEditor(page)).toBeVisible();
+  await expect(documentEditor(page)).toContainText("offline edit");
+  await expect(page.getByRole("button", { name: "Rebuild from the latest version" })).toHaveCount(
+    0
+  );
+  await expect(page.getByText("This document could not load")).toHaveCount(0);
+
+  await page.unroute(textRoute);
+  await transport.release();
+  await expect
+    .poll(async () => (await getArtifactText(upload.artifact.id)).markdown)
+    .toBe("before\n\noffline edit\n");
+  await expect(documentEditor(page)).toContainText("offline edit");
 });
 
 test("a live document refuses a rebuild", async ({ page }) => {

@@ -314,11 +314,12 @@ func TestDocumentSocketRefusesARoomOutsideTheSchema(t *testing.T) {
 	}
 }
 
-// A room that only ever receives valid writes is never refused: the socket's admission check and
-// `/text` read a copy of the resident room taken under its lock (snapshotDocument), never its live
-// tree halfway through a write, which they would read as a tree outside the schema - the socket
-// closed with documentSchemaCloseCode, the read answered 409 with the repair. Under -race the
-// direct walk of the live tree is also a data race with the writer.
+// A room that only ever receives valid writes is never refused: the socket's admission check,
+// `/text`, a version's capture (`POST /versions`) and a read outside any transaction (docView)
+// read a copy of the resident room taken under its lock (snapshotDocument), never its live tree
+// halfway through a write, which they would read as a tree outside the schema - the socket closed
+// with documentSchemaCloseCode, the read or the version answered 409 with the repair. Under -race
+// the direct walk of the live tree is also a data race with the writer.
 func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -363,11 +364,30 @@ func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 		}
 	}()
 
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	version := func() error {
+		ctx := context.Background()
+		tx, err := service.store.Pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		joined, ledger := service.Join(ctx, tx)
+		defer ledger.Discard()
+		_, err = service.SnapshotVersion(joined, artifactID, alice)
+		return err
+	}
 	var reads, sockets int
 	var refusals []string
 	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
 		if _, _, err := service.TextWithToken(context.Background(), artifactID); err != nil {
 			refusals = append(refusals, fmt.Sprintf("read %d: %v", reads, err))
+		}
+		if _, err := service.currentToken(context.Background(), artifactID); err != nil {
+			refusals = append(refusals, fmt.Sprintf("unjoined read %d: %v", reads, err))
+		}
+		if err := version(); err != nil {
+			refusals = append(refusals, fmt.Sprintf("version %d: %v", reads, err))
 		}
 		reads++
 		connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
@@ -387,12 +407,12 @@ func TestAHealthyRoomUnderWritesIsNeverRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(refusals) != 0 {
-		t.Fatalf("a healthy room under writes refused %d of %d reads and sockets: %s", len(refusals), reads+sockets, strings.Join(refusals, "; "))
+		t.Fatalf("a healthy room under writes refused %d of %d reads, versions and sockets: %s", len(refusals), 3*reads+sockets, strings.Join(refusals, "; "))
 	}
 	if reads < 20 {
-		t.Fatalf("the probe made %d reads and %d sockets, too few to say anything", reads, sockets)
+		t.Fatalf("the probe made %d rounds of reads and versions and %d sockets, too few to say anything", reads, sockets)
 	}
-	t.Logf("%d reads and %d sockets on a room under writes, none refused", reads, sockets)
+	t.Logf("%d rounds of reads, unjoined reads and versions and %d sockets on a room under writes, none refused", reads, sockets)
 }
 
 func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {

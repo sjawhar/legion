@@ -225,14 +225,32 @@ error for the read and for `writeHandlerError` alike, and both take its codes in
 cause the error carries: a failed room carries the error another operation failed it with
 (settlement's schema refusal, a settlement that failed three times - its warm-up refused because
 the issue had closed, among others - a writer's failed or cancelled commit, a failed store write
-or load), which says nothing of this request. `DOC_SCHEMA` is a live tree outside the schema,
-taken after the refusals that name the caller's own input or a missing block, so an ask block the
-renderer refused stays `400 INVALID_ASK_BLOCK`. Anything else is `INTERNAL`, as
-`writeHandlerError` answers it. Only a request that has gone away fails, decided by that request's
+or load, a history that did not decode), which says nothing of this request.
+`DOCUMENT_UNLOADABLE` (409) is a stored history this request itself could not decode
+(`docs.ErrDocumentUnloadable`), the one state `POST /api/v1/artifacts/{id}/rebuild` repairs and the
+one code the dashboard offers that rebuild for. `DOC_SCHEMA` is a tree outside the schema: one the
+document holds is a `docs.OutsideSchemaError`, which `treeOf` and `documentMarkdown` classify where
+they read or render a document's tree, so every route that starts from it - `GET /text`,
+`GET /blocks`, `POST /edits`, `POST /versions` - answers 409 with its one message, while a schema
+refusal of a tree a write itself produced is a 500 (`producedSchemaError`). Both are taken after
+the refusals that name the caller's own input or a missing block, so an ask block the renderer
+refused stays `400 INVALID_ASK_BLOCK`. Anything else is `INTERNAL`, as `writeHandlerError` answers
+it. Only a request that has gone away fails, decided by that request's
 own context rather than the error, since a room a writer's cancelled commit failed carries that
 writer's `context.Canceled` in its cause. Nor does that read wait for a failed room's recovery
 (`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`,
 `GET /blocks` and the block route wait.
+
+A read of a resident room reads a copy taken under its document lock (`snapshotDocument`,
+`crdt.EncodeStateAsUpdateV1`), never the live tree: `GET /text` and the document websocket's
+admission check (`loadDocument`), a version's capture (`captureLiveTextAndAuthors`) and a read
+outside any transaction (`docView`). A walk of the live tree takes no lock (reearth/ygo v1.49.5,
+`crdt/yxml.go`) while every peer update and service write holds that lock as it applies, so the walk
+can read a write halfway through as a tree outside the schema and answer a healthy document 409 with
+the repair. A version's capture holds the room's state lock across the copy and the authors it
+captures, so an author the update observer credits is captured only with that update's text; the
+order - state lock, then document lock - is never reversed, since only a Yjs transaction's own
+function holds a document's lock and none takes a room's state lock.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code

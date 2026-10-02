@@ -289,7 +289,8 @@ func (s *Service) joinRead(ctx context.Context, artifactID string) (*crdt.Doc, e
 }
 
 // docView runs read against the document the caller sees: the transaction's fork when there is
-// one (joinRead), otherwise the live room, which it loads.
+// one (joinRead), otherwise a copy of the live room, which it loads, taken under the room's lock
+// (snapshotDocument): the room's peers and the service write it while read walks it.
 func (s *Service) docView(ctx context.Context, artifactID string, read func(*crdt.Doc)) error {
 	fork, err := s.joinRead(ctx, artifactID)
 	if err != nil {
@@ -299,9 +300,16 @@ func (s *Service) docView(ctx context.Context, artifactID string, read func(*crd
 		read(fork)
 		return nil
 	}
+	var copyErr error
 	err = s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		read(doc)
+		var snapshot *crdt.Doc
+		if snapshot, copyErr = snapshotDocument(doc); copyErr == nil {
+			read(snapshot)
+		}
 	})
+	if copyErr != nil {
+		return copyErr
+	}
 	if errors.Is(err, websocket.ErrNoChanges) {
 		return nil
 	}

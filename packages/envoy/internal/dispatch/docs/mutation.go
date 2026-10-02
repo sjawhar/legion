@@ -1098,15 +1098,25 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		}
 	}
 
+	// The room's state lock is held from the read to the authors it captures, so an author the
+	// update observer credits (creditContentChange, after the update is in the room) is captured
+	// only with that update's text. The room itself is read through a copy taken under its
+	// document lock (snapshotDocument), as a peer or service write holds that lock while it
+	// applies and a direct walk of the live tree takes none. The order - state lock, then document
+	// lock - is never reversed: nothing that holds a document's lock, which only a Yjs
+	// transaction's own function does, takes a room's state lock.
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	doc := fork
 	if doc == nil {
-		doc = s.srv.GetDoc(room)
-	}
-	if doc == nil {
-		return nil, "", versionPending{}, nil, errors.New("warm live document did not retain room")
+		live := s.srv.GetDoc(room)
+		if live == nil {
+			return nil, "", versionPending{}, nil, errors.New("warm live document did not retain room")
+		}
+		if doc, err = snapshotDocument(live); err != nil {
+			return nil, "", versionPending{}, nil, err
+		}
 	}
 	tree, err := treeOf(doc)
 	if err != nil {

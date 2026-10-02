@@ -296,16 +296,25 @@ attributes, so a Dark Reader rewrite cannot trigger an editor redraw loop.
 Live document block links use `#b-<blockId>`: once Proof is ready, Dispatch focuses and pulses that stable block. Copying a document block link uses the selected block's `blockId`; historical versions stay read-only markdown views.
 
 A browser editor normalizes a tree it cannot represent and writes the result back, so a stored
-tree outside the Proof schema must never reach one. Each admission - a mount, and every socket the
-server refuses - opens the connection only after a `GET /text` read that admission started itself
-(`queryClient.fetchQuery` with `staleTime: 0`) succeeds; a cached result, or a read from before a
-refusal, can predate the tree. A `409 DOC_SCHEMA` read shows the repair message and the markdown
-upload that repairs it, and `503 DOC_SERVICE_UNAVAILABLE` offers the rebuild from the latest
-version. After admission the provider owns reconnects, and the server is what stops one into an
-unreadable room: it closes the socket with code `4409` before any sync, and `connection.ts` stops
-the provider and calls `onOutsideSchema`, where `ProofDocument` tears the editor down and admits
-again. Later refetches of the text - every `artifact.version` event invalidates it - leave a
-connected editor alone.
+tree outside the Proof schema must never reach one. Each admission - a mount, a socket the server
+refuses, and a blocked admission's retry - opens the connection only after a fresh `GET /text` read
+succeeds (`queryClient.fetchQuery` with `staleTime: 0`): a cached result can predate the tree.
+`fetchQuery` joins a read already in flight, which can have started before a refusal; the server
+checks every socket itself, so such a read admits at most a socket the server refuses again. The
+admission's own read alone decides, and only an admission opens anything: a `409 DOC_SCHEMA` read
+shows the repair message and a markdown upload under the document's own name (whatever the picked
+file is called) that repairs it, `409 DOCUMENT_UNLOADABLE` offers the rebuild from the latest
+version, and any other failure says the document could not load. A blocked admission is admitted
+again by the next successful read of the text - the refetch a repair upload's or a rebuild's
+invalidation makes - so a repair reconnects the editor. After admission the provider owns
+reconnects, and the server is what stops one into an unreadable room: it closes the socket with
+code `4409` (`DOCUMENT_SCHEMA_CLOSE_CODE` in `packages/contracts`) before any sync, and
+`connection.ts` stops the provider and calls `onOutsideSchema`, where `ProofDocument` tears the
+editor down and admits again after 0, 1, 2, 4 and 8 seconds for successive refusals; the sixth in a
+row stops reconnecting and asks for a reload, and a socket that syncs ends the run. Later refetches
+of the text - every `artifact.version` event and every reconnect of the event stream refresh it -
+leave a connected editor alone whether they succeed or fail, so an outage that answers them 500 or
+503 keeps the editor and the edits it holds.
 
 Before constructing Proof, Dispatch fetches `/api/v1/schema/blocks` once and keeps the schema by
 version for the session. It passes that schema to the live editor, historical-version editor, and
