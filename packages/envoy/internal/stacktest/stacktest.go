@@ -20,7 +20,8 @@ import (
 	"testing"
 )
 
-// maxStackEnv carries the cap, in bytes, to the child process the parent runs.
+// maxStackEnv carries the cap, in bytes, to the child process the parent runs, which caps its
+// stacks at that value: a child run by hand with it set runs the body under the cap it names.
 const maxStackEnv = "ENVOY_TEST_MAX_STACK_BYTES"
 
 // Under runs body with every goroutine's stack capped at maxStackBytes.
@@ -28,11 +29,15 @@ const maxStackEnv = "ENVOY_TEST_MAX_STACK_BYTES"
 // In the parent it starts the test binary again for this one test, with the cap in the
 // environment, and mirrors the child's result: a skipped child skips the parent, a passing child
 // passes, and any failure shows the child's whole output - a stack overflow's fatal error among it.
-// In the child, where the cap is set, it runs body.
+// In the child, where the cap is set, it runs body under that cap.
 func Under(t *testing.T, maxStackBytes int, body func(t *testing.T)) {
 	t.Helper()
-	if os.Getenv(maxStackEnv) != "" {
-		debug.SetMaxStack(maxStackBytes)
+	if value := os.Getenv(maxStackEnv); value != "" {
+		capped, err := strconv.Atoi(value)
+		if err != nil {
+			t.Fatalf("%s=%q is not a byte count: %v", maxStackEnv, value, err)
+		}
+		debug.SetMaxStack(capped)
 		body(t)
 		return
 	}
