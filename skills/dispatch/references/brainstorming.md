@@ -17,13 +17,13 @@ conversation, and neither is a whole design written in one version.
    established: the problem and its evidence, what the human has said in their own words, the
    facts the next questions need, and each question that is ready, as a decision block at the end
    of the section that sets it up. Write nothing past those questions.
-2. **The human answers or comments.** Reply to each comment in its thread (`dispatch_comment` with
-   `reply_to`), and rewrite the passage the answer or the comment changes.
-3. **Each next version folds the answers in and adds what they open.** Write each answer into the
-   text in the human's words (or the option they chose), with the date, then add the next sections,
-   each with its question. Every question that is ready goes out at once, each as a decision block
-   at the end of the section that sets it up; a question waits only when it depends on an answer
-   still open.
+2. **The human answers or comments.** Reply to each human comment in its thread
+   (`dispatch_comment` with `reply_to`), then rewrite the passage the answer or the comment changes.
+3. **Each next version folds the answers in and adds what they open.** Keep each answered
+   decision block where it is, fold its answer into the surrounding text in the human's words (or
+   the option they chose), with the date, then add the next sections, each with its question.
+   Every question that is ready goes out at once, each as a decision block at the end of the
+   section that sets it up; a question waits only when it depends on an answer still open.
 4. **A comment that answers a question settles it** as surely as the block does. Fold it into the
    text at once, and close the block with `dispatch_resolve_ask` if the human has not.
 5. **Request approval once, when nothing in the spec is new to the human:** every block settled,

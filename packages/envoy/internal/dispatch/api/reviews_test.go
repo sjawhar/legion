@@ -177,7 +177,7 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 	}
 }
 
-// An approval request's question carries the requester's summary of what the version proposes,
+// An approval request's question carries the requester's summary of what the human is approving,
 // within the ask cap. A request after the document has moved on retracts the ask naming the older
 // version and opens one at the latest.
 func TestApprovalRequestSummaryAndARepeatAfterANewVersion(t *testing.T) {

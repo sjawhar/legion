@@ -35,14 +35,14 @@ after `skill://dispatch/` is relative to this skill's base directory.
 
 ## Design changes are brainstormed here
 
-When a session has Dispatch, a design change that needs the human's choices is brainstormed in its
-issue's spec: this replaces the brainstorming skill's chat questions and its spec file, so ask no
-design question in chat and write no design document into the repository. The first version holds
-only what the conversation has established and every question that is ready, each a decision block
-at the end of the section that sets it up; a question waits only when it depends on an answer still
-open. Each next version folds the answers in, in the human's words (or the option they chose) with
-the date, and adds the questions they open. Approval is requested once, when nothing in the spec is
-new to the human. Before you write a spec's first version, and again before each next turn, read
+When a session has Dispatch, a design change needing the human's choices is brainstormed in its
+issue's spec, not chat or a repository design document. The first version holds only established
+facts and every ready question, each a decision block at the end of the section that sets it up; a
+question waits only when it depends on an answer still open. Each next version replies in each
+human comment's thread (`dispatch_comment` with `reply_to`), folds the answers into the surrounding
+text while their decision blocks stay, in the human's words (or the option they chose) with the
+date, and adds the questions they open. Approval is requested once, when nothing in the spec is new
+to the human. Before you write a spec's first version, and again before each next turn, read
 [Brainstorming in the spec](skill://dispatch/references/brainstorming.md): each step, and a worked
 example.
 
@@ -100,8 +100,8 @@ a new version that keeps the human's own text, never a second "spec" artifact be
   "Update HH:MMZ" section, a pull-request list, or handoff notes. Progress is not a Dispatch
   object at all; it lives in your transcript and your pull request (see [Messages](#messages)).
 - **No commentary.** The spec talks about the design, never about the spec or the conversation: no
-  sentence calls it a draft, a conversation, a version or a turn, says what a later version will
-  add, or narrates the exchange that produced it.
+  sentence calls it a draft, a conversation, a version or a turn; says what a later version will
+  add; describes an earlier version or correction; or narrates the exchange that produced it.
 
 Before a new version goes out, read it as the human will: no two passages conflict, each point has
 one reading, and every decision block passes the phone test above. A worked example is
@@ -376,9 +376,9 @@ Approval is a property of a document, not a question you phrase: a human approve
 version, the way a pull-request review approves a commit, and any later version makes that
 approval stale. Answering a decision block writes a new version, so request approval only when
 all three hold: every decision block is settled, which means answered and folded into the text, or
-waived as the next paragraph says; the human has agreed to every point in the spec; and the design
-as a whole has not been approved. A Legion root spec under an armed design gate always goes to
-approval once all three hold (`skill://legion-architect`).
+waived as the next paragraph says; the human has agreed to every point in the spec; and the current
+version has not been approved. A Legion root spec under an armed design gate always goes to approval
+once all three hold (`skill://legion-architect`).
 
 When all three hold, request it in the pass that finishes the spec: a design waiting with nothing in
 the human's Inbox waits on nobody. A choice you can make yourself
