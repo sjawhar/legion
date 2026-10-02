@@ -758,8 +758,9 @@ func TestCensusSubcommandExitsOneWhenAPendingMigrationsCensusCountsRows(t *testi
 	database := storetest.Open(t)
 	if _, err := database.Pool.Exec(ctx, `
 		alter table asks drop constraint asks_approval_kind_check;
-		-- 0064 stays applied: the template already dropped users, so it cannot be pending here.
-		delete from schema_migrations where version >= 53 and version < 64;
+		delete from schema_migrations where version >= 53;
+		-- The template already applied 0064, which dropped users; a database at 52 still has it.
+		create table users (login text primary key);
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
 			values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"session","id":"s"}', 'U');

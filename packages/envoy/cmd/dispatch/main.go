@@ -489,7 +489,14 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 	if len(set) > 0 && len(missing) > 0 {
 		return bootConfig{}, fmt.Errorf("Google sign-in needs all four of DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and DISPATCH_SIGNIN_GROUP: %s set, %s missing", strings.Join(set, ", "), strings.Join(missing, ", "))
 	}
-	devSignIn := getenv("DISPATCH_DEV_SIGNIN") == "1"
+	var devSignIn bool
+	switch flag := getenv("DISPATCH_DEV_SIGNIN"); flag {
+	case "":
+	case "1":
+		devSignIn = true
+	default:
+		return bootConfig{}, fmt.Errorf("DISPATCH_DEV_SIGNIN=%q (expected 1 or unset)", flag)
+	}
 
 	switch mode := strings.TrimSpace(getenv("DISPATCH_IDENTITY")); {
 	case mode == "" || mode == "cookie":
@@ -542,15 +549,11 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		}
 	}
 
-	switch flag := getenv("DISPATCH_DEV_SIGNIN"); flag {
-	case "":
-	case "1":
+	if devSignIn {
 		if err := devSignInFence(boot, getenv); err != nil {
 			return bootConfig{}, err
 		}
 		boot.DevSignIn = true
-	default:
-		return bootConfig{}, fmt.Errorf("DISPATCH_DEV_SIGNIN=%q (expected 1 or unset)", flag)
 	}
 	return boot, nil
 }
