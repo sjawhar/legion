@@ -107,7 +107,7 @@ func (s *memoryPeopleStore) get(email string) (auth.PersonMembership, bool) {
 
 const (
 	rigClientID = "dispatch-client"
-	rigGroup    = "platform-managers"
+	rigGroup    = "dispatch-members"
 	rigEmail    = "a.b+c@d.example"
 )
 
@@ -166,10 +166,10 @@ func (r *signInRig) advance(d time.Duration) {
 func personClaims(groups ...string) map[string]any {
 	return map[string]any{
 		"sub":              "person-subject",
-		"cognito:username": "GoogleWorkspace_A.B+C@D.example",
+		"cognito:username": "ExampleIdP_A.B+C@D.example",
 		"cognito:groups":   groups,
 		"email":            "someone-else@d.example",
-		"identities":       []map[string]any{{"providerName": "GoogleWorkspace"}},
+		"identities":       []map[string]any{{"providerName": "ExampleIdP"}},
 	}
 }
 
@@ -230,7 +230,7 @@ func (r *signInRig) whoami(cookie *http.Cookie) *httptest.ResponseRecorder {
 // email claim; a member of the group gets a session and lands on the page they asked for.
 func TestSignInNamesThePersonByTheirUsernameNotTheEmailClaim(t *testing.T) {
 	rig := newSignInRig(t, "")
-	response := rig.signIn(t, personClaims("hawk-users", rigGroup))
+	response := rig.signIn(t, personClaims("other-group", rigGroup))
 	if response.Code != http.StatusFound || response.Header().Get("Location") != "/issues/CORE-1" {
 		t.Fatalf("callback: status %d Location %q body=%s, want 302 to /issues/CORE-1", response.Code, response.Header().Get("Location"), response.Body.String())
 	}
@@ -260,7 +260,7 @@ func TestSignInRefusesSomeoneOutsideTheGroupWithPageAndLog(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	rig := newSignInRig(t, "")
-	response := rig.signIn(t, personClaims("hawk-users"))
+	response := rig.signIn(t, personClaims("other-group"))
 	if response.Code != http.StatusForbidden || !strings.HasPrefix(response.Header().Get("Content-Type"), "text/html") {
 		t.Fatalf("callback: status %d Content-Type %q, want 403 text/html", response.Code, response.Header().Get("Content-Type"))
 	}
@@ -320,12 +320,12 @@ func TestSessionEndsWhenTheRefreshFails(t *testing.T) {
 func TestSessionEndsWhenThePersonLeavesTheGroup(t *testing.T) {
 	rig := newSignInRig(t, "")
 	cookie := sessionCookie(rig.signIn(t, personClaims(rigGroup)))
-	rig.issuer.UpdateGrants(func(claims map[string]any) { claims["cognito:groups"] = []string{"hawk-users"} })
+	rig.issuer.UpdateGrants(func(claims map[string]any) { claims["cognito:groups"] = []string{"other-group"} })
 	rig.advance(2 * time.Hour)
 	if response := rig.whoami(cookie); response.Code != http.StatusUnauthorized {
 		t.Fatalf("whoami after leaving the group: status %d body %s, want 401", response.Code, response.Body.String())
 	}
-	if again := rig.signIn(t, personClaims("hawk-users")); again.Code != http.StatusForbidden {
+	if again := rig.signIn(t, personClaims("other-group")); again.Code != http.StatusForbidden {
 		t.Fatalf("signing in again outside the group: status %d, want 403", again.Code)
 	}
 }

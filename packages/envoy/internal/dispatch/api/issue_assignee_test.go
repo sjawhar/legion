@@ -37,8 +37,8 @@ func expectAssignee(t *testing.T, got *string, want string) {
 	}
 }
 
-// A human who creates an issue is its assignee, stored as the lowercase login even when the
-// identity layer echoes GitHub's display casing.
+// A human who creates an issue is its assignee. Every identity names a person by lowercase
+// email, so the assignee is lowercase even when the identity header that named them was not.
 func TestCreateIssueByHumanAssignsCreatorLowercased(t *testing.T) {
 	handler := newTestHandler(t)
 	createAssigneeProject(t, handler)
@@ -155,7 +155,7 @@ func TestIssueAssigneeRejectsUnlistedAndMalformedLogins(t *testing.T) {
 	expectAssignee(t, decodeBody[assigneeIssue](t, unchanged).Assignee, "alice")
 }
 
-// Anyone on the allowlist may reassign; the update event carries the new assignee and PATCH
+// Anyone who has signed in may reassign; the update event carries the new assignee and PATCH
 // null clears it. A PATCH that does not mention assignee (the daemon's status writes) leaves it.
 func TestPatchIssueReassignsClearsAndLeavesAssigneeAlone(t *testing.T) {
 	handler := newTestHandler(t)
@@ -253,8 +253,9 @@ func TestListIssuesSummariesCarryAssignee(t *testing.T) {
 	expectAssignee(t, byTitle["Nobody's"], "")
 }
 
-// GET /users is the picker's option list: the allowlist, sorted, humans only.
-func TestListUsersReturnsSortedAllowlistForHumansOnly(t *testing.T) {
+// GET /users is the picker's option list: everyone who has signed in (`people`), sorted, humans
+// only.
+func TestListUsersReturnsSignedInPeopleForHumansOnly(t *testing.T) {
 	handler := newTestHandler(t)
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/users", nil, "alice")
 	if response.Code != http.StatusOK {
@@ -274,8 +275,9 @@ func TestListUsersReturnsSortedAllowlistForHumansOnly(t *testing.T) {
 	}
 }
 
-// GET /whoami tells a caller who the server takes it for: a human by (display-cased) login, a
-// personal token by its owner's lowercase login, the shared token by a null owner.
+// GET /whoami tells a caller who the server takes it for: a human by lowercase email, whatever
+// casing the identity header carried, a personal token by its owner, the shared token by a null
+// owner.
 func TestWhoamiNamesHumanPersonalTokenOwnerAndSharedToken(t *testing.T) {
 	handler := newTestHandler(t)
 	type whoami struct {

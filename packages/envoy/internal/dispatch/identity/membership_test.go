@@ -13,17 +13,17 @@ import (
 
 const (
 	memberEmail    = "a.b+c@d.example"
-	memberGroup    = "platform-managers"
+	memberGroup    = "dispatch-members"
 	memberRedirect = "https://dispatch.example/auth/callback"
 )
 
 func memberClaims(groups ...string) map[string]any {
 	return map[string]any{
 		"sub":              "person-subject",
-		"cognito:username": "GoogleWorkspace_" + memberEmail,
+		"cognito:username": "ExampleIdP_" + memberEmail,
 		"cognito:groups":   groups,
 		"email":            "not-the-person@d.example",
-		"identities":       []map[string]any{{"providerName": "GoogleWorkspace"}},
+		"identities":       []map[string]any{{"providerName": "ExampleIdP"}},
 	}
 }
 
@@ -116,7 +116,7 @@ func TestMembershipEndsTheSessionWhenTheRefreshFails(t *testing.T) {
 
 func TestMembershipEndsTheSessionWhenThePersonLeavesTheGroup(t *testing.T) {
 	rig := newMembershipRig(t)
-	rig.issuer.UpdateGrants(func(claims map[string]any) { claims["cognito:groups"] = []string{"hawk-users"} })
+	rig.issuer.UpdateGrants(func(claims map[string]any) { claims["cognito:groups"] = []string{"other-group"} })
 	rig.now = rig.now.Add(2 * time.Hour)
 	if err := rig.membership.Confirm(context.Background(), memberEmail); !errors.Is(err, ErrNoIdentity) {
 		t.Fatalf("Confirm after leaving the group: err = %v, want ErrNoIdentity", err)
@@ -127,7 +127,7 @@ func TestMembershipEndsTheSessionWhenThePersonLeavesTheGroup(t *testing.T) {
 // A refreshed ID token naming another person is not this person's membership, whatever its groups.
 func TestMembershipEndsTheSessionWhenTheRefreshNamesSomeoneElse(t *testing.T) {
 	rig := newMembershipRig(t)
-	rig.issuer.UpdateGrants(func(claims map[string]any) { claims["cognito:username"] = "GoogleWorkspace_other@d.example" })
+	rig.issuer.UpdateGrants(func(claims map[string]any) { claims["cognito:username"] = "ExampleIdP_other@d.example" })
 	rig.now = rig.now.Add(2 * time.Hour)
 	if err := rig.membership.Confirm(context.Background(), memberEmail); !errors.Is(err, ErrNoIdentity) {
 		t.Fatalf("Confirm with a refresh naming someone else: err = %v, want ErrNoIdentity", err)
