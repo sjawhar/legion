@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -178,6 +179,48 @@ func TestAKubernetesDaemonRefusesTheBootItsWorkerImageProbeRefuses(t *testing.T)
 	}
 	if count, _ := boots(t, cfg); count != 0 {
 		t.Errorf("a boot whose image was refused was recorded %d times", count)
+	}
+}
+
+// The issue-pod cutover ships no outbox row that fails on every attempt. Each tree close of the
+// daemon's own project whose linger the outbox cannot decode (zero, missing, a string) is named by
+// id and refuses the boot before the layout marker is installed or the boot recorded; a valid
+// close, and another project's row, which this daemon never leases, are not named.
+func TestAKubernetesDaemonRefusesAnUndecodableTreeCloseBeforeItsLayout(t *testing.T) {
+	ctx := context.Background()
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	pool := isolatedOutboxPool(t)
+	cfg.PostgresDSN = pool.Config().ConnString()
+	issue := cfg.Project + "-208"
+	insert := func(issue, linger string) int64 {
+		t.Helper()
+		payload := `{"op": "tree_close", "tree": "` + issue + `", "role": "tester", "generation": 1` + linger + `}`
+		var id int64
+		if err := pool.QueryRow(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error)
+			values ('supervise', $1, $2::jsonb, 0, now(), '') returning id`, issue, payload).Scan(&id); err != nil {
+			t.Fatalf("seed a tree close: %v", err)
+		}
+		return id
+	}
+	zero := insert(issue, `, "linger": 0`)
+	missing := insert(issue, ``)
+	text := insert(issue, `, "linger": "1"`)
+	insert(issue, `, "linger": 1`)
+	insert("OTHER-208", `, "linger": 0`)
+
+	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	err := run(runCtx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
+	want := fmt.Sprintf("outbox tree close rows %v name no root generation", []int64{zero, missing, text})
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("boot = %v, want the refusal %q", err, want)
+	}
+	var layouts int
+	if err := pool.QueryRow(ctx, `select count(*) from runtime_layouts`).Scan(&layouts); err != nil || layouts != 0 {
+		t.Errorf("runtime layouts after the refused boot = %d (err %v), want none", layouts, err)
+	}
+	if count, _ := boots(t, cfg); count != 0 {
+		t.Errorf("a refused boot was recorded %d times", count)
 	}
 }
 

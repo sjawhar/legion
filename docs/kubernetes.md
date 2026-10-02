@@ -393,7 +393,10 @@ first resource record confirms its reservation without deleting anything.
 Before the daemon opens its store, so before any schema write, image probe or reconcile, it checks
 that Agent Sandbox is installed and refuses a namespace that still holds a per-claim Sandbox of the
 layout before issue pods, naming it; once the store opens and before it migrates, it refuses a
-claim that still records such a Sandbox. Migrate or remove those first. The daemon runs on a host
+claim that still records such a Sandbox. After it migrates and before it installs the issue-pod
+layout marker, it refuses an outbox tree close of its project whose linger (the root generation
+the close expires) it could never decode, naming each row: no daemon writes one, and such a row
+would fail on every attempt. Migrate or remove those first. The daemon runs on a host
 its pods can reach and serves the worker stream they dial. The controller is
 `legion controller start` on the operator's machine
 ([Operator-launched controller](#operator-launched-controller)).

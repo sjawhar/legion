@@ -300,6 +300,28 @@ func (s *Store) HasLegacySandboxClaims(ctx context.Context, project string) (boo
 	return legacy, nil
 }
 
+// UndecodableTreeCloses lists the outbox tree closes of the Dispatch project dispatchProject (the
+// issue-key prefix the outbox leases by, record.Postgres.ClaimDue) whose linger, the root
+// generation they expire, is not a whole number of at least 1. The outbox decodes such a row
+// strictly and refuses it on every attempt (record.validateOutboxPayload). Migration 0016 gave the
+// older shape, a close naming no linger, its root's generation or deleted it, and every writer
+// since sets it, so after migration this census is empty unless a row was written outside the
+// daemon.
+func (s *Store) UndecodableTreeCloses(ctx context.Context, dispatchProject string) ([]int64, error) {
+	rows, err := s.pool.Query(ctx, `select id from outbox where kind = 'supervise' and payload->>'op' = 'tree_close'
+		and split_part(issue, '-', 1) = $1
+		and not coalesce(jsonb_typeof(payload->'linger') = 'number' and payload->>'linger' ~ '^[1-9][0-9]*$', false)
+		order by id`, dispatchProject)
+	if err != nil {
+		return nil, fmt.Errorf("census undecodable tree closes: %w", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return nil, fmt.Errorf("census undecodable tree closes: %w", err)
+	}
+	return ids, nil
+}
+
 type issueResourcesRow interface{ Scan(...any) error }
 
 func scanIssueResources(row issueResourcesRow) (IssueResources, error) {
