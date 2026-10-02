@@ -4,75 +4,194 @@
       "key": "LEGION-464",
       "asks": [
         {
-          "id": "464-v2",
-          "created_at": "2026-10-01T17:10:36Z",
+          "id": "e3873904-e4a6-45db-8c2d-6e2e1b62ded2",
+          "created_at": "2026-10-01T17:10:36.829143Z",
           "kind": "approval",
           "block_id": null
         },
         {
-          "id": "464-v3",
-          "created_at": "2026-10-01T17:13:23Z",
+          "id": "7bbc5e42-d542-47cd-b22d-c96d592bc44d",
+          "created_at": "2026-10-01T17:13:23.786968Z",
           "kind": "approval",
           "block_id": null
         },
         {
-          "id": "464-v4",
-          "created_at": "2026-10-01T17:16:31Z",
+          "id": "b58c6168-c347-4707-902e-423ee5dacded",
+          "created_at": "2026-10-01T17:16:31.345894Z",
           "kind": "approval",
           "block_id": null
         },
         {
-          "id": "464-v5",
-          "created_at": "2026-10-01T17:18:47Z",
+          "id": "ea52b291-9028-43c5-9b5f-76076152887b",
+          "created_at": "2026-10-01T17:18:47.673839Z",
           "kind": "approval",
           "block_id": null
         }
       ],
       "events": [
         {
-          "id": 1,
+          "id": 42678,
+          "seq": 6,
           "type": "ask.opened",
+          "actor": {
+            "kind": "session",
+            "id": "01a0ef85-79c0-7197-9a12-31f588da3406"
+          },
+          "created_at": "2026-10-01T17:10:36.829143Z",
           "payload": {
-            "id": "464-v2",
+            "id": "e3873904-e4a6-45db-8c2d-6e2e1b62ded2",
             "kind": "approval",
-            "approval": { "artifact_id": "artifact-464", "version": 2 }
+            "approval": {
+              "artifact_id": "83feb774-59a9-4a3d-bf6b-ce583ac5aebf",
+              "name": "spec.md",
+              "version": 2
+            }
           }
         },
         {
-          "id": 2,
-          "type": "ask.opened",
+          "id": 42711,
+          "seq": 7,
+          "type": "ask.resolved",
+          "actor": {
+            "kind": "session",
+            "id": "01a0ef85-79c0-7197-9a12-31f588da3406"
+          },
+          "created_at": "2026-10-01T17:13:17.32771Z",
           "payload": {
-            "id": "464-v3",
+            "id": "e3873904-e4a6-45db-8c2d-6e2e1b62ded2",
             "kind": "approval",
-            "approval": { "artifact_id": "artifact-464", "version": 3 }
+            "approval": {
+              "artifact_id": "83feb774-59a9-4a3d-bf6b-ce583ac5aebf",
+              "name": "spec.md",
+              "version": 2
+            }
           }
         },
         {
-          "id": 3,
+          "id": 42713,
+          "seq": 9,
           "type": "ask.opened",
+          "actor": {
+            "kind": "session",
+            "id": "01a0ef85-79c0-7197-9a12-31f588da3406"
+          },
+          "created_at": "2026-10-01T17:13:23.786968Z",
           "payload": {
-            "id": "464-v4",
+            "id": "7bbc5e42-d542-47cd-b22d-c96d592bc44d",
             "kind": "approval",
-            "approval": { "artifact_id": "artifact-464", "version": 4 }
+            "approval": {
+              "artifact_id": "83feb774-59a9-4a3d-bf6b-ce583ac5aebf",
+              "name": "spec.md",
+              "version": 3
+            }
           }
         },
         {
-          "id": 4,
-          "type": "ask.opened",
+          "id": 42725,
+          "seq": 10,
+          "type": "ask.resolved",
+          "actor": {
+            "kind": "session",
+            "id": "01a0ef85-79c0-7197-9a12-31f588da3406"
+          },
+          "created_at": "2026-10-01T17:16:21.732498Z",
           "payload": {
-            "id": "464-v5",
+            "id": "7bbc5e42-d542-47cd-b22d-c96d592bc44d",
             "kind": "approval",
-            "approval": { "artifact_id": "artifact-464", "version": 5 }
+            "approval": {
+              "artifact_id": "83feb774-59a9-4a3d-bf6b-ce583ac5aebf",
+              "name": "spec.md",
+              "version": 3
+            }
           }
         },
         {
-          "id": 5,
+          "id": 42728,
+          "seq": 12,
+          "type": "ask.opened",
+          "actor": {
+            "kind": "session",
+            "id": "01a0ef85-79c0-7197-9a12-31f588da3406"
+          },
+          "created_at": "2026-10-01T17:16:31.345894Z",
+          "payload": {
+            "id": "b58c6168-c347-4707-902e-423ee5dacded",
+            "kind": "approval",
+            "approval": {
+              "artifact_id": "83feb774-59a9-4a3d-bf6b-ce583ac5aebf",
+              "name": "spec.md",
+              "version": 4
+            }
+          }
+        },
+        {
+          "id": 42748,
+          "seq": 13,
+          "type": "ask.resolved",
+          "actor": {
+            "kind": "session",
+            "id": "01a0ef85-79c0-7197-9a12-31f588da3406"
+          },
+          "created_at": "2026-10-01T17:18:47.365078Z",
+          "payload": {
+            "id": "b58c6168-c347-4707-902e-423ee5dacded",
+            "kind": "approval",
+            "approval": {
+              "artifact_id": "83feb774-59a9-4a3d-bf6b-ce583ac5aebf",
+              "name": "spec.md",
+              "version": 4
+            }
+          }
+        },
+        {
+          "id": 42750,
+          "seq": 15,
+          "type": "ask.opened",
+          "actor": {
+            "kind": "session",
+            "id": "01a0ef85-79c0-7197-9a12-31f588da3406"
+          },
+          "created_at": "2026-10-01T17:18:47.673839Z",
+          "payload": {
+            "id": "ea52b291-9028-43c5-9b5f-76076152887b",
+            "kind": "approval",
+            "approval": {
+              "artifact_id": "83feb774-59a9-4a3d-bf6b-ce583ac5aebf",
+              "name": "spec.md",
+              "version": 5
+            }
+          }
+        },
+        {
+          "id": 42803,
+          "seq": 20,
           "type": "ask.answered",
-          "actor": { "kind": "user", "id": "reviewer" },
+          "actor": {
+            "kind": "user",
+            "id": "sjawhar"
+          },
+          "created_at": "2026-10-01T17:29:37.615957Z",
           "payload": {
-            "id": "464-v5",
+            "id": "ea52b291-9028-43c5-9b5f-76076152887b",
             "kind": "approval",
-            "approval": { "artifact_id": "artifact-464", "version": 5 }
+            "approval": {
+              "artifact_id": "83feb774-59a9-4a3d-bf6b-ce583ac5aebf",
+              "name": "spec.md",
+              "version": 5
+            }
+          }
+        },
+        {
+          "id": 42804,
+          "seq": 21,
+          "type": "artifact.changes_requested",
+          "actor": {
+            "kind": "user",
+            "id": "sjawhar"
+          },
+          "created_at": "2026-10-01T17:29:37.615957Z",
+          "payload": {
+            "ask_id": "ea52b291-9028-43c5-9b5f-76076152887b"
           }
         }
       ]
@@ -81,50 +200,206 @@
       "key": "AGENTC-418",
       "asks": [
         {
-          "id": "418-v3",
-          "created_at": "2026-10-01T12:04:28Z",
+          "id": "d8b79b2b-315c-4529-a06f-177eb0f79698",
+          "created_at": "2026-10-01T12:04:28.353084Z",
           "kind": "approval",
           "block_id": null
         },
         {
-          "id": "418-v4",
-          "created_at": "2026-10-01T14:14:38Z",
+          "id": "fc123280-c1ed-4f1b-b6a5-961618c232f7",
+          "created_at": "2026-10-01T14:14:38.687324Z",
           "kind": "approval",
           "block_id": null
         },
         {
-          "id": "418-v12",
-          "created_at": "2026-10-01T14:40:20Z",
+          "id": "1c4f2807-0702-45bb-bb0f-a45f29d8af61",
+          "created_at": "2026-10-01T14:40:20.407605Z",
           "kind": "approval",
           "block_id": null
         }
       ],
       "events": [
         {
-          "id": 6,
+          "id": 41108,
+          "seq": 14,
           "type": "ask.opened",
+          "actor": {
+            "kind": "session",
+            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4"
+          },
+          "created_at": "2026-10-01T12:04:28.353084Z",
           "payload": {
-            "id": "418-v3",
+            "id": "d8b79b2b-315c-4529-a06f-177eb0f79698",
             "kind": "approval",
-            "approval": { "artifact_id": "artifact-418", "version": 3 }
+            "approval": {
+              "artifact_id": "4bd9cfed-2e6e-4d79-83a4-ef99173d088d",
+              "name": "spec.md",
+              "version": 3
+            }
           }
         },
         {
-          "id": 7,
-          "type": "ask.opened",
+          "id": 41383,
+          "seq": 15,
+          "type": "comment.created",
+          "actor": {
+            "kind": "user",
+            "id": "sjawhar"
+          },
+          "created_at": "2026-10-01T14:11:47.761211Z",
           "payload": {
-            "id": "418-v4",
-            "kind": "approval",
-            "approval": { "artifact_id": "artifact-418", "version": 4 }
+            "id": "fa8094f5-1029-4c55-bf47-ce476ee41310",
+            "ask_id": "d8b79b2b-315c-4529-a06f-177eb0f79698"
           }
         },
         {
-          "id": 8,
-          "type": "ask.opened",
+          "id": 41391,
+          "seq": 16,
+          "type": "comment.created",
+          "actor": {
+            "kind": "session",
+            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4"
+          },
+          "created_at": "2026-10-01T14:13:36.232594Z",
           "payload": {
-            "id": "418-v12",
+            "id": "d098f7f7-432e-46cb-a1ce-7b6d89198db6",
+            "ask_id": "d8b79b2b-315c-4529-a06f-177eb0f79698"
+          }
+        },
+        {
+          "id": 41393,
+          "seq": 17,
+          "type": "ask.resolved",
+          "actor": {
+            "kind": "session",
+            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4"
+          },
+          "created_at": "2026-10-01T14:14:30.850445Z",
+          "payload": {
+            "id": "d8b79b2b-315c-4529-a06f-177eb0f79698",
             "kind": "approval",
-            "approval": { "artifact_id": "artifact-418", "version": 12 }
+            "approval": {
+              "artifact_id": "4bd9cfed-2e6e-4d79-83a4-ef99173d088d",
+              "name": "spec.md",
+              "version": 3
+            }
+          }
+        },
+        {
+          "id": 41395,
+          "seq": 19,
+          "type": "ask.opened",
+          "actor": {
+            "kind": "session",
+            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4"
+          },
+          "created_at": "2026-10-01T14:14:38.687324Z",
+          "payload": {
+            "id": "fc123280-c1ed-4f1b-b6a5-961618c232f7",
+            "kind": "approval",
+            "approval": {
+              "artifact_id": "4bd9cfed-2e6e-4d79-83a4-ef99173d088d",
+              "name": "spec.md",
+              "version": 4
+            }
+          }
+        },
+        {
+          "id": 41404,
+          "seq": 20,
+          "type": "comment.created",
+          "actor": {
+            "kind": "user",
+            "id": "sjawhar"
+          },
+          "created_at": "2026-10-01T14:16:14.142807Z",
+          "payload": {
+            "id": "48bc93fd-9a1c-4cee-a3f9-cda998614316",
+            "ask_id": "fc123280-c1ed-4f1b-b6a5-961618c232f7"
+          }
+        },
+        {
+          "id": 41410,
+          "seq": 21,
+          "type": "comment.created",
+          "actor": {
+            "kind": "session",
+            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4"
+          },
+          "created_at": "2026-10-01T14:17:51.017412Z",
+          "payload": {
+            "id": "f22eabef-36a0-48e5-881c-225a56163027",
+            "ask_id": "fc123280-c1ed-4f1b-b6a5-961618c232f7"
+          }
+        },
+        {
+          "id": 41412,
+          "seq": 22,
+          "type": "ask.resolved",
+          "actor": {
+            "kind": "session",
+            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4"
+          },
+          "created_at": "2026-10-01T14:19:11.030765Z",
+          "payload": {
+            "id": "fc123280-c1ed-4f1b-b6a5-961618c232f7",
+            "kind": "approval",
+            "approval": {
+              "artifact_id": "4bd9cfed-2e6e-4d79-83a4-ef99173d088d",
+              "name": "spec.md",
+              "version": 4
+            }
+          }
+        },
+        {
+          "id": 41500,
+          "seq": 39,
+          "type": "ask.opened",
+          "actor": {
+            "kind": "session",
+            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4"
+          },
+          "created_at": "2026-10-01T14:40:20.407605Z",
+          "payload": {
+            "id": "1c4f2807-0702-45bb-bb0f-a45f29d8af61",
+            "kind": "approval",
+            "approval": {
+              "artifact_id": "4bd9cfed-2e6e-4d79-83a4-ef99173d088d",
+              "name": "spec.md",
+              "version": 12
+            }
+          }
+        },
+        {
+          "id": 41515,
+          "seq": 40,
+          "type": "ask.answered",
+          "actor": {
+            "kind": "user",
+            "id": "sjawhar"
+          },
+          "created_at": "2026-10-01T14:48:25.425214Z",
+          "payload": {
+            "id": "1c4f2807-0702-45bb-bb0f-a45f29d8af61",
+            "kind": "approval",
+            "approval": {
+              "artifact_id": "4bd9cfed-2e6e-4d79-83a4-ef99173d088d",
+              "name": "spec.md",
+              "version": 12
+            }
+          }
+        },
+        {
+          "id": 41516,
+          "seq": 41,
+          "type": "artifact.approved",
+          "actor": {
+            "kind": "user",
+            "id": "sjawhar"
+          },
+          "created_at": "2026-10-01T14:48:25.425214Z",
+          "payload": {
+            "ask_id": "1c4f2807-0702-45bb-bb0f-a45f29d8af61"
           }
         }
       ]
@@ -133,35 +408,148 @@
       "key": "LEGION-462",
       "asks": [
         {
-          "id": "462-v4",
-          "created_at": "2026-10-01T15:03:32Z",
+          "id": "6c39dabb-7525-4d13-92d6-4273a545e7ea",
+          "created_at": "2026-10-01T15:03:32.590994Z",
           "kind": "approval",
           "block_id": null
         },
         {
-          "id": "462-v5",
-          "created_at": "2026-10-01T15:11:41Z",
+          "id": "fdb4899e-47b4-44ed-b102-19740aa6f183",
+          "created_at": "2026-10-01T15:11:41.583233Z",
           "kind": "approval",
           "block_id": null
         }
       ],
       "events": [
         {
-          "id": 9,
+          "id": 41565,
+          "seq": 7,
           "type": "ask.opened",
+          "actor": {
+            "kind": "session",
+            "id": "01a0c1c2-0078-76f0-a629-f100206c8692"
+          },
+          "created_at": "2026-10-01T15:03:32.590994Z",
           "payload": {
-            "id": "462-v4",
+            "id": "6c39dabb-7525-4d13-92d6-4273a545e7ea",
             "kind": "approval",
-            "approval": { "artifact_id": "artifact-462", "version": 4 }
+            "approval": {
+              "artifact_id": "9ca2a4e4-515e-4dd9-a1a3-2f68b296d9bf",
+              "name": "spec.md",
+              "version": 4
+            }
           }
         },
         {
-          "id": 10,
-          "type": "ask.opened",
+          "id": 41567,
+          "seq": 8,
+          "type": "comment.created",
+          "actor": {
+            "kind": "user",
+            "id": "sjawhar"
+          },
+          "created_at": "2026-10-01T15:04:00.789111Z",
           "payload": {
-            "id": "462-v5",
+            "id": "8f9387b3-b32d-4070-a7e1-b86930b6c9b1",
+            "ask_id": "6c39dabb-7525-4d13-92d6-4273a545e7ea"
+          }
+        },
+        {
+          "id": 41569,
+          "seq": 9,
+          "type": "comment.created",
+          "actor": {
+            "kind": "session",
+            "id": "01a0c1c2-0078-76f0-a629-f100206c8692"
+          },
+          "created_at": "2026-10-01T15:05:07.775931Z",
+          "payload": {
+            "id": "a6df4430-8f06-44e4-8326-08e606c86f6b",
+            "ask_id": "6c39dabb-7525-4d13-92d6-4273a545e7ea"
+          }
+        },
+        {
+          "id": 41574,
+          "seq": 10,
+          "type": "ask.resolved",
+          "actor": {
+            "kind": "session",
+            "id": "01a0c1c2-0078-76f0-a629-f100206c8692"
+          },
+          "created_at": "2026-10-01T15:08:13.882004Z",
+          "payload": {
+            "id": "6c39dabb-7525-4d13-92d6-4273a545e7ea",
             "kind": "approval",
-            "approval": { "artifact_id": "artifact-462", "version": 5 }
+            "approval": {
+              "artifact_id": "9ca2a4e4-515e-4dd9-a1a3-2f68b296d9bf",
+              "name": "spec.md",
+              "version": 4
+            }
+          }
+        },
+        {
+          "id": 41583,
+          "seq": 12,
+          "type": "comment.created",
+          "actor": {
+            "kind": "session",
+            "id": "01a0c1c2-0078-76f0-a629-f100206c8692"
+          },
+          "created_at": "2026-10-01T15:11:41.283719Z",
+          "payload": {
+            "id": "058a372b-01b1-4714-9f49-9d372b2a2273",
+            "ask_id": "6c39dabb-7525-4d13-92d6-4273a545e7ea"
+          }
+        },
+        {
+          "id": 41584,
+          "seq": 13,
+          "type": "ask.opened",
+          "actor": {
+            "kind": "session",
+            "id": "01a0c1c2-0078-76f0-a629-f100206c8692"
+          },
+          "created_at": "2026-10-01T15:11:41.583233Z",
+          "payload": {
+            "id": "fdb4899e-47b4-44ed-b102-19740aa6f183",
+            "kind": "approval",
+            "approval": {
+              "artifact_id": "9ca2a4e4-515e-4dd9-a1a3-2f68b296d9bf",
+              "name": "spec.md",
+              "version": 5
+            }
+          }
+        },
+        {
+          "id": 41668,
+          "seq": 14,
+          "type": "ask.answered",
+          "actor": {
+            "kind": "user",
+            "id": "sjawhar"
+          },
+          "created_at": "2026-10-01T15:28:43.040312Z",
+          "payload": {
+            "id": "fdb4899e-47b4-44ed-b102-19740aa6f183",
+            "kind": "approval",
+            "approval": {
+              "artifact_id": "9ca2a4e4-515e-4dd9-a1a3-2f68b296d9bf",
+              "name": "spec.md",
+              "version": 5
+            }
+          }
+        },
+        {
+          "id": 41669,
+          "seq": 15,
+          "type": "artifact.approved",
+          "actor": {
+            "kind": "user",
+            "id": "sjawhar"
+          },
+          "created_at": "2026-10-01T15:28:43.040312Z",
+          "payload": {
+            "ask_id": "fdb4899e-47b4-44ed-b102-19740aa6f183"
           }
         }
       ]

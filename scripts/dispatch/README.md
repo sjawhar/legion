@@ -40,6 +40,9 @@ action or permission only a human can complete. `design` is a decision about the
 decision with no design document. The script reports uncoded standalone questions separately.
 
 For every document with approval activity in the window, **Approval rounds** shows Inbox rows,
-hand-backs, and human turns. A hand-back is every arrival of the request in the human's Inbox: its
-opening `ask.opened`, and each `ask.edited` that sets `requested_version` to `version`. A round
-with more hand-backs than human turns plus one is flagged.
+arrivals, and human turns. An arrival is the request reaching the human's Inbox: each `ask.opened`,
+and each `ask.handed_back`. An `ask.edited` only rewords a request (a move to a new version, a new
+summary) and never arrives; a hand-back with a new summary is an `ask.edited` followed by its
+`ask.handed_back`, one arrival. Before F1 a request made again opened a new row, so there each
+arrival is an `ask.opened`. A round with more arrivals than human turns plus one is flagged.
+`scripts/e2e/lib/design-gate-approval-requests.jq` reads the same arrivals for the stage 4b proof.

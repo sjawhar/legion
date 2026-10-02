@@ -26,10 +26,8 @@ export type CensusAsk = Pick<
   "id" | "created_at" | "kind" | "block_id" | "question" | "author"
 >;
 
-/** An approval as an `ask.*` event recorded it; events written before F1 carry no
- * `requested_version`. */
-type RecordedApproval = Pick<AskApproval, "artifact_id" | "version"> &
-  Partial<Pick<AskApproval, "requested_version">>;
+/** The document an approval ask names, as every `ask.*` event of one records it. */
+type RecordedApproval = Pick<AskApproval, "artifact_id">;
 
 /**
  * The fields of a recorded Dispatch event the approval count reads. The history it reads predates
@@ -55,7 +53,7 @@ type RecordedEvent = CensusEvent & Pick<DispatchEvent, "seq" | "created_at">;
 interface ApprovalRound {
   readonly artifactId: string;
   readonly inboxRows: number;
-  readonly handbacks: number;
+  readonly arrivals: number;
   readonly humanTurns: number;
   readonly exceedsHumanTurnBudget: boolean;
 }
@@ -86,7 +84,7 @@ interface CensusOptions {
 
 interface MutableApprovalRound {
   inboxRows: number;
-  handbacks: number;
+  arrivals: number;
   humanTurnKeys: Set<string>;
 }
 
@@ -164,18 +162,18 @@ function approvalRound(
 ): MutableApprovalRound {
   const existing = rounds.get(artifactId);
   if (existing !== undefined) return existing;
-  const created = { inboxRows: 0, handbacks: 0, humanTurnKeys: new Set<string>() };
+  const created = { inboxRows: 0, arrivals: 0, humanTurnKeys: new Set<string>() };
   rounds.set(artifactId, created);
   return created;
 }
 
 /**
- * Counts, per document, every time an approval request reached the human's Inbox (`handbacks`):
- * the request's opening `ask.opened`, and each hand-back, an `ask.edited` that sets
- * `requested_version` to `version`. A move, the `ask.edited` a new version writes, leaves
- * `requested_version` below `version` and reaches nobody. Before F1 every request opened its own
- * row, so the same rule counts each one. A round with more arrivals than human turns plus one is
- * flagged.
+ * Counts, per document, every time an approval request reached the human's Inbox (`arrivals`):
+ * each `ask.opened` and each `ask.handed_back`. An `ask.edited` only rewords a request, by moving
+ * it to a new version or giving it a new summary, so it never arrives; a hand-back with a new
+ * summary is an `ask.edited` followed by its `ask.handed_back`, and arrives once. Before F1 a
+ * request made again opened a new row, a new `ask.opened`, so the same rule counts it. A round
+ * with more arrivals than human turns plus one is flagged.
  */
 export function summarizeApprovalRounds(events: readonly CensusEvent[]): ApprovalRound[] {
   const rounds = new Map<string, MutableApprovalRound>();
@@ -185,13 +183,11 @@ export function summarizeApprovalRounds(events: readonly CensusEvent[]): Approva
     if (payload.kind !== "approval" || payload.id === undefined || payload.approval === undefined) {
       continue;
     }
-    const { artifact_id: artifactId, version, requested_version } = payload.approval;
+    const artifactId = payload.approval.artifact_id;
     approvalAskArtifacts.set(payload.id, artifactId);
     const round = approvalRound(rounds, artifactId);
     if (type === "ask.opened") round.inboxRows += 1;
-    if (type === "ask.opened" || (type === "ask.edited" && requested_version === version)) {
-      round.handbacks += 1;
-    }
+    if (type === "ask.opened" || type === "ask.handed_back") round.arrivals += 1;
   }
 
   for (const event of events) {
@@ -216,9 +212,9 @@ export function summarizeApprovalRounds(events: readonly CensusEvent[]): Approva
     .map(([artifactId, round]) => ({
       artifactId,
       inboxRows: round.inboxRows,
-      handbacks: round.handbacks,
+      arrivals: round.arrivals,
       humanTurns: round.humanTurnKeys.size,
-      exceedsHumanTurnBudget: round.handbacks > round.humanTurnKeys.size + 1,
+      exceedsHumanTurnBudget: round.arrivals > round.humanTurnKeys.size + 1,
     }))
     .sort((left, right) => left.artifactId.localeCompare(right.artifactId));
 }
