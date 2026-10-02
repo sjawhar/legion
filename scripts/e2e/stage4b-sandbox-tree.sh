@@ -266,27 +266,33 @@ pool_tree_room() {
 
 # limit_pending SELECTOR prints each pod of the run matching SELECTOR (label pairs added to the
 # run's project label) that the scheduler cannot place because the legion pool is at its limits:
-# Pending and PodScheduled=False Unschedulable, with a Karpenter FailedScheduling event saying
-# every instance type exceeds the pool's limits that names this pod by uid and is no older than its
-# Unschedulable transition. A Sandbox pod keeps its Sandbox's name across replacements, and events
-# outlive the pod they name, so a name match is no evidence. Prints nothing when there is none,
-# or when the cluster cannot be read.
+# Pending and PodScheduled=False Unschedulable, and Karpenter's current verdict on it is that every
+# instance type exceeds the pool's limits. That verdict is Karpenter's newest FailedScheduling event
+# naming this pod by uid, no older than its Unschedulable transition. A Sandbox pod keeps its
+# Sandbox's name across replacements, and events outlive the pod they name, so a name match is no
+# evidence. The transition does not move while the pod stays unschedulable, so an older limit event
+# says nothing once Karpenter has given a newer reason (affinity, the volume's node, a taint). The
+# default scheduler's own FailedScheduling events, which every Pending pod gets, are not
+# Karpenter's verdict. Prints nothing when there is none, or when the cluster cannot be read.
 limit_pending() {
   kubectl --context "$operator" -n "$namespace" --request-timeout=20s get pods -l "legion.dev/project=$run_label,$1" -o json >"$work/limit-pods.json" || return 0
   kubectl --context "$operator" -n "$namespace" --request-timeout=20s get events --field-selector reason=FailedScheduling -o json >"$work/limit-events.json" || return 0
   jq -r --slurpfile events "$work/limit-events.json" '
     $events[0] as $events
     | def seconds: sub("\\.[0-9]+"; "") | fromdateiso8601;
+    def at: .series.lastObservedTime // .lastTimestamp // .eventTime // .metadata.creationTimestamp;
     [.items[] | select(.status.phase == "Pending")
       | {name: .metadata.name, uid: .metadata.uid,
          since: ([.status.conditions[]? | select(.type == "PodScheduled" and .status == "False" and .reason == "Unschedulable") | .lastTransitionTime // empty] | first)}
       | select(.uid != null and .since != null) | .since |= seconds] as $pending
-    | $events.items[]
-    | select(.involvedObject.kind == "Pod" and ((.message // "") | contains("exceed limits for nodepool (NodePool=legion)")))
-    | (.series.lastObservedTime // .lastTimestamp // .eventTime // .metadata.creationTimestamp) as $at
-    | select($at != null)
-    | ($at | seconds) as $t | .involvedObject.uid as $uid
-    | $pending[] | select(.uid == $uid and $t >= .since)
+    | [$events.items[]
+        | select(.involvedObject.kind == "Pod" and (.source.component // .reportingComponent) == "karpenter" and at != null)
+        | {uid: .involvedObject.uid, t: (at | seconds), limit: ((.message // "") | contains("exceed limits for nodepool (NodePool=legion)"))}
+      ] as $verdicts
+    | $pending[]
+    | . as $pod
+    | ([$verdicts[] | select(.uid == $pod.uid)] | max_by(.t)) as $current
+    | select($current != null and $current.limit and $current.t >= $pod.since)
     | "pod \(.name) (uid \(.uid); Karpenter: all available instance types exceed limits for nodepool legion)"' "$work/limit-pods.json" | sort -u
 }
 

@@ -48,13 +48,29 @@ const pendingPod = (name: string, uid: string, tree: string, since: string) => (
     ],
   },
 });
-// limitEvent is Karpenter's FailedScheduling event for pod NAME with UID, last seen AT.
-const limitEvent = (name: string, uid: string, at: string) => ({
-  involvedObject: { kind: "Pod", name, uid },
-  lastTimestamp: at,
-  message:
-    'Failed to schedule pod, incompatible with nodepool "other"; all available instance types exceed limits for nodepool (NodePool=legion)',
-});
+// schedulingEvent is a FailedScheduling event from COMPONENT for pod NAME with UID, last seen AT.
+const schedulingEvent =
+  (component: string, message: string) => (name: string, uid: string, at: string) => ({
+    involvedObject: { kind: "Pod", name, uid },
+    source: { component },
+    lastTimestamp: at,
+    message,
+  });
+// limitEvent is Karpenter's verdict that every instance type exceeds the legion pool's limits.
+const limitEvent = schedulingEvent(
+  "karpenter",
+  'Failed to schedule pod, incompatible with nodepool "other"; all available instance types exceed limits for nodepool (NodePool=legion)'
+);
+// affinityEvent is Karpenter's verdict for a genuine scheduling reason, the tree's affinity.
+const affinityEvent = schedulingEvent(
+  "karpenter",
+  "Failed to schedule pod, unsatisfiable topology constraint for pod affinity, key=kubernetes.io/hostname"
+);
+// schedulerEvent is the default scheduler's FailedScheduling, which every Pending pod gets.
+const schedulerEvent = schedulingEvent(
+  "default-scheduler",
+  "0/16 nodes are available: 14 node(s) didn't match Pod's node affinity/selector."
+);
 interface Capacity {
   subject?: string;
   pods?: object[];
@@ -185,19 +201,26 @@ describe("stage 4b's verdict line", () => {
   });
 
   const starvedPod = pendingPod("legion-x-t1", "uid-now", "T1", "2026-10-02T10:00:00Z");
-  test("says BLOCKED on capacity for a wait its own tree's limit-Pending pod starved, naming the pod", () => {
-    const starved = controllerRun("[]", "timeout", {
-      subject: "T1",
-      pods: [starvedPod],
-      events: [limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z")],
+  for (const [name, events] of [
+    ["Karpenter's limit verdict", [limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z")]],
+    [
+      "Karpenter's limit verdict, with the default scheduler's own event newer",
+      [
+        limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z"),
+        schedulerEvent("legion-x-t1", "uid-now", "2026-10-02T10:05:00Z"),
+      ],
+    ],
+  ] as [string, object[]][]) {
+    test(`says BLOCKED on capacity for a wait its own tree's pod starved, on ${name}`, () => {
+      const starved = controllerRun("[]", "timeout", { subject: "T1", pods: [starvedPod], events });
+      expect(starved.code).toBe(1);
+      expect(starved.stdout).toContain(
+        "CHECK controller: BLOCKED: capacity: the legion pool is at its limits, so the scheduler cannot place pod legion-x-t1 (uid uid-now; Karpenter: all available instance types exceed limits for nodepool legion)"
+      );
+      expect(starved.stdout).toContain("stage 4b e2e: BLOCKED (check controller)");
+      expect(starved.stdout).not.toContain("CHECK controller: FAIL");
     });
-    expect(starved.code).toBe(1);
-    expect(starved.stdout).toContain(
-      "CHECK controller: BLOCKED: capacity: the legion pool is at its limits, so the scheduler cannot place pod legion-x-t1 (uid uid-now; Karpenter: all available instance types exceed limits for nodepool legion)"
-    );
-    expect(starved.stdout).toContain("stage 4b e2e: BLOCKED (check controller)");
-    expect(starved.stdout).not.toContain("CHECK controller: FAIL");
-  });
+  }
 
   // Each of these timed out with a limit event in the cluster that is no evidence about the wait's
   // own pod: it must fail as any timeout does.
@@ -231,6 +254,17 @@ describe("stage 4b's verdict line", () => {
       {
         pods: [starvedPod],
         events: [limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z")],
+      },
+    ],
+    [
+      "a limit verdict Karpenter has since replaced with a genuine reason",
+      {
+        subject: "T1",
+        pods: [starvedPod],
+        events: [
+          limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z"),
+          affinityEvent("legion-x-t1", "uid-now", "2026-10-02T10:05:00Z"),
+        ],
       },
     ],
     ["no pod Pending on the pool's limits", { subject: "T1" }],
