@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // IssueResources is the durable ownership record for one issue's shared Sandbox resources. A
@@ -145,6 +146,13 @@ func (s *Store) HasLegacySandboxClaims(ctx context.Context, project string) (boo
 			or locator->'sandbox'->>'generation' is null)
 	)`, project).Scan(&legacy)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			// A brand-new database has no claims table until the first migration, and therefore
+			// cannot contain a legacy locator. This preserves the no-schema-write-before-census
+			// ordering for existing databases.
+			return false, nil
+		}
 		return false, fmt.Errorf("census legacy Sandbox claims for %s: %w", project, err)
 	}
 	return legacy, nil
