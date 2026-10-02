@@ -96,9 +96,9 @@ production placeholders to build the image.
 ```bash
 cd packages/envoy/deploy/compose
 unused=(DATABASE_URL=unused DISPATCH_AGENT_TOKEN=unused DISPATCH_ALLOWED_LOGINS=unused DISPATCH_SERVER_URL=unused NATS_URLS=unused)
-acceptance_envoy_port=19021
-acceptance_dispatch_port=8767
-acceptance_pg_port=55516
+acceptance_envoy_port=19061
+acceptance_dispatch_port=18767
+acceptance_pg_port=55660
 acceptance_image_tag=dispatch-acceptance-local
 acceptance_compose_project=dispatch-acceptance
 env "${unused[@]}" ENVOY_IMAGE_TAG="$acceptance_image_tag" docker compose -f dispatch.compose.yml build dispatch
