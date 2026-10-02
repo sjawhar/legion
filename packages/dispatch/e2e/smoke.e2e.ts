@@ -32,7 +32,7 @@ test("an anonymous user is sent to GitHub sign-in", async ({ browser }) => {
 
   await page.goto("/");
 
-  await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toHaveAttribute(
+  await expect(page.getByRole("link", { name: "Sign in with Google" })).toHaveAttribute(
     "href",
     "/auth/start"
   );

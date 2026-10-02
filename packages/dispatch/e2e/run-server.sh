@@ -52,13 +52,10 @@ cd "$(dirname "$0")/../../envoy"
 exec env \
   DATABASE_URL="$database_url" \
   DISPATCH_AGENT_TOKEN=e2e-token \
-  DISPATCH_ALLOWED_LOGINS=alice,bob \
   DISPATCH_APP_CLIENT_ID=Iv1.e2efake \
-  DISPATCH_APP_CLIENT_SECRET=e2e-dummy-secret \
   DISPATCH_APP_PEM_B64="$app_pem_b64" \
   DISPATCH_GITHUB_API_BASE="http://127.0.0.1:$fake_github_port" \
   DISPATCH_IDENTITY=header:X-Dispatch-User \
-  DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
   DISPATCH_LISTEN_HOST=127.0.0.1 \
   DISPATCH_NATS_DISABLED=1 \
   DISPATCH_PORT="$e2e_port" \

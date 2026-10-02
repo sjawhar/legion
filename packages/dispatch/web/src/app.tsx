@@ -190,7 +190,7 @@ function SignInPage(): ReactNode {
         className={`mt-8 inline-flex rounded-lg px-4 py-2 font-semibold ${primaryButtonBg} ${primaryButtonHoverBg}`}
         href="/auth/start"
       >
-        Sign in with GitHub
+        Sign in with Google
       </a>
     </ShellMessagePage>
   );

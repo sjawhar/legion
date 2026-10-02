@@ -663,10 +663,6 @@ export class DispatchApiClient {
     return this.response(`/api/github/rest/${path.replace(/^\/+/, "")}`, init);
   }
 
-  githubGraphql<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
-    return this.post<T>("/api/github/graphql", { query, variables });
-  }
-
   /** `GET /api/v1/credential-requests?approver=me`: every request waiting on the viewer, as
    *  the Inbox's credential-requests section lists them. */
   getCredentialPending(): Promise<CredentialPendingResponse> {

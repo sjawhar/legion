@@ -451,7 +451,6 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.whoAmI();
   await api.logout();
   await api.githubRest("repos/acme/dispatch");
-  await api.githubGraphql("{ viewer { login } }");
 
   expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
     ["GET", "/api/v1/projects"],
@@ -487,7 +486,6 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["GET", "/auth/whoami"],
     ["POST", "/auth/logout"],
     ["GET", "/api/github/rest/repos/acme/dispatch"],
-    ["POST", "/api/github/graphql"],
   ]);
 });
 

@@ -23,7 +23,7 @@ const tables = [
   "issue_external_links",
   "issues",
   "projects",
-  "users",
+  "people",
 ];
 
 const execFileAsync = promisify(execFile);
@@ -129,6 +129,9 @@ async function resetDatabaseOnce(): Promise<void> {
     $$`,
     "-c",
     `TRUNCATE TABLE ${tables.join(", ")} RESTART IDENTITY CASCADE`,
+    "-c",
+    // The people the scenarios act as, as if each had signed in: the only assignable names.
+    "INSERT INTO people (email) VALUES ('alice'), ('bob')",
   ]);
 }
 

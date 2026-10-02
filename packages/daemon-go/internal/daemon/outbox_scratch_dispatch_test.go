@@ -191,7 +191,6 @@ attempts:
 			"DATABASE_URL="+serverURL.String(),
 			"DISPATCH_AGENT_TOKEN="+token,
 			"DISPATCH_IDENTITY=header:X-Dispatch-User",
-			"DISPATCH_ALLOWED_LOGINS=smoke",
 			"DISPATCH_NATS_DISABLED=1",
 			"DISPATCH_LISTEN_HOST=127.0.0.1",
 			fmt.Sprintf("DISPATCH_PORT=%d", port),
