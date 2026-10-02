@@ -811,8 +811,9 @@ export interface Comment extends AnchorPosition {
 }
 
 /** What a route that posts a comment answers (`POST /api/v1/issues/{key}/comments`,
- *  `POST /api/v1/artifacts/{id}/comments`): the comment row and, on a reply to an open ask, whom
- *  that ask waits on now that the reply is its newest. It is the value the comment's event carries
+ *  `POST /api/v1/artifacts/{id}/comments`, and the delivery callback
+ *  `POST /api/v1/comments/{id}/reply`): the comment row and, on a reply to an open ask, whom that
+ *  ask waits on now that the reply is its newest. It is the value the comment's event carries
  *  under the same name, and may differ from `turn`: an agent's reply on a moved approval request
  *  leaves that request waiting on the agent. */
 export interface CommentWriteResponse extends Comment {

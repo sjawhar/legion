@@ -51,12 +51,20 @@ const waitingOnExpression = `case
 	else coalesce(lr.turn, 'human')
 end`
 
+// askWaitingOnQuery reads whom the open ask $1 waits on. askWaitingOn runs it on its own, and a
+// comment's insert sends it in the same round trip, right behind the insert
+// (commentThreadTarget.insertComment).
+const askWaitingOnQuery = `select ` + waitingOnExpression + `
+		from asks a` + lastReplyJoin + `
+		where a.id = $1 and a.state = 'open'`
+
 func askWaitingOn(ctx context.Context, q queryer, askID string) (string, error) {
+	return scanAskWaitingOn(q.QueryRow(ctx, askWaitingOnQuery, askID))
+}
+
+func scanAskWaitingOn(row pgx.Row) (string, error) {
 	var waitingOn string
-	err := q.QueryRow(ctx, `select `+waitingOnExpression+`
-		from asks a`+lastReplyJoin+`
-		where a.id = $1 and a.state = 'open'`, askID).Scan(&waitingOn)
-	if err != nil {
+	if err := row.Scan(&waitingOn); err != nil {
 		return "", fmt.Errorf("read ask waiting_on: %w", err)
 	}
 	return waitingOn, nil
@@ -64,9 +72,11 @@ func askWaitingOn(ctx context.Context, q queryer, askID string) (string, error) 
 
 // askReadColumns are askRowColumns plus the newest comment in the ask's thread. WaitingOn derives
 // from that reply with the moved and newly handed-back approval-request overrides in
-// waitingOnExpression; LastReply still names the newest comment. Queries selecting them read from
-// askReadFrom. Event payloads are built from askRowColumns instead: they never carry WaitingOn.
-const askReadColumns = askRowColumns + `, lr.author, lr.created_at, ` + waitingOnExpression
+// waitingOnExpression, aliased waiting_on so a query ordering by it (the Inbox) names the column
+// rather than evaluating the rule a second time; LastReply still names the newest comment. Queries
+// selecting them read from askReadFrom. Event payloads are built from askRowColumns instead: they
+// never carry WaitingOn.
+const askReadColumns = askRowColumns + `, lr.author, lr.created_at, ` + waitingOnExpression + ` as waiting_on`
 
 const askReadFrom = askRowFrom + lastReplyJoin
 

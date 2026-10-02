@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -573,6 +575,64 @@ func TestApprovalWaitingOnSupportsTheMigrationMaximumVersion(t *testing.T) {
 	}
 	if inbox := readInboxRow(t, handler, askID); inbox.WaitingOn != "human" {
 		t.Fatalf("Inbox waiting_on = %q, want human", inbox.WaitingOn)
+	}
+}
+
+// The longest summary the route accepts at version 1 still fits the ask cap once a version move
+// rebuilds the question at version 10, whose number is one character longer.
+func TestAVersionMoveKeepsTheLongestAcceptedSummaryWithinTheAskCap(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Long summary", "A spec")
+	request := func(summary string) *httptest.ResponseRecorder {
+		return sessionRequest(t, handler, http.MethodPost,
+			"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
+			map[string]any{"actor": sessionActor(), "summary": summary})
+	}
+	refused := request(strings.Repeat("é", maxAskQuestion16))
+	match := regexp.MustCompile(`the (\d+)-character limit`).FindStringSubmatch(refused.Body.String())
+	if refused.Code != http.StatusBadRequest || match == nil {
+		t.Fatalf("summary past the cap: status=%d body=%s, want CAP_EXCEEDED naming the limit", refused.Code, refused.Body.String())
+	}
+	limit, err := strconv.Atoi(match[1])
+	if err != nil {
+		t.Fatalf("parse the summary limit %q: %v", match[1], err)
+	}
+	summary := strings.Repeat("é", limit)
+	requested := request(summary)
+	if requested.Code != http.StatusCreated {
+		t.Fatalf("request approval with the longest summary: status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	askID := decodeBody[struct {
+		Ask struct {
+			ID string `json:"id"`
+		} `json:"ask"`
+	}](t, requested).Ask.ID
+	// Versions 2 to 9 are written directly, so the next version a route writes is the first with
+	// two digits.
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into artifact_versions (artifact_id, number, markdown, authors)
+		select v.artifact_id, n, v.markdown, '[]'
+		from artifact_versions v, generate_series(2, 9) n
+		where v.artifact_id = $1 and v.number = 1
+	`, issue.PrimaryArtifactID); err != nil {
+		t.Fatalf("write versions 2 to 9: %v", err)
+	}
+	if named := dispatchRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
+		map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
+		t.Fatalf("name version 10: status=%d body=%s", named.Code, named.Body.String())
+	}
+	moved := readAskDetail(t, handler, askID)
+	if moved.Question != "Approve spec.md (version 10)? "+summary {
+		t.Fatalf("moved question = %q, want version 10 with the summary unchanged", moved.Question)
+	}
+	if length := len16(moved.Question); length > maxAskQuestion16 {
+		t.Fatalf("moved question is %d units, past the %d-unit ask cap", length, maxAskQuestion16)
 	}
 }
 

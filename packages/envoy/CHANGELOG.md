@@ -66,17 +66,22 @@
 - A Dispatch approval request follows its document's versions instead of being retracted and
   reopened on every edit (LEGION-470). A version write moves the open request to the new version
   (`ask.edited`), keeping its thread and summary, and leaves it Waiting on agents until its agent
-  calls `POST /api/v1/artifacts/{id}/approval-requests` again. That call rewords the request when
-  its summary is new (`ask.edited`) and, when the request waits on its agent (moved, or answered in
-  its thread), hands it back to the human with the new event `ask.handed_back`, which leaves the
-  question and `edited_at` alone so an answer the human had started is still saved. The route
-  answers 201 when it wrote anything and 200 when the request already stood as asked.
-  `ask.approval` gains `requested_version`, the version last handed to the human. Both comment
-  routes answer `ask_waiting_on`, the value `comment.created` already carries, beside the comment
-  on a reply to an open ask. Migration `0064` backfills `requested_version` and adds
-  `asks.handed_back_reply_id`, `0065` makes `comments.created_at` default to `clock_timestamp()` so
-  an ask's newest reply is the one that committed last, and `0066` adds the column's foreign key to
-  `comments`; each census answers `0`.
+  calls `POST /api/v1/artifacts/{id}/approval-requests` again. While the request waits on its agent
+  (moved, or answered in its thread), that call hands it back to the human with the new event
+  `ask.handed_back`, rewording it first when the summary is new (`ask.edited`); a hand-back that
+  rewords nothing leaves the question and `edited_at` alone, so an answer the human had started is
+  still saved. While the request already waits on the human, the same summary is a repeat that
+  writes nothing and a different one is refused `409 APPROVAL_WAITS_ON_HUMAN`, since an approval
+  request carries nothing new. The route answers 201 when it wrote anything and 200 when the
+  request already stood as asked. A summary's limit is counted against a ten-digit version, so no
+  version move takes the question past the ask cap. `ask.approval` gains `requested_version`, the
+  version last handed to the human. Every route that posts a comment (both comment routes and the
+  delivery callback `POST /api/v1/comments/{id}/reply`) answers `ask_waiting_on`, the value the
+  comment's event already carries, beside the comment on a reply to an open ask. Migration `0064`
+  backfills `requested_version` and adds `asks.handed_back_reply_id`, `0065` makes
+  `comments.created_at` default to `clock_timestamp()` so an ask's newest reply is the one that
+  committed last, and `0066` adds the column's foreign key to `comments` under a 500 ms
+  `lock_timeout` of its own; each census answers `0`.
 - A markdown document uploaded as an artifact is at most 1 MiB, the bound an issue's spec and
   every edit already have; other artifacts keep the 25 MiB limit. The dashboard shows the
   server's message for a refused upload (LEGION-465).

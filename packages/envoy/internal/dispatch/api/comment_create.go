@@ -111,13 +111,32 @@ func (t commentThreadTarget) eventThread(waitingOn string) commentEventThread {
 	return thread
 }
 
-// waitingOn is whom the thread's open ask waits on once a reply posted into it is its newest
-// comment, read in the reply's own transaction; "" when the thread is not an open ask's.
-func (t commentThreadTarget) waitingOn(ctx context.Context, q queryer) (string, error) {
-	if t.AskID == nil || t.AskState != "open" {
-		return "", nil
+// insertComment runs insert, the statement that writes a comment into this thread, and scans the
+// row it returns with scan. For a reply to an open ask it sends askWaitingOnQuery behind the insert
+// in the same round trip, and returns whom the ask waits on now that the reply is its newest
+// comment; "" when the thread is not an open ask's.
+func (t commentThreadTarget) insertComment(
+	ctx context.Context, tx pgx.Tx, scan func(pgx.Row) error, insert string, args ...any,
+) (string, error) {
+	openAsk := t.AskID != nil && t.AskState == "open"
+	batch := &pgx.Batch{}
+	batch.Queue(insert, args...)
+	if openAsk {
+		batch.Queue(askWaitingOnQuery, *t.AskID)
 	}
-	return askWaitingOn(ctx, q, *t.AskID)
+	results := tx.SendBatch(ctx, batch)
+	defer results.Close()
+	if err := scan(results.QueryRow()); err != nil {
+		return "", err
+	}
+	waitingOn := ""
+	if openAsk {
+		var err error
+		if waitingOn, err = scanAskWaitingOn(results.QueryRow()); err != nil {
+			return "", err
+		}
+	}
+	return waitingOn, results.Close()
 }
 
 func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
@@ -470,11 +489,14 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		}
 	}
 	var comment model.Comment
-	if err := tx.QueryRow(r.Context(), `
+	waitingOn, err := threadTarget.insertComment(r.Context(), tx, func(row pgx.Row) error {
+		return row.Scan(&comment.CreatedAt)
+	}, `
 		insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, turn, suggestion)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		returning created_at
-	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, turn, suggestionJSON).Scan(&comment.CreatedAt); err != nil {
+	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, turn, suggestionJSON)
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -496,11 +518,6 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	comment.Suggestion = suggestion
 	comment.Mentions = mentions
 	comment.Deliveries = []model.CommentDelivery{}
-	waitingOn, err := threadTarget.waitingOn(r.Context(), tx)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
 	if comment.Anchor != nil {
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil, projectionKind), actor); err != nil {
 			s.writeHandlerError(w, err)

@@ -82,9 +82,9 @@ func RewriteApprovalAsk(
 	}
 	ask.Question = ApprovalQuestion(ask.Approval.Name, version, summary)
 	ask.Approval.Version = version
-	approval, err := json.Marshal(ask.Approval)
+	approval, err := EncodeApproval(ask.Approval)
 	if err != nil {
-		return model.Event{}, fmt.Errorf("encode approval ask: %w", err)
+		return model.Event{}, err
 	}
 	var editedAt time.Time
 	if err := tx.QueryRow(ctx, `
@@ -112,6 +112,15 @@ func RewriteApprovalAsk(
 		return model.Event{}, fmt.Errorf("stamp approval ask references: %w", err)
 	}
 	return event, nil
+}
+
+// EncodeApproval is an approval ask's approval as asks.approval stores it.
+func EncodeApproval(approval *model.AskApproval) ([]byte, error) {
+	encoded, err := json.Marshal(approval)
+	if err != nil {
+		return nil, fmt.Errorf("encode approval ask: %w", err)
+	}
+	return encoded, nil
 }
 
 // ApprovalQuestion renders the server-owned question prefix with its optional summary.

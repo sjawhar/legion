@@ -97,7 +97,7 @@ const validCalls = {
   dispatch_doc_read: { issue: "DSP-1" },
   dispatch_request_approval: {
     issue: "DSP-1",
-    summary: "Proposes a live sync in place of the nightly export.",
+    summary: "A live sync replaces the nightly export.",
   },
   dispatch_artifact: { issue: "DSP-1", name: "design.pdf", path: "design.pdf" },
   dispatch_read: { issue: "DSP-1" },

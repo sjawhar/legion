@@ -737,11 +737,15 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 	// A callback reply requests no turn, so it hands the turn back the way any session reply
 	// with no `turn` does.
 	turn := thread.replyTurn(actor, nil)
-	reply, err := scanComment(tx.QueryRow(r.Context(), `
+	var reply model.Comment
+	waitingOn, err := thread.insertComment(r.Context(), tx, func(row pgx.Row) (err error) {
+		reply, err = scanComment(row)
+		return err
+	}, `
 		insert into comments (issue_key, artifact_id, author, body, reply_to, ask_id, turn)
 		values ($1, $2, $3, $4, $5, $6, $7)
 		returning `+commentColumns+`
-	`, comment.IssueKey, comment.ArtifactID, author, *input.Body, thread.ReplyTo, thread.AskID, turn))
+	`, comment.IssueKey, comment.ArtifactID, author, *input.Body, thread.ReplyTo, thread.AskID, turn)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -751,11 +755,6 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-	}
-	waitingOn, err := thread.waitingOn(r.Context(), tx)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
 	}
 	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", reply.ID, reply.Body)
 	if err != nil {
