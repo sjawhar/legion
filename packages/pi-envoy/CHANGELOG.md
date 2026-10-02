@@ -277,6 +277,12 @@
   frame), releases what its own claim recorded, so the Retry Dispatch offers for that failed
   attempt runs the side turn again. Before, that Retry was dropped as a repeat and nothing
   answered it.
+- A frame whose `event_id` is empty no longer counts as a copy of an earlier one. The session
+  recorded `""` as an event id and dropped every later frame that carried an empty one, distinct
+  events included. A frame is now claimed under each identity field read on its own by the rule
+  `DedupeIdentitySchema` (`@legion/envoy-client/delivery`) gives it, so an empty `event_id` or
+  `dedupe_key` identifies nothing while a valid sibling still recognises a repeat. No listener or
+  bus envelope carries an empty one; only a raw NATS publisher can send it.
 - The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
   (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
   passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot
