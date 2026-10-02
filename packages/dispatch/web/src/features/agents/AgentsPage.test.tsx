@@ -1367,6 +1367,43 @@ test("Agents keeps exchanges with activity after the persisted cutoff and hides 
   }
 });
 
+// The cutoff and the answers carry microseconds: an answer 44 µs after the Clear, in the same
+// millisecond, is news and stays, and the answer at the Clear itself is cleared.
+test("an exchange answered within the Clear's millisecond but after it stays visible", async () => {
+  const page = renderAgents({
+    agentState: {
+      "planner-session": {
+        cleared_before: "2026-09-14T03:00:00.123456Z",
+        read_through: "2026-09-14T03:00:00.1235Z",
+        unread_replies: 0,
+      },
+    },
+    messages: [
+      exchange("m2", "Pending question", "2026-09-14T02:00:00Z", {
+        body: "Answer after the Clear",
+        createdAt: "2026-09-14T03:00:00.1235Z",
+      }),
+      exchange("m1", "Cleared question", "2026-09-14T01:00:00Z", {
+        body: "Answer at the Clear",
+        createdAt: "2026-09-14T03:00:00.123456Z",
+      }),
+    ],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    const conversation = await within(planner).findByRole("list", {
+      name: "Conversation with Planner",
+    });
+    await expect(within(conversation).findByText("Answer after the Clear")).resolves.toBeTruthy();
+    expect(within(planner).queryByText("Cleared question")).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
 test("Agents replies to an issue-less exchange through the agent route, threaded under the answer", async () => {
   const root = message("Can this ship?", {
     deliveries: [
