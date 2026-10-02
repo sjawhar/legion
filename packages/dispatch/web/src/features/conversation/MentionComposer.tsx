@@ -17,13 +17,7 @@ import {
 
 import { ApiError, api, apiErrorMessage } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
-import type {
-  Agent,
-  AskOption,
-  AskUrgency,
-  CreateCommentInput,
-  DeliveryCapability,
-} from "../../api/types";
+import type { Agent, AskOption, AskUrgency, DeliveryCapability } from "../../api/types";
 import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
 import { RefusableButton } from "../../components/RefusableButton";
@@ -68,6 +62,14 @@ import { ReferencePicker } from "../refs/ReferencePicker";
 import { buildDispatchReference, composerReferences } from "../refs/routes";
 import { MODE_LABELS } from "./delivery";
 import { ReplyQuote, replyQuoteText } from "./ReplyQuote";
+import {
+  type DeliveryPlan,
+  deliveryPlan,
+  mentionText,
+  type SentRequest,
+  sendRequest,
+  survivingMentions,
+} from "./send-request";
 import { useAgents } from "./useAgents";
 
 export type ComposerOwner =
@@ -119,12 +121,6 @@ interface Draft {
   readonly body: string;
   readonly mentions: readonly AcceptedMention[];
   readonly replacement?: string;
-}
-
-/** A send's own copy of the draft, taken when it starts: what the request is built from, and
- *  what a refusal hands back. */
-interface SentDraft extends Draft {
-  readonly replacement: string;
 }
 
 interface MentionOption {
@@ -262,33 +258,9 @@ function mentionQuery(
 }
 
 /** The prefix that sends a comment or message in a mode other than a Send, the default one, as the
- *  composer's does-not-advertise warning names it. `parseDelivery` matches the same two prefixes
- *  with its own pattern. */
+ *  composer's does-not-advertise warning names it. `parseDelivery` (`send-request.ts`) matches
+ *  the same two prefixes with its own pattern. */
 const DELIVERY_PREFIXES = { aside: "/aside", btw: "/btw" } as const;
-
-function parseDelivery(body: string): { body: string; delivery: DeliveryCapability } {
-  const match = /^(\/btw |\/aside )/.exec(body);
-  if (match === null) return { body, delivery: "steer" };
-  return { body: body.slice(match[0].length), delivery: match[0] === "/btw " ? "btw" : "aside" };
-}
-
-interface DeliveryPlan {
-  readonly body: string;
-  readonly delivery: DeliveryCapability | undefined;
-}
-
-function deliveryPlan(body: string, inherited: DeliveryCapability | undefined): DeliveryPlan {
-  const parsed = parseDelivery(body);
-  const hasCommand = parsed.body !== body;
-  return {
-    body: inherited === undefined || !hasCommand ? body : parsed.body,
-    delivery: inherited === undefined ? undefined : hasCommand ? parsed.delivery : inherited,
-  };
-}
-
-function mentionText(text: string): string {
-  return `@${text}`;
-}
 
 function mentionDisplay(title: string, target: string): string {
   const trimmed = title.trim();
@@ -373,25 +345,6 @@ function seededDraft(
   };
 }
 
-function survivingMentions(body: string, mentions: readonly AcceptedMention[]): AcceptedMention[] {
-  const seen = new Set<string>();
-  const surviving: AcceptedMention[] = [];
-  for (const mention of mentions) {
-    if (
-      seen.has(mention.target) ||
-      mention.start < 0 ||
-      mention.end > body.length ||
-      mention.start >= mention.end ||
-      body.slice(mention.start, mention.end) !== mentionText(mention.text)
-    ) {
-      continue;
-    }
-    seen.add(mention.target);
-    surviving.push(mention);
-  }
-  return surviving;
-}
-
 export function hasUnsavedInput(
   body: string,
   replacement: string,
@@ -434,108 +387,6 @@ function draftRefusal(
     return `Type the message after ${outbound.delivery === "btw" ? "/btw" : "/aside"}.`;
   }
   return undefined;
-}
-
-/**
- * A send, whole, as it stood when Send started it: where it goes (the owner, the reply it answers,
- * its kind and anchor), what it carries (the draft and an ask's fields), and, for an edit, which
- * comment it saves and how. TanStack gives a pending mutation each new render's options and calls
- * `mutationFn` only once `onMutate` has resolved, so a request read from the latest render follows
- * whatever changed in Send's own task - a host's Reply or issue pick, a kind switch, a newer
- * anchor. Built from this value alone, the request is the one the reader sent, in every host,
- * whether or not the host holds its own controls while the send is out.
- */
-interface SentRequest {
-  readonly anchor: ComposerAnchor | undefined;
-  readonly ask: {
-    readonly multiple: boolean;
-    readonly options: AskOption[];
-    readonly urgency: AskUrgency;
-  };
-  readonly draft: SentDraft;
-  readonly edit:
-    | {
-        readonly id: string;
-        readonly save: ((id: string, body: string) => Promise<unknown>) | undefined;
-      }
-    | undefined;
-  readonly kind: ComposerKind;
-  readonly owner: ComposerOwner;
-  readonly replyTo: MentionReplyTarget | null;
-}
-
-/** Sends a `SentRequest`. It sits outside the component, so no later render's props or state can
- *  reach the request it builds. */
-async function sendRequest({
-  anchor,
-  ask,
-  draft,
-  edit,
-  kind,
-  owner,
-  replyTo,
-}: SentRequest): Promise<unknown> {
-  const { body, mentions, replacement } = draft;
-  if (edit !== undefined) {
-    return edit.save === undefined
-      ? api.editComment(edit.id, { body: body.trim() })
-      : edit.save(edit.id, body.trim());
-  }
-  const selection =
-    anchor === undefined ? undefined : { artifact: anchor.artifact, mark_id: anchor.mark_id };
-  if (kind === "ask") {
-    if (owner.kind === "session")
-      throw new Error("The direct session channel does not support asks.");
-    const input = {
-      anchor: selection,
-      multiple: ask.multiple,
-      options: ask.options,
-      question: body.trim(),
-      urgency: ask.urgency,
-    };
-    return owner.kind === "issue"
-      ? api.createAsk(owner.issueKey, input)
-      : api.createArtifactAsk(owner.artifactId, input);
-  }
-  if (owner.kind === "session") {
-    const inheritedDelivery = replyTo?.thread?.delivery ?? "steer";
-    const plan = deliveryPlan(body, inheritedDelivery);
-    const reply = replyTo === null ? {} : { in_reply_to: replyTo.id };
-    return api.createAgentMessage(owner.sessionId, {
-      body: plan.body,
-      delivery: plan.delivery ?? inheritedDelivery,
-      ...reply,
-    });
-  }
-  if (replyTo?.parentKind === "message") {
-    if (owner.kind !== "issue") throw new Error("Legacy message replies belong to an issue.");
-    const plan = deliveryPlan(body, replyTo.thread?.delivery);
-    return api.createMessage(owner.issueKey, {
-      body: plan.body,
-      in_reply_to: replyTo.id,
-      ...(replyTo.thread === undefined
-        ? {}
-        : { delivery: plan.delivery, target: replyTo.thread.target }),
-    });
-  }
-  const targets = survivingMentions(body, mentions).map((mention) => mention.target);
-  const baseBody = kind === "suggestion" && body.trim() === "" ? "Suggested replacement." : body;
-  const plan = deliveryPlan(baseBody, targets.length === 0 ? undefined : "steer");
-  const comment: CreateCommentInput = {
-    body: plan.body,
-    ...(replyTo === null ? {} : { reply_to: replyTo.id }),
-    ...(kind === "suggestion" ? { suggestion: { replace_with: replacement } } : {}),
-    ...(targets.length === 0
-      ? {}
-      : {
-          delivery: plan.delivery ?? "steer",
-          mentions: targets.map((target) => ({ target })),
-        }),
-  };
-  const input = replyTo === null ? { ...comment, anchor: selection } : comment;
-  return owner.kind === "issue"
-    ? api.createComment(owner.issueKey, input)
-    : api.createArtifactComment(owner.artifactId, input);
 }
 
 interface MentionComposerProps {
@@ -931,7 +782,10 @@ export function MentionComposer({
       mentions,
       replacement: replacementTextarea.current?.value ?? replacement,
     },
-    edit: edit === undefined ? undefined : { id: edit.id, save: saveEdit },
+    edit:
+      edit === undefined
+        ? undefined
+        : { id: edit.id, save: saveEdit ?? ((id, text) => api.editComment(id, { body: text })) },
     kind,
     owner,
     replyTo,

@@ -1,5 +1,13 @@
 import { type MutationKey, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { api } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
@@ -27,19 +35,13 @@ export interface AgentReply {
   readonly target: ReplyTarget;
 }
 
-/** Agent rows mounted this page load, so each mount's send has a name no other mount shares. */
-let agentRowMounts = 0;
-
 /** The name of an agent row's send. The row reads it (`useIsMutating`) to hold what a message on
  *  its way has already fixed - the picker and the Reply buttons - and the composer names its send
  *  with it, so the two keys cannot drift apart. It belongs to one mount of the row: a row that
  *  unmounts mid-send (its session left the registry, or the reader left the page) comes back with
  *  a fresh composer, which holds nothing for a send it did not make. */
 export function useAgentSendKey(sessionID: string): MutationKey {
-  const [mount] = useState(() => {
-    agentRowMounts += 1;
-    return agentRowMounts;
-  });
+  const mount = useId();
   return useMemo(() => ["agent-composer", sessionID, mount], [sessionID, mount]);
 }
 
