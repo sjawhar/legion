@@ -149,12 +149,12 @@ row before it waits for the slot. The slot is in memory, where Postgres cannot s
 no transaction may wait for it while holding a lock its holder still needs. A failed room's eviction
 flushes and compacts under the advisory lock, so no transaction waits for a failed room to recover
 either: a document operation inside a transaction (a handler's, or settlement's own) that meets one
-fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`), the transaction rolls back, and
-the caller retries once the room has reloaded; so does a write whose room fails before its first
-append, since the reloaded room may lack it. A room's own load never waits for that recovery
-either - the eviction waits in ygo's `CloseRoom` for the load's ready barrier, so the two would
-hold each other - and refuses instead, which ends the eviction; the replacement room's load then
-runs the one settlement the failure dropped.
+fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`, whatever failed the room), the
+transaction rolls back, and the caller retries once the room has reloaded; so does a write whose
+room fails before its first append, since the reloaded room may lack it. A room's own load never
+waits for that recovery either - the eviction waits in ygo's `CloseRoom` for the load's ready
+barrier, so the two would hold each other - and refuses instead, which ends the eviction; the
+replacement room's load then runs the one settlement the failure dropped.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
@@ -182,6 +182,34 @@ latest version number, or `null` when it has none (the live markdown beside it a
 are two unsynchronised reads, in both directions; `token` is the concurrency primitive). The server resolves
 the block when it creates a quote or browser-mark anchor; `envoy-dispatch backfill-anchor-blocks`
 fills legacy anchors only when their cached quote has one current match.
+`GET /api/v1/artifacts/{id}/blocks/{block_id}` places any one block (`pmdoc.BlockPathOf`, over
+the document `readDocument` serves): its path of `{type, id, index}` from the top-level block
+down, and for a table block, row or cell a `table` naming the table's id, the row's child index
+(0 is the header row), the cell's child index in its row (the indexes `delete_row` and
+`delete_column` take, so a spanning cell counts once), the text of the header cell drawn above
+the cell and the row's cells as their opening words. The header is found where the renderer
+writes the cell (`tableGrid`, laid out on a span budget of its own through the anchored row), so
+in a table with colspans or rowspans it is the column the cell is drawn in, not the header row's
+child at the cell's index. `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}` attach the
+same answer for the anchor's `block_id` as `anchor_block` (`api.anchorBlock`), computed at read
+time and never stored or carried on lists and events; a block the live document no longer holds
+leaves it absent while the anchor keeps its stale `block_id`. The position is one derived field
+of those reads, so a document they cannot read does not fail them: the read answers 200 without
+`anchor_block` and with `anchor_block_error`, logged at WARN. `api.documentErrorCode` names that
+error for the read and for `writeHandlerError` alike, and both take its codes in one order, so
+`anchor_block_error` is the code the block route answers the same error with.
+`DOC_SERVICE_UNAVAILABLE` is a room or store that could not serve the document, taken before any
+cause the error carries: a failed room carries the error another operation failed it with
+(settlement's schema refusal, a settlement that failed three times - its warm-up refused because
+the issue had closed, among others - a writer's failed or cancelled commit, a failed store write
+or load), which says nothing of this request. `DOC_SCHEMA` is a live tree outside the schema,
+taken after the refusals that name the caller's own input or a missing block, so an ask block the
+renderer refused stays `400 INVALID_ASK_BLOCK`. Anything else is `INTERNAL`, as
+`writeHandlerError` answers it. Only a request that has gone away fails, decided by that request's
+own context rather than the error, since a room a writer's cancelled commit failed carries that
+writer's `context.Canceled` in its cause. Nor does that read wait for a failed room's recovery
+(`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`,
+`GET /blocks` and the block route wait.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code

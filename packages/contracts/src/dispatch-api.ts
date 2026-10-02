@@ -458,6 +458,52 @@ export interface ArtifactBlock {
   };
 }
 
+/** One node on a block's path from the document's top-level block down to the block: its type,
+ *  its block id ("" for a node the live document has not stamped yet) and its index among its
+ *  parent's children. */
+export interface BlockPathEntry {
+  readonly type: string;
+  readonly id: string;
+  readonly index: number;
+}
+
+/** Where a block stands in the table holding it. `row` is the row's index (0 is the header row)
+ *  and `column` the cell's index in its row — the indexes `delete_row` and `delete_column` take.
+ *  `row` is null for the table block itself; `column` and `header` are null for the table and for
+ *  a row block. `header` is the text of the header cell drawn above the cell's column once colspans
+ *  and rowspans take their places, "" where no header cell covers it. `cells` is each cell of the
+ *  row as its opening words, by child index; null for the table block. */
+export interface TablePosition {
+  readonly id: string;
+  readonly row: number | null;
+  readonly column: number | null;
+  readonly header: string | null;
+  readonly cells: readonly string[] | null;
+}
+
+/** Where a block stands in its document: `GET /api/v1/artifacts/{id}/blocks/{block_id}`'s answer,
+ *  and a comment's or ask's `anchor_block`. `table` is present for a table block and for every
+ *  block inside one. */
+export interface BlockPath {
+  readonly id: string;
+  readonly type: string;
+  readonly path: readonly BlockPathEntry[];
+  readonly table?: TablePosition;
+}
+
+/** Where a comment's or an ask's anchor's block stands in the live document. Set on the
+ *  single-record reads alone (`GET /api/v1/comments/{id}`, `GET /api/v1/asks/{id}`); lists and
+ *  events never carry it. */
+export interface AnchorPosition {
+  /** Absent when the anchor names no block, the block has left the document, the document could
+   *  not be read (`anchor_block_error` then says why), or the server predates it. */
+  readonly anchor_block?: BlockPath;
+  /** Why `anchor_block` is absent although the anchor names a block: the read could not read its
+   *  document, named by the code the API answers that error with elsewhere. The read itself still
+   *  answers. */
+  readonly anchor_block_error?: "DOC_SERVICE_UNAVAILABLE" | "DOC_SCHEMA" | "INTERNAL";
+}
+
 /** An opaque SHA-256 token for one stable block's full Proof state, including inline marks. */
 export interface EditBlockPrecondition {
   readonly id: string;
@@ -495,7 +541,7 @@ export interface Version {
 
 export type AskKind = "question" | "approval";
 
-export interface Ask {
+export interface Ask extends AnchorPosition {
   readonly id: string;
   readonly issue_key: string | null;
   readonly artifact_id?: string | null;
@@ -728,7 +774,7 @@ export interface CommentDeliveryEventPayload {
   readonly error?: string;
   readonly reply_id: string | null;
 }
-export interface Comment {
+export interface Comment extends AnchorPosition {
   readonly id: string;
   readonly issue_key: string | null;
   readonly artifact_id?: string | null;

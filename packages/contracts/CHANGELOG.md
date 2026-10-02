@@ -15,6 +15,15 @@
 
 ### Added
 
+- `BlockPath`, `BlockPathEntry` and `TablePosition`, the shape of
+  `GET /api/v1/artifacts/{id}/blocks/{block_id}`: a block's path from the top-level block down
+  and, in a table, the row and column indexes `delete_row` and `delete_column` take, the text of
+  the header cell drawn above the cell and the row's cells. `AnchorPosition`, which `Comment` and
+  `Ask` extend, carries the same for the anchor's block on the single-record reads as
+  `anchor_block`, and `anchor_block_error` says why `anchor_block` is absent when the read could
+  not read the anchor's document, as the code the API answers that error with elsewhere
+  (`DOC_SERVICE_UNAVAILABLE`, `DOC_SCHEMA`, `INTERNAL`). `dispatch_read`'s description names the
+  `Position:` line it prints (LEGION-460).
 - `CreateBroadcastInput.idempotency_key` (required): names one send, so the server answers a
   repeat of it with the broadcast the first request made and refuses the key's reuse for a
   different request with `409 BROADCAST_KEY_REUSED` (LEGION-446).

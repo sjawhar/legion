@@ -507,6 +507,27 @@ func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, blocks)
 }
 
+func (s *server) getArtifactBlockPath(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	path, err := s.deps.Docs.BlockPath(r.Context(), artifact.ID, r.PathValue("block_id"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, path)
+}
+
 // blockReferences counts the comments and asks anchored directly to each block.
 // getArtifactBlocks adds a table's descendant-cell counts before it serves the
 // table block. The predicate is two conjuncts (is not null, then not the empty

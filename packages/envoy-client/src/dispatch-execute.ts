@@ -6,6 +6,7 @@ import type {
   Ask,
   AskRead,
   AskUrgency,
+  BlockPath,
   Comment,
   CommentRead,
   CreateAskInput,
@@ -1455,6 +1456,7 @@ function askSummary({ ask, replies }: AskRead, graph: readonly string[]): string
   ]);
   return [
     `Question: ${ask.question}`,
+    ...anchorLines(ask),
     "Options:",
     ...(ask.options.length === 0
       ? ["- none"]
@@ -1527,12 +1529,12 @@ export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: strin
 function commentSummary({ comment, replies }: CommentRead, graph: readonly string[]): string {
   const root = [
     `${comment.id} · ${actorText(comment.author)}`,
-    ...(comment.anchor?.quote === undefined ? [] : [`> ${comment.anchor.quote}`]),
+    ...anchorLines(comment),
     `Body: ${comment.body}`,
   ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} · ${actorText(reply.author)}`,
-    ...(reply.anchor?.quote === undefined ? [] : [`> ${reply.anchor.quote}`]),
+    ...anchorLines(reply),
     `Body: ${reply.body}`,
   ]);
   return [
@@ -1542,6 +1544,45 @@ function commentSummary({ comment, replies }: CommentRead, graph: readonly strin
     ...(chain.length === 0 ? ["- none"] : chain),
     ...graph,
   ].join("\n");
+}
+
+/** An anchored record's quote, then where its block stands: the position, or why the read could
+ *  not place it. A record without an anchor prints neither. */
+function anchorLines(
+  record: Pick<Comment, "anchor" | "anchor_block" | "anchor_block_error">
+): string[] {
+  return [
+    ...(record.anchor?.quote === undefined ? [] : [`> ${record.anchor.quote}`]),
+    ...(record.anchor_block === undefined
+      ? []
+      : [`Position: ${positionText(record.anchor_block)}`]),
+    ...(record.anchor_block_error === undefined
+      ? []
+      : [`Position: unavailable (${record.anchor_block_error})`]),
+  ];
+}
+
+/** Where an anchor's block stands. Every node from the top-level block down reads `type[index]`;
+ *  in a table the row and cell read instead as `row 5 (Red-teamer loop), column Due`: the row's
+ *  index (0 is the header), labelled by its cells before the anchored column — blank cells and
+ *  bare numbers dropped, since a `#` column repeats the index — and the column's header, or its
+ *  index where no header cell covers it. */
+export function positionText(block: BlockPath): string {
+  const { table, path } = block;
+  const segments = path.map((entry) => `${entry.type}[${entry.index}]`);
+  if (table === undefined || table.row === null) return segments.join(" › ");
+  const tableAt = path.findIndex((entry) => entry.type === "table");
+  const cells = table.cells ?? [];
+  const label = (table.column === null ? cells : cells.slice(0, table.column))
+    .map((cell) => cell.trim())
+    .filter((cell) => cell !== "" && !/^\d+$/.test(cell))
+    .join(" · ");
+  const row = label === "" ? `row ${table.row}` : `row ${table.row} (${label})`;
+  const header = table.header === null || table.header === "" ? String(table.column) : table.header;
+  return [
+    ...segments.slice(0, tableAt + 1),
+    table.column === null ? row : `${row}, column ${header}`,
+  ].join(" › ");
 }
 
 function messageSummary({ message, replies }: MessageRead, graph: readonly string[]): string {

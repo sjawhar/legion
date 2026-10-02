@@ -38,6 +38,20 @@
   change should do (restore its draft, copy the message, reload and send again). Keys are stored
   per human in `broadcast_idempotency_keys` (migration `0055`) and kept as long as their
   broadcast (LEGION-446).
+- `GET /api/v1/artifacts/{id}/blocks/{block_id}` says where one block stands in a Dispatch
+  document: its path from the top-level block down (each node's type, block id and child index)
+  and, for a table block, row or cell, the table's id, the row index (0 is the header row), the
+  cell's column index (the indexes `delete_row` and `delete_column` take), the text of the header
+  cell drawn above it (in a table with colspans or rowspans, the column the cell is drawn in) and
+  the row's cells. An id the live document does not hold is `404 TARGET_NOT_FOUND`.
+  `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}` carry the same answer for their
+  anchor's block as `anchor_block`, derived from the live document at read time and absent when
+  the anchor names no block or the block has left the document; lists and events do not carry
+  it. When the anchor's document cannot be read, those two reads still answer `200`, without
+  `anchor_block` and with `anchor_block_error` (`DOC_SERVICE_UNAVAILABLE`, `DOC_SCHEMA` or
+  `INTERNAL`, the codes the API answers those errors with elsewhere), logged at WARN, and they do
+  not wait for a failed document room's recovery; only a request that has itself gone away fails
+  them (LEGION-460).
 
 ### Changed
 
@@ -127,6 +141,13 @@
 - Dispatch exits with status 1 when it cannot bind its listen address. It logged
   `dispatch: listen … bind: address already in use` and exited 0, so a supervisor read a port
   clash as a clean stop.
+
+- A Dispatch request refused because its document room failed answers
+  `503 DOC_SERVICE_UNAVAILABLE` whatever failed the room, as a comment's or ask's
+  `anchor_block_error` names it: both name a document error through one classification
+  (`api.documentErrorCode`), which takes a failed room before any cause the room carries. A room
+  failed by settlement's schema refusal answered `500 DOC_SCHEMA`, though the request had not met
+  that refusal itself; a retry once the room is evicted meets the document (LEGION-460).
 
 - A search that contains only stop words now returns `200` with no results, so every consumer
   can show an empty result rather than a retryable failure.
