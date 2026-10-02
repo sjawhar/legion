@@ -13,18 +13,34 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
+// rebuildUpdateItems is the number of paragraphs each update of oversizedHistory adds; eleven of
+// them exceed ygo's cap of 1<<20 items in one update.
 const rebuildUpdateItems = 100_000
 
-func oversizedHistoryUpdate(t *testing.T) []byte {
+// oversizedHistory is eleven updates one client made in turn, each prepending rebuildUpdateItems
+// empty paragraphs. Each is accepted on its own: AppendUpdate applies it to an empty document,
+// where the first integrates and each later one parks whole behind the clock gap the earlier ones
+// leave, within ygo's pending cap of 100,000 items. Merged, they are one client's 1.1 million
+// items, which ygo refuses from that client's header before it integrates any (reearth/ygo v1.49.5,
+// crdt/update.go decodeAndPark), so the history cannot load and no load of it walks a million
+// items first. Each paragraph is prepended because ygo finds an insert position by walking the
+// fragment's children from its start (crdt/yxml.go leftChildAt): appending takes quadratic time,
+// about 30 s for 100,000.
+func oversizedHistory(t *testing.T) [][]byte {
 	t.Helper()
 	doc := crdt.New()
 	fragment := doc.GetXmlFragment(fragmentName)
-	doc.Transact(func(transaction *crdt.Transaction) {
-		for index := range rebuildUpdateItems {
-			fragment.InsertElement(transaction, index, crdt.NewYXmlElement("paragraph"))
-		}
-	})
-	return crdt.EncodeStateAsUpdateV1(doc, nil)
+	updates := make([][]byte, 11)
+	for index := range updates {
+		before := doc.StateVector()
+		doc.Transact(func(transaction *crdt.Transaction) {
+			for range rebuildUpdateItems {
+				fragment.InsertElement(transaction, 0, crdt.NewYXmlElement("paragraph"))
+			}
+		})
+		updates[index] = crdt.EncodeStateAsUpdateV1(doc, before)
+	}
+	return updates
 }
 
 // rebuildDocument rebuilds the way the route does: inside a transaction joined with Service.Join,
@@ -52,13 +68,13 @@ func rebuildDocument(t *testing.T, service *Service, artifactID string, markdown
 // A history that exceeds ygo's merged-update item cap cannot load. Rebuilding it preserves the
 // latest saved version, advances the durable cursor, and leaves the artifact's version history.
 // Until the rebuild's transaction ends its room refuses loads and a second rebuild, which would
-// read the old history the transaction has not yet replaced.
+// read the old history the transaction has not yet replaced; once it commits, the room opens.
 func TestRebuildDocumentRestoresDocumentThatCannotLoad(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before\n")
 	persistence := NewPgVersioned(database)
-	for range 11 {
-		if _, err := persistence.AppendUpdate(context.Background(), artifactID, oversizedHistoryUpdate(t)); err != nil {
+	for _, update := range oversizedHistory(t) {
+		if _, err := persistence.AppendUpdate(context.Background(), artifactID, update); err != nil {
 			t.Fatalf("append accepted history update: %v", err)
 		}
 	}
@@ -109,6 +125,9 @@ func TestRebuildDocumentRestoresDocumentThatCannotLoad(t *testing.T) {
 	}
 	if updates != 1 || versions != 1 {
 		t.Fatalf("rebuild left %d updates and %d artifact versions, want 1 and 1", updates, versions)
+	}
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("load after the rebuild commits: %v", err)
 	}
 }
 
