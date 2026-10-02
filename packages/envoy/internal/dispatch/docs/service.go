@@ -1335,24 +1335,10 @@ type BlockIDBackfill struct {
 // failure is reported with that document so later documents can still be stamped.
 func (s *Service) BackfillBlockIDs(ctx context.Context) ([]BlockIDBackfill, error) {
 	ctx = store.WithTransactionTracking(ctx)
-	rows, err := s.store.Pool.Query(ctx, `select id::text from artifacts where kind = 'doc' order by id`)
+	artifactIDs, err := s.documentIDs(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list documents: %w", err)
+		return nil, err
 	}
-	var artifactIDs []string
-	for rows.Next() {
-		var artifactID string
-		if err := rows.Scan(&artifactID); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scan document: %w", err)
-		}
-		artifactIDs = append(artifactIDs, artifactID)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, fmt.Errorf("iterate documents: %w", err)
-	}
-	rows.Close()
 
 	result := make([]BlockIDBackfill, 0, len(artifactIDs))
 	for _, artifactID := range artifactIDs {
@@ -1362,81 +1348,89 @@ func (s *Service) BackfillBlockIDs(ctx context.Context) ([]BlockIDBackfill, erro
 }
 
 func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) BlockIDBackfill {
-	report := BlockIDBackfill{ArtifactID: artifactID}
+	// The backfill writes the same closure the settlement does, so its row is classified the same
+	// way: stamping a block a rendering never names changes no text, while re-minting a typed
+	// block's repeated id changes the `#id` its directive carries.
+	stamped, skipped, err := s.repairDocument(ctx, artifactID, func(doc *crdt.Doc, origin any) (int, bool, error) {
+		before, beforeErr := renderDocument(doc)
+		tree, count, err := ensureBlockIDsInDocument(doc, origin)
+		if err != nil {
+			return count, false, err
+		}
+		return count, closureChangedMarkdown(before, beforeErr, tree), nil
+	})
+	return BlockIDBackfill{ArtifactID: artifactID, Stamped: stamped, Skipped: skipped, Err: err}
+}
+
+// repairDocument runs repair on artifactID's live document as a server-owned repair and appends
+// what it wrote as one update: repair transacts with origin and reports how many repairs it made
+// and whether they change the document's content (doc_updates.content_changed). A repair that
+// makes none writes nothing. It writes a closed issue's document too, whose room refuses every
+// other write, and broadcasts the update to the room's peers before the update is durable, as the
+// settlement's own repairs do. skipped names why a stopping service left the document alone.
+func (s *Service) repairDocument(
+	ctx context.Context,
+	artifactID string,
+	repair func(doc *crdt.Doc, origin any) (repairs int, contentChanged bool, err error),
+) (repairs int, skipped string, err error) {
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
-		report.Err = fmt.Errorf("recover document: %w", err)
-		return report
+		return 0, "", fmt.Errorf("recover document: %w", err)
 	}
 	state := s.room(artifactID)
 	state.mu.Lock()
 	if s.stopping.Load() {
 		state.mu.Unlock()
-		report.Skipped = "service stopping"
-		return report
+		return 0, "service stopping", nil
 	}
 	state.mu.Unlock()
 
-	backfillCtx := withOwnerVerified(ctx)
+	repairCtx := withOwnerVerified(ctx)
 	slot := s.prepareSuppressedPersistence(artifactID)
 	origin := &identityClosureOrigin{}
-	// The backfill writes the same closure the settlement does, so its row is classified the same
-	// way: stamping a block a rendering never names changes no text, while re-minting a typed
-	// block's repeated id changes the `#id` its directive carries.
-	var stampedChanged bool
-	updates, err := s.applyCaptured(backfillCtx, artifactID, origin, func(doc *crdt.Doc) error {
-		before, beforeErr := renderDocument(doc)
-		stamped, count, stampErr := ensureBlockIDsInDocument(doc, origin)
-		report.Stamped = count
-		if stampErr != nil {
-			return stampErr
-		}
-		stampedChanged = closureChangedMarkdown(before, beforeErr, stamped)
-		return nil
+	var contentChanged bool
+	updates, err := s.applyCaptured(repairCtx, artifactID, origin, func(doc *crdt.Doc) error {
+		var repairErr error
+		repairs, contentChanged, repairErr = repair(doc, origin)
+		return repairErr
 	})
 	if err != nil {
 		s.cancelSuppressedPersistence(artifactID, slot)
-		report.Err = fmt.Errorf("stamp document: %w", err)
-		return report
+		return repairs, "", fmt.Errorf("repair document: %w", err)
 	}
-	if report.Stamped == 0 {
+	if repairs == 0 {
 		s.cancelSuppressedPersistence(artifactID, slot)
-		return report
+		return 0, "", nil
 	}
 	update, err := mergeUpdates(updates)
 	if err != nil {
 		s.discardSuppressedPersistence(artifactID, slot)
 		s.failRoom(artifactID, err)
-		report.Err = fmt.Errorf("capture identity update: %w", err)
-		return report
+		return repairs, "", fmt.Errorf("capture repair update: %w", err)
 	}
-	if err := s.srv.BroadcastUpdate(backfillCtx, artifactID, update); err != nil {
+	if err := s.srv.BroadcastUpdate(repairCtx, artifactID, update); err != nil {
 		s.discardSuppressedPersistence(artifactID, slot)
-		s.failRoom(artifactID, fmt.Errorf("broadcast identity update: %w", err))
-		report.Err = fmt.Errorf("broadcast identity update: %w", err)
-		return report
+		s.failRoom(artifactID, fmt.Errorf("broadcast repair update: %w", err))
+		return repairs, "", fmt.Errorf("broadcast repair update: %w", err)
 	}
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
 		s.discardSuppressedPersistence(artifactID, slot)
 		s.failRoom(artifactID, err)
-		report.Err = fmt.Errorf("begin document transaction: %w", err)
-		return report
+		return repairs, "", fmt.Errorf("begin document transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, stampedChanged); err != nil {
+	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, contentChanged); err != nil {
 		s.discardSuppressedPersistence(artifactID, slot)
 		s.failRoom(artifactID, err)
-		report.Err = fmt.Errorf("append identity update: %w", err)
-		return report
+		return repairs, "", fmt.Errorf("append repair update: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		s.discardSuppressedPersistence(artifactID, slot)
 		s.failRoom(artifactID, err)
-		report.Err = fmt.Errorf("commit identity update: %w", err)
-		return report
+		return repairs, "", fmt.Errorf("commit repair update: %w", err)
 	}
 	s.finishSuppressedPersistence(slot, update)
-	return report
+	return repairs, "", nil
 }
 
 // addUnlessStopping registers one worker with group unless Shutdown has already begun, and
