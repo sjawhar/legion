@@ -1091,31 +1091,41 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		state.mu.Unlock()
 		return write.tree, write.markdown, capture, authors, nil
 	}
-	if fork == nil && s.srv.GetDoc(room) == nil {
-		err := s.srv.Apply(ctx, room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
-		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-			return nil, "", versionPending{}, nil, fmt.Errorf("warm live document: %w", err)
-		}
-	}
-
 	// The room's state lock is held from the read to the authors it captures, so an author the
 	// update observer credits (creditContentChange, after the update is in the room) is captured
 	// only with that update's text. The room itself is read through a copy taken under its
 	// document lock (snapshotDocument), as a peer or service write holds that lock while it
 	// applies and a direct walk of the live tree takes none. The order - state lock, then document
 	// lock - is never reversed: nothing that holds a document's lock, which only a Yjs
-	// transaction's own function does, takes a room's state lock.
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	// transaction's own function does, takes a room's state lock. The copy is taken inside the
+	// Apply that loads and holds the room, as docView reads it: a room looked up again once that
+	// Apply returned can have been evicted in between.
 	doc := fork
-	if doc == nil {
-		live := s.srv.GetDoc(room)
-		if live == nil {
-			return nil, "", versionPending{}, nil, errors.New("warm live document did not retain room")
+	var capture versionPending
+	var authors []model.Actor
+	if doc != nil {
+		state := s.room(room)
+		state.mu.Lock()
+		capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
+		state.mu.Unlock()
+	} else {
+		var copyErr error
+		err := s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
+			if s.afterReadWarm != nil {
+				s.afterReadWarm(room)
+			}
+			state := s.room(room)
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			if doc, copyErr = snapshotDocument(live); copyErr == nil {
+				capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
+			}
+		})
+		if copyErr != nil {
+			return nil, "", versionPending{}, nil, copyErr
 		}
-		if doc, err = snapshotDocument(live); err != nil {
-			return nil, "", versionPending{}, nil, err
+		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			return nil, "", versionPending{}, nil, fmt.Errorf("warm live document: %w", err)
 		}
 	}
 	tree, err := treeOf(doc)
@@ -1126,7 +1136,6 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	if err != nil {
 		return nil, "", versionPending{}, nil, err
 	}
-	capture, authors := captureAuthors(state, joinedLiveWrite(ctx, room), actor)
 	return tree, markdown, capture, authors, nil
 }
 

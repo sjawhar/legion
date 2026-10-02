@@ -150,24 +150,28 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 }
 
 // VerifyMark returns what a browser-written mark anchors to, now or after its next document
-// update.
+// update. It subscribes to the room's updates inside the Apply that loads and holds the room: a
+// room looked up again once that Apply returned can have been evicted in between.
 func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error) {
-	if err := s.srv.Apply(ctx, artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {}); err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+	updates := make(chan struct{}, 1)
+	var unsubscribe func()
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		if s.afterReadWarm != nil {
+			s.afterReadWarm(artifactID)
+		}
+		unsubscribe = doc.OnUpdate(func(_ []byte, _ any) {
+			select {
+			case updates <- struct{}{}:
+			default:
+			}
+		})
+	})
+	if unsubscribe != nil {
+		defer unsubscribe()
+	}
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return Anchored{}, err
 	}
-	doc := s.srv.GetDoc(artifactID)
-	if doc == nil {
-		return Anchored{}, errors.New("warm live document did not retain room")
-	}
-
-	updates := make(chan struct{}, 1)
-	unsubscribe := doc.OnUpdate(func(_ []byte, _ any) {
-		select {
-		case updates <- struct{}{}:
-		default:
-		}
-	})
-	defer unsubscribe()
 
 	timer := time.NewTimer(s.markWait)
 	defer timer.Stop()

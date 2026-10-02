@@ -90,6 +90,10 @@ type Service struct {
 	// afterSettleLock runs after settleRoom has taken the document's advisory lock and before
 	// it touches the room. Nil outside tests; tests use it to fail the room in that window.
 	afterSettleLock func(room string)
+	// afterReadWarm runs once a read that may load its room holds that room - a version's
+	// capture (captureLiveTextAndAuthors) and VerifyMark - and before the read takes anything from
+	// it. Nil outside tests; tests use it to evict the room in that window.
+	afterReadWarm func(room string)
 	// afterPublishRefused runs when a committed write's publish is refused by its room, before
 	// the publish decides whether to fail that room. Nil outside tests; tests use it to let the
 	// refused room's recovery finish in that window.
