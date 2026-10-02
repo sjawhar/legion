@@ -1,4 +1,4 @@
-import { itemFromSearch } from "@legion/contracts";
+import { hasControlCharacter, itemFromSearch } from "@legion/contracts";
 import { matchPath } from "react-router-dom";
 
 import type { Artifact } from "../../api/types";
@@ -105,7 +105,7 @@ export function issueTabForRoute(
 function decodedSegment(value: string): string | undefined {
   try {
     const decoded = decodeURIComponent(value);
-    return decoded === "" || /\p{Cc}/u.test(decoded) ? undefined : decoded;
+    return decoded === "" || hasControlCharacter(decoded) ? undefined : decoded;
   } catch {
     return undefined;
   }
@@ -188,7 +188,7 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
 /** A `dispatch://` reference's route. One holding a control character names nothing, as the
  * server's `text.Extract` reads it. */
 export function parseDispatchReference(value: string): DispatchReferenceRoute | undefined {
-  if (/\p{Cc}/u.test(value)) {
+  if (hasControlCharacter(value)) {
     return undefined;
   }
   const match = value.match(/^dispatch:\/\/([^/]+)(?:\/(.*))?$/);
@@ -318,7 +318,7 @@ export function referenceRouteFromHref(
   if (href.startsWith("dispatch://")) {
     return parseDispatchReference(href);
   }
-  if (/\p{Cc}/u.test(href)) {
+  if (hasControlCharacter(href)) {
     return undefined;
   }
   let url: URL;

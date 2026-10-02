@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { DISPATCH_HREF_REFERENCES, itemFromSearch } from "./dispatch-href";
+import { DISPATCH_HREF_REFERENCES, hasControlCharacter, itemFromSearch } from "./dispatch-href";
+
+test("identifies control characters", () => {
+  expect(hasControlCharacter("\u0000")).toBe(true);
+  expect(hasControlCharacter("\u001F")).toBe(true);
+  expect(hasControlCharacter("visible")).toBe(false);
+});
 
 describe("itemFromSearch", () => {
   test("names the item a document URL carries", () => {

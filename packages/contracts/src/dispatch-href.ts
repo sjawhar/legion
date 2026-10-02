@@ -10,6 +10,11 @@ export interface DispatchHrefItem {
   kind: "ask" | "comment";
 }
 
+/** Whether a decoded Dispatch path or query segment holds a control character. */
+export function hasControlCharacter(value: string): boolean {
+  return /\p{Cc}/u.test(value);
+}
+
 /**
  * The item a dashboard URL's query names: `undefined` when it names none, `null` when the query
  * is not a shape Dispatch emits (both parameters at once, or an id that is not a decodable
@@ -36,7 +41,7 @@ export function itemFromSearch(search: string): DispatchHrefItem | undefined | n
   } catch {
     return null;
   }
-  if (/\p{Cc}/u.test(id)) {
+  if (hasControlCharacter(id)) {
     return null;
   }
   return ask === null ? { id, kind: "comment" } : { id, kind: "ask" };

@@ -429,13 +429,7 @@ func TestCitationsOfAnIDDecodingToNULDoNotFailTheWrite(t *testing.T) {
 	body := "See dispatch://" + target.Key + "/comment/%00, https://dispatch.example/issues/" + target.Key +
 		"/comments/%00 and https://dispatch.example/issues/" + target.Key + "/spec?comment=%2500.\n"
 
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+target.Key+"/comments", map[string]string{
-		"body": body,
-	}, "alice")
-	if response.Code != http.StatusCreated {
-		t.Fatalf("create comment citing a NUL id: status=%d body=%s", response.Code, response.Body.String())
-	}
-	comment := decodeBody[model.Comment](t, response)
+	comment := createReferenceAPIComment(t, handler, target.Key, body)
 	commentRef := "dispatch://" + target.Key + "/comment/" + comment.ID
 	if edges := graphEdges(t, handler, url.Values{"from": {commentRef}, "kind": {"mentions"}}).Edges; len(edges) != 0 {
 		t.Fatalf("comment mentions = %#v; want none", edges)

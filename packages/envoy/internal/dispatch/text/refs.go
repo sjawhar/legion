@@ -38,6 +38,10 @@ const ComponentIDPattern = `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
 
 var componentIDPattern = regexp.MustCompile(ComponentIDPattern)
 
+func hasControl(value string) bool {
+	return strings.ContainsFunc(value, unicode.IsControl)
+}
+
 // IsComponentID reports whether value is a component id: a lowercase slug of
 // [a-z0-9] with single-character-bounded hyphens, such as web or dispatch-server.
 func IsComponentID(value string) bool {
@@ -123,7 +127,7 @@ func trimReference(raw string) string {
 // `parseDispatchReference` reads: a slug as written, an `@v` version, and an item id decoded as
 // `itemSegment` decodes it. A reference holding a control character names nothing.
 func parseDispatch(value string) (Ref, bool) {
-	if strings.ContainsFunc(value, unicode.IsControl) {
+	if hasControl(value) {
 		return Ref{}, false
 	}
 	key, tail, found := strings.Cut(value, "/")
@@ -211,8 +215,7 @@ func itemSegment(raw string) (string, bool) {
 // the index binds ids as `text[]`, where Postgres refuses a NUL and fails the write holding it.
 func decodeItemID(value string) (string, bool) {
 	decoded, err := url.PathUnescape(value)
-	return decoded, err == nil && utf8.ValidString(decoded) &&
-		!strings.ContainsFunc(decoded, unicode.IsControl)
+	return decoded, err == nil && utf8.ValidString(decoded) && !hasControl(decoded)
 }
 
 // parseServer reads a dashboard URL of serverURL as the dashboard's `referenceRouteFromHref` reads
@@ -224,7 +227,7 @@ func parseServer(raw, serverURL string) (Ref, bool) {
 	if err != nil || base.Scheme == "" || base.Host == "" {
 		return Ref{}, false
 	}
-	if strings.ContainsFunc(raw, unicode.IsControl) {
+	if hasControl(raw) {
 		return Ref{}, false
 	}
 	value, err := url.Parse(raw)
