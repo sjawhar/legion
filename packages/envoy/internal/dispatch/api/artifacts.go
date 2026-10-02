@@ -23,7 +23,10 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-const maxArtifactBlobSize = 25 << 20
+const (
+	maxArtifactBlobSize      = 25 << 20
+	maxDocumentMarkdownBytes = int(maxJSONRequestBytes) // A Markdown document; maxJSONRequestBytes bounds an issue's spec and every edit the same way (LEGION-465).
+)
 
 func (s *server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -115,7 +118,12 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 		writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "invalid artifact content type")
 		return
 	}
-	s.storeArtifact(w, r, input, actor, artifactKind(mediaType), target)
+	kind := artifactKind(mediaType)
+	if kind == "doc" && len(input.content) > maxDocumentMarkdownBytes {
+		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "a markdown document is at most 1 MiB; a larger file is stored as a binary artifact under another content type")
+		return
+	}
+	s.storeArtifact(w, r, input, actor, kind, target)
 }
 
 func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (artifactUploadInput, bool) {
@@ -505,6 +513,27 @@ func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
 		blocks[index].References = counts
 	}
 	WriteJSON(w, http.StatusOK, blocks)
+}
+
+func (s *server) getArtifactBlockPath(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	path, err := s.deps.Docs.BlockPath(r.Context(), artifact.ID, r.PathValue("block_id"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, path)
 }
 
 // blockReferences counts the comments and asks anchored directly to each block.

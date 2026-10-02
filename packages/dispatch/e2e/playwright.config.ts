@@ -2,8 +2,17 @@ import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 import { dispatchPort, fakeEnvoyPort, fakeGithubPort, harnessPorts } from "./harness-ports";
+import { plainHttpHost } from "./plain-http-origin";
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${dispatchPort}`;
+// The plain-HTTP project's origin: the harness `baseURL` names, by a host name Chromium maps back
+// to that harness's host, so the page is a non-loopback plain-HTTP origin while every request still
+// reaches the same listener. `plainHttpSpec` is the one file that project runs; `chromium` and
+// `iphone` ignore it, since its first assertion (no secure context) fails on loopback by design.
+const harness = new URL(baseURL);
+const plainHttpOrigin = new URL(baseURL);
+plainHttpOrigin.hostname = plainHttpHost;
+const plainHttpSpec = /plain-http-origin\.e2e\.ts/;
 const startsOwnServers = !process.env.PLAYWRIGHT_BASE_URL;
 const fakeEnvoy = fileURLToPath(new URL("./fake-envoy.ts", import.meta.url));
 const fakeGithub = fileURLToPath(new URL("./fake-github.ts", import.meta.url));
@@ -145,8 +154,12 @@ export default defineConfig({
       }
     : {}),
   projects: [
-    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
-    { name: "iphone", use: { ...devices["iPhone 13"], browserName: "chromium" } },
+    { name: "chromium", testIgnore: plainHttpSpec, use: { ...devices["Desktop Chrome"] } },
+    {
+      name: "iphone",
+      testIgnore: plainHttpSpec,
+      use: { ...devices["iPhone 13"], browserName: "chromium" },
+    },
     // A caret beside a collaborator's cursor behaves per engine, and the issue picker's
     // keyboard-step rule rests on each engine dispatching a closed select's `change` in the key's
     // own task, so those two specs also run in WebKit.
@@ -170,6 +183,15 @@ export default defineConfig({
       name: "firefox",
       testMatch: /(code-line-replace|keyboard-agents-picker)\.e2e\.ts/,
       use: { ...devices["Desktop Firefox"] },
+    },
+    {
+      name: "chromium-plain-http",
+      testMatch: plainHttpSpec,
+      use: {
+        ...devices["Desktop Chrome"],
+        baseURL: plainHttpOrigin.origin,
+        launchOptions: { args: [`--host-resolver-rules=MAP ${plainHttpHost} ${harness.hostname}`] },
+      },
     },
   ],
 });

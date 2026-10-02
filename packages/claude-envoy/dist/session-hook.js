@@ -13979,6 +13979,9 @@ function claimHolds(claim, titles) {
   return titles.has(claim.actor.id) ? "holds" : "lapsed";
 }
 // ../contracts/src/dispatch-href.ts
+function hasControlCharacter(value) {
+  return /\p{Cc}/u.test(value);
+}
 function itemFromSearch(search) {
   const params = new URLSearchParams(search);
   const ask = params.get("ask");
@@ -13997,6 +14000,9 @@ function itemFromSearch(search) {
   try {
     id = decodeURIComponent(raw);
   } catch {
+    return null;
+  }
+  if (hasControlCharacter(id)) {
     return null;
   }
   return ask === null ? { id, kind: "comment" } : { id, kind: "ask" };
@@ -14404,7 +14410,7 @@ var dispatchToolSpecs = [
     name: "dispatch_artifact",
     example: { issue: "DSP-1", name: "design.md", content: `# Design
 ` },
-    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
+    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch_doc_edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key for an unlinked document.").optional(),
@@ -14424,7 +14430,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + OWNER_REFERENCE,
+    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair) or `INTERNAL`. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -16596,6 +16602,7 @@ function askSummary({ ask, replies }, graph) {
   ]);
   return [
     `Question: ${ask.question}`,
+    ...anchorLines(ask),
     "Options:",
     ...ask.options.length === 0 ? ["- none"] : ask.options.map((option) => `- ${option.label}${option.description ? ` \u2014 ${option.description}` : ""}`),
     `State: ${ask.state}`,
@@ -16659,12 +16666,12 @@ function formatOpenAsksSummary(response, baseUrl) {
 function commentSummary({ comment, replies }, graph) {
   const root = [
     `${comment.id} \xB7 ${actorText(comment.author)}`,
-    ...comment.anchor?.quote === undefined ? [] : [`> ${comment.anchor.quote}`],
+    ...anchorLines(comment),
     `Body: ${comment.body}`
   ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
-    ...reply.anchor?.quote === undefined ? [] : [`> ${reply.anchor.quote}`],
+    ...anchorLines(reply),
     `Body: ${reply.body}`
   ]);
   return [
@@ -16675,6 +16682,28 @@ function commentSummary({ comment, replies }, graph) {
     ...graph
   ].join(`
 `);
+}
+function anchorLines(record2) {
+  return [
+    ...record2.anchor?.quote === undefined ? [] : [`> ${record2.anchor.quote}`],
+    ...record2.anchor_block === undefined ? [] : [`Position: ${positionText(record2.anchor_block)}`],
+    ...record2.anchor_block_error === undefined ? [] : [`Position: unavailable (${record2.anchor_block_error})`]
+  ];
+}
+function positionText(block) {
+  const { table, path: path2 } = block;
+  const segments = path2.map((entry) => `${entry.type}[${entry.index}]`);
+  if (table === undefined || table.row === null)
+    return segments.join(" \u203A ");
+  const tableAt = path2.findIndex((entry) => entry.type === "table");
+  const cells = table.cells ?? [];
+  const label = (table.column === null ? cells : cells.slice(0, table.column)).map((cell) => cell.trim()).filter((cell) => cell !== "" && !/^\d+$/.test(cell)).join(" \xB7 ");
+  const row = label === "" ? `row ${table.row}` : `row ${table.row} (${label})`;
+  const header = table.header === null || table.header === "" ? String(table.column) : table.header;
+  return [
+    ...segments.slice(0, tableAt + 1),
+    table.column === null ? row : `${row}, column ${header}`
+  ].join(" \u203A ");
 }
 function messageSummary({ message, replies }, graph) {
   const root = [`${message.id} \xB7 ${actorText(message.author)}`, `Body: ${message.body}`];
@@ -16786,17 +16815,19 @@ async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
   ].join(`
 `));
 }
-function refusalWithCode(error48, suffix = "") {
+function refusalWithCode(error48, ...clauses) {
+  const suffix = clauses.filter((clause) => clause !== "").join("; ");
+  const joined = suffix === "" ? "" : `; ${suffix}`;
   if (error48 instanceof DispatchGatewayError) {
     let told = error48.message;
-    if (suffix !== "") {
-      told = error48.mayHaveReachedDispatch ? `${error48.answer}${suffix}` : `${error48.answer}, so ${error48.advice}${suffix}`;
+    if (joined !== "") {
+      told = error48.mayHaveReachedDispatch ? `${error48.answer}${joined}` : `${error48.answer}, so ${error48.advice}${joined}`;
     }
     return new DispatchGatewayError(error48.status, error48.answer, error48.advice, `${error48.code}: ${told}`);
   }
   if (!(error48 instanceof DispatchServiceError))
     return error48;
-  return new DispatchServiceError(error48.code, error48.status, `${error48.code}: ${error48.message}${suffix}`, error48.candidates, error48.current, error48.mismatches);
+  return new DispatchServiceError(error48.code, error48.status, `${error48.code}: ${error48.message}${joined}`, error48.candidates, error48.current, error48.mismatches);
 }
 function dispatchAnswered(error48, status) {
   return error48 instanceof DispatchServiceError && error48.fromDispatch && error48.status === status;
@@ -16982,7 +17013,7 @@ async function executeDispatchTool(input) {
         } catch (error48) {
           const told = writeMayHaveLanded(error48) ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "the reason was not posted, so the close was not sent";
           if (error48 instanceof DispatchServiceError)
-            throw refusalWithCode(error48, `; ${told}`);
+            throw refusalWithCode(error48, told);
           throw withAccount(error48, told);
         }
       }
@@ -17002,14 +17033,14 @@ async function executeDispatchTool(input) {
           actor
         });
       } catch (error48) {
-        const taken = dispatchAnswered(error48, 500) && newLinks.length > 0 ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
+        const taken = dispatchAnswered(error48, 500) && newLinks.length > 0 ? `one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
         if (closingNote === undefined)
           throw refusalWithCode(error48, taken);
         const posted = `the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
         const fix = error48 instanceof DispatchGatewayError && error48.transient ? "" : "fix what refused the close, then ";
         const landed = writeMayHaveLanded(error48) ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again` : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
         if (error48 instanceof DispatchServiceError)
-          throw refusalWithCode(error48, `${taken}; ${landed}`);
+          throw refusalWithCode(error48, taken, landed);
         throw withAccount(error48, landed);
       }
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;

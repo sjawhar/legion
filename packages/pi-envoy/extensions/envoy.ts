@@ -18,6 +18,7 @@ import {
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import {
   createDeliveryDedupe,
+  DedupeIdentitySchema,
   type DispatchDelivery,
   expectsLaneReceipt,
   inboundTimestamp,
@@ -111,6 +112,19 @@ const NATS_RETRY_INTERVAL_MS = 15_000;
 const CAPABILITIES_WITHOUT_BTW: readonly DeliveryCapability[] = DELIVERY_CAPABILITIES.filter(
   (capability) => capability !== "btw"
 );
+
+/**
+ * The identity a delivery is claimed under, each field read on its own by the shared rule for it
+ * (`DedupeIdentitySchema`): a field the rule refuses identifies nothing, and a valid sibling still
+ * does. `renderInbound` renders a frame whose `dedupe_key` is empty, and that frame's `event_id`
+ * must still recognise its second copy.
+ */
+const ClaimIdentitySchema = DedupeIdentitySchema.extend({
+  event_id: DedupeIdentitySchema.shape.event_id.catch(undefined),
+  dedupe_key: DedupeIdentitySchema.shape.dedupe_key.catch(undefined),
+  source: DedupeIdentitySchema.shape.source.catch(undefined),
+  source_event_id: DedupeIdentitySchema.shape.source_event_id.catch(undefined),
+});
 
 /**
  * Transcript entry recording the role this session holds. Successful claims
@@ -644,7 +658,10 @@ export default function envoyExtension(pi: PiApi): void {
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
-    const claim = rendered.skip ? undefined : delivered.claim(rendered.envelope);
+    const dedupeIdentity = ClaimIdentitySchema.safeParse(rendered.envelope);
+    const claim = rendered.skip
+      ? undefined
+      : delivered.claim(dedupeIdentity.success ? dedupeIdentity.data : undefined);
     if (claim !== undefined) {
       const envelope = rendered.envelope;
       if (envelope !== undefined) {

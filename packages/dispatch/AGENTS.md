@@ -213,8 +213,11 @@ direct record link can never approve a machine login).
 
 `CredentialRecordPage.tsx` (`/credentials/:recordId`) and `MachineLoginPage.tsx`
 (`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
-lifetime, requested/expiry timestamps, rules version, approver, then the agent's reason) and
-`CredentialDecisionButtons.tsx` (the Approve/Deny pair, shown whenever the record is `pending`).
+a pod enrollment's worker slot when it has one, lifetime, requested/expiry timestamps, rules
+version, approver, then the agent's reason) and `CredentialDecisionButtons.tsx` (the Approve/Deny
+pair, shown whenever the record is `pending`). The broker's `enrollment.slot` (`implementer-g3`,
+null without one) is what tells the requests of two roles in one pod apart, since they share the
+pod's kind and runtime id.
 The reason renders inside a `<blockquote>` as **plain text only** — no Markdown pipeline, no
 linkification, `white-space: pre-wrap` — since it is the agent's own words, not reviewed content;
 a pending machine-kind record adds the sentence "Approving lets `<host>` start agent sessions as
@@ -232,8 +235,8 @@ surfaces verbatim through `ApiError`'s message, never reworded.
 `GrantsSection.tsx` renders on `/settings`, under the same `FEATURE_OFF` gate: the live
 approval-granted grants the viewer approved, and those on enrollments the viewer operates whoever
 approved them (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`). Each row names its approver
-(the broker's `approver` field) and has a Revoke button that POSTs `{}` to
-`/api/v1/credential-grants/{id}/revoke`.
+(the broker's `approver` field), a pod enrollment's slot under its enrollment, and has a Revoke
+button that POSTs `{}` to `/api/v1/credential-grants/{id}/revoke`.
 
 `packages/envoy/internal/dispatch/agentsecrets/client.go` is Dispatch's server-side client for the
 broker's UI-bearer API (`DISPATCH_AGENT_SECRETS_URL`/`DISPATCH_AGENT_SECRETS_TOKEN[_FILE]`,
@@ -630,6 +633,17 @@ editing puts text typed over a code block's last line before that line's newline
 paragraph's hard break along with the text after it, which Chromium and WebKit never do, so that
 spec is the one that needs a second engine; the picker spec runs for the reason given under `webkit` above. CI installs Firefox
 beside Chromium for them (`bun run e2e:install` does the same locally).
+
+The `chromium-plain-http` project runs `e2e/plain-http-origin.e2e.ts` alone, selected by file name: Chromium with
+`--host-resolver-rules=MAP dispatch-e2e.test <harness host>` (`e2e/plain-http-origin.ts`) and a `baseURL` of
+`http://dispatch-e2e.test:<harness port>`, so the page's origin is a plain-HTTP host name that is not loopback — what a
+LAN address, a tailnet name or the phone of the manual check gets — where `isSecureContext` is false and
+`crypto.randomUUID` is undefined, while every request still reaches the harness listener. Its two tests open a
+document and type a paragraph into it, and check a comment body renders formatted — block ids and Markdown bodies both
+mint through `@legion/proof-editor`'s `uuidV4` (LEGION-461). Each first asserts that insecure context, so a fixture
+that drifted to a secure origin fails in any run, one test or both, rather than passing for another reason. `chromium`
+and `iphone` ignore that spec by file name. It skips when `PLAYWRIGHT_BASE_URL` is `https:`, where there is no
+plain-HTTP origin to map.
 
 ## Phone acceptance
 

@@ -83,16 +83,7 @@ type bootConfig struct {
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "backfill-block-ids":
-			os.Exit(backfillBlockIDs(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
-		case "backfill-anchor-blocks":
-			os.Exit(backfillAnchorBlocks(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
-		case "rebuild-refs":
-			os.Exit(rebuildRefs(context.Background(), os.Getenv("DATABASE_URL"), loadServerURL(), os.Stdout))
-		case "redeliver-webhooks":
-			os.Exit(redeliverWebhooks(context.Background(), os.Args[2:], os.Stdout))
-		}
+		os.Exit(runSubcommand(context.Background(), os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
 	}
 	boot, err := resolveBootConfig(os.Getenv)
 	if err != nil {
@@ -286,6 +277,9 @@ func main() {
 			Docs:      documentService,
 		})
 	}
+	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
+	// anyone opening its document.
+	go documentService.RunSettlementResumption(ctx)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -397,12 +391,11 @@ func defaultWebDistDir() (string, error) {
 // dir's app.json at Path. The dev sign-in fence decides on it; String is the form the boot log
 // prints.
 type appCredentialSource struct {
-	FromFile bool
-	Path     string
+	Path string
 }
 
 func (s appCredentialSource) String() string {
-	if s.FromFile {
+	if s.Path != "" {
 		return "file:" + s.Path
 	}
 	return "env"
@@ -424,7 +417,7 @@ func loadAppCredentials(dataDir string) (*auth.AppConfig, appCredentialSource, e
 	if cfg == nil {
 		return nil, appCredentialSource{}, nil
 	}
-	return cfg, appCredentialSource{FromFile: true, Path: path}, nil
+	return cfg, appCredentialSource{Path: path}, nil
 }
 
 func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
@@ -567,7 +560,7 @@ func devSignInLoadedFence(boot bootConfig, serverURL string, app *auth.AppConfig
 	if app == nil || app.PEM == "" {
 		return nil
 	}
-	if source.FromFile {
+	if source.Path != "" {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 refuses the App private key in %s, whatever DISPATCH_GITHUB_API_BASE names: that file is where the real App's key is kept, and with the flag any loopback client can have the App sign calls. Pass a throwaway App in the environment instead (DISPATCH_APP_CLIENT_ID, DISPATCH_APP_CLIENT_SECRET and a generated DISPATCH_APP_PEM_B64, which take precedence over app.json), with DISPATCH_GITHUB_API_BASE naming a GitHub fake on a loopback host, as packages/dispatch/e2e/run-server.sh does", source.Path)
 	}
 	if !routes.LoopbackURL(boot.GitHubAPIBase) {
@@ -764,6 +757,50 @@ func listenAddress(getenv func(string) string) (string, error) {
 		}
 	}
 	return net.JoinHostPort(host, port), nil
+}
+
+// subcommand is an argument envoy-dispatch takes in place of serving. run gets the arguments
+// after the name.
+type subcommand struct {
+	name string
+	run  func(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int
+}
+
+// subcommands are every argument envoy-dispatch takes in place of serving: runSubcommand both
+// dispatches on this table and names it, in this order, when it refuses an argument.
+var subcommands = []subcommand{
+	{"backfill-block-ids", func(ctx context.Context, _ []string, getenv func(string) string, stdout, _ io.Writer) int {
+		return backfillBlockIDs(ctx, getenv("DATABASE_URL"), stdout)
+	}},
+	{"backfill-anchor-blocks", func(ctx context.Context, _ []string, getenv func(string) string, stdout, _ io.Writer) int {
+		return backfillAnchorBlocks(ctx, getenv("DATABASE_URL"), stdout)
+	}},
+	{"rebuild-refs", func(ctx context.Context, _ []string, getenv func(string) string, stdout, _ io.Writer) int {
+		return rebuildRefs(ctx, getenv("DATABASE_URL"), loadServerURL(), stdout)
+	}},
+	{"redeliver-webhooks", func(ctx context.Context, args []string, _ func(string) string, stdout, _ io.Writer) int {
+		return redeliverWebhooks(ctx, args, stdout)
+	}},
+	{"census", func(ctx context.Context, _ []string, getenv func(string) string, stdout, stderr io.Writer) int {
+		return census(ctx, getenv("DATABASE_URL"), stdout, stderr)
+	}},
+}
+
+// runSubcommand runs the subcommand args name and returns its exit code. A name it does not know
+// is refused with exit 2 rather than falling through to the server: the server migrates the
+// database at boot, so a deployment running `envoy-dispatch census` on an image that predates
+// the subcommand must get a refusal, never a boot that applies the migrations the census was to
+// inspect.
+func runSubcommand(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+	names := make([]string, len(subcommands))
+	for i, sub := range subcommands {
+		if sub.name == args[0] {
+			return sub.run(ctx, args[1:], getenv, stdout, stderr)
+		}
+		names[i] = sub.name
+	}
+	fmt.Fprintf(stderr, "envoy-dispatch: unknown subcommand %q; the subcommands are %s, and envoy-dispatch with no argument serves\n", args[0], strings.Join(names, ", "))
+	return 2
 }
 
 // openMigrated opens the database a DB subcommand works on and brings it to the current

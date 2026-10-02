@@ -31,6 +31,7 @@ var (
 	ErrAlreadyEnrolled  = errors.New("this runtime is already enrolled and live")
 	ErrPodIdentity      = errors.New("the projected token does not identify this pod")
 	ErrNotLive          = errors.New("enrollment is not live")
+	ErrInvalidSlot      = errors.New("a slot is only for a pod enrollment and must match ^[a-z][a-z0-9-]{0,62}$")
 )
 
 type Credential struct {
@@ -48,6 +49,10 @@ type Enrollment struct {
 	Thumbprint string
 	SessionID  *string
 	PodToken   string
+	// Slot names one of several independent identities in one pod (record.ValidSlot): each slot
+	// of a pod is an enrollment of its own, with its own key, lease and grants. "" is the one
+	// identity of every box, host and single-identity pod enrollment.
+	Slot string
 	// Subject is a pod enrollment's verified service-account subject, set by Create from the
 	// projected token itself and never from the caller; nil for box and host.
 	Subject      *string
@@ -173,7 +178,15 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 	return cred, nil
 }
 
+// Create enrolls in under cred. A live enrollment is unique per launcher credential, runtime id and
+// slot: the same key in the same slot gets its live enrollment back (Existing), a different key in
+// a live slot is ErrAlreadyEnrolled, and another slot of the same pod is an enrollment of its own.
+// A slot is valid only on a pod enrollment (ErrInvalidSlot); a pod's runtime id is always the pod
+// UID its projected token proves, whichever slot it enrolls.
 func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (Enrollment, error) {
+	if in.Slot != "" && (in.Kind != "pod" || !record.ValidSlot(in.Slot)) {
+		return Enrollment{}, ErrInvalidSlot
+	}
 	if in.Operator != nil {
 		in.Operator = new(record.CanonicalLogin(*in.Operator))
 	}
@@ -217,9 +230,9 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 		return Enrollment{}, false, err
 	}
 	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at)
-		values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		in.ID, in.Kind, in.RuntimeID, in.Operator, in.Thumbprint, in.SessionID, in.Subject, cred.ID, in.LeaseExpires)
+	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, slot, operator, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at)
+		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		in.ID, in.Kind, in.RuntimeID, in.Slot, in.Operator, in.Thumbprint, in.SessionID, in.Subject, cred.ID, in.LeaseExpires)
 	if store.IsUniqueViolation(err) {
 		// The failed insert aborted tx, which still holds its pooled connection. Release it before
 		// recovery asks the pool for one: holding one connection while waiting for a second is how
@@ -235,19 +248,20 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 	if err != nil {
 		return Enrollment{}, false, err
 	}
-	if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ('enrollment.created',$1,$2, jsonb_build_object('kind',$3::text,'runtime_id',$4::text,'thumbprint',$5::text))`,
-		in.ID, "launcher:"+cred.ID.String(), in.Kind, in.RuntimeID, in.Thumbprint); err != nil {
+	if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ('enrollment.created',$1,$2,
+		jsonb_strip_nulls(jsonb_build_object('kind',$3::text,'runtime_id',$4::text,'thumbprint',$5::text,'slot',nullif($6::text,''))))`,
+		in.ID, "launcher:"+cred.ID.String(), in.Kind, in.RuntimeID, in.Thumbprint, in.Slot); err != nil {
 		return Enrollment{}, false, err
 	}
 	return in, false, tx.Commit(ctx)
 }
 
 // recoverConflict resolves an insert that collided with an unrevoked enrollment of the same
-// runtime under the same launcher credential. The launcher may be retrying after a crash between
-// our 201 and its persist: the same key gets its live enrollment back, and a different key for a
-// live runtime is a refusal. A colliding row whose lease has lapsed is not live, whatever its
+// runtime and slot under the same launcher credential. The launcher may be retrying after a crash
+// between our 201 and its persist: the same key gets its live enrollment back, and a different key
+// for a live slot is a refusal. A colliding row whose lease has lapsed is not live, whatever its
 // revoked_at says: it is ended here — like a revoke, with an enrollment.expired audit row — and
-// the caller retries, so a lapsed lease never leaves the runtime id permanently locked.
+// the caller retries, so a lapsed lease never leaves the slot permanently locked.
 func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrollment) (Enrollment, bool, error) {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -257,7 +271,7 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 	var existing Enrollment
 	var live bool
 	err = tx.QueryRow(ctx, `select id, thumbprint, lease_expires_at, lease_expires_at > now() from enrollments
-		where launcher_credential_id=$1 and runtime_id=$2 and revoked_at is null for update`, cred.ID, in.RuntimeID).
+		where launcher_credential_id=$1 and runtime_id=$2 and slot=$3 and revoked_at is null for update`, cred.ID, in.RuntimeID, in.Slot).
 		Scan(&existing.ID, &existing.Thumbprint, &existing.LeaseExpires, &live)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Enrollment{}, true, nil
@@ -403,15 +417,15 @@ func (s *Service) Lookup(ctx context.Context, id string) (string, bool, error) {
 	return thumbprint, live, err
 }
 
-// Get answers this enrollment's own metadata (kind, operator, lease expiry) for
+// Get answers this enrollment's own metadata (kind, operator, slot, lease expiry) for
 // GET /v1/enrollments/self. Added in Task 11 for that read, following the same query pattern as
 // Lookup above. Unlike Lookup, which proof.Verifier calls with an untrusted, possibly malformed id
 // straight off a forged proof, Get is only ever called with an id a proof has already
 // authenticated, so it need not guard against a non-UUID id the way Lookup does.
 func (s *Service) Get(ctx context.Context, id string) (Enrollment, error) {
 	var e Enrollment
-	err := s.Store.Pool.QueryRow(ctx, `select id, kind, runtime_id, operator, lease_expires_at from enrollments where id=$1 and revoked_at is null`, id).
-		Scan(&e.ID, &e.Kind, &e.RuntimeID, &e.Operator, &e.LeaseExpires)
+	err := s.Store.Pool.QueryRow(ctx, `select id, kind, runtime_id, operator, slot, lease_expires_at from enrollments where id=$1 and revoked_at is null`, id).
+		Scan(&e.ID, &e.Kind, &e.RuntimeID, &e.Operator, &e.Slot, &e.LeaseExpires)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Enrollment{}, ErrNotLive
 	}

@@ -418,6 +418,36 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 	return markdown, blocks, nil
 }
 
+// BlockPath is where the block carrying blockID stands in the document the caller sees
+// (readDocument): pmdoc.ErrTargetNotFound when no block carries it, a document with no state
+// included.
+func (s *Service) BlockPath(ctx context.Context, artifactID, blockID string) (model.BlockPath, error) {
+	doc, err := s.readDocument(ctx, artifactID)
+	if err != nil {
+		return model.BlockPath{}, err
+	}
+	if doc == nil {
+		return model.BlockPath{}, fmt.Errorf("%w: block %q", pmdoc.ErrTargetNotFound, blockID)
+	}
+	tree, err := treeOf(doc)
+	if err != nil {
+		return model.BlockPath{}, err
+	}
+	path, err := pmdoc.BlockPathOf(tree, blockID)
+	if err != nil {
+		return model.BlockPath{}, err
+	}
+	out := model.BlockPath{ID: path.ID, Type: path.Type, Path: make([]model.BlockPathEntry, len(path.Path))}
+	for index, entry := range path.Path {
+		out.Path[index] = model.BlockPathEntry(entry)
+	}
+	if path.Table != nil {
+		table := model.TablePosition(*path.Table)
+		out.Table = &table
+	}
+	return out, nil
+}
+
 // SnapshotVersion returns the current immutable version, adding an unnamed
 // version only when the live text has diverged since the previous one.
 func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor model.Actor) (VersionResult, error) {

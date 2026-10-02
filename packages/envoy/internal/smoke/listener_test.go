@@ -76,10 +76,11 @@ func TestSmoke(t *testing.T) {
 			"ENVOY_API_TOKEN": smokeAPIToken,
 		}),
 		testcontainers.WithExposedPorts("9020/tcp"),
-		// /healthz answers 200 from the moment the port binds: "starting" until NATS init completes,
-		// then "healthy" (a liveness answer, docs/solutions/envoy/async-health-startup-pattern.md).
-		// /v1 opens only when init completes, so the subtests below start once the body says
-		// "healthy"; a 200 alone released them into the /v1 503 "service starting" window.
+		// /healthz answers 200 from the moment the port binds: "starting" until the durable consumer
+		// binds, then "healthy" (a liveness answer, docs/solutions/envoy/async-health-startup-pattern.md).
+		// /v1 answers 503 "service starting" until NATS is connected and the interest and session
+		// caches are warm, so the subtests below start once the body says "healthy"; a 200 alone
+		// released them into that window.
 		testcontainers.WithWaitStrategy(
 			wait.ForHTTP("/healthz").
 				WithPort("9020/tcp").

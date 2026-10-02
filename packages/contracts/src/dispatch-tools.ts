@@ -854,7 +854,7 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1", name: "design.md", content: "# Design\n" },
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
-      "dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. " +
+      "dispatch_doc_edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
       "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
       `${OWNER_REFERENCE}`,
     arguments: (z) => ({
@@ -895,6 +895,10 @@ export const dispatchToolSpecs = [
       "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " +
       "or project plus artifact; or message alone, which reads a human's direct message to this session and every " +
       "reply to it (they belong to no issue). " +
+      "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " +
+      "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " +
+      "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " +
+      "(try again shortly), `DOC_SCHEMA` (the document needs repair) or `INTERNAL`. " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
       OWNER_REFERENCE,

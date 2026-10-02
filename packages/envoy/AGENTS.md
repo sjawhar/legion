@@ -24,7 +24,7 @@ events to the right session.
 | Webhook handlers       | `internal/webhook/{github,slack,ghostwispr}.go` | HTTP ingress, signature verification, publish path |
 | Webhook config         | `internal/webhook/config.go`                     | ENVOY_WEBHOOKS parsing, startup validation         |
 | Listener behavior      | `cmd/listener/main.go`                    | subscribe/match/deliver flow                       |
-| NATS client            | `internal/bus/nats.go`                    | reconnect/self-heal logic                          |
+| NATS client            | `internal/bus/nats.go`, `internal/bus/recovery.go` | connect, subscribe and publish; reconnect, recovery and the reconnect hooks |
 | NATS credential        | `internal/bus/nkey.go`                    | every bus connection's nkey user: `NATS_NKEY_SEED_FILE` (wins) or `NATS_NKEY_SEED`; unusable refuses, neither set connects without one |
 | Stream definition      | `internal/bus/stream.go`                  | `ENVOY_NOTIFICATIONS` subjects, retention and duplicate window, and their reconciliation at start |
 | Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
@@ -33,7 +33,7 @@ events to the right session.
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
-| Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), and the watch that names the lock a timed-out migration wanted |
+| Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`) |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
@@ -44,6 +44,28 @@ settlement is two-phase: it first applies `EnsureBlockIDs` in one Yjs transactio
 captured update in the same Postgres transaction as any resulting version and event, then renders
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
+
+The closer's timer lives in memory, so the database says which documents still owe it: every
+durable document update writes the document's `doc_settlements_pending` row in its own transaction
+(`markSettlementPending`, migration 0063), and the settlement that has read every update deletes it
+in the transaction that commits its writes. A settlement that did not commit - one a shutdown's
+budget cut short or a room failure dropped - is armed again from that row two ways: a room's load
+arms one when the row is there (`onLoadDocument`, unless the load is a settlement's own warm-up),
+and `cmd/dispatch` runs `docs.Service.RunSettlementResumption`, which at start and every minute
+arms the settlement of each document whose row is a minute old and whose issue is open
+(`resumeOwedSettlements`), so a document nobody opens settles too. It runs on an interval because a
+rolling deploy stops the old task after the new one has started. A closed issue's rooms arm none
+until it reopens. `docs.Service.Shutdown` runs the settlement of each loaded room whose document has
+that row, and no other, inside its 5 s drain budget (`shutdownDrainBudget`, within the caller's
+deadline: `cmd/dispatch` gives HTTP shutdown and document shutdown one 5 s context between them,
+`shutdownTimout`); a settled document's repeat would spend the budget for nothing. It cancels the
+database work of any settlement the budget cuts short so its transaction rolls back, and logs for
+each document that owed one whether it settled or was left to resume (`dispatch: document settled
+before shutdown`, `dispatch: document settlement left to resume after shutdown` with
+`shutdown_budget_ended`). A settlement cut short is not an error; a caller's deadline
+that passes before Shutdown can read that back is, and its error names the documents that owed
+one. A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on the development
+machine, past that budget.
 
 A write never puts one block id on two blocks. `EnsureBlockIDs` keeps a repeated id for the first
 holder in document order, and ask rows and anchors are keyed on block ids, so a block written ahead
@@ -149,12 +171,13 @@ row before it waits for the slot. The slot is in memory, where Postgres cannot s
 no transaction may wait for it while holding a lock its holder still needs. A failed room's eviction
 flushes and compacts under the advisory lock, so no transaction waits for a failed room to recover
 either: a document operation inside a transaction (a handler's, or settlement's own) that meets one
-fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`), the transaction rolls back, and
-the caller retries once the room has reloaded; so does a write whose room fails before its first
-append, since the reloaded room may lack it. A room's own load never waits for that recovery
-either - the eviction waits in ygo's `CloseRoom` for the load's ready barrier, so the two would
-hold each other - and refuses instead, which ends the eviction; the replacement room's load then
-runs the one settlement the failure dropped.
+fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`, whatever failed the room), the
+transaction rolls back, and the caller retries once the room has reloaded; so does a write whose
+room fails before its first append, since the reloaded room may lack it. A room's own load never
+waits for that recovery either - the eviction waits in ygo's `CloseRoom` for the load's ready
+barrier, so the two would hold each other - and refuses instead, which ends the eviction; the
+replacement room's load then runs the settlement the failure dropped, which the document's
+`doc_settlements_pending` row still names.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
@@ -182,6 +205,34 @@ latest version number, or `null` when it has none (the live markdown beside it a
 are two unsynchronised reads, in both directions; `token` is the concurrency primitive). The server resolves
 the block when it creates a quote or browser-mark anchor; `envoy-dispatch backfill-anchor-blocks`
 fills legacy anchors only when their cached quote has one current match.
+`GET /api/v1/artifacts/{id}/blocks/{block_id}` places any one block (`pmdoc.BlockPathOf`, over
+the document `readDocument` serves): its path of `{type, id, index}` from the top-level block
+down, and for a table block, row or cell a `table` naming the table's id, the row's child index
+(0 is the header row), the cell's child index in its row (the indexes `delete_row` and
+`delete_column` take, so a spanning cell counts once), the text of the header cell drawn above
+the cell and the row's cells as their opening words. The header is found where the renderer
+writes the cell (`tableGrid`, laid out on a span budget of its own through the anchored row), so
+in a table with colspans or rowspans it is the column the cell is drawn in, not the header row's
+child at the cell's index. `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}` attach the
+same answer for the anchor's `block_id` as `anchor_block` (`api.anchorBlock`), computed at read
+time and never stored or carried on lists and events; a block the live document no longer holds
+leaves it absent while the anchor keeps its stale `block_id`. The position is one derived field
+of those reads, so a document they cannot read does not fail them: the read answers 200 without
+`anchor_block` and with `anchor_block_error`, logged at WARN. `api.documentErrorCode` names that
+error for the read and for `writeHandlerError` alike, and both take its codes in one order, so
+`anchor_block_error` is the code the block route answers the same error with.
+`DOC_SERVICE_UNAVAILABLE` is a room or store that could not serve the document, taken before any
+cause the error carries: a failed room carries the error another operation failed it with
+(settlement's schema refusal, a settlement that failed three times - its warm-up refused because
+the issue had closed, among others - a writer's failed or cancelled commit, a failed store write
+or load), which says nothing of this request. `DOC_SCHEMA` is a live tree outside the schema,
+taken after the refusals that name the caller's own input or a missing block, so an ask block the
+renderer refused stays `400 INVALID_ASK_BLOCK`. Anything else is `INTERNAL`, as
+`writeHandlerError` answers it. Only a request that has gone away fails, decided by that request's
+own context rather than the error, since a room a writer's cancelled commit failed carries that
+writer's `context.Canceled` in its cause. Nor does that read wait for a failed room's recovery
+(`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`,
+`GET /blocks` and the block route wait.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
@@ -751,6 +802,26 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifact
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
 exists, and refuses to run without `dispatch.server_url`.
+A mention's source is the node whose text holds it, never the issue that text belongs to: a
+citation in an issue's spec is an edge out of the spec document, so
+`GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
+issue's own `child_of` and `affects` edges, and the cited node's `?to=` backlink names the spec.
+Where a reference in text ends, and what it names, is one rule with two readers: `text.ExtractAt`,
+which every write indexes through, and the dashboard's `composerReferences` (`refs/routes.ts`,
+scanning with `referenceSpans` and parsing with `referenceRouteFromHref`), behind its reference
+pills, unfurl cards and linked text. `DISPATCH_TEXT_REFERENCES` in `@legion/contracts`, whose
+JSON copy is `text/testdata/dispatch-text-references.json`, is the table both are tested against,
+so a change to the rule changes both readers and the table: `**dispatch://KEY**`,
+`` `dispatch://KEY` `` and `[dispatch://KEY](dispatch://KEY)` (how a document stores
+`<dispatch://KEY>`) all mention `KEY`, though the dashboard shows the code span as code, not a
+link. The Go reader parses a reference as the browser does: a query's pairs split on `&` alone,
+as `URLSearchParams` splits them (`searchParams`), an item id is decoded as `decodeURIComponent`
+decodes it, a slug is the whole segment, and a reference holding a control character, or an item
+id that decodes to one, names nothing; the index binds ids as `text[]`, where Postgres refuses a
+NUL, so a decoded NUL would fail the write and stop `rebuild-refs` at the body holding it. Where a
+browser normalizes a URL and net/url does not (host case, a default port, dot segments, a
+backslash), the two still differ, and so does how many U+FFFD stand for the invalid UTF-8 in a
+query's item id, an id no item has.
 
 The live document holds the tree as the browser editor holds it (`pmdoc.Update`, `pmdoc.Read`).
 That editor builds each node it loads with its schema, so an attribute the live document lacks
@@ -1154,10 +1225,10 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 ## Operational notes
 
 - Health endpoints reflect dependency health, not just process liveness. `/healthz` returns `degraded` for transient JetStream/KV probe failures and `unhealthy` for NATS loss, a stopped interest, session or CI KV watcher, or a missing durable consumer. A listener that mounts no GitHub webhook route keeps no CI cache, and its healthy answer carries `"ci_cache": "not_applicable"`.
-- NATS reconnects indefinitely, in place: the bus starts from `nats.GetDefaultOptions` (reconnect, client pings, drain and flusher timeouts), so the connection object and every JetStream or KV handle taken from it survive a server restart. A publish while reconnecting waits for the reconnect within its own deadline (5 s for a publish, 2 s for a role-lane forward), and reconnect attempts run every second. The reconnect buffer is off, so a publish that fails was not sent. A subscription nats.go re-sent on the reconnected connection is kept as it is; one on a replaced connection is bound again. Every reconnect recreates the interest, session and CI KV watchers on the reconnected connection, because a server restart loses their ordered consumers and nats.go would replace them only after missed heartbeats; while NATS is connected, the self-health monitor also rebuilds those watchers and a missing durable consumer when a probe finds a stopped watcher, a closed KV handle or a lost consumer. All three watchers share one lifecycle (`internal/kvwatch`), and the listener keeps its caches as one list (`listenerCaches`, which holds the CI cache only on a listener that mounts the GitHub webhook route), which rewatch, self-health, `/healthz` and shutdown each loop over. The first start runs in the background. When it fails with no watcher current, it records the failure and releases the cache's readiness; when a Rewatch's watcher is current, it does neither, and that watcher releases readiness once it has delivered every existing key. A rewatch opens the bucket on the connection it is given, so a store bound to a replaced connection moves to the new one. A rewatch onto a bucket whose stream was deleted and created again empties the cache and its revision fence before the new watcher fills them. A bucket recreated under a watcher that did not end (nats.go's ordered consumer can reset onto the new stream without delivering its first revisions) is caught by each store's `Ping`, which the self-health probe runs: it records a terminal watcher error, so the next tick rebuilds the watcher. A watch whose stream is older than a running, healthy watcher's (it read the bucket before a newer watch switched to a recreated one) is discarded, and read and dropped until it ends; against an ended or flagged watcher it installs as usual, since a restored or clock-stepped bucket can have an older creation time. Only the current watcher releases readiness, at the end of its scan or when it ends on its own; a replaced watcher's end-of-scan releases nothing. An entry from a watcher already replaced is dropped. A watcher that ends on its own records the terminal error `/healthz` and self-health read. A stopped watcher arms nothing, and one armed while the stop ran is read and dropped until the drain ends it. A watcher reporting `consumer not active` during the gap is logged at WARN, and so is a shutdown drain that finds a watcher's consumer already gone (`consumer not found`): the drain deletes each consumer nats.go created as it ends that subscription, and the ordered consumer of a watcher the last reconnect had not yet replaced can already be gone (a restart loses it outright, since it is kept in memory; a disconnect longer than its inactive threshold lets the server delete it). At the pinned nats.go that delete is the only report of the bare error, so the bus warns on the bare error alone; a nats.go bump re-checks that. The one other report of `consumer not found`, an ordered consumer nats.go failed to recreate, wraps the error and stays an ERROR. Every other async error is an ERROR.
+- NATS reconnects indefinitely, in place: the bus starts from `nats.GetDefaultOptions` (reconnect, client pings, drain and flusher timeouts), so the connection object and every JetStream or KV handle taken from it survive a server restart. A publish while reconnecting waits for the reconnect within its own deadline (5 s for a publish, 2 s for a role-lane forward), and reconnect attempts run every second. The reconnect buffer is off, so a publish that fails was not sent. A subscription nats.go re-sent on the reconnected connection is kept as it is; one on a replaced connection is bound again. Every reconnect recreates the interest, session and CI KV watchers on the reconnected connection, because a server restart loses their ordered consumers and nats.go would replace them only after missed heartbeats, and a connection the bus dials to replace a closed one moves them onto itself. After each of those connection events a run of the reconnect hooks that do this begins that covers it, whatever re-subscribing returned, since a listener waiting out the task that holds its durable has that durable's re-subscribe refused by design while `/v1` and the role lane already read the caches. A run covers every event counted before it began, so an event that lands between runs gets a run of its own and a burst of events that land before one begins gets one. Runs take turns (`bus.Client.rewatch`), so a recovery retrying that re-subscribe waits for a run in progress rather than starting a second beside it. A run that fails is run again by a recovery, the only way an event gets a second run: the failure starts one, and when one is already ending the failure finds it running and starts none, so a recovery looks again once it has cleared its flag. Re-subscribing holds no lock across a bind's request, so a reconnect that lands while a bind is in flight, such as the listener's bind attempt, whose lookup the reconnect can lose for JetStream to wait out for 10 s, restores and runs the hooks without waiting for it: a registration has one bind at a time, so the restore leaves that registration to its bind, and the recovery the reconnect starts binds it should that bind fail. Nothing has failed there, so the restore logs it at INFO, `envoy nats resubscribe left to the bind in flight` with the `subject`, and `envoy nats resubscribe failed` and `envoy nats recovery resubscribe failed` stay ERRORs for binds that failed. While NATS is connected, the self-health monitor also rebuilds those watchers and a missing durable consumer when a probe finds a stopped watcher, a closed KV handle or a lost consumer. All three watchers share one lifecycle (`internal/kvwatch`), and the listener keeps its caches as one list (`listenerCaches`, which holds the CI cache only on a listener that mounts the GitHub webhook route), which rewatch, self-health, `/healthz` and shutdown each loop over. The first start runs in the background. When it fails with no watcher current, it records the failure and releases the cache's readiness; when a Rewatch's watcher is current, it does neither, and that watcher releases readiness once it has delivered every existing key. A rewatch opens the bucket on the connection it is given, so a store bound to a replaced connection moves to the new one. A rewatch onto a bucket whose stream was deleted and created again empties the cache and its revision fence before the new watcher fills them. A bucket recreated under a watcher that did not end (nats.go's ordered consumer can reset onto the new stream without delivering its first revisions) is caught by each store's `Ping`, which the self-health probe runs: it records a terminal watcher error, so the next tick rebuilds the watcher. A watch whose stream is older than a running, healthy watcher's (it read the bucket before a newer watch switched to a recreated one) is discarded, and read and dropped until it ends; against an ended or flagged watcher it installs as usual, since a restored or clock-stepped bucket can have an older creation time. Only the current watcher releases readiness, at the end of its scan or when it ends on its own; a replaced watcher's end-of-scan releases nothing. An entry from a watcher already replaced is dropped. A watcher that ends on its own records the terminal error `/healthz` and self-health read. A stopped watcher arms nothing, and one armed while the stop ran is read and dropped until the drain ends it. A watcher reporting `consumer not active` during the gap is logged at WARN, and so is a shutdown drain that finds a watcher's consumer already gone (`consumer not found`): the drain deletes each consumer nats.go created as it ends that subscription, and the ordered consumer of a watcher the last reconnect had not yet replaced can already be gone (a restart loses it outright, since it is kept in memory; a disconnect longer than its inactive threshold lets the server delete it). At the pinned nats.go that delete is the only report of the bare error, so the bus warns on the bare error alone; a nats.go bump re-checks that. The one other report of `consumer not found`, an ordered consumer nats.go failed to recreate, wraps the error and stays an ERROR. Every other async error is an ERROR.
 - Every cache warm-up logs one line when its initial scan ends — `<cache> cache warm-up` with the bucket, `elapsed_ms`, `entries`, `delete_markers` and `outcome` — at INFO when the scan delivered every existing key and at WARN when nats.go's idle timer gave up on it (`outcome: "timed out"`, `internal/kvwatch`). The two counts are disjoint: `entries` is the live keys the scan delivered, `delete_markers` what it streamed past to find them; a cache can hold fewer keys than `entries`, since it evicts a value it cannot decode. The line, like every line a cache watcher writes (a failed first start, a recreated bucket, its own end), goes through the logger its store hands it (`store.WithLogger`, `session.WithSessionLogger`, and the CI store's own), so in the listener it is a JSON record with `machine_id`, as `internal/store`'s lines are. A timed-out scan is logged and never recorded as the watcher's error, because the watcher is still running and its cache still follows the bucket: `Err`, `Ping`, `/healthz` and the self-health rebuild must keep meaning "this watcher is dead". Reading the timeout consumes nats.go's single buffered error, so a watcher that later ends after a timed-out scan records `<cache> watcher stopped` rather than the timeout; `internal/kvwatch` reads that error in one place (`idleTimeout`), for the warm-up, a watcher's terminal error and the one-shot `ScanExistingKeys`, which refuses a scan the timer ended.
 - Each listener collects the interest bucket's delete markers, because nothing else does: every delete path leaves one (the reaper for each dead session, an unsubscribe-all, the admin delete), the bucket has no `MaxAge` and keeps one message per subject, and each marker is replayed by every restart's cache warm-up before that listener serves, so uncollected markers grow every restart's time with no deliveries (LEGION-374). A pass reads the stream (read 1), runs one MetaOnly scan of the bucket, takes the **floor** = the lowest revision that scan delivered as a PUT, reads the stream again (read 2), and sends one unfiltered `STREAM.PURGE` of everything below the floor. The floor comes from the stream, never from the cache: it is a sequence that scan saw, every live key's latest message is that PUT or a later write with a higher sequence, no value is decoded on the way (so a live key this build cannot decode, which the cache evicts while its message stays in the stream, is protected), and a write after the scan is given a higher sequence and survives. It refuses to purge at DEBUG when there is nothing below the floor or no live key at all, and at WARN when a read of the stream failed, the scan did not complete, the stream was replaced, the sequence space moved backward, or the floor is above the stream's last sequence. Every pass logs one line, `interest markers collected` or `interest marker collection refused` with its `reason`, carrying every stream value the decision used — `read1_*` and `read2_*` (both reads come before the purge), `floor`, `live`, `delete_markers` — plus, when it purged, `purged`, `purged_first_seq` and `purged_msgs` from a read after the purge; a read the pass never took is absent from the line, so an unexpected purge or refusal is diagnosable from the line alone. `purged` is the drop in the stream's message count between read 2 and that read, so it is approximate both ways: a put in between under-reports it, and a peer listener's purge in between is counted by both passes, so a sum of `purged` across the fleet overstates what was removed. A purge whose count read fails still logs `interest markers collected`, at WARN and without the `purged` fields. A bucket with no live PUT is never collected, on purpose: a fleet-wide outage leaves every marker in place, which is safe. The creation time bounds the stream's identity and the sequences bound its space, and neither alone bounds both: a bucket deleted and created again has a new creation time but, when the original's first sequence was still 1, need not lower any sequence, and a JetStream restore keeps the snapshot's creation time and shows only as a sequence space that moved backward. A creation time re-stamped with no replacement (an in-place config update plus a restart, at 2.10) refuses one pass, which costs five minutes. A floor above `LastSeq` is the one value that makes the server's unfiltered purge compact the whole stream. One window cannot be guarded: `STREAM.PURGE` at 2.10 takes no expected-stream precondition, so a bucket deleted and created again between read 2 and the purge cannot be refused — that window is one round trip, which is why read 2 is taken immediately before the purge. Every listener runs a pass after its interest cache's first warm-up and then on the reapers' five-minute cadence; the purge is idempotent (a repeat purges 0), so there is no lock and no leader. The one capability it adds is publish on `$JS.API.STREAM.PURGE.KV_envoy_interests`: a NATS user without it leaves every marker where it was, logs `interest marker collection could not purge the bucket` once per process (the connection's own `envoy nats async error` names the permissions violation), and keeps serving.
-- Only a terminal failure that remains after three consecutive recovery intervals self-terminates the listener. A rebuild that reports success is probed at once, and a healthy probe resets the count, so separate faults that each rebuild repairs (a bucket deleted and recreated, then another, then the durable) never add up to a restart, unless the probe right after a rebuild also fails: that failure, transient or terminal, keeps the count, and the terminal line names its error. A listener bucket deleted and not recreated (the interest, session, CI or role bucket) fails every rebuild, because a rebuild opens a bucket and never creates one, so it ends in a restart, and the next start creates the bucket again; a missing bucket counts as terminal, so this holds for the role bucket too, which keeps no cache watcher: `Rewatch` reopens its handle all the same, and its only watch is the one-shot revision snapshot `store.Open` takes. Shutdown stops HTTP first (up to ten seconds), waits within that window for a self-health rebuild still running, retires the interest, session and CI KV watchers (`StopWatch`, final and without a server request, so a reconnect hook still running cannot arm one), and drains NATS through `bus.Client.Drain`. The drain stops the client first, so it never reconnects or re-subscribes, and lets deliveries already in their handlers finish, role-lane forwards included. It is bounded to ten seconds, and a connection that is reconnecting is closed at once. It logs completion and exits non-zero so Docker's restart policy can restore it. A runtime must therefore allow about twenty seconds after SIGTERM: the compose file sets `stop_grace_period: 30s`, and ECS's default `stopTimeout` is 30 seconds.
+- Only a terminal failure that remains after three consecutive recovery intervals self-terminates the listener. A rebuild that reports success is probed at once, and a healthy probe resets the count, so separate faults that each rebuild repairs (a bucket deleted and recreated, then another, then the durable) never add up to a restart, unless the probe right after a rebuild also fails: that failure, transient or terminal, keeps the count, and the terminal line names its error. A listener bucket deleted and not recreated (the interest, session, CI or role bucket) fails every rebuild, because a rebuild opens a bucket and never creates one, so it ends in a restart, and the next start creates the bucket again; a missing bucket counts as terminal, so this holds for the role bucket too, which keeps no cache watcher: `Rewatch` reopens its handle all the same, and its only watch is the one-shot revision snapshot `store.Open` takes. Shutdown stops HTTP first (up to ten seconds), waits within that window for a self-health rebuild still running, retires the interest, session and CI KV watchers (`StopWatch`, final and without a server request, so a reconnect hook still running cannot arm one), and drains NATS through `bus.Client.Drain`. The drain stops the client first, so it never reconnects, re-subscribes or registers a subscription, and lets deliveries already in their handlers finish, role-lane forwards included. It does not wait for a bind in flight: a subscription such a bind makes after the stop is drained with the rest, so the messages the server already routed to it reach its handler rather than being discarded, and the close ends a bind still in flight. It is bounded to ten seconds, and a connection that is reconnecting is closed at once. It logs completion and exits non-zero so Docker's restart policy can restore it. A runtime must therefore allow about twenty seconds after SIGTERM: the compose file sets `stop_grace_period: 30s`, and ECS's default `stopTimeout` is 30 seconds.
 - The listener refuses to bind its durable (`listener-<machine id>`) when the durable's idle heartbeat or ack policy differs from the listener's consumer policy (no heartbeat, explicit acks), because NATS cannot change either in place. It checks the durable right after the NATS connect, before the cache warm-ups, logs `subscribe refused, shutting down`, naming the durable and every such setting it carries, and exits 1 at once rather than retrying a bind that cannot succeed. Deleting the durable lets the next start recreate it at deliver policy `all`, which replays every message the stream retains (72 hours). To keep its cursor instead, recreate it from its own config at one past its ack floor, while no listener runs for that machine:
 
   ```bash
@@ -1169,6 +1240,7 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
   ```
 
   The listener's next start stamps the rest of its policy onto the recreated durable and binds it. A message past the ack floor that was already acknowledged out of order is delivered again.
+- During a rolling deploy the replacement serves `/v1` and its role lane while the old task still holds the durable: `/v1` opens once NATS is connected and the interest and session caches are warm (`envoy-listener /v1 open`, with `since_listening_ms`), and the role lane is a core-NATS queue subscription in the machine's group, `envoy-listener-<machine id>`, which NATS hands each role message to one member of, so the overlap forwards no message twice. The durable's bind is polled every 2 s (`subscribe failed, retrying`, logged at the first refusal and then once per 30 s), so it binds within 2 s of the old task's exit (`durable bound`, with `attempts` and `waited_ms`); a durable still held after 135 s ends the start with `subscribe failed after max attempts, shutting down`, as the backoff it replaced did. `/healthz` answers 200 `starting` until the bind, so `starting` no longer means `/v1` is closed. Every end of the bind wait other than the bind, that exhaustion, a refusal, a SIGTERM, is an ordered shutdown like any other, since `/v1` and the role lane already serve. Each request a starting gate refuses logs `request refused while starting` with `gate` (`webhook` or `v1`), `method` and `path`, the listener's only record of a caller it turned away. `packages/envoy/scripts/listener-deploy-probe.sh` watches a deploy from a client's seat (`packages/envoy/scripts/README.md`).
 - If a session is not live in the registry, delivery fails and the message is NAK'd for retry (up to MaxDeliver attempts over the stream's MaxAge window).
 - CI settlements are published by the listeners that receive GitHub webhooks, which in production is the Fargate listener behind the webhook load balancer (its deployment sets `ENVOY_WEBHOOKS=github,slack`). Only the GitHub route records checks, so a listener whose `ENVOY_WEBHOOKS` does not name `github` - the on-prem fleet's, which sets no webhook variable - opens no CI store: no `envoy_ci_state` bucket, watch or consumer, no summary loop and no `envoy_ci_legacy_records_held` gauge, and it logs `CI store not opened` at start. It must not scan that bucket. The watch delivers every record as it starts, and an on-prem listener reaches production NATS only through a relay: there the burst trips the server's 10 s write deadline (`Slow Consumer Detected`) and holds up the replies `store.Open` waits on past their 10 s deadline, so the start fails.
 - A check_run or check_suite webhook writes the CI record of its commit in each pull request it names, so every check of a head writes one record, and the CI store combines concurrent observations of a record into one compare-and-swap write (`update`), and a burst of a pull request's checks costs far fewer writes than it has observations. A write retries a lost compare-and-swap, or a transient KV error, from a fresh read for up to two seconds (`recordBudget`). One that runs out answers every delivery in its batch 503, which Dispatch's redelivery sweep resends, and logs one JSON line at ERROR, `ci record exceeded its retry budget`, carrying `owner`, `repo`, `number`, `sha`, `checks` (the record's checks with the batch applied, or 0 when no attempt could read the record), `attempts`, `observations` (the deliveries it answered 503) and `error` (`cistore: record exceeded CAS budget` when the last attempt lost its compare-and-swap). It is an ERROR because each one means GitHub was answered 503, and it is meant for an alarm on the CI-record budget to count. The CI store's other lines go through the same JSON logger, so they carry the listener's `machine_id`.
@@ -1452,7 +1524,7 @@ the synchronous listener call records the sent or failed attempt instead of blin
 
 ## Secrets broker
 
-AGENTC-393 v9's secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
+AGENTC-393's secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
 and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/agent-secrets` is its
 client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
@@ -1466,13 +1538,24 @@ broker checks it against the record's approver and records it on the decision ev
 bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
 agents is the deployment's job. `internal/broker/enroll` turns a launcher credential into a leased
 enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected
-service-account token); `internal/broker/rules` evaluates `agent-secret-rules.yaml` policy per
-request (the AGENTC-393 overview document, contract v9, is its contract; a file that still has an
-`approvers:` section is refused, naming the removal); `internal/broker/proof` authenticates a
-session's or a launcher's signed request against its live enrollment or credential;
-`internal/broker/machine` decides typed-code machine logins and mints the launcher credentials
-they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets Manager, or a
-fake local file for development.
+service-account token). A live enrollment is unique per launcher credential, runtime id and slot:
+`POST /v1/enrollments` takes an optional pod-only `slot` (`^[a-z][a-z0-9-]{0,62}$`, else `400
+INVALID_SLOT`, and a slot on a box or host is refused the same way) naming one of several
+independent identities in one pod. The launcher whose proof authenticates the enrollment chooses
+the slot; a session's proof cannot enroll anything (`401 LAUNCHER_INVALID`). So each slot of a pod
+holds its own key, lease, requests and grants, while a pod's `runtime_id` stays the pod UID its
+token proves. Omitted or `""` is the runtime's one enrollment, every box's and host's. The same key
+in the same slot gets its live enrollment back (200), a different key in a live slot is `409
+ALREADY_ENROLLED`, and the rules never see the slot: every slot of a pod matches on its verified
+service account alone. Migration 0007 is forward-only: an older broker binary's conflict lookup
+reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled
+back past it once a slotted enrollment exists. `internal/broker/rules` evaluates
+`agent-secret-rules.yaml` policy per request (the AGENTC-393 overview document is its contract; a
+file that still has an `approvers:` section is refused, naming the removal); `internal/broker/proof`
+authenticates a session's or a launcher's signed request against its live enrollment or
+credential; `internal/broker/machine` decides typed-code machine logins and mints the launcher
+credentials they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets
+Manager, or a fake local file for development.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
@@ -1565,7 +1648,7 @@ broker's `_FILE` secret-loading convention: `<NAME>_FILE`, when set, names a fil
 contents win over a bare `<NAME>` — with both set, the file wins silently, nothing is refused — and
 a named-but-unreadable or empty file is a startup error naming the file, never a silent fallback to
 an unset value. `config.Load` refuses to start naming a stale removal still set in the
-environment — AGENTC-393 v9's `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
+environment — the removed `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
 `BROKER_DISPATCH_PROJECT` and `BROKER_ASK_POLL_SECONDS` (the broker holds no Dispatch credential
 and asks/issues nothing), and `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker
 checks no WebAuthn origin) — so a stale deployment fails loudly rather than silently running on
@@ -1581,7 +1664,7 @@ local-dev-only path. The broker takes no flags, and refuses any flag it is given
 
 `internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
-contract for every row is the AGENTC-393 overview document (contract v9). Each row's handler is
+contract for every row is the AGENTC-393 overview document. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
 which fixes both the credential `server.authenticate` checks and the caller the handler receives (a
 launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route — the UI bearer
@@ -1603,16 +1686,19 @@ for the current, authoritative route list.
 
 `internal/broker/record` implements the credential-request record every human decision turns
 on: `Body.Canonical()` renders the contract's fixed `\n`-terminated line format (the request
-object verbatim, the approver, the enrollment triple, lifetime, rules version, expiry, and the
+object verbatim, the approver, the enrollment's tab-separated kind, runtime id and operator, plus
+a pod's slot as a fourth field only when it has one, lifetime, rules version, expiry, and the
 machine-login code or `-`), `Body.ID()` is the lowercase-hex SHA-256 of that canonical form — the
-record's own content-addressed id — and `ParseBody` is `Canonical`'s exact inverse, refusing any
-stored body that would not reproduce itself byte-for-byte. `VerifyRequestObject` enforces the
-requester's signed request object end to end (single ES256 JWS, `typ` `agent-secrets-request+jwt`
-— disjoint from the per-call proof's `agent-secrets-proof+jwt`, each verifier refusing the other's
-— embedded P-256 JWK, `iss` equal to that JWK's own thumbprint, `aud` equal to `BROKER_PUBLIC_URL`,
-`iat`/`exp` within skew and a 600-second cap, a `reason` of at most 400 runes with bidi/zero-width
-categories refused, and `authorization_details` either every entry `agent_secret` or exactly one
-`launcher_credential` entry naming a valid hostname and an optional `[a-z0-9-]{1,64}` service).
+record's own content-addressed id, which a slotless record keeps byte for byte — and `ParseBody`
+is `Canonical`'s exact inverse, refusing any stored body that would not reproduce itself
+byte-for-byte and any fourth enrollment field that is not a pod's valid slot. `VerifyRequestObject`
+enforces the requester's signed request object end to end (single ES256 JWS, `typ`
+`agent-secrets-request+jwt` — disjoint from the per-call proof's `agent-secrets-proof+jwt`, each
+verifier refusing the other's — embedded P-256 JWK, `iss` equal to that JWK's own thumbprint, `aud`
+equal to `BROKER_PUBLIC_URL`, `iat`/`exp` within skew and a 600-second cap, a `reason` of at most
+400 runes with bidi/zero-width categories refused, and `authorization_details` either every entry
+`agent_secret` or exactly one `launcher_credential` entry naming a valid hostname and an optional
+`[a-z0-9-]{1,64}` service).
 `Body.ApproverLogin(login)` is the one approver comparison: a record's approver is resolved when
 the record is created (an approval rule's `login:<name>`, the requesting enrollment's operator for
 `approver: operator`, or a machine login's `login_hint`), and every decision and every chain
@@ -1640,8 +1726,8 @@ still-live grant covering the exact same name set (`reuseLiveGrant`: no new requ
 as long as the current rules still allow it and the grant's whole chain still verifies), then
 evaluates the rules per name: any `deny` denies the whole request with no record written at all; a
 name no rule mentions at all aborts the whole call with `rules.ErrUnknownSecret` (`400
-UNKNOWN_SECRET`, per contract v9) instead of being folded into an ordinary `deny` decision — no
-request row is written either, matching the "at record time" wording; a name
+UNKNOWN_SECRET`, per the AGENTC-393 overview document) instead of being folded into an ordinary
+`deny` decision — no request row is written either, matching the "at record time" wording; a name
 needing approval that names a *different* approver than an already-approval-needing name in the
 same request is refused `400 MIXED_APPROVERS`; when every name is decided (`granted`/`denied`) with
 nothing pending, the request and, if granted, its grant are written with no record; a request
@@ -1676,7 +1762,7 @@ a no-op, writing no second audit row. Audit rows never carry secret values: `aud
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
 machine login. `Login` verifies a machine's signed request object (`login_hint` required — the
 approving operator's login — and exactly one `launcher_credential` authorization detail), mints an
-eight-symbol confirmation code (`XXXX-XXXX`, the pre-v9 alphabet unchanged) and a separate opaque
+eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
 `pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
 pending login by that human-readable code alone (`LookupByCode` / `POST /v1/machine-logins/lookup`)
@@ -1740,6 +1826,13 @@ listens on the port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127
 AGENTC-833), so concurrent instances can never collide on a shared port either.
 `dev-broker.test.sh` proves both kinds of isolation with fakes (no real Postgres or network) and
 runs in CI's `envoy-go` job.
+
+`.github/workflows/release-envoy-listener.yaml` runs on a `main` push that touches a file the
+image builds from, and by hand (`workflow_dispatch`) from any branch. Every run builds,
+smoke-tests and pushes `ghcr.io/sjawhar/legion/envoy:<commit sha>`, labelled
+`org.opencontainers.image.revision` with that sha. Its `release` job (moving `:latest`, the
+`legion-envoy-v*` tag and the GitHub release) runs only on `refs/heads/main`, so a branch
+dispatch publishes one immutable image, for a dev slot to pin before merge, and moves no tag.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
 `cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper` (AGENTC-393): each of

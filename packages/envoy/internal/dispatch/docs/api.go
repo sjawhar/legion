@@ -22,6 +22,7 @@ type API interface {
 	TextWithToken(ctx context.Context, artifactID string) (string, string, error)
 	Blocks(ctx context.Context, artifactID string) ([]model.ArtifactBlock, error)
 	TextWithBlocks(ctx context.Context, artifactID string) (string, []model.ArtifactBlock, error)
+	BlockPath(ctx context.Context, artifactID, blockID string) (model.BlockPath, error)
 	SnapshotVersion(ctx context.Context, artifactID string, actor model.Actor) (VersionResult, error)
 	SetIssueClosed(ctx context.Context, issueKey string, closed bool)
 	AcquireConditionalEdit(ctx context.Context, artifactID string) (func(), error)

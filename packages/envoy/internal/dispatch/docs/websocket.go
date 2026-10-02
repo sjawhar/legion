@@ -323,6 +323,10 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
+	owed, err := settlementPending(ctx, rooms, room)
+	if err != nil {
+		return err
+	}
 	tree, err := treeOf(doc)
 	if err != nil {
 		slog.Error("dispatch: loaded document outside Proof schema", "room", room, "error", err)
@@ -337,14 +341,13 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	state.mu.Lock()
 	state.closed = !open
 	state.contentMarkdown = &markdown
-	// A failure dropped this document's settlement (failRoomLocked). This state is the
-	// replacement it left the mark for, so it settles once rather than waiting for an edit to
-	// arm one. A room that failed again while this load ran leaves the mark for its own
-	// replacement, since failing a room always sets it.
-	if state.failed == nil {
-		if _, dropped := s.settleAfterReload.LoadAndDelete(room); dropped {
-			s.scheduleSettleLocked(room, state)
-		}
+	// The document owes a settlement no settlement committed: one a shutdown's budget cut short,
+	// or one a room failure dropped (failRoomLocked). Its timer lived in the process or the room
+	// that is gone, so this load settles once rather than waiting for an edit to arm one - unless
+	// the load is a settlement's own warm-up, which settles it next. A room that failed again
+	// while this load ran leaves the row for its own replacement.
+	if state.failed == nil && owed && !state.settleWarming {
+		s.scheduleSettleLocked(room, state)
 	}
 	state.mu.Unlock()
 	doc.OnUpdate(func(update []byte, origin any) {

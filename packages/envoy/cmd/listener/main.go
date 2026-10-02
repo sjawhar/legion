@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -31,9 +30,9 @@ import (
 	"github.com/sjawhar/envoy/internal/webhook"
 )
 
-// listenerDeps holds the NATS-dependent resources, all open. main builds the webhook and /v1
-// handlers over it once initialization completes; /healthz and the metrics gauges, which answer
-// during startup too, read it through an atomic.Pointer that stays nil until then.
+// listenerDeps holds the NATS-dependent resources, all open. main builds the /v1 handlers over it
+// once the stores are open; /healthz and the metrics gauges, which answer during startup too, read
+// it through an atomic.Pointer that stays nil until the durable consumer binds.
 type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
@@ -74,145 +73,6 @@ func listenerCaches(registry *store.Registry, sessions *session.SessionRegistry,
 		caches = append(caches, listenerCache{name: "CI", cache: ciStore})
 	}
 	return caches
-}
-
-// Canonical policy for the listener's durable consumer. DeliverSubject is
-// deliberately not part of the policy: it is fixed at creation and preserved
-// for the consumer's lifetime (nats.Bind attaches to whatever subject the
-// server has persisted).
-//
-// consumerInactiveThreshold lets the server delete a machine's durable
-// consumer once its listener has been gone this long. The notification
-// stream only retains 72h of messages, so a consumer inactive longer than
-// that has already lost data and its durability protects nothing; without
-// a threshold, every decommissioned machine leaves a consumer behind
-// forever, silently accumulating pending state.
-const (
-	consumerAckWait           = 60 * time.Second
-	consumerMaxAckPending     = 256
-	consumerMaxDeliver        = 20
-	consumerInactiveThreshold = 7 * 24 * time.Hour
-)
-
-// applyListenerConsumerPolicy stamps the canonical consumer policy onto
-// config. Shared by the create and drift-correction paths so the policy has
-// exactly one definition: the drift correction applies it to a copy of the
-// durable's config and updates the durable when the copy differs. The policy
-// has no idle heartbeat: the create path starts from a zero config, so a
-// durable the listener creates has none. listenerDurableRefusal refuses an
-// existing durable whose heartbeat or ack policy differs, since NATS cannot
-// change either in place.
-func applyListenerConsumerPolicy(config *nats.ConsumerConfig, subjects []string) {
-	config.FilterSubject = ""
-	config.FilterSubjects = subjects
-	config.AckPolicy = nats.AckExplicitPolicy
-	config.AckWait = consumerAckWait
-	config.MaxAckPending = consumerMaxAckPending
-	config.MaxDeliver = consumerMaxDeliver
-	config.InactiveThreshold = consumerInactiveThreshold
-}
-
-// errListenerDurableRefused marks a durable startListenerSubscription will not bind however often
-// it is asked: no retry can succeed, so the listener's startup exits at once.
-var errListenerDurableRefused = errors.New("listener durable refused")
-
-// listenerDurableRefusal refuses an existing durable carrying a setting the listener's consumer
-// policy fixes and NATS cannot change in place, so the drift correction could never apply it:
-//   - An idle heartbeat. The bus logs nats.ErrConsumerNotActive at WARN because only KV watchers'
-//     ordered consumers report it, and only while disconnected; a heartbeat here would make a
-//     stalled durable report that same WARN.
-//   - An ack policy other than explicit. The delivery handler acks each message or NAKs it for a
-//     delayed retry, one at a time; under ack all, a later message's ack would also ack an earlier
-//     one still waiting for its retry.
-//
-// Recreating the durable would drop its cursor, so the listener leaves it to an operator, and the
-// refusal names every such setting the durable carries and says how to recreate it without
-// replaying the stream.
-func listenerDurableRefusal(consumer string, config nats.ConsumerConfig) error {
-	var settings []string
-	if config.Heartbeat != 0 {
-		settings = append(settings, fmt.Sprintf("an idle heartbeat of %s", config.Heartbeat))
-	}
-	if config.AckPolicy != nats.AckExplicitPolicy {
-		settings = append(settings, fmt.Sprintf("ack policy %s", config.AckPolicy))
-	}
-	if len(settings) == 0 {
-		return nil
-	}
-	without := "that setting"
-	if len(settings) > 1 {
-		without = "those settings"
-	}
-	return fmt.Errorf("%w: durable consumer %s has %s, which the listener's consumer policy forbids and NATS cannot change in place; "+
-		"deleting it lets the listener recreate it at deliver policy all, which replays every retained message, "+
-		"so to keep its cursor recreate it from its own config without %s, at deliver policy by_start_sequence "+
-		"with opt_start_seq one past its ack_floor.stream_seq (packages/envoy/AGENTS.md, Operational notes)",
-		errListenerDurableRefused, consumer, strings.Join(settings, " and "), without)
-}
-
-// listenerDurable reads the machine's durable. It returns a nil info when there is none,
-// listenerDurableRefusal's error when the listener's policy cannot use the one there is, and the
-// lookup's error when NATS cannot say.
-func listenerDurable(client *bus.Client, consumer string) (*nats.ConsumerInfo, error) {
-	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
-	if errors.Is(err, nats.ErrConsumerNotFound) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := listenerDurableRefusal(consumer, info.Config); err != nil {
-		return nil, err
-	}
-	return info, nil
-}
-
-// startListenerSubscription preserves the durable consumer so restarts resume
-// from the last ACKed non-role message instead of skipping pending work.
-//
-// The consumer is always created server-side and then bound, never created by
-// js.Subscribe: the client library deletes consumers it created itself on
-// Unsubscribe()/Drain(), and both the bus reconnect recovery and the SIGTERM
-// drain paths trigger exactly that — silently resetting the durable cursor.
-// The config drift-correction also stamps consumerInactiveThreshold onto
-// consumers created before the threshold existed.
-func startListenerSubscription(client *bus.Client, consumer string, handler nats.MsgHandler) (*nats.Subscription, error) {
-	subjects := bus.StreamSubjects()
-	info, err := listenerDurable(client, consumer)
-	switch {
-	case err != nil:
-		return nil, err
-	case info == nil:
-		// The deliver subject is a random inbox, not a derivable name: on a
-		// shared NATS account a predictable subject would let any client
-		// hold interest on it — shadow-reading deliveries and making the
-		// consumer look push-bound so the listener could never attach.
-		config := nats.ConsumerConfig{
-			Durable:        consumer,
-			DeliverSubject: nats.NewInbox(),
-		}
-		applyListenerConsumerPolicy(&config, subjects)
-		if _, err := client.JS().AddConsumer(bus.Stream, &config); err != nil {
-			return nil, err
-		}
-	default:
-		// Only a field the policy writes can differ: the copy shares every other one, the
-		// server-set metadata included, and listenerDurable has already refused any ack policy
-		// but explicit.
-		corrected := info.Config
-		applyListenerConsumerPolicy(&corrected, subjects)
-		if !reflect.DeepEqual(corrected, info.Config) {
-			if _, err := client.JS().UpdateConsumer(bus.Stream, &corrected); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return client.Subscribe(
-		"",
-		handler,
-		nats.Bind(bus.Stream, consumer),
-		nats.ManualAck(),
-	)
 }
 
 func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
@@ -383,12 +243,13 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 	}
 }
 
-// healthzHandler is the listener's /healthz. It answers 200 "starting" before NATS setup has
-// published deps, 200 "healthy" with the durable consumer's lag once every dependency answers,
-// 503 "unhealthy" when NATS is unavailable, the durable subscription is inactive, a cache's
-// watcher has stopped or the durable consumer is gone, and 200 "degraded" for a transient KV
-// failure the self-health monitor and the NATS reconnect retry. A listener that mounts no GitHub
-// webhook route keeps no CI cache, and its answer carries "ci_cache": "not_applicable".
+// healthzHandler is the listener's /healthz. It answers 200 "starting" until main publishes deps
+// once the durable consumer binds, which during a rolling deploy waits out the task being replaced
+// while /v1 already serves; 200 "healthy" with the durable consumer's lag once every dependency
+// answers; 503 "unhealthy" when NATS is unavailable, the durable subscription is inactive, a cache's
+// watcher has stopped or the durable consumer is gone; and 200 "degraded" for a transient KV failure
+// the self-health monitor and the NATS reconnect retry. A listener that mounts no GitHub webhook
+// route keeps no CI cache, and its answer carries "ci_cache": "not_applicable".
 func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -484,11 +345,19 @@ func webhookRoutes(cfg *webhook.WebhookConfig) []webhookRoute {
 	return routes
 }
 
-// startingGate answers 503 "service starting" until open hands it the mux to serve. main builds
-// each gate's mux only once every dependency of its handlers is open, so a request never reaches a
-// handler over a dependency that is not there.
+// startingGate answers 503 "service starting" until open hands it the mux to serve, and logs each
+// request it refuses: that line is the listener's only record of a caller it turned away while it
+// started. main builds each gate's mux only once every dependency of its handlers is open, so a
+// request never reaches a handler over a dependency that is not there.
 type startingGate struct {
-	mux atomic.Pointer[http.ServeMux]
+	name   string
+	logger *logging.Logger
+	mux    atomic.Pointer[http.ServeMux]
+}
+
+// newStartingGate returns a closed gate whose refusals log under name.
+func newStartingGate(name string, logger *logging.Logger) *startingGate {
+	return &startingGate{name: name, logger: logger}
 }
 
 func (g *startingGate) open(mux *http.ServeMux) { g.mux.Store(mux) }
@@ -496,6 +365,11 @@ func (g *startingGate) open(mux *http.ServeMux) { g.mux.Store(mux) }
 func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mux := g.mux.Load()
 	if mux == nil {
+		g.logger.Warn("request refused while starting",
+			slog.String("gate", g.name),
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+		)
 		writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 		return
 	}
@@ -503,9 +377,8 @@ func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // openWebhooks builds the webhook routes over NATS and the CI store (nil without the GitHub route)
-// and opens the webhook gate onto them. A webhook waits on nothing else: the durable consumer's
-// bind in particular waits out a rolling deploy's old task, and GitHub does not redeliver a
-// delivery refused in that window.
+// and opens the webhook gate onto them. A webhook waits on nothing else, not even the interest and
+// session caches /v1 waits on, and GitHub does not redeliver a delivery refused while they warm.
 func openWebhooks(gate *startingGate, hooks []webhookRoute, client *bus.Client, ciStore *cistore.Store) {
 	routes := http.NewServeMux()
 	for _, hook := range hooks {
@@ -514,14 +387,16 @@ func openWebhooks(gate *startingGate, hooks []webhookRoute, client *bus.Client, 
 	gate.open(routes)
 }
 
-// openListener builds the /v1 routes over the complete dependencies, opens the /v1 gate onto them,
-// and only then publishes the dependencies. Publishing is what turns /healthz healthy, and the
-// webhook gate opened earlier, so a probe that reads healthy always finds every route open.
-func openListener(gate *startingGate, ready *listenerDeps, machineID string, logger *logging.Logger, publish func(*listenerDeps)) {
+// openV1Routes builds the /v1 routes over the stores and opens the /v1 gate onto them. No /v1
+// handler reads the durable consumer, so /v1 opens before the durable binds: during a rolling deploy
+// the bind waits out the task being replaced, and callers that resolve the listener's name reach
+// both tasks meanwhile. Publishing the dependencies, which turns /healthz healthy, waits for the
+// bind.
+func openV1Routes(gate *startingGate, ready *listenerDeps, machineID string, logger *logging.Logger, listeningAt time.Time) {
 	routes := http.NewServeMux()
 	registerV1Routes(routes, ready, machineID, logger)
 	gate.open(routes)
-	publish(ready)
+	logger.Info("envoy-listener /v1 open", slog.Int64("since_listening_ms", time.Since(listeningAt).Milliseconds()))
 }
 
 func main() {
@@ -607,15 +482,16 @@ func main() {
 
 	// The webhook and /v1 routes answer 503 "service starting" until their dependencies are open,
 	// each behind its own gate: the webhooks once NATS and, for the GitHub route, the CI store are
-	// (Phase 5), /v1 once every store and the durable consumer are (Phase 6). The webhook paths
-	// reach their gate bare, /v1 through apiAuth.
-	var webhookGate, v1Gate startingGate
+	// (Phase 5), /v1 once the interest and session caches are too (Phase 6). Neither waits for the
+	// durable consumer, which only /healthz reads. The webhook paths reach their gate bare, /v1
+	// through apiAuth.
+	webhookGate, v1Gate := newStartingGate("webhook", logger), newStartingGate("v1", logger)
 	hooks := webhookRoutes(webhookCfg)
 	for _, hook := range hooks {
-		mux.Handle(hook.path, &webhookGate)
+		mux.Handle(hook.path, webhookGate)
 	}
 	// Serve /v1/* on the listener port for local plugin registration.
-	v1Handler := apiAuth(apiToken, apiVerifier, logger, &v1Gate)
+	v1Handler := apiAuth(apiToken, apiVerifier, logger, v1Gate)
 	mux.Handle("/v1", v1Handler)
 	mux.Handle("/v1/", v1Handler)
 
@@ -632,6 +508,7 @@ func main() {
 			fatal <- err
 		}
 	}()
+	listeningAt := time.Now()
 	logger.Info("envoy-listener listening", slog.String("addr", addr))
 
 	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here). The listener owns
@@ -641,19 +518,15 @@ func main() {
 		log.Fatal(err)
 	}
 	consumer := "listener-" + strings.ReplaceAll(cfg.MachineID, " ", "-")
-	// exitRefused ends a start that met a refused durable. No retry can bind it, and while this
-	// listener starts, /healthz answers 200 "starting", so a rolling deploy waiting on it would take
-	// the task for healthy and stop the one it replaces.
-	exitRefused := func(err error) {
-		logger.Error("subscribe refused, shutting down", slog.String("error", err.Error()))
+	// The durable is checked here, before the cache warm-ups below (up to 30 s each), so a refused
+	// one ends the start within the NATS connect. No retry can bind it, and while this listener
+	// starts, /healthz answers 200 "starting", so a rolling deploy waiting on it would take the task
+	// for healthy and stop the one it replaces. Nothing serves yet, so the start ends at once. A
+	// lookup that fails is left to the bind, which retries it.
+	if _, err := listenerDurable(client, consumer); errors.Is(err, errListenerDurableRefused) {
+		logger.Error(durableRefusedLine, slog.String("error", err.Error()))
 		client.Conn.Close()
 		os.Exit(1)
-	}
-	// The durable is checked here, before the cache warm-ups below (up to 30 s each), so a refused
-	// one ends the start within the NATS connect. A lookup that fails is left to the subscribe
-	// loop, which retries it.
-	if _, err := listenerDurable(client, consumer); errors.Is(err, errListenerDurableRefused) {
-		exitRefused(err)
 	} else if err != nil {
 		logger.Warn("durable consumer check failed; the subscribe retries it", slog.String("consumer", consumer), slog.String("error", err.Error()))
 	}
@@ -675,7 +548,7 @@ func main() {
 	} else {
 		logger.Info("CI store not opened: no GitHub webhook route, so this listener records and settles no checks")
 	}
-	openWebhooks(&webhookGate, hooks, client, ciStore)
+	openWebhooks(webhookGate, hooks, client, ciStore)
 	logger.Info("envoy-listener webhooks open (NATS connected)")
 
 	// The registry and its cache watcher log through the listener's own handler, so its role-restore
@@ -751,15 +624,7 @@ func main() {
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
-	// Subscribe with retry — during rolling deployments, the old container may
-	// still hold the durable consumer binding. nats.Bind rejects a second
-	// binding ("consumer is already bound"), so retry with backoff until the
-	// old listener's delivery interest clears; never delete the consumer to
-	// steal the binding — that resets the durable cursor and replays the full
-	// retention window to every subscriber. A durable refused here is not
-	// retried either. The loop is the only refusal when the check after the
-	// connect could not read the durable (logged at WARN above), and it also
-	// catches a durable made refusable since that check.
+	// Phase 6: Open the role lane and /v1 onto the stores, then bind the durable consumer.
 	deliveryConfig := listenerDeliveryHandlerConfig{
 		client:            client,
 		forwardRole:       client.RequestCoreTo,
@@ -776,44 +641,9 @@ func main() {
 		deliveryDuration:  deliveryDuration,
 	}
 
-	var sub *nats.Subscription
-	for attempt := 1; attempt <= 10; attempt++ {
-		sub, err = startListenerSubscription(client, consumer, jetStreamDeliveryHandler(deliveryConfig))
-		if err == nil {
-			break
-		}
-		if errors.Is(err, errListenerDurableRefused) {
-			exitRefused(err)
-		}
-		if attempt == 10 {
-			logger.Error("subscribe failed after max attempts, shutting down",
-				slog.String("error", err.Error()),
-				slog.Int("attempts", attempt),
-			)
-			// Close NATS before exiting — releases the consumer binding so the
-			// next container can claim it. log.Fatal/os.Exit skips cleanup.
-			client.Conn.Close()
-			os.Exit(1)
-		}
-		// Check if auto-resubscribe (bus.Client.onReconnect) already succeeded
-		// while we were sleeping. If so, the subscription is in place. A retry would
-		// replace our own handle with a new bind of the same consumer, and that bind
-		// races the server's release of the old one's push binding: it can be
-		// refused with "consumer is already bound to a subscription".
-		if client.SubOK() {
-			logger.Info("subscribe succeeded via auto-resubscribe during retry backoff")
-			break
-		}
-		backoff := time.Duration(attempt) * 3 * time.Second
-		logger.Warn("subscribe failed, retrying",
-			slog.String("error", err.Error()),
-			slog.Int("attempt", attempt),
-			slog.String("retry_in", backoff.String()),
-		)
-		time.Sleep(backoff)
-	}
-	_ = sub // used by NATS internally
-
+	// The role lane is a core-NATS queue subscription in this machine's group. During a rolling
+	// deploy the task being replaced is a member too, and NATS hands each role message to one member
+	// of a group, so opening the lane before the durable binds forwards no message twice.
 	roleSub, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", coreNATSDeliveryHandler(deliveryConfig), roleQueue)
 	if err != nil {
 		logger.Error("core role subscription failed", slog.String("error", err.Error()))
@@ -827,7 +657,12 @@ func main() {
 	}
 	_ = roleSub
 
-	// Phase 6: Open the /v1 routes onto the initialized state, then publish it.
+	// From here a SIGTERM or SIGINT is an ordered shutdown: /v1 serves from the next step, and the
+	// bind can wait out a rolling deploy's old task for most of a minute. Before here, during the
+	// NATS connect and the cache warm-ups, a signal ends the process at once, as it always has.
+	stopping, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	ready := &listenerDeps{
 		client:     client,
 		registry:   registry,
@@ -837,7 +672,40 @@ func main() {
 		consumer:   consumer,
 		streamName: bus.Stream,
 	}
-	openListener(&v1Gate, ready, cfg.MachineID, logger, deps.Store)
+	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
+
+	// During a rolling deploy the old task still holds the durable's push binding, and nats.Bind
+	// rejects a second one ("consumer is already bound"), so the bind is polled until the old task's
+	// delivery interest clears. It never deletes the consumer to take the binding: that resets the
+	// durable cursor and replays the full retention window to every subscriber. A durable refused
+	// here is not retried either. The bind is the only refusal when the check after the connect
+	// could not read the durable (logged at WARN above), and it also catches a durable made
+	// refusable since that check.
+	bind, err := bindListenerDurable(stopping, client, consumer, jetStreamDeliveryHandler(deliveryConfig), logger, durableBindInterval, durableBindDeadline)
+	// A start the bind ends shuts down in order: /v1 and the role lane already serve, and no
+	// background loop has started yet. shutdownListener exits, so nothing below runs on an error.
+	if err != nil {
+		switch {
+		case errors.Is(err, errListenerDurableRefused):
+			logger.Error(durableRefusedLine, slog.String("error", err.Error()))
+		case errors.Is(err, errListenerDurableBindExhausted):
+			logger.Error("subscribe failed after max attempts, shutting down",
+				slog.String("error", err.Error()),
+				slog.Int("attempts", bind.attempts),
+				slog.Int64("waited_ms", bind.waited.Milliseconds()),
+			)
+		case stopping.Err() != nil:
+			logger.Info("received signal, shutting down", slog.String("signal", context.Cause(stopping).Error()), slog.String("phase", "durable bind"))
+		default:
+			logger.Error("durable bind failed, shutting down",
+				slog.String("error", err.Error()),
+				slog.Int("attempts", bind.attempts),
+				slog.Int64("waited_ms", bind.waited.Milliseconds()),
+			)
+		}
+		shutdownListener(logger, server, client, caches, listenerLoops{})
+	}
+	deps.Store(ready)
 	logger.Info("envoy-listener ready (NATS connected)")
 
 	// Phase 6b: Start interest reaper for stale KV cleanup.
@@ -910,19 +778,37 @@ func main() {
 	}()
 
 	// Phase 7: Block until SIGTERM/SIGINT or fatal error.
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
-
 	select {
 	case err := <-fatal:
 		logger.Error("fatal error", slog.String("error", err.Error()))
-	case s := <-sig:
-		logger.Info("received signal, shutting down", slog.String("signal", s.String()))
+	case <-stopping.Done():
+		logger.Info("received signal, shutting down", slog.String("signal", context.Cause(stopping).Error()))
 	}
+	shutdownListener(logger, server, client, caches, listenerLoops{
+		stop: func() {
+			monitorCancel()
+			summaryCancel()
+		},
+		monitorDone: monitorDone,
+	})
+}
 
+// listenerLoops are the background loops main starts once the durable binds: stop ends them, and
+// monitorDone is closed once the self-health monitor has returned. A start that ends before the
+// bind has started none, and passes the zero value.
+type listenerLoops struct {
+	stop        func()
+	monitorDone <-chan struct{}
+}
+
+// shutdownListener is the ordered shutdown every end of a start that serves /v1 comes to, a
+// signal, a fatal error or a bind that did not complete, and exits non-zero so the runtime's
+// restart policy restores the listener.
+func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.Client, caches []listenerCache, loops listenerLoops) {
 	// Stop background loops before draining NATS.
-	monitorCancel()
-	summaryCancel()
+	if loops.stop != nil {
+		loops.stop()
+	}
 
 	// Ordered shutdown:
 	// 2. HTTP server — stop accepting new requests, drain in-flight.
@@ -938,10 +824,12 @@ func main() {
 	// watcher failure, and a reconnect hook still running cannot arm a new one; then drain in-flight
 	// deliveries without reconnecting, but never let a blocked NATS request pin the process after
 	// its HTTP listener is gone.
-	select {
-	case <-monitorDone:
-	case <-shutdownCtx.Done():
-		logger.Warn("self-health monitor still running at shutdown")
+	if loops.monitorDone != nil {
+		select {
+		case <-loops.monitorDone:
+		case <-shutdownCtx.Done():
+			logger.Warn("self-health monitor still running at shutdown")
+		}
 	}
 	for _, c := range caches {
 		c.cache.StopWatch()
