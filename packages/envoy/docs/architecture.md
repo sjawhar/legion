@@ -43,7 +43,7 @@ Agent messages  --/       |
 
 ## Listener API
 
-All `/v1/*` endpoints return 503 until NATS initialization completes.
+All `/v1/*` endpoints answer 503 until NATS is connected and the interest and session caches are warm; they do not wait for the durable consumer.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|

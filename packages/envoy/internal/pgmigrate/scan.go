@@ -23,16 +23,22 @@ const (
 	sqlOther                                // any other one byte
 )
 
-// scanSQL reads text token by token, calling visit with each token's kind, span and, for a quoted
-// identifier, its decoded name. It stops at the first error visit returns, which it returns. A
-// string literal is continued by whitespace holding a newline and another quote; what follows a
-// number is read on its own, as scan.l reads it or refuses it as trailing junk. An unterminated
-// literal, comment or quoted identifier takes the rest of the text, which Postgres refuses before
-// it runs anything.
-func scanSQL(text string, visit func(kind sqlTokenKind, start, end int, identifier string) error) error {
+// sqlToken is one token scanSQL reads, including the decoded name of a quoted identifier.
+type sqlToken struct {
+	kind       sqlTokenKind
+	start, end int
+	identifier string
+}
+
+// scanSQL reads text token by token, calling visit with each token. It stops at the first error
+// visit returns, which it returns. A string literal is continued by whitespace holding a newline
+// and another quote; what follows a number is read on its own, as scan.l reads it or refuses it as
+// trailing junk. An unterminated literal, comment or quoted identifier takes the rest of the text,
+// which Postgres refuses before it runs anything.
+func scanSQL(text string, visit func(sqlToken) error) error {
 	for i := 0; i < len(text); {
 		kind, end, identifier := nextSQLToken(text, i)
-		if err := visit(kind, i, end, identifier); err != nil {
+		if err := visit(sqlToken{kind: kind, start: i, end: end, identifier: identifier}); err != nil {
 			return err
 		}
 		i = end

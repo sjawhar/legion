@@ -84,7 +84,7 @@ func touchedNames(code string) []string {
 // touchedIndexes names the indexes a migration's code drops or alters.
 func touchedIndexes(code string) []string {
 	var names []string
-	for _, match := range indexMatches(code, nil) {
+	for _, match := range indexMatches(code) {
 		names = append(names, match.name)
 	}
 	slices.Sort(names)
@@ -93,59 +93,54 @@ func touchedIndexes(code string) []string {
 
 // touch is one table a statement of a migration names, with what the statement does to its rows.
 type touch struct {
-	name        string
-	writes      rowWrite
-	conditional bool
+	name   string
+	writes rowWrite
+	offset int
 }
 
 func touches(code string) []touch {
-	return matchedTouches(code, nil)
+	return matchedTouches(code)
 }
 
-func migrationTouches(text migrationText) []touch {
-	return matchedTouches(text.code, text.conditionalAt)
-}
-
-func matchedTouches(code string, conditional func(int) bool) []touch {
+func matchedTouches(code string) []touch {
 	var out []touch
 	for _, form := range touchedTablePatterns {
-		for _, match := range matchedNames(code, form.pattern, conditional) {
-			out = append(out, touch{name: match.name, writes: form.writes, conditional: match.conditional})
+		for _, match := range matchedNames(code, form.pattern) {
+			out = append(out, touch{name: match.name, writes: form.writes, offset: match.offset})
 		}
 	}
 	return out
 }
 
 type matchedName struct {
-	name        string
-	conditional bool
+	name   string
+	offset int
 }
 
 func namesMatching(code string, pattern *regexp.Regexp) []string {
 	var names []string
-	for _, match := range matchedNames(code, pattern, nil) {
+	for _, match := range matchedNames(code, pattern) {
 		names = append(names, match.name)
 	}
 	return names
 }
 
-func indexMatches(code string, conditional func(int) bool) []matchedName {
+func indexMatches(code string) []matchedName {
 	var out []matchedName
 	for _, pattern := range touchedIndexPatterns {
-		out = append(out, matchedNames(code, pattern, conditional)...)
+		out = append(out, matchedNames(code, pattern)...)
 	}
 	return out
 }
 
-func matchedNames(code string, pattern *regexp.Regexp, conditional func(int) bool) []matchedName {
+func matchedNames(code string, pattern *regexp.Regexp) []matchedName {
 	var names []matchedName
 	for _, match := range pattern.FindAllStringSubmatchIndex(code, -1) {
-		insideBlock := conditional != nil && conditional(match[0])
 		for _, raw := range strings.Split(code[match[2]:match[3]], ",") {
 			name := strings.ToLower(strings.Trim(strings.TrimSpace(raw), `"`))
 			name = strings.TrimPrefix(name, "public.")
 			if name != "" {
-				names = append(names, matchedName{name: name, conditional: insideBlock})
+				names = append(names, matchedName{name: name, offset: match[0]})
 			}
 		}
 	}
@@ -191,7 +186,7 @@ type TouchedTable struct {
 // each migration before it reads the next, finds in the catalog.
 func CensusTables(ctx context.Context, q Querier, sql string) ([]TouchedTable, error) {
 	text := readMigration(sql)
-	matches := migrationTouches(text)
+	matches := matchedTouches(text.code)
 	var keys []foreignKey
 	if writesRows(matches) {
 		var err error
@@ -210,11 +205,11 @@ func censusTables(ctx context.Context, q Querier, text migrationText, matches []
 	unconditional := map[string]bool{}
 	for _, touch := range matches {
 		writes[touch.name] |= touch.writes
-		if !touch.conditional {
+		if !text.conditionalAt(touch.offset) {
 			unconditional[touch.name] = true
 		}
 	}
-	for _, index := range indexMatches(text.code, text.conditionalAt) {
+	for _, index := range indexMatches(text.code) {
 		var table string
 		err := q.QueryRow(ctx, "select indrelid::regclass::text from pg_index where indexrelid = to_regclass($1)", index.name).Scan(&table)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -227,7 +222,7 @@ func censusTables(ctx context.Context, q Querier, text migrationText, matches []
 		if _, named := writes[table]; !named {
 			writes[table] = 0
 		}
-		if !index.conditional {
+		if !text.conditionalAt(index.offset) {
 			unconditional[table] = true
 		}
 	}
@@ -389,14 +384,14 @@ func readMigration(sql string) migrationText {
 	var code strings.Builder
 	var conditional []conditionalSpan
 	statement := "" // the first word of the statement being read
-	scanSQL(sql, func(kind sqlTokenKind, start, end int, _ string) error {
-		text := sql[start:end]
+	scanSQL(sql, func(token sqlToken) error {
+		text := sql[token.start:token.end]
 		switch {
-		case kind == sqlComment:
+		case token.kind == sqlComment:
 			code.WriteByte(' ')
-		case kind == sqlString, kind == sqlUnicodeEscape && text[2] == '\'':
+		case token.kind == sqlString, token.kind == sqlUnicodeEscape && text[2] == '\'':
 			code.WriteString("''")
-		case kind == sqlDollarString && statement == "do":
+		case token.kind == sqlDollarString && statement == "do":
 			open := strings.IndexByte(text[1:], '$') + 2
 			body := readMigration(strings.TrimSuffix(text[open:], text[:open]))
 			code.WriteByte(' ')
@@ -404,11 +399,11 @@ func readMigration(sql string) migrationText {
 			code.WriteString(body.code)
 			conditional = append(conditional, conditionalSpan{start: bodyStart, end: code.Len()})
 			code.WriteByte(' ')
-		case kind == sqlDollarString:
+		case token.kind == sqlDollarString:
 			code.WriteString("''")
 		default:
 			switch {
-			case kind == sqlWord && statement == "":
+			case token.kind == sqlWord && statement == "":
 				statement = strings.ToLower(text)
 			case text == ";":
 				statement = ""

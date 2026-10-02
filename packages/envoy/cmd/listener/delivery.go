@@ -26,6 +26,11 @@ const roleForwardDedupePrefix = "envoy.role.forward."
 
 const roleReceiptTimeout = 2 * time.Second
 
+// exceptionPublishFailedLine is the line a delivery logs when its delivery exception could not be
+// published. The deployed publish-failure metric filter matches it exactly (agent-c
+// meta/infra/pulumi/components/envoy/listener.py), so every site that logs it uses this constant.
+const exceptionPublishFailedLine = "listener exception publish failed"
+
 func shouldNAKFanoutDelivery(sessionLive bool, err error) bool {
 	return err != nil && sessionLive
 }
@@ -212,7 +217,7 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 	retry := outcome.retry
 	if outcome.exceptionReason != "" && !isExceptionsTopic(item.Topic) && (isControlTopic(item.Topic) || outcome.fanoutRefusal) {
 		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.fanoutRefusal); err != nil {
-			cfg.logger.Error("listener exception publish failed", slog.String("error", err.Error()), slog.String("topic", item.Topic))
+			cfg.logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
 			if outcome.exceptionFailureClearsAttempt {
 				cfg.attemptCache.Clear(item.DedupeKey, outcome.sessionID)
 			}
@@ -245,7 +250,7 @@ func publishNoHolderExceptionOrNak(cfg listenerDeliveryHandlerConfig, message de
 		if sessionID != "" {
 			cfg.attemptCache.Clear(item.DedupeKey, sessionID)
 		}
-		cfg.logger.Error("listener exception publish failed", slog.String("error", err.Error()), slog.String("topic", item.Topic))
+		cfg.logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
 		cfg.messagesNAKed.Inc()
 		message.finalize(true)
 		return false

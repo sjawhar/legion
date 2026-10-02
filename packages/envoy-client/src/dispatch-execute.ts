@@ -1790,20 +1790,21 @@ async function refuseRemovingOpenDecisionBlocks(
  * helper that never returns leaves its switch case with no visible terminator, which Biome's
  * noFallthroughSwitchClause rejects.
  *
- * A gateway's answer stays a `DispatchGatewayError`, and `suffix`, the caller's account of what
- * its call did, joins it in one sentence. Where the request may have reached Dispatch
- * (`mayHaveReachedDispatch`), the client's advice could judge only from the method (a write is
- * told to check whether it took effect), so a suffix, which knows what its call did, takes its
- * place and must say what to do; otherwise the request never reached Dispatch, and the suffix
- * follows the client's advice.
+ * A gateway's answer stays a `DispatchGatewayError`, and the caller's account of what its call did
+ * joins it in one sentence. Where the request may have reached Dispatch (`mayHaveReachedDispatch`),
+ * the client's advice could judge only from the method (a write is told to check whether it took
+ * effect), so that account, which knows what its call did, takes its place and must say what to do;
+ * otherwise the request never reached Dispatch, and the account follows the client's advice.
  */
-function refusalWithCode(error: unknown, suffix = ""): unknown {
+function refusalWithCode(error: unknown, ...clauses: string[]): unknown {
+  const suffix = clauses.filter((clause) => clause !== "").join("; ");
+  const joined = suffix === "" ? "" : `; ${suffix}`;
   if (error instanceof DispatchGatewayError) {
     let told = error.message;
-    if (suffix !== "") {
+    if (joined !== "") {
       told = error.mayHaveReachedDispatch
-        ? `${error.answer}${suffix}`
-        : `${error.answer}, so ${error.advice}${suffix}`;
+        ? `${error.answer}${joined}`
+        : `${error.answer}, so ${error.advice}${joined}`;
     }
     return new DispatchGatewayError(
       error.status,
@@ -1816,7 +1817,7 @@ function refusalWithCode(error: unknown, suffix = ""): unknown {
   return new DispatchServiceError(
     error.code,
     error.status,
-    `${error.code}: ${error.message}${suffix}`,
+    `${error.code}: ${error.message}${joined}`,
     error.candidates,
     error.current,
     error.mismatches
@@ -2084,7 +2085,7 @@ export async function executeDispatchTool(
           const told = writeMayHaveLanded(error)
             ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again"
             : "the reason was not posted, so the close was not sent";
-          if (error instanceof DispatchServiceError) throw refusalWithCode(error, `; ${told}`);
+          if (error instanceof DispatchServiceError) throw refusalWithCode(error, told);
           throw withAccount(error, told);
         }
       }
@@ -2113,7 +2114,7 @@ export async function executeDispatchTool(
         // gateway's 500 page is not that answer, and gets no such reading.
         const taken =
           dispatchAnswered(error, 500) && newLinks.length > 0
-            ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)`
+            ? `one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)`
             : "";
         if (closingNote === undefined) throw refusalWithCode(error, taken);
         // The reason is on the issue, so a blind retry would post it a second time: the error
@@ -2127,8 +2128,7 @@ export async function executeDispatchTool(
         const landed = writeMayHaveLanded(error)
           ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`
           : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
-        if (error instanceof DispatchServiceError)
-          throw refusalWithCode(error, `${taken}; ${landed}`);
+        if (error instanceof DispatchServiceError) throw refusalWithCode(error, taken, landed);
         throw withAccount(error, landed);
       }
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
