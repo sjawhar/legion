@@ -485,19 +485,21 @@ paths move; the two runs' `FAILED-ROOM` lines are the comparison.
 `e2e/fake-envoy.ts` is a stub Envoy listener the harness starts on
 `FAKE_ENVOY_PORT` (default `9021`) and the only Envoy a local harness server talks to:
 `run-server.sh` builds `ENVOY_URL` from that port alone. Playwright starts the same listener for a
-deployed run, whose target must receive that port's URL; the acceptance profile takes it through
-the required `DISPATCH_ACCEPTANCE_ENVOY_URL`. Tests seed live sessions and their capabilities with
+deployed run; `deploy/compose/dispatch.acceptance.compose.yml` requires `FAKE_ENVOY_PORT` and
+derives the target's Envoy URL from it. Tests seed live sessions and their capabilities with
 `setLiveSessions`, change their scripted 200/404 send response with `setSessionSendStatus`, and
 inspect targeted sends with `getSentMessages`; persisted subscriptions use `setInterests`, all from
-`e2e/agents.ts`. These Envoy fixture helpers run for local and deployed targets. The fake GitHub's
-`seedFakeGithub` remains unavailable to a deployed target and skips the test that calls it. A
-fixture call follows `resetDatabase()` rather than running beside it in a `Promise.all`: a reset
-left running would overlap the next test's, and each waits out the other's open transaction. It
-also holds the Agents page the keyboard specs share: `seedAgents` (the Planner and Reviewer
-sessions, both listed, and two open issues for the picker) and `openAgents`, which waits for the
-page's heading before a key is pressed, since the keymap binds only once sign-in resolves. A session
-a shared helper seeds, as these two are, carries no `last_seen`, so the fake answers every read of
-it with the current time and it never ages into `Inactive`, however long the harness runs. A
+`e2e/agents.ts`. `resetDatabase()` clears every fake Envoy fixture as well as the database, so a
+subscription from an earlier row cannot match a recycled issue key. These Envoy fixture helpers run
+for local and deployed targets. The fake GitHub's `seedFakeGithub` remains unavailable to a deployed
+target and skips the test that calls it. A fixture call follows `resetDatabase()` rather than running
+beside it in a `Promise.all`: a reset left running would overlap the next test's, and each waits out
+the other's open transaction. It also holds the Agents page the keyboard specs share: `seedAgents`
+(the Planner and Reviewer sessions, both listed, and two open issues for the picker) and
+`openAgents`, which waits for the page's heading before a key is pressed, since the keymap binds
+only once sign-in resolves. A session a shared helper seeds, as these two are, carries no
+`last_seen`, so the fake answers every read of it with the current time and it never ages into
+`Inactive`, however long the harness runs. A
 Playwright worker evaluates a helper module once, at the first spec that imports it, so a time
 computed at the helper's module scope ages with every spec the worker runs after that, until the
 Agents page folds the session under `Inactive` at 10 minutes. A spec's own module scope is evaluated
@@ -571,10 +573,10 @@ opt-in through `DISPATCH_E2E_REUSE_SERVERS`, whose only accepted value is `1`: u
 starts this run's own servers, and any other value is refused at config load naming the variable
 and the value. `CI` takes no part in that decision, so a shell that exports it and one that does
 not behave alike; a lane that shares one hand-started harness across runs sets
-`DISPATCH_E2E_REUSE_SERVERS=1`. A deployed run passes the `FAKE_ENVOY_PORT` it starts to its target
-as `DISPATCH_ACCEPTANCE_ENVOY_URL`; the README's acceptance recipe wires that pair. A listing run
-starts no web server, so it skips the probe. The port validation above is not gated on that mode,
-so a malformed or duplicated port is refused in every invocation.
+`DISPATCH_E2E_REUSE_SERVERS=1`. A deployed run passes `FAKE_ENVOY_PORT` to the acceptance Compose
+file, which derives the target's `ENVOY_URL` from that same value; the README's acceptance recipe
+wires the pair. A listing run starts no web server, so it skips the probe. The port validation above
+is not gated on that mode, so a malformed or duplicated port is refused in every invocation.
 
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,

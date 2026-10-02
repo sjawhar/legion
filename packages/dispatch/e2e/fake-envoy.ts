@@ -94,6 +94,16 @@ Bun.serve({
         ...(duplicate ? { duplicate: true } : {}),
       });
     }
+    if (request.method === "PUT" && url.pathname === "/__fixture/reset") {
+      sessions = [];
+      liveSessions = new Set();
+      sendStatuses.clear();
+      interests = [];
+      sentMessages.length = 0;
+      publishedKeys.clear();
+      unsubscribeCalls.length = 0;
+      return Response.json({ ok: true });
+    }
     if (request.method === "PUT" && url.pathname === "/__fixture/sessions") {
       sessions = (await request.json()) as FakeSession[];
       sendStatuses.clear();

@@ -333,15 +333,17 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Newest ask" },
     session
   );
-  await setLiveSessions([{ session_id: "e2e-session", title: "e2e-session-title" }]);
-  await setInterests([
-    {
-      session_id: "e2e-session",
-      topics: [
-        `notifications.dispatch.issue.${firstIssue.key}`,
-        `notifications.dispatch.issue.${firstIssue.key}.>`,
-      ],
-    },
+  await Promise.all([
+    setLiveSessions([{ session_id: "e2e-session", title: "e2e-session-title" }]),
+    setInterests([
+      {
+        session_id: "e2e-session",
+        topics: [
+          `notifications.dispatch.issue.${firstIssue.key}`,
+          `notifications.dispatch.issue.${firstIssue.key}.>`,
+        ],
+      },
+    ]),
   ]);
   await expect
     .poll(async () =>

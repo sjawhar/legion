@@ -34,6 +34,11 @@ async function fixtureRequest(
   return response;
 }
 
+/** Clears all mutable fake Envoy state between e2e rows. */
+export async function resetFakeEnvoy(): Promise<void> {
+  await fixtureRequest("/__fixture/reset", "PUT");
+}
+
 export async function setLiveSessions(rows: FakeSession[]): Promise<void> {
   await fixtureRequest("/__fixture/sessions", "PUT", rows);
 }

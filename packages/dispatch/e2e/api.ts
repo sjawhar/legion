@@ -67,6 +67,10 @@ export function devSignInPath(login: string): string {
   return `/auth/_dev/signin?login=${encodeURIComponent(login)}`;
 }
 
+export function devSignInError(login: string, status: number, responseText: string): Error {
+  return new Error(`dev sign-in as ${login} failed: ${status} ${responseText}`);
+}
+
 const sessionCookies = new Map<string, Promise<string>>();
 
 /** The `dsession` cookie the server issues `login` at its dev sign-in route, minted once per
@@ -86,9 +90,7 @@ function sessionCookie(login: string): Promise<string> {
         .find((header) => header.startsWith("dsession="))
         ?.split(";")[0];
       if (response.status !== 302 || value === undefined) {
-        throw new Error(
-          `dev sign-in as ${login} failed: ${response.status} ${await response.text()}`
-        );
+        throw devSignInError(login, response.status, await response.text());
       }
       return value;
     }

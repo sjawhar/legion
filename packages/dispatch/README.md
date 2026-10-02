@@ -82,34 +82,36 @@ DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslm
 
 ## Acceptance run against the deployed image
 
-The `acceptance` Compose profile runs Playwright against a locally built Dispatch image with its
-own Postgres volume and database. It signs `alice` and `bob` in through the dev sign-in route, as
-the local harness does, so the image must be built from a tree that has the route. It also uses an
-acceptance-only agent token, disabled NATS, and a private loopback fake Envoy with no token; the
-server's required `DISPATCH_ACCEPTANCE_ENVOY_URL` must name the same port that
-`e2e:deployed` starts with `FAKE_ENVOY_PORT`. The fake Envoy makes subscriber, Agents-page, and
-fixture-hook rows exercise the deployed server instead of a real session. Fake GitHub rows still
-skip because the acceptance profile does not configure that listener. The profile starts only the
-named acceptance service and its database dependency. Compose still interpolates every service in
-the file, and the production `dispatch` service requires five variables the acceptance run never
-uses, so the recipe passes placeholders for them.
+The `dispatch.acceptance.compose.yml` Compose file runs Playwright against a locally built Dispatch
+image with its own Postgres volume and database. It signs `alice` and `bob` in through the dev
+sign-in route, as the local harness does, so the image must be built from a tree that has the route.
+It also uses an acceptance-only agent token, disabled NATS, and a private loopback fake Envoy with
+no token. `FAKE_ENVOY_PORT` is the required shared input: the acceptance service derives its
+`ENVOY_URL` from it, and `e2e:deployed` starts the fake listener on it. The fake Envoy makes
+subscriber, Agents-page, and fixture-hook rows exercise the deployed server instead of a real
+session. Fake GitHub rows still skip because the acceptance service does not configure that
+listener. The production Compose file has no acceptance-only variables; it still requires five
+production placeholders to build the image.
 
 ```bash
 cd packages/envoy/deploy/compose
 unused=(DATABASE_URL=unused DISPATCH_AGENT_TOKEN=unused DISPATCH_ALLOWED_LOGINS=unused DISPATCH_SERVER_URL=unused NATS_URLS=unused)
 acceptance_envoy_port=19021
-acceptance_envoy_url="http://127.0.0.1:${acceptance_envoy_port}"
-env "${unused[@]}" DISPATCH_ACCEPTANCE_PG_PORT=55516 DISPATCH_ACCEPTANCE_ENVOY_URL="$acceptance_envoy_url" ENVOY_IMAGE_TAG=pr4-local docker compose -f dispatch.compose.yml build dispatch
-env "${unused[@]}" DISPATCH_ACCEPTANCE_PG_PORT=55516 DISPATCH_ACCEPTANCE_ENVOY_URL="$acceptance_envoy_url" ENVOY_IMAGE_TAG=pr4-local docker compose -p dispatch-acceptance -f dispatch.compose.yml --profile acceptance up -d dispatch-acceptance
+acceptance_dispatch_port=8767
+acceptance_pg_port=55516
+acceptance_image_tag=dispatch-acceptance-local
+acceptance_compose_project=dispatch-acceptance
+env "${unused[@]}" ENVOY_IMAGE_TAG="$acceptance_image_tag" docker compose -f dispatch.compose.yml build dispatch
+FAKE_ENVOY_PORT="$acceptance_envoy_port" DISPATCH_ACCEPTANCE_PORT="$acceptance_dispatch_port" DISPATCH_ACCEPTANCE_PG_PORT="$acceptance_pg_port" ENVOY_IMAGE_TAG="$acceptance_image_tag" docker compose -p "$acceptance_compose_project" -f dispatch.acceptance.compose.yml up -d dispatch-acceptance
 cd ../../../dispatch
 FAKE_ENVOY_PORT="$acceptance_envoy_port" \
-PLAYWRIGHT_BASE_URL=http://127.0.0.1:8767 \
-PLAYWRIGHT_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55516/dispatch_acceptance?sslmode=disable' \
+PLAYWRIGHT_BASE_URL="http://127.0.0.1:${acceptance_dispatch_port}" \
+PLAYWRIGHT_DATABASE_URL="postgres://postgres:dispatch@127.0.0.1:${acceptance_pg_port}/dispatch_acceptance?sslmode=disable" \
 E2E_AGENT_TOKEN=acceptance-token \
 bun run e2e:deployed
 cd ../envoy/deploy/compose
-env "${unused[@]}" DISPATCH_ACCEPTANCE_PG_PORT=55516 DISPATCH_ACCEPTANCE_ENVOY_URL="$acceptance_envoy_url" ENVOY_IMAGE_TAG=pr4-local docker compose -p dispatch-acceptance -f dispatch.compose.yml --profile acceptance down -v
-docker rmi ghcr.io/sjawhar/legion/envoy:pr4-local
+FAKE_ENVOY_PORT="$acceptance_envoy_port" DISPATCH_ACCEPTANCE_PORT="$acceptance_dispatch_port" DISPATCH_ACCEPTANCE_PG_PORT="$acceptance_pg_port" ENVOY_IMAGE_TAG="$acceptance_image_tag" docker compose -p "$acceptance_compose_project" -f dispatch.acceptance.compose.yml down -v
+docker rmi "ghcr.io/sjawhar/legion/envoy:${acceptance_image_tag}"
 ```
 
 `e2e/seed.ts` truncates its database before each scenario. Always set

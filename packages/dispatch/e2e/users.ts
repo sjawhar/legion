@@ -1,6 +1,6 @@
 import type { Browser, BrowserContext, BrowserContextOptions } from "@playwright/test";
 
-import { devSignInPath } from "./api";
+import { devSignInError, devSignInPath } from "./api";
 
 /** Signs `context` in as `login` at the harness server's dev sign-in route. The cookie it sets is
  *  the one a GitHub sign-in issues; the context's request client shares the context's cookie jar,
@@ -11,9 +11,7 @@ import { devSignInPath } from "./api";
 export async function signIn(context: BrowserContext, login: string): Promise<void> {
   const response = await context.request.get(devSignInPath(login), { maxRedirects: 0 });
   if (response.status() !== 302) {
-    throw new Error(
-      `dev sign-in as ${login} failed: ${response.status()} ${await response.text()}`
-    );
+    throw devSignInError(login, response.status(), await response.text());
   }
 }
 

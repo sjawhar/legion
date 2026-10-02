@@ -20,6 +20,38 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+test("database reset clears fake Envoy subscribers before the next issue", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const staleIssue = await createIssue({ project: "CORE", title: "Stale subscriber" });
+  await setLiveSessions([{ session_id: "stale-session", title: "Stale session" }]);
+  await setInterests([
+    {
+      session_id: "stale-session",
+      topics: [
+        `notifications.dispatch.issue.${staleIssue.key}`,
+        `notifications.dispatch.issue.${staleIssue.key}.>`,
+      ],
+    },
+  ]);
+  await resetDatabase();
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "No stale subscriber" });
+  expect(issue.key).toBe(staleIssue.key);
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    const subscribers = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === `/api/v1/issues/${issue.key}/subscribers`
+    );
+    await page.goto(`/issues/${issue.key}`);
+    expect((await subscribers).status()).toBe(200);
+    await expect(page.getByRole("button", { name: "Subscribers: 0" })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
 test("issue header closes an issue and reopens it into Backlog", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Close from the header" });

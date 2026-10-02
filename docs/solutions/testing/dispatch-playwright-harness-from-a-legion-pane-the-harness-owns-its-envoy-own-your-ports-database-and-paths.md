@@ -68,10 +68,11 @@ generates one for its own process under `DISPATCH_DEV_SIGNIN`. The server runs
 with no caller Home or XDG directory, so
 `~/.config/opencode/envoy.json` and
 `~/.local/share/dispatch/{app.json,signing-key}` cannot participate. The fake
-Envoy is the only Envoy this harness is ever meant to talk to. With
-`PLAYWRIGHT_BASE_URL` exported, which `bun run e2e:deployed` expects and does not set itself, no
-Dispatch server or fake GitHub starts; Playwright still starts the fake Envoy on `FAKE_ENVOY_PORT`,
-and the acceptance profile receives that URL through `DISPATCH_ACCEPTANCE_ENVOY_URL`.
+Envoy is the only Envoy this harness is ever meant to talk to. With `PLAYWRIGHT_BASE_URL` exported,
+which `bun run e2e:deployed` expects and does not set itself, no Dispatch server or fake GitHub
+starts; Playwright still starts the fake Envoy on `FAKE_ENVOY_PORT`, and
+`deploy/compose/dispatch.acceptance.compose.yml` derives the acceptance server's Envoy URL from that
+required port.
 
 Proof: with `ENVOY_URL=http://127.0.0.1:1` exported, the pre-fix script
 answers `GET /api/v1/agents` with `dial tcp 127.0.0.1:1: connect: connection

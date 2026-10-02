@@ -91,15 +91,17 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
   }
   await setEventCreatedAt(first.id, new Date(Date.now() - 20 * 60 * 1_000).toISOString());
   await setEventCreatedAt(code.id, new Date(Date.now() - 10 * 60 * 1_000).toISOString());
-  await setLiveSessions([{ session_id: "e2e-conv-agent", title: "Planner (e2e)" }]);
-  await setInterests([
-    {
-      session_id: "e2e-conv-agent",
-      topics: [
-        `notifications.dispatch.issue.${issue.key}`,
-        `notifications.dispatch.issue.${issue.key}.>`,
-      ],
-    },
+  await Promise.all([
+    setLiveSessions([{ session_id: "e2e-conv-agent", title: "Planner (e2e)" }]),
+    setInterests([
+      {
+        session_id: "e2e-conv-agent",
+        topics: [
+          `notifications.dispatch.issue.${issue.key}`,
+          `notifications.dispatch.issue.${issue.key}.>`,
+        ],
+      },
+    ]),
   ]);
 
   const alice = await asUser(browser, "alice");

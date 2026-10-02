@@ -1,3 +1,4 @@
+import { resetFakeEnvoy } from "./agents";
 import { forgetSessions, quiesceDocuments } from "./api";
 import { sql } from "./psql";
 
@@ -94,13 +95,15 @@ async function resetDatabaseOnce(): Promise<void> {
  * artifact_versions, while TRUNCATE takes an exclusive lock on every table in its own order;
  * with both running PostgreSQL breaks the cycle by aborting one of them (LEGION-168), which is
  * either a failed reset or a settlement that dies mid-scenario. Quiescing first leaves the
- * server with nothing to run, so the two never overlap. The truncate takes `user_sessions` with
- * it, so a session cookie minted before it is refused until its login signs in again:
- * e2e/api.ts forgets its cached ones here, and a browser context signs in after the reset
- * (e2e/users.ts).
+ * server with nothing to run, so the two never overlap. It also clears the fake Envoy, whose
+ * process-local subscriptions outlive a database truncate and otherwise match recycled issue keys.
+ * The truncate takes `user_sessions` with it, so a session cookie minted before it is refused
+ * until its login signs in again: e2e/api.ts forgets its cached ones here, and a browser context
+ * signs in after the reset (e2e/users.ts).
  */
 export async function resetDatabase(): Promise<void> {
   await quiesceDocuments();
   await resetDatabaseOnce();
+  await resetFakeEnvoy();
   forgetSessions();
 }
