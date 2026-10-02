@@ -3583,8 +3583,8 @@ describe("executeDispatchTool", () => {
     expect(result.details).not.toHaveProperty("topic");
   });
 
-  // A repeat at the version an open request already names returns that request unchanged, so
-  // the question the human sees carries the earlier summary, not the one this call sent.
+  // The result quotes the question the server returned, which is what the human's Inbox shows, even
+  // where it differs from the summary this call sent.
   test("dispatch_request_approval reports the open request's own question, not the summary it sent", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));

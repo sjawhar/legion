@@ -127,8 +127,8 @@ spec.md (document id <UUID>) at version <N> (ask <id>)", followed by the questio
 Inbox shows, and its `details.artifact` / `details.version` carry the same two values. The
 document id is never the slug or file name you passed in (`spec`, `spec.md`): the daemon
 recognizes the document's approval events by that id, and both the `legion` tool and the daemon
-refuse a value that is not a UUID. Calling `dispatch_request_approval` again at the version an
-open request names returns that request unchanged, so it is safe to repeat; once the document has
+refuse a value that is not a UUID. Calling `dispatch_request_approval` again with the same summary
+and nothing newer in the request's thread writes nothing, so it is safe to repeat; once the document has
 a newer version, that request follows it and waits on you (its `ask.edited` reaches you). Call
 `dispatch_request_approval` once when the revision is complete to hand it back with a `summary` of
 what the revision proposes. If its text instead reads "spec.md (document id <UUID>) is already

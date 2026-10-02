@@ -388,13 +388,13 @@ A Legion root spec under an armed design gate always goes to approval once its b
 
 Request it once, when the spec is ready for the human to read. A request is one row in the Inbox
 for the life of the document: a later version moves that row to the new version and files it under
-Waiting on agents. Calling `dispatch_request_approval` again hands the same row back with a new
-`summary`; its hand-back edit returns it to Waiting on you even if the prior thread reply left it
-Waiting on agents. A later reply again follows its own `turn`; hand it back once per revision, when you are done. A
-human who comments on the request instead of answering it is continuing the design conversation:
-reply in the thread; when the comment raises a choice that is theirs, write it into the spec as a
-decision block (the request waits on you while the block is open); when it changes the design,
-rewrite the text; then hand the request back once. A choice you can make yourself is not a decision
+Waiting on agents. Requesting again hands the same row back to Waiting on you, with a new `summary`
+when the proposal changed or the same one after you answered in its thread, even if the prior reply
+left it Waiting on agents. Hand it back once per revision. A human who comments on the request
+instead of answering it is continuing the design conversation: reply in the thread; when the
+comment raises a choice that is theirs, write it into the spec as a decision block (the request
+waits on you while the block is open); when it changes the design, rewrite the text; then hand the
+request back once. A choice you can make yourself is not a decision
 block ([Before you ask](#before-you-ask), gate 1): write your call and its reason into the design
 and name it in `summary`; a human who disagrees answers `Request changes`. When a human asks for
 approval while a block is open, do not request it and do not hold it silently: name each open block

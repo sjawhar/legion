@@ -159,11 +159,13 @@ reaches a version only when the document settles, about two seconds later, or wi
 in) and then request. A block written in the last few seconds counts as open before Dispatch has
 opened its ask.
 A new version moves an open request to the new version, and its `ask.edited` reaches you; the
-request then waits on you until the next `dispatch_request_approval` hands the same row back with
-its new summary. That hand-back returns it to the human even if the preceding reply left it waiting
-on the agent; a later reply again follows its own `turn`. A repeat with the same summary changes
-nothing. The answer reaches you as `artifact.approved` or `artifact.changes_requested` with the
-pinned `version`; `changes_requested` carries the reason, which is your next piece of work.
+request then waits on you until the next `dispatch_request_approval` hands the same row back, with
+a new summary when the proposal changed or the same one after you answered a question in its
+thread. That hand-back returns it to the human even if the preceding reply left it waiting on the
+agent; a later reply again follows its own `turn`. A repeat with nothing newer in the request's
+thread changes nothing. The answer reaches you as `artifact.approved` or
+`artifact.changes_requested` with the pinned `version`; `changes_requested` carries the reason,
+which is your next piece of work.
 `dispatch_read` and `dispatch_doc_read` show the document's approval state; `stale` means it was
 approved and then edited.
 
