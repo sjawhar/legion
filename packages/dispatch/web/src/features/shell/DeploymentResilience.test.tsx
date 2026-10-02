@@ -54,6 +54,35 @@ test("a Vite preload error reloads once per session and always reaches its impor
   }
 });
 
+test("a chunk that fails while the page is being left does not reload over the navigation", () => {
+  window.sessionStorage.clear();
+  installChunkFailureRecovery();
+  const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
+  const whileLeaving = new Event("vite:preloadError", { cancelable: true });
+  const afterReturning = new Event("vite:preloadError", { cancelable: true });
+
+  try {
+    window.dispatchEvent(new Event("beforeunload"));
+    window.dispatchEvent(whileLeaving);
+
+    expect(whileLeaving.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+
+    // A page the back/forward cache restores is shown again, and its own failures reload it.
+    window.dispatchEvent(new Event("pageshow"));
+    window.dispatchEvent(afterReturning);
+
+    expect(afterReturning.defaultPrevented).toBe(false);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
+  } finally {
+    window.dispatchEvent(new Event("pageshow"));
+    reload.mockRestore();
+    window.sessionStorage.clear();
+  }
+});
+
 test("a chunk that fails while the browser is offline is not a stale deployment: no reload, the importer sees the error", () => {
   window.sessionStorage.clear();
   installChunkFailureRecovery();

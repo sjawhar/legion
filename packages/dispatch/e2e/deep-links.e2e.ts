@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, type Route, test } from "@playwright/test";
 
 import {
   createArtifactComment,
@@ -231,6 +231,48 @@ test("emitted document item hrefs select and scroll their anchored thread", asyn
         await page.getByRole("button", { name: "Close review panel" }).click();
       }
     }
+  } finally {
+    await context.close();
+  }
+});
+
+test("a document link followed while the page before it is still downloading its document opens the link", async ({
+  browser,
+}, testInfo) => {
+  const { issue } = await seedIssue();
+  const comments = [
+    await createComment(issue.key, {
+      anchor: { artifact: "spec", quote: "astrolabe" },
+      body: "Comment on the spec.",
+    }),
+    await createComment(issue.key, {
+      anchor: { artifact: secondarySlug, quote: "link" },
+      body: "Comment on the secondary document.",
+    }),
+  ];
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    // The first page's document transport is still downloading when the reader follows the next
+    // link. WebKit cancels that download as the navigation starts (Firefox cancels a real one too,
+    // though not one Playwright holds), and the page must not answer the failed chunk by
+    // reloading itself over the navigation.
+    const transport = /\/assets\/yjs-[^/]+\.js$/u;
+    const held: Route[] = [];
+    await page.route(transport, (route) => {
+      held.push(route);
+    });
+    await page.goto(`/issues/${issue.key}/spec?comment=${comments[0].id}`);
+    await expect.poll(() => held.length).toBeGreaterThan(0);
+    await page.unroute(transport);
+
+    const link = `/issues/${issue.key}/artifacts/${secondarySlug}?comment=${comments[1].id}`;
+    await page.goto(link);
+    await expectSelectedMarginItem(page, comments[1].id, testInfo.project.name === "iphone", true);
+    const opened = new URL(page.url());
+    expect(`${opened.pathname}${opened.search}`).toBe(link);
+    await Promise.all(held.map((route) => route.abort().catch(() => undefined)));
   } finally {
     await context.close();
   }

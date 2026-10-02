@@ -61,8 +61,26 @@ async function deploymentChanged(): Promise<boolean> {
   return latest !== undefined && latest !== runningIndexAsset();
 }
 
+// Set from the start of a navigation away from this page (`beforeunload`) until the page is shown
+// again (`pageshow`, which a back/forward-cache restore fires). WebKit and Firefox cancel the chunk
+// downloads still in flight when a navigation starts, WebKit also refuses the ones the page starts
+// after it, and Vite reports each as a failed chunk. Those are not a replaced deployment, and a
+// reload then would replace the reader's navigation with a reload of the page they are leaving.
+let leavingPage = false;
+
+function markPageLeaving(): void {
+  leavingPage = true;
+}
+
+function markPageShown(): void {
+  leavingPage = false;
+}
+
 // Reloads the page once per session for a chunk that failed to download while online.
 function reloadForChunkFailure(): void {
+  if (leavingPage) {
+    return;
+  }
   // A chunk that fails to download while the browser is offline is a network outage, not a
   // replaced deployment: reloading now would swap the app for the browser's offline page.
   if (!navigator.onLine) {
@@ -81,8 +99,10 @@ function reloadForChunkFailure(): void {
 // reads as a module and fails on with a TypeError that says nothing about the download; a
 // prevented stylesheet failure loads the module without its styles. So the handler never
 // prevents it: the importer always sees the failure itself, and the page also reloads at most
-// once per session.
+// once per session, never while it is being left.
 export function installChunkFailureRecovery(): void {
+  window.addEventListener("beforeunload", markPageLeaving);
+  window.addEventListener("pageshow", markPageShown);
   window.addEventListener("vite:preloadError", reloadForChunkFailure);
 }
 
