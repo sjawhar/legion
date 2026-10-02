@@ -643,6 +643,12 @@ func TestTheCensusPairCheckNamesACensusReadingWhatANewMigrationRenamesOrRetypes(
 			census: "select count(*) from things where id = 'x'",
 			want:   "census 0003_check.census.sql reads things.id, which 0002_change.up.sql gives a new type",
 		},
+		"a renamed and retyped column": {
+			change: "alter table things rename column kind to category; alter table things alter column category type varchar",
+			check:  "alter table things add constraint category_check check (category <> 'bad')",
+			census: "select count(*) from things where category = 'bad'",
+			want:   "census 0003_check.census.sql reads things.category, which 0002_change.up.sql renames from things.kind and gives a new type",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			set := fstest.MapFS{

@@ -1,10 +1,14 @@
 package pgmigrate
 
 import (
+	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Every statement form the repository's migrations take a lock with names its table, once, with
@@ -43,6 +47,28 @@ func TestTouchedTablesFindsEveryStatementFormTheMigrationsUse(t *testing.T) {
 			t.Errorf("TouchedTables(%q) = %v, want %v", sql, got, want)
 		}
 	}
+}
+
+// CensusTables does not need the foreign-key catalog for a migration that writes no row, so a
+// pure DDL migration stays readable when its caller cannot query that catalog.
+func TestCensusTablesSkipsForeignKeysForAMigrationThatDoesNotWriteRows(t *testing.T) {
+	got, err := CensusTables(context.Background(), refusingCatalogQuerier{}, "alter table things add column note text")
+	if err != nil {
+		t.Fatalf("CensusTables: %v", err)
+	}
+	if want := []TouchedTable{{Name: "things"}}; !slices.Equal(got, want) {
+		t.Errorf("CensusTables = %#v, want %#v", got, want)
+	}
+}
+
+type refusingCatalogQuerier struct{}
+
+func (refusingCatalogQuerier) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return nil, errors.New("unexpected catalog query")
+}
+
+func (refusingCatalogQuerier) QueryRow(context.Context, string, ...any) pgx.Row {
+	return nil
 }
 
 // An index a migration drops or alters is named, so CensusTables can resolve it to its table.

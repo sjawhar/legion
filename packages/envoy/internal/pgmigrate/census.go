@@ -212,7 +212,7 @@ func Census(ctx context.Context, conn *pgx.Conn, migrations []Migration, version
 			entry.refuse("%s records no version, yet the database holds %s: the runner would apply every migration from this one over it", versionTable, someTables(unrecorded))
 		}
 		text := readMigration(migration.SQL)
-		tables, err := censusTables(ctx, tx, text, keys)
+		tables, err := censusTables(ctx, tx, text, migrationTouches(text), keys)
 		if err != nil {
 			return nil, fmt.Errorf("census: %s: %w", migration.Name, err)
 		}
@@ -416,9 +416,9 @@ func lockHolders(ctx context.Context, tx pgx.Tx, oid uint32) ([]lockHolder, erro
 // launched just before the table passed it too. Any other session might, when its transaction is
 // long open or the census cannot see how long.
 //
-// A session's activity says nothing where Postgres hides it from the census's role (no
-// pg_read_all_stats), and where Postgres does not track it (track_activities off): there its state
-// is disabled, its activity text empty and its transaction start unrecorded, to every role.
+// When the census's role may see a session with track_activities off, Postgres reports its state
+// as disabled, its activity text empty and its transaction start unrecorded. Without the ordinary
+// pg_read_all_stats visibility, those fields are hidden instead.
 func holderRefusal(holder lockHolder, table string, pastFreezeAge, cancelsAutovacuum bool, long time.Duration) string {
 	untracked := holder.State == untrackedState
 	if holder.Autovacuum {

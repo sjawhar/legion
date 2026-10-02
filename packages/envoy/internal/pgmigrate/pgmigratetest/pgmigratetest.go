@@ -293,11 +293,11 @@ func CheckCensusNamesTheMigrationsItReads(ctx context.Context, conn *pgx.Conn, f
 					continue
 				}
 				advice := "write the census without it"
-				if creator.verb == "creates" {
+				if creator.kind == createdKindCreated {
 					advice += " (a table or column the same release creates holds no row to count)"
 				}
 				return fmt.Errorf("census %s reads %s, which %s %s: a deployment takes the census before any migration of its release applies, so a release carrying both refuses every deploy; ship %s in an earlier release and name it in a comment in the census, or %s",
-					migration.CensusName, creator.name, creator.migration.Name, creator.verb, creator.migration.Name, advice)
+					migration.CensusName, creator.name, creator.migration.Name, creator.verb(), creator.migration.Name, advice)
 			}
 		}
 		tx, err := conn.Begin(ctx)
@@ -326,12 +326,35 @@ type catalogObject struct {
 }
 
 // createdBy is the migration that last made a catalog object what a census reads: what it did to
-// it (verb), and the name and, for a column, the type it left.
+// it, and the name and, for a column, the type it left.
 type createdBy struct {
 	migration pgmigrate.Migration
-	verb      string
+	kind      createdKind
 	name      string
+	priorName string
 	typ       uint32
+}
+
+type createdKind uint8
+
+const (
+	createdKindCreated createdKind = 1 << iota
+	createdKindRenamed
+	createdKindRetyped
+)
+
+func (c createdBy) verb() string {
+	switch c.kind {
+	case createdKindCreated:
+		return "creates"
+	case createdKindRenamed:
+		return "renames from " + c.priorName
+	case createdKindRetyped:
+		return "gives a new type"
+	case createdKindRenamed | createdKindRetyped:
+		return "renames from " + c.priorName + " and gives a new type"
+	}
+	panic(fmt.Sprintf("unknown created kind %d", c.kind))
 }
 
 // recordChanges records migration as the creator of every table, column, function and type of the
@@ -364,11 +387,16 @@ func recordChanges(ctx context.Context, conn *pgx.Conn, migration pgmigrate.Migr
 		prior, ok := created[object]
 		switch {
 		case !ok:
-			created[object] = createdBy{migration: migration, verb: "creates", name: name, typ: typ}
-		case prior.name != name:
-			created[object] = createdBy{migration: migration, verb: "renames from " + prior.name, name: name, typ: typ}
-		case prior.typ != typ:
-			created[object] = createdBy{migration: migration, verb: "gives a new type", name: name, typ: typ}
+			created[object] = createdBy{migration: migration, kind: createdKindCreated, name: name, typ: typ}
+		case prior.name != name || prior.typ != typ:
+			var kind createdKind
+			if prior.name != name {
+				kind |= createdKindRenamed
+			}
+			if prior.typ != typ {
+				kind |= createdKindRetyped
+			}
+			created[object] = createdBy{migration: migration, kind: kind, name: name, priorName: prior.name, typ: typ}
 		}
 	}
 	return rows.Err()

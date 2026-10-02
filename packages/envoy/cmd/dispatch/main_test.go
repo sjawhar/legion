@@ -685,6 +685,20 @@ func TestCensusSubcommandExitCodes(t *testing.T) {
 	}
 }
 
+// pgmigrate.Census already prefixes its errors with "census:", so the command prints that
+// prefix once when a census cannot be taken.
+func TestCensusSubcommandPrintsACensusErrorWithOnePrefix(t *testing.T) {
+	database := storetest.Open(t)
+	var out, errOut bytes.Buffer
+	if code := census(context.Background(), database.Pool.Config().ConnString()+"&search_path=nosuch", &out, &errOut); code != 2 {
+		t.Fatalf("exit %d, want 2; stderr %q", code, errOut.String())
+	}
+	const want = "census: the connection's search_path names no schema that exists, so current_schema() is null: the census would find neither schema_migrations nor any table, and the runner can create neither; name an existing schema in the search_path\n"
+	if got := errOut.String(); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+}
+
 // A database at 52 holding a row 0053's check refuses is refused by the embedded 0053 census,
 // exit 1, and the report names the migration, the count and the census file.
 func TestCensusSubcommandExitsOneWhenAPendingMigrationsCensusCountsRows(t *testing.T) {

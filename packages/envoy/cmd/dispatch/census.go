@@ -22,7 +22,11 @@ func census(ctx context.Context, databaseURL string, out, errOut io.Writer) int 
 	}
 	report, err := store.Census(ctx, databaseURL)
 	if err != nil {
-		fmt.Fprintf(errOut, "census: %v\n", err)
+		message := err.Error()
+		if !strings.HasPrefix(message, "census: ") {
+			message = "census: " + message
+		}
+		fmt.Fprintln(errOut, message)
 		return 2
 	}
 	report.Write(out)

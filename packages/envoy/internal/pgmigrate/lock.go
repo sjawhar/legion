@@ -92,8 +92,9 @@ type Session struct {
 	Autovacuum  bool           `json:"autovacuum"`
 }
 
-// untrackedState is the state pg_stat_activity shows, to every role, for a session with
-// track_activities off: Postgres then records neither its activity text nor its transaction's start.
+// untrackedState is the state pg_stat_activity shows for a session with track_activities off,
+// when the census's role may see that session: Postgres then records neither its activity text nor
+// its transaction's start.
 const untrackedState = "disabled"
 
 // String is the session as every message names it, saying which fields Postgres hid.

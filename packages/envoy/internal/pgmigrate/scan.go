@@ -23,15 +23,16 @@ const (
 	sqlOther                                // any other one byte
 )
 
-// scanSQL reads text token by token, calling visit with each token's kind and its span, and stops
-// at the first error visit returns, which it returns. A string literal is continued by whitespace
-// holding a newline and another quote; what follows a number is read on its own, as scan.l reads it
-// or refuses it as trailing junk. An unterminated literal, comment or quoted identifier takes the
-// rest of the text, which Postgres refuses before it runs anything.
-func scanSQL(text string, visit func(kind sqlTokenKind, start, end int) error) error {
+// scanSQL reads text token by token, calling visit with each token's kind, span and, for a quoted
+// identifier, its decoded name. It stops at the first error visit returns, which it returns. A
+// string literal is continued by whitespace holding a newline and another quote; what follows a
+// number is read on its own, as scan.l reads it or refuses it as trailing junk. An unterminated
+// literal, comment or quoted identifier takes the rest of the text, which Postgres refuses before
+// it runs anything.
+func scanSQL(text string, visit func(kind sqlTokenKind, start, end int, identifier string) error) error {
 	for i := 0; i < len(text); {
-		kind, end := sqlToken(text, i)
-		if err := visit(kind, i, end); err != nil {
+		kind, end, identifier := nextSQLToken(text, i)
+		if err := visit(kind, i, end, identifier); err != nil {
 			return err
 		}
 		i = end
@@ -39,8 +40,9 @@ func scanSQL(text string, visit func(kind sqlTokenKind, start, end int) error) e
 	return nil
 }
 
-// sqlToken returns the kind of the token that starts at i and the index after it.
-func sqlToken(text string, i int) (sqlTokenKind, int) {
+// nextSQLToken returns the kind of the token that starts at i, the index after it and, for a
+// quoted identifier, the identifier's decoded name.
+func nextSQLToken(text string, i int) (sqlTokenKind, int, string) {
 	c := text[i]
 	var next byte
 	if i+1 < len(text) {
@@ -48,19 +50,19 @@ func sqlToken(text string, i int) (sqlTokenKind, int) {
 	}
 	switch {
 	case isSQLSpace(c):
-		return sqlSpace, i + 1
+		return sqlSpace, i + 1, ""
 	case c == '-' && next == '-':
-		return sqlComment, endOfLineComment(text, i)
+		return sqlComment, endOfLineComment(text, i), ""
 	case c == '/' && next == '*':
-		return sqlComment, endOfBlockComment(text, i)
+		return sqlComment, endOfBlockComment(text, i), ""
 	case c == '\'':
-		return sqlString, endOfStringLiteral(text, i, false)
+		return sqlString, endOfStringLiteral(text, i, false), ""
 	case c == '"':
-		_, end := quotedIdentifier(text, i)
-		return sqlQuotedIdentifier, end
+		name, end := quotedIdentifier(text, i)
+		return sqlQuotedIdentifier, end, name
 	case c == '$':
 		if end, ok := endOfDollarQuote(text, i); ok {
-			return sqlDollarString, end
+			return sqlDollarString, end, ""
 		}
 	case isDigit(c):
 		end := i + 1
@@ -73,7 +75,7 @@ func sqlToken(text string, i int) (sqlTokenKind, int) {
 				break
 			}
 		}
-		return sqlNumber, end
+		return sqlNumber, end, ""
 	case isIdentStart(c):
 		var after byte
 		if i+2 < len(text) {
@@ -81,22 +83,22 @@ func sqlToken(text string, i int) (sqlTokenKind, int) {
 		}
 		switch {
 		case (c == 'e' || c == 'E') && next == '\'':
-			return sqlString, endOfStringLiteral(text, i+1, true)
+			return sqlString, endOfStringLiteral(text, i+1, true), ""
 		case strings.IndexByte("bBxXnN", c) >= 0 && next == '\'':
-			return sqlString, endOfStringLiteral(text, i+1, false)
+			return sqlString, endOfStringLiteral(text, i+1, false), ""
 		case (c == 'u' || c == 'U') && next == '&' && after == '\'':
-			return sqlUnicodeEscape, endOfStringLiteral(text, i+2, false)
+			return sqlUnicodeEscape, endOfStringLiteral(text, i+2, false), ""
 		case (c == 'u' || c == 'U') && next == '&' && after == '"':
 			_, end := quotedIdentifier(text, i+2)
-			return sqlUnicodeEscape, end
+			return sqlUnicodeEscape, end, ""
 		}
 		end := i + 1
 		for end < len(text) && (isIdentStart(text[end]) || isDigit(text[end]) || text[end] == '$') {
 			end++
 		}
-		return sqlWord, end
+		return sqlWord, end, ""
 	}
-	return sqlOther, i + 1
+	return sqlOther, i + 1, ""
 }
 
 // isSQLSpace is scan.l's space: [ \t\n\r\f].
