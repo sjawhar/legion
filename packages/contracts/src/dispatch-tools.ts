@@ -826,8 +826,9 @@ export const dispatchToolSpecs = [
       "Request changes) in the human's Inbox whose question names the document and version, " +
       "followed by the summary; the answer pins a review to that version and arrives as " +
       "artifact.approved or artifact.changes_requested. A later version carries the same open " +
-      "request forward automatically; call this again with the new summary to hand it back to " +
-      "the human. A repeat with unchanged wording leaves the request unchanged. " +
+      "request forward automatically; call this again to hand it back to the human, with a new " +
+      "summary when the proposal changed or the same one after answering a question in its " +
+      "thread. A repeat with nothing newer in the request's thread changes nothing. " +
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +

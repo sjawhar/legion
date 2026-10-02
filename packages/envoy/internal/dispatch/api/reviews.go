@@ -409,11 +409,10 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	// A supplied summary is validated even when this request opens no row.
-	if hasSummary {
-		if _, err := approvalQuestion(artifact.Name, version, summary); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
+	question, err := approvalQuestion(artifact.Name, version, summary)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
 	}
 	type response struct {
 		Ask        *model.Ask             `json:"ask"`
@@ -439,14 +438,26 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	events := []model.Event{}
 	if open != nil {
 		if !hasSummary {
-			summary, err = docs.ApprovalAskSummary(*open)
+			// A request without a summary keeps the one the open ask carries.
+			if summary, err = docs.ApprovalAskSummary(*open); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			question = docs.ApprovalQuestion(artifact.Name, version, summary)
+		}
+		handBack := open.Approval.Version != version || open.Approval.RequestedVersion != version || open.Question != question
+		if !handBack {
+			// A thread reply newer than the last hand-back holds the turn with the agent, so this
+			// request hands the turn back even with nothing else to change. A repeat with nothing
+			// newer in the thread finds the request waiting on the human and writes nothing.
+			waitingOn, err := askWaitingOn(r.Context(), tx, open.ID)
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
+			handBack = waitingOn == "agent"
 		}
-		question := docs.ApprovalQuestion(artifact.Name, version, summary)
-		if open.Approval.Version != version || open.Approval.RequestedVersion != version || open.Question != question {
+		if handBack {
 			event, err := docs.RewriteApprovalAsk(
 				r.Context(), tx, s.deps.Events, open, actor, version, version, summary, s.deps.ServerURL,
 			)
@@ -476,11 +487,6 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	question, err := approvalQuestion(artifact.Name, version, summary)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
 	var rowID string
 	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {
 		s.writeHandlerError(w, err)
@@ -567,8 +573,8 @@ func approvalQuestion(name string, version int, summary string) (string, error) 
 	if summary == "" {
 		return question, nil
 	}
-	// The summary follows the question's fixed prefix after one space.
-	left := max(0, maxAskQuestion16-len16(docs.ApprovalQuestion(name, version, ""))-1)
+	// The summary follows the question's fixed prefix after one space; the cap leaves it the rest.
+	left := max(0, maxAskQuestion16-(len16(question)-len16(summary)))
 	if length := len16(summary); length > left {
 		return "", capExceededError("summary", length, left)
 	}

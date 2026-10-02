@@ -36898,7 +36898,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_request_approval",
     example: { issue: "DSP-1", summary: "Proposes a live sync in place of the nightly export." },
-    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. A later version makes an approval stale, " + "and writing it retracts an open request for an older version; request again for the new " + "one. A repeat at the version an open request names returns that request unchanged. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
+    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. A later version carries the same open " + "request forward automatically; call this again to hand it back to the human, with a new " + "summary when the proposal changed or the same one after answering a question in its " + "thread. A repeat with nothing newer in the request's thread changes nothing. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -41091,7 +41091,7 @@ ${followsAsk(askOwner)}`,
         replyToOwnAsk: replyToAsk !== undefined && (comment.advice?.your_open_asks?.some((ask) => ask.id === replyToAsk) ?? false)
       });
       if (replyToAsk !== undefined) {
-        const askState = comment.turn === null ? "" : `; ask now waiting on ${comment.turn}`;
+        const askState = comment.waiting_on === undefined ? "" : `; ask now waiting on ${comment.waiting_on}`;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner2)}`,
@@ -41102,7 +41102,7 @@ ${followsAsk(askOwner)}`,
             ...commentDetails,
             ask: replyToAsk,
             follows: { ask: replyToAsk },
-            ...comment.turn === null ? {} : { ask_waiting_on: comment.turn },
+            ...comment.waiting_on === undefined ? {} : { ask_waiting_on: comment.waiting_on },
             ...comment.advice === undefined ? {} : { advice: comment.advice }
           }
         };
