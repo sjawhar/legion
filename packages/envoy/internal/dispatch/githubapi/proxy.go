@@ -59,6 +59,11 @@ func ProxyREST(w http.ResponseWriter, r *http.Request, client *githubapp.Client)
 	body, status, header, err := client.Read(r.Context(), token, target)
 	if err != nil {
 		slog.Warn("dispatch: GitHub proxy read failed", "path", target, "error", err)
+		var tooLarge *githubapp.ResponseTooLargeError
+		if errors.As(err, &tooLarge) {
+			api.WriteJSON(w, http.StatusBadGateway, map[string]string{"error": tooLarge.Error(), "code": "GITHUB_UPSTREAM"})
+			return
+		}
 		api.WriteJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub read failed", "code": "GITHUB_UPSTREAM"})
 		return
 	}

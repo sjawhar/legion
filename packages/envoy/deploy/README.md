@@ -141,11 +141,11 @@ The Dispatch service reads its public browser origin and NATS URLs from
 | `NATS_NKEY_SEED_FILE` | no | A file holding the NATS nkey user seed this process connects as (trimmed); wins over `NATS_NKEY_SEED`. A set but empty, missing, unreadable, blank or non-user-seed value refuses startup naming the variable and path. Neither set connects without a credential. |
 | `NATS_NKEY_SEED` | no | The NATS nkey user seed itself, when `NATS_NKEY_SEED_FILE` is unset. |
 | `DISPATCH_AGENT_TOKEN` | yes | Shared devbox fallback bearer token; per-person tokens minted in Dispatch Settings are preferred for individual agents. |
-| `DISPATCH_SIGNIN_ISSUER` / `DISPATCH_SIGNIN_CLIENT_ID` / `DISPATCH_SIGNIN_CLIENT_SECRET` / `DISPATCH_SIGNIN_GROUP` | cookie identity | The sign-in pool's issuer, Dispatch's app client and its secret, and the group a person must be in. Cookie identity requires all four at startup, and some without the others refuse to boot; header identity needs none. `DISPATCH_ALLOWED_LOGINS` is removed and refused at startup. |
+| `DISPATCH_SIGNIN_ISSUER` / `DISPATCH_SIGNIN_CLIENT_ID` / `DISPATCH_SIGNIN_CLIENT_SECRET` / `DISPATCH_SIGNIN_GROUP` | cookie identity | The sign-in pool's issuer, Dispatch's app client and its secret, and the group a person must be in. Cookie identity requires all four at startup, and some without the others refuse to boot. Header identity is for tests and local harnesses only, and refuses every one of these settings. `DISPATCH_ALLOWED_LOGINS` is removed and refused at startup. |
 | `DISPATCH_LISTEN_HOST` | no | Defaults to `127.0.0.1`; for direct tailnet access, set it to `$(tailscale ip -4)`, never `0.0.0.0`. |
 | `DISPATCH_PORT` | no | Defaults to `8766`; the healthcheck follows it. |
-| `DISPATCH_IDENTITY` | no | `cookie` (default) or `header:<name>` for a trusted proxy or tests. |
-| `DISPATCH_IDENTITY_HEADER_TRUSTED` | conditional | Set to `1` when header identity and `DISPATCH_SIGNIN_ISSUER` share a deployment. |
+| `DISPATCH_IDENTITY` | no | `cookie` (default) is Dispatch's production identity. `header:<name>` is only for tests and local harnesses. |
+| `DISPATCH_IDENTITY_HEADER_TRUSTED` | test/local header identity | Set to `1` for every header-identity test or local harness. A missing flag refuses boot. |
 | `DISPATCH_REPO_PROJECTS` | no | Optional boot seed for repository-to-project settings (`owner/repo=KEY,...`). Existing dashboard settings are not overwritten. |
 | `DISPATCH_DEFAULT_PROJECT` | no | Native Dispatch project for external repositories without a stored mapping. |
 | `DISPATCH_NATS_DISABLED` | no | Set to `1` to run database and SSE paths without NATS. |

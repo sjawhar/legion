@@ -20,6 +20,7 @@ type fakeGitHub struct {
 	mu            sync.Mutex
 	installations map[string]int64
 	reads         []string
+	response      string
 }
 
 func (f *fakeGitHub) handler(t *testing.T) http.Handler {
@@ -42,7 +43,10 @@ func (f *fakeGitHub) handler(t *testing.T) http.Handler {
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("X-GitHub-Request-Id", "req-1")
-		w.WriteHeader(http.StatusOK)
+		if f.response != "" {
+			fmt.Fprint(w, f.response)
+			return
+		}
 		fmt.Fprint(w, `{"state":"open","title":"Ship it"}`)
 	})
 	return mux
@@ -108,6 +112,17 @@ func TestProxyReadsTheRepositoryAsItsAppInstallation(t *testing.T) {
 	}
 	if seen := fake.seen(); strings.Join(seen, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("GitHub saw:\n%s\nwant:\n%s", strings.Join(seen, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestProxyRejectsAResponseLargerThanTheGitHubLimit(t *testing.T) {
+	client, fake := newProxyRig(t)
+	fake.response = strings.Repeat("x", 1<<20+1)
+
+	response := proxy(client, http.MethodGet, "/api/github/rest/repos/acme/web/pulls/7")
+	if response.Code != http.StatusBadGateway || errorCode(t, response) != "GITHUB_UPSTREAM" ||
+		!strings.Contains(response.Body.String(), "1048576-byte limit") {
+		t.Fatalf("oversized GitHub response: status %d body %s, want 502 naming the response limit", response.Code, response.Body.String())
 	}
 }
 

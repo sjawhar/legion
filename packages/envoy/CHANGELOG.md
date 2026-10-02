@@ -71,9 +71,10 @@
   membership with the pool's refresh token at least hourly, ending every session of a person the
   pool refuses or drops from the group; the event and agent-conversation streams re-check the
   caller on every heartbeat. The session cookie's payload encodes the email so any address
-  round-trips; a cookie of the earlier shape no longer verifies. Header identity accepts any
-  value, lowercased. Everyone who has signed in is recorded in `people` (migration `0064`), which
-  is the assignee picker's list and the only names an issue may be assigned to. The web app's
+  round-trips; a cookie of the earlier shape no longer verifies. Header identity is only for tests
+  and local harnesses, requires `DISPATCH_IDENTITY_HEADER_TRUSTED=1`, and never shares a
+  deployment with the sign-in pool. Everyone who has signed in is recorded in `people` (migration
+  `0064`), which is the assignee picker's list and the only names an issue may be assigned to. The
   GitHub reads (`/api/github/rest/...`) go to GitHub as the GitHub App installation, GET only and
   only a pull request, an issue or a commit's check runs. `DISPATCH_ALLOWED_LOGINS` and
   `DISPATCH_APP_CLIENT_SECRET` are removed and refused at boot; GitHub OAuth sign-in, the per-user
@@ -165,6 +166,8 @@
 
 ### Fixed
 
+- A GitHub App response over 1 MiB now fails whole instead of returning a truncated body. The
+  dashboard proxy answers `502 GITHUB_UPSTREAM` and names the 1 MiB limit.
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds

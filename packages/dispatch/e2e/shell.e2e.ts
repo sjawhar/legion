@@ -49,7 +49,7 @@ test("signing out returns to the sign-in page", async ({ browser }, testInfo) =>
   }
   await expect(page.getByText("Signed in as alice")).toBeVisible();
 
-  // This harness authenticates through a trusted proxy header rather than the session
+  // This harness authenticates through test-only header identity rather than the session
   // cookie /auth/logout clears, so nothing server-side makes a later whoami actually
   // fail. Simulate the real-world post-logout state deterministically: once the logout
   // request has been seen, every subsequent whoami call is answered as unauthenticated,

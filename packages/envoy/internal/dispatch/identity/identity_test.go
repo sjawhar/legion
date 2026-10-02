@@ -120,8 +120,8 @@ func cookieRequest(t *testing.T, email string, generation int64) *http.Request {
 	return request
 }
 
-// The trusted proxy's header names a person by email; Dispatch's form of it is lowercased, and
-// the person is recorded as having signed in, which is what makes them assignable.
+// A test or local harness header names a person by email; Dispatch's form of it is lowercased,
+// and the person is recorded as having signed in, which is what makes them assignable.
 func TestHeaderIdentityNamesThePersonLowercasedAndRecordsThem(t *testing.T) {
 	people := newTestPeopleStore()
 	identity := HeaderIdentity{Header: "X-Dispatch-User", People: people}

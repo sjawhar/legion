@@ -1,8 +1,8 @@
 // Package routes assembles the Dispatch HTTP server routes.
 //
-// Authenticated people identify through either a signed cookie, issued when they sign in with
-// Google Workspace through the sign-in pool, or a trusted proxy header. The web app's GitHub
-// reads go to GitHub as the GitHub App.
+// Authenticated people use a signed cookie issued when they sign in with Google Workspace through
+// the sign-in pool. Test and local harnesses can inject header identity. The web app's GitHub reads
+// go to GitHub as the GitHub App.
 package routes
 
 import (
@@ -51,8 +51,8 @@ type AppContext struct {
 	DefaultProject string
 	ServerURL      string
 	// SignIn is the sign-in pool's authorization code flow and SignInGroup the group a person
-	// must be in to sign in; a nil SignIn is a server with no Google sign-in (header identity,
-	// the dev sign-in server), whose /auth/start and /auth/callback answer 503.
+	// must be in to sign in; a nil SignIn is a test/local header-identity or dev sign-in server,
+	// whose /auth/start and /auth/callback answer 503.
 	SignIn      *oidc.CodeFlow
 	SignInGroup string
 	apiDeps     api.Deps

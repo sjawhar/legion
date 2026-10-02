@@ -152,11 +152,12 @@ lowercase email:
   the person's membership with it at least hourly: a refresh the pool refuses,
   or one whose ID token no longer puts them in the group, ends every session
   they hold. Logout ends Dispatch's session only, not the pool's.
-- `header:<Header-Name>` trusts a reverse-proxy identity header, accepting any
-  value, lowercased, and records each person it sees. This mode logs a boot
-  warning. When `DISPATCH_SIGNIN_ISSUER` is set, it requires
-  `DISPATCH_IDENTITY_HEADER_TRUSTED=1` to prevent a direct client from
-  supplying its own header.
+- `header:<Header-Name>` is for tests and local harnesses only, never for a
+  production Dispatch deployment. It accepts a header value, lowercases it and
+  records the person. The harness must set `DISPATCH_IDENTITY_HEADER_TRUSTED=1`;
+  Dispatch refuses header identity when that flag is absent or when any
+  `DISPATCH_SIGNIN_*` setting is present, so it cannot share a deployment with
+  Google sign-in.
 
 The people Dispatch has seen, either way, are the assignee picker's options and
 the only names an issue may be assigned to.
@@ -215,6 +216,7 @@ cd packages/envoy
 DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable' \
 DISPATCH_AGENT_TOKEN=local-agent-token \
 DISPATCH_IDENTITY='header:X-Dispatch-User' \
+DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
 DISPATCH_INSECURE_COOKIE=1 \
 DISPATCH_DEFAULT_PROJECT=LOCAL \
 DISPATCH_NATS_DISABLED=1 \
@@ -472,6 +474,9 @@ or `/healthz` is a JSON 404 `{"code":"NOT_FOUND","error":"no route for GET
 /v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell; a missing file
 under `/assets` stays `404 {"error":"not found"}`.
 
+
+In this table, header identity means only the test/local harness mode described above. Production
+Dispatch uses cookie identity through the sign-in pool.
 | Path | Method | Identity | Purpose |
 | --- | --- | --- | --- |
 | `/api/v1` | GET | none | List every `/api/v1` route with its auth and purpose. |
