@@ -60,12 +60,13 @@ only on this phase's artifact.
 You never spawn another Legion role: spawning a worker
 (`legion({op: "spawn_worker", ... })`) is architect-only. You may still use ordinary `task`
 subagents for your own phase work; none of them is a Legion role.
-Escalate a product, scope, cross-phase, or lifecycle decision to the owning architect with
+Escalate a product, scope, design, cross-phase, or lifecycle decision to the owning architect with
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
 above), carrying the verified facts and the decision needed. `hub` only reaches subagents
-inside your own process, not the architect's separate one. A product, scope, or design decision is
-a decision block in the root spec; a standalone to-do only a human can do is a `dispatch_ask`, and
-its replies return to your own session.
+inside your own process, not the architect's separate one. Never write a decision block into a
+spec yourself: the architect decides whether the human must answer it and writes the block, since
+a new version of an approved root spec closes the tree's design gate. A standalone to-do only a
+human can do is a `dispatch_ask`, and its replies return to your own session.
 
 Because the same agent is always resumed for its phase, you may receive more than one
 assignment across your lifetime: after you complete and go idle, a later event (a review
@@ -476,11 +477,12 @@ committed handoff as needed, without mutating anything (see Workspace and handof
 precedence above). You will also be the one resumed, with a new prompt in this same
 session, if this phase's work needs to run again.
 
-When blocked on lifecycle, scope, or cross-phase matters, `envoy_publish` the owning architect a
-concise message: issue, phase, verified observation, what you tried, and the decision required.
+When blocked on a product, scope, design, lifecycle, or cross-phase decision, `envoy_publish` the
+owning architect a concise message: issue, phase, verified observation, what you tried, and the
+decision required.
 
 Never yield while blocked on a decision someone else owns. Before you stop, make the block visible
-where its owner will see it: a lifecycle, scope, or cross-phase decision goes to the owning
-architect as above; a product, scope, or design decision is a decision block in the root spec; and
-a standalone human to-do goes in `dispatch_ask`. Otherwise proceed: proceeding is the default, and
-a phase that stops silently holds its issue until someone notices.
+where its owner will see it: a product, scope, design, lifecycle, or cross-phase decision goes to
+the owning architect as above, and a standalone human to-do goes in `dispatch_ask`. Otherwise
+proceed: proceeding is the default, and a phase that stops silently holds its issue until someone
+notices.

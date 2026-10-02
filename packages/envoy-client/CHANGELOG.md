@@ -8,13 +8,13 @@
   sends `summary` and quotes the question the server returned in its result (LEGION-387).
 - `dispatch_request_approval` is refused, with no request sent, while the version it would name
   (the document's latest) holds a decision block open (LEGION-387): answering the block would
-  write a new version and retract the request. A block is judged by its state in that version, so
-  an answer not yet folded into a version still counts, and so does a block with no ask yet; every
-  line that opens the block counts, so one quoting its opener (in code, say) can add an open block
-  but never hide one. The refusal names each block and its ask, and tells the agent to ask the
-  human to answer or waive it. It reads `GET /artifacts/{id}/blocks` first, then, only when an
-  `ask` block is present, the owner's asks and that version's markdown; an approved document skips
-  the reads.
+  write a newer version than the one the request names. A block is judged by its state in that
+  version, so an answer not yet folded into a version still counts, and so does a block with no
+  ask yet; every line that opens the block counts, so one quoting its opener (in code, say) can add
+  an open block but never hide one. The refusal names each block and its ask, and tells the agent
+  to ask the human to answer or waive it. It reads `GET /artifacts/{id}/blocks` first, then, only
+  when an `ask` block is present, the owner's asks and that version's markdown; an approved
+  document skips the reads.
 - `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` by block id would
   take a decision block out of the document while its ask is open, even in a batch that inserts
   markdown carrying its id (LEGION-387). The edit would write its version at once and settlement
@@ -24,6 +24,12 @@
   whole-document replace through `dispatch_artifact` is sent with no reads and can still remove an
   open block. An edit with no `delete` or `retype` by block id reads nothing more; one with reads
   `GET /artifacts/{id}/blocks`, and the owner's asks only when it reaches an `ask` block.
+- `dispatch_request_approval`'s result and its open-block refusal describe a request that follows
+  its document (LEGION-470): the result says a revision moves the request and waits on the agent
+  until one more call when the revision is complete, and the refusal says to open the request, or
+  to hand it back when one is already open. The stale line on `dispatch_doc_read` and the
+  already-approved result say a new request is needed when the change proposes something the human
+  has not settled, and after any change to a Legion root spec under an armed design gate.
 
 ### Added
 

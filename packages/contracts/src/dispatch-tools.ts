@@ -395,7 +395,6 @@ export const dispatchToolSpecs = [
       "dispatch_request_approval. Do not use this tool for a status update or discussion; use dispatch_message instead. " +
       "A to-do a human must complete is a question phrased as that to-do, with the options you want (for example Done / Can't). " +
       "Anything that requires a human to do, including a credential or grant renewal, is an ask, never a message. " +
-      "Ask a human to approve a document only with dispatch_request_approval. " +
       "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " +
       `reference — it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} ` +
       `characters and has at most 8 options. ${OWNER_REFERENCE}`,
@@ -833,9 +832,11 @@ export const dispatchToolSpecs = [
       "artifact.approved or artifact.changes_requested. An open request follows the document: a later version moves it to that version and " +
       "parks it as waiting on you; call this again to hand the same Inbox row back to the human, with a new " +
       "summary when the proposal changed or the same one after answering a question in its " +
-      "thread. A repeat with nothing newer in the request's thread changes nothing. " +
+      "thread. Only an exact repeat (same version and summary, nothing newer in its thread) writes nothing; a reworded summary hands the row back again. " +
+      "Approve and Request changes each close the request, so the next call opens a new one. " +
       "Call it once per revision, when the revision is complete, never after each edit. " +
-      "An approval goes stale when the document changes after it; request again only when the change proposes something the human has not settled. " +
+      "An approval goes stale when the document changes after it; request again when the change proposes something the human has not settled, " +
+      "and after any change to a Legion root spec under an armed design gate, which a new version closes until a human approves it. " +
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +

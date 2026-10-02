@@ -125,9 +125,8 @@ out of Design move the same way, and the emptied section is deleted. An ask bloc
 differ; [Editing a document](skill://dispatch/references/document-edits.md) says which.
 
 A decision block after approval reopens the design: writing it makes the approval stale, which is
-right. The request follows the document, and you fold the answered block into the text before you
-hand it back ([Approval of a spec](#approval-of-a-spec)). Outside a Legion root issue, a stale
-approval needs no new request unless the change proposes something the human has not settled.
+right. Fold the answered block into the text, then request approval as
+[Approval requests](skill://dispatch/references/documents.md#approval-requests) says.
 
 See [Typed blocks](#typed-blocks) for the syntax and [Before you ask](#before-you-ask) under
 [Asking](#asking) to decide whether the question is a real decision at all.
@@ -209,8 +208,10 @@ field, and choosing your next issue are in [Working an issue](skill://dispatch/r
 Two kinds of question reach a human. A decision about the design a document records is a decision
 block in that document ([Decision blocks](#decision-blocks)), whatever phase the work is in and
 whether or not the document was approved; the document's approval state is the human's business,
-not a reason to keep the question out. A to-do or permission only a human can give, or a decision
-with no document to live in, is a `dispatch_ask`. The gates below apply to both.
+not a reason to keep the question out. A Legion phase worker sends such a decision to its
+architect instead, which writes the block (`skill://legion-worker`). A to-do or permission only a
+human can give, or a decision with no document to live in, is a `dispatch_ask`. The gates below
+apply to both.
 
 ### Before you ask
 
@@ -320,15 +321,7 @@ they must read to decide belongs in the spec in the first place — see [Artifac
 
 Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you audit what a whole project is waiting on rather than just your own asks.
 
-**Unsettled product shape needs a decision before implementation.** When a page, navigation entry,
-table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not
-already settled, write a decision block in the document that records the work before the first
-implementation commit. A lane's schema decision or a platform-PO contract ruling does not settle
-product shape. This does not turn a user-specified decision or routine implementation into an
-approval request. A control or behaviour the human asked for in words is settled by those words,
-together with every choice inside it that his words do not make (where it sits, its defaults, its
-options): build it without a block, as gate 4 of [Before you ask](#before-you-ask) says. This rule
-covers only product shape outside what he asked for.
+**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, write a decision block in the document that records the work before the first implementation commit. A lane's schema decision or a platform-PO contract ruling does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request. A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without a block, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for.
 
 **Anything you are blocked on a human for is visible in Dispatch.** An agent waits on a human only
 through an open ask. A to-do, permission, credential or grant renewal, setting, review click, or
@@ -386,26 +379,23 @@ waived as the next paragraph says; and it proposes something the human has not a
 A Legion root spec under an armed design gate always goes to approval once its blocks are settled
 (`skill://legion-architect`).
 
-Request it once, when the spec is ready for the human to read. A request is one row in the Inbox
-for the life of the document: a later version moves that row to the new version and files it under
-Waiting on agents. Requesting again hands the same row back to Waiting on you, with a new `summary`
-when the proposal changed or the same one after you answered in its thread, even if the prior reply
-left it Waiting on agents. Hand it back once per revision. A human who comments on the request
-instead of answering it is continuing the design conversation: reply in the thread; when the
-comment raises a choice that is theirs, write it into the spec as a decision block (the request
-waits on you while the block is open); when it changes the design, rewrite the text; then hand the
-request back once. A choice you can make yourself is not a decision
-block ([Before you ask](#before-you-ask), gate 1): write your call and its reason into the design
-and name it in `summary`; a human who disagrees answers `Request changes`. When a human asks for
-approval while a block is open, do not request it and do not hold it silently: name each open block
-and ask them to answer it or waive it. For a waiver, close the block with `dispatch_resolve_ask`
-(`kind: "resolved"`, their words as `reason`), then write their decision into the text in their
-words and request. `dispatch_request_approval` refuses while any block is open.
+Request it once, when the spec is ready for the human to read, and hand it back once per revision,
+when the revision is complete, never after each edit. How the request follows the document, and
+what each call does after an answer, is in [Approval requests](skill://dispatch/references/documents.md#approval-requests).
+A human who comments on the request instead of answering it is continuing the design conversation:
+reply in the thread; when the comment raises a choice that is theirs, write it into the spec as a
+decision block; when it changes the design, rewrite the text; then hand the request back once. A
+choice you can make yourself is not a decision block ([Before you ask](#before-you-ask), gate 1):
+write your call and its reason into the design and name it in `summary`; a human who disagrees
+answers `Request changes`. When a human asks for approval while a block is open, do not request it
+and do not hold it silently: name each open block and ask them to answer it or waive it. For a
+waiver, close the block with `dispatch_resolve_ask` (`kind: "resolved"`, their words as `reason`),
+then write their decision into the text in their words and request. `dispatch_request_approval`
+refuses while any block is open.
 
 `summary` names the proposals in this version the human has not agreed to, in one to three
 sentences, and never an open question: the Inbox shows it after "Approve spec.md (version N)?".
-Never write "Approve" options into an ordinary `dispatch_ask`; only humans approve. The call, its
-result and its answer: [Approval requests](skill://dispatch/references/documents.md#approval-requests).
+Never write "Approve" options into an ordinary `dispatch_ask`; only humans approve.
 
 ## The Spec
 
@@ -478,7 +468,7 @@ dispatch_message({ issue, body })
 ```
 
 It returns `details` `{ issue, message }`. `body` is capped at 2,000 characters. A message is not a decision
-(`dispatch_ask`) or document feedback (`dispatch_comment`), and it does not wake anyone unless the issue is routed.
+(a decision block, or `dispatch_ask` for a human to-do) or document feedback (`dispatch_comment`), and it does not wake anyone unless the issue is routed.
 
 A BTW, Aside or Steer frame, or a message from the Agents page, is answered as
 [Targeted and direct messages](skill://dispatch/references/messages.md) says.

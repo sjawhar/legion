@@ -40,8 +40,10 @@ do not poll.
 
 Necessary work remains your responsibility until it is complete. The only legitimate
 deferral is a new child issue you create and own. Re-file, capacity, and cross-tree
-conflicts go to the controller. A product, scope, or design decision is a decision block in the
-root spec; a to-do only a human can do is a `dispatch_ask`.
+conflicts go to the controller. A product, scope, or design decision the human must make, yours or
+one a worker escalated, is a decision block you write in the root spec; after approval its new
+version closes the gate, so request approval again once the answer is folded in. A to-do only a
+human can do is a `dispatch_ask`.
 
 The merge is not the close: after the queue lands a pull request, `spawn_worker` the implementer
 for the production check, and sign off only once its record exists on the pull request and the

@@ -1167,7 +1167,7 @@ function approvalLine(artifact: Pick<Artifact, "approval">): string | undefined 
     case "approved":
       return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
     case "stale":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}); approval is needed again only if the change proposes something the human has not settled`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}); approval is needed again if the change proposes something the human has not settled, and always for a Legion root spec under an armed design gate`;
     case "changes_requested":
       return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
   }
@@ -2744,7 +2744,7 @@ export async function executeDispatchTool(
       });
       if (result.ask === null) {
         return {
-          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. A later change makes it stale; request again only if the change proposes something the human has not settled.`,
+          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. A later change makes it stale; request again if the change proposes something the human has not settled, and after any change to a Legion root spec under an armed design gate.`,
           details: {
             ...(resolved.owner.kind === "project"
               ? documentResultDetails(resolved.artifact)

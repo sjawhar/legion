@@ -18,9 +18,8 @@
 - `dispatch_request_approval` is refused while the document holds an open decision block, even
   when a human asked for approval, and the refusal names each block. "Approval of a spec" says
   what to do instead: name the open block and ask the human to answer or waive it; a waived block
-  is closed with `dispatch_resolve_ask`. It also says to request approval in the pass that
-  finishes a spec whose remaining choices are the agent's own, rather than making each of them a
-  decision block.
+  is closed with `dispatch_resolve_ask`. It also says that a choice the agent can make itself is
+  written into the design and named in `summary`, not made a decision block.
 - `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` would take a
   decision block out of the document while its ask is open, even in a batch that inserts it
   again; the refusal names `replace`, `move` and, for the session that asked, `dispatch_edit_ask` instead. A whole-document
@@ -34,6 +33,21 @@
   data, anything that reaches a customer) the lane's own `dispatch_ask` to Sami on its own issue,
   never routed through the platform PO, in "Before you ask" gate 1, "Writing a spec" and "When you
   need a human". A contract between two lanes still goes to the platform PO over Envoy.
+- Design questions stay in the spec (LEGION-470). The `dispatch` skill and the `dispatch_ask` and
+  `dispatch_message` descriptions put a decision about a document's design in a decision block in
+  that document, at every phase and whether or not it was approved; `dispatch_ask` is for a to-do
+  or permission only a human can give. Legion phase workers send a product, scope or design
+  decision to their architect, which writes the block (`legion-worker`, the headless role text); a
+  new version of an approved root spec closes the design gate, so the root architect requests
+  approval again once the answer is folded in (`legion-architect`, the architect role texts).
+- An approval request is made once and handed back once per revision, when the revision is
+  complete (`dispatch_request_approval`'s description, "Approval of a spec", `legion-architect`).
+  `references/documents.md#approval-requests` states once how a request follows its document,
+  which call writes nothing, and that `Approve` and `Request changes` close it, so the next call
+  opens a new one.
+- The run-end nudge offers a decision block in the document a question concerns, or `dispatch_ask`
+  for a to-do. A `dispatch_doc_edit` that inserts an ask block or retypes a block into one spends
+  the nudge's check, as `dispatch_ask` does.
 
 ### Added
 

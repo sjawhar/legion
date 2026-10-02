@@ -158,16 +158,28 @@ reaches a version only when the document settles, about two seconds later, or wi
 `dispatch_doc_edit`: fold the answer into the text (or, for a waiver, write the human's decision
 in) and then request. A block written in the last few seconds counts as open before Dispatch has
 opened its ask.
-A new version moves an open request to the new version, and its `ask.edited` reaches you; the
-request then waits on you until the next `dispatch_request_approval` hands the same row back, with
-a new summary when the proposal changed or the same one after you answered a question in its
-thread. That hand-back returns it to the human even if the preceding reply left it waiting on the
-agent; a later reply again follows its own `turn`. A repeat with nothing newer in the request's
-thread changes nothing. The answer reaches you as `artifact.approved` or
-`artifact.changes_requested` with the pinned `version`; `changes_requested` carries the reason,
-which is your next piece of work.
+
+One request lasts until a human answers it:
+
+- A new version moves an open request to that version, and its `ask.edited` reaches you; the
+  request then waits on you.
+- The next `dispatch_request_approval` hands the same row back to the human's Inbox. Any change
+  hands it back: a newer version or a different `summary`. So does the same call after you
+  answered a question in its thread, even when that reply left it waiting on the agent; a later
+  reply again follows its own `turn`. Only a call that repeats the last one exactly (same version,
+  same `summary`, nothing newer in its thread) writes nothing, so a reworded `summary` for the same
+  revision puts the request in front of the human a second time.
+- `Approve` and `Request changes` each close the request. The answer reaches you as
+  `artifact.approved` or `artifact.changes_requested` with the pinned `version`;
+  `changes_requested` carries the reason, which is your next piece of work. After either answer
+  there is no request to hand back: the next call opens a new one at the latest version.
+- A call while the latest version is approved opens nothing and says so.
+
 `dispatch_read` and `dispatch_doc_read` show the document's approval state; `stale` means it was
-approved and then edited.
+approved and then edited. A stale approval needs a new request only when the change proposes
+something the human has not settled, except on a Legion root spec under an armed design gate:
+there any later version closes the gate for the whole tree until a human approves it, so the root
+architect requests approval again once the revision is complete (`skill://legion-architect`).
 
 ## A document that is reloading
 

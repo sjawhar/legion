@@ -20,14 +20,15 @@ clickable and the answer stays with the release design:
 ```ts
 dispatch_doc_edit({
   issue: "LEGION-815",
+  artifact: "spec",
   ops: [{
     op: "insert",
     after: "Release requires reviewed operator instructions before deployment.",
     markdown: `:::ask{#release-gate urgency="high"}
 Choose the release gate. Recommendation: ship after release-note review, since the tested deployment is otherwise ready.
 
-- Review notes, then ship — Keeps the release intact and reviewed.
-- Ship now — Meets the demo deadline; release notes follow later.
+- Review notes, then ship: Keeps the release intact and reviewed.
+- Ship now: Meets the demo deadline; release notes follow later.
 :::`,
   }],
 })

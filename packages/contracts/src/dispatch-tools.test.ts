@@ -209,9 +209,6 @@ describe("dispatchToolSpecs", () => {
     );
     expect(ask.description).toContain("decision block");
     expect(ask.description).toContain("Never give an ask an Approve option");
-    expect(ask.description).toContain(
-      "Ask a human to approve a document only with dispatch_request_approval"
-    );
     expect(approval.description).toContain("same Inbox row");
     expect(approval.description).toContain("Call it once per revision");
     expect(message.description).toContain("Not a design decision");
