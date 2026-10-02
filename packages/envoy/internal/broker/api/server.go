@@ -118,7 +118,8 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 
 // proofSubject verifies r's Proof header and returns who it authenticates, unwrapped: authLauncher
 // and authProof each translate a failure into their own vocabulary (LAUNCHER_INVALID vs
-// PROOF_INVALID, contract v9's Authentication §1/§2), so this reports only the raw error.
+// PROOF_INVALID, Authentication items 1 and 2 of the shared broker contract at
+// dispatch://AGENTC-393/artifact/plan-overview-md), so this reports only the raw error.
 func (s *server) proofSubject(r *http.Request) (proof.Subject, error) {
 	return s.deps.Proof.Verify(r.Context(), r.Header.Get("Proof"), r.Method, s.deps.PublicURL+r.URL.Path, time.Now())
 }

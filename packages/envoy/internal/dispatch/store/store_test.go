@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -305,6 +306,141 @@ func TestEveryMigrationFileIsEmbedded(t *testing.T) {
 	if err := pgmigratetest.CheckEmbedsEveryFile(migrationFiles, "migrations"); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// censusRequiredFrom is the first migration number that must declare a census (LEGION-459): one
+// more than the highest migration on main when the census landed, so no migration written before
+// the rule is caught by it. Every migration below it that declares one is a worked example. Read
+// from origin/main on 2026-10-01, where the set ended at 0055.
+const censusRequiredFrom = 56
+
+// Every migration from censusRequiredFrom on declares a census: the count a deployment reads before
+// it applies the migration. One that cannot refuse or rewrite any row declares `select 0` and says why.
+func TestEveryMigrationFromTheCensusRuleOnDeclaresACensus(t *testing.T) {
+	if err := pgmigratetest.CheckCensusDeclaredFrom(migrationFiles, "migrations", censusRequiredFrom); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The census's textual reading of which tables a migration touches is held to the real set: every
+// name it finds is a table the set itself creates.
+func TestTouchedTablesOfEveryMigrationAreTablesTheSetCreates(t *testing.T) {
+	if err := pgmigratetest.CheckTouchedTablesAreKnown(migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The census's reading of which tables a migration touches is held to what every real migration
+// locks, applied in order to an empty database (pgmigratetest.CheckTouchedTablesAgainstLocks): a
+// statement form the patterns miss fails here, which no reading of names alone can catch.
+func TestTouchedTablesOfEveryMigrationAreTheTablesItLocks(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	conn, err := pgx.ConnectConfig(ctx, store.Pool.Config().ConnConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close(context.Background()) })
+	if err := pgmigratetest.CheckTouchedTablesAgainstLocks(ctx, conn, migrationFiles, "migrations"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The lock audit fails both ways: on a table a migration locks that the reading misses (reindex
+// is a form the patterns do not know), and on a table the reading names that the migration never
+// locks (a quoted identifier holding a statement's text, which the patterns read as that
+// statement).
+func TestTheLockAuditRefusesAMissedTableAndAMisreadOne(t *testing.T) {
+	for name, tc := range map[string]struct{ second, want string }{
+		"a form the patterns do not know": {
+			second: "reindex table things",
+			want:   "migration 0002_second.up.sql locks things above ACCESS SHARE, which pgmigrate.CensusTables does not read from it",
+		},
+		"a name the patterns misread": {
+			second: `select 1 as "delete from things"`,
+			want:   "migration 0002_second.up.sql names things, which pgmigrate.CensusTables reads from it, but takes no lock on it",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := auditTwoMigrations(t, "create table things (id integer, kind text)", tc.second)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CheckTouchedTablesAgainstLocks = %v, want it to say %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The lock audit holds pgmigrate.CensusTables, the one reading Census takes too, to what each
+// migration locks: the table behind an index the migration drops, which no statement of it names;
+// the tables a foreign key reaches from rows it writes, which an earlier migration of the set
+// seeds, since on an empty table a foreign key locks nothing; a function's body, which the
+// migration defines and does not run, so the table it writes is not the migration's; and a write a
+// DO block makes only when a table holds rows, which on the audit's database it does not, so the
+// table it would write is left unlocked there and is no misread.
+func TestTheLockAuditAcceptsWhatTheCensusReads(t *testing.T) {
+	const parents = `create table parent (id integer primary key);
+		create table child (id integer primary key, parent_id integer references parent on delete cascade);
+		create table grandchild (id integer primary key, child_id integer references child on delete cascade);
+		create table watcher (id integer primary key, parent_id integer references parent);
+		create table follower (id integer primary key, parent_id integer references parent on delete set null);
+		insert into parent values (1), (2);
+		insert into child values (1, 1);
+		insert into grandchild values (1, 1);
+		insert into follower values (1, 1);`
+	for name, tc := range map[string]struct{ first, second string }{
+		"an index the migration drops": {
+			first:  "create table things (id integer, kind text); create index things_kind on things (kind)",
+			second: "drop index things_kind",
+		},
+		// child and follower take ROW EXCLUSIVE (a cascade and a set null), grandchild the cascade
+		// from child's row, and watcher ROW SHARE: the check that no row of it still references 1.
+		"the tables a deleted row's foreign keys reach": {
+			first:  parents,
+			second: "delete from parent where id = 1",
+		},
+		// Each row child gains or changes is checked against parent: ROW SHARE on parent.
+		"the table an inserted or updated row's foreign key checks": {
+			first:  parents,
+			second: "update child set parent_id = 2; insert into child values (2, 1)",
+		},
+		// An upsert's do update can change the key, which every table referencing it is checked
+		// for (child, watcher, follower: ROW SHARE).
+		"the tables an upsert that changes a key reaches": {
+			first:  parents,
+			second: "insert into parent values (2) on conflict (id) do update set id = 5",
+		},
+		"a function whose body writes a table": {
+			first:  "create table things (id integer, kind text)",
+			second: "create function note_thing() returns trigger language plpgsql as $$ begin insert into things (id) values (1); return new; end $$",
+		},
+		"a write a DO block makes only when a table holds rows": {
+			first:  "create table things (id integer, kind text); create table others (id integer)",
+			second: "do $$ begin if exists (select 1 from things) then update others set id = 2; end if; end $$",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := auditTwoMigrations(t, tc.first, tc.second); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// auditTwoMigrations runs the lock audit over a set of first and second on a database of its own.
+func auditTwoMigrations(t *testing.T, first, second string) error {
+	t.Helper()
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	conn, err := pgx.ConnectConfig(ctx, store.Pool.Config().ConnConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close(context.Background()) })
+	set := fstest.MapFS{
+		"migrations/0001_first.up.sql":  {Data: []byte(first)},
+		"migrations/0002_second.up.sql": {Data: []byte(second)},
+	}
+	return pgmigratetest.CheckTouchedTablesAgainstLocks(ctx, conn, set, "migrations")
 }
 
 func TestMigrateSkipsVersionRecordedOutsideTheRunner(t *testing.T) {

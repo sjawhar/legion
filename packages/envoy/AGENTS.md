@@ -33,7 +33,7 @@ events to the right session.
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
-| Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), and the watch that names the lock a timed-out migration wanted |
+| Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`) |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
@@ -149,12 +149,12 @@ row before it waits for the slot. The slot is in memory, where Postgres cannot s
 no transaction may wait for it while holding a lock its holder still needs. A failed room's eviction
 flushes and compacts under the advisory lock, so no transaction waits for a failed room to recover
 either: a document operation inside a transaction (a handler's, or settlement's own) that meets one
-fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`), the transaction rolls back, and
-the caller retries once the room has reloaded; so does a write whose room fails before its first
-append, since the reloaded room may lack it. A room's own load never waits for that recovery
-either - the eviction waits in ygo's `CloseRoom` for the load's ready barrier, so the two would
-hold each other - and refuses instead, which ends the eviction; the replacement room's load then
-runs the one settlement the failure dropped.
+fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`, whatever failed the room), the
+transaction rolls back, and the caller retries once the room has reloaded; so does a write whose
+room fails before its first append, since the reloaded room may lack it. A room's own load never
+waits for that recovery either - the eviction waits in ygo's `CloseRoom` for the load's ready
+barrier, so the two would hold each other - and refuses instead, which ends the eviction; the
+replacement room's load then runs the one settlement the failure dropped.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
@@ -182,6 +182,34 @@ latest version number, or `null` when it has none (the live markdown beside it a
 are two unsynchronised reads, in both directions; `token` is the concurrency primitive). The server resolves
 the block when it creates a quote or browser-mark anchor; `envoy-dispatch backfill-anchor-blocks`
 fills legacy anchors only when their cached quote has one current match.
+`GET /api/v1/artifacts/{id}/blocks/{block_id}` places any one block (`pmdoc.BlockPathOf`, over
+the document `readDocument` serves): its path of `{type, id, index}` from the top-level block
+down, and for a table block, row or cell a `table` naming the table's id, the row's child index
+(0 is the header row), the cell's child index in its row (the indexes `delete_row` and
+`delete_column` take, so a spanning cell counts once), the text of the header cell drawn above
+the cell and the row's cells as their opening words. The header is found where the renderer
+writes the cell (`tableGrid`, laid out on a span budget of its own through the anchored row), so
+in a table with colspans or rowspans it is the column the cell is drawn in, not the header row's
+child at the cell's index. `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}` attach the
+same answer for the anchor's `block_id` as `anchor_block` (`api.anchorBlock`), computed at read
+time and never stored or carried on lists and events; a block the live document no longer holds
+leaves it absent while the anchor keeps its stale `block_id`. The position is one derived field
+of those reads, so a document they cannot read does not fail them: the read answers 200 without
+`anchor_block` and with `anchor_block_error`, logged at WARN. `api.documentErrorCode` names that
+error for the read and for `writeHandlerError` alike, and both take its codes in one order, so
+`anchor_block_error` is the code the block route answers the same error with.
+`DOC_SERVICE_UNAVAILABLE` is a room or store that could not serve the document, taken before any
+cause the error carries: a failed room carries the error another operation failed it with
+(settlement's schema refusal, a settlement that failed three times - its warm-up refused because
+the issue had closed, among others - a writer's failed or cancelled commit, a failed store write
+or load), which says nothing of this request. `DOC_SCHEMA` is a live tree outside the schema,
+taken after the refusals that name the caller's own input or a missing block, so an ask block the
+renderer refused stays `400 INVALID_ASK_BLOCK`. Anything else is `INTERNAL`, as
+`writeHandlerError` answers it. Only a request that has gone away fails, decided by that request's
+own context rather than the error, since a room a writer's cancelled commit failed carries that
+writer's `context.Canceled` in its cause. Nor does that read wait for a failed room's recovery
+(`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`,
+`GET /blocks` and the block route wait.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
@@ -674,14 +702,17 @@ resolved afresh under that same number, never reported undeliverable unsent.
 
 The idempotency key carries no attempt number: it is `<message>:<mode>` and
 `<comment>:<target>:<mode>`, stable across every attempt of that pair. The listener prefixes the
-recipient (`agent.<session>.<key>`) and the JetStream MsgId appends the topic, so the key's real
-scope is **(message, mode, recipient session)**, and a retry of a send that already landed is a
-duplicate JetStream drops before the agent's subject ever sees it. That is what makes a retry
-after a receipt timeout safe: the listener publishes the envelope before it answers, so an
-answer that misses the client's window says nothing about whether the message landed, and only
-the same key can be recognised as the repeat it is. **This holds for as long as the stream's
-duplicate window, which equals its retention by construction (both are `streamDuplicateWindow`,
-`internal/bus/stream.go`) and is reconciled on every `bus.ConnectOwningStream` by `ensureStreamWithConfig`.**
+recipient (`agent.<session>.<key>`) to make the envelope's `dedupe_key`, and the JetStream MsgId
+appends the topic, so the key's real scope is **(message, mode, recipient session)**, and a retry
+of a send that already landed repeats the dedupe key of the frame that landed - and nothing else
+of it, because the listener mints a fresh `event_id` per send. That is what makes a retry after a
+receipt timeout safe: the listener publishes the envelope before it answers, so an answer that
+misses the client's window says nothing about whether the message landed, and only the same key
+can be recognised as the repeat it is. **Who recognises it, for how long, and where that fails is
+stated once, on `DELIVERY_DUPLICATE_WINDOW_MS` in `packages/contracts/src/dispatch-api.ts`; read
+it there rather than here.** The stream's duplicate window equals its retention by construction
+(both are `streamDuplicateWindow`, `internal/bus/stream.go`) and is reconciled on every
+`bus.ConnectOwningStream` by `ensureStreamWithConfig`.
 A retry in a DIFFERENT mode is a different key and genuinely does deliver again, which is what
 the dashboard's retry row says: its **Retry** re-sends the attempt's own mode, and the two
 mode-change actions say "instead". A mode change never rides on a stranded attempt - resuming it
@@ -692,27 +723,28 @@ attempt pinned to the session the stranded row named.
 
 **The window is one number, and the promise expires with it.** `DELIVERY_DUPLICATE_WINDOW_MS` in
 `packages/contracts` is the single literal: `contracts.DeliveryDuplicateWindow` is generated from
-it for Go, and the dashboard reads it directly. Past that window the stream holds neither the
-message nor its MsgId, so a same-mode retry publishes a second frame - which is why the row
-stores only the CAUSE of a receipt timeout and never the advice. Every delivery surface composes
-the advice through one predicate, `isSafeRetry` in
-`packages/dispatch/web/src/features/conversation/delivery.ts`: it shows the "retrying is safe"
-sentence, and offers the same-mode **Retry** at all, only for a failed attempt inside the window
-that is not itself a duplicate - and it reads a negative age as young, because `created_at` is
-Postgres-stamped while the browser supplies `now`. The mode-change actions are not gated: they
-always deliver. Their clause ("sending in a different mode delivers it again") is added only
-for a receipt timeout, the one cause whose send may already have reached the recipient;
-`RECEIPT_TIMEOUT_CAUSE` in `packages/contracts` is that cause's single literal, generated into
-Go as `contracts.ReceiptTimeoutCause` so the string Dispatch stores and the string the
-dashboard keys on cannot drift. This window bounds a delivery retry only: a broadcast's
-`idempotency_key` is a `broadcast_idempotency_keys` row that lives as long as its broadcast, so
-a repeated create is recognised however late it arrives (the broadcast paragraphs below).
+it for Go, and the hosts' dedupe and the dashboard read it directly. Past that window neither the
+stream nor a host remembers the key, so a same-mode retry is a second delivery - which is why the
+row stores only the CAUSE of a receipt timeout and never the advice. Every delivery surface
+composes the advice from `packages/dispatch/web/src/features/conversation/delivery.ts`, whose
+header names the surfaces: it makes the promise only for a failed attempt inside the window, and
+an attempt its session answered with an error gets a mode change rather than a Retry
+(`DELIVERY_DUPLICATE_WINDOW_MS` says why). The mode-change actions are not gated: they always
+deliver. Their clause ("sending in a different mode delivers it again") is added only for a
+receipt timeout, the one cause whose send may
+already have reached the recipient; `RECEIPT_TIMEOUT_CAUSE` in `packages/contracts` is that
+cause's single literal, generated into Go as `contracts.ReceiptTimeoutCause` so the string
+Dispatch stores and the string the dashboard keys on cannot drift. This window bounds a delivery
+retry only: a broadcast's `idempotency_key` is a `broadcast_idempotency_keys` row that lives as
+long as its broadcast, so a repeated create is recognised however late it arrives (the broadcast
+paragraphs below).
 
-An attempt the stream recognised records `duplicate` and no envelope id: it reached the listener
-and put nothing new on the recipient's subject, so it reads as "already delivered" rather than as
-a fresh send. The flag rides the attempt read, the `message.delivery` payload and the comment
-delivery payload, and every surface that renders an attempt - the targeted-message card, the
-comment thread's mention list, and the issue event feed - reads it.
+An attempt the stream recognised records `duplicate` and no envelope id: an earlier attempt
+landed, so this one is a repeat (`DELIVERY_DUPLICATE_WINDOW_MS` says who drops it), and it reads
+as "already delivered" rather than as a fresh send. The flag rides the attempt read, the
+`message.delivery` payload and the comment delivery payload, and every surface that renders an
+attempt - the targeted-message card, the comment thread's mention list, and the issue event feed
+- reads it.
 
 Because the attempt is committed `pending` before its send and names the session that send is
 going to, the session can answer or refuse the frame while it is still in flight - and can answer
@@ -1170,7 +1202,7 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 - A check_run or check_suite webhook writes the CI record of its commit in each pull request it names, so every check of a head writes one record, and the CI store combines concurrent observations of a record into one compare-and-swap write (`update`), and a burst of a pull request's checks costs far fewer writes than it has observations. A write retries a lost compare-and-swap, or a transient KV error, from a fresh read for up to two seconds (`recordBudget`). One that runs out answers every delivery in its batch 503, which Dispatch's redelivery sweep resends, and logs one JSON line at ERROR, `ci record exceeded its retry budget`, carrying `owner`, `repo`, `number`, `sha`, `checks` (the record's checks with the batch applied, or 0 when no attempt could read the record), `attempts`, `observations` (the deliveries it answered 503) and `error` (`cistore: record exceeded CAS budget` when the last attempt lost its compare-and-swap). It is an ERROR because each one means GitHub was answered 503, and it is meant for an alarm on the CI-record budget to count. The CI store's other lines go through the same JSON logger, so they carry the listener's `machine_id`.
 - Every write of a CI record stamps it `schema: 1` (`encodeRecord`), so a record without the field was last written by a listener that settled only its pull request's head and left every other terminal commit unsettled. Such a record settles only in `[debounce, debounce + 5 min)` after its `last_event_at` (`handoverGrace`), which covers the time between the old listener's last tick and this one's first: a compose deploy of a listener that receives GitHub webhooks is stop-then-start, and its slow path to the first tick takes at least the startup floor in the table in `docs/solutions/architecture-patterns/envoy-ci-summary.md`, which lists the terms and their bounds. So a head that finished just before the old listener was replaced still settles, and the commits that listener declined to settle hours or days earlier never do. Every admitted record is at most debounce plus grace old (5 min 5 s at the 5 s debounce), by construction. Five minutes is the smallest round figure above that startup floor, and a wider grace would only make admitted settlements later: any width admits the non-head records the head-gated listener left in its last debounce plus grace, which this listener settles as it settles every commit, so the width bounds how late such a settlement arrives, not whether one does, while the aged backlog is held back by its age at any width shorter than its records' ages (5 minutes against the 7-day TTL, about 1 in 2,000). One predicate, `due`, decides it for the summary tick (before it reclaims a claim) and for `ClaimSettlement`, and the gauge `envoy_ci_legacy_records_held` on `/metrics` carries how many records the last tick held back, with one INFO line, `checks held back a head-gated listener's unsettled records, at least`, the first time a process holds any (a floor, since the loop does not wait for the CI cache to load). That is a decision, not an accident: an operator who finds a terminal record with `settled_emitted: false` and no `schema` is looking at that history, which the bucket's seven-day TTL expires. An observation that changes the record (a new check run, a re-run, a suite) stamps it and the commit settles as any other, and a stamped record of any schema is never held back, so a settlement pending across a restart of this listener still publishes. A record without a schema whose `last_event_at` is ahead of the listener's clock publishes once wall time reaches its band, and raising `ENVOY_CI_DEBOUNCE` moves the band's far edge, so a restart with a larger debounce admits the records in the added slice. A head-gated listener run after a rollback decodes a stamped record, ignoring the field, and its own writes drop it. Seven days after the last head-gated listener stops, no record without a schema remains.
 - The `ENVOY_NOTIFICATIONS` duplicate window is 72 hours, matching the retained notification lifetime. Startup reconciles that setting with `UpdateStream`, so a Dispatch outbox retry after a post-publish crash cannot create another retained message while the original remains available.
-- An envelope publishes under a JetStream MsgId of its dedupe key and topic when that key names the upstream event itself: `contracts.DedupeKeyNamesTheUpstreamEvent`, which asks the envelope rather than its source name, and holds for a `github`, `slack` or `ghostwispr` key that is the source plus the envelope's own `SourceEventID` (the webhook normalizers' shape) and for every `dispatch` envelope (LEGION-271). A webhook redelivery of an event the stream already holds (GitHub's and Ghost Wispr's resend under the original delivery id, Slack's retry under the original `event_id`) is dropped at publish and still answered 200, and each topic of one delivery's fan-out lands once. The case this covers is a first attempt that reached the stream but that the sender recorded as failed: a reply slower than GitHub's 10-second limit, or a 503 after part of a fan-out published. GitHub redelivers only the past three days, which lies inside the window. The rule reads the key because a source name proves nothing: the MCP bridge publishes under the source its configuration names, `github` included, with a key that is a hash of the resource URI and the summary, which two distinct events on one URI share whenever the read returns no text; and a CI settlement carries a key of the head and the record's generation, which a record recreated under that head can reuse with a different snapshot. Neither is a redelivery, and neither is deduped. Agent-sourced envelopes carry no MsgId.
+- An envelope publishes under a JetStream MsgId of its dedupe key and topic when that key names its event: `contracts.DedupeKeyNamesTheUpstreamEvent`, which asks the envelope rather than its source name, and holds for a `github`, `slack` or `ghostwispr` key that is the source plus the envelope's own `SourceEventID` (the webhook normalizers' shape), for every `dispatch` envelope (LEGION-271), and for a key minted once for its message, from any source (`contracts.MintedDedupeKeyPattern`: the listener's own `publish.<id>` or `agent.<session>.<id>`, the same around the shared transport's UUID idempotency key, or either behind the role arbiter's forward mark), which only a re-send of that message repeats. It is `dedupeKeyNamesItsEvent` in `packages/contracts`, which every core-NATS host asks for its own dedupe. A webhook redelivery of an event the stream already holds (GitHub's and Ghost Wispr's resend under the original delivery id, Slack's retry under the original `event_id`) is dropped at publish and still answered 200, and each topic of one delivery's fan-out lands once. The case this covers is a first attempt that reached the stream but that the sender recorded as failed: a reply slower than GitHub's 10-second limit, or a 503 after part of a fan-out published. GitHub redelivers only the past three days, which lies inside the window. The rule reads the key because a source name proves nothing: the MCP bridge publishes under the source its configuration names, `github` included, with a key that is a hash of the resource URI and the summary, which two distinct events on one URI share whenever the read returns no text (LEGION-423); a CI settlement carries a key of the head and the record's generation, which a record recreated under that head can reuse with a different snapshot; and the Go daemon's outbox keys a notice by its row id, `legion-outbox:<row>`, which starts over with each new store (LEGION-426). None is a redelivery, and none is deduped. An envelope under any other key its caller chose carries no MsgId.
 - A `bus.ConnectOwningStream` caller reconciles `ENVOY_NOTIFICATIONS`'s subjects at start by adding its own to the deployed list. Only the deployed services call it: the listener (including the on-prem fleet's) and Dispatch's server. A caller that only publishes or only tails - `natstail`, the MCP server, `envoy-dispatch`'s operator commands - uses `bus.Connect`, which neither creates the stream nor updates it. **Either connect refuses a NATS server that is not this machine's unless the run sets `ENVOY_ALLOW_REMOTE_NATS=1`**, decided from the URL before anything dials, because nothing distinguishes the deployed Dispatch from the same binary run out of a checkout: both read `natsUrls` from `~/.config/opencode/envoy.json`, which on an agent machine names production. Each deployment states its reach instead (`deploy/compose/*.compose.yml`, the production deployment's listener and Dispatch service definitions, the on-prem fleet's Pulumi), and each must carry it **before** an image whose binaries read it runs there, or that start refuses the shared NATS its deployment names and exits; setting it early is free, because a binary built before the variable ignores it (LEGION-249). Once every writer runs a build with this reconciliation, a restart during a rollout cannot drop a subject another deployment needs, except when two writers with different lists start within one read-update round trip (JetStream's stream update has no compare-and-swap). A start removes a deployed subject only when it overlaps a role lane (`notifications.role.>` or its exceptions twin) or one of the binary's own subjects (a widened, narrowed or split subject, which JetStream refuses beside it). In the second case the binary's shape wins, and a WARN names the dropped subject and every subject that replaced it. Each start also logs, at INFO, the deployed subjects it keeps without compiling them, which is the list the retire step works from. Retiring a subject is an operator step once no deployment compiled with it can start: `nats stream edit ENVOY_NOTIFICATIONS --subjects=... -f` (`docs/solutions/envoy/nats-jetstream-stream-ensure-only-adds-subjects.md`).
 - Cross-machine route correctness depends on valid session registry entries with non-null ports.
 
@@ -1178,8 +1210,8 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 
 | Endpoint | Method | Contract |
 | --- | --- | --- |
-| `/v1/messages/send` | POST | Sends to a live `target_session`. Dispatch uses `source: "dispatch"`, an idempotency key, and a `payload` JSON string whose frame is `{event, delivery}`; the response is the envelope plus `recipient` with the full target session ID, and `duplicate: true` when JetStream already held this message. Only a `source: "dispatch"` send publishes under a MsgId, so only it can ever answer `duplicate`: a send that declares `github`, `slack` or `ghostwispr` carries a `SourceEventID` minted for it, which its dedupe key does not name (`contracts.DedupeKeyNamesTheUpstreamEvent`); the field is omitted (read as false) otherwise, which is also what an older listener answers. It means "the stream already held this MsgId", which includes the publish path's own reconnect retry whose first attempt landed and lost its acknowledgement. A message NATS cannot take whole is a 413 naming its size against the server's max payload, and a topic NATS does not accept (one holding whitespace or an empty token) a 400. |
-| `/v1/messages/publish` | POST | Publishes a non-agent topic. An optional `dedupe_key` is used verbatim as the envelope's dedupe key (how a re-sent copy stays recognisable to the receiver's own dedupe); it is mutually exclusive with `idempotency_key` — both present is a 400 whose `expected` names both fields — it may not begin with the reserved forward mark `envoy.role.forward.` (a 400 naming `dedupe_key`; the role arbiter drops such an envelope on sight, so accepting it would be a 200 for a message that vanishes), and an empty string is absent; without either key the key is minted. A `notifications.role.<role>` topic requires a live holder and returns that session ID in `holder`. Its 404 adds `reason: "unclaimed"` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the final heartbeat remains in its one-TTL diagnostic window. A message NATS cannot take whole is a 413 naming its size against the server's max payload, and a topic NATS does not accept (one holding whitespace or an empty token) a 400. |
+| `/v1/messages/send` | POST | Sends to a live `target_session`. Dispatch uses `source: "dispatch"`, an idempotency key, and a `payload` JSON string whose frame is `{event, delivery}`; the response is the envelope plus `recipient` with the full target session ID, and `duplicate: true` when JetStream already held this message. A `source: "dispatch"` send publishes under a MsgId, and so does a send whose key was minted once for it (the listener's own, or around the shared transport's UUID idempotency key); only those can ever answer `duplicate`: a send that declares `github`, `slack` or `ghostwispr` carries a `SourceEventID` minted for it, which its dedupe key does not name (`contracts.DedupeKeyNamesTheUpstreamEvent`); the field is omitted (read as false) otherwise, which is also what an older listener answers. It means "the stream already held this MsgId", which includes the publish path's own reconnect retry whose first attempt landed and lost its acknowledgement. A message NATS cannot take whole is a 413 naming its size against the server's max payload, and a topic NATS does not accept (one holding whitespace or an empty token) a 400. The route takes the caller's `source` and idempotency key as given (`messageEnvelope`), so any caller can send a `source: "dispatch"` frame under the key a Dispatch send will use, which a core-NATS host then drops as a repeat when the real send or its Retry arrives. That key is not secret: a comment mention's is `<comment id>:<target>:<mode>` (`comment_delivery.go`), and the comment id rides the `comment.created` envelope on the issue's owner topic. It is accepted because every caller `apiAuth` admits (the shared bearer, or any service-account token the verifier accepts, whose claims it does not read) can already send any `source: "dispatch"` frame, with any content, to any live session; suppressing one Retry is a subset of that, and a Dispatch-only credential is the fix for the whole class. The listener is not the only route to that either: a NATS user that may publish on `notifications.agent.>` or `notifications.dispatch.>` reaches core-NATS hosts directly, and with no nkey configured (`internal/bus/nkey.go`) that is any process that can reach the server. |
+| `/v1/messages/publish` | POST | Publishes a non-agent topic. An optional `dedupe_key` is used verbatim as the envelope's dedupe key (how a re-sent copy stays recognisable to the receiver's own dedupe); it is mutually exclusive with `idempotency_key` — both present is a 400 whose `expected` names both fields — it may not begin with the reserved forward mark `envoy.role.forward.` (a 400 naming `dedupe_key`; the role arbiter drops such an envelope on sight, so accepting it would be a 200 for a message that vanishes), it may not ride a `source: "dispatch"` envelope (a 400 naming `dedupe_key`: every host drops a repeat of a dispatch key, and Dispatch's outbox keys are sequential, so a chosen `dispatch-<next id>` would make hosts drop the real event; Dispatch's outbox publishes to the bus and its sends take the listener's key, so it never sets one here), and an empty string is absent; without either key the key is minted. A `notifications.role.<role>` topic requires a live holder and returns that session ID in `holder`. Its 404 adds `reason: "unclaimed"` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the final heartbeat remains in its one-TTL diagnostic window. A message NATS cannot take whole is a 413 naming its size against the server's max payload, and a topic NATS does not accept (one holding whitespace or an empty token) a 400. |
 | `/v1/roles/<role>` | GET | Returns the live role holder, including its capabilities and `last_seen`. A 404 has `reason: "unclaimed"` when no role claim exists; for an absent holder it has `reason: "holder_lapsed"` with the prior holder's ID, whether this lookup released the claim, and any final last-seen time retained for one TTL. |
 | `/v1/roles/set` | POST | Claims a role for a live session and registers its role topic. Last-claim-wins by default. With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues); any other live holder answers `409 {error, role, holder}` and nothing changes. |
 | `/v1/interests/subscribe` | POST | Persists session topics, route metadata, and optional delivery `capabilities`; registrations without capabilities persist `[]`. The response can include `warnings` when a GitHub repository has no retained events, and when a GitHub topic's token after its owner and name is not one of `contracts.GithubTopicKinds` or a wildcard. When a kind follows the extra tokens, or the name holds an empty token, the name was spelled with its dot, and the warning names the spelling Envoy publishes (`notifications.github.acme.site.io.pr.7.>` → `acme.site_io`). Otherwise the warning says the token is not a GitHub topic kind and names the kinds (`notifications.github.acme.widgets.checks.>`). |
@@ -1448,7 +1480,7 @@ the synchronous listener call records the sent or failed attempt instead of blin
 
 ## Secrets broker
 
-AGENTC-393 v9's secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
+AGENTC-393's secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
 and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/agent-secrets` is its
 client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
@@ -1462,13 +1494,24 @@ broker checks it against the record's approver and records it on the decision ev
 bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
 agents is the deployment's job. `internal/broker/enroll` turns a launcher credential into a leased
 enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected
-service-account token); `internal/broker/rules` evaluates `agent-secret-rules.yaml` policy per
-request (the AGENTC-393 overview document, contract v9, is its contract; a file that still has an
-`approvers:` section is refused, naming the removal); `internal/broker/proof` authenticates a
-session's or a launcher's signed request against its live enrollment or credential;
-`internal/broker/machine` decides typed-code machine logins and mints the launcher credentials
-they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets Manager, or a
-fake local file for development.
+service-account token). A live enrollment is unique per launcher credential, runtime id and slot:
+`POST /v1/enrollments` takes an optional pod-only `slot` (`^[a-z][a-z0-9-]{0,62}$`, else `400
+INVALID_SLOT`, and a slot on a box or host is refused the same way) naming one of several
+independent identities in one pod. The launcher whose proof authenticates the enrollment chooses
+the slot; a session's proof cannot enroll anything (`401 LAUNCHER_INVALID`). So each slot of a pod
+holds its own key, lease, requests and grants, while a pod's `runtime_id` stays the pod UID its
+token proves. Omitted or `""` is the runtime's one enrollment, every box's and host's. The same key
+in the same slot gets its live enrollment back (200), a different key in a live slot is `409
+ALREADY_ENROLLED`, and the rules never see the slot: every slot of a pod matches on its verified
+service account alone. Migration 0007 is forward-only: an older broker binary's conflict lookup
+reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled
+back past it once a slotted enrollment exists. `internal/broker/rules` evaluates
+`agent-secret-rules.yaml` policy per request (the AGENTC-393 overview document is its contract; a
+file that still has an `approvers:` section is refused, naming the removal); `internal/broker/proof`
+authenticates a session's or a launcher's signed request against its live enrollment or
+credential; `internal/broker/machine` decides typed-code machine logins and mints the launcher
+credentials they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets
+Manager, or a fake local file for development.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
@@ -1561,7 +1604,7 @@ broker's `_FILE` secret-loading convention: `<NAME>_FILE`, when set, names a fil
 contents win over a bare `<NAME>` — with both set, the file wins silently, nothing is refused — and
 a named-but-unreadable or empty file is a startup error naming the file, never a silent fallback to
 an unset value. `config.Load` refuses to start naming a stale removal still set in the
-environment — AGENTC-393 v9's `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
+environment — the removed `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
 `BROKER_DISPATCH_PROJECT` and `BROKER_ASK_POLL_SECONDS` (the broker holds no Dispatch credential
 and asks/issues nothing), and `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker
 checks no WebAuthn origin) — so a stale deployment fails loudly rather than silently running on
@@ -1577,7 +1620,7 @@ local-dev-only path. The broker takes no flags, and refuses any flag it is given
 
 `internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
-contract for every row is the AGENTC-393 overview document (contract v9). Each row's handler is
+contract for every row is the AGENTC-393 overview document. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
 which fixes both the credential `server.authenticate` checks and the caller the handler receives (a
 launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route — the UI bearer
@@ -1599,16 +1642,19 @@ for the current, authoritative route list.
 
 `internal/broker/record` implements the credential-request record every human decision turns
 on: `Body.Canonical()` renders the contract's fixed `\n`-terminated line format (the request
-object verbatim, the approver, the enrollment triple, lifetime, rules version, expiry, and the
+object verbatim, the approver, the enrollment's tab-separated kind, runtime id and operator, plus
+a pod's slot as a fourth field only when it has one, lifetime, rules version, expiry, and the
 machine-login code or `-`), `Body.ID()` is the lowercase-hex SHA-256 of that canonical form — the
-record's own content-addressed id — and `ParseBody` is `Canonical`'s exact inverse, refusing any
-stored body that would not reproduce itself byte-for-byte. `VerifyRequestObject` enforces the
-requester's signed request object end to end (single ES256 JWS, `typ` `agent-secrets-request+jwt`
-— disjoint from the per-call proof's `agent-secrets-proof+jwt`, each verifier refusing the other's
-— embedded P-256 JWK, `iss` equal to that JWK's own thumbprint, `aud` equal to `BROKER_PUBLIC_URL`,
-`iat`/`exp` within skew and a 600-second cap, a `reason` of at most 400 runes with bidi/zero-width
-categories refused, and `authorization_details` either every entry `agent_secret` or exactly one
-`launcher_credential` entry naming a valid hostname and an optional `[a-z0-9-]{1,64}` service).
+record's own content-addressed id, which a slotless record keeps byte for byte — and `ParseBody`
+is `Canonical`'s exact inverse, refusing any stored body that would not reproduce itself
+byte-for-byte and any fourth enrollment field that is not a pod's valid slot. `VerifyRequestObject`
+enforces the requester's signed request object end to end (single ES256 JWS, `typ`
+`agent-secrets-request+jwt` — disjoint from the per-call proof's `agent-secrets-proof+jwt`, each
+verifier refusing the other's — embedded P-256 JWK, `iss` equal to that JWK's own thumbprint, `aud`
+equal to `BROKER_PUBLIC_URL`, `iat`/`exp` within skew and a 600-second cap, a `reason` of at most
+400 runes with bidi/zero-width categories refused, and `authorization_details` either every entry
+`agent_secret` or exactly one `launcher_credential` entry naming a valid hostname and an optional
+`[a-z0-9-]{1,64}` service).
 `Body.ApproverLogin(login)` is the one approver comparison: a record's approver is resolved when
 the record is created (an approval rule's `login:<name>`, the requesting enrollment's operator for
 `approver: operator`, or a machine login's `login_hint`), and every decision and every chain
@@ -1636,8 +1682,8 @@ still-live grant covering the exact same name set (`reuseLiveGrant`: no new requ
 as long as the current rules still allow it and the grant's whole chain still verifies), then
 evaluates the rules per name: any `deny` denies the whole request with no record written at all; a
 name no rule mentions at all aborts the whole call with `rules.ErrUnknownSecret` (`400
-UNKNOWN_SECRET`, per contract v9) instead of being folded into an ordinary `deny` decision — no
-request row is written either, matching the "at record time" wording; a name
+UNKNOWN_SECRET`, per the AGENTC-393 overview document) instead of being folded into an ordinary
+`deny` decision — no request row is written either, matching the "at record time" wording; a name
 needing approval that names a *different* approver than an already-approval-needing name in the
 same request is refused `400 MIXED_APPROVERS`; when every name is decided (`granted`/`denied`) with
 nothing pending, the request and, if granted, its grant are written with no record; a request
@@ -1672,7 +1718,7 @@ a no-op, writing no second audit row. Audit rows never carry secret values: `aud
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
 machine login. `Login` verifies a machine's signed request object (`login_hint` required — the
 approving operator's login — and exactly one `launcher_credential` authorization detail), mints an
-eight-symbol confirmation code (`XXXX-XXXX`, the pre-v9 alphabet unchanged) and a separate opaque
+eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
 `pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
 pending login by that human-readable code alone (`LookupByCode` / `POST /v1/machine-logins/lookup`)
@@ -1736,6 +1782,13 @@ listens on the port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127
 AGENTC-833), so concurrent instances can never collide on a shared port either.
 `dev-broker.test.sh` proves both kinds of isolation with fakes (no real Postgres or network) and
 runs in CI's `envoy-go` job.
+
+`.github/workflows/release-envoy-listener.yaml` runs on a `main` push that touches a file the
+image builds from, and by hand (`workflow_dispatch`) from any branch. Every run builds,
+smoke-tests and pushes `ghcr.io/sjawhar/legion/envoy:<commit sha>`, labelled
+`org.opencontainers.image.revision` with that sha. Its `release` job (moving `:latest`, the
+`legion-envoy-v*` tag and the GitHub release) runs only on `refs/heads/main`, so a branch
+dispatch publishes one immutable image, for a dev slot to pin before merge, and moves no tag.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
 `cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper` (AGENTC-393): each of

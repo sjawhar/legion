@@ -47,10 +47,17 @@ import type {
   WhoamiResponse,
 } from "@legion/contracts";
 
+import { textHead } from "./ask-answer";
+
 export type { DispatchServiceErrorShape } from "@legion/contracts";
 
 export class DispatchServiceError extends Error {
   override readonly name = "DispatchServiceError";
+  /**
+   * Whether Dispatch itself wrote this refusal, so its status and code say what Dispatch decided;
+   * false for an answer something in Dispatch's place wrote (`DispatchGatewayError`).
+   */
+  readonly fromDispatch: boolean = true;
 
   constructor(
     readonly code: string,
@@ -61,6 +68,40 @@ export class DispatchServiceError extends Error {
     readonly mismatches?: DispatchServiceErrorShape["mismatches"]
   ) {
     super(message);
+  }
+}
+
+/**
+ * A non-2xx answer that is not Dispatch's JSON, so whatever answers in its place (a proxy, a load
+ * balancer, an auth gateway) wrote it. `answer` says what came back and `advice` what asking again
+ * can do, judged from the method and the status alone; the message joins them. A caller that knows
+ * more about what its own request did gives `answer` advice of its own instead. `code` is
+ * `HTTP_<status>`, as for any refusal that names no code.
+ */
+export class DispatchGatewayError extends DispatchServiceError {
+  override readonly fromDispatch = false;
+  /** Whether the status can clear on its own: a 5xx, a timeout (408) or a rate limit (429). */
+  readonly transient: boolean;
+  /**
+   * Whether the request may have reached Dispatch before the gateway answered, so a write may
+   * have taken effect (`reachesDispatch`).
+   */
+  readonly mayHaveReachedDispatch: boolean;
+
+  constructor(
+    status: number,
+    /**
+     * `<METHOD> <url> answered <status>[ <reason>] with <body>, which looks like a proxy or
+     * gateway page rather than Dispatch's own answer`.
+     */
+    readonly answer: string,
+    /** What asking again can do, as a clause that follows "so", without a final stop. */
+    readonly advice: string,
+    message = `${answer}, so ${advice}.`
+  ) {
+    super(`HTTP_${status}`, status, message);
+    this.transient = transientStatus(status);
+    this.mayHaveReachedDispatch = reachesDispatch(status);
   }
 }
 
@@ -117,10 +158,7 @@ function requestSignal(signal: AbortSignal | undefined): AbortSignal {
  */
 function whyNotAPage(answer: unknown): string | undefined {
   if (typeof answer === "string") {
-    return (
-      "text that is not a JSON page, which looks like a proxy or gateway page rather than " +
-      "Dispatch's own answer, so a retry may succeed."
-    );
+    return `text that is not a JSON page, ${GATEWAY_PAGE}, so a retry may succeed.`;
   }
   let what: string;
   if (Array.isArray(answer)) {
@@ -143,6 +181,125 @@ function whyNotAPage(answer: unknown): string | undefined {
   return (
     `${what}. Retrying will not help: the same request gets the same answer until that ` +
     "Dispatch is upgraded or fixed."
+  );
+}
+
+/**
+ * What a body that is not Dispatch's JSON is. Dispatch writes every answer as JSON, its errors and
+ * its `/api` 404 included, so anything else in its place came from a proxy or gateway in the way.
+ */
+const GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
+
+/**
+ * What asking again can do once a gateway answered `method` with `status`. A status that cannot
+ * clear answers the same request the same way. One that can (`transientStatus`) may clear for a
+ * read. A write answered so may already have taken effect only when the request reached Dispatch
+ * (`reachesDispatch`), where a blind retry could apply it twice; otherwise it did not, and a retry
+ * may succeed as for a read.
+ */
+function gatewayAdvice(method: string, status: number): string {
+  if (!transientStatus(status)) {
+    return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
+  }
+  if (method === "GET") return "a retry may succeed";
+  return reachesDispatch(status)
+    ? "the write may or may not have reached Dispatch: check whether it took effect before retrying it"
+    : "the write did not reach Dispatch, and a retry may succeed";
+}
+
+/**
+ * Whether a status that did not come from Dispatch can clear on its own: a gateway's 5xx, a
+ * timeout or a rate limit can; any other status answers the same request the same way.
+ */
+function transientStatus(status: number): boolean {
+  return status >= 500 || status === 408 || status === 429;
+}
+
+/**
+ * Whether a gateway that answered with `status` may have forwarded the request to Dispatch first:
+ * only after a 5xx, which a gateway sends when the upstream failed, timed out or dropped the
+ * connection, possibly once Dispatch had the request. A 408 or 429 is the gateway's own timeout on
+ * the client's request or its own rate limit, and any other status its own refusal, each sent
+ * before it forwards anything.
+ */
+function reachesDispatch(status: number): boolean {
+  return status >= 500;
+}
+
+const REDACTED = "[redacted]";
+
+/**
+ * The most of a body an excerpt scans. A gateway page's inline styles and scripts can run to tens
+ * of kilobytes before its first words, so this reaches well past them, and it bounds the work a
+ * body of any size can cost.
+ */
+const EXCERPT_SCAN_LIMIT = 64 * 1024;
+
+/**
+ * The shortest run of the client's bearer's characters an excerpt redacts wherever it stands. A
+ * gateway that echoes the header can cut it short, split it with markup, or write it twice with the
+ * copies overlapping (a bearer can end in its own first characters), so redacting only whole copies
+ * leaves most of one behind; a bearer shorter than this is redacted only whole.
+ */
+const BEARER_PIECE = 8;
+
+/**
+ * The first `EXCERPT_SCAN_LIMIT` characters of `text`, each run of `bearer`'s characters at least
+ * `BEARER_PIECE` long replaced with one `REDACTED`. Every piece of that length starting inside the
+ * limit is found (one that runs past it reads up to `BEARER_PIECE - 1` characters beyond), so a
+ * run is redacted whole however the limit or another copy cuts it. Redaction changes the length,
+ * so the text is cut to the limit only afterwards, and nothing from past the limit moves into it.
+ * Each distinct piece is one native scan of that slice, and no two distinct pieces of one length
+ * match at the same position, so the marking is bounded by the slice and the scans by the limit and
+ * the bearer's length, whatever the size of the body. Searching again for a repeated piece would
+ * mark the same matches again: a bearer of one character repeated would mark every position of the
+ * slice once per piece.
+ */
+function redactBearer(text: string, bearer: string): string {
+  if (bearer === "") return text.slice(0, EXCERPT_SCAN_LIMIT);
+  const length = Math.min(BEARER_PIECE, bearer.length);
+  const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
+  const covered = new Uint8Array(scanned.length);
+  const pieces = new Set<string>();
+  for (let at = 0; at + length <= bearer.length; at++) pieces.add(bearer.slice(at, at + length));
+  for (const piece of pieces) {
+    let found = scanned.indexOf(piece);
+    while (found !== -1) {
+      covered.fill(1, found, found + length);
+      found = scanned.indexOf(piece, found + 1);
+    }
+  }
+  let redacted = "";
+  let kept = 0;
+  for (let start = covered.indexOf(1); start !== -1; start = covered.indexOf(1, kept)) {
+    redacted += `${scanned.slice(kept, start)}${REDACTED}`;
+    const end = covered.indexOf(0, start);
+    kept = end === -1 ? scanned.length : end;
+  }
+  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
+}
+
+/**
+ * Text a gateway chose (a body, or the reason phrase) as one line of plain text safe to quote. A
+ * misconfigured gateway echoes the request back, so two kinds of credential are redacted: first
+ * every piece of the client's own bearer, trimmed as fetch sends it (`redactBearer`); then, after
+ * scripts, styles and tags are dropped, the value after `Authorization:` (its scheme kept) or
+ * `Bearer`. All of it runs before the cut to one line, so a cut never leaves a credential's first
+ * characters behind. The text is the answerer's, and the excerpt is built on the host's event loop,
+ * so only the first `EXCERPT_SCAN_LIMIT` characters are read and every pattern runs in linear time:
+ * a tag holds no `<`, and a script or style block left open runs to the end.
+ */
+function excerpt(text: string, token: string): string {
+  const plain = redactBearer(text, token.trim())
+    .replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ")
+    .replace(/<[^<>]*>/g, " ");
+  return textHead(
+    plain
+      .replace(
+        /(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi,
+        `$1${REDACTED}`
+      )
+      .replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`)
   );
 }
 
@@ -616,23 +773,25 @@ export class DispatchClient {
       Authorization: `Bearer ${this.token}`,
     };
     if (body !== undefined) headers["Content-Type"] = "application/json";
-    const response = await this.fetchImpl(this.#url(path, query), {
+    const url = this.#url(path, query);
+    const response = await this.fetchImpl(url, {
       method,
       headers,
       signal: this.#signal,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    return this.#response<T>(response);
+    return this.#response<T>(method, url, response);
   }
 
   async #form<T>(method: string, path: readonly string[], body: FormData): Promise<T> {
-    const response = await this.fetchImpl(this.#url(path), {
+    const url = this.#url(path);
+    const response = await this.fetchImpl(url, {
       method,
       headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
       body,
       signal: this.#signal,
     });
-    return this.#response<T>(response);
+    return this.#response<T>(method, url, response);
   }
 
   #url(path: readonly string[], query?: object): string {
@@ -652,7 +811,16 @@ export class DispatchClient {
     return url.toString();
   }
 
-  async #response<T>(response: Response): Promise<T> {
+  /**
+   * The answer's payload, or the refusal it carries. Dispatch's own refusal is JSON with a string
+   * `error` (`writeError` in the server), and it renders as that text with its `code`. Any other
+   * non-2xx body — a gateway's HTML page, an empty body, JSON of another shape — did not come
+   * from Dispatch, so it is a `DispatchGatewayError` naming the request (method, URL and query;
+   * the token travels in a header, never the URL), the status and reason phrase, a one-line
+   * plain-text excerpt of the body (or, when none of what the excerpt reads is text, the body's
+   * size), and what asking again can do for that method and status.
+   */
+  async #response<T>(method: string, url: string, response: Response): Promise<T> {
     const text = await response.text();
     let payload: unknown = text;
     if (text && isJson(response)) {
@@ -664,13 +832,34 @@ export class DispatchClient {
     }
     if (!response.ok) {
       const error = asErrorShape(payload);
-      throw new DispatchServiceError(
-        error.code ?? `HTTP_${response.status}`,
+      if (typeof error.error === "string") {
+        throw new DispatchServiceError(
+          error.code ?? `HTTP_${response.status}`,
+          response.status,
+          error.error,
+          error.candidates,
+          error.current,
+          error.mismatches
+        );
+      }
+      const quoted = excerpt(text, this.token);
+      let body: string;
+      if (quoted !== "") {
+        body = `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
+      } else if (text === "") {
+        body = "an empty body";
+      } else {
+        const within =
+          text.length > EXCERPT_SCAN_LIMIT ? ` in its first ${EXCERPT_SCAN_LIMIT / 1024} KiB` : "";
+        const size = Buffer.byteLength(text).toLocaleString("en-US");
+        body = `a body of ${size} bytes and no readable text${within}`;
+      }
+      const reasonPhrase = excerpt(response.statusText, this.token);
+      const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
+      throw new DispatchGatewayError(
         response.status,
-        error.error ?? (typeof payload === "string" && payload ? payload : response.statusText),
-        error.candidates,
-        error.current,
-        error.mismatches
+        `${method} ${url} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`,
+        gatewayAdvice(method, response.status)
       );
     }
     return payload as T;

@@ -1,15 +1,16 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
 import type { Ask, Comment, IssueDetails } from "../../api/types";
+import type { RetypeOutcome } from "../doc/editor";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Margin } from "./Margin";
-import { MarginProvider, useMargin } from "./margin-context";
+import { type DocumentBridge, MarginProvider, useMargin } from "./margin-context";
 import {
   anchoredAsk,
   comment,
@@ -716,6 +717,185 @@ test("composeForMark rejects when the composer is dismissed unsaved", async () =
       expect(screen.getByLabelText("Second composer outcome").textContent).toBe("composer closed");
       expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull();
     });
+  } finally {
+    view.unmount();
+  }
+});
+
+function fakeBridge(retype: (markId: string, kind: string) => RetypeOutcome): {
+  bridge: DocumentBridge;
+  held: (string | null)[];
+  removed: string[];
+  retyped: [string, string][];
+} {
+  const held: (string | null)[] = [];
+  const removed: string[] = [];
+  const retyped: [string, string][] = [];
+  return {
+    bridge: {
+      focusBlock() {},
+      focusMark() {},
+      removeMark(markId) {
+        removed.push(markId);
+      },
+      retypeMark(markId, kind) {
+        retyped.push([markId, kind]);
+        return retype(markId, kind);
+      },
+      setActiveBlocks() {},
+      setActiveMarks() {},
+      setComposerMark(markId) {
+        held.push(markId);
+      },
+    },
+    held,
+    removed,
+    retyped,
+  };
+}
+
+function RegisterBridge({ bridge }: { bridge: DocumentBridge }): ReactNode {
+  const { registerDocument } = useMargin();
+  useEffect(() => {
+    registerDocument(bridge);
+    return () => registerDocument(undefined);
+  }, [bridge, registerDocument]);
+  return null;
+}
+
+/** What a remounted `ProofDocument` does (a new artifact or block schema): the old editor
+ *  unregisters and a fresh one registers, while the margin and its open composer stay. */
+function ReopenDocument({ bridge }: { bridge: DocumentBridge }): ReactNode {
+  const { registerDocument } = useMargin();
+  return (
+    <button
+      onClick={() => {
+        registerDocument(undefined);
+        registerDocument(bridge);
+      }}
+      type="button"
+    >
+      Reopen the document
+    </button>
+  );
+}
+
+function renderMarginWithBridge(bridge: DocumentBridge, reopened?: DocumentBridge) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["asks", issue.key], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], []);
+  return render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <RegisterBridge bridge={bridge} />
+          {reopened === undefined ? null : <ReopenDocument bridge={reopened} />}
+          <MarkComposerProbe />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+}
+
+test("the composer's kind switch retypes its mark through the document and sends under the new mark", async () => {
+  const fake = fakeBridge((markId, kind) =>
+    kind === "suggestion"
+      ? { refused: "unmarkable" }
+      : { markId: `${markId}-${kind}`, quote: "selected" }
+  );
+  const createAsk = spyOn(api, "createAsk").mockResolvedValue(undefined as never);
+  const view = renderMarginWithBridge(fake.bridge);
+
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
+    const composer = await screen.findByRole("form", { name: "Comment composer" });
+    const kinds = within(composer).getByRole("group", { name: "Kind" });
+
+    fireEvent.click(within(kinds).getByRole("button", { name: "Suggest" }));
+    expect(fake.retyped).toEqual([["m-1", "suggestion"]]);
+    expect(within(composer).getByRole("status").textContent).toBe(
+      "A suggestion needs whole words inside one table cell. Comment or ask about this selection instead, or close this composer and select again."
+    );
+    expect(
+      within(kinds).getByRole("button", { name: "Comment" }).getAttribute("aria-pressed")
+    ).toBe("true");
+
+    fireEvent.click(within(kinds).getByRole("button", { name: "Ask" }));
+    expect(fake.retyped).toEqual([
+      ["m-1", "suggestion"],
+      ["m-1", "ask"],
+    ]);
+    await waitFor(() =>
+      expect(within(kinds).getByRole("button", { name: "Ask" }).getAttribute("aria-pressed")).toBe(
+        "true"
+      )
+    );
+    expect(within(composer).queryByRole("status")).toBeNull();
+
+    fireEvent.change(within(composer).getByLabelText("Question"), { target: { value: "Why?" } });
+    fireEvent.click(within(composer).getAllByRole("button", { name: "Ask" }).at(-1) as HTMLElement);
+    await waitFor(() => expect(createAsk).toHaveBeenCalledTimes(1));
+    expect(createAsk.mock.calls[0]?.[1]).toMatchObject({
+      anchor: { artifact: "artifact-1", mark_id: "m-1-ask" },
+      question: "Why?",
+    });
+    expect(fake.removed).toEqual([]);
+  } finally {
+    view.unmount();
+    createAsk.mockRestore();
+  }
+});
+
+test("the margin removes the composer's mark when the composer is cancelled or replaced, and tells the document which mark the composer holds", async () => {
+  const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
+  const reopened = fakeBridge((markId, kind) => ({
+    markId: `${markId}-${kind}`,
+    quote: "selected",
+  }));
+  const view = renderMarginWithBridge(fake.bridge, reopened.bridge);
+
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
+    const composer = await screen.findByRole("form", { name: "Comment composer" });
+    fireEvent.click(
+      within(within(composer).getByRole("group", { name: "Kind" })).getByRole("button", {
+        name: "Ask",
+      })
+    );
+    await screen.findByLabelText("Question");
+
+    // A newer composer takes the margin: the retyped mark, not the original, is removed.
+    fireEvent.click(screen.getByRole("button", { name: "Compose second" }));
+    await waitFor(() => expect(fake.removed).toEqual(["m-1-ask"]));
+    // Registering told the document no composer was open; each compose since named its mark.
+    expect(fake.held).toEqual([null, "m-1", "m-1-ask", "m-2"]);
+
+    // A fresh editor registered under the open composer learns which mark the composer holds.
+    fireEvent.click(screen.getByRole("button", { name: "Reopen the document" }));
+    expect(reopened.held).toEqual(["m-2"]);
+
+    // Cancelling removes the mark the composer holds, in the document now open.
+    fireEvent.keyDown(
+      within(screen.getByRole("form", { name: "Comment composer" })).getByLabelText("Comment"),
+      { key: "Escape" }
+    );
+    await waitFor(() => expect(reopened.removed).toEqual(["m-2"]));
+    expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull();
+    // The document always knew which mark was the composer's, so a selection-bar action that cut
+    // into it counted as the composer's own write.
+    expect(reopened.held).toEqual(["m-2", null]);
+    // The replaced document's log stays frozen: once the document reopened onto `reopened`, the
+    // margin told `fake` nothing more.
+    expect(fake.held).toEqual([null, "m-1", "m-1-ask", "m-2"]);
   } finally {
     view.unmount();
   }

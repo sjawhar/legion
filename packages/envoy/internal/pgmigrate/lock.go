@@ -71,17 +71,62 @@ type LockWait struct {
 	// Object is the relation's name for a relation lock, and the lock type for any other.
 	Object string
 	// Holders are the sessions pg_blocking_pids named, oldest transaction first.
-	Holders []LockHolder
+	Holders []Session
 }
 
-// LockHolder is a session ahead of a migration in a lock's queue. Its query text is left out: an
-// operator reads it from pg_stat_activity, and the runner's error goes to the service's logs.
-type LockHolder struct {
-	PID         uint32     `json:"pid"`
-	User        string     `json:"user"`
-	Application string     `json:"application"`
-	State       string     `json:"state"`
-	XactStart   *time.Time `json:"xact_start"`
+// Session is a database session a migration was queued behind or the census reports. Its query
+// text is never read: an operator reads it from pg_stat_activity, and what names a session here
+// goes to the service's or the deployment's logs. XactAge is how long its transaction had been
+// open when it was read, to the microsecond Postgres keeps, nil when the census cannot see it:
+// pg_stat_activity shows another role's xact_start, and its state, only to a superuser or a
+// member of pg_read_all_stats, and records neither for a session with track_activities off
+// (untrackedState). The census refuses a lock holder whose age it cannot see, so a deployment
+// that grants the census's role pg_read_all_stats lets it read the age instead. Autovacuum is an
+// autovacuum worker, which the census tells apart however much Postgres hides (lockHolders).
+type Session struct {
+	PID         uint32         `json:"pid"`
+	User        string         `json:"user"`
+	Application string         `json:"application"`
+	State       string         `json:"state"`
+	XactAge     *time.Duration `json:"xact_age"`
+	Autovacuum  bool           `json:"autovacuum"`
+}
+
+// untrackedState is the state pg_stat_activity shows for a session with track_activities off,
+// when the census's role may see that session: Postgres then records neither its activity text nor
+// its transaction's start.
+const untrackedState = "disabled"
+
+// String is the session as every message names it, saying which fields Postgres hid.
+func (s Session) String() string {
+	user := "user " + s.User
+	switch {
+	case s.Autovacuum:
+		user = "autovacuum worker"
+	case s.User == "":
+		user = "user not visible"
+	}
+	state := s.State
+	if state == "" {
+		state = "state not visible"
+	}
+	age := "transaction age not visible"
+	if s.XactAge != nil {
+		age = "transaction open " + s.XactAge.String()
+	}
+	return fmt.Sprintf("pid %d (%s, application %q, %s, %s)", s.PID, user, s.Application, state, age)
+}
+
+// sessionList names the sessions for a sentence, or none.
+func sessionList(sessions []Session) string {
+	if len(sessions) == 0 {
+		return "none"
+	}
+	parts := make([]string, len(sessions))
+	for i, s := range sessions {
+		parts[i] = s.String()
+	}
+	return strings.Join(parts, "; ")
 }
 
 // LockTimeoutError is a migration that gave up waiting for a lock and applied nothing, since its
@@ -107,17 +152,7 @@ func (e *LockTimeoutError) Error() string {
 	} else {
 		fmt.Fprintf(&b, "migration %s gave up waiting for %s on %s when its lock_timeout ran out (%s unless the migration sets its own) and applied nothing", e.Migration, e.Wait.Mode, e.Wait.Object, LockTimeout)
 		if len(e.Wait.Holders) > 0 {
-			b.WriteString("; it was queued behind ")
-			for i, holder := range e.Wait.Holders {
-				if i > 0 {
-					b.WriteString(", ")
-				}
-				fmt.Fprintf(&b, "pid %d (user %s, application %q, %s", holder.PID, holder.User, holder.Application, holder.State)
-				if holder.XactStart != nil {
-					fmt.Fprintf(&b, ", transaction open since %s", holder.XactStart.UTC().Format(time.RFC3339))
-				}
-				b.WriteString(")")
-			}
+			fmt.Fprintf(&b, "; it was queued behind %s", sessionList(e.Wait.Holders))
 		}
 		switch {
 		case e.Wait.LockType == "relation":
@@ -142,13 +177,15 @@ func (e *LockTimeoutError) Unwrap() error { return e.Err }
 // LockTimeout, so the last reading before Postgres gives up names the wait.
 const watchInterval = 200 * time.Millisecond
 
-// lockWaitQuery reads the lock backend $1 is waiting for, if any, and the sessions ahead of it.
+// lockWaitQuery reads the lock backend $1 is waiting for, if any, and the sessions ahead of it, each
+// transaction's age in nanoseconds, as Session's time.Duration decodes it.
 const lockWaitQuery = `
 	select w.locktype, w.mode, coalesce(w.relation::regclass::text, w.locktype),
 		coalesce((
 			select json_agg(json_build_object(
 				'pid', a.pid, 'user', a.usename, 'application', a.application_name,
-				'state', a.state, 'xact_start', a.xact_start) order by a.xact_start)
+				'state', a.state, 'xact_age', (extract(epoch from now() - a.xact_start) * 1000000000)::bigint)
+				order by a.xact_start)
 			from pg_stat_activity a
 			where a.pid = any(pg_blocking_pids(w.pid))
 		), '[]')

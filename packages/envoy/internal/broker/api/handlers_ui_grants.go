@@ -43,11 +43,7 @@ func (s *server) listGrantsForApprover(w http.ResponseWriter, r *http.Request) {
 			names = []string{}
 		}
 		out[i] = approverGrantResp{
-			GrantID:  g.GrantID,
-			RecordID: g.RecordID,
-			Enrollment: recordEnrollmentResp{
-				Kind: g.Enrollment.Kind, RuntimeID: g.Enrollment.RuntimeID, Operator: g.Enrollment.Operator,
-			},
+			GrantID: g.GrantID, RecordID: g.RecordID, Enrollment: enrollmentResp(g.Enrollment),
 			Names: names, Approver: g.Approver, ExpiresAt: g.ExpiresAt, CreatedAt: g.CreatedAt,
 		}
 	}
