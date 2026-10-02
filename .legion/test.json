@@ -1,0 +1,91 @@
+{
+  "checks": {
+    "ci": "daemon-go job success at aa02c6d2e90a (run 37035270804, job 110931869305) and at fec3927b65fc (run 37033524383, job 110926104184); tmux installed in the job, package ok 23.120s",
+    "citations": "awk body of TestRealTmuxObserveReportsGoneOnce contains LEGION-274 and LEGION-370: both-cited",
+    "diffStat": "jj diff -r 'main@origin..@-' --stat: .legion/implement.json, .legion/plan.json, packages/daemon-go/internal/runtime/tmux/tmux_real_test.go (+13/-8 in the Go file); the same command restricted to verify.go and observe.go: 0 files changed",
+    "gofmt": "gofmt -l internal/runtime/tmux/tmux_real_test.go printed nothing",
+    "vet": "go vet ./internal/runtime/tmux/ exit 0"
+  },
+  "completed": "2026-10-02T18:02:28.292178861Z",
+  "environment": "Tester's worker pod (worker image, Debian 13 trixie, uid 1000, 8 CPUs, gVisor: /proc/loadavg reads 0.00 0.00 0.00 throughout); user-space go1.26.1 linux/amd64 (go.dev tarball) and tmux 3.5a (trixie .debs via dpkg -x, wrapper on PATH binding LD_LIBRARY_PATH) provisioned under $HOME per plan T2 with the bun downloader; env.sh sets PATH, GOTOOLCHAIN=local, GOWORK=off. Output files under $HOME/proof: after-idle-1.txt (warm-up, --- PASS 35.11s with the stand-in build), after-idle-200.txt, after-load-200.txt, before-load-40.txt, nc1.txt, nc2.txt, nc3-after.txt, nc3-before.txt. The pod ships no go, tmux or curl, as the plan says.",
+  "failed": 0,
+  "implementerProof": {
+    "how": "Round 1: re-ran the implementer's round-1 surfaces independently in the tester's own re-provisioned pod (worker image, 8 CPUs, gVisor; go1.26.1, tmux 3.5a via plan T2) at head f6739738c778 (its Go content is code head b0913f621889): idle PASS=200 FAIL=0 SKIP=0 wall=281s (implementer: 50/50); loaded RESULT: 200 pass, 0 fail of 200 (busy=8, wall=406s, go test exit=0) (implementer: 100/100); NC-1 5/5 FAIL at tmux_real_test.go:1321 'the sweep never reported the killed pane gone; last = {... Kind:alive ... Detail:pane %1 is gone WorkspaceLost:false}' after 14.42s, 10.17s, 10.24s, 10.20s, 10.18s (implementer: 5/5 at :1321, same text). Confirmed on GitHub that run 37041704472 at f6739738c778 shows job daemon-go completed success and its log shows the apt-get install of tmux, 'go test -count=1 ./...' and 'ok github.com/sjawhar/legion/daemon/internal/runtime/tmux 23.366s'; Tests run 37041704396 lint/typecheck/test success; PR Title 37041704385 success; Worker Image 37041704501 success. Static claims re-checked: gofmt -l empty, go vet exit 0, the test body cites LEGION-274, LEGION-370, internal/supervise/machine.go:806 (the line reads 'case runtime.Gone, runtime.NotRecordedProcess:') and observe.go:58-60 (the untrack on a final verdict), and carries neither 'killed by its timeout' nor 'list-panes ran before the kill'; jj diff -r 'main@origin..@-' --stat on verify.go and observe.go: 0 files changed. Round 0: Re-ran every surface independently in the tester's own pod (worker image, Debian 13, uid 1000, 8 CPUs, gVisor; user-space go1.26.1 linux/amd64 and tmux 3.5a via the plan's T2 recipe) at the same head, with the plan's loaded-run.sh verbatim: Surface B 200 idle PASS=200 FAIL=0 SKIP=0 wall=256s (implementer: 200/200, 258s); Surface C RESULT: 200 pass, 0 fail of 200 (busy=8, wall=425s, go test exit=0) (implementer: 200/200, 432s); Surface D on main@origin's test over a copy of the package RESULT: 30 pass, 10 fail of 40 (busy=8, wall=99s) with 7x Kind:uncertain 'no current target', 2x 'has no readable /proc stat', 1x 'is not running OMP' (implementer 12/40, planner 13/40, same two kinds); NC-1 5/5 FAIL at tmux_real_test.go:1317 after 10.18-15.67 s (implementer: 5/5 at :1317); NC-2 5/5 FAIL at tmux_real_test.go:1322 'the sweep reported a final verdict again: {... Kind:gone ... Detail:pane %1 is gone ...}' (implementer: 5/5 at :1322). Confirmed the cited CI runs on GitHub: run 37033524383 (fec3927b65fc) and run 37035270804 (aa02c6d2e90a) both show job daemon-go completed success; the latter's job log shows the apt-get install of tmux, go1.26.1, 'go test -count=1 ./...' and 'ok github.com/sjawhar/legion/daemon/internal/runtime/tmux 23.120s', so the real-tmux tests ran rather than skipped. Checked the implementer's static claims: gofmt -l prints nothing, go vet exit 0, jj diff -r 'main@origin..@-' --stat lists tmux_real_test.go plus the two .legion handoffs and no entry for verify.go or observe.go, the plan's awk/grep prints both-cited.",
+    "verdict": "verified"
+  },
+  "observations": [
+    "Accepted limit, as spec v3 states: a classifier that reads a failed listing or a gone pane as NotRecordedProcess passes this test, since a killed pane's final verdict may be either; that contract is held by TestRealTmuxUncertainOnABrokenSocket (tmux_real_test.go:1034), present at this head.",
+    "The before run's not_recorded_process failures (3 of 10) confirm the planner's measurement that spec v2's 'fail only on NotRecordedProcess' rule would have left the test flaky; the v3 design is the one implemented.",
+    "The sweep's post-kill observation stream in the before failures ends at :1309 on the first non-Alive, non-Gone kind, so no before run ever reached the silence check; after the change the silence check is the only thing that can fail once a final verdict arrives, and NC-2 shows it still does.",
+    "No codegraph tool is available in this session; the affected test was chosen from the diff (the changed file is the test itself) and the plan.",
+    "Round 1: the loop's predicate (Gone or NotRecordedProcess ends it) is textually unchanged at :1319; the diff adds `var last`, assigns it in the observations arm, and prints it from the deadline Fatalf. The 200 idle and 200 loaded runs at the new head show the added assignment changed nothing observable on the passing path."
+  ],
+  "passed": 6,
+  "phase": "test",
+  "proof": [
+    {
+      "command": ". $HOME/proof/env.sh \u0026\u0026 cd $LEGION_WORKSPACE/packages/daemon-go \u0026\u0026 go test ./internal/runtime/tmux/ -run 'TestRealTmuxObserveReportsGoneOnce$' -count=200 -timeout 90m -v \u003e $HOME/proof/after-idle-200.txt 2\u003e\u00261",
+      "criterion": "Passes across the tmux teardown window (repetition at idle, plan Surface B)",
+      "headSha": "aa02c6d2e90a",
+      "negativeControl": "NC-1 in $HOME/scratch/after (a copy of the package at the head; its tmux_real_test.go diffs empty against @-): sed -i '299s/runtime.Gone/runtime.Alive/; 305s/runtime.NotRecordedProcess/runtime.Alive/' internal/runtime/tmux/verify.go (a gone pane read as alive, and the straddling probe too), go test -run 'TestRealTmuxObserveReportsGoneOnce$' -count=5 -\u003e 5/5 FAIL at tmux_real_test.go:1317 'the sweep never reported the killed pane gone' after 15.67s, 10.18s, 10.22s, 10.21s, 10.19s (the unchanged 10 s deadline); verify.go restored and diff -q against the workspace prints nothing.",
+      "observed": "PASS=200 FAIL=0 SKIP=0 wall=256s exit=0; 'ok github.com/sjawhar/legion/daemon/internal/runtime/tmux 255.222s'; no tmux_real_test.go failure line",
+      "surface": "Tester's pod: real tmux 3.5a server, go1.26.1, the workspace package at the head"
+    },
+    {
+      "command": "$HOME/proof/loaded-run.sh $LEGION_WORKSPACE/packages/daemon-go 200 8 $HOME/proof/after-load-200.txt",
+      "criterion": "Race closed, not moved: passes under load where the unchanged test fails with both failure kinds (plan Surfaces C and D)",
+      "headSha": "aa02c6d2e90a",
+      "negativeControl": "Surface D, the unchanged test: main@origin's tmux_real_test.go (jj file show -r main@origin) over a copy of the same package, same recipe: $HOME/proof/loaded-run.sh $HOME/scratch/before/daemon-go 40 8 $HOME/proof/before-load-40.txt -\u003e RESULT: 30 pass, 10 fail of 40 (busy=8, wall=99s, go test exit=1), all at tmux_real_test.go:1309 'sweep reported {...}': 7x Kind:uncertain Detail:'cannot verify pane %N: list-panes -t %N exited 1: no current target', 2x Kind:not_recorded_process 'pane %N pid N has no readable /proc stat (recorded pid N start T)', 1x Kind:not_recorded_process 'pane %N pid N is not running OMP (recorded pid N start T)'.",
+      "observed": "RESULT: 200 pass, 0 fail of 200 (busy=8, wall=425s, go test exit=0); SKIP=0; 'ok github.com/sjawhar/legion/daemon/internal/runtime/tmux 421.551s'",
+      "surface": "Tester's pod under the plan's load recipe (8 nice-10 busy loops + 1 nice-10 fsync dd writer, $HOME/proof/loaded-run.sh verbatim from the plan; /proc/loadavg reads 0.00 throughout in this gVisor pod, so load is recorded as busy= and wall=)"
+    },
+    {
+      "command": "legion gh -- run view 37035270804 --repo sjawhar/legion --json jobs; legion gh -- run view 37035270804 --repo sjawhar/legion --job 110931869305 --log (https://github.com/sjawhar/legion/actions/runs/37035270804/job/110931869305); also run 37033524383 job 110926104184 at fec3927b65fc",
+      "criterion": "Passes across the tmux teardown window on the surface the flake was seen on (CI daemon-go job), and one final verdict, never again (plan NC-2)",
+      "headSha": "aa02c6d2e90a",
+      "negativeControl": "NC-2 in $HOME/scratch/after: sed -i '58s/if obs.Kind == runtime.Gone || obs.Kind == runtime.NotRecordedProcess {/if false {/' internal/runtime/tmux/observe.go (a sweep that never untracks after a final verdict), -count=5 -\u003e 5/5 FAIL at tmux_real_test.go:1322 'the sweep reported a final verdict again: {... Kind:gone ... Detail:pane %1 is gone WorkspaceLost:false}' (the unchanged 1 s silence check); observe.go restored. NC-3 (the plan's informative control, run with line 25 paneGoneStderr = regexp.MustCompile(`\\A\\z never`) so every failed listing is Uncertain): on the new loop 5/5 FAIL at tmux_real_test.go:1317 after 13.87s, 10.21s, 10.21s, 10.21s, 10.18s (the Uncertain tolerance is bounded by the deadline); on the unchanged test 5/5 FAIL at once at tmux_real_test.go:1309 'sweep reported {... Kind:uncertain ... no server running on ...}' (the flake made deterministic).",
+      "observed": "daemon-go: completed success at aa02c6d2e90a; the job log shows 'sudo apt-get update \u0026\u0026 sudo apt-get install -y --no-install-recommends tmux', 'go version go1.26.1 linux/amd64', 'go test -count=1 ./...' and 'ok github.com/sjawhar/legion/daemon/internal/runtime/tmux 23.120s'. At fec3927b65fc: run 37033524383 daemon-go completed success. Tests, PR Title and Worker Image runs at both heads: success.",
+      "surface": "GitHub Actions: workflow 'Legion Envoy and Contracts' job daemon-go on PR #1678 (installs tmux, go test -count=1 ./...)"
+    },
+    {
+      "command": "sed -i '299s/runtime.Gone/runtime.Alive/; 305s/runtime.NotRecordedProcess/runtime.Alive/' internal/runtime/tmux/verify.go \u0026\u0026 go test ./internal/runtime/tmux/ -run 'TestRealTmuxObserveReportsGoneOnce$' -count=5 -timeout 20m -v",
+      "criterion": "Fails when the classifier genuinely reports a wrong verdict, and the failure names the verdict it saw (review round 1 finding)",
+      "headSha": "f6739738c778",
+      "negativeControl": "The unflipped workspace package at the same head: 200 idle runs PASS=200 FAIL=0 SKIP=0 wall=281s exit=0, 'ok github.com/sjawhar/legion/daemon/internal/runtime/tmux 277.069s'. Every scratch edit restored afterwards (diff -q of verify.go, observe.go and tmux_real_test.go against the workspace prints nothing); the workspace diff is empty.",
+      "observed": "5/5 FAIL at tmux_real_test.go:1321 'the sweep never reported the killed pane gone; last = {Locator:{...} Kind:alive At:... Detail:pane %1 is gone WorkspaceLost:false}' after 14.42s, 10.17s, 10.24s, 10.20s, 10.18s: the wrong verdict is in the failure line. NC-3 (verify.go:25 paneGoneStderr = a regexp matching nothing, so every failed listing is Uncertain): 5/5 FAIL at :1321 with 'last = {... Kind:uncertain ... Detail:cannot verify pane %1: list-panes -t %1 exited 1: no server running on ...}' after 13.37s then ~10.2s. Silent sweep (the rig's ProbeInterval at tmux_real_test.go:497 set to time.Hour, so the sweep reports its first Alive and nothing more): 2/2 FAIL at :1321 with 'last = {Locator:{...} Kind: At:0001-01-01 00:00:00 +0000 UTC Detail: WorkspaceLost:false}', the zero observation. The three cases the review named as indistinguishable now print three different lines.",
+      "surface": "Tester's pod, scratch copy of the package at f6739738c778 (its tmux_real_test.go diffs empty against @-) with verify.go:299 and :305 flipped to Alive, real tmux 3.5a server"
+    },
+    {
+      "command": "$HOME/proof/loaded-run.sh $LEGION_WORKSPACE/packages/daemon-go 200 8 $HOME/proof/after-load-200.txt (idle: go test ./internal/runtime/tmux/ -run 'TestRealTmuxObserveReportsGoneOnce$' -count=200 -timeout 90m -v)",
+      "criterion": "Passes across the tmux teardown window at the round-1 head, and the race stays closed (plan Surfaces B, C, D re-run at the new head)",
+      "headSha": "f6739738c778",
+      "negativeControl": "Surface D in this pod, the unchanged test (main@origin's tmux_real_test.go over a copy of the package) under the same recipe: $HOME/proof/loaded-run.sh $HOME/scratch/before/daemon-go 40 8 $HOME/proof/before-load-40.txt -\u003e RESULT: 31 pass, 9 fail of 40 (busy=8, wall=94s, go test exit=1), all at tmux_real_test.go:1309 'sweep reported {...}': 5x Kind:uncertain 'cannot verify pane %N: list-panes -t %N exited 1: no current target', 4x Kind:not_recorded_process 'pane %N pid N has no readable /proc stat (recorded pid N start T)'. NC-2 at the new head (observe.go:58 -\u003e if false): 5/5 FAIL at tmux_real_test.go:1326 'the sweep reported a final verdict again: {... Kind:gone ... Detail:pane %1 is gone ...}' (the unchanged 1 s silence check, four lines further down).",
+      "observed": "Loaded: RESULT: 200 pass, 0 fail of 200 (busy=8, wall=406s, go test exit=0), SKIP=0, 'ok .../internal/runtime/tmux 402.123s'. Idle: PASS=200 FAIL=0 SKIP=0 wall=281s exit=0 (the stand-in build included). CI at the head: run 37041704472 job daemon-go completed success (tmux installed, 'ok .../internal/runtime/tmux 23.366s').",
+      "surface": "Tester's re-provisioned pod under the plan's load recipe (8 nice-10 busy loops + 1 nice-10 fsync dd writer, $HOME/proof/loaded-run.sh verbatim; /proc/loadavg reads 0.00 in this gVisor pod), real tmux 3.5a server, the workspace package at the head"
+    }
+  ],
+  "reviewRounds": [
+    {
+      "checks": {
+        "ci": "run 37041704472 daemon-go success at f6739738c778 (job 110953194428), tmux installed, package ok 23.366s; Tests 37041704396 lint/typecheck/test success; PR Title 37041704385; Worker Image 37041704501",
+        "citations": "test body cites LEGION-274, LEGION-370, internal/supervise/machine.go:806, observe.go:58-60; 0 occurrences of 'killed by its timeout' or 'list-panes ran before the kill'; machine.go:806 reads 'case runtime.Gone, runtime.NotRecordedProcess:' and observe.go:58-60 is the untrack on Gone or NotRecordedProcess",
+        "diffStat": "jj diff -r 'c757032bc6d7..@-' --stat: tmux_real_test.go (+12/-8), .legion/implement.json, .legion/review.json; verify.go and observe.go unchanged from main@origin",
+        "gofmt": "gofmt -l internal/runtime/tmux/tmux_real_test.go printed nothing",
+        "threads": "2 review threads open, each answered by the implementer with its fix commit b0913f621889 and awaiting the reviewer's Accepted:; resolving them is the reviewer's, not the tester's",
+        "vet": "go vet ./internal/runtime/tmux/ exit 0"
+      },
+      "codeHead": "b0913f621889",
+      "environment": "Fresh tester pod on relaunch (the previous $HOME was gone); plan T2 re-run: go1.26.1 linux/amd64, tmux 3.5a, 8 CPUs, gVisor, /proc/loadavg 0.00 throughout. Output files under $HOME/proof: after-idle-200.txt, after-load-200.txt, before-load-40.txt, nc1.txt, nc3.txt, nc2.txt, silent.txt.",
+      "head": "f6739738c778",
+      "observations": [
+        "The silent-sweep deadline line prints the zero runtime.Observation (empty Kind, At 0001-01-01), since the pre-kill Alive is read before `last` exists; it is distinguishable from the stuck-on-Alive and stuck-on-Uncertain lines, which was the review's requirement. A reviewer who wants it to read 'no observation after the kill' can ask; the tester records no failure for it.",
+        "NC-2's failure line moved from :1322 to :1326 with the four added lines; the message text is unchanged."
+      ],
+      "reviewHandoff": "8ce1f2d8385d",
+      "round": 1,
+      "verdict": "pass"
+    }
+  ],
+  "schemaVersion": 1,
+  "summary": "Round 1 (head f6739738c778, code head b0913f621889): the deadline fatal now names the last observation and the comments cite internal/supervise/machine.go:806 and observe.go:58-60 by path; the loop's logic is unchanged and verify.go/observe.go stay at main@origin. Tester re-ran every surface independently in a re-provisioned pod at the new head: 200/200 idle, 200/200 under the plan's load recipe where the unchanged test fails 9 of 40 with both failure kinds, NC-1 5/5 at the deadline printing 'last = {... Kind:alive Detail:pane %1 is gone ...}', NC-3 5/5 at the deadline printing 'last = {... Kind:uncertain ...}', a silent sweep 2/2 at the deadline printing the zero observation, NC-2 5/5 at the moved silence check (:1326); gofmt/vet clean, all four citations resolve to the lines they name, CI daemon-go green at the head with tmux installed. Verdict pass; no failures, no red test. Round 0 (head aa02c6d2e90a, code head fec3927b65fc): Every acceptance check of plan T4 holds on the tester's own runs at aa02c6d2e90a (code head fec3927b65fc; the handoff commit changes no Go file): 200/200 idle, 200/200 under the plan's load recipe where the unchanged test fails 10 of 40 with both failure kinds, NC-1 5/5 at the 10 s deadline, NC-2 5/5 at the 1 s silence check, NC-3 5/5 at the deadline on the new loop and 5/5 immediate Kind:uncertain fatals on the unchanged one; gofmt/vet clean, verify.go and observe.go unchanged from main@origin, both issue keys cited in the test body, CI daemon-go job green at the head with tmux installed. Verdict pass; no failures, no red test written."
+}
