@@ -59,17 +59,17 @@ type censusToken struct {
 // escapes can spell any name, and no census needs one.
 func censusTokens(text string) ([]censusToken, error) {
 	var tokens []censusToken
-	err := scanSQL(text, func(kind sqlTokenKind, start, end int, identifier string) error {
-		switch kind {
+	err := scanSQL(text, func(token sqlToken) error {
+		switch token.kind {
 		case sqlSpace, sqlComment, sqlString, sqlDollarString:
 		case sqlUnicodeEscape:
 			return errors.New("a census may not hold a Unicode escape (U&): its escapes can spell any name, and a census needs none")
 		case sqlQuotedIdentifier:
-			tokens = append(tokens, censusToken{text: strings.ToLower(identifier), quoted: true})
+			tokens = append(tokens, censusToken{text: strings.ToLower(token.identifier), quoted: true})
 		case sqlWord:
-			tokens = append(tokens, censusToken{text: strings.ToLower(text[start:end])})
+			tokens = append(tokens, censusToken{text: strings.ToLower(text[token.start:token.end])})
 		default:
-			tokens = append(tokens, censusToken{text: text[start:end]})
+			tokens = append(tokens, censusToken{text: text[token.start:token.end]})
 		}
 		return nil
 	})

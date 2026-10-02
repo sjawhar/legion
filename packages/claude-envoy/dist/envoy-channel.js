@@ -40608,17 +40608,19 @@ async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
   ].join(`
 `));
 }
-function refusalWithCode(error48, suffix = "") {
+function refusalWithCode(error48, ...clauses) {
+  const suffix = clauses.filter((clause) => clause !== "").join("; ");
+  const joined = suffix === "" ? "" : `; ${suffix}`;
   if (error48 instanceof DispatchGatewayError) {
     let told = error48.message;
-    if (suffix !== "") {
-      told = error48.mayHaveReachedDispatch ? `${error48.answer}${suffix}` : `${error48.answer}, so ${error48.advice}${suffix}`;
+    if (joined !== "") {
+      told = error48.mayHaveReachedDispatch ? `${error48.answer}${joined}` : `${error48.answer}, so ${error48.advice}${joined}`;
     }
     return new DispatchGatewayError(error48.status, error48.answer, error48.advice, `${error48.code}: ${told}`);
   }
   if (!(error48 instanceof DispatchServiceError))
     return error48;
-  return new DispatchServiceError(error48.code, error48.status, `${error48.code}: ${error48.message}${suffix}`, error48.candidates, error48.current, error48.mismatches);
+  return new DispatchServiceError(error48.code, error48.status, `${error48.code}: ${error48.message}${joined}`, error48.candidates, error48.current, error48.mismatches);
 }
 function dispatchAnswered(error48, status) {
   return error48 instanceof DispatchServiceError && error48.fromDispatch && error48.status === status;
@@ -40804,7 +40806,7 @@ async function executeDispatchTool(input) {
         } catch (error48) {
           const told = writeMayHaveLanded(error48) ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "the reason was not posted, so the close was not sent";
           if (error48 instanceof DispatchServiceError)
-            throw refusalWithCode(error48, `; ${told}`);
+            throw refusalWithCode(error48, told);
           throw withAccount(error48, told);
         }
       }
@@ -40824,14 +40826,14 @@ async function executeDispatchTool(input) {
           actor
         });
       } catch (error48) {
-        const taken = dispatchAnswered(error48, 500) && newLinks.length > 0 ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
+        const taken = dispatchAnswered(error48, 500) && newLinks.length > 0 ? `one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
         if (closingNote === undefined)
           throw refusalWithCode(error48, taken);
         const posted = `the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
         const fix = error48 instanceof DispatchGatewayError && error48.transient ? "" : "fix what refused the close, then ";
         const landed = writeMayHaveLanded(error48) ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again` : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
         if (error48 instanceof DispatchServiceError)
-          throw refusalWithCode(error48, `${taken}; ${landed}`);
+          throw refusalWithCode(error48, taken, landed);
         throw withAccount(error48, landed);
       }
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;

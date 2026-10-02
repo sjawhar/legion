@@ -388,12 +388,11 @@ func defaultWebDistDir() (string, error) {
 // dir's app.json at Path. The dev sign-in fence decides on it; String is the form the boot log
 // prints.
 type appCredentialSource struct {
-	FromFile bool
-	Path     string
+	Path string
 }
 
 func (s appCredentialSource) String() string {
-	if s.FromFile {
+	if s.Path != "" {
 		return "file:" + s.Path
 	}
 	return "env"
@@ -415,7 +414,7 @@ func loadAppCredentials(dataDir string) (*auth.AppConfig, appCredentialSource, e
 	if cfg == nil {
 		return nil, appCredentialSource{}, nil
 	}
-	return cfg, appCredentialSource{FromFile: true, Path: path}, nil
+	return cfg, appCredentialSource{Path: path}, nil
 }
 
 func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
@@ -558,7 +557,7 @@ func devSignInLoadedFence(boot bootConfig, serverURL string, app *auth.AppConfig
 	if app == nil || app.PEM == "" {
 		return nil
 	}
-	if source.FromFile {
+	if source.Path != "" {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 refuses the App private key in %s, whatever DISPATCH_GITHUB_API_BASE names: that file is where the real App's key is kept, and with the flag any loopback client can have the App sign calls. Pass a throwaway App in the environment instead (DISPATCH_APP_CLIENT_ID, DISPATCH_APP_CLIENT_SECRET and a generated DISPATCH_APP_PEM_B64, which take precedence over app.json), with DISPATCH_GITHUB_API_BASE naming a GitHub fake on a loopback host, as packages/dispatch/e2e/run-server.sh does", source.Path)
 	}
 	if !routes.LoopbackURL(boot.GitHubAPIBase) {
