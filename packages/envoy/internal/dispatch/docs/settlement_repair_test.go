@@ -42,15 +42,17 @@ func TestSettlementRepairKeepsAnEditMadeAfterItsRead(t *testing.T) {
 }
 
 // A browser that deletes the ask block settlement is repairing, between the reconciliation and its
-// write, keeps the deletion: the repair finds no block to write into. The repair's empty transaction
-// is held from the room's persistence by the repair's slot, which the room's persistence worker
-// then consumes, and nothing empty is stored (LEGION-479).
+// write, keeps the deletion: the repair finds no block to write into, so the settlement wrote nothing
+// into the room and leaves the moved document, versions included, to the settlement the deletion
+// scheduled. The repair's transaction, which changed nothing, still reports an update; its slot is
+// finished with that update and the room's persistence worker consumes it (LEGION-479).
 func TestSettlementRepairOfAnAskAPeerDeletedWritesNothing(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext.\n")
 	service.settleRoom(artifactID, 0)
 	answerBlockAsk(t, service, artifactID)
+	versionsBefore := latestVersionNumber(t, service, artifactID)
 
 	var deleted atomic.Bool
 	service.afterSettleReconcile = func(room string) {
@@ -69,15 +71,20 @@ func TestSettlementRepairOfAnAskAPeerDeletedWritesNothing(t *testing.T) {
 	waitForDocumentText(t, service, artifactID, "Context.\n")
 	requireNoSuppressedSlots(t, service, artifactID, "after the repair")
 	waitForPersistedProofText(t, service.store, artifactID, "Context.\n")
-	var empty int
+	if versions := latestVersionNumber(t, service, artifactID); versions != versionsBefore {
+		t.Fatalf("latest version = %d, want %d: the settlement versioned the ask block the peer deleted", versions, versionsBefore)
+	}
+}
+
+func latestVersionNumber(t *testing.T, service *Service, artifactID string) int {
+	t.Helper()
+	var latest int
 	if err := service.store.Pool.QueryRow(context.Background(), `
-		select count(*) from doc_updates where artifact_id = $1 and update = $2
-	`, artifactID, emptyTransactionUpdate()).Scan(&empty); err != nil {
-		t.Fatalf("count empty document updates: %v", err)
+		select coalesce(max(number), 0) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&latest); err != nil {
+		t.Fatalf("read the latest document version: %v", err)
 	}
-	if empty != 0 {
-		t.Fatalf("%d empty document updates stored, want the repair's empty transaction held back", empty)
-	}
+	return latest
 }
 
 // A settlement takes a suppression slot before it stamps block ids, and the stamp it then writes
@@ -238,13 +245,4 @@ func editAsPeer(t *testing.T, service *Service, artifactID string, edit func(*pm
 	if err := crdt.ApplyUpdateV1(room, crdt.EncodeStateAsUpdateV1(peer, synced), "peer"); err != nil {
 		t.Fatalf("apply the peer's edit to the room: %v", err)
 	}
-}
-
-// emptyTransactionUpdate is the update ygo reports for a transaction that changed nothing.
-func emptyTransactionUpdate() []byte {
-	doc := crdt.New()
-	var update []byte
-	doc.OnUpdate(func(reported []byte, _ any) { update = append([]byte(nil), reported...) })
-	doc.Transact(func(*crdt.Transaction) {})
-	return update
 }

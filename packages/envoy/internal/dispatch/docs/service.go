@@ -223,16 +223,6 @@ func (s *Service) prepareSuppressedPersistence(room string) *suppressSlot {
 	return slot
 }
 
-// emptyUpdate is the update ygo reports for a transaction that changed nothing: it reports one for
-// every transaction it commits, and hands it to the room's persistence worker like any other.
-var emptyUpdate = func() []byte {
-	doc := crdt.New()
-	var update []byte
-	doc.OnUpdate(func(reported []byte, _ any) { update = append([]byte(nil), reported...) })
-	doc.Transact(func(*crdt.Transaction) {})
-	return update
-}()
-
 // applyCaptured runs mutate on room's live document, whose transactions it tags with origin,
 // and returns the updates the room recorded for that origin, in order: the bytes the room's
 // persistence observer is handed, which a suppression slot must match. A mutation that changes
@@ -260,22 +250,28 @@ func (s *Service) applyCaptured(ctx context.Context, room string, origin any, mu
 
 // applySuppressed writes one of settlement's repairs into room's live document under a suppression
 // slot of its own: mutate writes at most one transaction, tagged with the origin it is handed, and
-// the room's persistence worker is handed each transaction's update on its own, so a slot matches
-// exactly one. It returns the slot with the update when the transaction changed the document, and
-// otherwise neither, having released the slot: a slot left queued holds the worker at the room's
-// next update. A repair computed against the document as it stands finds nothing to write when a
-// peer has made it unnecessary since settlement read the document (LEGION-479); its transaction
-// still reports emptyUpdate, which the slot is finished with, so the worker takes it with the slot
-// rather than storing it. A mutation that ran no transaction leaves nothing to match, and its slot
-// is cancelled.
-func (s *Service) applySuppressed(ctx context.Context, room string, mutate func(doc *crdt.Doc, origin any) error) (*suppressSlot, []byte, error) {
+// reports whether that transaction changed the document. The room's persistence worker is handed
+// each transaction's update on its own, so a slot matches exactly one. It returns the slot with
+// the update when the transaction changed the document, and otherwise neither, having released the
+// slot: a slot left queued holds the worker at the room's next update. A repair computed against
+// the document as it stands finds nothing to write when a peer has made it unnecessary since
+// settlement read the document (LEGION-479), and its transaction still reports an update, the
+// document's delete set, which ygo reports for every transaction it commits. The slot is finished
+// with that update, so the worker takes it with the slot rather than storing it. A mutation that
+// ran no transaction leaves nothing to match, and its slot is cancelled.
+func (s *Service) applySuppressed(ctx context.Context, room string, mutate func(doc *crdt.Doc, origin any) (bool, error)) (*suppressSlot, []byte, error) {
 	slot := s.prepareSuppressedPersistence(room)
 	origin := &identityClosureOrigin{}
-	updates, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error { return mutate(doc, origin) })
+	wrote := false
+	updates, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
+		var mutateErr error
+		wrote, mutateErr = mutate(doc, origin)
+		return mutateErr
+	})
 	if err == nil && len(updates) > 1 {
 		err = fmt.Errorf("a settlement repair wrote %d updates, want one", len(updates))
 	}
-	if len(updates) == 1 && bytes.Equal(updates[0], emptyUpdate) {
+	if len(updates) == 1 && !wrote {
 		s.finishSuppressedPersistence(slot, updates[0])
 		return nil, nil, err
 	}
@@ -1038,10 +1034,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		}
 	}
 	if pmdoc.BlockIDRepairCount(tree) > 0 {
-		slot, update, err := s.applySuppressed(ctx, room, func(doc *crdt.Doc, origin any) error {
+		slot, update, err := s.applySuppressed(ctx, room, func(doc *crdt.Doc, origin any) (bool, error) {
+			var stamped int
 			var stampErr error
-			tree, _, stampErr = ensureBlockIDsInDocument(doc, origin)
-			return stampErr
+			tree, stamped, stampErr = ensureBlockIDsInDocument(doc, origin)
+			return stamped > 0, stampErr
 		})
 		if err != nil {
 			if errors.Is(err, ErrDocSchema) {
@@ -1127,21 +1124,23 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		s.afterSettleReconcile(room)
 	}
 	if len(reconciliation.repairs) > 0 {
-		slot, update, err := s.applySuppressed(ctx, room, func(doc *crdt.Doc, origin any) error {
+		slot, update, err := s.applySuppressed(ctx, room, func(doc *crdt.Doc, origin any) (bool, error) {
 			fragment := doc.GetXmlFragment(fragmentName)
 			// The repairs are made on the document as it stands, read inside the transaction that
 			// writes them: the tree they were reconciled on was read before settlement's database
 			// work, and writing that tree would revert whatever a peer wrote since (LEGION-479).
-			return doc.TransactE(func(transaction *crdt.Transaction) error {
+			repaired := false
+			err := doc.TransactE(func(transaction *crdt.Transaction) error {
 				live, readErr := treeOfTransaction(transaction, fragment)
 				if readErr != nil {
 					return readErr
 				}
-				if !reconciliation.repairLive(live) {
+				if repaired = reconciliation.repairLive(live); !repaired {
 					return nil
 				}
 				return pmdoc.Update(transaction, fragment, live)
 			}, origin)
+			return repaired, err
 		})
 		if err != nil {
 			s.discardSuppressedPersistence(room, slots...)

@@ -49,9 +49,10 @@ reconciled was read before its database work, and writing that tree would revert
 made since (LEGION-479). Each repair's update is held from the room's own persistence by a
 suppression slot of its own (`applySuppressed`; ygo's persistence worker is handed each update on
 its own), and every path releases it: a slot nothing finishes holds the worker at the room's next
-update. A repair that finds nothing to write still commits an empty transaction, for which ygo
-hands the worker an update too (`emptyUpdate`); its slot is finished with that update, so the
-worker takes it with the slot rather than storing it. A settlement that wrote
+update. A repair reports whether its transaction wrote anything; one that wrote nothing still
+committed that transaction, and ygo hands the worker an update for it too (the document's delete
+set), so its slot is finished with that update and the worker takes it rather than storing it. A
+settlement that wrote
 into the room commits what it wrote even when the document moved after its read, since the room and
 its browsers hold it; one that wrote nothing leaves a moved document to the settlement the move
 scheduled. `envoy-dispatch backfill-block-ids` runs that closure across every
