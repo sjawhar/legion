@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"runtime"
-	"strconv"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +13,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/goroutinetest"
 	"github.com/sjawhar/envoy/internal/testnats"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
@@ -244,9 +243,11 @@ func TestReconnectHooksRunWhileTheDurableCannotBind(t *testing.T) {
 			}
 			// Recovery retries the refused restore 1 s and 3 s after its first attempt, and each
 			// attempt asks rewatch for a run before it logs its failure, so once the third attempt has
-			// logged, every retry has had its chance to run the hook again.
+			// logged, both retries have had their chance to run the hook again. The retries after it,
+			// which go on while the durable is held, find what the third found: the reconnect covered
+			// and no connection event since, so rewatch finds the hooks not due and runs nothing.
 			waitFor(t, 30*time.Second, "the recovery's third attempt at the refused restore", func() bool {
-				return logs.lineAt("ERROR", "envoy nats recovery resubscribe failed", `"attempt":3,`) != ""
+				return slices.Contains(logs.attempts("ERROR"), recoveryAttempt{Msg: "envoy nats recovery resubscribe failed", Attempt: 3})
 			})
 			if runs := len(hooked); runs != 0 {
 				t.Fatalf("the reconnect hook ran %d more time(s) for one reconnect", runs)
@@ -313,10 +314,12 @@ func TestReconnectHooksRunOneAtATimeOnceForEachEventBetweenRuns(t *testing.T) {
 	// has logged, every chance to run the hooks again has passed.
 	afterRun := captureBusLogs(t)
 	waitFor(t, 30*time.Second, "a recovery attempt begun after the reconnect's run to log its refused restore", func() bool {
-		var begun struct{ Attempt int }
-		line := afterRun.lineAt("INFO", `"msg":"envoy nats recovery attempt"`)
-		return line != "" && json.Unmarshal([]byte(line), &begun) == nil &&
-			afterRun.lineAt("ERROR", "envoy nats recovery resubscribe failed", fmt.Sprintf(`"attempt":%d,`, begun.Attempt)) != ""
+		for _, begun := range afterRun.attempts("INFO") {
+			if begun.Msg == "envoy nats recovery attempt" {
+				return slices.Contains(afterRun.attempts("ERROR"), recoveryAttempt{Msg: "envoy nats recovery resubscribe failed", Attempt: begun.Attempt})
+			}
+		}
+		return false
 	})
 	if got, most := runs.Load(), mostAtOnce.Load(); got != 2 || most != 1 {
 		t.Fatalf("the hooks ran %d time(s) for two connection events between runs, at most %d at once; want 2 runs, one at a time", got, most)
@@ -345,7 +348,7 @@ func TestAFailedRunOfTheReconnectHooksRunsAgainWithoutAnotherConnectionEvent(t *
 	ran := make(chan hookRun, 8)
 	var runs atomic.Int32
 	client.AddReconnectHook(func(conn *natsgo.Conn) error {
-		ran <- hookRun{conn: conn, goroutine: goroutineID()}
+		ran <- hookRun{conn: conn, goroutine: goroutinetest.ID()}
 		if runs.Add(1) == 1 {
 			return errors.New("the first run fails")
 		}
@@ -355,62 +358,31 @@ func TestAFailedRunOfTheReconnectHooksRunsAgainWithoutAnotherConnectionEvent(t *
 	if err := client.Conn.ForceReconnect(); err != nil {
 		t.Fatalf("reconnect in place: %v", err)
 	}
-	var recovery uint64
+	var recoveryGoroutine uint64
 	for run := 1; run <= 2; run++ {
 		select {
 		case got := <-ran:
 			if got.conn != client.Conn {
 				t.Fatalf("run %d of the reconnect hooks was on a connection the client no longer has", run)
 			}
-			recovery = got.goroutine
+			if run == 2 {
+				recoveryGoroutine = got.goroutine
+			}
 		case <-time.After(15 * time.Second):
 			t.Fatalf("the reconnect hooks ran %d time(s) after an in-place reconnect whose first run failed; want them run again", run-1)
 		}
+	}
+	if reconnects := client.Conn.Stats().Reconnects; reconnects != 1 {
+		t.Fatalf("the connection reconnected %d time(s); want the one in-place reconnect, so no other connection event ran the hooks", reconnects)
 	}
 	// The run that succeeded covers the reconnect. It ran on the goroutine of the recovery the failed
 	// run started, the one thing besides a connection event that runs the hooks, and that recovery
 	// looks once more for hooks due after it clears its flag; once its goroutine has returned, every
 	// chance to run them again has passed.
-	waitFor(t, 15*time.Second, "the recovery that ran the hooks again to end", func() bool { return !goroutineLive(recovery) })
+	waitFor(t, 15*time.Second, "the recovery that ran the hooks again to end", func() bool { return !goroutinetest.Live(recoveryGoroutine) })
 	if extra := len(ran); extra != 0 {
 		t.Fatalf("the reconnect hooks ran %d more time(s) after a run succeeded", extra)
 	}
-	if reconnects := client.Conn.Stats().Reconnects; reconnects != 1 {
-		t.Fatalf("the connection reconnected %d time(s); want the one in-place reconnect, so no other connection event ran the hooks", reconnects)
-	}
-}
-
-// goroutineID returns the calling goroutine's id, which the runtime gives no other goroutine.
-func goroutineID() uint64 {
-	header := make([]byte, 64)
-	header = header[:runtime.Stack(header, false)]
-	// The trace opens with "goroutine <id> ".
-	id, err := strconv.ParseUint(strings.Fields(string(header))[1], 10, 64)
-	if err != nil {
-		panic(fmt.Sprintf("read the goroutine id from %q: %v", header, err))
-	}
-	return id
-}
-
-// goroutineLive reports whether the goroutine id has yet to return, from the goroutine dump, where
-// each goroutine's trace opens with "goroutine <id> ".
-func goroutineLive(id uint64) bool {
-	dump := make([]byte, 1<<20)
-	for {
-		n := runtime.Stack(dump, true)
-		if n < len(dump) {
-			dump = dump[:n]
-			break
-		}
-		dump = make([]byte, 2*len(dump))
-	}
-	header := fmt.Sprintf("goroutine %d ", id)
-	for _, trace := range strings.Split(string(dump), "\n\n") {
-		if strings.HasPrefix(trace, header) {
-			return true
-		}
-	}
-	return false
 }
 
 // A failure that wants a recovery while one is ending is not left to the next connection event:

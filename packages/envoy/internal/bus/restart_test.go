@@ -3,7 +3,9 @@ package bus_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -200,7 +202,7 @@ func (l *busLogs) String() string {
 }
 
 func (l *busLogs) errorLine() string {
-	return l.lineAt("ERROR", "")
+	return l.lineAt("ERROR")
 }
 
 // lineAt returns the first record at level whose text holds every fragment, or "".
@@ -220,6 +222,38 @@ lines:
 		return line
 	}
 	return ""
+}
+
+// recoveryAttempt is what a record the recovery logs about one of its attempts names: the message
+// and the attempt's number.
+type recoveryAttempt struct {
+	Msg     string
+	Attempt int
+}
+
+// attempts decodes, in the order they were logged, the records at level that carry an attempt
+// number, so a test reads the number from the record rather than from where slog writes it.
+func (l *busLogs) attempts(level string) []recoveryAttempt {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var found []recoveryAttempt
+	for _, line := range strings.Split(l.buffer.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		var record struct {
+			Level   string
+			Msg     string
+			Attempt int
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			panic(fmt.Sprintf("decode the bus log record %q: %v", line, err))
+		}
+		if record.Level == level && record.Attempt > 0 {
+			found = append(found, recoveryAttempt{Msg: record.Msg, Attempt: record.Attempt})
+		}
+	}
+	return found
 }
 
 func captureBusLogs(t *testing.T) *busLogs {
