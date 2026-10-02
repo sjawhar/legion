@@ -99,11 +99,20 @@ const treeVolume = "tree"
 // asked for, its Service's.
 const maxNameLength = 63
 
-// SandboxName is the Sandbox a claim runs in, and the pod behind it: the claim token as a DNS-1123
-// name, and past 63 characters a readable prefix and an 8-hex hash of the whole token. It is the
-// same for every generation of the claim, since a generation is a new boot token and a relaunch,
-// never a new Sandbox.
-func SandboxName(t claim.Token) string { return dnsName(string(t), maxNameLength) }
+// SandboxName is the Sandbox and pod name for an issue. The six role claims of that issue share
+// it; their container and generation live in each process locator instead. A claim token always
+// ends in one fixed role word, so stripping it preserves the project and issue token even where an
+// issue name has hyphens.
+func SandboxName(t claim.Token) string {
+	name := string(t)
+	for _, role := range claim.Roles {
+		if strings.HasSuffix(name, "-"+string(role)) {
+			name = strings.TrimSuffix(name, "-"+string(role))
+			break
+		}
+	}
+	return dnsName(name, maxNameLength)
+}
 
 // TreeClaimName is the tree volume's claim: the root Sandbox's `tree` template, as the controller
 // names the claim it makes from it. Every pod of the tree mounts it by this name.

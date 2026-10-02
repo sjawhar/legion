@@ -245,13 +245,13 @@ func (l launch) agentArgv(agent []string) []string {
 	return append(argv, "--mode", "rpc", "--append-system-prompt", l.prompt)
 }
 
-// labels are every object of the claim's labels (decision 1).
+// labels are the issue resource's labels. A role belongs to a process locator, not to a shared
+// issue pod, so no pod or Sandbox label picks a role.
 func (r *Runtime) labels(spec runtime.SpawnSpec) map[string]string {
 	return map[string]string{
 		labelProject: r.project,
 		labelTree:    labelValue(spec.Tree),
 		labelIssue:   labelValue(spec.Issue),
-		labelRole:    string(spec.Role),
 	}
 }
 

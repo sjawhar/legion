@@ -115,7 +115,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		r.suspendFailedLaunch(ctx, spec.Claim, s)
 		return fail("wait for its new pod", err)
 	}
-	loc := r.locatorFor(spec.Claim, pod.UID)
+	loc := r.locatorFor(spec.Claim, pod.UID, spec.Generation)
 	r.join(loc)
 	return loc, nil
 }

@@ -46,6 +46,17 @@ var ErrListenerClosed = errors.New("worker stream listener closed")
 // one minted for a generation the claim has since left.
 type HelloResolver func(bootToken string) (c claim.Token, generation uint64, stale bool, ok bool)
 
+// LauncherResolver accepts a role launcher's independent hello. It is separate from HelloResolver:
+// a launcher never binds a claim's child shim connection or emits an agent Event.
+type LauncherResolver func(shimwire.LauncherHello) (LauncherHandler, string)
+
+// LauncherHandler owns one authenticated launcher connection after the listener has written its
+// acknowledgement. It reads launcher state/results and writes start/stop commands; returning ends
+// only this launcher connection.
+type LauncherHandler interface {
+	ServeLauncher(net.Conn, *bufio.Reader, *shimwire.Writer)
+}
+
 // Options are the listener's settings.
 type Options struct {
 	// RPCTimeout is worker_rpc_timeout_seconds: how long a connection has to complete its hello,
@@ -59,13 +70,13 @@ type Options struct {
 // context Listen was given: when that ends it stops accepting, closes every connection — each
 // with its Closed event — and then closes Events().
 type Listener struct {
-	addr    string
-	ln      net.Listener
-	resolve HelloResolver
-	timeout time.Duration
-	log     *slog.Logger
-	events  *eventQueue
-
+	addr     string
+	ln       net.Listener
+	resolve  HelloResolver
+	launcher LauncherResolver
+	timeout  time.Duration
+	log      *slog.Logger
+	events   *eventQueue
 	mu    sync.Mutex
 	conns map[claim.Token]*Conn
 	// accepted is every connection not yet finished, the ones still in their hello included, so
@@ -127,6 +138,14 @@ func (l *Listener) Addr() string { return l.addr }
 // listener has ended and every connection's Closed has been delivered. The consumer ranges over
 // it until it closes.
 func (l *Listener) Events() <-chan Event { return l.events.out }
+
+// SetLauncherResolver registers the issue-pod runtime's launcher acceptor after that runtime has
+// been constructed. A launcher that arrives earlier receives a named refusal and reconnects.
+func (l *Listener) SetLauncherResolver(resolver LauncherResolver) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.launcher = resolver
+}
 
 // Conn is the claim's live connection, if it has one. A claim with none — not connected yet, or
 // gone — is an ordinary state, not an error.
@@ -259,11 +278,15 @@ func (l *Listener) serve(nc net.Conn) {
 	// (worker-stream-listener.ts:11-13). The frames after the hello are read through the same
 	// buffer, so bytes that followed the hello in its own write are not lost.
 	src := bufio.NewReaderSize(nc, shimwire.MaxHelloBytes+1)
-	conn, reason := l.hello(nc, src)
-	if conn == nil {
+	conn, launcher, reason := l.hello(nc, src)
+	if conn == nil && launcher == nil {
 		if reason != "" {
 			l.log.Warn("worker-stream: rejected hello (" + reason + ")")
 		}
+		return
+	}
+	if launcher != nil {
+		launcher.ServeLauncher(nc, src, shimwire.NewWriter(nc))
 		return
 	}
 	conn.read(src)
@@ -278,31 +301,58 @@ func (l *Listener) serve(nc net.Conn) {
 	l.mu.Unlock()
 }
 
-// hello reads and judges the connection's first line. It returns the registered connection, or
-// the reason it refused — empty when there is nothing to say: the peer went away, or the
-// listener is ending (worker-stream-listener.ts:107-173).
-func (l *Listener) hello(nc net.Conn, src *bufio.Reader) (*Conn, string) {
+// hello reads and judges the connection's first line. It returns a registered child shim
+// connection, an independent launcher handler, or the reason it refused.
+func (l *Listener) hello(nc net.Conn, src *bufio.Reader) (*Conn, LauncherHandler, string) {
 	if err := nc.SetReadDeadline(time.Now().Add(l.timeout)); err != nil {
-		return nil, ""
+		return nil, nil, ""
 	}
 	line, err := src.ReadSlice('\n')
 	switch {
 	case errors.Is(err, bufio.ErrBufferFull):
-		return nil, "hello too long"
+		return nil, nil, "hello too long"
 	case errors.Is(err, os.ErrDeadlineExceeded) && !l.isClosed():
 		// The byte bound never fires on silence, and a connection that never finishes its hello
 		// would hold its descriptor for ever (worker-stream-listener.ts:54-57).
-		return nil, "hello timeout"
+		return nil, nil, "hello timeout"
 	case err != nil:
-		return nil, ""
+		return nil, nil, ""
 	}
 	line = bytes.TrimSpace(line)
 	if !json.Valid(line) {
-		return nil, "not json"
+		return nil, nil, "not json"
 	}
 	frame, err := shimwire.Decode(line)
 	if err != nil {
-		return nil, "malformed hello"
+		return nil, nil, "malformed hello"
+	}
+	if launcherHello, ok := frame.(shimwire.LauncherHello); ok {
+		if err := launcherHello.Validate(); err != nil {
+			return nil, nil, "malformed launcher hello"
+		}
+		l.mu.Lock()
+		resolver, closed := l.launcher, l.closed
+		l.mu.Unlock()
+		if closed {
+			return nil, nil, ""
+		}
+		if resolver == nil {
+			return nil, nil, "launcher acceptor unavailable"
+		}
+		handler, reason := resolver(launcherHello)
+		if handler == nil {
+			if reason == "" {
+				reason = "launcher refused"
+			}
+			return nil, nil, reason
+		}
+		if err := nc.SetReadDeadline(time.Time{}); err != nil {
+			return nil, nil, "connection closed before launcher_hello_ack"
+		}
+		if err := shimwire.NewWriter(nc).WriteFrame(shimwire.LauncherHelloAck{}); err != nil {
+			return nil, nil, "connection closed before launcher_hello_ack"
+		}
+		return nil, handler, ""
 	}
 	var hello shimwire.Hello2
 	switch f := frame.(type) {
@@ -312,25 +362,26 @@ func (l *Listener) hello(nc net.Conn, src *bufio.Reader) (*Conn, string) {
 		// The shim that sent it predates GoDaemonAPIVersion 8 (hello2): the worker image or the pane's
 		// legion binary is older than this daemon. The image probe refuses such an image at boot; a
 		// pane's shim is this daemon's own binary. Either way the fix is the newer build, named here.
-		return nil, "hello v1: the shim predates hello2 (daemon API contract 8); rebuild the worker image or the pane's legion binary from this daemon's commit"
+		return nil, nil, "hello v1: the shim predates hello2 (daemon API contract 8); rebuild the worker image or the pane's legion binary from this daemon's commit"
 	default:
-		return nil, "malformed hello"
+		return nil, nil, "malformed hello"
 	}
 	if hello.Validate() != nil {
-		return nil, "malformed hello"
+		return nil, nil, "malformed hello"
 	}
 	token, generation, stale, known := l.resolve(hello.BootToken)
 	switch {
 	case !known:
-		return nil, "unknown boot token"
+		return nil, nil, "unknown boot token"
 	case stale:
-		return nil, "stale worker generation"
+		return nil, nil, "stale worker generation"
 	}
 	var identity *AgentSecretsIdentity
 	if hello.AgentSecrets != nil {
 		identity = &AgentSecretsIdentity{Thumbprint: hello.AgentSecrets.Thumbprint, PodToken: hello.AgentSecrets.PodToken}
 	}
-	return l.register(nc, token, generation, identity)
+	conn, reason := l.register(nc, token, generation, identity)
+	return conn, nil, reason
 }
 
 // register binds the claim to this connection, unless a live connection already holds it — the

@@ -40,6 +40,13 @@ const (
 	TypeHello2                       = "hello2"
 	TypeAgentSecretsEnrollment       = "agent-secrets-enrollment"
 	TypeAgentSecretsEnrollmentResult = "agent-secrets-enrollment-result"
+	TypeLauncherHello       = "launcher_hello"
+	TypeLauncherHelloAck    = "launcher_hello_ack"
+	TypeLauncherState       = "launcher_state"
+	TypeLauncherStart       = "launcher_start"
+	TypeLauncherStartResult = "launcher_start_result"
+	TypeLauncherStop        = "launcher_stop"
+	TypeLauncherStopResult  = "launcher_stop_result"
 )
 
 // The protocol's sizes, verified against the shipped files: the largest plain line including its
@@ -102,6 +109,75 @@ type AgentSecretsEnrollment struct {
 
 // AgentSecretsEnrollmentResult answers AgentSecretsEnrollment.
 type AgentSecretsEnrollmentResult struct {
+	ID    string `json:"id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// LauncherHello authenticates a role launcher independently from its child shim. The daemon
+// minted Token belongs to exactly this pod UID, role and Secret epoch; LauncherID changes each
+// time Kubernetes restarts the launcher container.
+type LauncherHello struct {
+	Token      string `json:"token"`
+	Sandbox    string `json:"sandbox"`
+	Role       string `json:"role"`
+	PodUID     string `json:"podUid"`
+	LauncherID string `json:"launcherId"`
+}
+
+// LauncherHelloAck admits a launcher to receive child process commands.
+type LauncherHelloAck struct{}
+
+// LauncherChild is the actual worker-shim child the launcher has running, if any.
+type LauncherChild struct {
+	Generation uint64 `json:"generation"`
+	PID        int    `json:"pid"`
+}
+
+// LauncherExit is the last child exit the launcher observed. A launcher reports it after a
+// reconnect before it accepts another start, so the daemon never invents Gone from a lost reply.
+type LauncherExit struct {
+	Generation    uint64 `json:"generation"`
+	Code          int    `json:"code"`
+	Signal        string `json:"signal,omitempty"`
+	WorkspaceLost bool   `json:"workspaceLost,omitempty"`
+}
+
+// LauncherState is the launcher's actual child state at hello and after every child transition.
+type LauncherState struct {
+	Child    *LauncherChild `json:"child,omitempty"`
+	LastExit *LauncherExit  `json:"lastExit,omitempty"`
+}
+
+// LauncherStart starts one worker-shim child. The daemon owns the generation and request ID; a
+// repeated request is idempotent only when its payload is unchanged.
+type LauncherStart struct {
+	ID         string   `json:"id"`
+	Generation uint64   `json:"generation"`
+	BootToken  string   `json:"bootToken"`
+	Argv       []string `json:"argv"`
+	Env        []string `json:"env"`
+	ResumeFile string   `json:"resumeFile,omitempty"`
+}
+
+// LauncherStartResult is the launcher's answer to LauncherStart.
+type LauncherStartResult struct {
+	ID                string `json:"id"`
+	OK                bool   `json:"ok"`
+	RunningGeneration uint64 `json:"runningGeneration,omitempty"`
+	Error             string `json:"error,omitempty"`
+}
+
+// LauncherStop stops only the child of Generation. The launcher refuses an older generation
+// rather than risking a newer role process.
+type LauncherStop struct {
+	ID         string `json:"id"`
+	Generation uint64 `json:"generation"`
+	GraceMs    int    `json:"graceMs"`
+}
+
+// LauncherStopResult is the launcher's answer to LauncherStop.
+type LauncherStopResult struct {
 	ID    string `json:"id"`
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
@@ -219,6 +295,13 @@ func (r Raw) FrameType() string                        { return r.Type }
 func (Hello2) FrameType() string                       { return TypeHello2 }
 func (AgentSecretsEnrollment) FrameType() string       { return TypeAgentSecretsEnrollment }
 func (AgentSecretsEnrollmentResult) FrameType() string { return TypeAgentSecretsEnrollmentResult }
+func (LauncherHello) FrameType() string       { return TypeLauncherHello }
+func (LauncherHelloAck) FrameType() string    { return TypeLauncherHelloAck }
+func (LauncherState) FrameType() string       { return TypeLauncherState }
+func (LauncherStart) FrameType() string       { return TypeLauncherStart }
+func (LauncherStartResult) FrameType() string { return TypeLauncherStartResult }
+func (LauncherStop) FrameType() string        { return TypeLauncherStop }
+func (LauncherStopResult) FrameType() string  { return TypeLauncherStopResult }
 
 func (f Hello) MarshalJSON() ([]byte, error) {
 	type plain Hello
@@ -293,6 +376,40 @@ func (f AgentSecretsEnrollmentResult) MarshalJSON() ([]byte, error) {
 	return marshalFrame(TypeAgentSecretsEnrollmentResult, plain(f))
 }
 
+func (f LauncherHello) MarshalJSON() ([]byte, error) {
+	type plain LauncherHello
+	return marshalFrame(TypeLauncherHello, plain(f))
+}
+
+func (LauncherHelloAck) MarshalJSON() ([]byte, error) {
+	return marshalFrame(TypeLauncherHelloAck, struct{}{})
+}
+
+func (f LauncherState) MarshalJSON() ([]byte, error) {
+	type plain LauncherState
+	return marshalFrame(TypeLauncherState, plain(f))
+}
+
+func (f LauncherStart) MarshalJSON() ([]byte, error) {
+	type plain LauncherStart
+	return marshalFrame(TypeLauncherStart, plain(f))
+}
+
+func (f LauncherStartResult) MarshalJSON() ([]byte, error) {
+	type plain LauncherStartResult
+	return marshalFrame(TypeLauncherStartResult, plain(f))
+}
+
+func (f LauncherStop) MarshalJSON() ([]byte, error) {
+	type plain LauncherStop
+	return marshalFrame(TypeLauncherStop, plain(f))
+}
+
+func (f LauncherStopResult) MarshalJSON() ([]byte, error) {
+	type plain LauncherStopResult
+	return marshalFrame(TypeLauncherStopResult, plain(f))
+}
+
 // Validate refuses a hello the listener would refuse (worker-stream-listener.ts:140-148).
 func (f Hello) Validate() error {
 	if f.BootToken == "" {
@@ -337,6 +454,49 @@ func (f Hello2) Validate() error {
 		return fmt.Errorf("%w: hello2 agentSecrets carries no podToken", ErrMalformedFrame)
 	case strings.Count(id.PodToken, ".") != 2:
 		return fmt.Errorf("%w: hello2 agentSecrets podToken is not a JWT", ErrMalformedFrame)
+	}
+	return nil
+}
+
+// Validate refuses an unactionable launcher hello before the listener hands it to the runtime.
+func (f LauncherHello) Validate() error {
+	switch {
+	case f.Token == "":
+		return fmt.Errorf("%w: launcher_hello carries no token", ErrMalformedFrame)
+	case f.Sandbox == "":
+		return fmt.Errorf("%w: launcher_hello carries no sandbox", ErrMalformedFrame)
+	case f.Role == "":
+		return fmt.Errorf("%w: launcher_hello carries no role", ErrMalformedFrame)
+	case f.PodUID == "":
+		return fmt.Errorf("%w: launcher_hello carries no podUid", ErrMalformedFrame)
+	case f.LauncherID == "":
+		return fmt.Errorf("%w: launcher_hello carries no launcherId", ErrMalformedFrame)
+	}
+	return nil
+}
+
+func (f LauncherStart) Validate() error {
+	switch {
+	case f.ID == "":
+		return fmt.Errorf("%w: launcher_start carries no id", ErrMalformedFrame)
+	case f.Generation == 0:
+		return fmt.Errorf("%w: launcher_start carries no generation", ErrMalformedFrame)
+	case f.BootToken == "":
+		return fmt.Errorf("%w: launcher_start carries no bootToken", ErrMalformedFrame)
+	case len(f.Argv) == 0:
+		return fmt.Errorf("%w: launcher_start carries no argv", ErrMalformedFrame)
+	}
+	return nil
+}
+
+func (f LauncherStop) Validate() error {
+	switch {
+	case f.ID == "":
+		return fmt.Errorf("%w: launcher_stop carries no id", ErrMalformedFrame)
+	case f.Generation == 0:
+		return fmt.Errorf("%w: launcher_stop carries no generation", ErrMalformedFrame)
+	case f.GraceMs <= 0:
+		return fmt.Errorf("%w: launcher_stop graceMs is %d", ErrMalformedFrame, f.GraceMs)
 	}
 	return nil
 }
@@ -403,6 +563,20 @@ func Decode(line []byte) (Frame, error) {
 		return decodeInto[AgentSecretsEnrollment](trimmed)
 	case TypeAgentSecretsEnrollmentResult:
 		return decodeInto[AgentSecretsEnrollmentResult](trimmed)
+	case TypeLauncherHello:
+		return decodeInto[LauncherHello](trimmed)
+	case TypeLauncherHelloAck:
+		return LauncherHelloAck{}, nil
+	case TypeLauncherState:
+		return decodeInto[LauncherState](trimmed)
+	case TypeLauncherStart:
+		return decodeInto[LauncherStart](trimmed)
+	case TypeLauncherStartResult:
+		return decodeInto[LauncherStartResult](trimmed)
+	case TypeLauncherStop:
+		return decodeInto[LauncherStop](trimmed)
+	case TypeLauncherStopResult:
+		return decodeInto[LauncherStopResult](trimmed)
 	default:
 		return Raw{Type: head.Type, JSON: bytes.Clone(trimmed)}, nil
 	}

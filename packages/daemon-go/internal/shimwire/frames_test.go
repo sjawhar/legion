@@ -77,6 +77,33 @@ func TestEveryExchangedFrameRoundTripsItsWireLine(t *testing.T) {
 			`{"type":"rpc_chunk","chunkId":"agent-end-1","index":0,"count":2,"byteLength":1048577,"data":"eA=="}`,
 			RPCChunk{ChunkID: "agent-end-1", Index: 0, Count: 2, ByteLength: 1_048_577, Data: "eA=="},
 		},
+		{
+			"launcher_hello",
+			`{"type":"launcher_hello","token":"launcher-token","sandbox":"legion-legion-legion-208","role":"tester","podUid":"pod-1","launcherId":"launcher-1"}`,
+			LauncherHello{Token: "launcher-token", Sandbox: "legion-legion-legion-208", Role: "tester", PodUID: "pod-1", LauncherID: "launcher-1"},
+		},
+		{"launcher_hello_ack", `{"type":"launcher_hello_ack"}`, LauncherHelloAck{}},
+		{
+			"launcher_state",
+			`{"type":"launcher_state","child":{"generation":7,"pid":42},"lastExit":{"generation":6,"code":143,"signal":"terminated","workspaceLost":true}}`,
+			LauncherState{Child: &LauncherChild{Generation: 7, PID: 42}, LastExit: &LauncherExit{Generation: 6, Code: 143, Signal: "terminated", WorkspaceLost: true}},
+		},
+		{
+			"launcher_start",
+			`{"type":"launcher_start","id":"start-1","generation":7,"bootToken":"boot-7","argv":["omp","--mode","rpc"],"env":["A=B"],"resumeFile":"/sessions/test.jsonl"}`,
+			LauncherStart{ID: "start-1", Generation: 7, BootToken: "boot-7", Argv: []string{"omp", "--mode", "rpc"}, Env: []string{"A=B"}, ResumeFile: "/sessions/test.jsonl"},
+		},
+		{
+			"launcher_start_result",
+			`{"type":"launcher_start_result","id":"start-1","ok":true,"runningGeneration":7}`,
+			LauncherStartResult{ID: "start-1", OK: true, RunningGeneration: 7},
+		},
+		{
+			"launcher_stop",
+			`{"type":"launcher_stop","id":"stop-1","generation":7,"graceMs":10000}`,
+			LauncherStop{ID: "stop-1", Generation: 7, GraceMs: 10_000},
+		},
+		{"launcher_stop_result", `{"type":"launcher_stop_result","id":"stop-1","ok":true}`, LauncherStopResult{ID: "stop-1", OK: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			decoded, err := Decode([]byte(tc.line))

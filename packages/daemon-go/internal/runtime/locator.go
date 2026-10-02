@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
@@ -24,8 +26,9 @@ const (
 // Incarnation is what makes the locator an address of a *process* and not of a slot. Under tmux
 // it is the pane's own pid and that process's `/proc/<pid>/stat` start ticks ("<pid>:<ticks>"),
 // because a pane id is reissued by a recreated tmux server and a pid is reissued by the kernel;
-// under a sandbox it is the pod uid. Two observations of the same claim at different
-// incarnations are two different processes, which is how a stale event is fenced.
+// under a sandbox it is the pod UID and role process generation (`<podUID>/<generation>`). Two
+// observations of the same claim at different incarnations are two different processes, which is
+// how a stale event is fenced.
 type Locator struct {
 	Runtime     string          `json:"runtime"`
 	Claim       claim.Token     `json:"claim"`
@@ -41,13 +44,15 @@ type TmuxLocator struct {
 	Pane   string `json:"pane"`
 }
 
-// SandboxLocator is one agent's sandbox in a cluster. Stage 4 is what fills one in; it is
-// declared now so the shape a locator is stored and validated in does not change when it does.
+// SandboxLocator identifies one role process in an issue's Agent Sandbox. The pod UID, container
+// and generation are required because all six role launchers share one Sandbox and pod. A process
+// incarnation is `PodUID/Generation`, rather than a pod UID alone.
 type SandboxLocator struct {
-	Namespace string `json:"namespace"`
-	// Name is the Agent Sandbox object's name — the sandbox, not the pod behind it, which the
-	// cluster may replace. The locator's incarnation is that pod's uid.
-	Name string `json:"name"`
+	Namespace  string `json:"namespace"`
+	Name       string `json:"name"`
+	PodUID     string `json:"podUid"`
+	Container  string `json:"container"`
+	Generation uint64 `json:"generation"`
 }
 
 // Validate is the refusal `encoding/json` cannot make. Unmarshalling leaves an absent member at
@@ -91,8 +96,38 @@ func (l Locator) Validate() error {
 		if l.Sandbox.Name == "" {
 			return fmt.Errorf("locator %s: sandbox member with no name", l.Claim)
 		}
+		if l.Sandbox.PodUID == "" {
+			return fmt.Errorf("locator %s: sandbox member with no pod UID", l.Claim)
+		}
+		if l.Sandbox.Container == "" {
+			return fmt.Errorf("locator %s: sandbox member with no role container", l.Claim)
+		}
+		if l.Sandbox.Generation == 0 {
+			return fmt.Errorf("locator %s: sandbox member with no process generation", l.Claim)
+		}
+		if want := SandboxIncarnation(l.Sandbox.PodUID, l.Sandbox.Generation); l.Incarnation != want {
+			return fmt.Errorf("locator %s: sandbox incarnation %q, want %q from pod UID and generation", l.Claim, l.Incarnation, want)
+		}
+		role, ok := roleOf(l.Claim)
+		if !ok || l.Sandbox.Container != string(role) {
+			return fmt.Errorf("locator %s: sandbox container %q does not match claim role", l.Claim, l.Sandbox.Container)
+		}
 	default:
 		return fmt.Errorf("locator %s: no runtime answers to %q", l.Claim, l.Runtime)
 	}
 	return nil
+}
+
+// SandboxIncarnation is the persisted process address for one role generation inside a pod.
+func SandboxIncarnation(podUID string, generation uint64) string {
+	return podUID + "/" + strconv.FormatUint(generation, 10)
+}
+
+func roleOf(token claim.Token) (claim.Role, bool) {
+	for _, role := range claim.Roles {
+		if strings.HasSuffix(string(token), "-"+string(role)) {
+			return role, true
+		}
+	}
+	return "", false
 }
