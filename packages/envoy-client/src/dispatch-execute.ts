@@ -6,6 +6,7 @@ import type {
   Ask,
   AskRead,
   AskUrgency,
+  BlockPath,
   Comment,
   CommentRead,
   CreateAskInput,
@@ -1455,6 +1456,7 @@ function askSummary({ ask, replies }: AskRead, graph: readonly string[]): string
   ]);
   return [
     `Question: ${ask.question}`,
+    ...anchorLines(ask),
     "Options:",
     ...(ask.options.length === 0
       ? ["- none"]
@@ -1527,12 +1529,12 @@ export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: strin
 function commentSummary({ comment, replies }: CommentRead, graph: readonly string[]): string {
   const root = [
     `${comment.id} · ${actorText(comment.author)}`,
-    ...(comment.anchor?.quote === undefined ? [] : [`> ${comment.anchor.quote}`]),
+    ...anchorLines(comment),
     `Body: ${comment.body}`,
   ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} · ${actorText(reply.author)}`,
-    ...(reply.anchor?.quote === undefined ? [] : [`> ${reply.anchor.quote}`]),
+    ...anchorLines(reply),
     `Body: ${reply.body}`,
   ]);
   return [
@@ -1542,6 +1544,45 @@ function commentSummary({ comment, replies }: CommentRead, graph: readonly strin
     ...(chain.length === 0 ? ["- none"] : chain),
     ...graph,
   ].join("\n");
+}
+
+/** An anchored record's quote, then where its block stands: the position, or why the read could
+ *  not place it. A record without an anchor prints neither. */
+function anchorLines(
+  record: Pick<Comment, "anchor" | "anchor_block" | "anchor_block_error">
+): string[] {
+  return [
+    ...(record.anchor?.quote === undefined ? [] : [`> ${record.anchor.quote}`]),
+    ...(record.anchor_block === undefined
+      ? []
+      : [`Position: ${positionText(record.anchor_block)}`]),
+    ...(record.anchor_block_error === undefined
+      ? []
+      : [`Position: unavailable (${record.anchor_block_error})`]),
+  ];
+}
+
+/** Where an anchor's block stands. Every node from the top-level block down reads `type[index]`;
+ *  in a table the row and cell read instead as `row 5 (Red-teamer loop), column Due`: the row's
+ *  index (0 is the header), labelled by its cells before the anchored column — blank cells and
+ *  bare numbers dropped, since a `#` column repeats the index — and the column's header, or its
+ *  index where no header cell covers it. */
+export function positionText(block: BlockPath): string {
+  const { table, path } = block;
+  const segments = path.map((entry) => `${entry.type}[${entry.index}]`);
+  if (table === undefined || table.row === null) return segments.join(" › ");
+  const tableAt = path.findIndex((entry) => entry.type === "table");
+  const cells = table.cells ?? [];
+  const label = (table.column === null ? cells : cells.slice(0, table.column))
+    .map((cell) => cell.trim())
+    .filter((cell) => cell !== "" && !/^\d+$/.test(cell))
+    .join(" · ");
+  const row = label === "" ? `row ${table.row}` : `row ${table.row} (${label})`;
+  const header = table.header === null || table.header === "" ? String(table.column) : table.header;
+  return [
+    ...segments.slice(0, tableAt + 1),
+    table.column === null ? row : `${row}, column ${header}`,
+  ].join(" › ");
 }
 
 function messageSummary({ message, replies }: MessageRead, graph: readonly string[]): string {
@@ -1749,20 +1790,21 @@ async function refuseRemovingOpenDecisionBlocks(
  * helper that never returns leaves its switch case with no visible terminator, which Biome's
  * noFallthroughSwitchClause rejects.
  *
- * A gateway's answer stays a `DispatchGatewayError`, and `suffix`, the caller's account of what
- * its call did, joins it in one sentence. Where the request may have reached Dispatch
- * (`mayHaveReachedDispatch`), the client's advice could judge only from the method (a write is
- * told to check whether it took effect), so a suffix, which knows what its call did, takes its
- * place and must say what to do; otherwise the request never reached Dispatch, and the suffix
- * follows the client's advice.
+ * A gateway's answer stays a `DispatchGatewayError`, and the caller's account of what its call did
+ * joins it in one sentence. Where the request may have reached Dispatch (`mayHaveReachedDispatch`),
+ * the client's advice could judge only from the method (a write is told to check whether it took
+ * effect), so that account, which knows what its call did, takes its place and must say what to do;
+ * otherwise the request never reached Dispatch, and the account follows the client's advice.
  */
-function refusalWithCode(error: unknown, suffix = ""): unknown {
+function refusalWithCode(error: unknown, ...clauses: string[]): unknown {
+  const suffix = clauses.filter((clause) => clause !== "").join("; ");
+  const joined = suffix === "" ? "" : `; ${suffix}`;
   if (error instanceof DispatchGatewayError) {
     let told = error.message;
-    if (suffix !== "") {
+    if (joined !== "") {
       told = error.mayHaveReachedDispatch
-        ? `${error.answer}${suffix}`
-        : `${error.answer}, so ${error.advice}${suffix}`;
+        ? `${error.answer}${joined}`
+        : `${error.answer}, so ${error.advice}${joined}`;
     }
     return new DispatchGatewayError(
       error.status,
@@ -1775,7 +1817,7 @@ function refusalWithCode(error: unknown, suffix = ""): unknown {
   return new DispatchServiceError(
     error.code,
     error.status,
-    `${error.code}: ${error.message}${suffix}`,
+    `${error.code}: ${error.message}${joined}`,
     error.candidates,
     error.current,
     error.mismatches
@@ -2043,7 +2085,7 @@ export async function executeDispatchTool(
           const told = writeMayHaveLanded(error)
             ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again"
             : "the reason was not posted, so the close was not sent";
-          if (error instanceof DispatchServiceError) throw refusalWithCode(error, `; ${told}`);
+          if (error instanceof DispatchServiceError) throw refusalWithCode(error, told);
           throw withAccount(error, told);
         }
       }
@@ -2072,7 +2114,7 @@ export async function executeDispatchTool(
         // gateway's 500 page is not that answer, and gets no such reading.
         const taken =
           dispatchAnswered(error, 500) && newLinks.length > 0
-            ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)`
+            ? `one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)`
             : "";
         if (closingNote === undefined) throw refusalWithCode(error, taken);
         // The reason is on the issue, so a blind retry would post it a second time: the error
@@ -2086,8 +2128,7 @@ export async function executeDispatchTool(
         const landed = writeMayHaveLanded(error)
           ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`
           : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
-        if (error instanceof DispatchServiceError)
-          throw refusalWithCode(error, `${taken}; ${landed}`);
+        if (error instanceof DispatchServiceError) throw refusalWithCode(error, taken, landed);
         throw withAccount(error, landed);
       }
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;

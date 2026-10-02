@@ -105,11 +105,12 @@ func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *rec
 type enrollmentRow struct {
 	ID, Kind, Thumbprint string
 	Operator             *string
-	RuntimeID            string
+	RuntimeID, Slot      string
 	Subject              *string
 }
 
-// requester is the enrollment as the rules see it.
+// requester is the enrollment as the rules see it. A pod's slot is not part of it: every slot of
+// a pod is matched by its verified service-account subject alone.
 func (e enrollmentRow) requester() rules.Requester {
 	return rules.Requester{Kind: e.Kind, Operator: deref(e.Operator), Subject: deref(e.Subject)}
 }
@@ -306,7 +307,7 @@ func (m *Machine) createPending(ctx context.Context, enr enrollmentRow, r newReq
 	body := record.Body{
 		Request:         obj.Compact,
 		Approver:        r.approver,
-		Enrollment:      record.Enrollment{Kind: enr.Kind, RuntimeID: enr.RuntimeID, Operator: deref(enr.Operator)},
+		Enrollment:      record.Enrollment{Kind: enr.Kind, RuntimeID: enr.RuntimeID, Operator: deref(enr.Operator), Slot: enr.Slot},
 		LifetimeSeconds: int(r.lifetime.Seconds()),
 		RulesVersion:    r.rulesVersion,
 		ExpiresAt:       r.pendingExpiresAt,
@@ -624,9 +625,9 @@ func mayRevoke(login string, approver, operator *string) bool {
 // enrollment reads a live enrollment (not revoked, lease not lapsed); pgx.ErrNoRows otherwise.
 func (m *Machine) enrollment(ctx context.Context, id string) (enrollmentRow, error) {
 	var e enrollmentRow
-	err := m.Store.Pool.QueryRow(ctx, `select id, kind, operator, thumbprint, runtime_id, subject from enrollments
+	err := m.Store.Pool.QueryRow(ctx, `select id, kind, operator, thumbprint, runtime_id, slot, subject from enrollments
 		where id=$1 and revoked_at is null and lease_expires_at > now()`, id).
-		Scan(&e.ID, &e.Kind, &e.Operator, &e.Thumbprint, &e.RuntimeID, &e.Subject)
+		Scan(&e.ID, &e.Kind, &e.Operator, &e.Thumbprint, &e.RuntimeID, &e.Slot, &e.Subject)
 	return e, err
 }
 
