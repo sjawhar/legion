@@ -243,9 +243,9 @@ Every `dispatch_ask` passes four gates first:
    is not what this forbids; changing something else is. An ask that turns his complaint about
    one control into a choice about another does not address what he asked, and changing that
    other control is a change he never asked for. What is still an ask the moment you know it,
-   even before delivery, is anything "Anything that needs the human is an ask" (further down)
-   lists that the delivery waits on — including a conflict between what he asked for and another
-   of his rules, which this gate would otherwise bury as settled.
+   even before delivery, is anything "Anything you are blocked on a human for is an open ask"
+   (further down) lists that the delivery waits on — including a conflict between what he asked
+   for and another of his rules, which this gate would otherwise bury as settled.
 
 The platform PO audits open asks. One that fails a gate — or that points at another message in
 prose instead of carrying its content (below) — is retracted, with the PO's answer as the record.
