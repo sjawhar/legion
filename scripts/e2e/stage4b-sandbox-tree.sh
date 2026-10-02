@@ -1653,28 +1653,15 @@ drive_gated_spec() {
   until_true 43200 "a human to approve the $issue spec in Dispatch, opening its design gate" gate_open "$issue" "$artifact"
   approved=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.approvedVersion')
   asks=$(dispatch_get "issues/$issue/asks")
-  events=$(dispatch_get "issues/$issue/events")
+  events=$(dispatch_events "$issue")
   jq . <<<"$asks" >"$evidence/$issue-asks.json"
   jq . <<<"$events" >"$evidence/$issue-events.json"
-  # An approval row follows versions. ask.opened records its first hand-back and ask.edited records
-  # each later one whose requested_version advanced; old events use version as that value.
-  requested_versions=$(jq -r --arg artifact "$artifact" '
-    (
-      [.[] | select(.type == "ask.opened" and .payload.kind == "approval" and .payload.approval.artifact_id == $artifact)
-       | (.payload.approval.requested_version // .payload.approval.version)]
-      +
-      [.[] | select(
-        .type == "ask.edited"
-        and .payload.kind == "approval"
-        and .payload.approval.artifact_id == $artifact
-        and ((.payload.approval.requested_version // .payload.approval.version)
-          > (.payload.previous.approval.requested_version // .payload.previous.approval.version // 0)
-      ) | (.payload.approval.requested_version // .payload.approval.version)]
-    ) | unique | .[]
+  # An approval row follows versions. The shared selector reads the full event history: ask.opened
+  # records its first hand-back and ask.edited records each later requested_version advance.
+  requested_versions=$(jq -r -L "$root/scripts/e2e/lib" --arg artifact "$artifact" '
+    include "design-gate-approval-requests";
+    approval_requested_versions($artifact)
   ' <<<"$events")
-  if [ -z "$requested_versions" ]; then
-    requested_versions=$(jq -r --arg artifact "$artifact" '[.[] | select(.kind == "approval" and .approval.artifact_id == $artifact) | (.approval.requested_version // .approval.version)] | unique | .[]' <<<"$asks")
-  fi
   for version in $requested_versions; do
     dispatch_get "artifacts/$artifact/versions/$version" >"$evidence/$issue-spec-v$version.json" ||
       fail "$issue: version $version of its spec could not be read"
