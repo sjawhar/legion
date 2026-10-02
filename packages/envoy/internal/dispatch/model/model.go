@@ -789,12 +789,11 @@ type Comment struct {
 	AnchorPosition
 	ReplyTo *string `json:"reply_to"`
 	AskID   *string `json:"ask_id"`
-	// Turn is set on a reply to an open ask (AskID non-nil) and names who holds the
-	// turn after this comment: "human" when the human needs to act, "agent" when the
-	// comment is a progress note and the asking agent still owes the next move. A
-	// human's reply always hands the turn to the agent. Nil on replies under a closed
-	// ask (nothing is waiting) and on every other comment.
+	// Turn records the reply's own turn. WaitingOn is the open ask's derived turn once this
+	// comment becomes its newest reply, so a moved approval request remains agent-owned even
+	// when the replying session's default turn would otherwise be human.
 	Turn       *string           `json:"turn"`
+	WaitingOn  string            `json:"waiting_on,omitempty"`
 	Resolved   bool              `json:"resolved"`
 	ResolvedBy *Actor            `json:"resolved_by"`
 	ResolvedAt *string           `json:"resolved_at"`

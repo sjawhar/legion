@@ -82,7 +82,7 @@ func MoveApprovalAsks(ctx context.Context, tx pgx.Tx, broker *events.Broker, art
 		var editedAt time.Time
 		if err := tx.QueryRow(ctx, `
 			update asks
-			set question = $2, approval = $3, edited_at = now()
+			set question = $2, approval = $3, edited_at = clock_timestamp()
 			where id = $1
 			returning edited_at
 		`, ask.ID, ask.Question, approval).Scan(&editedAt); err != nil {

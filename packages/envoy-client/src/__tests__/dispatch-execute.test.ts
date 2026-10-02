@@ -5476,6 +5476,7 @@ describe("executeDispatchTool", () => {
         reply_to: null,
         ask_id: askID,
         turn: "human",
+        waiting_on: "human",
         resolved: false,
         suggestion: null,
         created_at: "2026-09-09T00:00:00Z",
@@ -5569,6 +5570,7 @@ describe("executeDispatchTool", () => {
         reply_to: null,
         ask_id: askID,
         turn: "agent",
+        waiting_on: "agent",
         resolved: false,
         suggestion: null,
         created_at: "2026-09-09T00:00:00Z",
@@ -5603,6 +5605,30 @@ describe("executeDispatchTool", () => {
         body: expect.objectContaining({ ask_id: askID, turn: "agent" }),
       },
     ]);
+  });
+
+  test("reports a moved approval ask's derived turn instead of the replying agent's turn", async () => {
+    const askID = "01234567-0000-4000-8000-000000000045";
+    const result = await executeDispatchTool({
+      tool: "dispatch_comment",
+      args: { issue: "DSP-42", body: "The revision is ready.", reply_to_ask: askID },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: (async () =>
+        response({
+          id: "comment-3",
+          issue_key: "DSP-42",
+          ask_id: askID,
+          turn: "human",
+          waiting_on: "agent",
+        })) as unknown as typeof fetch,
+    });
+
+    expect(result.text).toContain("ask now waiting on agent");
+    expect(result.details).toMatchObject({ ask_waiting_on: "agent" });
   });
 
   test("rejects a comment turn without reply_to_ask before calling the server", async () => {

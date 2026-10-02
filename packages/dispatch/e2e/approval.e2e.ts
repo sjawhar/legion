@@ -192,6 +192,46 @@ test("an approval request stays in one Inbox card while its document version mov
   }
 });
 
+test("a human comment, revision, and hand-back return an approval card to Waiting on you", async ({
+  browser,
+}) => {
+  await createProject({ key: "TURN", name: "Approval turn" });
+  const issue = await createIssue({
+    project: "TURN",
+    spec: "The plan.",
+    title: "Hand-back turn",
+  });
+  const requested = await requestApproval(
+    issue.primary_artifact_id,
+    { summary: "Names the initial proposal." },
+    session
+  );
+  await createComment(
+    issue.key,
+    { ask_id: requested.ask.id, body: "Please clarify the rollout." },
+    { login: "alice" }
+  );
+  await editArtifact(
+    issue.primary_artifact_id,
+    { ops: [{ op: "replace", find: "The plan.", with: "The revised plan." }] },
+    session
+  );
+  await requestApproval(issue.primary_artifact_id, { summary: "Clarifies the rollout." }, session);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    await expect(
+      page.locator('[data-inbox-section="human"]').getByTestId(`ask-${requested.ask.id}`)
+    ).toBeVisible();
+    await page.goto(`/issues/${issue.key}`);
+    await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (1)");
+  } finally {
+    await alice.close();
+  }
+});
+
 test("an approval ask's Inbox card shows a question carrying a long summary whole", async ({
   browser,
 }, testInfo) => {

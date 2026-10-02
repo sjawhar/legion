@@ -84,7 +84,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		  and ($2 = ''
 		       or ($2 = 'unassigned' and (i.key is null or i.assignee is null))
 		       or ($2 = 'login' and i.assignee = $3))
-		order by i.priority asc nulls last, coalesce(lr.turn, 'human') = 'agent' asc,
+		order by i.priority asc nulls last, (`+waitingOnExpression+`) = 'agent' asc,
 		         coalesce(lr.created_at, a.created_at) desc, a.id desc
 	`, project, assigneeMode, assigneeLogin, canonicalLogin(caller.ID))
 	if err != nil {

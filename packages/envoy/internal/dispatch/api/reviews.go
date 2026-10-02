@@ -490,6 +490,10 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 			open = &updated
 			events = append(events, event)
 		}
+		if err := asks.FollowAuthor(r.Context(), tx, open.ID, actor); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		if err := s.attachOpenedEventIDs(r.Context(), tx, []*model.Ask{open}); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -501,7 +505,6 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		s.publish(events...)
 		awaiting := *artifact.Approval
 		awaiting.State = "awaiting"
-		awaiting.RequestedBy = &actor
 		awaiting.AskID = &open.ID
 		WriteJSON(w, http.StatusOK, response{Ask: open, ArtifactID: artifact.ID, Version: version, Approval: awaiting})
 		return
@@ -609,7 +612,7 @@ func (s *server) updateApprovalAsk(ctx context.Context, tx pgx.Tx, owner owner, 
 	var editedAt time.Time
 	if err := tx.QueryRow(ctx, `
 		update asks
-		set question = $2, approval = $3, edited_at = now()
+		set question = $2, approval = $3, edited_at = clock_timestamp()
 		where id = $1
 		returning edited_at
 	`, ask.ID, ask.Question, approval).Scan(&editedAt); err != nil {

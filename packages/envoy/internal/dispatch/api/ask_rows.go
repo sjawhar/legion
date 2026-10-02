@@ -34,13 +34,27 @@ const lastReplyJoin = `
 		) lr on true`
 
 // waitingOnExpression puts a moved approval request with its agent until that agent hands its
-// current version back. All other open asks follow their newest thread turn.
+// current version back. A hand-back is newer than the thread reply it follows, so it hands the
+// turn to the human before ordinary replies again decide it.
 const waitingOnExpression = `case
 	when a.kind = 'approval'
 		and (a.approval->>'requested_version')::integer < (a.approval->>'version')::integer
 	then 'agent'
+	when a.kind = 'approval' and a.edited_at >= lr.created_at
+	then 'human'
 	else coalesce(lr.turn, 'human')
 end`
+
+func askWaitingOn(ctx context.Context, q queryer, askID string) (string, error) {
+	var waitingOn string
+	err := q.QueryRow(ctx, `select `+waitingOnExpression+`
+		from asks a`+lastReplyJoin+`
+		where a.id = $1 and a.state = 'open'`, askID).Scan(&waitingOn)
+	if err != nil {
+		return "", fmt.Errorf("read ask waiting_on: %w", err)
+	}
+	return waitingOn, nil
+}
 
 // askReadColumns are askRowColumns plus the newest comment in the ask's thread, which is
 // WaitingOn for an open ask and LastReply where a read carries one. Queries selecting them
