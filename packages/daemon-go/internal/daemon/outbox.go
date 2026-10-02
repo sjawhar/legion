@@ -588,7 +588,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
 			return fmt.Errorf("close the tree of claim %s: %w", token, err)
 		}
-		if err := r.cleanupIssueResources(ctx, issue); err != nil {
+		if err := r.cleanupIssueResources(ctx, issue, payload.Linger); err != nil {
 			return err
 		}
 		return nil
@@ -598,10 +598,11 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 }
 
 // cleanupIssueResources is the durable whole-issue effect after a tree-close row retired one
-// claim. It acts only once every persisted sibling claim of this exact issue is retired; a later
-// re-admission leaves one launching/active claim and fences an old close before the runtime ever
-// sees a delete. Runtime Release remains role-scoped.
-func (r *outbox) cleanupIssueResources(ctx context.Context, issue record.Issue) error {
+// claim. It acts only once every persisted sibling claim of this exact issue is retired; the
+// runtime then atomically checks that the root still lingers at treeGeneration, so a committed
+// re-admission start that has not yet made a claim fences the old close before deletion. Runtime
+// Release remains role-scoped.
+func (r *outbox) cleanupIssueResources(ctx context.Context, issue record.Issue, treeGeneration uint64) error {
 	cleaner, ok := r.supervisor.deps.Runtime.(runtime.IssueResourceCleaner)
 	if !ok {
 		return nil
@@ -623,7 +624,7 @@ func (r *outbox) cleanupIssueResources(ctx context.Context, issue record.Issue) 
 	if !found {
 		return nil
 	}
-	if err := cleaner.CleanupIssue(ctx, r.project, issue.Key); err != nil {
+	if err := cleaner.CleanupIssue(ctx, r.project, issue.Key, issue.Tree, treeGeneration); err != nil {
 		return fmt.Errorf("cleanup resources of closed issue %s: %w", issue.Key, err)
 	}
 	return nil
