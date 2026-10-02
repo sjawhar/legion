@@ -45,6 +45,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 )
 
@@ -111,6 +112,10 @@ type Runtime struct {
 	// holds launchedMu from its check through its delete (deleteOrphan).
 	launchedMu sync.Mutex
 	launched   map[string]bool
+	// resourceStore is injected by daemon boot before any claim launches. Unit rigs explicitly
+	// skip the production layout census and resource capability with test-only options.
+	resourceStore           *store.Store
+	testLayoutCensusSkipped bool
 }
 
 // New builds the runtime from opts, starts its Sandbox and pod informers for ctx's lifetime, and
@@ -137,10 +142,20 @@ func New(ctx context.Context, rc *rest.Config, opts Options) (*Runtime, error) {
 			return nil, err
 		}
 	}
+
 	if listener, ok := opts.Conns.(*stream.Listener); ok {
 		listener.SetLauncherResolver(r.LauncherResolver())
 	}
 	return r, nil
+}
+
+// SetIssueResourceStore injects the daemon's durable capability before supervision launches any
+// role. It is deliberately not an Option: production boot owns the store; unit rigs use the
+// explicit test-only layout-census skip.
+func (r *Runtime) SetIssueResourceStore(resources *store.Store) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.resourceStore = resources
 }
 
 // rejectLegacyIssueSandboxes is the Kubernetes half of the issue-pod layout fence. It runs before
@@ -256,6 +271,7 @@ func configure(opts Options) (*Runtime, error) {
 		tokens: opts.Tokens, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, issues: map[string]chan struct{}{},
 		trees: map[string]chan struct{}{}, launched: map[string]bool{}, launchers: newLaunchers(),
+		testLayoutCensusSkipped: opts.SkipLegacyLayoutCensusForTest,
 	}
 	if len(r.agent) == 0 {
 		r.agent = []string{defaultAgent}
