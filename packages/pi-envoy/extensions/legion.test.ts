@@ -1707,6 +1707,7 @@ describe("Legion OMP extension", () => {
     expect(requests.some((request) => request.path === "/v1/roles/set")).toBe(false);
     expect(exits).toEqual([]);
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+    expect(fixture.title.set).toEqual([]);
 
     // No tool gate was installed for this session either: a plain bash call, which an
     // unregistered root/phase worker would otherwise have blocked, passes through untouched.
@@ -1758,6 +1759,7 @@ describe("Legion OMP extension", () => {
     expect(requests.some((request) => request.path === "/v1/roles/set")).toBe(false);
     expect(exits).toEqual([]);
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+    expect(fixture.title.set).toEqual([]);
 
     await expect(
       toolCall(
@@ -3345,6 +3347,7 @@ describe("Legion OMP extension", () => {
     const subagentSwitch = subagent.handlers.get("session_switch");
     if (subagentSwitch === undefined) throw new Error("subagent switch handler missing");
     await subagentSwitch({ reason: "new" }, sessionContext("ses_subagent", childFile));
+    expect(subagent.title.set).toEqual([]);
     expect(listener.requests.filter((r) => r.path === "/legion/v1/controller/ready")).toEqual([
       controllerReadyBody("ses_pane_first", "/tmp/first.jsonl"),
     ]);
