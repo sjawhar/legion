@@ -17,6 +17,15 @@ const focusableSelector = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(", ");
 
+/** The controls focus can reach inside `container`, in order. One under a `hidden` ancestor - a
+ *  composer kept mounted, out of sight, for a send it has out - takes no focus, so it is neither
+ *  where the trap starts nor where it wraps. */
+function focusableIn(container: HTMLElement): HTMLElement[] {
+  return [...container.querySelectorAll<HTMLElement>(focusableSelector)].filter(
+    (element) => element.closest("[hidden]") === null
+  );
+}
+
 // Depth-counted so a picker opening inside an already-locked sheet does not unlock scroll
 // when the picker (not the sheet) closes first; only the outermost acquire/release touches
 // the DOM, and it restores the exact inline values a page may already have set.
@@ -124,9 +133,7 @@ export function useDialog<T extends HTMLElement>({
       }
       const initial =
         initialFocusRef?.current ??
-        (container === null
-          ? null
-          : (container.querySelectorAll<HTMLElement>(focusableSelector)[0] ?? container));
+        (container === null ? null : (focusableIn(container)[0] ?? container));
       initial?.focus();
     });
 
@@ -136,7 +143,7 @@ export function useDialog<T extends HTMLElement>({
       if (event.key !== "Tab" || container === null) {
         return;
       }
-      const elements = container.querySelectorAll<HTMLElement>(focusableSelector);
+      const elements = focusableIn(container);
       const first = elements[0];
       const last = elements[elements.length - 1];
       if (first === undefined || last === undefined) {

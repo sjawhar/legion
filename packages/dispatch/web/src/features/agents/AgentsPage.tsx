@@ -1,5 +1,5 @@
 import { DELIVERY_CAPABILITIES } from "@legion/contracts";
-import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   useCallback,
@@ -28,7 +28,7 @@ import { LabelPill } from "../../components/Pill";
 import { PinButton } from "../../components/PinButton";
 import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
-import { useSubmitGuard } from "../../hooks/useSubmitGuard";
+import { useSending } from "../../hooks/useSending";
 import {
   borderDefault,
   card,
@@ -579,10 +579,9 @@ function AgentRow({
   const [opened, setOpened] = useState(false);
   if (expanded && !opened) setOpened(true);
   const sendKey = useAgentSendKey(agent.session_id);
-  const sending = useIsMutating({ mutationKey: sendKey }) > 0;
-  const submitGuard = useSubmitGuard();
+  const { sending, sendingNow } = useSending(sendKey);
   const beginReply = (next: AgentReply) => {
-    if (!submitGuard.held()) setReplyTo(next);
+    if (!sendingNow()) setReplyTo(next);
   };
   const detailsId = useId();
 
@@ -726,9 +725,7 @@ function AgentRow({
               onCancelReply={() => setReplyTo(null)}
               onClose={leaveAgentComposer}
               replyTo={replyTo}
-              sending={sending}
               sendKey={sendKey}
-              submitGuard={submitGuard}
             />
           </div>
         </div>

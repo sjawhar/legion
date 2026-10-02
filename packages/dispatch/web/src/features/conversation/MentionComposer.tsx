@@ -23,7 +23,7 @@ import { QueryError } from "../../components/QueryError";
 import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
-import { type SubmitGuard, useSubmitGuard } from "../../hooks/useSubmitGuard";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   badgeMed,
   borderDefault,
@@ -400,12 +400,10 @@ interface MentionComposerProps {
   readonly seedMentions?: readonly { readonly target: string; readonly title: string }[];
   readonly inline?: boolean;
   readonly kind?: ComposerKind;
-  /** Names the send, so a host can read whether it is in flight (`useIsMutating`). */
+  /** Names the send, so a host can hold its own controls - a Reply, an issue picker - while it is
+   *  out (`useSending`), from Send's own task on. That decides only what the reader sees: the
+   *  request is frozen when Send starts (`SentRequest`), whatever those controls do. */
   readonly mutationKey?: MutationKey;
-  /** Shared by a host whose own controls - a Reply, an issue picker - should hold from Send's task
-   *  until the answer, as this fieldset does. It decides what the reader sees: the request is
-   *  frozen when Send starts (`SentRequest`), whatever those controls do. */
-  readonly submitGuard?: SubmitGuard;
   readonly onCancelReply?: () => void;
   readonly onClose: () => void;
   readonly onSent: () => void;
@@ -429,7 +427,6 @@ export function MentionComposer({
   inline = false,
   kind = "comment",
   mutationKey,
-  submitGuard: suppliedSubmitGuard,
   onCancelReply,
   onClose,
   onKindChange,
@@ -504,8 +501,9 @@ export function MentionComposer({
     setAskOptions([emptyAskOption()]);
   };
   const references = useMemo(() => composerReferences(body), [body]);
-  const localSubmitGuard = useSubmitGuard();
-  const submitGuard = suppliedSubmitGuard ?? localSubmitGuard;
+  // This composer's own hold, from Send's task until the server answers. It is never shared: a
+  // composer that mounts while another one's send is out holds nothing for it.
+  const submitGuard = useSubmitGuard();
   const uploadRetryGuard = useSubmitGuard();
   const editBody = edit?.body;
 

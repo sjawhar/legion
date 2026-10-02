@@ -1,3 +1,4 @@
+import type { MutationKey } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
@@ -94,6 +95,10 @@ export interface ThreadCardProps {
   pendingAction: boolean;
   /** Renders the root and reply delivery attempts where the owner has event-sourced deliveries. */
   renderDeliveries?(comment: ThreadComment): ReactNode;
+  /** Names the reply composer's send, so a host that holds its own Replies while one of its sends
+   *  is out (the Conversation tab) holds them for this one too, and holds the thread open while
+   *  this one is. */
+  replyMutationKey?: MutationKey;
   /** Conversation owns the turn-level copy control outside this card. */
   showReference?: boolean;
   /** Document margins pulse an orphaned block; timeline cards link to the document instead. */
@@ -207,6 +212,7 @@ export function ThreadCard({
   pendingAction,
   pulseOrphanBlock = true,
   renderDeliveries,
+  replyMutationKey,
   thread,
   viewerLogin,
   editingCommentId: editingId,
@@ -418,6 +424,7 @@ export function ThreadCard({
                 <MentionComposer
                   inline
                   kind="comment"
+                  mutationKey={replyMutationKey}
                   onCancelReply={onToggle}
                   onClose={onToggle}
                   onSent={() => {}}

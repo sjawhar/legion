@@ -12,7 +12,7 @@ import {
 import { api } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
 import type { Agent } from "../../api/types";
-import type { SubmitGuard } from "../../hooks/useSubmitGuard";
+import { useSending } from "../../hooks/useSending";
 import {
   borderDefault,
   dangerText,
@@ -35,7 +35,7 @@ export interface AgentReply {
   readonly target: ReplyTarget;
 }
 
-/** The name of an agent row's send. The row reads it (`useIsMutating`) to hold what a message on
+/** The name of an agent row's send. The row reads it (`useSending`) to hold what a message on
  *  its way has already fixed - the picker and the Reply buttons - and the composer names its send
  *  with it, so the two keys cannot drift apart. It belongs to one mount of the row: a row that
  *  unmounts mid-send (its session left the registry, or the reader left the page) comes back with
@@ -56,8 +56,6 @@ export function AgentMessageComposer({
   onCancelReply,
   onClose,
   replyTo,
-  sending,
-  submitGuard,
   sendKey,
 }: {
   agent: Agent;
@@ -67,16 +65,13 @@ export function AgentMessageComposer({
    *  which is NOT one level out; that case is filtered below. */
   onClose: () => void;
   replyTo: AgentReply | null;
-  /** Whether this row's send is in flight (`sendKey`). The message is addressed by then, so the
-   *  picker holds until it lands. */
-  sending: boolean;
-  /** The row's synchronous send hold, shared with the composer, so the picker and Reply hold from
-   *  Send's own task, before `sending` renders. The send's request is frozen at Send either way. */
-  submitGuard: SubmitGuard;
-  /** The row's `useAgentSendKey`, which names the composer's send. */
+  /** The row's `useAgentSendKey`, which names the composer's send. While that send is out the
+   *  message is addressed, so the picker holds until it lands, from Send's own task on
+   *  (`useSending`). The send's request is frozen at Send either way. */
   sendKey: MutationKey;
 }): ReactNode {
   const queryClient = useQueryClient();
+  const { sending, sendingNow } = useSending(sendKey);
   const [issueKey, setIssueKey] = useState("");
   const [issuePickerOpen, setIssuePickerOpen] = useState(false);
   // `MentionComposer` calls `onSent` and then `onClose` on a successful send (its save's
@@ -139,7 +134,7 @@ export function AgentMessageComposer({
    *  issue already held leaves alone. */
   const [commits, setCommits] = useState(0);
   const commitIssue = (value: string) => {
-    if (submitGuard.held()) return;
+    if (sendingNow()) return;
     setIssueKey(value);
     setIssuePickerOpen(false);
     setCommits((count) => count + 1);
@@ -221,7 +216,7 @@ export function AgentMessageComposer({
           data-agent-issue-picker=""
           disabled={sending}
           onClick={() => {
-            if (!submitGuard.held()) setIssuePickerOpen((open) => !open);
+            if (!sendingNow()) setIssuePickerOpen((open) => !open);
           }}
           type="button"
         >
@@ -251,7 +246,7 @@ export function AgentMessageComposer({
                   setPendingIssue(issueKey);
                 }}
                 onChange={(event) => {
-                  if (submitGuard.held()) return;
+                  if (sendingNow()) return;
                   setPendingIssue(event.target.value);
                   // A step from the select's own keys only moves the selection, so a keyboard
                   // reader can pass the first option to reach the second; `Enter` below is the
@@ -261,7 +256,7 @@ export function AgentMessageComposer({
                   commitIssue(event.target.value);
                 }}
                 onKeyDown={(event) => {
-                  if (submitGuard.held()) {
+                  if (sendingNow()) {
                     event.preventDefault();
                     return;
                   }
@@ -304,7 +299,6 @@ export function AgentMessageComposer({
             : [{ target: `session:${agent.session_id}`, title: agent.title || agent.session_id }]
         }
         mutationKey={sendKey}
-        submitGuard={submitGuard}
         onCancelReply={onCancelReply}
         onClose={() => {
           if (sentJustNow.current) {

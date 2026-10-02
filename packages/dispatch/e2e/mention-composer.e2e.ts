@@ -237,6 +237,48 @@ test("a same-task Reply cannot send a conversation comment to an agent's message
   }
 });
 
+// A thread card's own reply composer lives in the card's open thread, so the thread holds open
+// while that reply is out - from Send's own task on - and its refusal and draft stay there.
+test("a conversation thread's own reply holds Collapse thread while it is out", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "a phone opens the thread full-screen instead");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Held thread" });
+  const earlier = await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const turn = page.locator(`[data-turn="comment:${earlier.id}"]`);
+    await turn.getByRole("button", { name: "Expand thread" }).click();
+    const form = turn.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const collapse = turn.getByRole("button", { name: "Collapse thread" });
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Thread reply");
+    const collapseButton = await collapse.elementHandle();
+    await form.evaluate((node, collapseControl) => {
+      const sendButton = node.querySelector<HTMLButtonElement>('button[type="submit"]');
+      if (sendButton === null || !(collapseControl instanceof HTMLButtonElement))
+        throw new Error("expected Send and the thread's Collapse");
+      sendButton.click();
+      collapseControl.click();
+    }, collapseButton);
+
+    await expect(field).toHaveValue("Thread reply");
+    await expect(field).toBeDisabled();
+    await expect(collapse).toBeDisabled();
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(field).toHaveValue("Thread reply");
+    await expect(collapse).toBeEnabled();
+  } finally {
+    await alice.close();
+  }
+});
+
 test("E7b and Retry: removing a prefilled mention creates a plain reply, and retries name their target", async ({
   browser,
 }) => {
