@@ -7,9 +7,9 @@ import (
 
 // PersonMembership is what Dispatch holds to confirm that a person signed in through the sign-in
 // pool may still use it: the pool's refresh token for them and when their membership was last
-// confirmed. A person recorded any other way (the trusted identity header, the local dev sign-in,
-// the people migration), or whose sign-in has ended, holds neither: an empty RefreshToken and a
-// zero ConfirmedAt.
+// confirmed. A person recorded any other way (the local/test identity header, the local dev
+// sign-in, the people migration), or whose sign-in has ended, holds neither: an empty RefreshToken
+// and a zero ConfirmedAt.
 type PersonMembership struct {
 	RefreshToken string
 	ConfirmedAt  time.Time

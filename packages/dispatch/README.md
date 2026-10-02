@@ -43,7 +43,7 @@ runs the Vite development server for interface work.
 server and Postgres. The harness starts `e2e/run-server.sh` unless
 `PLAYWRIGHT_BASE_URL` selects a deployed server. The script resolves the
 concrete Go binary in the caller's toolchain environment, then starts Dispatch
-with pinned server settings: trusted `X-Dispatch-User` identity for `alice`
+with pinned server settings: test-only `X-Dispatch-User` identity for `alice`
 and `bob`, `DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
 key and cookie-signing key, a loopback listen host and the suite's dashboard
 origin. The server process has no caller Home or XDG directory and receives no
@@ -76,7 +76,7 @@ DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslm
 ## Acceptance run against the deployed image
 
 The `acceptance` Compose profile runs Playwright against a locally built Dispatch image with its
-own Postgres volume and database. It uses header identity for `alice` and `bob`, an
+own Postgres volume and database. It uses test-only header identity for `alice` and `bob`, an
 acceptance-only agent token, disabled NATS, and port 8767; it starts only the named acceptance
 service and its database dependency.
 

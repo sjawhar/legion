@@ -189,7 +189,7 @@ until_true 60 "the Envoy listener" listener "http://127.0.0.1:$envoy_port/v1/ses
 env -i PATH="$PATH" HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent XDG_DATA_HOME=/nonexistent \
   DATABASE_URL="postgres://dispatch:dispatch@127.0.0.1:$pg_port/dispatch?sslmode=disable" \
   DISPATCH_AGENT_TOKEN="$(cat "$work/dispatch-token")" \
-  DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$dispatch_port" \
+  DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$dispatch_port" \
   DISPATCH_SERVER_URL="http://127.0.0.1:$dispatch_port" DISPATCH_SIGNING_KEY="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" \
   DISPATCH_WEB_DIST="$root/packages/dispatch/web/dist" ENVOY_URL="http://127.0.0.1:$envoy_port" \
   ENVOY_TOKEN="$(cat "$work/envoy-token")" NATS_URLS="$nats_url" \

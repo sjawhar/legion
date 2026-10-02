@@ -361,7 +361,7 @@ func TestAuthStartWithoutSignInIsUnavailable(t *testing.T) {
 	}
 }
 
-// newTestRouter is a router on header identity with no sign-in configured.
+// newTestRouter injects header identity without configuring sign-in.
 func newTestRouter(t *testing.T) (http.Handler, *AppContext) {
 	t.Helper()
 	people := newMemoryPeople()

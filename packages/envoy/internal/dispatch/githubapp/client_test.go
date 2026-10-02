@@ -299,6 +299,47 @@ func newTestClient(t *testing.T, fake *fakeGitHub) *Client {
 	return client
 }
 
+func TestReadRejectsAResponseLargerThanTheLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, strings.Repeat("x", responseLimit+1))
+	}))
+	t.Cleanup(server.Close)
+	_, pemText := testKeyPEM(t)
+	client, err := New(&auth.AppConfig{ClientID: "Iv1.testclient", PEM: pemText}, server.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	body, status, header, err := client.Read(context.Background(), "installation-token", "/repos/acme/web/pulls/7")
+	if err == nil || !strings.Contains(err.Error(), "1048576-byte limit") {
+		t.Fatalf("Read: err = %v, want a response-limit error", err)
+	}
+	if body != nil || status != 0 || header != nil {
+		t.Fatalf("Read: body=%d status=%d header=%v, want no truncated response", len(body), status, header)
+	}
+}
+
+func TestReadAcceptsAResponseAtTheLimit(t *testing.T) {
+	want := strings.Repeat("x", responseLimit)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, want)
+	}))
+	t.Cleanup(server.Close)
+	_, pemText := testKeyPEM(t)
+	client, err := New(&auth.AppConfig{ClientID: "Iv1.testclient", PEM: pemText}, server.URL)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	body, status, _, err := client.Read(context.Background(), "installation-token", "/repos/acme/web/pulls/7")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if status != http.StatusOK || string(body) != want {
+		t.Fatalf("Read: status=%d body length=%d, want 200 and %d bytes", status, len(body), len(want))
+	}
+}
+
 func TestCheckSourceVerifiesJWTAndResolvesInstallation(t *testing.T) {
 	fake := &fakeGitHub{
 		t:              t,

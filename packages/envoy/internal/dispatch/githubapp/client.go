@@ -64,6 +64,15 @@ const (
 	blobResponseLimit = 2 << 20
 )
 
+// ResponseTooLargeError reports a response that did not fit inside a caller's configured limit.
+type ResponseTooLargeError struct {
+	Limit int64
+}
+
+func (err *ResponseTooLargeError) Error() string {
+	return fmt.Sprintf("GitHub response body exceeds the %d-byte limit", err.Limit)
+}
+
 const defaultBase = "https://api.github.com"
 
 // tokenExpirySlack retires a cached installation token this long before
@@ -251,8 +260,7 @@ func (c *Client) RepositoryToken(ctx context.Context, owner, repo string) (strin
 }
 
 // Read performs GET path (an API path with its query, under the API origin) with an
-// installation token, and returns GitHub's answer as it came: body (up to the response limit),
-// status and headers.
+// installation token, returning GitHub's complete answer when it fits within the response limit.
 func (c *Client) Read(ctx context.Context, token, path string) ([]byte, int, http.Header, error) {
 	if c == nil {
 		return nil, 0, nil, ErrNoAppKey
@@ -336,7 +344,7 @@ func (c *Client) doLimited(ctx context.Context, method, target, authorization st
 	return body, status, err
 }
 
-// request performs one API call and returns its body (read up to limit), status and headers.
+// request performs one API call and returns its complete body when it fits within limit, status and headers.
 func (c *Client) request(ctx context.Context, method, target, authorization string, limit int64) ([]byte, int, http.Header, error) {
 	request, err := http.NewRequestWithContext(ctx, method, target, nil)
 	if err != nil {
@@ -349,9 +357,12 @@ func (c *Client) request(ctx context.Context, method, target, authorization stri
 		return nil, 0, nil, fmt.Errorf("%s %s: %w", method, target, err)
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, limit))
+	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("read %s %s response: %w", method, target, err)
+	}
+	if int64(len(body)) > limit {
+		return nil, 0, nil, &ResponseTooLargeError{Limit: limit}
 	}
 	return body, response.StatusCode, response.Header, nil
 }

@@ -129,10 +129,11 @@ write identity errors with `identity.WriteError`.
   renews that sign-in at least hourly: a refresh the pool refuses, or one whose
   ID token no longer puts the person in the group, advances their session
   generation and forgets the token, ending every session they hold.
-- `DISPATCH_IDENTITY=header:<Header-Name>` accepts any person a trusted proxy
-  names in that header, lowercased, and records them in `people`. With
-  `DISPATCH_SIGNIN_ISSUER` set it also requires
-  `DISPATCH_IDENTITY_HEADER_TRUSTED=1`.
+- `DISPATCH_IDENTITY=header:<Header-Name>` is for tests and local harnesses
+  only, never for a production Dispatch deployment. It accepts the named
+  header's value lowercased and records it in `people`; it requires
+  `DISPATCH_IDENTITY_HEADER_TRUSTED=1` and refuses any `DISPATCH_SIGNIN_*`
+  setting, so it cannot share a deployment with Google sign-in.
 - `DISPATCH_ALLOWED_LOGINS` and `DISPATCH_APP_CLIENT_SECRET` are refused at
   boot as removed settings, naming what replaced them.
 - `DISPATCH_DEV_SIGNIN=1` mounts `GET /auth/_dev/signin?login=<email>&next=<path>`

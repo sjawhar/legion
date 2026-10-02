@@ -225,7 +225,7 @@ func main() {
 		}
 		requestIdentity = cookieIdentity
 	} else {
-		slog.Warn("dispatch: trusting request identity header", "header", boot.IdentityHeader)
+		slog.Warn("dispatch: using test/local header identity", "header", boot.IdentityHeader)
 		requestIdentity = identity.HeaderIdentity{Header: boot.IdentityHeader, People: people}
 	}
 
@@ -470,6 +470,7 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.ListenAddr = listenAddr
+	identityMode := strings.TrimSpace(getenv("DISPATCH_IDENTITY"))
 	signInSettings := []struct{ name, value string }{
 		{"DISPATCH_SIGNIN_ISSUER", boot.SignInIssuer},
 		{"DISPATCH_SIGNIN_CLIENT_ID", boot.SignInClientID},
@@ -484,6 +485,9 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 			set = append(set, setting.name)
 		}
 	}
+	if strings.HasPrefix(identityMode, "header:") && len(set) > 0 {
+		return bootConfig{}, fmt.Errorf("%s must be unset because header identity and Google sign-in cannot share a deployment: header identity is only for tests and local harnesses", strings.Join(set, ", "))
+	}
 	if len(set) > 0 && len(missing) > 0 {
 		return bootConfig{}, fmt.Errorf("Google sign-in needs all four of DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and DISPATCH_SIGNIN_GROUP: %s set, %s missing", strings.Join(set, ", "), strings.Join(missing, ", "))
 	}
@@ -496,7 +500,7 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		return bootConfig{}, fmt.Errorf("DISPATCH_DEV_SIGNIN=%q (expected 1 or unset)", flag)
 	}
 
-	switch mode := strings.TrimSpace(getenv("DISPATCH_IDENTITY")); {
+	switch mode := identityMode; {
 	case mode == "" || mode == "cookie":
 		if boot.SignInIssuer == "" && !devSignIn {
 			return bootConfig{}, errors.New("cookie identity signs people in with Google Workspace: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and DISPATCH_SIGNIN_GROUP are required")
@@ -506,8 +510,8 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		if boot.IdentityHeader == "" {
 			return bootConfig{}, errors.New("DISPATCH_IDENTITY header name required")
 		}
-		if boot.SignInIssuer != "" && getenv("DISPATCH_IDENTITY_HEADER_TRUSTED") != "1" {
-			return bootConfig{}, errors.New("DISPATCH_IDENTITY_HEADER_TRUSTED=1 required with Google sign-in and header identity")
+		if getenv("DISPATCH_IDENTITY_HEADER_TRUSTED") != "1" {
+			return bootConfig{}, errors.New("DISPATCH_IDENTITY_HEADER_TRUSTED=1 required: header identity is only for tests and local harnesses")
 		}
 	default:
 		return bootConfig{}, fmt.Errorf("DISPATCH_IDENTITY=%q (expected cookie or header:<Header-Name>)", mode)

@@ -166,6 +166,7 @@ dispatch_env=(
   DATABASE_URL="$database_url"
   DISPATCH_AGENT_TOKEN="$shared_dispatch_token"
   DISPATCH_IDENTITY=header:X-Dispatch-User
+  DISPATCH_IDENTITY_HEADER_TRUSTED=1
   DISPATCH_LISTEN_HOST=127.0.0.1
   DISPATCH_PORT="$dispatch_port"
   NATS_URLS="nats://127.0.0.1:$nats_port"

@@ -54,8 +54,8 @@ func (i CookieIdentity) Login(r *http.Request) (string, error) {
 	return session.Login, nil
 }
 
-// HeaderIdentity resolves the person a trusted proxy names in Header, by email. Every person it
-// resolves is recorded as having signed in.
+// HeaderIdentity resolves the person a test or local harness names in Header, by email. Every
+// person it resolves is recorded as having signed in.
 type HeaderIdentity struct {
 	Header string
 	People auth.PeopleStore
