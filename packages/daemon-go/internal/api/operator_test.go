@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"slices"
@@ -18,6 +19,16 @@ const architectToken = claim.Token("legion-legion-legion-208-architect")
 
 func spawnBody() SpawnRequest {
 	return SpawnRequest{Tree: "LEGION-208", Issue: "LEGION-208", Role: claim.RoleArchitect, Prompt: "Reply ready and wait."}
+}
+
+type recordedTreeCleanup struct {
+	project, tree string
+	err           error
+}
+
+func (c *recordedTreeCleanup) CleanupTree(_ context.Context, project, tree string) error {
+	c.project, c.tree = project, tree
+	return c.err
 }
 
 // Every operator route compares the bearer in constant time and answers 403 to anything else —
@@ -368,6 +379,26 @@ func TestTheOperatorClosesATreeNoWorkflowIssueBacks(t *testing.T) {
 				t.Fatalf("releases = %+v, want the root released once", releases)
 			}
 		})
+	}
+}
+
+// A tree without a workflow issue has no outbox row. Once every claim stopped, the operator route
+// invokes the explicit durable tree-resource capability with the configured runtime project and
+// tree; it never invents a workflow record merely to get cleanup.
+func TestOperatorCloseInvokesDurableTreeCleanupWithoutAWorkflowRecord(t *testing.T) {
+	h := newHarness(t)
+	cleaner := &recordedTreeCleanup{}
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, TreeCleaner: cleaner,
+	}).Handler
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("close = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	if cleaner.project != testProject || cleaner.tree != "LEGION-208" {
+		t.Fatalf("tree cleanup = project %q tree %q, want %q %q", cleaner.project, cleaner.tree, testProject, "LEGION-208")
 	}
 }
 

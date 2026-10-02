@@ -282,24 +282,24 @@ func (r *liveRig) checkSecretsCopiedTokenNegative() error {
 	return nil
 }
 
-// secrets-self-enroll-negative: inside a pod there is no launcher credential; an enroll attempt with
-// a fresh key and the pod's own token, bearing the pod's boot token as if it were one, is 401.
+// secrets-self-enroll-negative: a pod cannot mint another enrollment through the agent-secrets
+// CLI. The only CLI enrollment route is a helper-backed box enrollment; pod enrollment is the
+// daemon's launcher-proof path, so the CLI refuses before it could present a credential.
 func (r *liveRig) checkSecretsSelfEnrollNegative() error {
 	root := r.claim("root")
-	script := fmt.Sprintf(`mkdir -p /tmp/second && tp=$(/opt/legion/go/bin/agent-secrets keygen --out /tmp/second) && /opt/legion/go/bin/agent-secrets enroll --launcher-token-file %s/%s --kind pod --runtime-id "$POD_UID" --thumbprint "$tp" --approver-issue %s --pod-token-file %s/%s 2>&1; echo "---exit $?---"`,
-		generationDir(root.gen), bootTokenKey, root.issue, AgentSecretsTokenDir, AgentSecretsTokenFile)
+	script := `mkdir -p /tmp/second && tp=$(/opt/legion/go/bin/agent-secrets keygen --out /tmp/second) && /opt/legion/go/bin/agent-secrets enroll --kind pod --runtime-id "$POD_UID" --thumbprint "$tp" 2>&1; echo "---exit $?---"`
 	out, err := r.exec(root, "sh", "-c", script)
 	if err != nil && !strings.Contains(out, "---exit ") {
 		return err
 	}
-	if strings.Contains(out, "---exit 0---") || !strings.Contains(out, "401") {
-		return fmt.Errorf("a self-enrollment from inside the pod was not refused 401: %s", out)
+	if strings.Contains(out, "---exit 0---") || !strings.Contains(out, "--helper is required") {
+		return fmt.Errorf("a self-enrollment from inside the pod was not refused by the CLI boundary: %s", out)
 	}
 	self, code, _, err := r.agentSecrets(root, "self", "--json")
 	if err != nil || code != 0 || !strings.Contains(self, r.enrollments[root.token].id) {
 		return fmt.Errorf("after the attempt, agent-secrets self answered %q (exit %d): the pod's own enrollment must be unchanged", self, code)
 	}
-	note("runtime", "root: enroll with the pod's boot token as bearer → 401; the pod's enrollment is unchanged (a second session in the pod shares it, by the spec's pod-generation rule, and cannot become a second identity)")
+	note("runtime", "root: direct agent-secrets enroll refused before broker access; the pod's enrollment is unchanged")
 	return nil
 }
 

@@ -813,6 +813,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
 		claimReady = workflow.claimReady
 	}
+	treeCleaner, _ := s.supervisor.deps.Runtime.(api.TreeResourceCleaner)
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{
 			store:        st,
@@ -840,6 +841,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Tokens:            tokens,
 		GitHubOwner:       githubOwner(cfg),
 		Grants:            grants,
+		TreeCleaner:       treeCleaner,
 		ClaimReady:        claimReady,
 	})
 

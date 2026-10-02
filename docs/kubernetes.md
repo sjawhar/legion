@@ -353,15 +353,26 @@ was not made by this runtime (`packages/daemon-go/internal/runtime/sandbox`).
 
 Releasing a role ends only its process. The issue owns its Sandbox, its role Secrets and, for a
 root, the tree PVC, recorded in the daemon's store (`issue_resources`) before any role of it starts.
-Once an issue's close has retired every claim of it, the outbox cleans its resources, and the store
-begins that cleanup only in the same transaction that finds no claim of the issue but retired, so a
-re-admitted issue is never cleaned; a launch that arrives during a cleanup waits for it to be
-confirmed. A child issue's Sandbox is deleted and its absence confirmed through the API. A root is
-cleaned last, because its Sandbox owns the tree PVC and its deletion lets garbage collection take
-the volume every pod of the tree mounts: the root's cleanup begins only when every child record of
-the tree is confirmed, refuses every new child from then on, and deletes nothing while the API still
-lists a child Sandbox of the tree. Then the root Sandbox is deleted and awaited, then the PVC, and
-the root is confirmed, and so admitted again, only once both are gone.
+Once an issue's close has retired every claim of it, the outbox cleans its resources. A workflow
+close carries its root linger generation: the cleanup locks the root workflow record before its
+claim census, so a committed re-admission and its pending start fence an old close even before that
+start creates a claim. A cleanup already begun but not confirmed resumes after such a re-admission;
+its marker remains the new start's wait until API confirmation.
+
+A child issue's Sandbox is deleted and its absence confirmed through the API. A root is cleaned
+last: its cleanup begins only when every child record is confirmed, then refuses new children and
+requires the API to list no child Sandbox of the tree. The root Sandbox delete carries its UID and
+resourceVersion plus `foreground` propagation. Agent Sandbox v1.0.3 creates the root tree PVC with
+that Sandbox as its controller owner and `blockOwnerDeletion: true`; foreground deletion keeps the
+owner visible until Kubernetes garbage collection deletes that blocking dependent. The restricted
+daemon has no PVC API verb, so it confirms the root Sandbox is NotFound before confirming the
+durable cleanup; it does not read or delete a PVC. The live runtime proof must observe the actual
+PVC owner reference and its absence after foreground deletion, rather than infer that result from
+labels or a generic garbage-collection rule.
+
+An operator-created tree has no workflow record. After its operator close has stopped every claim,
+the daemon's explicit tree-resource capability reads its durable rows and applies the same
+child-first/root-last cleanup; it never manufactures a workflow issue to authorize it.
 
 Before the daemon opens its store, so before any schema write, image probe or reconcile, it checks
 that Agent Sandbox is installed and refuses a namespace that still holds a per-claim Sandbox of the

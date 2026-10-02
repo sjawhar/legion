@@ -629,16 +629,17 @@ func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	return nil
 }
 
-// CleanupIssue is the sole whole-issue delete capability, which the outbox calls once an issue's
-// close retired every claim of it. BeginIssueCleanup locks and checks the root linger generation
-// with the resource lifecycle, so a committed re-admission and its pending start fence an old
-// close even before the start creates a claim. A child issue's Sandbox is deleted and its absence
-// confirmed through the API before its record is confirmed. A tree root is cleaned last, because
-// its Sandbox owns the tree PVC and deleting it lets owner-reference garbage collection take the
-// volume every pod of the tree mounts: BeginIssueCleanup refuses the root while any child record of
-// the tree is unconfirmed and, once begun, refuses every new child admission; then the API must
-// list no child Sandbox of the tree either. Only after both is the root Sandbox deleted and waited
-// out, then the PVC, and the root's cleanup is confirmed once both are gone.
+// CleanupIssue is the sole whole-issue delete capability. The outbox calls it for a workflow
+// linger close, and CleanupTree calls it for explicit operator authority over a non-workflow tree.
+// BeginIssueCleanup locks and checks the root linger generation for the first case, so a committed
+// re-admission and its pending start fence an old close even before the start creates a claim. A
+// child issue's Sandbox is deleted and its absence confirmed through the API before its record is
+// confirmed. A tree root is cleaned last, because its Sandbox owns the tree PVC: BeginIssueCleanup
+// refuses the root while any child record is unconfirmed and, once begun, refuses every new child
+// admission; then the API must list no child Sandbox of the tree either. Its UID/resourceVersion-
+// fenced foreground Sandbox deletion remains visible until Kubernetes garbage collection deleted
+// the root PVC's blocking owner-dependent. Sandbox NotFound is therefore the restricted runtime's
+// complete cleanup confirmation: it has no PVC API grant and never deletes a PVC itself.
 func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string, treeGeneration uint64) error {
 	if project != r.project {
 		return fmt.Errorf("cleanup issue %s: project %s is not runtime project %s", issue, project, r.project)
@@ -671,43 +672,51 @@ func (r *Runtime) CleanupIssue(ctx context.Context, project, issue, tree string,
 		return fmt.Errorf("cleanup issue %s: read Sandbox %s: %w", issue, resource.Sandbox, err)
 	default:
 		uid, resourceVersion := sandbox.GetUID(), sandbox.GetResourceVersion()
+		options := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &resourceVersion}}
+		if root {
+			foreground := metav1.DeletePropagationForeground
+			options.PropagationPolicy = &foreground
+		}
 		deleting, cancel := call(ctx)
-		err = r.sandboxClient().Delete(deleting, resource.Sandbox, metav1.DeleteOptions{
-			Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &resourceVersion},
-		})
+		err = r.sandboxClient().Delete(deleting, resource.Sandbox, options)
 		cancel()
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("cleanup issue %s: delete Sandbox %s: %w", issue, resource.Sandbox, err)
 		}
 	}
+	// A root's tree PVC is a blocking controller-owned Sandbox dependent: foreground deletion keeps
+	// the root Sandbox visible until Kubernetes garbage collection deleted that PVC. The restricted
+	// daemon identity has no PVC verb, so Sandbox NotFound is the API confirmation this durable
+	// cleanup requires; no PVC read or delete may weaken the grant.
 	if err := r.awaitSandboxDeleted(ctx, resource.Sandbox); err != nil {
 		return err
 	}
-	if root {
-		pvc := treeVolume + "-" + resource.Sandbox
-		reading, cancel := call(ctx)
-		claim, err := r.kube.CoreV1().PersistentVolumeClaims(r.namespace).Get(reading, pvc, metav1.GetOptions{})
-		cancel()
-		switch {
-		case apierrors.IsNotFound(err):
-		case err != nil:
-			return fmt.Errorf("cleanup root issue %s: read tree PVC %s after its root Sandbox is gone: %w", issue, pvc, err)
-		default:
-			uid, resourceVersion := claim.GetUID(), claim.GetResourceVersion()
-			deleting, cancel := call(ctx)
-			err = r.kube.CoreV1().PersistentVolumeClaims(r.namespace).Delete(deleting, pvc, metav1.DeleteOptions{
-				Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &resourceVersion},
-			})
-			cancel()
-			if err != nil && !apierrors.IsNotFound(err) {
-				return fmt.Errorf("cleanup root issue %s: delete tree PVC %s after its root Sandbox is gone: %w", issue, pvc, err)
-			}
-		}
-		if err := r.awaitPVCDeleted(ctx, pvc); err != nil {
+	return resources.ConfirmIssueCleanup(ctx, project, issue, resource.CleanupGeneration)
+}
+
+// CleanupTree is the operator-close capability for a tree that has no workflow record. It reads
+// only the runtime's durable resource rows, cleans every child then its root, and passes a zero
+// tree generation to mark this as explicit operator authority rather than a workflow linger close.
+func (r *Runtime) CleanupTree(ctx context.Context, project, tree string) error {
+	if project != r.project {
+		return fmt.Errorf("cleanup tree %s: project %s is not runtime project %s", tree, project, r.project)
+	}
+	r.mu.Lock()
+	resources := r.resourceStore
+	r.mu.Unlock()
+	if resources == nil {
+		return errors.New("cleanup tree resources: no durable issue resource store")
+	}
+	issues, err := resources.TreeIssueResources(ctx, project, tree)
+	if err != nil {
+		return err
+	}
+	for _, issue := range issues {
+		if err := r.CleanupIssue(ctx, project, issue.Issue, tree, 0); err != nil {
 			return err
 		}
 	}
-	return resources.ConfirmIssueCleanup(ctx, project, issue, resource.CleanupGeneration)
+	return nil
 }
 
 // refuseTreeChildSandboxes is the API half of the root-last fence: the root's cleanup has begun,
@@ -747,29 +756,6 @@ func (r *Runtime) awaitSandboxDeleted(ctx context.Context, name string) error {
 			return ctx.Err()
 		case <-deadline.C:
 			return fmt.Errorf("confirm Sandbox %s deletion: timed out after %s", name, r.bootTimeout)
-		case <-time.After(recheckInterval):
-		}
-	}
-}
-
-func (r *Runtime) awaitPVCDeleted(ctx context.Context, name string) error {
-	deadline := time.NewTimer(r.bootTimeout)
-	defer deadline.Stop()
-	for {
-		reading, cancel := call(ctx)
-		_, err := r.kube.CoreV1().PersistentVolumeClaims(r.namespace).Get(reading, name, metav1.GetOptions{})
-		cancel()
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("confirm tree PVC %s deletion: %w", name, err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return fmt.Errorf("confirm tree PVC %s deletion: timed out after %s", name, r.bootTimeout)
 		case <-time.After(recheckInterval):
 		}
 	}

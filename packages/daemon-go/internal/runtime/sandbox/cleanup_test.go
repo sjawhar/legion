@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
@@ -70,11 +71,11 @@ func resourceStore(t *testing.T) *store.Store {
 // store: the root's Sandbox and tree PVC exist; the child's Sandbox exists when childLive.
 type cleanupRig struct {
 	*rig
-	st                         *store.Store
-	root, child, tree          string
-	rootPVC                    string
-	pvcDeletesObserved         []store.IssueResources
-	sandboxDeletes, pvcDeletes map[string]metav1.DeleteOptions
+	st                *store.Store
+	root, child, tree string
+	rootPVC           string
+	sandboxDeletes    map[string]metav1.DeleteOptions
+	pvcDeletes        map[string]metav1.DeleteOptions
 }
 
 func newCleanupRig(t *testing.T, childLive bool) *cleanupRig {
@@ -86,9 +87,15 @@ func newCleanupRig(t *testing.T, childLive bool) *cleanupRig {
 	}
 	rootSandbox := sandboxObject(t, c.root, "uid-sandbox-root", modeRunning, claimLabels(rootSpec(t).Role))
 	rootSandbox.SetResourceVersion("sandbox-rv-root")
+	rootOwner := metav1.OwnerReference{
+		APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox", Name: c.root, UID: "uid-sandbox-root",
+		Controller: new(true), BlockOwnerDeletion: new(true),
+	}
 	objects := []k8sruntime.Object{
 		rootSandbox,
-		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: c.rootPVC, Namespace: testNamespace, UID: "uid-pvc-root", ResourceVersion: "pvc-rv-root"}},
+		&corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+			Name: c.rootPVC, Namespace: testNamespace, UID: "uid-pvc-root", ResourceVersion: "pvc-rv-root", OwnerReferences: []metav1.OwnerReference{rootOwner},
+		}},
 	}
 	if childLive {
 		childSandbox := sandboxObject(t, c.child, "uid-sandbox-child", modeRunning,
@@ -110,15 +117,25 @@ func newCleanupRig(t *testing.T, childLive bool) *cleanupRig {
 	if err := st.EnsureIssueResources(ctx, testProject, childIssue, testTree, c.child); err != nil {
 		t.Fatal(err)
 	}
-	// What the root's record says at the moment its PVC delete is requested.
-	c.kube.PrependReactor("delete", "persistentvolumeclaims", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
-		root, _, _ := st.IssueResources(context.Background(), testProject, testTree)
-		c.pvcDeletesObserved = append(c.pvcDeletesObserved, root)
-		return false, nil, nil
-	})
 	c.dyn.PrependReactor("delete", "sandboxes", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
 		delete := action.(k8stesting.DeleteAction)
-		c.sandboxDeletes[delete.GetName()] = delete.GetDeleteOptions()
+		options := delete.GetDeleteOptions()
+		c.sandboxDeletes[delete.GetName()] = options
+		if delete.GetName() == c.root && options.PropagationPolicy != nil && *options.PropagationPolicy == metav1.DeletePropagationForeground {
+			object, err := c.kube.Tracker().Get(corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims"), testNamespace, c.rootPVC)
+			if err != nil {
+				return true, nil, err
+			}
+			pvc := object.(*corev1.PersistentVolumeClaim)
+			if len(pvc.OwnerReferences) != 1 || pvc.OwnerReferences[0].UID != "uid-sandbox-root" ||
+				pvc.OwnerReferences[0].Controller == nil || !*pvc.OwnerReferences[0].Controller ||
+				pvc.OwnerReferences[0].BlockOwnerDeletion == nil || !*pvc.OwnerReferences[0].BlockOwnerDeletion {
+				return true, nil, errors.New("root PVC is not a blocking Sandbox owner-dependent")
+			}
+			if err := c.kube.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims"), testNamespace, c.rootPVC); err != nil {
+				return true, nil, err
+			}
+		}
 		return false, nil, nil
 	})
 	c.kube.PrependReactor("delete", "persistentvolumeclaims", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
@@ -207,10 +224,11 @@ func TestARootCleanupDeletesNothingWhileTheAPIListsAChildSandbox(t *testing.T) {
 	}
 }
 
-// Children first, root last: the child's Sandbox goes, then the root Sandbox that owns the tree
-// PVC, then the PVC, which is requested only once the root Sandbox is gone and before the root's
-// cleanup is confirmed; confirmation follows both.
-func TestARootIsCleanedAfterItsChildrenSandboxThenPVC(t *testing.T) {
+// Children first, root last: the child's Sandbox goes before the root Sandbox. The root request
+// uses foreground propagation, so its blocking PVC dependent is removed by garbage collection
+// before the root is absent and confirmation admits a later run; the restricted runtime never
+// makes a PVC API call itself.
+func TestARootIsCleanedAfterItsChildrenByForegroundGarbageCollection(t *testing.T) {
 	c := newCleanupRig(t, true)
 	if err := c.r.CleanupIssue(c.ctx, testProject, childIssue, testTree, 1); err != nil {
 		t.Fatalf("child cleanup: %v", err)
@@ -218,25 +236,28 @@ func TestARootIsCleanedAfterItsChildrenSandboxThenPVC(t *testing.T) {
 	if err := c.r.CleanupIssue(c.ctx, testProject, testTree, testTree, 1); err != nil {
 		t.Fatalf("root cleanup: %v", err)
 	}
-	want := []string{"sandboxes " + c.child, "sandboxes " + c.root, "persistentvolumeclaims " + c.rootPVC}
+	want := []string{"sandboxes " + c.child, "sandboxes " + c.root}
 	if got := c.deletes(); strings.Join(got, ", ") != strings.Join(want, ", ") {
 		t.Fatalf("deletes = %v, want %v", got, want)
 	}
-	if len(c.pvcDeletesObserved) != 1 || !c.pvcDeletesObserved[0].CleanupStarted || !c.pvcDeletesObserved[0].CleanupConfirmedAt.IsZero() {
-		t.Fatalf("the root's record at its PVC delete = %+v, want begun and unconfirmed", c.pvcDeletesObserved)
+	if len(c.pvcDeletes) != 0 {
+		t.Fatalf("the restricted runtime sent PVC delete requests: %+v", c.pvcDeletes)
 	}
 	if c.sandbox(c.root) != nil {
 		t.Fatal("the root Sandbox survived its cleanup")
+	}
+	if _, err := c.kube.CoreV1().PersistentVolumeClaims(testNamespace).Get(context.Background(), c.rootPVC, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("the root PVC after foreground cleanup: %v, want NotFound", err)
 	}
 	if root := c.rootRecord(t); root.CleanupConfirmedAt.IsZero() {
 		t.Fatalf("root record after cleanup = %+v, want confirmed", root)
 	}
 }
 
-// Deletion can race an operator replacement of a same-named object. Every deletion carries both
-// object identity fields Kubernetes checks: a stale cleaner then gets a conflict instead of
-// deleting a replacement Sandbox or root PVC.
-func TestCleanupDeletesCarryUIDAndResourceVersionPreconditions(t *testing.T) {
+// A stale cleanup must not delete a replacement Sandbox. Both child and root deletes carry UID and
+// resourceVersion preconditions, while root deletion explicitly waits for the blocking PVC owner
+// dependency through foreground garbage collection rather than using a PVC grant.
+func TestCleanupSandboxDeletesCarryIdentityAndRootIsForeground(t *testing.T) {
 	c := newCleanupRig(t, true)
 	if err := c.r.CleanupIssue(c.ctx, testProject, childIssue, testTree, 1); err != nil {
 		t.Fatalf("child cleanup: %v", err)
@@ -254,9 +275,63 @@ func TestCleanupDeletesCarryUIDAndResourceVersionPreconditions(t *testing.T) {
 			t.Fatalf("Sandbox %s delete options = %+v, want UID %s and resourceVersion %s", name, got, want.uid, want.version)
 		}
 	}
-	got, found := c.pvcDeletes[c.rootPVC]
-	if !found || got.Preconditions == nil || got.Preconditions.UID == nil || got.Preconditions.ResourceVersion == nil ||
-		string(*got.Preconditions.UID) != "uid-pvc-root" || *got.Preconditions.ResourceVersion != "pvc-rv-root" {
-		t.Fatalf("PVC %s delete options = %+v, want UID uid-pvc-root and resourceVersion pvc-rv-root", c.rootPVC, got)
+	root := c.sandboxDeletes[c.root]
+	if root.PropagationPolicy == nil || *root.PropagationPolicy != metav1.DeletePropagationForeground {
+		t.Fatalf("root Sandbox delete propagation = %+v, want foreground", root.PropagationPolicy)
+	}
+	if len(c.pvcDeletes) != 0 {
+		t.Fatalf("the restricted runtime sent PVC delete requests: %+v", c.pvcDeletes)
+	}
+}
+
+// Operator-created trees have no workflow `issues` row. Their explicit close authority must still
+// run the same durable child-first/root-last cleanup rather than manufacturing a workflow record.
+func TestDirectTreeCleanupRequiresNoWorkflowRecord(t *testing.T) {
+	c := newCleanupRig(t, true)
+	if _, err := c.st.Pool().Exec(c.ctx, `delete from issues where key = $1`, testTree); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.r.CleanupTree(c.ctx, testProject, testTree); err != nil {
+		t.Fatalf("direct tree cleanup: %v", err)
+	}
+	if root := c.rootRecord(t); root.CleanupConfirmedAt.IsZero() {
+		t.Fatalf("direct root cleanup record = %+v, want confirmed", root)
+	}
+}
+
+// A transient foreground root delete holds the durable marker and the next admission. Retrying the
+// same close resumes that marker, then foreground garbage collection removes the blocking PVC and
+// confirmation admits the next resource epoch; no failure clears the fence.
+func TestForegroundRootDeleteFailureKeepsTheAdmissionFenceUntilRetryConfirms(t *testing.T) {
+	c := newCleanupRig(t, true)
+	if err := c.r.CleanupIssue(c.ctx, testProject, childIssue, testTree, 1); err != nil {
+		t.Fatalf("child cleanup: %v", err)
+	}
+	failed := true
+	c.dyn.PrependReactor("delete", "sandboxes", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		delete := action.(k8stesting.DeleteAction)
+		if delete.GetName() == c.root && failed {
+			failed = false
+			return true, nil, errors.New("transient Sandbox API failure")
+		}
+		return false, nil, nil
+	})
+	if err := c.r.CleanupIssue(c.ctx, testProject, testTree, testTree, 1); err == nil || !strings.Contains(err.Error(), "transient Sandbox API failure") {
+		t.Fatalf("first root cleanup = %v, want its transient delete failure", err)
+	}
+	if root := c.rootRecord(t); !root.CleanupStarted || !root.CleanupConfirmedAt.IsZero() {
+		t.Fatalf("root after transient delete = %+v, want begun and unconfirmed", root)
+	}
+	if err := c.st.EnsureIssueResources(c.ctx, testProject, testTree, testTree, c.root); !errors.Is(err, store.ErrIssueCleanupInProgress) {
+		t.Fatalf("new root admission during foreground cleanup retry = %v, want ErrIssueCleanupInProgress", err)
+	}
+	if err := c.r.CleanupIssue(c.ctx, testProject, testTree, testTree, 1); err != nil {
+		t.Fatalf("root cleanup retry: %v", err)
+	}
+	if root := c.rootRecord(t); root.CleanupConfirmedAt.IsZero() {
+		t.Fatalf("root after retry = %+v, want confirmed", root)
+	}
+	if err := c.st.EnsureIssueResources(c.ctx, testProject, testTree, testTree, c.root); err != nil {
+		t.Fatalf("new root admission after confirmation: %v", err)
 	}
 }
