@@ -53,11 +53,19 @@ const (
 	subscriptionCount
 )
 
+// clientStopMode is how the client was stopped, which decides what a bind that ends after the stop
+// does with what it bound (endBind).
 type clientStopMode uint8
 
 const (
 	clientRunning clientStopMode = iota
+	// clientDraining: Drain is taking the subscriptions it drains itself. A bind that ends now
+	// installs for its next pass.
 	clientDraining
+	// clientDrainCollected: Drain has taken the last of those subscriptions, just before it drains
+	// the connection. A bind that ends now drains what it bound.
+	clientDrainCollected
+	// clientClosed: Close stopped the client. A bind that ends now unsubscribes what it bound.
 	clientClosed
 )
 
@@ -82,18 +90,12 @@ type Client struct {
 	publishAcknowledgementClock AcknowledgementClock
 	mu                          sync.Mutex
 
-	// subscriptionsMu guards subscriptions, stopMode and drainCollected. It is held to read and
-	// write them, never across a bind's request to the server, so a reconnect's restore, the health
-	// reads and Drain never wait out a request the reconnect lost.
+	// subscriptionsMu guards subscriptions and stopMode. It is held to read and write them, never
+	// across a bind's request to the server, so a reconnect's restore, the health reads and Drain
+	// never wait out a request the reconnect lost.
 	subscriptionsMu sync.Mutex
 	subscriptions   [subscriptionCount]recoverableSubscription
-	// stopMode distinguishes Close from Drain. A bind that completes during Drain's collection is
-	// installed for the next pass, while a Close never installs its late bind.
-	stopMode clientStopMode
-	// drainCollected is set once Drain has taken the last of the subscriptions it drains itself,
-	// just before it drains the connection. A bind that ends after it drains what it bound
-	// (endBind).
-	drainCollected bool
+	stopMode        clientStopMode
 
 	reconnectHooksMu sync.Mutex
 	reconnectHooks   []func(*nats.Conn) error
@@ -440,8 +442,7 @@ func (c *Client) endBind(subscription *recoverableSubscription, sub *nats.Subscr
 	close(subscription.binding)
 	subscription.binding = nil
 	mode := c.stopMode
-	lateDrain := err == nil && mode == clientDraining && c.drainCollected
-	if err == nil && (mode == clientRunning || (mode == clientDraining && !c.drainCollected)) {
+	if err == nil && (mode == clientRunning || mode == clientDraining) {
 		subscription.active = sub
 	}
 	c.subscriptionsMu.Unlock()
@@ -450,11 +451,9 @@ func (c *Client) endBind(subscription *recoverableSubscription, sub *nats.Subscr
 		return err
 	}
 	switch mode {
-	case clientDraining:
-		if lateDrain {
-			_ = sub.Drain()
-			return errStopped
-		}
+	case clientDrainCollected:
+		_ = sub.Drain()
+		return errStopped
 	case clientClosed:
 		_ = sub.Unsubscribe()
 		return errStopped
@@ -566,7 +565,8 @@ func (c *Client) Drain(timeout time.Duration) error {
 }
 
 // deliveringSubscriptions returns the installed subscriptions that are still valid, those a pass
-// of Drain has yet to drain. Finding none, it records that Drain has taken its last (drainCollected).
+// of Drain has yet to drain. Finding none during a Drain, it records that Drain has taken its last
+// (clientDrainCollected).
 func (c *Client) deliveringSubscriptions() []*nats.Subscription {
 	c.subscriptionsMu.Lock()
 	defer c.subscriptionsMu.Unlock()
@@ -576,7 +576,9 @@ func (c *Client) deliveringSubscriptions() []*nats.Subscription {
 			delivering = append(delivering, subscription.active)
 		}
 	}
-	c.drainCollected = len(delivering) == 0
+	if len(delivering) == 0 && c.stopMode == clientDraining {
+		c.stopMode = clientDrainCollected
+	}
 	return delivering
 }
 

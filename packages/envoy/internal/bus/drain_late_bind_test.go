@@ -110,7 +110,7 @@ func TestDrainLetsTheDeliveriesOfABindEndingAfterTheStopFinish(t *testing.T) {
 			client.subscriptionsMu.Lock()
 			client.stopMode = clientDraining
 			if tc.late {
-				client.drainCollected = true
+				client.stopMode = clientDrainCollected
 			}
 			client.subscriptionsMu.Unlock()
 			client.stop()
