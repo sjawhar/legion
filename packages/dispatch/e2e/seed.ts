@@ -9,6 +9,7 @@ const tables = [
   "architecture_sources",
   "user_issue_state",
   "user_agent_state",
+  "user_agent_read",
   "events",
   "refs",
   "messages",
@@ -68,15 +69,19 @@ export async function setEventCreatedAt(eventId: number, iso: string): Promise<v
   ]);
 }
 
-/** Dates a seeded comment: the server stamps `created_at` itself, so two comments in one second
- *  with chosen fractions can only be fixtured on the row. */
-export async function setCommentCreatedAt(commentId: string, iso: string): Promise<void> {
+/** Dates a seeded comment or message: the server stamps `created_at` itself, so two rows in one
+ *  second or one millisecond with chosen fractions can only be fixtured on the row. */
+export async function setCreatedAt(
+  table: "comments" | "messages",
+  id: string,
+  iso: string
+): Promise<void> {
   await execFileAsync("psql", [
     databaseUrl(),
     "-v",
     "ON_ERROR_STOP=1",
     "-c",
-    `UPDATE comments SET created_at = ${sqlLiteral(iso)}::timestamptz WHERE id = ${sqlLiteral(commentId)}::uuid`,
+    `UPDATE ${table} SET created_at = ${sqlLiteral(iso)}::timestamptz WHERE id = ${sqlLiteral(id)}::uuid`,
   ]);
 }
 

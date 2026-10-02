@@ -2,13 +2,16 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
   acceptSuggestion,
+  createArtifactComment,
   createAsk,
   createComment,
   createIssue,
   createProject,
+  createProjectDocument,
   getArtifact,
   getArtifactText,
   getAsk,
+  listArtifactComments,
   listComments,
 } from "./api";
 import {
@@ -23,7 +26,7 @@ import {
   markSpan,
   selectEditorText,
 } from "./editor";
-import { resetDatabase, setCommentAuthorService, setCommentCreatedAt } from "./seed";
+import { resetDatabase, setCommentAuthorService, setCreatedAt } from "./seed";
 import { asUser } from "./users";
 
 const session = {
@@ -54,6 +57,14 @@ async function expandedConversationThread(page: Page, rootId: string): Promise<L
   await turn.getByRole("button", { name: "Expand thread" }).click();
   const phoneThread = page.getByRole("dialog", { name: "Thread" });
   return (await phoneThread.count()) === 0 ? turn : phoneThread;
+}
+
+/** The card of a margin thread the reader opened: in the Thread dialog on the phone layout, in
+ *  the margin beside the document everywhere else. */
+function openedThreadCard(page: Page, project: string, rootId: string): Locator {
+  return project === "iphone"
+    ? page.getByRole("dialog", { name: "Thread" }).getByTestId(`margin-comment-${rootId}`)
+    : marginCard(page, rootId);
 }
 
 async function commentWithBody(issueKey: string, artifactId: string | undefined, body: string) {
@@ -536,10 +547,7 @@ test("a document mark opens its thread in the margin and stays on the document",
     // Proof's model: the thread opens beside the document (in the phone's Thread dialog on a
     // small viewport); the reader never leaves the document.
     const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    const card =
-      testInfo.project.name === "iphone"
-        ? phoneThread.getByTestId(`margin-comment-${comment.id}`)
-        : marginCard(page, comment.id);
+    const card = openedThreadCard(page, testInfo.project.name, comment.id);
     await expect(card).toHaveAttribute("aria-current", "true");
     await expect(card).toContainText("focus this");
     await expect(card).toContainText("brown");
@@ -602,8 +610,8 @@ test("the margin lists replies written in the same second in the order they were
     { body: "written first", reply_to: root.id },
     session
   );
-  await setCommentCreatedAt(first.id, "2026-10-02T00:00:01.12Z");
-  await setCommentCreatedAt(second.id, "2026-10-02T00:00:01.123456Z");
+  await setCreatedAt("comments", first.id, "2026-10-02T00:00:01.12Z");
+  await setCreatedAt("comments", second.id, "2026-10-02T00:00:01.123456Z");
   // The fixture holds only if the server hands back the two widths the trap needs.
   const stamped = new Map(
     (await listComments(issue.key)).map((item) => [item.id, item.created_at])
@@ -620,14 +628,55 @@ test("the margin lists replies written in the same second in the order they were
     await expect(connectedDot(page)).toHaveText("connected");
     await expectMark(page, root.anchor.mark_id, "brown");
     await markSpan(page, root.anchor.mark_id).click();
-    const card =
-      testInfo.project.name === "iphone"
-        ? page.getByRole("dialog", { name: "Thread" }).getByTestId(`margin-comment-${root.id}`)
-        : marginCard(page, root.id);
+    const card = openedThreadCard(page, testInfo.project.name, root.id);
     await expect(card.getByRole("list", { name: "Replies" }).getByRole("listitem")).toHaveText([
       /written first/,
       /written second/,
     ]);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A standalone document's document-level threads have no mark, so none of them is placed, and the
+// margin lists them newest first: by time, where two written in one second are the trap above.
+test("the margin lists unplaced threads written in the same second newest first", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "UNPL", name: "Unplaced order" });
+  const document = await createProjectDocument("UNPL", {
+    content: "The astrolabe handbook is a project document.",
+    name: "handbook.md",
+  });
+  // Posted in the reverse of the times they are given, so creation order cannot pass the check.
+  const newer = await createArtifactComment(document.artifact.id, { body: "root written second" });
+  const older = await createArtifactComment(document.artifact.id, { body: "root written first" });
+  await setCreatedAt("comments", older.id, "2026-10-02T00:00:01.12Z");
+  await setCreatedAt("comments", newer.id, "2026-10-02T00:00:01.123456Z");
+  const stamped = new Map(
+    (await listArtifactComments(document.artifact.id)).map((item) => [item.id, item])
+  );
+  expect(
+    [older.id, newer.id].map((id) => [stamped.get(id)?.anchor, stamped.get(id)?.created_at])
+  ).toEqual([
+    [null, "2026-10-02T00:00:01.12Z"],
+    [null, "2026-10-02T00:00:01.123456Z"],
+  ]);
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/projects/UNPL/documents/${document.artifact.slug}`);
+    await expect(connectedDot(page)).toHaveText("connected");
+    await setSheet(page, testInfo.project.name, true);
+    const cards = page.getByTestId("margin-sheet").locator('[data-testid^="margin-comment-"]');
+    await expect(cards).toHaveText([/root written second/, /root written first/]);
+    // The list's order is the order on screen: the newer card sits above the older one.
+    const [upper, lower] = await Promise.all([
+      cards.nth(0).boundingBox(),
+      cards.nth(1).boundingBox(),
+    ]);
+    expect(upper?.y ?? Number.POSITIVE_INFINITY).toBeLessThan(lower?.y ?? Number.NEGATIVE_INFINITY);
   } finally {
     await alice.close();
   }
@@ -924,11 +973,7 @@ test("a comment a verified service token wrote names its service account in the 
     await setSheet(page, testInfo.project.name, true);
     // Only an expanded thread carries the author line under each comment.
     await marginCard(page, comment.id).locator('button[aria-expanded="false"]').click();
-    const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    const thread =
-      (await phoneThread.count()) === 0
-        ? marginCard(page, comment.id)
-        : phoneThread.getByTestId(`margin-comment-${comment.id}`);
+    const thread = openedThreadCard(page, testInfo.project.name, comment.id);
     await expect(thread).toContainText("Implementer (as legion/legion-worker)");
   } finally {
     await alice.close();
