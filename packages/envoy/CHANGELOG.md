@@ -138,7 +138,10 @@
   or Claude Code plugin built from the same executor) keeps that URL from being sent at all,
   because its `dispatch_search` refuses the same rules before any request.
 
+- A Markdown document now nests at most 100 blocks, and a document tree deeper than 10,000 levels is outside the Proof schema (LEGION-465).
+
 ### Fixed
+- One MiB of `>` formed 1,048,576 nested quotes inside the document cap and eventually ended the process in a stack overflow while its tree was validated. Dispatch now refuses the document before building that tree (LEGION-465).
 - Dispatch exits with status 1 when it cannot bind its listen address. It logged
   `dispatch: listen … bind: address already in use` and exited 0, so a supervisor read a port
   clash as a clean stop.

@@ -115,7 +115,7 @@ func (footnotes) Extend(m goldmark.Markdown) {
 // written (definitionsInPlace) and writes no backlink.
 func footnoteParserOptions() []parser.Option {
 	return []parser.Option{
-		parser.WithBlockParsers(util.Prioritized(frontmatterAttempt{endsContainers{footnoteDefinitionParser{extension.NewFootnoteBlockParser()}}}, 999)),
+		parser.WithBlockParsers(util.Prioritized(frontmatterAttempt{endsContainers{footnoteDefinitionParser{nestingGuard{extension.NewFootnoteBlockParser()}}}}, 999)),
 		parser.WithInlineParsers(util.Prioritized(footnoteReferenceParser{extension.NewFootnoteParser()}, 101)),
 	}
 }

@@ -75,12 +75,15 @@ func yattrToMarkName(name string) string {
 }
 
 func (n *Node) Validate() error {
-	return validateNode(n)
+	return validateNode(n, 0)
 }
 
-func validateNode(n *Node) error {
+func validateNode(n *Node, depth int) error {
 	if n == nil {
 		return fmt.Errorf("%w: nil node", ErrSchema)
+	}
+	if depth > maxTreeDepth {
+		return treeDepthError(depth)
 	}
 	if !nodeTypes[n.Type] {
 		if _, typed := typedBlock(n.Type); !typed {
@@ -96,7 +99,7 @@ func validateNode(n *Node) error {
 		}
 	}
 	for _, child := range n.Children {
-		if err := validateNode(child); err != nil {
+		if err := validateNode(child, depth+1); err != nil {
 			return err
 		}
 	}

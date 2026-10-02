@@ -37,8 +37,8 @@ var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, taskList{}, footnotes{}),
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
-			util.Prioritized(&typedDirectiveParser{}, 950),
-			util.Prioritized(&unsupportedDirectiveParser{}, 900),
+			util.Prioritized(nestingGuard{&typedDirectiveParser{}}, 950),
+			util.Prioritized(nestingGuard{&unsupportedDirectiveParser{}}, 900),
 			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
 		),
 	),
@@ -65,11 +65,11 @@ func blockParsers() []util.PrioritizedValue {
 		block := prioritized.Value.(parser.BlockParser)
 		switch reflect.TypeOf(block) {
 		case listParser:
-			parsers[index].Value = frontmatterAttempt{tabIndented{endsContainers{emptyItemGuard{block}}, listMarkerStart}}
+			parsers[index].Value = frontmatterAttempt{tabIndented{endsContainers{emptyItemGuard{nestingGuard{block}}}, listMarkerStart}}
 		case listItemParser:
-			parsers[index].Value = tabIndented{endsContainers{listItemColumns{block}}, listMarkerStart}
+			parsers[index].Value = tabIndented{endsContainers{listItemColumns{nestingGuard{block}}}, listMarkerStart}
 		case quoteParser:
-			parsers[index].Value = frontmatterAttempt{tabIndented{endsContainers{block}, nil}}
+			parsers[index].Value = frontmatterAttempt{tabIndented{endsContainers{nestingGuard{block}}, nil}}
 		case setextParser:
 			parsers[index].Value = tabIndented{underlineAfterTable{block}, setextUnderline}
 		case fenceParser:
@@ -212,6 +212,10 @@ func parseUnstamped(markdown string, firstLine int, readFrontmatter bool, budget
 		source = source[rest:]
 	}
 	root, err := blockReader.parse(source, unclosedFrontmatter, budget)
+	var nesting nestingError
+	if errors.As(err, &nesting) {
+		return nil, fmt.Errorf("%w: line %d opens a block inside %d blocks; a document nests at most %d blocks (quotes, lists and their items, typed blocks and footnote definitions)", ErrSchema, firstLine+nesting.line, MaxNesting, MaxNesting)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -564,13 +568,16 @@ func convert(node ast.Node, source []byte, firstLine int, footnotes map[int]stri
 	if err := refuseBlocks(node, source, firstLine); err != nil {
 		return nil, err
 	}
-	return parseBlock(node, source, footnotes)
+	return parseBlock(node, source, footnotes, 0)
 }
 
-func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, error) {
+func parseBlock(node ast.Node, source []byte, footnotes map[int]string, depth int) (*Node, error) {
+	if depth > maxTreeDepth {
+		return nil, treeDepthError(depth)
+	}
 	switch current := node.(type) {
 	case *ast.Document:
-		children, err := parseBlocks(current, source, footnotes)
+		children, err := parseBlocks(current, source, footnotes, depth)
 		if err != nil {
 			return nil, err
 		}
@@ -594,15 +601,15 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		}
 		return &Node{Type: "heading", Attrs: Attrs{"level": current.Level, "id": ""}, Children: children}, nil
 	case *ast.Blockquote:
-		children, err := parseBlocks(current, source, footnotes)
+		children, err := parseBlocks(current, source, footnotes, depth)
 		if err != nil {
 			return nil, err
 		}
 		return &Node{Type: "blockquote", Children: emptyParagraphFirst(children, false)}, nil
 	case *ast.List:
-		return parseList(current, source, footnotes)
+		return parseList(current, source, footnotes, depth)
 	case *ast.ListItem:
-		return parseListItem(current, source, footnotes)
+		return parseListItem(current, source, footnotes, depth)
 	case *ast.FencedCodeBlock:
 		language := string(current.Language(source))
 		var value any
@@ -623,13 +630,13 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 	case *ast.ThematicBreak:
 		return &Node{Type: "hr"}, nil
 	case *extensionast.Footnote:
-		children, err := parseBlocks(current, source, footnotes)
+		children, err := parseBlocks(current, source, footnotes, depth)
 		if err != nil {
 			return nil, err
 		}
 		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": unescapeMarkdownText(current.Ref)}, Children: emptyParagraphFirst(children, false)}, nil
 	case *typedDirective:
-		return parseTypedDirective(current, source, footnotes)
+		return parseTypedDirective(current, source, footnotes, depth)
 	case *extensionast.Table:
 		return parseTable(current, source, footnotes)
 	default:
@@ -638,10 +645,10 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 	}
 }
 
-func parseBlocks(parent ast.Node, source []byte, footnotes map[int]string) ([]*Node, error) {
+func parseBlocks(parent ast.Node, source []byte, footnotes map[int]string, depth int) ([]*Node, error) {
 	children := make([]*Node, 0, parent.ChildCount())
 	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
-		parsed, err := parseBlock(child, source, footnotes)
+		parsed, err := parseBlock(child, source, footnotes, depth+1)
 		if err != nil {
 			return nil, err
 		}
@@ -650,8 +657,9 @@ func parseBlocks(parent ast.Node, source []byte, footnotes map[int]string) ([]*N
 	}
 	return children, nil
 }
-func parseTypedDirective(directive *typedDirective, source []byte, footnotes map[int]string) (*Node, error) {
-	children, err := parseBlocks(directive, source, footnotes)
+
+func parseTypedDirective(directive *typedDirective, source []byte, footnotes map[int]string, depth int) (*Node, error) {
+	children, err := parseBlocks(directive, source, footnotes, depth)
 	if err != nil {
 		return nil, err
 	}
@@ -661,7 +669,7 @@ func parseTypedDirective(directive *typedDirective, source []byte, footnotes map
 // parseList reads a list's and its items' spread as browserListSpacing recorded them, or, where it
 // recorded none, from goldmark's looseness: a loose list's items holding more than one block are
 // spread, and the list is spread when none of them is.
-func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, error) {
+func parseList(list *ast.List, source []byte, footnotes map[int]string, depth int) (*Node, error) {
 	nodeType := "bullet_list"
 	browserSpread, browser := list.Attribute(browserSpreadAttr)
 	attrs := Attrs{"spread": !list.IsTight}
@@ -679,7 +687,7 @@ func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, 
 			// refuseBlocks refuses every block outside convertedBlocks, and goldmark builds a list of items.
 			panic(fmt.Sprintf("conversion reached a list holding a %s block, which parseList does not convert", child.Kind()))
 		}
-		parsed, err := parseListItem(item, source, footnotes)
+		parsed, err := parseListItem(item, source, footnotes, depth+1)
 		if err != nil {
 			return nil, err
 		}
@@ -696,14 +704,14 @@ func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, 
 	return &Node{Type: nodeType, Attrs: attrs, Children: children}, nil
 }
 
-func parseListItem(item *ast.ListItem, source []byte, footnotes map[int]string) (*Node, error) {
+func parseListItem(item *ast.ListItem, source []byte, footnotes map[int]string, depth int) (*Node, error) {
 	attrs := Attrs{"label": "•", "listType": "bullet", "checked": nil, "spread": false}
 	if firstBlock := item.FirstChild(); firstBlock != nil {
 		if checkbox, ok := firstBlock.FirstChild().(*extensionast.TaskCheckBox); ok {
 			attrs["checked"] = checkbox.IsChecked
 		}
 	}
-	children, err := parseBlocks(item, source, footnotes)
+	children, err := parseBlocks(item, source, footnotes, depth)
 	if err != nil {
 		return nil, err
 	}
