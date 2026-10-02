@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -8,88 +9,157 @@ import (
 	"time"
 )
 
-// Saving a document, comment, ask or message whose text is a pathological run finishes in bounded
-// time at the route's own cap (LEGION-465). Before the fix a 100 KB `a_` spec took 85 s through
-// this route and a 1 MiB one hours, all of it in Postgres's search indexing; a 900 KB `)_` spec
-// took 14 s in the Go document pipeline. The bound is ten times the slowest save measured after
-// the fix on a development machine (a 1 MiB `a_b*` document: 2.3 s).
+// Saving a document or an issue title takes time linear in a pathological run, up to the route's
+// own cap (LEGION-465). Before the fix Postgres's search indexing read a run of `a_` or `q_` in
+// quadratic time, and pmdoc parsed `a_b*` in nearly quadratic time. On one loaded machine, before
+// the fix and after it at the same moment, 64 KiB of `a_` saved in 46 s and 0.3 s, 128 KiB of
+// `a_b*` in 33 s and 1.3-2.1 s, an issue titled with 32 KiB of `q_` in 12 s and 0.06-0.17 s, and
+// the duplicate check against a 16 KiB title took 18-21 s and 0.12-0.31 s. Times after the fix
+// follow the runner's load, so no wall-clock bound holds on every runner; each save is timed at
+// growing sizes instead, and its growth is bounded (growsLinearly).
+//
+// A ladder's first size is small enough that the request's own cost is most of its time, about
+// the same before the fix and after (1 KiB of `a_`: 39-48 ms before, 51-61 ms after); its second
+// is where the code before the fix is many times slower, so that code fails the first step by
+// several times the bound. The duplicate check's own cost is about 2 ms, which the title's
+// passes at a few hundred bytes, so its ladder starts at 64 B. Each ladder ends at the route's
+// cap: a document's 1 MiB, and 256 KiB for `)_`, whose 1 MiB is more items than one document
+// update can hold (TestUploadRefusesADocumentTooLargeToStore); a title has no cap of its own, and
+// 512 KiB stands for the request's 1 MiB. `)_` saved in linear time before the fix too and is held
+// to the same growth.
+//
+// Comments and messages cap their text at 2,000 characters and an ask's question at 800, which
+// bounds their cost: a comment of 2,000 characters of `a_` took 51 ms before the fix and 56 ms
+// after, so no route under such a cap is timed.
+//
+// Settlement is held off. A document's settlement holds its issue's row while it renders, so a
+// save timed while one ran would count the wait for it; and the test server's shutdown, which
+// would otherwise spend its drain budget settling 1 MiB documents, finds no document loaded and
+// leaves each to resume.
 func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
-	handler := newTestHandler(t)
+	handler, _, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createArtifactIssue(t, handler)
-	// `)_` is linear with a large constant - every `)_` is an italic span, so 1 MiB of it is
-	// 524,288 text nodes and more items than one document update can hold
-	// (TestUploadRefusesADocumentTooLargeToStore) - and pmdoc's linear-time test holds it at
-	// 1 MiB; here 256 KB keeps its settlement inside the test server's shutdown budget.
+	documents := 0
 	for _, test := range []struct {
 		shape string
-		bytes int
-	}{{"a_", 1 << 20}, {"a_b*", 1 << 20}, {")_", 256 << 10}} {
-		shape := test.shape
-		body := strings.Repeat(shape, test.bytes/len(shape))
-		started := time.Now()
-		response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
-			"name": "pathological-" + strings.Map(func(r rune) rune {
-				if r >= 'a' && r <= 'z' {
-					return r
-				}
-				return 'x'
-			}, shape) + ".md",
-		}, "body.md", "text/markdown", []byte(body), "alice")
-		if response.Code != http.StatusCreated {
-			t.Fatalf("upload %d bytes of %q: status=%d body=%.200s", test.bytes, shape, response.Code, response.Body.String())
-		}
-		if elapsed := time.Since(started); elapsed > 30*time.Second {
-			t.Errorf("saving %d bytes of %q took %s, want under 30 s", test.bytes, shape, elapsed)
-		}
-	}
-	// The 2,000-character routes, at their cap: the parser is quadratic in the run, so a run of
-	// 2,000 `_`-joined characters cost 55 ms alone and a comment, ask and message each hold one.
-	twoThousand := strings.Repeat("a_", 1000)
-	for _, route := range []struct{ path, field string }{
-		{"/api/v1/issues/" + issue.Key + "/comments", "body"},
-		{"/api/v1/issues/" + issue.Key + "/messages", "body"},
+		sizes []int
+	}{
+		{"a_", []int{1 << 10, 64 << 10, 1 << 20}},
+		{"a_b*", []int{2 << 10, 128 << 10, 1 << 20}},
+		{")_", []int{256, 16 << 10, 256 << 10}},
 	} {
-		started := time.Now()
-		response := dispatchRequest(t, handler, http.MethodPost, route.path, map[string]any{route.field: twoThousand}, "alice")
-		if response.Code != http.StatusCreated {
-			t.Fatalf("%s with a 2,000-character run: status=%d body=%.200s", route.path, response.Code, response.Body.String())
+		t.Run("document "+test.shape, func(t *testing.T) {
+			growsLinearly(t, "saving a document of `"+test.shape+"`", test.sizes, func(size int) time.Duration {
+				documents++
+				body := strings.Repeat(test.shape, size/len(test.shape))
+				started := time.Now()
+				response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+					"name": fmt.Sprintf("pathological-%d.md", documents),
+				}, "body.md", "text/markdown", []byte(body), "alice")
+				elapsed := time.Since(started)
+				if response.Code != http.StatusCreated {
+					t.Fatalf("upload %s of %q: status=%d body=%.200s", sizeText(size), test.shape, response.Code, response.Body.String())
+				}
+				return elapsed
+			})
+		})
+	}
+	// Creating an issue reads titles through the parser three ways: the duplicate check's
+	// to_tsvector over the new title and every title in the project, its ts_headline over each
+	// near-duplicate's title, and the issues trigger. Every title gets a project of its own, so
+	// no save reads the titles the ones before it stored; the duplicate check reads one stored
+	// title, whose word `q` makes it the near-duplicate its headline is drawn from.
+	projects := 0
+	project := func(t *testing.T) string {
+		t.Helper()
+		projects++
+		key := fmt.Sprintf("T%d", projects)
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": key, "name": key}, "alice"); response.Code != http.StatusCreated {
+			t.Fatalf("create project %s: status=%d body=%.200s", key, response.Code, response.Body.String())
 		}
-		if elapsed := time.Since(started); elapsed > 5*time.Second {
-			t.Errorf("%s with a 2,000-character run took %s, want under 5 s", route.path, elapsed)
-		}
+		return key
 	}
-	started := time.Now()
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{"question": strings.Repeat("a_", 400)}, "alice")
-	if response.Code != http.StatusCreated {
-		t.Fatalf("ask with an 800-character run: status=%d body=%.200s", response.Code, response.Body.String())
-	}
-	if elapsed := time.Since(started); elapsed > 5*time.Second {
-		t.Errorf("ask with an 800-character run took %s, want under 5 s", elapsed)
-	}
-	// An issue's title has no cap of its own (the request's 1 MiB bounds it), and creating an
-	// issue reads titles through the parser three ways: the duplicate check's to_tsvector over the
-	// new title and every title in the project, its ts_headline over each near-duplicate's title,
-	// and the issues trigger. The two runs below share no word, so both are created, the second
-	// reading the first's stored title; the third title is a word of the first, so the first is
-	// its near-duplicate and its headline is drawn from that 512 KiB run.
-	for _, title := range []string{strings.Repeat("q_", 256<<10), strings.Repeat("r_", 256<<10)} {
+	titled := func(t *testing.T, key string, size int) time.Duration {
+		t.Helper()
 		started := time.Now()
-		created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "TEST", "title": title}, "alice")
+		created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": key, "title": strings.Repeat("q_", size/2)}, "alice")
+		elapsed := time.Since(started)
 		if created.Code != http.StatusCreated {
-			t.Fatalf("issue with a 512 KiB title run: status=%d body=%.200s", created.Code, created.Body.String())
+			t.Fatalf("issue titled with %s of `q_`: status=%d body=%.200s", sizeText(size), created.Code, created.Body.String())
 		}
-		if elapsed := time.Since(started); elapsed > 30*time.Second {
-			t.Errorf("creating an issue with a 512 KiB title run took %s, want under 30 s", elapsed)
+		return elapsed
+	}
+	t.Run("issue title", func(t *testing.T) {
+		growsLinearly(t, "creating an issue titled with `q_`", []int{512, 32 << 10, 512 << 10}, func(size int) time.Duration {
+			return titled(t, project(t), size)
+		})
+	})
+	t.Run("duplicate check", func(t *testing.T) {
+		growsLinearly(t, "the duplicate check against a title of `q_`", []int{64, 16 << 10, 512 << 10}, func(size int) time.Duration {
+			key := project(t)
+			titled(t, key, size)
+			started := time.Now()
+			duplicate := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": key, "title": "q"}, "alice")
+			elapsed := time.Since(started)
+			if duplicate.Code != http.StatusConflict || !strings.Contains(duplicate.Body.String(), `"code":"POSSIBLE_DUPLICATE"`) {
+				t.Fatalf("issue titled with a word of a %s title run: status=%d body=%.200s, want 409 POSSIBLE_DUPLICATE", sizeText(size), duplicate.Code, duplicate.Body.String())
+			}
+			return elapsed
+		})
+	})
+}
+
+// growthAllowance is how many times faster than its input a save's time may grow from one size to
+// the next. Linear time grows at most as fast as the input, less while the request's own cost
+// counts, and quadratic time as the input's square. Four times the input's growth lets a runner's
+// load quadruple between two saves, and still refuses a quadratic save at any step over four;
+// every step here is eight or more.
+const growthAllowance = 4
+
+// growsLinearly times what at each size in turn and fails t at the first size whose time grew
+// more than growthAllowance times faster than the size did. The first size, where the request's
+// own cost is most of the time, is timed three times before the second size and three times after
+// it, and the fastest of the six kept: the first save's warm-up does not count as that cost, and a
+// load spike inflates it only if it lasts the whole of the second size's save. A step over the
+// bound times the larger size again and keeps the faster time, so a load spike during one save is
+// not read as growth; after the first step it also times the smaller size again and keeps the
+// slower, so load that rose between two saves is not either.
+func growsLinearly(t *testing.T, what string, sizes []int, timed func(size int) time.Duration) {
+	t.Helper()
+	first := func() time.Duration { return min(timed(sizes[0]), timed(sizes[0]), timed(sizes[0])) }
+	before := first()
+	for i := 1; i < len(sizes); i++ {
+		smaller, size := sizes[i-1], sizes[i]
+		growth := size / smaller
+		took := timed(size)
+		if i == 1 {
+			before = min(before, first())
 		}
+		if took > time.Duration(growthAllowance*growth)*before {
+			t.Logf("%s: %s at %s against %s at %s is over the bound; timing it again", what, took.Round(time.Millisecond), sizeText(size), before.Round(time.Millisecond), sizeText(smaller))
+			took = min(took, timed(size))
+			if i > 1 {
+				before = max(before, timed(smaller))
+			}
+		}
+		ratio := float64(took) / float64(before)
+		if took > time.Duration(growthAllowance*growth)*before {
+			t.Fatalf("%s took %s at %s, %.0f times the %s it took at %s: the input grew %d times, and a save linear in it may grow %d times at most (growthAllowance)",
+				what, took.Round(time.Millisecond), sizeText(size), ratio, before.Round(time.Millisecond), sizeText(smaller), growth, growthAllowance*growth)
+		}
+		t.Logf("%s: %s at %s, %s at %s, %.1f times for an input %d times larger (at most %d)", what, before.Round(time.Millisecond), sizeText(smaller), took.Round(time.Millisecond), sizeText(size), ratio, growth, growthAllowance*growth)
+		before = took
 	}
-	started = time.Now()
-	duplicate := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "TEST", "title": "q"}, "alice")
-	if duplicate.Code != http.StatusConflict || !strings.Contains(duplicate.Body.String(), `"code":"POSSIBLE_DUPLICATE"`) {
-		t.Fatalf("issue titled with a word of a 512 KiB title run: status=%d body=%.200s, want 409 POSSIBLE_DUPLICATE", duplicate.Code, duplicate.Body.String())
+}
+
+func sizeText(size int) string {
+	switch {
+	case size >= 1<<20 && size%(1<<20) == 0:
+		return fmt.Sprintf("%d MiB", size>>20)
+	case size >= 1<<10:
+		return fmt.Sprintf("%d KiB", size>>10)
 	}
-	if elapsed := time.Since(started); elapsed > 30*time.Second {
-		t.Errorf("the duplicate check against a 512 KiB title run took %s, want under 30 s", elapsed)
-	}
+	return fmt.Sprintf("%d B", size)
 }
 
 // Ordinary text searches as it did before search_text: a title, a document, a comment, an ask
