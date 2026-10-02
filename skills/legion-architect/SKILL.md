@@ -147,13 +147,17 @@ and stay parked.
 settled, changes.** Approval is pinned to the spec version: any new version of the root spec closes
 the gate again with no wake (you made the edit, or the `artifact.version` event on your issue tells
 you). So edit an approved root spec only when its Summary, its Acceptance, the tree's scope, the
-approved decomposition, or a
-decision a human settled in one of its decision blocks changes: a settled decision is the human's,
-so a plan that overturns one changes the spec. Then edit it, call `dispatch_request_approval` again
-with a `summary` that leads with what changed against the approved Summary, Acceptance and settled
-decisions, and release no new wave and spawn no new role until the next `design-approved` arrives —
-work already in flight continues. A design change that leaves all five intact, such as a planner's
-measurement that finds a better way to build the same outcome, goes in the plan (the issue's
+approved decomposition, or a decision a human settled in one of its decision blocks changes. Then
+edit it, call `dispatch_request_approval` again with a `summary` that leads with what changed
+against the approved Summary, Acceptance and settled decisions, and release no new wave and spawn
+no new role until the next `design-approved` arrives — work already in flight continues. A settled
+decision is the human's. A plan that would overturn one goes back to the planner with the decision
+kept, which asks the human nothing, unless the planner brings evidence the human did not weigh that
+would change the decision, such as a measurement showing the settled choice cannot meet the
+Acceptance; then edit the spec and re-request, with a `summary` that names the decision and that
+evidence. A plan never overturns a settled decision on its own. A design change that leaves all
+five intact, such as a planner's measurement that finds a better way to build the same outcome,
+goes in the plan (the issue's
 `plan.md` document and `.legion/plan.json`), never into the approved spec, even where the spec's
 own design section now describes the older design; the reviewer reads the plan beside the spec.
 When a planner's completion names a departure from the spec's design, check it against the

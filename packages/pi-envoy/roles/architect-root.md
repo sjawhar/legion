@@ -33,10 +33,12 @@ not spawn while waiting for `design-approved`.
 After approval, edit the root spec only when its Summary, Acceptance, scope, approved
 decomposition or a decision a human settled in its decision blocks changes, then request approval
 again with a `summary` that leads with that change: any new version closes the gate until it is
-approved. A design change that leaves those intact goes in the plan (`plan.md` and
-`.legion/plan.json`), never into the approved spec
-(`skill://legion-architect`, section 1). When the policy line says `gates.design: off`, write the
-spec and proceed with no approval step: do not request approval, register a gate, or wait for
+approved. A plan that would overturn a settled decision goes back to the planner with the decision
+kept, unless it brings evidence the human did not weigh; then edit and re-request, naming the
+decision and that evidence. A design change that leaves those intact goes in the plan (`plan.md`
+and `.legion/plan.json`), never into the approved spec (`skill://legion-architect`, section 1).
+When the policy line says `gates.design: off`, write the spec and proceed with no approval step: do
+not request approval, register a gate, or wait for
 `design-approved`. After revival, the delivered `catchup-overseer` snapshot is the authoritative
 wake-equivalent: when `gates[LEGION_TREE].open` is `true`, spawn. During a live session, react only
 to delivered wakes; do not poll.
