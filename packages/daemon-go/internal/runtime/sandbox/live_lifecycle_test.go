@@ -19,7 +19,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -46,10 +45,10 @@ func (r *liveRig) checkRootReady() error {
 	if err != nil {
 		return err
 	}
-	if string(pod.UID) != loc.Incarnation {
-		return fmt.Errorf("pod %s is uid %s, the launch returned %s", name, pod.UID, loc.Incarnation)
+	if string(pod.UID) != loc.Sandbox.PodUID {
+		return fmt.Errorf("pod %s is uid %s, the launch returned pod uid %s in %s", name, pod.UID, loc.Sandbox.PodUID, loc.Incarnation)
 	}
-	note("runtime", "Sandbox %s Ready=True; pod uid %s equals the returned incarnation", name, pod.UID)
+	note("runtime", "Sandbox %s Ready=True; pod uid %s and role container %s form returned incarnation %s", name, pod.UID, loc.Sandbox.Container, loc.Incarnation)
 	log, err := r.initLog(name)
 	if err != nil {
 		return err
@@ -137,12 +136,18 @@ func treeAffinity(p *corev1.Pod, tree string) bool {
 	return false
 }
 
-// worker-colocated: a worker spawned while the root runs requires, and gets, the root's node.
+// worker-colocated: another role of the same issue starts in the root's existing issue pod. Its
+// process locator has the same pod UID but its own role container, and no init container runs again.
 func (r *liveRig) checkWorkerColocated() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	if err := r.ensureRunning(root); err != nil {
 		return err
 	}
+	before, err := r.getPod(SandboxName(root.token))
+	if err != nil {
+		return err
+	}
+	init := append([]corev1.ContainerStatus(nil), before.Status.InitContainerStatuses...)
 	since := time.Now()
 	if _, err := r.spawn(worker, true); err != nil {
 		return err
@@ -154,23 +159,24 @@ func (r *liveRig) checkWorkerColocated() error {
 	if err != nil {
 		return err
 	}
-	rootPod, err := r.getPod(SandboxName(root.token))
-	if err != nil {
-		return err
+	if pod.Name != before.Name || string(pod.UID) != string(before.UID) || worker.loc.Sandbox.PodUID != root.loc.Sandbox.PodUID {
+		return fmt.Errorf("worker locator %+v and root locator %+v do not share one issue pod %s/%s", worker.loc.Sandbox, root.loc.Sandbox, before.Name, before.UID)
 	}
-	if !treeAffinity(pod, worker.tree) {
-		return fmt.Errorf("the worker pod carries no required podAffinity on %s=%s with topology %s: %+v", labelTree, worker.tree, corev1.LabelHostname, pod.Spec.Affinity)
+	if worker.loc.Sandbox.Container != string(worker.role) || root.loc.Sandbox.Container != string(root.role) {
+		return fmt.Errorf("worker/root role containers are %q/%q, want %q/%q", worker.loc.Sandbox.Container, root.loc.Sandbox.Container, worker.role, root.role)
 	}
-	if pod.Spec.NodeName != rootPod.Spec.NodeName {
-		return fmt.Errorf("the worker runs on %s, the root on %s", pod.Spec.NodeName, rootPod.Spec.NodeName)
+	if !slices.EqualFunc(init, pod.Status.InitContainerStatuses, func(a, b corev1.ContainerStatus) bool {
+		return a.Name == b.Name && a.ContainerID == b.ContainerID && a.State.Terminated != nil && b.State.Terminated != nil &&
+			a.State.Terminated.StartedAt.Equal(&b.State.Terminated.StartedAt) && a.State.Terminated.FinishedAt.Equal(&b.State.Terminated.FinishedAt)
+	}) {
+		return fmt.Errorf("starting %s reran issue-pod init containers: before %+v, after %+v", worker.role, init, pod.Status.InitContainerStatuses)
 	}
-	note("runtime", "worker pod %s: required podAffinity %s=%s, topology %s; node %s, the root's", pod.Name, labelTree, worker.tree, corev1.LabelHostname, pod.Spec.NodeName)
+	note("runtime", "worker role %s started in root issue pod %s (uid %s), container %s; both init-container identities stayed unchanged", worker.token, pod.Name, pod.UID, worker.loc.Sandbox.Container)
 	return nil
 }
 
-// suspend: the worker's pod goes and its Sandbox and the tree volume stay; the runtime reports
-// the recorded process Gone when asked, and Observe says nothing more about it that the supervisor
-// would act on.
+// suspend: stopping the worker's process leaves its issue Sandbox, pod, root role and tree PVC
+// intact. The stopped locator probes Gone; the root remains Alive in its separate role container.
 func (r *liveRig) checkSuspend() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	if err := r.ensureRunning(root); err != nil {
@@ -180,27 +186,39 @@ func (r *liveRig) checkSuspend() error {
 		return err
 	}
 	loc := *worker.loc
+	name := SandboxName(worker.token)
+	pod, err := r.getPod(name)
+	if err != nil {
+		return err
+	}
 	if err := r.rt.Suspend(r.ctx, loc); err != nil {
 		return err
 	}
-	returned, returnedAt := r.obs.mark(), time.Now()
 	if recorded, ok := r.rt.recorded(worker.token); ok {
 		return fmt.Errorf("Suspend returned with the claim still in the watch, at %s", recorded.Incarnation)
 	}
-	note("runtime", "Suspend returned with the claim out of the watch")
-	name := SandboxName(worker.token)
 	s, err := r.getSandbox(name)
 	if err != nil {
 		return err
 	}
-	if s.mode() != modeSuspended {
-		return fmt.Errorf("Sandbox %s is %s after Suspend returned", name, s.mode())
+	if s.mode() != modeRunning {
+		return fmt.Errorf("Suspend(%s) changed shared Sandbox %s to %s", worker.token, name, s.mode())
 	}
-	if err := r.awaitPodGone(worker); err != nil {
+	current, err := r.getPod(name)
+	if err != nil || string(current.UID) != string(pod.UID) {
+		return fmt.Errorf("Suspend(%s) changed its issue pod from %s: %v", worker.token, pod.UID, err)
+	}
+	obs, err := r.rt.Probe(r.ctx, loc)
+	if err != nil {
 		return err
 	}
+	if obs.Kind != runtime.Gone || !sameLocator(obs.Locator, loc) {
+		return fmt.Errorf("Probe(the stopped locator) answered %s for %s: %s", obs.Kind, obs.Locator.Incarnation, obs.Detail)
+	}
+	if rootObs, err := r.rt.Probe(r.ctx, *root.loc); err != nil || rootObs.Kind != runtime.Alive {
+		return fmt.Errorf("the root process after Suspend(%s) is %s: %v", worker.token, rootObs.Kind, err)
+	}
 	worker.loc, worker.state = nil, stateSuspended
-	note("runtime", "Sandbox %s operatingMode Suspended; pod %s gone", name, name)
 	pvc := TreeClaimName(root.token)
 	phase, err := r.kubectl("get", "pvc", pvc, "-o", "jsonpath={.status.phase}")
 	if err != nil {
@@ -209,59 +227,18 @@ func (r *liveRig) checkSuspend() error {
 	if phase != "Bound" {
 		return fmt.Errorf("the tree PVC %s is %q", pvc, phase)
 	}
-	note("operator", "PVC %s: Bound", pvc)
-	obs, err := r.rt.Probe(r.ctx, loc)
-	if err != nil {
-		return err
-	}
-	if obs.Kind != runtime.Gone || !sameLocator(obs.Locator, loc) {
-		return fmt.Errorf("Probe(the recorded locator) answered %s for %s: %s", obs.Kind, obs.Locator.Incarnation, obs.Detail)
-	}
-	note("runtime", "Probe(recorded %s): gone — %s", short(loc.Incarnation), obs.Detail)
-	time.Sleep(liveSettle)
-	// Observe re-reads the recorded incarnation after each evaluation (an observation's At is
-	// stamped as its evaluation ends), so one it delivers was evaluated before Suspend dropped the
-	// entry. Anything evaluated after Suspend returned means Observe went on reporting the claim.
-	late := 0
-	for _, o := range r.obs.since(returned) {
-		if o.Locator.Claim != worker.token {
-			continue
-		}
-		if o.At.After(returnedAt) {
-			return fmt.Errorf("Observe delivered %s for the suspended worker, evaluated at %s, after Suspend returned at %s: %s",
-				o.Kind, o.At.Format(time.RFC3339Nano), returnedAt.Format(time.RFC3339Nano), o.Detail)
-		}
-		late++
-	}
-	note("runtime", "Observe after Suspend returned, over %s: nothing evaluated after it returned (%d delivered late, each evaluated before)", liveSettle, late)
+	note("runtime", "Suspend(%s) stopped only its role process; issue Sandbox %s and root process stayed running in pod uid %s", worker.token, name, pod.UID)
+	note("operator", "PVC %s: Bound; Probe(stopped %s): Gone", pvc, short(loc.Incarnation))
 	return nil
 }
 
-// no-affinity: with no pod of the tree scheduled, a worker and then the resumed root carry no tree
-// affinity, schedule on any node no other tree holds, and mount the tree volume.
-func (r *liveRig) checkNoAffinity() error {
+// role-container-isolation: a second role of the issue starts in the existing pod's own container,
+// keeps the root process alive, and can stop without changing the root container or the pod.
+func (r *liveRig) checkRoleContainerIsolation() error {
 	root, second := r.claim("root"), r.claim("second")
-	if err := r.ensureSuspended(r.claim("worker")); err != nil {
-		return err
-	}
 	if err := r.ensureRunning(root); err != nil {
 		return err
 	}
-	if err := r.suspend(root); err != nil {
-		return err
-	}
-	note("runtime", "root suspended; its pod gone")
-	pods, err := r.kube.CoreV1().Pods(r.env.namespace).List(r.ctx, metav1.ListOptions{LabelSelector: labelProject + "=" + r.env.project + "," + labelTree + "=" + root.tree})
-	if err != nil {
-		return err
-	}
-	for _, p := range pods.Items {
-		if p.Spec.NodeName != "" && !terminal(&p) && p.DeletionTimestamp == nil {
-			return fmt.Errorf("pod %s of the tree is still scheduled on %s", p.Name, p.Spec.NodeName)
-		}
-	}
-	note("runtime", "no pod of tree %s is scheduled", root.tree)
-
 	since := time.Now()
 	if _, err := r.spawn(second, true); err != nil {
 		return err
@@ -269,55 +246,24 @@ func (r *liveRig) checkNoAffinity() error {
 	if _, err := r.awaitRunning(second, since); err != nil {
 		return err
 	}
-	pod, err := r.getPod(SandboxName(second.token))
-	if err != nil {
-		return err
+	if second.loc.Sandbox.PodUID != root.loc.Sandbox.PodUID || second.loc.Sandbox.Container == root.loc.Sandbox.Container {
+		return fmt.Errorf("second role locator %+v and root locator %+v are not separate containers of one issue pod", second.loc.Sandbox, root.loc.Sandbox)
 	}
-	if treeAffinity(pod, second.tree) || (pod.Spec.Affinity != nil && pod.Spec.Affinity.PodAffinity != nil) {
-		return fmt.Errorf("the worker spawned with no tree pod scheduled carries a tree affinity: %+v", pod.Spec.Affinity)
-	}
-	claimName := ""
-	for _, v := range pod.Spec.Volumes {
-		if v.Name == treeVolume && v.PersistentVolumeClaim != nil {
-			claimName = v.PersistentVolumeClaim.ClaimName
-		}
-	}
-	if claimName != TreeClaimName(root.token) {
-		return fmt.Errorf("the worker mounts claim %q, not the tree's %s", claimName, TreeClaimName(root.token))
-	}
-	phase, err := r.kubectl("get", "pvc", claimName, "-o", "jsonpath={.status.phase}")
-	if err != nil {
-		return err
-	}
-	note("runtime", "second worker pod %s: no tree affinity, node %s, Ready, mounts %s", pod.Name, pod.Spec.NodeName, claimName)
-	note("operator", "PVC %s: %s", claimName, phase)
-	if phase != "Bound" {
-		return fmt.Errorf("the tree PVC is %q", phase)
+	if rootObs, err := r.rt.Probe(r.ctx, *root.loc); err != nil || rootObs.Kind != runtime.Alive {
+		return fmt.Errorf("root process after starting %s is %s: %v", second.token, rootObs.Kind, err)
 	}
 	if err := r.suspend(second); err != nil {
 		return err
 	}
-	note("runtime", "second worker suspended; its pod gone")
-
-	since = time.Now()
-	if _, err := r.resume(root, root.marker); err != nil {
-		return err
+	if rootObs, err := r.rt.Probe(r.ctx, *root.loc); err != nil || rootObs.Kind != runtime.Alive {
+		return fmt.Errorf("root process after suspending %s is %s: %v", second.token, rootObs.Kind, err)
 	}
-	if _, err := r.awaitRunning(root, since); err != nil {
-		return err
-	}
-	rootPod, err := r.getPod(SandboxName(root.token))
-	if err != nil {
-		return err
-	}
-	if rootPod.Spec.Affinity != nil && rootPod.Spec.Affinity.PodAffinity != nil {
-		return fmt.Errorf("the resumed root carries a tree affinity although no other tree pod is scheduled: %+v", rootPod.Spec.Affinity)
-	}
-	note("runtime", "root resumed as %s: no tree affinity, node %s, Ready", short(string(rootPod.UID)), rootPod.Spec.NodeName)
+	note("runtime", "role %s ran then stopped in container %s; root %s stayed Alive in container %s of pod uid %s", second.token, second.last.Sandbox.Container, root.token, root.loc.Sandbox.Container, root.loc.Sandbox.PodUID)
 	return nil
 }
 
-// resume: the first worker comes back as a new incarnation of the same agent, beside the root.
+// resume: the first worker comes back as a new process generation of the same agent in the same
+// issue pod beside the root.
 func (r *liveRig) checkResume() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	if err := r.ensureSuspended(worker); err != nil {
@@ -336,18 +282,10 @@ func (r *liveRig) checkResume() error {
 	if err != nil {
 		return err
 	}
-	if loc.Incarnation == old.Incarnation {
-		return fmt.Errorf("the resumed incarnation %s is the old one", loc.Incarnation)
+	if loc.Incarnation == old.Incarnation || loc.Sandbox.PodUID != old.Sandbox.PodUID || loc.Sandbox.PodUID != root.loc.Sandbox.PodUID {
+		return fmt.Errorf("Resume(%s) returned %+v after %+v, want a new process generation in the unchanged issue pod %s", worker.token, loc.Sandbox, old.Sandbox, root.loc.Sandbox.PodUID)
 	}
-	note("runtime", "Resume(prev %s) returned %s", short(old.Incarnation), short(loc.Incarnation))
-	pod, err := r.getPod(SandboxName(worker.token))
-	if err != nil {
-		return err
-	}
-	if !treeAffinity(pod, worker.tree) {
-		return fmt.Errorf("the resumed worker carries no tree affinity although the root runs: %+v", pod.Spec.Affinity)
-	}
-	note("runtime", "resumed pod requires the tree's node again (the root is Ready); node %s", pod.Spec.NodeName)
+	note("runtime", "Resume(prev %s) returned %s in the same issue pod uid %s", short(old.Incarnation), short(loc.Incarnation), loc.Sandbox.PodUID)
 	if reg.hash != tokenHash(worker.bootToken) {
 		return fmt.Errorf("the registration's token hash %s is not generation %d's", short(reg.hash), worker.gen)
 	}
@@ -363,8 +301,8 @@ func (r *liveRig) checkResume() error {
 	return nil
 }
 
-// same-agent-negative: a resume naming a session the volume does not hold never starts a fresh
-// agent; the init container refuses, and the runtime reports it Gone with the refusal.
+// same-agent-negative: a resume naming a session the tree volume does not hold never starts a
+// fresh agent. The role launcher reports the refusal; the shared pod stays available to peers.
 func (r *liveRig) checkSameAgentNegative() error {
 	second := r.claim("second")
 	if err := r.ensureSuspended(second); err != nil {
@@ -387,8 +325,8 @@ func (r *liveRig) checkSameAgentNegative() error {
 		return fmt.Errorf("no final observation of %s within %s", loc.Incarnation, liveRunningLimit)
 	}
 	want := "Refusing to start " + second.issue + " fresh"
-	if gone.Kind != runtime.Gone || !strings.Contains(gone.Detail, want) || !strings.Contains(gone.Detail, "init container "+initContainer) {
-		return fmt.Errorf("observed %s, want gone quoting the init container's %q: %s", gone.Kind, want, gone.Detail)
+	if gone.Kind != runtime.Gone || !strings.Contains(gone.Detail, want) || !strings.Contains(gone.Detail, "role container "+string(second.role)) {
+		return fmt.Errorf("observed %s, want gone quoting the role container's refusal %q: %s", gone.Kind, want, gone.Detail)
 	}
 	note("runtime", "Observe: gone for %s — %s", short(loc.Incarnation), oneLine(gone.Detail))
 	if regs := r.reg.registrations(second.token); len(regs) > 0 && regs[len(regs)-1].gen == second.gen {
@@ -421,11 +359,11 @@ func (r *liveRig) checkSameAgentNegative() error {
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
-// kill-pod: a worker killed in place is reported Gone with its exit, and Resume(prev=dead)
-// relaunches it through Suspended.
-func (r *liveRig) checkKillPod() error {
-	worker := r.claim("worker")
-	if err := r.ensureRunning(r.claim("root")); err != nil {
+// kill-launcher: a worker role's launcher PID 1 ends in place, is reported Gone for that role
+// process, and Resume(prev=dead) starts a new generation in the same issue pod.
+func (r *liveRig) checkKillLauncher() error {
+	root, worker := r.claim("root"), r.claim("worker")
+	if err := r.ensureRunning(root); err != nil {
 		return err
 	}
 	if err := r.ensureRunning(worker); err != nil {
@@ -437,12 +375,12 @@ func (r *liveRig) checkKillPod() error {
 	if _, err := r.exec(worker, "sh", "-c", "kill 1"); err != nil {
 		return err
 	}
-	note("operator", "exec %s -- sh -c 'kill 1'", name)
+	note("operator", "exec %s -c %s -- sh -c 'kill 1'", name, worker.role)
 	gone, ok := r.obs.await(mark, liveGoneLimit, func(o runtime.Observation) bool {
 		return o.Locator.Claim == worker.token && o.Kind == runtime.Gone
 	})
 	if !ok {
-		return fmt.Errorf("no gone for %s within %s", name, liveGoneLimit)
+		return fmt.Errorf("no gone for %s within %s", old.Incarnation, liveGoneLimit)
 	}
 	if !sameLocator(gone.Locator, old) || !strings.Contains(gone.Detail, string(old.Sandbox.PodUID)) || !strings.Contains(gone.Detail, "role container "+old.Sandbox.Container+" terminated") {
 		return fmt.Errorf("the gone carries %s, want the old %s with the role container's exit: %s", gone.Locator.Incarnation, old.Incarnation, gone.Detail)
@@ -451,14 +389,14 @@ func (r *liveRig) checkKillPod() error {
 	if exit == nil {
 		return fmt.Errorf("the gone names no exit code: %s", gone.Detail)
 	}
-	note("runtime", "Observe: gone for old %s, main container exit code %s — %s", short(old.Incarnation), exit[1], oneLine(firstLine(gone.Detail)))
+	note("runtime", "Observe: gone for old %s, role container %s exit code %s — %s", short(old.Incarnation), old.Sandbox.Container, exit[1], oneLine(firstLine(gone.Detail)))
 	worker.loc, worker.state = nil, stateDead
 	before, err := r.getSandbox(name)
 	if err != nil {
 		return err
 	}
 	if before.mode() != modeRunning {
-		return fmt.Errorf("the dead pod's Sandbox is %s before the relaunch", before.mode())
+		return fmt.Errorf("the issue pod Sandbox is %s before the relaunch", before.mode())
 	}
 	since := time.Now()
 	fresh, err := r.resume(worker, worker.marker)
@@ -472,10 +410,13 @@ func (r *liveRig) checkKillPod() error {
 	if err != nil {
 		return err
 	}
-	if after.Generation-before.Generation != 2 {
-		return fmt.Errorf("the Sandbox went from generation %d to %d; a relaunch through Suspended is two writes", before.Generation, after.Generation)
+	if fresh.Incarnation == old.Incarnation || fresh.Sandbox.PodUID != old.Sandbox.PodUID || after.Generation != before.Generation {
+		return fmt.Errorf("Resume(prev=dead) returned %+v over Sandbox generation %d → %d, want a new process in unchanged pod %s and Sandbox generation", fresh.Sandbox, before.Generation, after.Generation, old.Sandbox.PodUID)
 	}
-	note("runtime", "Resume(prev=dead %s) returned %s; Sandbox generation %d → %d (Suspended, then the template and Running), the dead pod gone", short(old.Incarnation), short(fresh.Incarnation), before.Generation, after.Generation)
+	if rootObs, err := r.rt.Probe(r.ctx, *root.loc); err != nil || rootObs.Kind != runtime.Alive {
+		return fmt.Errorf("root after worker launcher restart is %s: %v", rootObs.Kind, err)
+	}
+	note("runtime", "Resume(prev=dead %s) returned %s in the same pod uid %s; root stayed Alive", short(old.Incarnation), short(fresh.Incarnation), fresh.Sandbox.PodUID)
 	r.killed.old, r.killed.fresh, r.killed.gone = old, fresh, gone
 	return nil
 }
@@ -489,7 +430,7 @@ func firstLine(s string) string {
 // new one.
 func (r *liveRig) checkStaleIncarnation() error {
 	if r.killed.fresh.Incarnation == "" {
-		return errors.New("kill-pod did not run; stale-incarnation rides its relaunch")
+		return errors.New("kill-launcher did not run; stale-incarnation rides its relaunch")
 	}
 	worker := r.claim("worker")
 	old, fresh := r.killed.old, r.killed.fresh
@@ -528,8 +469,8 @@ func (r *liveRig) checkStaleIncarnation() error {
 	if err != nil {
 		return err
 	}
-	if s.mode() != modeRunning || string(pod.UID) != fresh.Incarnation || uid != fresh.Incarnation {
-		return fmt.Errorf("Suspend(old) acted: Sandbox %s, pod uid %s (operator: %s), want Running and %s", s.mode(), pod.UID, uid, fresh.Incarnation)
+	if s.mode() != modeRunning || string(pod.UID) != fresh.Sandbox.PodUID || uid != fresh.Sandbox.PodUID {
+		return fmt.Errorf("Suspend(old) acted: Sandbox %s, pod uid %s (operator: %s), want Running and recorded pod uid %s", s.mode(), pod.UID, uid, fresh.Sandbox.PodUID)
 	}
 	note("runtime", "Suspend(old %s): nil; Sandbox still Running, pod still %s", short(old.Incarnation), short(string(pod.UID)))
 	note("operator", "pod %s uid %s", name, uid)
@@ -846,49 +787,42 @@ func (r *liveRig) checkOrphanSweep() error {
 	return nil
 }
 
-// release-tree: releasing every claim, a suspended one with no locator included, leaves nothing
-// of the run the runtime created: every Sandbox, every -boot Secret, and each tree volume go. The
-// operator's providers Secret carries the run's label too, for the teardown, but it is the
-// operator's, which Release never deletes, so the check leaves it out by name.
-func (r *liveRig) checkReleaseTree() error {
+// release-preserves-issue: release ends only the named role process. The shared issue Sandbox,
+// root process and tree PVC stay until the daemon's durable whole-issue cleanup effect runs; this
+// direct runtime harness deliberately has no store/outbox and never substitutes a local cleanup.
+func (r *liveRig) checkReleasePreservesIssue() error {
 	if err := r.startRuntimeOnce(); err != nil {
 		return err
 	}
-	for _, c := range r.claims {
-		if err := r.revoke(c); err != nil {
-			return err
-		}
+	root, worker := r.claim("root"), r.claim("worker")
+	if err := r.ensureRunning(root); err != nil {
+		return err
 	}
-	var released []string
-	// The roster in reverse, so each tree's root, whose Sandbox owns the tree volume, goes last.
-	for _, c := range slices.Backward(r.claims) {
-		if c.state == stateNone || c.state == stateReleased {
-			continue
-		}
-		loc := c.loc
-		if err := r.rt.Release(r.ctx, runtime.Known{Claim: c.token, Locator: loc}); err != nil {
-			return fmt.Errorf("Release(%s): %w", c.name, err)
-		}
-		how := "nil locator"
-		if loc != nil {
-			how = "locator " + short(loc.Incarnation)
-		}
-		released = append(released, c.name+" ("+how+")")
-		c.loc, c.state = nil, stateReleased
+	if err := r.ensureRunning(worker); err != nil {
+		return err
 	}
-	note("runtime", "Released %s", strings.Join(released, ", "))
-	selector := labelProject + "=" + r.env.project
-	providers := ProvidersSecretName(r.env.project)
-	var left string
-	err := r.poll(liveGoneLimit, "every object of the run to go", func() (bool, error) {
-		out, err := r.kubectl("get", "sandboxes,secrets,pvc,pods", "-l", selector, "--field-selector", "metadata.name!="+providers, "-o", "name")
-		left = strings.TrimSpace(out)
-		return left == "", err
-	})
+	loc := *worker.loc
+	name := SandboxName(worker.token)
+	if err := r.rt.Release(r.ctx, runtime.Known{Claim: worker.token, Locator: &loc}); err != nil {
+		return fmt.Errorf("Release(%s): %w", worker.name, err)
+	}
+	worker.loc, worker.state = nil, stateReleased
+	s, err := r.getSandbox(name)
 	if err != nil {
-		return fmt.Errorf("%w; left: %s", err, oneLine(left))
+		return err
 	}
-	note("operator", "kubectl get sandboxes,secrets,pvc,pods -l %s, less the operator's %s: none — every Sandbox, -boot Secret, and tree PVC (%s, %s) gone",
-		selector, providers, TreeClaimName(r.claim("root").token), TreeClaimName(r.claim("root2").token))
+	if s.mode() != modeRunning {
+		return fmt.Errorf("Release(%s) changed issue Sandbox %s to %s", worker.name, name, s.mode())
+	}
+	if rootObs, err := r.rt.Probe(r.ctx, *root.loc); err != nil || rootObs.Kind != runtime.Alive {
+		return fmt.Errorf("root after Release(%s) is %s: %v", worker.name, rootObs.Kind, err)
+	}
+	pvc := TreeClaimName(root.token)
+	phase, err := r.kubectl("get", "pvc", pvc, "-o", "jsonpath={.status.phase}")
+	if err != nil || phase != "Bound" {
+		return fmt.Errorf("tree PVC %s after Release(%s) is %q: %v", pvc, worker.name, phase, err)
+	}
+	note("runtime", "Release(%s) ended only that role; issue Sandbox %s and root %s stayed Alive", worker.name, name, root.token)
+	note("operator", "PVC %s: Bound", pvc)
 	return nil
 }
