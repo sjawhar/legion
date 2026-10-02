@@ -294,6 +294,9 @@ func TestDirectTreeCleanupRequiresNoWorkflowRecord(t *testing.T) {
 	if err := c.r.CleanupTree(c.ctx, testProject, testTree); err != nil {
 		t.Fatalf("direct tree cleanup: %v", err)
 	}
+	if got, want := c.deletes(), []string{"sandboxes " + c.child, "sandboxes " + c.root}; strings.Join(got, ", ") != strings.Join(want, ", ") {
+		t.Fatalf("direct cleanup deletes = %v, want children before root %v", got, want)
+	}
 	if root := c.rootRecord(t); root.CleanupConfirmedAt.IsZero() {
 		t.Fatalf("direct root cleanup record = %+v, want confirmed", root)
 	}
