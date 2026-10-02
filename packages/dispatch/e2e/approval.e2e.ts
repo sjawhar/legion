@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import type { Artifact } from "../web/src/api/types";
 
 import {
   createComment,
@@ -149,14 +150,15 @@ test("an approval request stays in one Inbox card while its document version mov
       { ops: [{ op: "replace", find: "The plan.", with: "The revised plan." }] },
       session
     );
+    let movedArtifact: Artifact | undefined;
     await expect
-      .poll(async () => (await getArtifact(artifactID, { login: "alice" })).versions.length)
+      .poll(async () => {
+        movedArtifact = await getArtifact(artifactID, { login: "alice" });
+        return movedArtifact.versions.length;
+      })
       .toBeGreaterThan(1);
-    const movedVersion = Math.max(
-      ...(await getArtifact(artifactID, { login: "alice" })).versions.map(
-        (version) => version.number
-      )
-    );
+    if (movedArtifact === undefined) throw new Error("the moved artifact was not read");
+    const movedVersion = Math.max(...movedArtifact.versions.map((version) => version.number));
 
     await page.reload();
     await expect(

@@ -38,7 +38,7 @@ const lastReplyJoin = `
 // turn to the human before ordinary replies again decide it.
 const waitingOnExpression = `case
 	when a.kind = 'approval'
-		and (a.approval->>'requested_version')::integer < (a.approval->>'version')::integer
+		and (a.approval->>'requested_version')::bigint < (a.approval->>'version')::bigint
 	then 'agent'
 	when a.kind = 'approval' and a.edited_at >= lr.created_at
 	then 'human'

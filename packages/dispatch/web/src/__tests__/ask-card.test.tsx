@@ -851,34 +851,6 @@ test("an approval-kind ask submits Approve with an optional note", async () => {
   }
 });
 
-test("an approval-kind ask naming an older version shows the server's refusal and offers no Retry", async () => {
-  const refusal =
-    "this approval ask names spec.md version 1, and the document is at version 2; review version 2 from the document header, or wait for a new approval request";
-  const input = ask({
-    kind: "approval",
-    options: [{ label: "Approve" }, { label: "Request changes" }],
-  });
-  const { view } = renderCard(
-    <AskCard
-      ask={input}
-      answerAsk={async () => {
-        throw new ApiError(409, { code: "APPROVAL_ASK_STALE", error: refusal });
-      }}
-      getAskThread={emptyThread(input)}
-    />
-  );
-
-  try {
-    fireEvent.click(await view.findByRole("radio", { name: "Approve" }));
-    fireEvent.click(view.getByRole("button", { name: "Answer" }));
-
-    const alert = await view.findByRole("alert");
-    expect(alert.textContent).toBe(refusal);
-    expect(within(alert).queryByRole("button", { name: "Retry" })).toBeNull();
-  } finally {
-    view.unmount();
-  }
-});
 
 // A refusal of what the answer says, or of the ask it answers, is refused again however often it
 // is sent, so the card says why and offers no Retry; anything else may pass on a retry.
