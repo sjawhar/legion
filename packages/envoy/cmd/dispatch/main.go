@@ -1,5 +1,5 @@
-// Command dispatch serves the Dispatch dashboard, GitHub OAuth flow, and
-// per-user GitHub REST and GraphQL proxy.
+// Command dispatch serves the Dispatch dashboard and API, signs people in with Google Workspace
+// through the sign-in pool, and reads GitHub for the web app as the GitHub App.
 package main
 
 import (
@@ -53,16 +53,21 @@ const (
 var buildCommit string
 
 type bootConfig struct {
-	DatabaseURL      string
-	AgentToken       string
-	RepoProjects     string
-	DefaultProject   string
-	EnvoyURL         string
-	GitHubAPIBase    string
-	IdentityHeader   string
-	AllowedLogins    map[string]struct{}
-	NATSDisabled     bool
-	TestHooksEnabled bool
+	DatabaseURL    string
+	AgentToken     string
+	RepoProjects   string
+	DefaultProject string
+	EnvoyURL       string
+	GitHubAPIBase  string
+	IdentityHeader string
+	// SignInIssuer, SignInClientID, SignInClientSecret and SignInGroup configure Google sign-in
+	// through the sign-in pool (DISPATCH_SIGNIN_*): all four or none; empty means no sign-in.
+	SignInIssuer       string
+	SignInClientID     string
+	SignInClientSecret string
+	SignInGroup        string
+	NATSDisabled       bool
+	TestHooksEnabled   bool
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -199,22 +204,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	users := store.NewPgUserStore(database.Pool)
+	people := store.NewPgPeopleStore(database.Pool)
 	sessions := store.NewPgSessionStore(database.Pool)
+
+	var signIn *oidc.CodeFlow
+	if boot.SignInIssuer != "" {
+		signIn, err = oidc.DiscoverCodeFlow(ctx, boot.SignInIssuer, boot.SignInClientID, boot.SignInClientSecret, oidc.DiscoveryTimeout)
+		if err != nil {
+			slog.Error("dispatch: discover the sign-in issuer", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("dispatch: signing people in through the sign-in pool", "issuer", boot.SignInIssuer, "client_id", boot.SignInClientID, "group", boot.SignInGroup)
+	}
 
 	var requestIdentity identity.Identity
 	if boot.IdentityHeader == "" {
-		requestIdentity = identity.CookieIdentity{
-			SigningKey:    signingKey,
-			AllowedLogins: boot.AllowedLogins,
-			Sessions:      sessions,
+		cookieIdentity := identity.CookieIdentity{SigningKey: signingKey, Sessions: sessions}
+		// The dev sign-in server signs people in without the pool, so it has no membership to
+		// confirm; every other cookie server confirms it hourly (resolveBootConfig requires sign-in).
+		if !boot.DevSignIn {
+			cookieIdentity.Membership = &identity.Membership{People: people, Sessions: sessions, SignIn: signIn, Group: boot.SignInGroup}
 		}
+		requestIdentity = cookieIdentity
 	} else {
 		slog.Warn("dispatch: trusting request identity header", "header", boot.IdentityHeader)
-		requestIdentity = identity.HeaderIdentity{
-			Header:        boot.IdentityHeader,
-			AllowedLogins: boot.AllowedLogins,
-		}
+		requestIdentity = identity.HeaderIdentity{Header: boot.IdentityHeader, People: people}
 	}
 
 	broker := events.NewBroker()
@@ -236,13 +250,14 @@ func main() {
 	}
 
 	appCtx, err := routes.BuildAppContext(routes.AppContextOptions{
-		SigningKey: signingKey,
-		WebDistDir: webDistDir,
-		Users:      users,
-		Sessions:   sessions,
-		Identity:   requestIdentity,
+		SigningKey:  signingKey,
+		WebDistDir:  webDistDir,
+		People:      people,
+		Sessions:    sessions,
+		Identity:    requestIdentity,
+		SignIn:      signIn,
+		SignInGroup: boot.SignInGroup,
 
-		AllowedLogins:  boot.AllowedLogins,
 		Store:          database,
 		AgentToken:     boot.AgentToken,
 		RepoProjects:   boot.RepoProjects,
@@ -420,16 +435,31 @@ func loadAppCredentials(dataDir string) (*auth.AppConfig, appCredentialSource, e
 	return cfg, appCredentialSource{Path: path}, nil
 }
 
+// removedVariables are the settings a release removed. A deployment that still sets one carries
+// configuration this binary would silently ignore, so boot refuses it and names what replaced it.
+var removedVariables = []struct{ name, replacement string }{
+	{"DISPATCH_ALLOWED_LOGINS", "people sign in with Google Workspace; DISPATCH_SIGNIN_GROUP names the group they must be in"},
+	{"DISPATCH_APP_CLIENT_SECRET", "nobody signs in through the GitHub App; its JWT needs only DISPATCH_APP_CLIENT_ID and DISPATCH_APP_PEM_B64"},
+}
+
 func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
+	for _, removed := range removedVariables {
+		if getenv(removed.name) != "" {
+			return bootConfig{}, fmt.Errorf("%s is no longer read and must be unset: %s", removed.name, removed.replacement)
+		}
+	}
 	boot := bootConfig{
-		DatabaseURL:      strings.TrimSpace(getenv("DATABASE_URL")),
-		AgentToken:       strings.TrimSpace(getenv("DISPATCH_AGENT_TOKEN")),
-		RepoProjects:     strings.TrimSpace(getenv("DISPATCH_REPO_PROJECTS")),
-		DefaultProject:   strings.TrimSpace(getenv("DISPATCH_DEFAULT_PROJECT")),
-		GitHubAPIBase:    strings.TrimSpace(getenv("DISPATCH_GITHUB_API_BASE")),
-		AllowedLogins:    parseAllowedLogins(getenv("DISPATCH_ALLOWED_LOGINS")),
-		NATSDisabled:     getenv("DISPATCH_NATS_DISABLED") == "1",
-		TestHooksEnabled: getenv("DISPATCH_TEST_HOOKS") == "1",
+		DatabaseURL:        strings.TrimSpace(getenv("DATABASE_URL")),
+		AgentToken:         strings.TrimSpace(getenv("DISPATCH_AGENT_TOKEN")),
+		RepoProjects:       strings.TrimSpace(getenv("DISPATCH_REPO_PROJECTS")),
+		DefaultProject:     strings.TrimSpace(getenv("DISPATCH_DEFAULT_PROJECT")),
+		GitHubAPIBase:      strings.TrimSpace(getenv("DISPATCH_GITHUB_API_BASE")),
+		SignInIssuer:       strings.TrimSpace(getenv("DISPATCH_SIGNIN_ISSUER")),
+		SignInClientID:     strings.TrimSpace(getenv("DISPATCH_SIGNIN_CLIENT_ID")),
+		SignInClientSecret: strings.TrimSpace(getenv("DISPATCH_SIGNIN_CLIENT_SECRET")),
+		SignInGroup:        strings.TrimSpace(getenv("DISPATCH_SIGNIN_GROUP")),
+		NATSDisabled:       getenv("DISPATCH_NATS_DISABLED") == "1",
+		TestHooksEnabled:   getenv("DISPATCH_TEST_HOOKS") == "1",
 	}
 	if boot.DatabaseURL == "" {
 		return bootConfig{}, errors.New("DATABASE_URL required")
@@ -442,19 +472,37 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.ListenAddr = listenAddr
+	signIn := map[string]string{
+		"DISPATCH_SIGNIN_ISSUER":        boot.SignInIssuer,
+		"DISPATCH_SIGNIN_CLIENT_ID":     boot.SignInClientID,
+		"DISPATCH_SIGNIN_CLIENT_SECRET": boot.SignInClientSecret,
+		"DISPATCH_SIGNIN_GROUP":         boot.SignInGroup,
+	}
+	var missing, set []string
+	for _, name := range []string{"DISPATCH_SIGNIN_ISSUER", "DISPATCH_SIGNIN_CLIENT_ID", "DISPATCH_SIGNIN_CLIENT_SECRET", "DISPATCH_SIGNIN_GROUP"} {
+		if signIn[name] == "" {
+			missing = append(missing, name)
+		} else {
+			set = append(set, name)
+		}
+	}
+	if len(set) > 0 && len(missing) > 0 {
+		return bootConfig{}, fmt.Errorf("Google sign-in needs all four of DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and DISPATCH_SIGNIN_GROUP: %s set, %s missing", strings.Join(set, ", "), strings.Join(missing, ", "))
+	}
+	devSignIn := getenv("DISPATCH_DEV_SIGNIN") == "1"
 
 	switch mode := strings.TrimSpace(getenv("DISPATCH_IDENTITY")); {
 	case mode == "" || mode == "cookie":
-		if len(boot.AllowedLogins) == 0 {
-			return bootConfig{}, errors.New("DISPATCH_ALLOWED_LOGINS required in cookie identity mode")
+		if boot.SignInIssuer == "" && !devSignIn {
+			return bootConfig{}, errors.New("cookie identity signs people in with Google Workspace: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and DISPATCH_SIGNIN_GROUP are required")
 		}
 	case strings.HasPrefix(mode, "header:"):
 		boot.IdentityHeader = strings.TrimSpace(strings.TrimPrefix(mode, "header:"))
 		if boot.IdentityHeader == "" {
 			return bootConfig{}, errors.New("DISPATCH_IDENTITY header name required")
 		}
-		if getenv("DISPATCH_APP_CLIENT_ID") != "" && getenv("DISPATCH_IDENTITY_HEADER_TRUSTED") != "1" {
-			return bootConfig{}, errors.New("DISPATCH_IDENTITY_HEADER_TRUSTED=1 required with OAuth and header identity")
+		if boot.SignInIssuer != "" && getenv("DISPATCH_IDENTITY_HEADER_TRUSTED") != "1" {
+			return bootConfig{}, errors.New("DISPATCH_IDENTITY_HEADER_TRUSTED=1 required with Google sign-in and header identity")
 		}
 	default:
 		return bootConfig{}, fmt.Errorf("DISPATCH_IDENTITY=%q (expected cookie or header:<Header-Name>)", mode)
@@ -515,6 +563,9 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 func devSignInFence(boot bootConfig, getenv func(string) string) error {
 	if boot.IdentityHeader != "" {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
+	}
+	if boot.SignInIssuer != "" {
+		return errors.New("DISPATCH_DEV_SIGNIN=1 signs people in without the sign-in pool, so DISPATCH_SIGNIN_* must be unset: a loopback server holds no sign-in client secret")
 	}
 	if !routes.LoopbackHostPort(boot.ListenAddr) {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q (listen address %q) must be 127.0.0.1 or [::1]", getenv("DISPATCH_LISTEN_HOST"), boot.ListenAddr)
@@ -644,18 +695,6 @@ func seedRepoProjects(ctx context.Context, database *store.Store, raw string) er
 		}
 	}
 	return nil
-}
-
-// parseAllowedLogins lower-cases every entry: GitHub logins are case-insensitive, and the
-// login GitHub returns at sign-in carries the user's display casing.
-func parseAllowedLogins(raw string) map[string]struct{} {
-	logins := map[string]struct{}{}
-	for _, login := range strings.Split(raw, ",") {
-		if login = strings.ToLower(strings.TrimSpace(login)); login != "" {
-			logins[login] = struct{}{}
-		}
-	}
-	return logins
 }
 
 func parsePositiveInt(raw string) (int, error) {

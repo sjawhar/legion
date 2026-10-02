@@ -170,13 +170,13 @@ func newSubscribersHandler(t *testing.T, database *store.Store, envoyURL string)
 		}
 	})
 	deps, err := NewDeps(DepsInput{
-		Store:         database,
-		Identity:      headerIdentity(database),
-		AgentToken:    "agent-token",
-		ServerURL:     "https://dispatch.example",
-		Docs:          documentService,
-		Events:        broker,
-		EnvoyURL:      envoyURL,
+		Store:      database,
+		Identity:   headerIdentity(database),
+		AgentToken: "agent-token",
+		ServerURL:  "https://dispatch.example",
+		Docs:       documentService,
+		Events:     broker,
+		EnvoyURL:   envoyURL,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

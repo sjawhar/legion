@@ -287,7 +287,7 @@ func TestWhoamiNamesHumanPersonalTokenOwnerAndSharedToken(t *testing.T) {
 	if human.Code != http.StatusOK {
 		t.Fatalf("human whoami: status=%d body=%s", human.Code, human.Body.String())
 	}
-	if got := decodeBody[whoami](t, human); got.Kind != "user" || got.Login != "Alice" {
+	if got := decodeBody[whoami](t, human); got.Kind != "user" || got.Login != "alice" {
 		t.Fatalf("human whoami = %#v", got)
 	}
 	minted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/me/agent-tokens", map[string]string{"name": "planner"}, "Bob")

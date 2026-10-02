@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -423,14 +424,16 @@ func TestDocumentRoutesRejectAmbiguousFilenameWithSlugChoices(t *testing.T) {
 	}
 }
 
+// unrecordedPeople is a people store for a test with no database: it records nobody.
+type unrecordedPeople struct{ auth.PeopleStore }
+
+func (unrecordedPeople) Record(context.Context, string) error { return nil }
+
 func TestArtifactIDRoutesValidateBeforeDatabaseUse(t *testing.T) {
 	mux := http.NewServeMux()
 	Register(mux, Deps{
-		Store: &store.Store{},
-		Identity: identity.HeaderIdentity{
-			Header:        "X-Dispatch-User",
-			People:        store.NewPgPeopleStore(nil),
-		},
+		Store:    &store.Store{},
+		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: unrecordedPeople{}},
 	})
 
 	for _, route := range []struct {

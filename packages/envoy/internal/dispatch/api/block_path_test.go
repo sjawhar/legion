@@ -362,10 +362,10 @@ func readingServer(t *testing.T, database *store.Store, persist docs.VersionedSt
 		service = wrap(documents)
 	}
 	deps, err := NewDeps(DepsInput{
-		Store:         database,
-		Identity:      headerIdentity(database),
-		Docs:          service,
-		Events:        broker,
+		Store:    database,
+		Identity: headerIdentity(database),
+		Docs:     service,
+		Events:   broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

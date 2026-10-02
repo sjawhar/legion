@@ -368,17 +368,12 @@ func TestAViewersRepliesCountAndClearWhateverTheCasingOfTheirLogin(t *testing.T)
 	}
 }
 
-// The Clear is the other half of that state, keyed the other way: user_agent_state is migration
-// 0033's table, on the raw actor id, while the read mark above is canonical. The write's rawness
-// is what this pins - canonicalising it while the read stays raw loses a non-lowercase viewer's
-// Clear outright and puts their count back up. The second read pins the keying itself, which
-// packages/envoy/AGENTS.md records as a known inconsistency: a future backfill that normalises
-// user_agent_state turns it red on purpose, as the invariant asking to be decided again rather
-// than a fault in the change that trips it. Why the write must stay raw is held by neither
-// assertion, since canonicalising the write and the state query's read together is
-// self-consistent and green: a Dispatch image predating user_agent_read wrote cleared_before under
-// the raw actor id and must still read it back across a rolling deploy.
-func TestClearIsKeyedOnTheRawActorID(t *testing.T) {
+// The Clear is the other half of that state. user_agent_state (migration 0033) is keyed on the
+// actor id as written, and every identity now names a person by their lowercase email (the
+// trusted header lowercases, the sign-in pool's username is lowercased, migrate-people rewrites
+// the rows older images wrote under a login's display casing), so a viewer's Clear is one row
+// whatever casing reaches the header.
+func TestClearIsKeyedOnTheCanonicalPerson(t *testing.T) {
 	handler, _, _, reply, _ := directConversationFrom(t, "Alice")
 	first := decodeBody[model.Message](t, reply("On it."))
 	if got := unreadReplies(t, handler, "Alice", "s1"); got.UnreadReplies != 1 {
@@ -393,8 +388,8 @@ func TestClearIsKeyedOnTheRawActorID(t *testing.T) {
 	if got := unreadReplies(t, handler, "Alice", "s1"); got.ClearedBefore == nil || got.UnreadReplies != 0 {
 		t.Fatalf("Alice reads %#v, want the Clear they wrote and nothing unread", got)
 	}
-	if got := unreadReplies(t, handler, "alice", "s1"); got.ClearedBefore != nil {
-		t.Fatalf("alice reads Alice's Clear (%#v); the Clear is keyed on the raw actor id", got)
+	if got := unreadReplies(t, handler, "alice", "s1"); got.ClearedBefore == nil || got.UnreadReplies != 0 {
+		t.Fatalf("alice reads %#v, want the Clear Alice wrote: one person, one Clear", got)
 	}
 }
 

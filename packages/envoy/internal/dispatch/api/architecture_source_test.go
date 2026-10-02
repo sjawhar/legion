@@ -134,7 +134,7 @@ func newArchitectureSourceServer(t *testing.T, fake *fakeGitHubApp) (http.Handle
 	github := httptest.NewServer(fake.handler(t))
 	t.Cleanup(github.Close)
 	handler, database, _ := newTestServer(t, testServerOptions{
-		app:           &auth.AppConfig{ClientID: "Iv1.test", ClientSecret: "secret", PEM: pemText},
+		app:           &auth.AppConfig{ClientID: "Iv1.test", PEM: pemText},
 		githubAPIBase: github.URL,
 	})
 	return handler, database
