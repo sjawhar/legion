@@ -443,8 +443,11 @@ func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
 }
 
 // rebuildArtifact discards only a history ygo cannot load and replaces it with one seed update
-// from the latest saved markdown. It is human-only because a rebuild intentionally deletes durable
-// history; a document that loads is refused unchanged.
+// from the latest saved markdown, or supplied markdown. It is human-only because a rebuild
+// intentionally deletes durable history; a document that loads is refused unchanged. The rebuild,
+// the version supplied markdown writes, its artifact.version event and the approval ask it
+// retracts commit in one transaction, so no refusal or failure leaves a changed document without
+// them.
 func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -466,7 +469,15 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
-	report, err := s.deps.Docs.RebuildDocument(r.Context(), artifact.ID, input.Markdown, actor)
+	tx, err := s.begin(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
+	report, written, err := s.deps.Docs.RebuildDocument(documentCtx, artifact.ID, input.Markdown, actor)
 	if errors.Is(err, docs.ErrDocumentLive) {
 		writeError(w, "DOCUMENT_LIVE", http.StatusConflict, err.Error())
 		return
@@ -480,45 +491,25 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var published []model.Event
-	if input.Markdown != nil {
-		tx, err := s.begin(r.Context())
+	if written.Wrote {
+		event, err := s.appendEvent(r.Context(), tx, ownerForArtifact(artifact).event(
+			"artifact.version",
+			actor,
+			docs.ArtifactVersionEventPayload(artifact.ID, artifact.Name, written.Version, nil, written.Changes),
+		))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		defer tx.Rollback(r.Context())
-		owner := ownerForArtifact(artifact)
-		if err := s.requireOpenOwner(r.Context(), tx, owner); err != nil {
+		if err := refs.Stamp(r.Context(), tx, "artifact", artifact.ID, event.ID); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
-		defer ledger.Discard()
-		written, err := s.deps.Docs.SnapshotVersion(documentCtx, artifact.ID, actor)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if written.Wrote {
-			event, err := s.appendEvent(r.Context(), tx, owner.event(
-				"artifact.version",
-				actor,
-				docs.ArtifactVersionEventPayload(artifact.ID, artifact.Name, written.Version, nil, written.Changes),
-			))
-			if err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-			if err := refs.Stamp(r.Context(), tx, "artifact", artifact.ID, event.ID); err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-			published = append(published, event)
-		}
-		if err := ledger.Commit(r.Context()); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
+		published = append(published, event)
+	}
+	if err := ledger.Commit(r.Context()); err != nil {
+		s.writeHandlerError(w, err)
+		return
 	}
 	s.publish(published...)
 	WriteJSON(w, http.StatusOK, report)

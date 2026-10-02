@@ -144,6 +144,14 @@ export function isDocumentSchemaError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "DOC_SCHEMA";
 }
 
+// A document whose room or store could not serve it. Its stored history may be one the server
+// cannot load at all, which a rebuild from the latest saved version restores.
+export function isDocumentServiceUnavailable(error: unknown): boolean {
+  return (
+    error instanceof ApiError && error.status === 503 && error.code === "DOC_SERVICE_UNAVAILABLE"
+  );
+}
+
 // The retry policy every query in the app shares: an auth outcome (401/403), a missing
 // architecture source, an unconfigured credential broker, or a stored document outside Proof's
 // schema is definitive and retrying it changes nothing; any other failure (dropped connection,

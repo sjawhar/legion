@@ -97,10 +97,9 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 			write.dropRendering()
 		}
 	}()
-	before, err := treeOf(fork)
-	repairing := errors.Is(err, ErrDocSchema)
-	if err != nil && !repairing {
-		return err
+	before, beforeErr := treeOf(fork)
+	if beforeErr != nil && !outsideSchema(beforeErr) {
+		return beforeErr
 	}
 	unsubscribe := fork.OnUpdate(func(update []byte, _ any) {
 		updates = append(updates, append([]byte(nil), update...))
@@ -128,15 +127,16 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 	if err != nil {
 		return err
 	}
-	// A repair replaces a tree that cannot render, so its write necessarily changes the content
-	// a version stores. Other writes compare the markdown before and after as usual.
+	// A write over a tree outside the Proof schema - one treeOf refuses, or one it reads that does
+	// not render (outsideSchema) - is a repair, so it necessarily changes the content a version
+	// stores. Other writes compare the markdown before and after as usual.
 	contentChanged := true
-	if !repairing {
+	if beforeErr == nil {
 		beforeMarkdown, err := renderTree(before)
-		if err != nil {
+		if err != nil && !outsideSchema(err) {
 			return err
 		}
-		contentChanged = beforeMarkdown != markdown
+		contentChanged = err != nil || beforeMarkdown != markdown
 	}
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, contentChanged); err != nil {
 		return fmt.Errorf("append transactional live document update: %w", err)
@@ -230,7 +230,13 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		current, err := treeOf(doc)
-		repairing := errors.Is(err, ErrDocSchema)
+		var currentMarkdown string
+		if err == nil {
+			currentMarkdown, err = renderTree(current)
+		}
+		// A tree outside the Proof schema - one treeOf refuses, or one it reads that does not
+		// render - has no readable text to compare or reanchor against: this replacement repairs it.
+		repairing := outsideSchema(err)
 		if err != nil && !repairing {
 			return err
 		}
@@ -248,20 +254,12 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		} else if err := refuseChangedAsks(current, target, pmdoc.AskContentError, newAskMarkdown()); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
-		if !repairing {
-			currentMarkdown, err := renderTree(current)
-			if err != nil {
-				return err
-			}
-			if canonical, err = renderTree(target); err != nil {
-				return err
-			}
-			if currentMarkdown == canonical {
-				unchanged = true
-				return nil
-			}
-		} else if canonical, err = renderTree(target); err != nil {
+		if canonical, err = renderTree(target); err != nil {
 			return err
+		}
+		if !repairing && currentMarkdown == canonical {
+			unchanged = true
+			return nil
 		}
 		type reanchor struct {
 			mark   anchoredMark

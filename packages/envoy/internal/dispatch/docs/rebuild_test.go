@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 
@@ -26,8 +27,32 @@ func oversizedHistoryUpdate(t *testing.T) []byte {
 	return crdt.EncodeStateAsUpdateV1(doc, nil)
 }
 
+// rebuildDocument rebuilds the way the route does: inside a transaction joined with Service.Join,
+// committed only when the rebuild succeeds.
+func rebuildDocument(t *testing.T, service *Service, artifactID string, markdown *string) (RebuildReport, VersionResult, error) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin rebuild: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	report, written, err := service.RebuildDocument(joined, artifactID, markdown, model.Actor{Kind: "user", ID: "alice"})
+	if err != nil {
+		return RebuildReport{}, VersionResult{}, err
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit rebuild: %v", err)
+	}
+	return report, written, nil
+}
+
 // A history that exceeds ygo's merged-update item cap cannot load. Rebuilding it preserves the
 // latest saved version, advances the durable cursor, and leaves the artifact's version history.
+// Until the rebuild's transaction ends its room refuses loads and a second rebuild, which would
+// read the old history the transaction has not yet replaced.
 func TestRebuildDocumentRestoresDocumentThatCannotLoad(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before\n")
@@ -47,19 +72,29 @@ func TestRebuildDocumentRestoresDocumentThatCannotLoad(t *testing.T) {
 	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrServiceUnavailable) {
 		t.Fatalf("read over-cap history: %v, want ErrServiceUnavailable", err)
 	}
-	var loadDuringRebuild error
-	service.afterRebuildMark = func(room string) {
-		loadDuringRebuild = service.warmLiveDocument(context.Background(), room)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin rebuild: %v", err)
 	}
-	report, err := service.RebuildDocument(context.Background(), artifactID, nil, model.Actor{Kind: "user", ID: "alice"})
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	report, written, err := service.RebuildDocument(joined, artifactID, nil, model.Actor{Kind: "user", ID: "alice"})
 	if err != nil {
 		t.Fatalf("rebuild document: %v", err)
 	}
-	if report.SourceVersion != 1 || report.RemovedUpdates != 11 || report.Head != 12 {
-		t.Fatalf("rebuild report = %#v, want source version 1, 11 updates removed, head 12", report)
+	if report.SourceVersion != 1 || report.RemovedUpdates != 11 || report.Head != 12 || written.Wrote {
+		t.Fatalf("rebuild report = %#v (%#v), want source version 1, 11 updates removed, head 12, no version", report, written)
 	}
-	if !errors.Is(loadDuringRebuild, ErrServiceUnavailable) {
-		t.Fatalf("load during rebuild: %v, want ErrServiceUnavailable", loadDuringRebuild)
+	if _, _, err := rebuildDocument(t, service, artifactID, nil); !errors.Is(err, ErrDocumentLive) {
+		t.Fatalf("second rebuild before the first commits: %v, want ErrDocumentLive", err)
+	}
+	if err := service.warmLiveDocument(ctx, artifactID); !errors.Is(err, ErrServiceUnavailable) {
+		t.Fatalf("load before the rebuild commits: %v, want ErrServiceUnavailable", err)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit rebuild: %v", err)
 	}
 	if text, err := service.Text(context.Background(), artifactID); err != nil || text != "before\n" {
 		t.Fatalf("read rebuilt document: %q (%v), want latest version markdown", text, err)
@@ -88,7 +123,7 @@ func TestRebuildDocumentRefusesALiveRoom(t *testing.T) {
 	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&before); err != nil {
 		t.Fatalf("count updates before rebuild: %v", err)
 	}
-	if _, err := service.RebuildDocument(context.Background(), artifactID, nil, model.Actor{Kind: "user", ID: "alice"}); !errors.Is(err, ErrDocumentLive) {
+	if _, _, err := rebuildDocument(t, service, artifactID, nil); !errors.Is(err, ErrDocumentLive) {
 		t.Fatalf("rebuild resident room: %v, want ErrDocumentLive", err)
 	}
 	var after int
@@ -114,9 +149,9 @@ func (s *rebuildCaptureStore) Load(ctx context.Context, room string) (persistenc
 	return s.VersionedStore.Load(ctx, room)
 }
 
-func (s *rebuildCaptureStore) Rebuild(ctx context.Context, room string, seed []byte) (RebuildReport, error) {
+func (s *rebuildCaptureStore) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
 	s.rebuilds++
-	return s.VersionedStore.Rebuild(ctx, room, seed)
+	return s.VersionedStore.RebuildTx(ctx, tx, room, seed)
 }
 
 func TestRebuildDocumentWritesThroughItsInjectedPersistence(t *testing.T) {
@@ -128,7 +163,7 @@ func TestRebuildDocumentWritesThroughItsInjectedPersistence(t *testing.T) {
 	}
 	service := New(Deps{Store: database, Persistence: persist})
 	replacement := "replacement\n"
-	if _, err := service.RebuildDocument(context.Background(), artifactID, &replacement, model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, _, err := rebuildDocument(t, service, artifactID, &replacement); err != nil {
 		t.Fatalf("rebuild document: %v", err)
 	}
 	if persist.rebuilds != 1 {

@@ -126,6 +126,26 @@ func TestSchemaRepairKeepsOpenAskBlocks(t *testing.T) {
 func TestStoredRenderOnlySchemaViolationLoadsForRepair(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "")
+	appendRenderOnlySchemaViolation(t, database, artifactID)
+	service := newSchemaRepairService(database)
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown render-only service: %v", err)
+		}
+	})
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load render-only violation for repair: %v", err)
+	}
+	if _, _, err := service.TextWithBlocks(context.Background(), artifactID); !errors.Is(err, ErrDocOutsideSchema) {
+		t.Fatalf("read render-only violation: %v, want ErrDocOutsideSchema", err)
+	}
+}
+
+// appendRenderOnlySchemaViolation persists the stored task item
+// TestStoredRenderOnlySchemaViolationLoadsForRepair describes, which the tree validator reads and
+// the renderer refuses.
+func appendRenderOnlySchemaViolation(t *testing.T, database *store.Store, artifactID string) {
+	t.Helper()
 	doc := crdt.New()
 	fragment := doc.GetXmlFragment(fragmentName)
 	tree := &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{{
@@ -146,17 +166,5 @@ func TestStoredRenderOnlySchemaViolationLoadsForRepair(t *testing.T) {
 	}
 	if _, err := NewPgVersioned(database).AppendUpdate(context.Background(), artifactID, crdt.EncodeStateAsUpdateV1(doc, nil)); err != nil {
 		t.Fatalf("persist render-only violation: %v", err)
-	}
-	service := newSchemaRepairService(database)
-	t.Cleanup(func() {
-		if err := service.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutdown render-only service: %v", err)
-		}
-	})
-	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
-		t.Fatalf("load render-only violation for repair: %v", err)
-	}
-	if _, _, err := service.TextWithBlocks(context.Background(), artifactID); !errors.Is(err, ErrDocOutsideSchema) {
-		t.Fatalf("read render-only violation: %v, want ErrDocOutsideSchema", err)
 	}
 }

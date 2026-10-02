@@ -281,7 +281,7 @@ the table says human only.
 | `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
 | `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
-| `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. |
+| `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`) before any sync, and the dashboard reads that close as the repair state. |
 
 ## Dispatch topics
 

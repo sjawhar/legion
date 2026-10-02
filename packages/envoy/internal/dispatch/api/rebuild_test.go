@@ -172,3 +172,103 @@ func TestRebuildArtifactVersionsSuppliedMarkdownButNotTheLatestVersionSource(t *
 		t.Fatalf("read supplied empty rebuild: status=%d body=%s", text.Code, text.Body.String())
 	}
 }
+
+func TestClosedIssueRebuildRefusesBeforeChangingTheDocument(t *testing.T) {
+	var broken *invalidLoadOnceStore
+	handler, _, _ := newTestServer(t, testServerOptions{
+		settle: time.Hour,
+		persistence: func(database *store.Store) docs.VersionedStore {
+			broken = &invalidLoadOnceStore{VersionedStore: docs.NewPgVersioned(database), invalid: make(map[string]bool)}
+			return broken
+		},
+	})
+	issue := createArtifactIssue(t, handler)
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "closed.md", "content": "before\n",
+	}, "alice")
+	artifact := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, created).Artifact
+	if closed := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice"); closed.Code != http.StatusOK {
+		t.Fatalf("close issue: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	broken.failNextLoad(artifact.ID)
+	rebuilt := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifact.ID+"/rebuild", map[string]any{"markdown": "changed\n"}, "alice")
+	if rebuilt.Code != http.StatusConflict || !strings.Contains(rebuilt.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("closed issue rebuild: status=%d body=%s, want 409 ISSUE_CLOSED", rebuilt.Code, rebuilt.Body.String())
+	}
+	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifact.ID+"/text", nil, "alice")
+	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"before\n"`) {
+		t.Fatalf("closed document after refused rebuild: status=%d body=%s, want unchanged before text", text.Code, text.Body.String())
+	}
+}
+
+// A rebuild from supplied markdown commits with its version: a failure after its destructive write
+// and before the version is written leaves the document's history, versions and events as they
+// were.
+func TestSuppliedRebuildThatFailsBeforeItsVersionLeavesTheDocument(t *testing.T) {
+	var broken *invalidLoadOnceStore
+	handler, database, _ := newTestServer(t, testServerOptions{
+		settle: time.Hour,
+		persistence: func(database *store.Store) docs.VersionedStore {
+			broken = &invalidLoadOnceStore{VersionedStore: docs.NewPgVersioned(database), invalid: make(map[string]bool)}
+			return broken
+		},
+	})
+	issue := createArtifactIssue(t, handler)
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "failing.md", "content": "before\n",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create document: status=%d body=%s", created.Code, created.Body.String())
+	}
+	artifact := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, created).Artifact
+	history := func(t *testing.T) string {
+		t.Helper()
+		var rows string
+		if err := database.Pool.QueryRow(context.Background(), `
+			select coalesce(string_agg(version::text || ':' || md5(update), ',' order by version), '')
+			from doc_updates where artifact_id = $1
+		`, artifact.ID).Scan(&rows); err != nil {
+			t.Fatalf("read document history: %v", err)
+		}
+		return rows
+	}
+	before := history(t)
+	if _, err := database.Pool.Exec(context.Background(), `
+		create function dispatch_test_reject_rebuild_version() returns trigger language plpgsql as $$
+		begin
+			raise exception 'reject the rebuild version';
+		end $$;
+		create trigger dispatch_test_reject_rebuild_version
+		before insert on artifact_versions for each row
+		execute function dispatch_test_reject_rebuild_version();
+	`); err != nil {
+		t.Fatalf("make the version write fail: %v", err)
+	}
+
+	broken.failNextLoad(artifact.ID)
+	rebuilt := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifact.ID+"/rebuild", map[string]any{"markdown": "changed\n"}, "alice")
+	if rebuilt.Code != http.StatusInternalServerError {
+		t.Fatalf("rebuild whose version fails: status=%d body=%s, want 500", rebuilt.Code, rebuilt.Body.String())
+	}
+	if after := history(t); after != before {
+		t.Fatalf("failed rebuild changed the document history from %q to %q", before, after)
+	}
+	var versions, events int
+	if err := database.Pool.QueryRow(context.Background(), `select count(*) from artifact_versions where artifact_id = $1`, artifact.ID).Scan(&versions); err != nil {
+		t.Fatalf("count versions: %v", err)
+	}
+	if err := database.Pool.QueryRow(context.Background(), `select count(*) from events where type = 'artifact.version' and payload->>'artifact_id' = $1`, artifact.ID).Scan(&events); err != nil {
+		t.Fatalf("count version events: %v", err)
+	}
+	if versions != 1 || events != 0 {
+		t.Fatalf("failed rebuild left %d versions and %d artifact.version events, want 1 and 0", versions, events)
+	}
+	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifact.ID+"/text", nil, "alice")
+	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"before\n"`) {
+		t.Fatalf("document after failed rebuild: status=%d body=%s, want unchanged before text", text.Code, text.Body.String())
+	}
+}

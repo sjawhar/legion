@@ -295,6 +295,18 @@ is fixed there, not worked around here. That source itself keeps decoration pain
 attributes, so a Dark Reader rewrite cannot trigger an editor redraw loop.
 Live document block links use `#b-<blockId>`: once Proof is ready, Dispatch focuses and pulses that stable block. Copying a document block link uses the selected block's `blockId`; historical versions stay read-only markdown views.
 
+A browser editor normalizes a tree it cannot represent and writes the result back, so a stored
+tree outside the Proof schema must never reach one. Each admission - a mount, and every socket the
+server refuses - opens the connection only after a `GET /text` read that admission started itself
+(`queryClient.fetchQuery` with `staleTime: 0`) succeeds; a cached result, or a read from before a
+refusal, can predate the tree. A `409 DOC_SCHEMA` read shows the repair message and the markdown
+upload that repairs it, and `503 DOC_SERVICE_UNAVAILABLE` offers the rebuild from the latest
+version. After admission the provider owns reconnects, and the server is what stops one into an
+unreadable room: it closes the socket with code `4409` before any sync, and `connection.ts` stops
+the provider and calls `onOutsideSchema`, where `ProofDocument` tears the editor down and admits
+again. Later refetches of the text - every `artifact.version` event invalidates it - leave a
+connected editor alone.
+
 Before constructing Proof, Dispatch fetches `/api/v1/schema/blocks` once and keeps the schema by
 version for the session. It passes that schema to the live editor, historical-version editor, and
 the one headless Markdown engine cached per schema version; the connection carries it as

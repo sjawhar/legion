@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
@@ -140,15 +142,57 @@ func validateUpdate(update []byte) error {
 	return crdt.ApplyUpdateV1(crdt.New(), update, nil)
 }
 
-func (s *Service) validateRoomLoad(ctx context.Context, room string) error {
+// roomDocument is the document a connection to room would sync: the resident room's, or else the
+// durable one its load would decode, nil when nothing is persisted. A durable history that does
+// not decode fails the room, as ygo's own load of it would.
+func (s *Service) roomDocument(ctx context.Context, room string) (*crdt.Doc, error) {
+	if doc := s.srv.GetDoc(room); doc != nil {
+		return doc, nil
+	}
 	result, err := s.persistence.Load(ctx, room)
-	if err == nil {
-		err = validateUpdate(result.Update)
+	var doc *crdt.Doc
+	if err == nil && len(result.Update) > 0 {
+		doc = crdt.New()
+		err = crdt.ApplyUpdateV1(doc, result.Update, nil)
 	}
-	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		s.failRoom(room, err)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			s.failRoom(room, err)
+		}
+		return nil, err
 	}
-	return err
+	return doc, nil
+}
+
+// documentSchemaCloseCode closes a document websocket whose room is outside the Proof schema. It
+// is in the private 4000-4999 range beside Hocuspocus's own 4401 and 4403, and the dashboard reads
+// it as the document's repair state rather than as a dropped connection to retry.
+const documentSchemaCloseCode = 4409
+
+// refuseOutsideSchema completes the upgrade only to close it with documentSchemaCloseCode before
+// anything of the document is sent: a browser reads a close code, never the status of a refused
+// upgrade. The zero upgrader keeps the same-origin rule ygo's own upgrade applies with no
+// AllowedOrigins configured.
+func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, cause error) {
+	slog.Warn("dispatch: refuse a document socket outside Proof schema; a replacement from markdown repairs it", "room", room, "error", cause)
+	var upgrader gws.Upgrader
+	connection, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return // the upgrader has answered the request
+	}
+	defer connection.Close()
+	deadline := time.Now().Add(time.Second)
+	if err := connection.WriteControl(gws.CloseMessage, gws.FormatCloseMessage(documentSchemaCloseCode, "DOC_SCHEMA"), deadline); err != nil {
+		return
+	}
+	// The client's close in reply completes the handshake; whatever it sent before that is
+	// discarded unread.
+	_ = connection.SetReadDeadline(deadline)
+	for {
+		if _, _, err := connection.NextReader(); err != nil {
+			return
+		}
+	}
 }
 
 // ServeHTTP serves the Hocuspocus-framed document websocket endpoint.
@@ -177,9 +221,17 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	if s.srv.GetDoc(room) == nil {
-		if err := s.validateRoomLoad(r.Context(), room); err != nil {
-			http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
+	doc, err := s.roomDocument(r.Context(), room)
+	if err != nil {
+		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	// A browser editor normalizes a tree it cannot represent and writes the result back, so no
+	// connection - a first one, or a provider's reconnect - joins a room outside the Proof schema
+	// until it is replaced from markdown. The server decides it here, for every client at once.
+	if doc != nil {
+		if _, err := renderDocument(doc); outsideSchema(err) {
+			refuseOutsideSchema(w, r, room, err)
 			return
 		}
 	}
@@ -267,6 +319,14 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 	return model.Actor{Kind: "user", ID: login}, nil
 }
 
+// refuseIfRebuilding refuses a room's load or injection while a rebuild's transaction holds it.
+func (s *Service) refuseIfRebuilding(room string) error {
+	if _, rebuilding := s.rebuilding.Load(room); rebuilding {
+		return fmt.Errorf("%w: the document is being rebuilt; retry", ErrServiceUnavailable)
+	}
+	return nil
+}
+
 // allowInject decides whether ygo may apply an injection to a room. Its issue read goes
 // through the shared pool for a caller that need hold no connection of its own (the
 // settlement warm-up in settleRoom), and that is outside the pool's deadlock cycle only
@@ -275,8 +335,8 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 // placeholder for a connection-holder to park on, so nothing holding a connection is waiting
 // on this read. A vendored reordering of those two calls puts it back in the cycle.
 func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) error {
-	if _, rebuilding := s.rebuilding.Load(info.Room); rebuilding {
-		return fmt.Errorf("%w: the document is being rebuilt; retry", ErrServiceUnavailable)
+	if err := s.refuseIfRebuilding(info.Room); err != nil {
+		return err
 	}
 	if s.shuttingDown(info.Room) {
 		return ErrServiceUnavailable
@@ -311,8 +371,8 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// failed until the process restarted (LEGION-282). A failed room refuses the load
 	// instead: ygo fails the load, closes the barrier with this error and removes the room,
 	// which lets the eviction finish, and the next access loads the replacement.
-	if _, rebuilding := s.rebuilding.Load(room); rebuilding {
-		return fmt.Errorf("%w: the document is being rebuilt; retry", ErrServiceUnavailable)
+	if err := s.refuseIfRebuilding(room); err != nil {
+		return err
 	}
 	if err := s.roomFailure(room); err != nil {
 		return err
@@ -329,21 +389,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
-	tree, err := treeOf(doc)
+	markdown, err := renderDocument(doc)
 	var contentMarkdown *string
-	if err == nil {
-		markdown, renderErr := renderTree(tree)
-		if renderErr != nil {
-			err = renderErr
-		} else {
-			contentMarkdown = &markdown
-		}
-	}
 	switch {
-	case errors.Is(err, ErrDocSchema):
+	case outsideSchema(err):
 		slog.Warn("dispatch: loaded document outside Proof schema; a replacement from markdown repairs it", "room", room, "error", err)
 	case err != nil:
 		return err
+	default:
+		contentMarkdown = &markdown
 	}
 	state := s.room(room)
 	state.mu.Lock()
@@ -378,31 +432,26 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 // carries - an anchor mark, or a heading id or list item label the browser editor derives - is no
 // content change.
 func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
-	tree, err := treeOf(doc)
-	if err == nil {
-		markdown, renderErr := renderTree(tree)
-		if renderErr != nil {
-			err = renderErr
+	markdown, err := renderDocument(doc)
+	if err != nil {
+		state := s.room(room)
+		state.mu.Lock()
+		state.contentMarkdown = nil
+		state.mu.Unlock()
+		if outsideSchema(err) {
+			slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
 		} else {
-			state := s.room(room)
-			state.mu.Lock()
-			defer state.mu.Unlock()
-			if state.contentMarkdown != nil && *state.contentMarkdown == markdown {
-				return false
-			}
-			state.contentMarkdown = &markdown
-			return true
+			slog.Error("dispatch: read updated document", "room", room, "error", err)
 		}
+		return true
 	}
 	state := s.room(room)
 	state.mu.Lock()
-	state.contentMarkdown = nil
-	state.mu.Unlock()
-	if errors.Is(err, ErrDocSchema) {
-		slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
-	} else {
-		slog.Error("dispatch: read updated document", "room", room, "error", err)
+	defer state.mu.Unlock()
+	if state.contentMarkdown != nil && *state.contentMarkdown == markdown {
+		return false
 	}
+	state.contentMarkdown = &markdown
 	return true
 }
 

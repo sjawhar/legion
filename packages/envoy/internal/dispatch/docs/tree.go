@@ -20,14 +20,19 @@ var (
 	ErrDocumentLoads    = errors.New("this document loads; nothing to rebuild — if it is outside the schema, replace it from markdown to repair it")
 )
 
+// outsideSchema reports whether err says a stored tree is outside the Proof schema: treeOf refused
+// it, or it read and did not render. A replacement from markdown repairs that state, so reads
+// answer it as ErrDocOutsideSchema (repairableSchemaError), a write takes it as a repair, and the
+// document websocket refuses a browser that would normalize it.
+func outsideSchema(err error) bool {
+	return errors.Is(err, ErrDocSchema) || errors.Is(err, pmdoc.ErrSchema)
+}
+
 func repairableSchemaError(err error) error {
-	if errors.Is(err, pmdoc.ErrSchema) && !errors.Is(err, ErrDocSchema) {
-		err = fmt.Errorf("%w: %v", ErrDocSchema, err)
+	if !outsideSchema(err) || errors.Is(err, ErrDocOutsideSchema) {
+		return err
 	}
-	if errors.Is(err, ErrDocSchema) && !errors.Is(err, ErrDocOutsideSchema) {
-		return fmt.Errorf("%w: %v", ErrDocOutsideSchema, err)
-	}
-	return err
+	return fmt.Errorf("%w: %v", ErrDocOutsideSchema, err)
 }
 
 // parseInput parses markdown a caller writes that replaces no live document: a new document's

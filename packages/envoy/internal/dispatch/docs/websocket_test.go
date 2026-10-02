@@ -222,6 +222,47 @@ func TestCorruptLoadMakesDocumentServiceUnavailable(t *testing.T) {
 	}
 }
 
+// A browser editor normalizes a tree it cannot represent and writes the result back, so the
+// document websocket admits no connection to a room outside the Proof schema: resident or only
+// stored, refused by the tree reader or only by the renderer. It completes the upgrade only to
+// close with documentSchemaCloseCode before any sync, a code a browser can read, and neither loads
+// nor fails the room.
+func TestDocumentSocketRefusesARoomOutsideTheSchema(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		corrupt func(*testing.T, *Service, string)
+	}{
+		{"a resident room the reader refuses", writeSchemaInvalidElement},
+		{"a stored history only the renderer refuses", func(t *testing.T, service *Service, artifactID string) {
+			appendRenderOnlySchemaViolation(t, service.store, artifactID)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			seedServiceText(t, service, artifactID, "before")
+			test.corrupt(t, service, artifactID)
+			httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+			t.Cleanup(httpServer.Close)
+			headers := http.Header{"X-Dispatch-User": []string{"alice"}}
+			wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
+			connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
+			if err != nil {
+				t.Fatalf("connect outside-schema document: response=%#v err=%v, want an upgrade the server closes", response, err)
+			}
+			t.Cleanup(func() { _ = connection.Close() })
+			connection.SetReadDeadline(time.Now().Add(time.Second))
+			_, message, err := connection.ReadMessage()
+			var closed *gws.CloseError
+			if !errors.As(err, &closed) || closed.Code != documentSchemaCloseCode {
+				t.Fatalf("first frame = %q (%v), want close %d before any sync", message, err, documentSchemaCloseCode)
+			}
+			if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrDocOutsideSchema) {
+				t.Fatalf("read after refused socket: %v, want ErrDocOutsideSchema", err)
+			}
+		})
+	}
+}
+
 func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")

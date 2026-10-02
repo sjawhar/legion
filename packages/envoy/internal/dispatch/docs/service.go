@@ -54,11 +54,12 @@ type Deps struct {
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
 // store. Document writes that join an API transaction use AppendUpdateTx, classifying
 // the update as content or not the way the room's update observer classifies a live one.
-// Rebuild replaces an unreadable history through the same persistence boundary as its preflight.
+// RebuildTx replaces an unreadable history inside the rebuild's transaction, through the same
+// persistence boundary as its preflight load.
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error)
-	Rebuild(ctx context.Context, room string, seed []byte) (RebuildReport, error)
+	RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error)
 }
 
 // Service owns live Yjs documents and their durable Dispatch versions.
@@ -90,10 +91,7 @@ type Service struct {
 	// the publish decides whether to fail that room. Nil outside tests; tests use it to let the
 	// refused room's recovery finish in that window.
 	afterPublishRefused func(room string)
-	// afterRebuildMark runs once a rebuild excludes loads and before it checks room residency.
-	// Nil outside tests; tests use it to race a load against the rebuild.
-	afterRebuildMark func(room string)
-	settleWG         sync.WaitGroup
+	settleWG            sync.WaitGroup
 	// evictWG counts the forced evictions failRoomLocked spawns. They flush the room through
 	// the store, so shutdown joins them before it closes.
 	evictWG sync.WaitGroup
@@ -119,7 +117,9 @@ type Service struct {
 	// write's (liveWriteOrigin), is a connected peer.
 	serviceOrigins   sync.Map
 	conditionalGates sync.Map
-	rebuilding       sync.Map
+	// rebuilding names the documents a rebuild holds (RebuildDocument): their rooms refuse
+	// loads and injections until the rebuild's transaction ends (Ledger.endRebuilds).
+	rebuilding sync.Map
 	// settleAfterReload names the rooms whose failure dropped their settlement, so the load
 	// of the room that replaces one settles it once (failRoomLocked, onLoadDocument). A
 	// failed room's state is discarded with the room, so the mark cannot live on the state.

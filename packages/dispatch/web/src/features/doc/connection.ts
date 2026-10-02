@@ -28,6 +28,11 @@ export interface DocumentConnection {
 export interface ConnectionCallbacks {
   schemaVersion: number;
   onAdmission(readOnly: boolean): void;
+  /**
+   * Fires when the server refuses the socket because the stored document is outside the Proof
+   * schema. The connection has stopped reconnecting; a fresh read decides what comes next.
+   */
+  onOutsideSchema(): void;
   onStatus(state: ConnectionState): void;
   /** Fires once, when the server's first sync completes after admission. */
   onSynced(): void;
@@ -49,6 +54,10 @@ export function colorForLogin(login: string): string {
 export function isSchemaReadOnly(scope: string | undefined): boolean {
   return scope === "readonly";
 }
+
+/** The close code the server refuses a document socket with when its room is outside the Proof
+ * schema (`documentSchemaCloseCode`, packages/envoy/internal/dispatch/docs/websocket.go). */
+const documentSchemaCloseCode = 4409;
 
 export function wsUrl(artifactId: string): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -81,6 +90,14 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         authenticated = true;
         callbacks.onAdmission(isSchemaReadOnly(provider.authorizedScope));
         notifySynced();
+      },
+      onClose: ({ event }) => {
+        // Hocuspocus answers every other close by reconnecting. This one is the server's decision
+        // about the stored document, so the provider stops here and the host reads it again.
+        if (event.code === documentSchemaCloseCode) {
+          provider.disconnect();
+          callbacks.onOutsideSchema();
+        }
       },
       onStatus: ({ status }) => callbacks.onStatus(status === "disconnected" ? "offline" : status),
       onSynced: ({ state }) => {

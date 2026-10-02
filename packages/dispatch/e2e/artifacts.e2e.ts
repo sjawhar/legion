@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { createAsk, createComment, createIssue, createIssueArtifact, createProject } from "./api";
-import { countDocumentSockets, documentEditor } from "./editor";
+import { countDocumentSockets, documentEditor, documentTransport } from "./editor";
 import { resetDatabase } from "./seed";
 
 const fixtureDirectory = fileURLToPath(new URL("./fixtures", import.meta.url));
@@ -345,6 +345,46 @@ test("an out-of-schema document does not reconnect from cached text", async ({ p
 
   await expect(page.getByText("replace the document from markdown to repair it")).toBeVisible();
   await expect.poll(sockets).toBe(1);
+});
+
+// A mounted editor's provider reconnects on its own after a dropped socket. Another client makes
+// the stored tree invalid while that socket is down; the server refuses the reconnect before any
+// sync, so the browser never holds the tree it would normalize and write back, and the page turns
+// the refusal into the repair message instead of reconnecting again.
+test("a mounted editor does not reconnect into a document made unreadable while its socket was down", async ({
+  page,
+}) => {
+  const sockets = countDocumentSockets(page);
+  const transport = await documentTransport(page);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    title: "No reconnect into an unreadable room",
+  });
+  const upload = await createIssueArtifact(issue.key, {
+    content: "before\n",
+    name: "reconnect-repair.md",
+  });
+
+  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await expect(documentEditor(page)).toContainText("before");
+  await expect.poll(sockets).toBe(1);
+
+  transport.hold();
+  await transport.sever();
+  await expect.poll(sockets).toBe(2);
+  const corrupted = await page.request.post(
+    `/api/v1/artifacts/${upload.artifact.id}/_test/outside-schema`
+  );
+  expect(corrupted.status()).toBe(204);
+  await transport.release();
+
+  await expect(page.getByText("replace the document from markdown to repair it")).toBeVisible();
+  await expect(documentEditor(page)).toBeHidden();
+  const text = await page.request.get(`/api/v1/artifacts/${upload.artifact.id}/text`);
+  expect(text.status()).toBe(409);
+  await expect(text.text()).resolves.toContain(`"code":"DOC_SCHEMA"`);
+  expect(sockets()).toBe(2);
 });
 
 test("a live document refuses a rebuild", async ({ page }) => {

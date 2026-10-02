@@ -1,4 +1,4 @@
-import { afterAll, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
@@ -52,19 +52,17 @@ function createQueryClient(): QueryClient {
 let defaultText = "";
 let restoreDefaultTextRead: (() => void) | undefined;
 
-function ensureDefaultTextRead(markdown: string): void {
-  defaultText = markdown;
-  if ("mock" in api.getArtifactText) {
-    return;
-  }
+// Each test starts with the server's text read answering the text its render seeded. A test's own
+// `spyOn(api, "getArtifactText")` returns this same mock and replaces what it answers.
+beforeEach(() => {
   const getArtifactText = spyOn(api, "getArtifactText").mockImplementation(async () => ({
     markdown: defaultText,
     version: null,
   }));
   restoreDefaultTextRead = () => getArtifactText.mockRestore();
-}
+});
 
-afterAll(() => restoreDefaultTextRead?.());
+afterEach(() => restoreDefaultTextRead?.());
 
 function CurrentRoute() {
   const location = useLocation();
@@ -152,7 +150,7 @@ function renderProofDocument({
     document.id,
     "text",
   ]);
-  ensureDefaultTextRead(cachedText?.markdown ?? fake.text);
+  defaultText = cachedText?.markdown ?? fake.text;
   const view = render(renderDocument());
   return {
     ...fake,
@@ -256,6 +254,74 @@ test("ProofDocument waits for a fresh text read before reconnecting from cached 
     view.unmount();
   } finally {
     getArtifactText.mockRestore();
+  }
+});
+
+// An artifact event invalidates the document's queries, its text read among them, every few
+// seconds while anyone edits. The fresh read gates admission only: a refetch after the editor
+// connects leaves that editor and its socket alone.
+test("ProofDocument keeps its connected editor through a later text refetch", async () => {
+  const queryClient = createQueryClient();
+  const { connections, editors, sync, view } = renderProofDocument({ queryClient });
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const getArtifactText = spyOn(api, "getArtifactText");
+    const readsBefore = getArtifactText.mock.calls.length;
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id, "text"] });
+    });
+    expect(getArtifactText.mock.calls.length).toBeGreaterThan(readsBefore);
+    expect(connections).toHaveLength(1);
+    expect(connections[0]?.destroyed).toBe(false);
+    expect(editors[0]?.destroyed).toBe(false);
+  } finally {
+    view.unmount();
+  }
+});
+
+// The server refuses a socket into a room outside the Proof schema. The mounted editor closes, and
+// a fresh read decides what follows: the repair it names, or a new connection once it reads.
+test("ProofDocument closes a refused socket and shows the repair a fresh read names", async () => {
+  const { connections, editors, refuse, sync, view } = renderProofDocument();
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    spyOn(api, "getArtifactText").mockRejectedValue(
+      new ApiError(409, {
+        code: "DOC_SCHEMA",
+        error:
+          "document is outside the Proof schema; replace the document from markdown to repair it",
+      })
+    );
+    act(() => refuse());
+
+    expect(
+      await screen.findByText(
+        "document is outside the Proof schema; replace the document from markdown to repair it"
+      )
+    ).not.toBeNull();
+    expect(connections).toHaveLength(1);
+    expect(connections[0]?.destroyed).toBe(true);
+    expect(editors[0]?.destroyed).toBe(true);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("ProofDocument reconnects after a refused socket when the fresh read succeeds", async () => {
+  const { connections, editors, refuse, sync, view } = renderProofDocument();
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    act(() => refuse());
+
+    await waitFor(() => expect(connections).toHaveLength(2));
+    expect(connections[0]?.destroyed).toBe(true);
+    expect(editors[0]?.destroyed).toBe(true);
+    expect(connections[1]?.destroyed).toBe(false);
+  } finally {
+    view.unmount();
   }
 });
 
