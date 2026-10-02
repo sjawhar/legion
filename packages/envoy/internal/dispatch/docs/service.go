@@ -85,6 +85,13 @@ type Service struct {
 	// afterSettleLock runs after settleRoom has taken the document's advisory lock and before
 	// it touches the room. Nil outside tests; tests use it to fail the room in that window.
 	afterSettleLock func(room string)
+	// afterSettleRead runs after settleRoom has read the document and before it stamps block ids
+	// into the room. Nil outside tests; tests use it to edit the room in that window.
+	afterSettleRead func(room string)
+	// afterSettleReconcile runs after settleRoom has reconciled the document's ask blocks with
+	// their rows and before it writes their repairs into the room. Nil outside tests; tests use it
+	// to edit the room in that window.
+	afterSettleReconcile func(room string)
 	// afterPublishRefused runs when a committed write's publish is refused by its room, before
 	// the publish decides whether to fail that room. Nil outside tests; tests use it to let the
 	// refused room's recovery finish in that window.
@@ -959,6 +966,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// the cursor, and the first settlement after a renderer change would version a document
 	// nobody had touched.
 	beforeMarkdown, beforeRenderErr := renderTree(tree)
+	if s.afterSettleRead != nil {
+		s.afterSettleRead(room)
+	}
 
 	stamped := pmdoc.BlockIDRepairCount(tree)
 	var slot *suppressSlot
@@ -1050,6 +1060,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		}
 		retry(err)
 		return
+	}
+	if s.afterSettleReconcile != nil {
+		s.afterSettleReconcile(room)
 	}
 	if reconciliation.changed {
 		if slot == nil {
