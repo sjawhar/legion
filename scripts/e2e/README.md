@@ -634,7 +634,13 @@ run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh). Its verdict is 
 on whether the controller could have failed that check for want of a model key; or
 `stage 4b e2e: BLOCKED (check <check>)` when the checkpoint could not run and the teardown checks
 (`namespace-clean`, `production-audit`) passed, which makes the run no verdict on the change while
-the checkpoints before it stand, and gets no notes. A failed teardown check outranks every reason
+the checkpoints before it stand, and gets no notes. Capacity is such a stop. Every tree takes a
+Legion node of its own, whatever its project (docs/kubernetes.md "Tree sizing"), so `preflight`
+ends BLOCKED `capacity: …` when the `legion` pool cannot place the run's two trees at once. Its
+room is the schedulable pool nodes no tree pod is on, plus the floor-sized nodes its cpu and
+memory limits still allow. A wait that times out while a pod of the run is Pending because
+Karpenter finds every instance type over the pool's limits also ends BLOCKED `capacity: …`, naming
+the pod. Any other timeout, and any check that fails outright, stays FAIL. A failed teardown check outranks every reason
 the run stopped: it prints its own `CHECK <name>: FAIL` line (the audit's names the run's writes and
 subscriptions outside LEGSMOKE, as the `production-audit` checkpoint does), and the verdict is
 `stage 4b e2e: FAIL (check <teardown check>, in the teardown after check <check>)` whenever the
@@ -753,7 +759,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | checkpoint | what it holds |
 | :--- | :--- |
 | `prerequisites` | the tools, the restricted context and the image by digest; the devbox `gh` acts as the proof human, `sjawhar-agent[bot]`; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
-| `preflight` | the runtime identity is the daemon's restricted IAM role and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; the run's Dispatch bearer reads `whoami` as an agent session, and an invalid bearer is refused 401; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
+| `preflight` | the runtime identity is the daemon's restricted IAM role and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; the pool's room for the run's two trees, the schedulable pool nodes no tree pod of any project is on plus the floor-sized nodes its limits allow, below which the run ends BLOCKED `capacity: …`; the run's Dispatch bearer reads `whoami` as an agent session, and an invalid bearer is refused 401; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
 | `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript. Each watch asks the server to end it within 300 s, so a loop a killed driver left stops within five minutes; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends that watch unrecorded |
 | `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`deploy/kubernetes/operator-route`](../../deploy/kubernetes/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
 | `admitted-issue-cap` | the three roots: two admitted and one waiting, in rank order |
