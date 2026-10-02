@@ -2642,13 +2642,15 @@ export async function executeDispatchTool(
       // A change the live document no longer carries: a browser deletion that landed after this
       // edit's version was rendered and before it reached the room, which is past undoing, so the
       // version records text the live document does not have (LEGION-269). `null` is a check that
-      // reached no verdict; an older server omits the field and reads as it always did.
+      // reached no verdict - the room is reloading, or holds a tree past the schema's depth bound,
+      // which a re-read answers DOC_SCHEMA for; an older server omits the field and reads as it
+      // always did.
       const lostOps = edited.lost_ops;
       const lostText =
         lostOps === undefined || (lostOps !== null && lostOps.length === 0)
           ? ""
           : lostOps === null
-            ? "; could not confirm this edit survived, because the live document is being reloaded — re-read it"
+            ? "; could not confirm this edit survived, because the live document is being reloaded or holds a tree too deep to read — re-read it"
             : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote — re-read the document`;
       const applied = `${head}${unchangedText}${lostText}`;
       const adviceLines = renderAdvice(

@@ -72,6 +72,10 @@
 
 ### Fixed
 
+- `dispatch_doc_edit` given `lost_ops: null` says the live document is being reloaded or holds a
+  tree too deep to read, where it said only that it was being reloaded: a document past the
+  schema's depth bound reaches no verdict either, and a re-read answers it `DOC_SCHEMA`
+  (LEGION-465).
 - A non-2xx answer whose body is not Dispatch's `{code, error}` JSON — a gateway's or proxy's HTML
   page, an empty body, JSON of another shape — reached every `dispatch_*` tool as its raw body
   (LEGION-457). `DispatchClient` now throws it as a `DispatchGatewayError` (a
