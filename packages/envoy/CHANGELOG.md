@@ -39,6 +39,13 @@
   change should do (restore its draft, copy the message, reload and send again). Keys are stored
   per human in `broadcast_idempotency_keys` (migration `0055`) and kept as long as their
   broadcast (LEGION-446).
+- Each request a listener's starting gate refuses logs `request refused while starting` with the
+  `gate` (`webhook` or `v1`), `method` and `path`; a start logs `envoy-listener /v1 open` with
+  `since_listening_ms` and `durable bound` with `attempts` and `waited_ms`.
+  `packages/envoy/scripts/listener-deploy-probe.sh` watches a listener deploy from a client's
+  seat, at every address the listener's name resolves to, and exits 1 when a task refused `/v1`
+  while it answered `/healthz`, or, with `--dispatch-*`, when a Dispatch message it posted did not
+  record state `sent` (LEGION-456).
 - `GET /api/v1/artifacts/{id}/blocks/{block_id}` says where one block stands in a Dispatch
   document: its path from the top-level block down (each node's type, block id and child index)
   and, for a table block, row or cell, the table's id, the row index (0 is the header row), the
@@ -139,6 +146,17 @@
   because its `dispatch_search` refuses the same rules before any request.
 
 ### Fixed
+- During a rolling deploy the replacement listener serves `/v1` and runs its role lane once NATS
+  is connected and the interest and session caches are warm (about 100 ms after it listens),
+  instead of answering every `/v1` call `503 service starting` until the old task let go of the
+  durable consumer (84 s in production on 2026-10-01). The durable's bind is polled every 2 s and
+  lands within 2 s of the old task's exit, still giving up after 135 s with
+  `subscribe failed after max attempts, shutting down`; `/healthz` stays 200 `starting` until it
+  binds. Both tasks of a machine are one role-lane queue group, so the overlap forwards no role
+  message twice. A SIGTERM during the bind wait is an ordered shutdown. The bus now restores every
+  subscription after a reconnect even when one cannot be restored, so a role lane is not left down
+  while the durable still refuses the bind (LEGION-456).
+
 - Dispatch exits with status 1 when it cannot bind its listen address. It logged
   `dispatch: listen … bind: address already in use` and exited 0, so a supervisor read a port
   clash as a clean stop.
