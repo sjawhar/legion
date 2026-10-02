@@ -300,16 +300,24 @@ test("Comment over text another reader's comment covers goes through, and that c
       await expect(kindButton(alicePage, "Comment")).toHaveAttribute("aria-pressed", "true");
       await expect(composer(alicePage).getByRole("status")).toHaveCount(0);
       await expect(askMarks(alicePage)).toHaveCount(0);
-      await expect.poll(async () => Object.keys(await commentTexts(alicePage)).length).toBe(2);
-      const aliceMark = Object.keys(await commentTexts(alicePage)).find((id) => id !== bobMark);
+      let aliceCommentTexts: Record<string, string> = {};
+      await expect
+        .poll(async () => {
+          aliceCommentTexts = await commentTexts(alicePage);
+          return Object.keys(aliceCommentTexts).length;
+        })
+        .toBe(2);
+      const aliceMark = Object.keys(aliceCommentTexts).find((id) => id !== bobMark);
       if (aliceMark === undefined) {
         throw new Error("Alice's comment mark is not in her editor.");
       }
-      for (const page of [alicePage, bobPage]) {
-        await expect
-          .poll(() => commentTexts(page))
-          .toEqual({ [bobMark]: "quick brown", [aliceMark]: "brown" });
-      }
+      await Promise.all(
+        [alicePage, bobPage].map((page) =>
+          expect
+            .poll(() => commentTexts(page))
+            .toEqual({ [bobMark]: "quick brown", [aliceMark]: "brown" })
+        )
+      );
 
       // Sent, the server verifies Alice's comment on "brown" and still reads Bob's "quick brown".
       await composer(alicePage).getByLabel("Comment").fill("just brown");
@@ -330,11 +338,13 @@ test("Comment over text another reader's comment covers goes through, and that c
           { body: "just brown", mark: aliceMark, quote: "brown" },
           { body: "whole phrase", mark: bobMark, quote: "quick brown" },
         ]);
-      for (const page of [alicePage, bobPage]) {
-        await expect
-          .poll(() => commentTexts(page))
-          .toEqual({ [bobMark]: "quick brown", [aliceMark]: "brown" });
-      }
+      await Promise.all(
+        [alicePage, bobPage].map((page) =>
+          expect
+            .poll(() => commentTexts(page))
+            .toEqual({ [bobMark]: "quick brown", [aliceMark]: "brown" })
+        )
+      );
     }
   );
 });

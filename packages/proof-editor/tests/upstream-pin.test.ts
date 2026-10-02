@@ -31,6 +31,7 @@ import {
 import type { StoredMark } from "proof-sdk-upstream/src/formats/marks";
 import { createHeadlessProof } from "../src/lib-headless.js";
 import { withDomWindow } from "./dom-window";
+import { markedText } from "./mark-text";
 
 const upstreamSrc = join(import.meta.dir, "..", "node_modules", "proof-sdk-upstream", "src");
 
@@ -158,16 +159,6 @@ function headlessMarksView(doc: ProseMirrorNode, metadata: Record<string, Stored
   return double;
 }
 
-/** The text a mark id covers, its runs joined in document order. */
-function coveredBy(doc: ProseMirrorNode, id: string): string {
-  let text = "";
-  doc.descendants((node) => {
-    if (node.isText && node.marks.some((mark) => mark.attrs.id === id)) text += node.text;
-    return true;
-  });
-  return text;
-}
-
 test("the pinned dependency acts on a split insert's own runs", async () => {
   // Alice's insert "quick brown" with Bob's insert "lazy " between its runs. Rejecting hers
   // joined her runs into one range and deleted his text too (EveryInc/proof-sdk#83).
@@ -193,7 +184,7 @@ test("the pinned dependency acts on a split insert's own runs", async () => {
   });
   expect(reject(view as unknown as EditorView, "a")).toBe(true);
   expect(view.state.doc.textContent).toBe("The lazy  fox");
-  expect(coveredBy(view.state.doc, "b")).toBe("lazy ");
+  expect(markedText(view.state.doc, "b")).toBe("lazy ");
 });
 
 test("the pinned dependency lets two people's comments and suggestions cover the same text", async () => {
@@ -226,17 +217,17 @@ test("the pinned dependency lets two people's comments and suggestions cover the
   const editorView = view as unknown as EditorView;
   const bob = comment(editorView, "quick brown", "human:bob", "Bob", { from: 5, to: 16 });
   const alice = comment(editorView, "brown", "human:alice", "Alice", { from: 11, to: 16 });
-  expect(coveredBy(view.state.doc, bob.id)).toBe("quick brown");
-  expect(coveredBy(view.state.doc, alice.id)).toBe("brown");
+  expect(markedText(view.state.doc, bob.id)).toBe("quick brown");
+  expect(markedText(view.state.doc, alice.id)).toBe("brown");
 
   // Written to markdown, the nested spans read back as both comments.
   const reparsed = parseMarkdown(serializeMarkdown(view.state.doc));
-  expect(coveredBy(reparsed, bob.id)).toBe("quick brown");
-  expect(coveredBy(reparsed, alice.id)).toBe("brown");
+  expect(markedText(reparsed, bob.id)).toBe("quick brown");
+  expect(markedText(reparsed, alice.id)).toBe("brown");
 
   expect(deleteMark(editorView, alice.id)).toBe(true);
-  expect(coveredBy(view.state.doc, alice.id)).toBe("");
-  expect(coveredBy(view.state.doc, bob.id)).toBe("quick brown");
+  expect(markedText(view.state.doc, alice.id)).toBe("");
+  expect(markedText(view.state.doc, bob.id)).toBe("quick brown");
 });
 
 // The timeout is explicit because the case spawns tsc over the whole upstream closure — two

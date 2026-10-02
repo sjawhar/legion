@@ -9,7 +9,6 @@ import {
   getArtifact,
   getArtifactText,
   getAsk,
-  getComment,
   listComments,
 } from "./api";
 import {
@@ -22,11 +21,10 @@ import {
   expectMark,
   marginCard,
   markSpan,
-  placeCaret,
   selectEditorText,
 } from "./editor";
+import { commentWithBody, setSheet } from "./margin-helpers";
 import { resetDatabase, setCommentAuthorService } from "./seed";
-import { centerOf, touchHold } from "./touch";
 import { asUser } from "./users";
 
 const session = {
@@ -35,41 +33,11 @@ const session = {
 };
 const initialMarkdown = "The quick brown fox";
 
-// On the phone layout the margin is a bottom sheet over the document. Acting on a selection
-// opens it; close it again before selecting another range, as a person would.
-async function setSheet(page: Page, project: string, open: boolean): Promise<void> {
-  if (project !== "iphone") {
-    return;
-  }
-  const sheet = page.getByTestId("margin-sheet");
-  if ((await sheet.getAttribute("data-expanded")) !== String(open)) {
-    if (open) {
-      await page.getByRole("button", { name: /Open review panel/ }).click();
-    } else {
-      await page.mouse.click(1, 1);
-    }
-  }
-  await expect(sheet).toHaveAttribute("data-expanded", String(open));
-}
-
 async function expandedConversationThread(page: Page, rootId: string): Promise<Locator> {
   const turn = page.locator(`[data-turn="comment:${rootId}"]`);
   await turn.getByRole("button", { name: "Expand thread" }).click();
   const phoneThread = page.getByRole("dialog", { name: "Thread" });
   return (await phoneThread.count()) === 0 ? turn : phoneThread;
-}
-
-async function commentWithBody(issueKey: string, artifactId: string | undefined, body: string) {
-  await expect
-    .poll(() =>
-      listComments(issueKey, artifactId).then((items) => items.find((item) => item.body === body))
-    )
-    .toBeDefined();
-  const comment = (await listComments(issueKey, artifactId)).find((item) => item.body === body);
-  if (comment === undefined) {
-    throw new Error(`Comment with body ${body} was not created.`);
-  }
-  return comment;
 }
 
 test.beforeEach(async () => {
@@ -913,251 +881,5 @@ test("a browser reconnecting after an accept keeps the accepted text", async ({ 
     await expect(documentEditor(page)).toHaveText("The quick red fox");
   } finally {
     await bob.close();
-  }
-});
-
-/** The text of every span of a mark, joined: a mark nested in another may render as more than one
- *  span. */
-async function markText(page: Page, markId: string): Promise<string> {
-  const spans = await markSpan(page, markId).allTextContents();
-  return spans.join("");
-}
-
-// Bob comments on "quick brown"; Alice starts a comment on "brown" and cancels it, then comments on
-// "brown". Each record mark keeps its own text in both browsers and in the server's reading of the
-// document, so the anchor refresh a document version runs leaves Bob's quote "quick brown" rather
-// than cutting it to "quick ".
-test("two readers' comments can cover the same text, and neither cuts the other's anchor", async ({
-  browser,
-}, testInfo) => {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", spec: initialMarkdown, title: "Overlap" });
-  const artifactId = issue.primary_artifact_id;
-  const alice = await asUser(browser, "alice");
-  const bob = await asUser(browser, "bob");
-
-  try {
-    const alicePage = await alice.newPage();
-    const bobPage = await bob.newPage();
-    await Promise.all([
-      alicePage.goto(`/issues/${issue.key}/spec`),
-      bobPage.goto(`/issues/${issue.key}/spec`),
-    ]);
-    for (const page of [alicePage, bobPage]) {
-      await expect(documentEditor(page)).toContainText(initialMarkdown);
-      await expect(connectedDot(page)).toHaveText("connected");
-    }
-
-    await selectEditorText(bobPage, "quick brown");
-    await barAction(bobPage, "Comment");
-    const bobComposer = bobPage.getByRole("form", { name: "Comment composer" });
-    await bobComposer.getByLabel("Comment").fill("Bob's comment");
-    await bobComposer.getByRole("button", { exact: true, name: "Send" }).click();
-    const bobComment = await commentWithBody(issue.key, artifactId, "Bob's comment");
-    if (bobComment.anchor === null) {
-      throw new Error("Bob's comment has no anchor.");
-    }
-    expect(bobComment.anchor.quote).toBe("quick brown");
-    const bobMark = bobComment.anchor.mark_id;
-    await expect.poll(() => markText(alicePage, bobMark)).toBe("quick brown");
-
-    // A comment Alice starts on "brown" and cancels takes its provisional mark away, and only it.
-    await setSheet(alicePage, testInfo.project.name, false);
-    await selectEditorText(alicePage, "brown");
-    await barAction(alicePage, "Comment");
-    await expect(alicePage.getByRole("form", { name: "Comment composer" })).toContainText("brown");
-    await alicePage.keyboard.press("Escape");
-    for (const page of [alicePage, bobPage]) {
-      await expect
-        .poll(() =>
-          documentEditor(page)
-            .locator("span[data-proof][data-id]")
-            .evaluateAll((spans) => [...new Set(spans.map((span) => span.getAttribute("data-id")))])
-        )
-        .toEqual([bobMark]);
-      await expect.poll(() => markText(page, bobMark)).toBe("quick brown");
-    }
-
-    await setSheet(alicePage, testInfo.project.name, false);
-    await selectEditorText(alicePage, "brown");
-    await barAction(alicePage, "Comment");
-    const aliceComposer = alicePage.getByRole("form", { name: "Comment composer" });
-    await aliceComposer.getByLabel("Comment").fill("Alice's comment");
-    await aliceComposer.getByRole("button", { exact: true, name: "Send" }).click();
-    const aliceComment = await commentWithBody(issue.key, artifactId, "Alice's comment");
-    if (aliceComment.anchor === null) {
-      throw new Error("Alice's comment has no anchor.");
-    }
-    expect(aliceComment.anchor.quote).toBe("brown");
-    const aliceMark = aliceComment.anchor.mark_id;
-
-    // A mark alone writes no document version. A typed paragraph does, and the transaction that
-    // writes the version also refreshes every open anchor from the document (writeVersionTx), so
-    // once the version is there each anchor's quote is what the server reads in the document now.
-    // The caret goes after "fox" directly: typeAtEnd's click lands wherever the editor's centre
-    // is, which can be a highlight, and the Enter then replaces the selection still on "brown".
-    const before = (await getArtifact(artifactId)).versions.length;
-    await setSheet(alicePage, testInfo.project.name, false);
-    await placeCaret(alicePage, "after", "fox");
-    await alicePage.keyboard.press("Enter");
-    await alicePage.keyboard.type("jumps");
-    await expect
-      .poll(() => getArtifact(artifactId).then(({ versions }) => versions.length))
-      .toBeGreaterThan(before);
-    expect((await getArtifactText(artifactId)).markdown).toBe("The quick brown fox\n\njumps\n");
-    const bobAnchor = (await getComment(bobComment.id)).comment.anchor;
-    expect({ quote: bobAnchor?.quote, orphaned: bobAnchor?.orphaned }).toEqual({
-      quote: "quick brown",
-      orphaned: false,
-    });
-    const aliceAnchor = (await getComment(aliceComment.id)).comment.anchor;
-    expect({ quote: aliceAnchor?.quote, orphaned: aliceAnchor?.orphaned }).toEqual({
-      quote: "brown",
-      orphaned: false,
-    });
-
-    for (const page of [alicePage, bobPage]) {
-      await expect.poll(() => markText(page, bobMark)).toBe("quick brown");
-      await expect.poll(() => markText(page, aliceMark)).toBe("brown");
-      await expect(markSpan(page, bobMark).locator(`[data-id="${aliceMark}"]`)).toHaveCount(1);
-      await expect(marginCard(page, bobComment.id)).toBeAttached();
-      await expect(marginCard(page, aliceComment.id)).toBeAttached();
-    }
-
-    await bobPage.reload();
-    await expect(connectedDot(bobPage)).toHaveText("connected");
-    await expect.poll(() => markText(bobPage, bobMark)).toBe("quick brown");
-    await expect.poll(() => markText(bobPage, aliceMark)).toBe("brown");
-    await expect(marginCard(bobPage, bobComment.id)).toBeAttached();
-    await expect(marginCard(bobPage, aliceComment.id)).toBeAttached();
-  } finally {
-    await bob.close();
-    await alice.close();
-  }
-});
-
-// Bob suggests on "quick brown" and his thread stays selected while Alice suggests on "brown"
-// from the same selection control a person uses. Selecting a thread only highlights its text;
-// both browsers keep Bob's anchor whole, show Alice's inside it, and send both quotes to the server.
-test("two readers' suggestions keep both action-bar anchors", async ({ browser }, testInfo) => {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({
-    project: "CORE",
-    spec: initialMarkdown,
-    title: "Suggestion overlap",
-  });
-  const artifactId = issue.primary_artifact_id;
-  const alice = await asUser(browser, "alice");
-  const bob = await asUser(browser, "bob");
-
-  try {
-    const alicePage = await alice.newPage();
-    const bobPage = await bob.newPage();
-    await Promise.all([
-      alicePage.goto(`/issues/${issue.key}/spec`),
-      bobPage.goto(`/issues/${issue.key}/spec`),
-    ]);
-    for (const page of [alicePage, bobPage]) {
-      await expect(connectedDot(page)).toHaveText("connected");
-    }
-
-    const pressSuggestion = async (page: Page) => {
-      const button = actionBar(page).getByRole("button", { exact: true, name: "Suggest" });
-      if (testInfo.project.name === "iphone") {
-        await touchHold(page, await centerOf(button), 0);
-        return;
-      }
-      await button.click();
-    };
-
-    await selectEditorText(bobPage, "quick brown");
-    await pressSuggestion(bobPage);
-    const bobComposer = bobPage.getByRole("form", { name: "Comment composer" });
-    await bobComposer.getByLabel("Replacement").fill("swift umber");
-    await bobComposer.getByRole("button", { exact: true, name: "Send" }).click();
-    const bobSuggestion = await commentWithBody(issue.key, artifactId, "Suggested replacement.");
-    if (bobSuggestion.anchor === null) {
-      throw new Error("Bob's suggestion has no anchor.");
-    }
-    expect(bobSuggestion.anchor.quote).toBe("quick brown");
-    const bobMark = bobSuggestion.anchor.mark_id;
-    for (const page of [alicePage, bobPage]) {
-      await expect.poll(() => markText(page, bobMark)).toBe("quick brown");
-    }
-
-    await setSheet(alicePage, testInfo.project.name, false);
-    await selectEditorText(alicePage, "brown");
-    await pressSuggestion(alicePage);
-    const aliceComposer = alicePage.getByRole("form", { name: "Comment composer" });
-    await expect(aliceComposer).toBeVisible();
-
-    // Check before Send: the editor itself must hold both marks, with no rewrite on either side.
-    const suggestionMarks = documentEditor(alicePage).locator(
-      'span[data-proof="suggestion"][data-id]'
-    );
-    await expect
-      .poll(() =>
-        suggestionMarks.evaluateAll(
-          (spans, existingId) =>
-            [...new Set(spans.map((span) => span.getAttribute("data-id")))].filter(
-              (id): id is string => id !== null && id !== existingId
-            ),
-          bobMark
-        )
-      )
-      .toEqual([expect.any(String)]);
-    const aliceMark = (
-      await suggestionMarks.evaluateAll(
-        (spans, existingId) =>
-          [...new Set(spans.map((span) => span.getAttribute("data-id")))].filter(
-            (id): id is string => id !== null && id !== existingId
-          ),
-        bobMark
-      )
-    )[0];
-    if (aliceMark === undefined) {
-      throw new Error("Alice's action-bar suggestion mark was not created.");
-    }
-    for (const page of [alicePage, bobPage]) {
-      await expect.poll(() => markText(page, bobMark)).toBe("quick brown");
-      await expect.poll(() => markText(page, aliceMark)).toBe("brown");
-    }
-
-    await aliceComposer.getByLabel("Replacement").fill("red");
-    await aliceComposer.getByRole("button", { exact: true, name: "Send" }).click();
-    await expect
-      .poll(() =>
-        listComments(issue.key, artifactId).then(
-          (comments) =>
-            comments.find((comment) => comment.anchor?.mark_id === aliceMark)?.anchor?.quote
-        )
-      )
-      .toBe("brown");
-    const aliceSuggestion = (await listComments(issue.key, artifactId)).find(
-      (comment) => comment.anchor?.mark_id === aliceMark
-    );
-    if (aliceSuggestion === undefined) {
-      throw new Error("Alice's suggestion was not created.");
-    }
-    const [savedBob, savedAlice] = await Promise.all([
-      getComment(bobSuggestion.id),
-      getComment(aliceSuggestion.id),
-    ]);
-    expect({
-      quote: savedBob.comment.anchor?.quote,
-      orphaned: savedBob.comment.anchor?.orphaned,
-    }).toEqual({ quote: "quick brown", orphaned: false });
-    expect({
-      quote: savedAlice.comment.anchor?.quote,
-      orphaned: savedAlice.comment.anchor?.orphaned,
-    }).toEqual({ quote: "brown", orphaned: false });
-
-    await bobPage.reload();
-    await expect(connectedDot(bobPage)).toHaveText("connected");
-    await expect.poll(() => markText(bobPage, bobMark)).toBe("quick brown");
-    await expect.poll(() => markText(bobPage, aliceMark)).toBe("brown");
-  } finally {
-    await bob.close();
-    await alice.close();
   }
 });

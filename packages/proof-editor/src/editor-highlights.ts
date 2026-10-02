@@ -1,5 +1,6 @@
-import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
-import { type EditorState, Plugin, PluginKey } from "@milkdown/kit/prose/state";
+import type { Fragment, Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
+import { type EditorState, Plugin, PluginKey, type Transaction } from "@milkdown/kit/prose/state";
+import { ReplaceStep } from "@milkdown/kit/prose/transform";
 import { Decoration, DecorationSet, type EditorView } from "@milkdown/kit/prose/view";
 import { $prose } from "@milkdown/kit/utils";
 import { blockIdOf } from "./editor/schema/block-ids";
@@ -16,6 +17,7 @@ interface EditorHighlights {
   activeBlocks: ReadonlySet<string>;
   pulsedMarks: ReadonlyMap<string, number>;
   pulsedBlocks: ReadonlyMap<string, number>;
+  decorations: DecorationSet;
 }
 
 type HighlightChange =
@@ -29,6 +31,7 @@ const noHighlights: EditorHighlights = {
   activeBlocks: new Set(),
   pulsedMarks: new Map(),
   pulsedBlocks: new Map(),
+  decorations: DecorationSet.empty,
 };
 
 function sameIds(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
@@ -44,6 +47,7 @@ function withPulse(
   id: string,
   token: number
 ): ReadonlyMap<string, number> {
+  if (pulses.get(id) === token) return pulses;
   const next = new Map(pulses);
   next.set(id, token);
   return next;
@@ -62,18 +66,21 @@ function withoutPulse(
 
 function applyChange(value: EditorHighlights, change: HighlightChange): EditorHighlights {
   if (change.kind === "active") {
+    const active = change.target === "mark" ? value.activeMarks : value.activeBlocks;
+    if (sameIds(active, change.ids)) return value;
     return change.target === "mark"
       ? { ...value, activeMarks: change.ids }
       : { ...value, activeBlocks: change.ids };
   }
-  if (change.kind === "pulse") {
-    return change.target === "mark"
-      ? { ...value, pulsedMarks: withPulse(value.pulsedMarks, change.id, change.token) }
-      : { ...value, pulsedBlocks: withPulse(value.pulsedBlocks, change.id, change.token) };
-  }
+  const pulses = change.target === "mark" ? value.pulsedMarks : value.pulsedBlocks;
+  const nextPulses =
+    change.kind === "pulse"
+      ? withPulse(pulses, change.id, change.token)
+      : withoutPulse(pulses, change.id, change.token);
+  if (nextPulses === pulses) return value;
   return change.target === "mark"
-    ? { ...value, pulsedMarks: withoutPulse(value.pulsedMarks, change.id, change.token) }
-    : { ...value, pulsedBlocks: withoutPulse(value.pulsedBlocks, change.id, change.token) };
+    ? { ...value, pulsedMarks: nextPulses }
+    : { ...value, pulsedBlocks: nextPulses };
 }
 
 function hasHighlights(value: EditorHighlights): boolean {
@@ -106,11 +113,10 @@ function blockClasses(node: ProseMirrorNode, value: EditorHighlights): string[] 
   ].filter(Boolean);
 }
 
-function highlightDecorations(state: EditorState): DecorationSet {
-  const value = highlightsKey.getState(state) ?? noHighlights;
+function highlightDecorations(doc: ProseMirrorNode, value: EditorHighlights): DecorationSet {
   if (!hasHighlights(value)) return DecorationSet.empty;
   const decorations: Decoration[] = [];
-  state.doc.descendants((node, pos) => {
+  doc.descendants((node, pos) => {
     const blockClass = blockClasses(node, value).join(" ");
     if (blockClass !== "") {
       decorations.push(Decoration.node(pos, pos + node.nodeSize, { class: blockClass }));
@@ -122,7 +128,27 @@ function highlightDecorations(state: EditorState): DecorationSet {
     }
     return false;
   });
-  return DecorationSet.create(state.doc, decorations);
+  return DecorationSet.create(doc, decorations);
+}
+
+function holdsHighlightedTarget(content: Fragment, value: EditorHighlights): boolean {
+  let found = false;
+  content.descendants((node) => {
+    found =
+      blockClasses(node, value).length > 0 ||
+      (node.isInline && markClasses(node, value).length > 0);
+    return !found;
+  });
+  return found;
+}
+
+/** Plain text and structure edits can move decorations. A mark, attribute or inserted highlighted
+ *  target can change which nodes carry the selected id, so those transactions rebuild. */
+function mapsHighlights(transaction: Transaction, value: EditorHighlights): boolean {
+  if (!hasHighlights(value)) return true;
+  return transaction.steps.every(
+    (step) => step instanceof ReplaceStep && !holdsHighlightedTarget(step.slice.content, value)
+  );
 }
 
 function dispatchHighlightChange(view: EditorView, change: HighlightChange): void {
@@ -142,11 +168,24 @@ export const editorHighlightsPlugin = $prose(
         init: () => noHighlights,
         apply(transaction, value) {
           const change = transaction.getMeta(highlightsKey) as HighlightChange | undefined;
-          return change === undefined ? value : applyChange(value, change);
+          if (change === undefined) {
+            if (!transaction.docChanged) return value;
+            return mapsHighlights(transaction, value)
+              ? {
+                  ...value,
+                  decorations: value.decorations.map(transaction.mapping, transaction.doc),
+                }
+              : { ...value, decorations: highlightDecorations(transaction.doc, value) };
+          }
+          const next = applyChange(value, change);
+          return next === value
+            ? value
+            : { ...next, decorations: highlightDecorations(transaction.doc, next) };
         },
       },
       props: {
-        decorations: highlightDecorations,
+        decorations: (state: EditorState) =>
+          (highlightsKey.getState(state) ?? noHighlights).decorations,
       },
     })
 );

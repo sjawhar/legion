@@ -475,13 +475,17 @@ export function createAskMark(view: EditorView, range: MarkRange, by: string): A
   return { id, from: range.from, to: range.to };
 }
 
-function collectAskMarkRanges(doc: ProseMirrorNode, markId: string): MarkRange[] {
-  const ranges: MarkRange[] = [];
+interface AskMarkSpan extends MarkRange {
+  mark: ProseMirrorMark;
+}
+
+function collectAskMarkRanges(doc: ProseMirrorNode, markId: string): AskMarkSpan[] {
+  const ranges: AskMarkSpan[] = [];
   doc.descendants((node, pos) => {
     if (!node.isText) return true;
     for (const mark of node.marks as ProseMirrorMark[]) {
       if (mark.type.name === 'dispatchAsk' && mark.attrs.id === markId) {
-        ranges.push({ from: pos, to: pos + node.nodeSize });
+        ranges.push({ from: pos, to: pos + node.nodeSize, mark });
       }
     }
     return true;
@@ -501,20 +505,12 @@ export function findAskMarkRange(doc: ProseMirrorNode, markId: string): MarkRang
  *  none were found. */
 export function removeAskMark(view: EditorView, markId: string): boolean {
   const { state } = view;
+  const ranges = collectAskMarkRanges(state.doc, markId);
+  if (ranges.length === 0) return false;
   let tr = state.tr;
-  let found = false;
-  state.doc.descendants((node, pos) => {
-    if (!node.isText) return true;
-    const mark = (node.marks as ProseMirrorMark[]).find(
-      (candidate) => candidate.type.name === 'dispatchAsk' && candidate.attrs.id === markId
-    );
-    if (mark) {
-      tr = tr.removeMark(pos, pos + node.nodeSize, mark);
-      found = true;
-    }
-    return true;
-  });
-  if (!found) return false;
+  for (const { from, to, mark } of ranges) {
+    tr = tr.removeMark(from, to, mark);
+  }
   view.dispatch(tr);
   return true;
 }

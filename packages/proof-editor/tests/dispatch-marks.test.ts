@@ -6,11 +6,11 @@
  */
 
 import { expect, test } from "bun:test";
-import type { Mark, Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import { EditorState, type Transaction } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { createAskMark, findAskMarkRange, removeAskMark } from "../src/dispatch-marks.js";
 import { createHeadlessProof } from "../src/lib-headless.js";
+import { markedText } from "./mark-text";
 
 interface ViewDouble {
   view: EditorView;
@@ -30,19 +30,6 @@ function viewOver(state: EditorState): ViewDouble {
   return { view: double as unknown as EditorView, transactions };
 }
 
-/** The text each ask id covers, run by run, in document order. */
-function askText(doc: ProseMirrorNode, id: string): string {
-  let text = "";
-  doc.descendants((node) => {
-    const covered = node.marks.some(
-      (mark: Mark) => mark.type.name === "dispatchAsk" && mark.attrs.id === id
-    );
-    if (node.isText && covered) text += node.text;
-    return true;
-  });
-  return text;
-}
-
 async function twoAsks() {
   const { schema } = await createHeadlessProof();
   const doc = schema.node("doc", null, [
@@ -60,8 +47,8 @@ async function twoAsks() {
 test("an ask over part of another ask leaves the first whole", async () => {
   const { view, transactions, bob, alice } = await twoAsks();
   const doc = view.state.doc;
-  expect(askText(doc, bob)).toBe("quick brown");
-  expect(askText(doc, alice)).toBe("brown");
+  expect(markedText(doc, bob)).toBe("quick brown");
+  expect(markedText(doc, alice)).toBe("brown");
   expect(findAskMarkRange(doc, bob)).toEqual({ from: 5, to: 16 });
   expect(findAskMarkRange(doc, alice)).toEqual({ from: 11, to: 16 });
   const second = transactions[1];
@@ -77,8 +64,8 @@ test("removing one of two overlapping asks leaves the other whole", async () => 
     const asks = await twoAsks();
     expect(removeAskMark(asks.view, asks[removed])).toBe(true);
     const doc = asks.view.state.doc;
-    expect({ removed, text: askText(doc, asks[removed]) }).toEqual({ removed, text: "" });
-    expect({ kept, text: askText(doc, asks[kept]) }).toEqual({ kept, text: keptText });
+    expect({ removed, text: markedText(doc, asks[removed]) }).toEqual({ removed, text: "" });
+    expect({ kept, text: markedText(doc, asks[kept]) }).toEqual({ kept, text: keptText });
     expect(doc.textContent).toBe("The quick brown fox");
   }
 });
@@ -95,12 +82,12 @@ test("an ask span nested inside another reads back from markdown as both asks", 
     `<span data-dispatch="ask" data-id="${id}" data-by="${by}">${text}</span>`;
   const markdown = `The ${ask("a1", "user:bob", `quick ${ask("a2", "user:alice", "brown")} fox`)} jumps.\n`;
   const doc = parseMarkdown(markdown);
-  expect({ a1: askText(doc, "a1"), a2: askText(doc, "a2") }).toEqual({
+  expect({ a1: markedText(doc, "a1"), a2: markedText(doc, "a2") }).toEqual({
     a1: "quick brown fox",
     a2: "brown",
   });
   const again = parseMarkdown(serializeMarkdown(doc));
-  expect({ a1: askText(again, "a1"), a2: askText(again, "a2") }).toEqual({
+  expect({ a1: markedText(again, "a1"), a2: markedText(again, "a2") }).toEqual({
     a1: "quick brown fox",
     a2: "brown",
   });
