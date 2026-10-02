@@ -18,7 +18,7 @@ def ts: (capture("^(?<s>[0-9-]+T[0-9:]+)(\\.(?<f>[0-9]+))?Z$") // error("not an 
     any($events[]?;
       .type == "ask.answered"
       and .payload.id == $request.id
-      and ((.payload.approval.requested_version // .payload.approval.version) == $request.approval.requested_version)
+      and (.payload | normalize_approval).approval.requested_version == $request.approval.requested_version
     );
   ($events | approval_requests($artifact)
     | map(. + {state: (if was_answered(.) then "answered" else "open" end)})) as $requests
