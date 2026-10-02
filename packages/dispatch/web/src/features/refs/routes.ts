@@ -429,15 +429,18 @@ export function composerReferences(
   appOrigin = window.location.origin
 ): ComposerReference[] {
   const references: ComposerReference[] = [];
+  const seen = new Set<string>();
   for (const { value } of referenceSpans(body)) {
     const route = referenceRouteFromHref(value, appOrigin);
     if (route === undefined) {
       continue;
     }
     const reference = buildDispatchReference(route);
-    if (!references.some((item) => item.reference === reference)) {
-      references.push({ href: buildReferencePath(route), reference });
+    if (seen.has(reference)) {
+      continue;
     }
+    seen.add(reference);
+    references.push({ href: buildReferencePath(route), reference });
   }
   return references;
 }
