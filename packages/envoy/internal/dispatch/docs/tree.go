@@ -35,6 +35,11 @@ func repairableSchemaError(err error) error {
 	return fmt.Errorf("%w: %v", ErrDocOutsideSchema, err)
 }
 
+// ErrDocumentTooLarge is a document whose tree encodes to more items than one document update can
+// store (ygo's cap of 1,048,576, maxUpdateItems): more formatted spans than any real document
+// has, such as 1 MiB of `)_`, which reads as 524,288 italic spans.
+var ErrDocumentTooLarge = errors.New("document holds more formatted spans than can be stored")
+
 // parseInput parses markdown a caller writes that replaces no live document: a new document's
 // first text, or the empty text a delete splices. Text an insert or an accept writes into a
 // document is parseFragmentInput's.

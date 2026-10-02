@@ -81,6 +81,8 @@ func Extract(body, serverURL string) []Ref {
 // block a mention sits in. Trailing punctuation the grammar trims never moves the start.
 func ExtractAt(body, serverURL string) []Located {
 	refs := []Located{}
+	var base *url.URL
+	baseParsed := false
 	for _, span := range referencePattern.FindAllStringIndex(body, -1) {
 		raw := trimReference(body[span[0]:span[1]])
 		if raw == "" {
@@ -92,7 +94,11 @@ func ExtractAt(body, serverURL string) []Located {
 			}
 			continue
 		}
-		if ref, ok := parseServer(raw, serverURL); ok {
+		if !baseParsed {
+			base, _ = url.Parse(serverURL)
+			baseParsed = true
+		}
+		if ref, ok := parseServer(raw, base); ok {
 			refs = append(refs, Located{Ref: ref, Offset: span[0]})
 			continue
 		}
@@ -218,13 +224,12 @@ func decodeItemID(value string) (string, bool) {
 	return decoded, err == nil && utf8.ValidString(decoded) && !hasControl(decoded)
 }
 
-// parseServer reads a dashboard URL of serverURL as the dashboard's `referenceRouteFromHref` reads
-// it: the key and the path's item id as written, the query as `searchParams` reads it, a version a
-// positive decimal. A URL holding a control character names nothing; net/url refuses only the
-// ASCII ones.
-func parseServer(raw, serverURL string) (Ref, bool) {
-	base, err := url.Parse(serverURL)
-	if err != nil || base.Scheme == "" || base.Host == "" {
+// parseServer reads a dashboard URL against its parsed server URL as the dashboard's
+// `referenceRouteFromHref` reads it: the key and the path's item id as written, the query as
+// `searchParams` reads it, a version a positive decimal. A URL holding a control character names
+// nothing; net/url refuses only the ASCII ones.
+func parseServer(raw string, base *url.URL) (Ref, bool) {
+	if base == nil || base.Scheme == "" || base.Host == "" {
 		return Ref{}, false
 	}
 	if hasControl(raw) {

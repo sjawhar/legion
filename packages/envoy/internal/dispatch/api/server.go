@@ -393,6 +393,11 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, "INVALID_MARKDOWN", http.StatusBadRequest, err.Error())
 		return
 	}
+	if errors.Is(err, docs.ErrDocumentTooLarge) {
+		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, err.Error())
+		slog.Warn("dispatch: API refused a document over the update item cap", "error", err)
+		return
+	}
 	if documentCode == codeDocSchema {
 		status := http.StatusInternalServerError
 		log := slog.Error
