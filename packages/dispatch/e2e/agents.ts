@@ -2,7 +2,7 @@ import { expect, type Page } from "@playwright/test";
 
 import type { CreateBroadcastInput } from "../web/src/api/types";
 import { createAsk, createComment, createIssue, createProject } from "./api";
-import { fakeEnvoyPort } from "./harness-ports";
+import { harnessPorts } from "./harness-ports";
 
 export interface FakeSession {
   session_id: string;
@@ -23,7 +23,7 @@ async function fixtureRequest(
   method: "GET" | "PATCH" | "PUT",
   body?: object
 ): Promise<Response> {
-  const response = await fetch(`http://127.0.0.1:${fakeEnvoyPort}${path}`, {
+  const response = await fetch(`http://127.0.0.1:${harnessPorts.fakeEnvoy.port}${path}`, {
     body: body === undefined ? undefined : JSON.stringify(body),
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     method,

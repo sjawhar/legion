@@ -2,7 +2,7 @@ import { expect, type Page, test } from "@playwright/test";
 
 import { createComment, createIssue, createProject, getArtifactText } from "./api";
 import { connectedDot, documentEditor, typeAtEnd } from "./editor";
-import { plainHttpHost } from "./plain-http-origin";
+import { httpsTarget, plainHttpHost, plainHttpSkipReason } from "./plain-http-origin";
 import { resetDatabase } from "./seed";
 import { asPlainHttpUser } from "./users";
 
@@ -15,10 +15,7 @@ const agent = {
 };
 const typed = "Typed on a plain-HTTP origin.";
 
-test.skip(
-  process.env.PLAYWRIGHT_BASE_URL?.startsWith("https:") === true,
-  "a deployed https server has no plain-HTTP origin to map"
-);
+test.skip(httpsTarget, plainHttpSkipReason);
 
 test.beforeEach(async () => {
   await resetDatabase();

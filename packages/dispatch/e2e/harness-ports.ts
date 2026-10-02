@@ -17,36 +17,40 @@
  * plain `bun` processes with no `process.send`, so a probe reached through an import would fire
  * inside them and refuse the second listener as soon as the first is listening.
  */
-function harnessPort(variable: string, fallback: string): number {
+
+/** One harness listener's port, beside the variable a refusal has to name. */
+export interface HarnessPort {
+  readonly port: number;
+  readonly variable: string;
+}
+
+function harnessPort(variable: string, fallback: string): HarnessPort {
   const resolved = process.env[variable] || fallback;
   const port = Number(resolved);
   if (!/^[1-9][0-9]{0,4}$/.test(resolved) || port > 65535) {
     throw new Error(`${variable} must be a port number, not ${JSON.stringify(resolved)}.`);
   }
-  return port;
+  return { port, variable };
 }
 
-export const dispatchPort = harnessPort("DISPATCH_E2E_PORT", "8777");
-export const fakeEnvoyPort = harnessPort("FAKE_ENVOY_PORT", "9021");
-export const fakeGithubPort = harnessPort("FAKE_GITHUB_PORT", "9022");
-export const plainHttpPort = harnessPort("PLAIN_HTTP_PORT", "9023");
-
-// The same four, paired with the variable a collision message has to name.
-const harnessPorts = [
-  { variable: "DISPATCH_E2E_PORT", port: dispatchPort },
-  { variable: "FAKE_ENVOY_PORT", port: fakeEnvoyPort },
-  { variable: "FAKE_GITHUB_PORT", port: fakeGithubPort },
-  { variable: "PLAIN_HTTP_PORT", port: plainHttpPort },
-];
+/** The four ports by listener, the one place a port is paired with its variable: the Playwright
+ *  config's listener table spreads these, and the collision check below names them. */
+export const harnessPorts = {
+  dispatch: harnessPort("DISPATCH_E2E_PORT", "8777"),
+  fakeEnvoy: harnessPort("FAKE_ENVOY_PORT", "9021"),
+  fakeGithub: harnessPort("FAKE_GITHUB_PORT", "9022"),
+  plainHttp: harnessPort("PLAIN_HTTP_PORT", "9023"),
+};
 
 // Two variables naming one port would each pass a per-port check, and every consumer would then
 // fail in its own words: Playwright refuses the second `webServer` without naming a variable, and
 // the second fake listener dies on `EADDRINUSE`. Refused here, where the ports resolve, so every
 // importer refuses it the same way, including the three Bun listeners.
-const collisions = [...new Set(harnessPorts.map((entry) => entry.port))]
+const resolvedPorts = Object.values(harnessPorts);
+const collisions = [...new Set(resolvedPorts.map((entry) => entry.port))]
   .map((port) => ({
     port,
-    variables: harnessPorts.filter((entry) => entry.port === port).map((entry) => entry.variable),
+    variables: resolvedPorts.filter((entry) => entry.port === port).map((entry) => entry.variable),
   }))
   .filter((collision) => collision.variables.length > 1);
 if (collisions.length > 0) {

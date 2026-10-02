@@ -6,7 +6,12 @@ import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 
 import { devSignInPath, sessionCookieName } from "./api";
-import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
+import {
+  httpsTarget,
+  plainHttpHost,
+  plainHttpOrigin,
+  plainHttpSkipReason,
+} from "./plain-http-origin";
 import { resetDatabase } from "./seed";
 
 // Runs only in the `chromium-plain-http` project, whose host name Chromium maps to loopback: the
@@ -14,10 +19,7 @@ import { resetDatabase } from "./seed";
 // under test to names its own fence refuses, nor hold the server's event streams after a page goes.
 const proxyModule = fileURLToPath(new URL("./plain-http-proxy.ts", import.meta.url));
 
-test.skip(
-  process.env.PLAYWRIGHT_BASE_URL?.startsWith("https:") === true,
-  "a deployed https server has no plain-HTTP origin to map"
-);
+test.skip(httpsTarget, plainHttpSkipReason);
 
 test.beforeEach(async () => {
   await resetDatabase();

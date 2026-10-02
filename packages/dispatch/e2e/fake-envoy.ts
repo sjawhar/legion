@@ -1,4 +1,4 @@
-import { fakeEnvoyPort } from "./harness-ports";
+import { harnessPorts } from "./harness-ports";
 
 interface FakeSession {
   readonly session_id: string;
@@ -27,7 +27,10 @@ interface FakeInterest {
 }
 
 /** Every piece of fixture state this listener holds. `PUT /__fixture/reset` replaces it whole, so
- *  a field added here is reset with the rest without being listed anywhere else. */
+ *  a field added here is reset with the rest without being listed anywhere else. A session reseed
+ *  replaces it whole too, so a handler reads its request body before it touches `state`: a write
+ *  through a `state` read before that await lands in an object a reseed may already have
+ *  dropped. */
 interface FakeEnvoyState {
   readonly sessions: FakeSession[];
   readonly liveSessions: Set<string>;
@@ -66,7 +69,7 @@ function asSeen(session: FakeSession, now: number): FakeSession {
 
 Bun.serve({
   hostname: "127.0.0.1",
-  port: fakeEnvoyPort,
+  port: harnessPorts.fakeEnvoy.port,
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/v1/sessions") {
@@ -139,10 +142,10 @@ Bun.serve({
     }
     if (request.method === "PATCH" && url.pathname.startsWith("/__fixture/sessions/")) {
       const sessionID = decodeURIComponent(url.pathname.slice("/__fixture/sessions/".length));
+      const body = (await request.json()) as { live?: boolean; send_status?: 200 | 404 };
       if (!state.sessions.some((session) => session.session_id === sessionID)) {
         return Response.json({ error: `unknown fixture session ${sessionID}` }, { status: 404 });
       }
-      const body = (await request.json()) as { live?: boolean; send_status?: 200 | 404 };
       if (body.live !== undefined) {
         if (body.live) state.liveSessions.add(sessionID);
         else state.liveSessions.delete(sessionID);
@@ -166,7 +169,8 @@ Bun.serve({
       return Response.json(state.interests);
     }
     if (request.method === "PUT" && url.pathname === "/__fixture/interests") {
-      state.interests = (await request.json()) as FakeInterest[];
+      const interests = (await request.json()) as FakeInterest[];
+      state.interests = interests;
       return Response.json({ ok: true });
     }
     // The real Dispatch server (packages/envoy/internal/dispatch/envoy/client.go's
@@ -197,4 +201,4 @@ Bun.serve({
   },
 });
 
-console.log(`fake envoy listener on 127.0.0.1:${fakeEnvoyPort}`);
+console.log(`fake envoy listener on 127.0.0.1:${harnessPorts.fakeEnvoy.port}`);

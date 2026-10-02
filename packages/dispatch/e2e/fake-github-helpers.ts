@@ -1,6 +1,6 @@
 import { test } from "@playwright/test";
 
-import { fakeGithubPort } from "./harness-ports";
+import { harnessPorts } from "./harness-ports";
 
 /** Replaces the fake GitHub's installations wholesale: repositories present are
  * "App installed" with the given Contents permission; absent ones answer 404.
@@ -19,7 +19,7 @@ export async function seedFakeGithub(
     Boolean(process.env.PLAYWRIGHT_BASE_URL),
     "the fake GitHub is unavailable with PLAYWRIGHT_BASE_URL"
   );
-  const response = await fetch(`http://127.0.0.1:${fakeGithubPort}/__fixture/repos`, {
+  const response = await fetch(`http://127.0.0.1:${harnessPorts.fakeGithub.port}/__fixture/repos`, {
     body: JSON.stringify(repos),
     headers: { "Content-Type": "application/json" },
     method: "PUT",

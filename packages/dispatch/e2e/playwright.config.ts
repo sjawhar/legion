@@ -2,7 +2,7 @@ import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 import { baseUrl } from "./api";
-import { dispatchPort, fakeEnvoyPort, fakeGithubPort, plainHttpPort } from "./harness-ports";
+import { harnessPorts } from "./harness-ports";
 import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 
 // The plain-HTTP project's origin is a proxy on PLAIN_HTTP_PORT, reached by a host name Chromium
@@ -18,30 +18,16 @@ const fakeGithub = fileURLToPath(new URL("./fake-github.ts", import.meta.url));
 const plainHttpProxy = fileURLToPath(new URL("./plain-http-proxy.ts", import.meta.url));
 const runServer = fileURLToPath(new URL("./run-server.sh", import.meta.url));
 
-// Every listener this config can start, beside the variable that names its port. A deployed run
-// (PLAYWRIGHT_BASE_URL) starts only those marked `deployed`: its Dispatch server is already up, and
-// the fake GitHub serves only a server this run starts. The port probe and `webServer` both read
-// `startedListeners`, so a listener is probed exactly when it is started.
+// Every listener this config can start, with its port beside that port's variable, both from
+// e2e/harness-ports.ts. A deployed run (PLAYWRIGHT_BASE_URL) starts only those marked `deployed`:
+// its Dispatch server is already up, and the fake GitHub serves only a server this run starts. The
+// port probe and `webServer` both read `startedListeners`, so a listener is probed exactly when it
+// is started.
 const listeners = [
-  { command: `bun ${fakeEnvoy}`, deployed: true, port: fakeEnvoyPort, variable: "FAKE_ENVOY_PORT" },
-  {
-    command: `bun ${plainHttpProxy}`,
-    deployed: true,
-    port: plainHttpPort,
-    variable: "PLAIN_HTTP_PORT",
-  },
-  {
-    command: `bun ${fakeGithub}`,
-    deployed: false,
-    port: fakeGithubPort,
-    variable: "FAKE_GITHUB_PORT",
-  },
-  {
-    command: `bash ${runServer}`,
-    deployed: false,
-    port: dispatchPort,
-    variable: "DISPATCH_E2E_PORT",
-  },
+  { ...harnessPorts.fakeEnvoy, command: `bun ${fakeEnvoy}`, deployed: true },
+  { ...harnessPorts.plainHttp, command: `bun ${plainHttpProxy}`, deployed: true },
+  { ...harnessPorts.fakeGithub, command: `bun ${fakeGithub}`, deployed: false },
+  { ...harnessPorts.dispatch, command: `bash ${runServer}`, deployed: false },
 ];
 const startedListeners = startsOwnServers
   ? listeners

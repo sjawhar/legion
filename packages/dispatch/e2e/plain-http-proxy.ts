@@ -2,7 +2,7 @@
 // browser maps to this listener, forwarded to the server under test at that server's own loopback
 // origin, which its dev sign-in host fence requires.
 import { baseUrl } from "./api";
-import { plainHttpPort } from "./harness-ports";
+import { harnessPorts } from "./harness-ports";
 import { plainHttpOrigin } from "./plain-http-origin";
 
 interface ProxySocket {
@@ -45,8 +45,8 @@ function forwardedHeaders(source: Headers, websocket: boolean): Headers {
   return headers;
 }
 
-// The target is plain HTTP: the one spec this proxy serves skips an https target
-// (e2e/plain-http-origin.e2e.ts), since it has no plain-HTTP origin to stand in for.
+// The target is plain HTTP: every spec this proxy serves skips an https target (`httpsTarget` in
+// e2e/plain-http-origin.ts), since it has no plain-HTTP origin to stand in for.
 function upstreamUrl(request: Request, websocket: boolean): URL {
   const incoming = new URL(request.url);
   const url = new URL(`${incoming.pathname}${incoming.search}`, target);
@@ -67,7 +67,7 @@ Bun.serve<ProxySocket>({
   // The workspace event stream is silent between the server's 15 s heartbeats, and Bun's default
   // 10 s idle timeout would cut it before the first one.
   idleTimeout: 0,
-  port: plainHttpPort,
+  port: harnessPorts.plainHttp.port,
   async fetch(request, server) {
     // Under dev sign-in the server answers only its own dashboard Host, so a page that reached it
     // by another name (a DNS-rebinding page, a tunnel) is told so
