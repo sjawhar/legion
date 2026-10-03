@@ -64,6 +64,9 @@ type bootConfig struct {
 	AllowedLogins    map[string]struct{}
 	NATSDisabled     bool
 	TestHooksEnabled bool
+	// TestSettleDelay is the document closer delay test processes use. It is the normal default
+	// unless DISPATCH_TEST_SETTLE_DELAY overrides it with the test hooks mounted.
+	TestSettleDelay time.Duration
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -230,6 +233,7 @@ func main() {
 		Identity:   requestIdentity,
 		AgentToken: boot.AgentToken,
 		ServerURL:  serverURL,
+		Settle:     boot.TestSettleDelay,
 	})
 
 	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
@@ -422,6 +426,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		AllowedLogins:    parseAllowedLogins(env.get("DISPATCH_ALLOWED_LOGINS")),
 		NATSDisabled:     env.get("DISPATCH_NATS_DISABLED") == "1",
 		TestHooksEnabled: env.get("DISPATCH_TEST_HOOKS") == "1",
+		TestSettleDelay:  docs.DefaultSettleDelay,
 		WebDist:          env.get("DISPATCH_WEB_DIST"),
 		SigningKey:       env.get("DISPATCH_SIGNING_KEY"),
 		InsecureCookie:   env.get("DISPATCH_INSECURE_COOKIE") != "",
@@ -438,6 +443,16 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.ListenAddr = listenAddr
+	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_SETTLE_DELAY")); raw != "" {
+		if !boot.TestHooksEnabled {
+			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_SETTLE_DELAY")
+		}
+		delay, err := time.ParseDuration(raw)
+		if err != nil || delay <= 0 {
+			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_SETTLE_DELAY=%q (expected a positive Go duration)", raw)
+		}
+		boot.TestSettleDelay = delay
+	}
 
 	switch mode := strings.TrimSpace(env.get("DISPATCH_IDENTITY")); {
 	case mode == "" || mode == "cookie":

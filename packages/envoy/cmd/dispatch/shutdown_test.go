@@ -121,24 +121,24 @@ func TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument(t *tes
 }
 
 // A deploy usually finds someone with a document open: the spec tab holds the document's websocket,
-// so its room is loaded with an editor connected, and what that editor last typed is owed a
-// settlement for two seconds (docs.Deps.Settle's default). The document service settles the room
-// while it is still loaded, and only then closes the editor's connection, so the edit is versioned,
-// credited to the editor, before the process exits rather than when someone next opens the spec.
+// so its room is loaded with an editor connected. The test gives its test-only process a longer
+// settle delay than its whole shutdown budget, so only Shutdown can version the edit.
 func TestSIGTERMWithAnEditorConnectedSettlesItsDocumentBeforeExit(t *testing.T) {
 	database := storetest.Open(t)
-	process := startDispatchProcess(t, database.Pool.Config().ConnString())
+	process := startDispatchProcessWithSettleDelay(t, database.Pool.Config().ConnString(), 30*time.Second)
 	process.waitHealthy(t)
 	_, artifactID := process.createIssue(t)
 	editor := process.openEditor(t, artifactID, "before\n")
-	// The spec the issue was created with is owed a settlement of its own; once that has run, the
-	// pending-settlement row the editor's keystrokes write is theirs alone.
-	waitForSettlementOwed(t, database, artifactID, false)
-	replaceText(t, editor, "before", "after")
+	// The initial spec is already owed. Its row makes the Shutdown settlement load and settle this
+	// room, so wait for the editor's durable update to advance that same row before signalling.
 	waitForSettlementOwed(t, database, artifactID, true)
+	marked := settlementMarkedAt(t, database, artifactID)
+	replaceText(t, editor, "before", "after")
+	waitForSettlementMarkedAfter(t, database, artifactID, marked)
 
 	signalled := process.Terminate(t)
-	process.waitPromptExit(t, signalled)
+	process.WaitExit(t, "SIGTERM")
+	t.Logf("exited %v after SIGTERM", time.Since(signalled))
 	select {
 	case <-editor.Ended:
 		t.Logf("the editor's connection ended %v after SIGTERM", editor.EndedAt().Sub(signalled))
@@ -327,6 +327,10 @@ type dispatchProcess struct {
 // it still runs. DISPATCH_TEST_HOOKS serves the agent conversation relay in-process, as the browser
 // harness does, since there is no NATS to relay it from.
 func startDispatchProcess(t *testing.T, databaseURL string) *dispatchProcess {
+	return startDispatchProcessWithSettleDelay(t, databaseURL, 0)
+}
+
+func startDispatchProcessWithSettleDelay(t *testing.T, databaseURL string, settleDelay time.Duration) *dispatchProcess {
 	t.Helper()
 	home := t.TempDir()
 	port := cmdtest.FreeTCPPort(t)
@@ -345,6 +349,9 @@ func startDispatchProcess(t *testing.T, databaseURL string) *dispatchProcess {
 		"DISPATCH_PORT=" + strconv.Itoa(port),
 		"DISPATCH_WEB_DIST=" + home,
 		"DISPATCH_TEST_HOOKS=1",
+	}
+	if settleDelay > 0 {
+		cmd.Env = append(cmd.Env, "DISPATCH_TEST_SETTLE_DELAY="+settleDelay.String())
 	}
 	return &dispatchProcess{Process: cmdtest.Start(t, "Dispatch", cmd), port: port}
 }
@@ -542,6 +549,28 @@ func settlementOwed(t *testing.T, database *store.Store, artifactID string) bool
 		t.Fatalf("read the pending settlement: %v", err)
 	}
 	return owed
+}
+
+func settlementMarkedAt(t *testing.T, database *store.Store, artifactID string) time.Time {
+	t.Helper()
+	var marked time.Time
+	if err := database.Pool.QueryRow(context.Background(),
+		`select marked_at from doc_settlements_pending where artifact_id = $1`, artifactID,
+	).Scan(&marked); err != nil {
+		t.Fatalf("read the pending settlement marker: %v", err)
+	}
+	return marked
+}
+
+func waitForSettlementMarkedAfter(t *testing.T, database *store.Store, artifactID string, before time.Time) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !settlementMarkedAt(t, database, artifactID).After(before) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the editor's durable update did not advance the pending settlement marker within 10s")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // waitForSettlementOwed waits up to 10 s for the document's pending-settlement row to be there, or

@@ -100,6 +100,8 @@ var settings = []setting{
 		Description: "Set to `1` on a loopback-only local server to sign any allowed login in at `/auth/_dev/signin` without GitHub."},
 	{Name: "DISPATCH_TEST_HOOKS", Required: "no",
 		Description: "Set to `1` to mount the end-to-end tests' hook routes; never in a real deployment."},
+	{Name: "DISPATCH_TEST_SETTLE_DELAY", Default: "`2s`", Required: "no",
+		Description: "Document settlement delay for an end-to-end test process; a positive Go duration. Set only with `DISPATCH_TEST_HOOKS=1`."},
 }
 
 // fileVariable is the _FILE form of a setting that has one.
