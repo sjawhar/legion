@@ -11,22 +11,15 @@ Every Dispatch setting the server and its subcommands read is a row of one table
 read, and a test fails on any other environment read in `cmd/dispatch` or `internal/dispatch`.
 `envoy-dispatch settings` prints the table (name, `_FILE` form, default, whether it is required,
 and a one-line description) without a database or a listener, and the docs site's Dispatch
-configuration reference is generated from it. The tables below explain the settings that need
-more than a line.
+configuration reference is generated from it: those are where every setting is listed. The rows
+below add only what a setting's one line cannot say.
 
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | Postgres connection string. Dispatch applies embedded migrations before serving. The pool size is fixed in code (`store.sharedPoolSize`), so a connection string carrying `pool_max_conns` is refused at startup; remove the parameter. |
-| `DISPATCH_SERVER_URL` | Public browser origin. When set, overrides `dispatch.serverUrl` from merged `envoy.json`. |
-| `NATS_URLS` | Comma-separated NATS URLs. When set, overrides `natsUrls` from merged `envoy.json`. |
 | `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. |
-| `DISPATCH_AGENT_TOKEN` | Shared bearer fallback for devbox agents. Personal tokens minted in Settings are the normal agent credential. |
-| `DISPATCH_ALLOWED_LOGINS` | Comma-separated GitHub login allowlist. Required for cookie identity mode and enforced during OAuth sign-in. |
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount `POST /api/v1/events/_test/disconnect`, which closes every open SSE connection, and `POST /api/v1/artifacts/_test/quiesce`, which closes every live document and waits for the settlements in flight. Test/e2e only — leave unset in every real deployment. |
 | `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<login>&next=<path>`, which signs an allowlisted login in with no GitHub step, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`), and the GitHub proxy answers `503 GITHUB_TOKEN_UNAVAILABLE` for every login. The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the login's session generation and deletes its stored GitHub token pair, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
-| `ENVOY_URL` | Base URL of the Envoy listener (`GET /v1/sessions`) behind `GET /api/v1/agents`; defaults to `http://127.0.0.1:9020`. Must name a loopback host with `DISPATCH_DEV_SIGNIN=1`. |
-| `DISPATCH_OIDC_ISSUER` | OIDC issuer whose projected service-account tokens authenticate as agents. Set with `DISPATCH_OIDC_AUDIENCE` or not at all. |
-| `DISPATCH_OIDC_AUDIENCE` | Audience those tokens must carry (`dispatch`). Set with `DISPATCH_OIDC_ISSUER` or not at all. |
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries. Existing dashboard mappings take
@@ -34,10 +27,6 @@ precedence over this seed. Dispatch resolves every external issue through the
 stored mapping, then falls back to `DISPATCH_DEFAULT_PROJECT` when configured.
 An unmapped external repository without a default project is rejected. An issue
 created through the default also gets a `repo:owner/name` label.
-
-`DISPATCH_SERVER_URL`, when set, overrides `dispatch.serverUrl` in merged
-`envoy.json`. It must be an absolute `http` or `https` URL with no path.
-`NATS_URLS`, when set, overrides `natsUrls` with its comma-separated values.
 
 `DISPATCH_SERVER_URL` IS the GitHub OAuth callback origin. It must equal the
 URL humans type into their browser, and the GitHub App must list
@@ -59,16 +48,14 @@ body, and every actor it writes carries `service`, the token's verified subject
 the body. A JWT the verifier rejects is `401 OIDC_TOKEN_INVALID` naming the
 reason class; it is never retried as a personal token.
 
-GitHub App credentials come either from these environment variables or from
-`~/.local/share/dispatch/app.json`; environment variables take precedence:
+GitHub App credentials come either from the `DISPATCH_APP_*` variables or from
+`~/.local/share/dispatch/app.json`; the variables take precedence. Two of them
+carry rules beyond their row:
 
 | Variable | Purpose |
 | --- | --- |
-| `DISPATCH_APP_CLIENT_ID` | GitHub App OAuth client ID. |
-| `DISPATCH_APP_CLIENT_SECRET` | GitHub App OAuth client secret. |
 | `DISPATCH_APP_PEM_B64` | Base64-encoded GitHub App private key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
 | `DISPATCH_GITHUB_API_BASE` | GitHub API origin override for App calls (tests and e2e point it at a fake); empty means `https://api.github.com`. With `DISPATCH_DEV_SIGNIN=1` and an App private key loaded, it must name `127.0.0.1`, `[::1]` or `localhost`. That checks the host, not what listens there: every App call hands a signed App JWT to whatever owns the port, so the key must be a throwaway. |
-| `DISPATCH_SIGNING_KEY` | Stable HMAC key for cookie sessions. Must be unset with `DISPATCH_DEV_SIGNIN=1`. |
 
 When no GitHub App credentials are configured, the server still starts, but
 OAuth and GitHub proxy routes respond with `503`, and saving a project's
