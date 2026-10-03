@@ -4,6 +4,9 @@
 
 ### Changed
 
+- `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary
+  and no question, and an approval is requested only once the human has agreed to every point in
+  the document (LEGION-475).
 - Added `AskApproval.requested_version`. An open approval ask now follows a document's latest
   version in the same row, and `requested_version < version` marks the interval while the agent
   is revising before handing that row back to a human (LEGION-470).

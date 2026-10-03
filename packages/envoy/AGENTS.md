@@ -25,7 +25,7 @@ events to the right session.
 | Webhook config         | `internal/webhook/config.go`                     | ENVOY_WEBHOOKS parsing, startup validation         |
 | Listener behavior      | `cmd/listener/main.go`                    | subscribe/match/deliver flow                       |
 | NATS client            | `internal/bus/nats.go`, `internal/bus/recovery.go` | connect, subscribe and publish; reconnect, recovery and the reconnect hooks |
-| NATS credential        | `internal/bus/nkey.go`                    | every bus connection's nkey user: `NATS_NKEY_SEED_FILE` (wins) or `NATS_NKEY_SEED`; unusable refuses, neither set connects without one |
+| NATS credential        | `internal/bus/nkey.go`                    | every bus connection's nkey user: `NATS_NKEY_SEED_FILE` (wins) or `NATS_NKEY_SEED`; unusable refuses, neither set connects without one. `Connect` and `ConnectOwningStream` read these and `ENVOY_ALLOW_REMOTE_NATS` from the process environment, or from the lookup `bus.WithEnvironment` hands them; `Dial` from the lookup its caller passes. envoy-dispatch hands both its settings table |
 | Stream definition      | `internal/bus/stream.go`                  | `ENVOY_NOTIFICATIONS` subjects, retention and duplicate window, and their reconciliation at start |
 | Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
 | Interest storage       | `internal/store/kv.go`                    | JetStream KV subscriptions                         |
@@ -33,6 +33,7 @@ events to the right session.
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
+| Dispatch settings | `cmd/dispatch/settings.go` | the one table of every Dispatch setting envoy-dispatch reads (the libraries it links read `HOME`, libpq's `PG*` and Go's own variables themselves); `envoy-dispatch settings` prints it, and a test fails on any other environment read under `cmd/dispatch` or `internal/dispatch` |
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`) |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
@@ -40,9 +41,34 @@ events to the right session.
 
 Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
 and `EnsureBlockIDs` repairs legacy or duplicate IDs before agent updates are written. Document
-settlement is two-phase: it first applies `EnsureBlockIDs` in one Yjs transaction and persists that
-captured update in the same Postgres transaction as any resulting version and event, then renders
-and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
+settlement is two-phase: it first writes its repairs into the room (`EnsureBlockIDs`, then the
+server-owned attributes of each ask block it reconciled) and persists the updates they captured in
+the same Postgres transaction as any resulting version and event, then renders and compares
+canonical markdown. Each repair is read and written in one Yjs transaction, which holds the
+document's lock, so it is computed against the document as it stands: the tree settlement
+reconciled was read before its database work, and writing that tree would revert an edit a peer
+made since (LEGION-479). Each repair's update is held from the room's own persistence by a
+suppression slot of its own (`applySuppressed`; ygo's persistence worker is handed each update on
+its own), and every path releases it: a slot nothing finishes holds the worker at the room's next
+update. A repair reports whether its transaction wrote anything; one that wrote nothing still
+committed that transaction, and ygo hands the worker an update for it too (the document's delete
+set), so its slot is finished with that update and the worker takes it rather than storing it. A
+settlement that wrote into the room renders its version from the document as it stands after the
+repairs (`lockedTreeOf`), so a peer's edit made since its read is in that version too, and credits
+that edit's author, whose own settlement then writes no version. It takes the authors with that
+tree, so an edit made while the version renders is credited on the version its own settlement
+writes, not on this one. A settlement that wrote into the room commits what it wrote even when the
+document moved after its read, since the room and its browsers hold it; one that wrote nothing
+leaves a moved document to the settlement the move scheduled. A repair is written only into the
+document the settlement read (`applySuppressed`): one whose room was evicted and reloaded since is
+refused and retried, and one whose room left the server while its transaction committed is given
+up and fails the room, its update discarded without waiting for its slot, since ygo then stores it
+on the committing goroutine itself (`persistStranded`). The room worker's compaction, except a
+failed room's eviction, skips a room whose lock another holder has (`compactIfIdle`), so a
+settlement holding the lock does not wait for that worker's exit. Two cases still hang until the
+server restarts (LEGION-498): a room that fails while a settlement commits into it, and a second
+writer committing into a room while it retires under a repair's commit.
+`envoy-dispatch backfill-block-ids` runs the same stamp through `applySuppressed` across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
 The closer's timer lives in memory, so the database says which documents still owe it: every
@@ -244,18 +270,20 @@ writer's `context.Canceled` in its cause. Nor does that read wait for a failed r
 A read of a resident room reads a copy taken under its document lock (`snapshotDocument`,
 `crdt.EncodeStateAsUpdateV1`), never the live tree: `GET /text` and the document websocket's
 admission check (`loadDocument`), a version's capture (`captureLiveTextAndAuthors`), a read
-outside any transaction (`docView`), and settlement's reads of the room (`settleRoomWithin`,
-`ensureBlockIDsInDocument`), so a torn read is never versioned as the document; the unrecorded-mark
-sweep (`sweepUnrecordedMarks`) reads the tree inside the transaction that unmarks it. A walk of the
-live tree takes no lock (reearth/ygo v1.49.5, `crdt/yxml.go`) while every peer update and service
-write holds that lock as it applies, so the walk can read a write halfway through as a tree outside
-the schema and answer a healthy document 409 with the repair. A version's capture holds the room's
-state lock across the copy and the authors it captures, so an author the update observer credits is
-captured only with that update's text; the order - state lock, then document lock - is never
-reversed, since only a Yjs transaction's own function holds a document's lock and none takes a
-room's state lock. A read that may load its room (a version's capture, `docView`, `VerifyMark`'s
-subscription) takes what it reads inside the `Server.Apply` that loads and holds the room: a room
-looked up again with `GetDoc` once that Apply returned can have been evicted in between.
+outside any transaction (`docView`), and settlement's reads of the room (`settleRoomWithin`'s first
+read and its version's, and the block-id backfill's read, through `lockedTreeOf`), so a torn read is
+never versioned as the document; a repair reads the tree inside the transaction that writes it
+(`rewriteLive`), and the unrecorded-mark sweep (`sweepUnrecordedMarks`) inside the transaction that
+unmarks it. A walk of the live tree takes no lock (reearth/ygo v1.49.5, `crdt/yxml.go`) while every
+peer update and service write holds that lock as it applies, so the walk can read a write halfway
+through as a tree outside the schema and answer a healthy document 409 with the repair. A version's
+capture holds the room's state lock across the copy and the authors it captures, so an author the
+update observer credits is captured only with that update's text; the order - state lock, then
+document lock - is never reversed, since only a Yjs transaction's own function holds a document's
+lock and none takes a room's state lock. A read that may load its room (a version's capture,
+`docView`, `VerifyMark`'s subscription) takes what it reads inside the `Server.Apply` that loads
+and holds the room: a room looked up again with `GetDoc` once that Apply returned can have been
+evicted in between.
 
 Every decode of a document's whole state takes a pending queue as long as the most items one
 update can carry (`newDocumentCopy`, `maxUpdateItems`): the copy, a write's fork (`forkLive`), and
@@ -1676,10 +1704,11 @@ NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its re-
 helper revokes a lapsed id before the session enrolls again, and while the session lives its
 record keeps that id until the revoke lands, so a restart meanwhile, even a second one before any
 login, still revokes it. A session that ends first takes its record with it and hands the id to a
-bounded revoke (three tries); before a login those fail, and the id ends with its lease. A revoke
-refused 403 `OPERATOR_MISMATCH` (an enrollment made under another operator's launcher credential)
-counts as done, and the session enrolls afresh. `agent-secrets launcher login-status`, which the
-helper answers, exits 0 while the helper holds a launcher credential and prints `issued`. A
+bounded revoke (three tries); before a login those fail, and the broker's sweeper ends the id once
+its lease lapses. A revoke refused 403 `OPERATOR_MISMATCH` (an enrollment made under another
+operator's launcher credential) counts as done, and the session enrolls afresh.
+`agent-secrets launcher login-status`, which the helper answers, exits 0 while the helper holds a
+launcher credential and prints `issued`. A
 re-login that is denied, expires unapproved or is still pending leaves the credential an earlier
 login installed in place, and the helper keeps enrolling sessions with it, so login-status still
 exits 0 and prints `issued`, and stderr names the most recent login and its code
@@ -1708,8 +1737,7 @@ login-status says `issued`, once the pinned release carries that answer and the 
 restarted on it; its login-status probe stays, since it also finds a helper that does not answer.
 Against an older helper an unconditional `--wait 10` stalls every launch 10 s while no credential
 exists. With `--wait N --exec`, a session the helper cannot enroll for want of a credential starts
-with a warning that its `agent-secrets` calls fail, and secret-run uses secretsd, until the machine
-is logged in.
+with a warning that its `agent-secrets` calls fail until the machine is logged in.
 
 `config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
 `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required; a literal
@@ -1826,7 +1854,13 @@ nothing pending, the request and, if granted, its grant are written with no reco
 needing approval writes the request row and a `credential_requests` record together, in one
 transaction serialized by an advisory lock keyed on the enrollment and the sorted name set, so an
 identical concurrent request coalesces onto the same record (`coalesced: true`) instead of writing
-a second one. `ApplyDecision` decides a pending record on the deciding human's login — approve
+a second one. Each of those write transactions first locks the requesting enrollment `for share`
+while it is live, before any request or grant row, so a request racing the sweep or a revoke
+writes nothing on an enrollment that ended after `Create` first read it (`401 PROOF_INVALID`, as
+for one that had ended before). A pending request leaves `pending` without a human only through
+`store.EndPendingRequests` (the session's cancel, the sweeper's expiry, an enrollment's end): one
+statement moves the request rows and writes each one's audit row and its record's terminal event.
+`ApplyDecision` decides a pending record on the deciding human's login — approve
 mints the grant while the requesting enrollment is still live, deny denies it — re-deriving the
 record's id, refusing any login but the record's approver whatever the record's state
 (`record.ErrNotApprover`, `403 NOT_APPROVER`), re-verifying its embedded request object, and
@@ -1835,7 +1869,12 @@ audit row in one transaction; a non-pending record, and one past its expiry that
 not yet expired, is `409 RECORD_TERMINAL` for its approver (a duplicate or late decision changes
 nothing) — but a record past its expiry, whether the sweeper has recorded it expired or not,
 answers with a message saying it expired before its approver acted (`requests.ErrExpired`), never
-that it was decided. `Values` releases a
+that it was decided. An `agent_secret` record is pending while its request is: `GET /v1/pending`
+(`PendingForApprover`) lists it only then, and `GET /v1/credential-requests/{id}` (`ReadRecord`)
+reads it as pending only then; a decided record's terminal event names the decision, and a request
+cancelled with no cancelled event on its record, the shape an ended enrollment's requests had
+before `endEnrollment` wrote one, reads as `cancelled` from its request row. A machine login is
+pending while it carries no terminal event. `Values` releases a
 live grant's inject-delivery values, re-checking the enrollment, the
 grant, its whole approval chain (`VerifyChain`), and — when the rules changed since the grant was
 decided — that the current rules still allow every granted name (`stillAllowed`: a name the rules no
@@ -1888,10 +1927,18 @@ behind it never authenticates. `proof.Verifier.Verify` distinguishes a session p
 carries `eid`) from a launcher proof (payload carries `lid`, never both or neither) but otherwise
 checks the same things: `alg` exactly ES256, the embedded JWK's thumbprint matching the stored one,
 signature, `iat` skew, `htm`/`htu`, and `jti` replay. `internal/broker/requests.Sweeper` is the one
-thing that moves pending state without a human: every `BROKER_SWEEP_SECONDS` tick it expires
-overdue pending `agent_secret` requests (waking each one's owner through the Envoy wake seam) and
-overdue pending machine logins, reading fresh from Postgres every time so a restart resumes
-exactly where the rows are.
+thing that moves state without a human: every `BROKER_SWEEP_SECONDS` tick it first ends every
+enrollment whose lease has lapsed (`enroll.Service.EndLapsed`: a gone pod, a box whose launcher
+stopped renewing, a host session whose helper died), as a revoke ends one, so its grants are
+revoked and its pending requests cancelled and dropped from the approver's list, with an
+`enrollment.expired` audit row and one log line each; then it expires overdue pending
+`agent_secret` requests (waking each one's owner through the Envoy wake seam) and overdue pending
+machine logins. It reads fresh from Postgres every time, so a restart resumes exactly where the
+rows are. Lapsed means what proof lookup means by not live (`lease_expires_at` no later than
+Postgres's `now()`), so a session that keeps renewing is never ended, and rows a concurrent renew
+or revoke holds are left to the next tick. Each ended enrollment's live grants are found through
+`grants_enrollment_live` (migration 0008), so a backlog of lapsed enrollments costs one index
+lookup each rather than a scan of `grants`.
 
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
 ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/...`. The Postgres-backed tests skip, rather

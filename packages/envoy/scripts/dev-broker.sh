@@ -3,11 +3,13 @@
 #
 # AGENTC-393 Task 12: the local dev surface a human can drive without AWS or Dispatch. Boots
 # Postgres (dev-postgres.sh, made idempotent here since that script has no guard of its own),
-# writes a scratch rules file (one automatic and one approval-required secret, approved by
-# APPROVER_LOGIN) and a fake secrets file, then starts cmd/broker against them. Prints the exports
-# a second shell needs to drive agent-secrets and agent-secrets-devrelay against it: devrelay
-# stands in for Dispatch's credential-request relay, sending the broker's UI routes the UI bearer
-# and the approving human's login, as Dispatch does when a signed-in human clicks Approve.
+# builds the broker and its three clients (agent-secrets, agent-secrets-helper and
+# agent-secrets-devrelay), writes a scratch rules file (DEMO_READ_TOKEN, granted automatically, and
+# DEMO_API_KEY, which APPROVER_LOGIN approves, each for a box or host session APPROVER_LOGIN
+# operates) and a fake secrets file, then starts cmd/broker against them. Prints the exports a
+# second shell needs to drive the clients against it: devrelay stands in for Dispatch's
+# credential-request relay, sending the broker's UI routes the UI bearer and the approving human's
+# login, as Dispatch does when a signed-in human clicks Approve.
 #
 # Each invocation creates and drops its own isolated Postgres database inside the shared
 # dispatch-pg container (named from this run's own WORK_DIR, below) and binds an OS-assigned
@@ -33,11 +35,11 @@ POSTGRES_CONTAINER="dispatch-pg"
 LISTEN_ADDR="127.0.0.1:0"
 PUBLIC_URL="http://127.0.0.1:0"
 UI_TOKEN="${BROKER_UI_TOKEN:-dev}"
-APPROVER_LOGIN="sjawhar"
+APPROVER_LOGIN="ada@example.com"
 
 WORK_DIR="$(mktemp -d /tmp/agent-secrets-dev.XXXXXX)"
-DEVRELAY_BIN="$WORK_DIR/agent-secrets-devrelay"
-BROKER_BIN="$WORK_DIR/broker"
+BIN_DIR="$WORK_DIR/bin"
+BROKER_BIN="$BIN_DIR/broker"
 RULES_FILE="$WORK_DIR/agent-secret-rules.yaml"
 FAKE_SECRETS_FILE="$WORK_DIR/fake-secrets.env"
 BROKER_LOG="$WORK_DIR/broker.log"
@@ -90,34 +92,38 @@ fi
 echo "dev-broker: created isolated database $DB_NAME" >&2
 docker exec "$POSTGRES_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 -q -c "create database ${DB_NAME};"
 
-# --- Build the two binaries this stack needs. ---
-echo "dev-broker: building agent-secrets-devrelay and broker..." >&2
-( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.1 go build -o "$DEVRELAY_BIN" ./cmd/agent-secrets-devrelay )
-( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.1 go build -o "$BROKER_BIN" ./cmd/broker )
+# --- Build the broker and the clients a second shell drives it with. ---
+echo "dev-broker: building broker, agent-secrets, agent-secrets-helper and agent-secrets-devrelay..." >&2
+mkdir -p "$BIN_DIR"
+for cmd in broker agent-secrets agent-secrets-helper agent-secrets-devrelay; do
+  ( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.26.1 go build -o "$BIN_DIR/$cmd" "./cmd/$cmd" )
+done
 
 # --- Scratch rules file: one automatic secret, one approval-required secret. ---
 cat > "$RULES_FILE" <<EOF
 version: 1
 secrets:
-  AGENT_SECRETS_PROOF_AUTOMATIC:
-    source: dev/agent-secrets/AGENT_SECRETS_PROOF_AUTOMATIC
+  DEMO_READ_TOKEN:
+    source: example/agent-secrets/DEMO_READ_TOKEN
     owner: ${APPROVER_LOGIN}
     delivery: inject
     max_lifetime_seconds: 3600
     requesters:
       - {kind: box, operator: ${APPROVER_LOGIN}, decision: automatic}
-  AGENT_SECRETS_PROOF_APPROVAL:
-    source: dev/agent-secrets/AGENT_SECRETS_PROOF_APPROVAL
+      - {kind: host, operator: ${APPROVER_LOGIN}, decision: automatic}
+  DEMO_API_KEY:
+    source: example/agent-secrets/DEMO_API_KEY
     owner: ${APPROVER_LOGIN}
     delivery: inject
     max_lifetime_seconds: 3600
     requesters:
       - {kind: box, operator: ${APPROVER_LOGIN}, decision: approval, approver: operator}
+      - {kind: host, operator: ${APPROVER_LOGIN}, decision: approval, approver: operator}
 EOF
 
 cat > "$FAKE_SECRETS_FILE" <<EOF
-dev/agent-secrets/AGENT_SECRETS_PROOF_AUTOMATIC=automatic-dev-value
-dev/agent-secrets/AGENT_SECRETS_PROOF_APPROVAL=approval-dev-value
+example/agent-secrets/DEMO_READ_TOKEN=demo-read-token-value
+example/agent-secrets/DEMO_API_KEY=demo-api-key-value
 EOF
 chmod 600 "$FAKE_SECRETS_FILE"
 
@@ -190,16 +196,18 @@ dev-broker: ready.
   export AGENT_SECRETS_URL=$PUBLIC_URL
   export AGENT_SECRETS_UI_TOKEN=$UI_TOKEN
   export AGENT_SECRETS_APPROVER=$APPROVER_LOGIN
+  export PATH=$BIN_DIR:\$PATH
 
-  devrelay binary:     $DEVRELAY_BIN
+  binaries:            $BIN_DIR  (broker, agent-secrets, agent-secrets-helper, agent-secrets-devrelay)
   fake secrets file:   $FAKE_SECRETS_FILE  (source -> value, for confirming a released grant)
   rules file:          $RULES_FILE
   approver login:      $APPROVER_LOGIN (devrelay approve/deny --login \$AGENT_SECRETS_APPROVER decides as this human)
   database:            $POSTGRES_URL  (this instance's own; created and dropped by this script)
 
-  One automatic secret (AGENT_SECRETS_PROOF_AUTOMATIC) and one approval-required secret
-  (AGENT_SECRETS_PROOF_APPROVAL, approver: $APPROVER_LOGIN) are configured. Drive it with
-  agent-secrets and \$DEVRELAY_BIN in another shell; press Ctrl-C here to stop the broker.
+  One automatic secret (DEMO_READ_TOKEN) and one approval-required secret (DEMO_API_KEY,
+  approver: $APPROVER_LOGIN) are configured for a box or host session $APPROVER_LOGIN operates.
+  Drive it with agent-secrets, agent-secrets-helper and agent-secrets-devrelay in another shell;
+  press Ctrl-C here to stop the broker.
 EOF
 
 wait "$BROKER_PID"

@@ -136,6 +136,13 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 }
 
 func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) error {
+	// ygo's persistence worker calls this, at its exit among other times. A failed room's eviction
+	// compacts under the room's lock, which every transaction meeting the failed room fails fast
+	// instead of waiting for; any other compaction leaves a room whose lock another holder has,
+	// which can be a settlement waiting for the worker's exit (compactIfIdle).
+	if !a.service.roomFailed(room) {
+		ctx = compactIfIdle(ctx)
+	}
 	_, err := a.store.Compact(ctx, room, 500)
 	return err
 }
@@ -442,7 +449,8 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		if published, ok := origin.(*liveWriteOrigin); ok {
 			s.finishSuppressedPersistence(published.slot, update)
 		}
-		if _, identityRepair := origin.(*identityClosureOrigin); identityRepair {
+		if repair, identityRepair := origin.(*identityClosureOrigin); identityRepair {
+			s.recordSuppressedCommit(repair.slot, doc, update)
 			return
 		}
 		replica.mu.Lock()

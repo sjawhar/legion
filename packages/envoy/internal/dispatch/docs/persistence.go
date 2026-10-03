@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -429,7 +430,8 @@ func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persis
 }
 
 // Compact folds older updates into the oldest retained record without changing
-// the room's materialized state.
+// the room's materialized state. Under a context compactIfIdle marked, it leaves a room whose lock
+// another holder has for a later compaction.
 func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -438,7 +440,8 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		return 0, nil
 	}
 	deleted := 0
-	err := p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
+	_, idleOnly := ctx.Value(compactIfIdleKey{}).(bool)
+	err := p.lockRoom(ctx, room, !idleOnly, func(conn *pgxpool.Conn) error {
 		tx, err := conn.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("begin compact document: %w", err)
@@ -511,6 +514,9 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		}
 		return nil
 	})
+	if errors.Is(err, errRoomLockBusy) {
+		return 0, nil
+	}
 	return deleted, err
 }
 
@@ -646,13 +652,41 @@ func (p *PgVersioned) recoverPruneTx(ctx context.Context, tx pgx.Tx, room string
 	return nil
 }
 
+// compactIfIdleKey marks a context whose compaction skips a room whose lock another holder has
+// (compactIfIdle).
+type compactIfIdleKey struct{}
+
+// compactIfIdle marks ctx so Compact leaves a room whose lock another holder has for a later
+// compaction rather than waiting for the lock. The room's persistence worker compacts under it
+// (servicePersistenceAdapter.Compact): the worker compacts as it exits, and a settlement holding
+// the room's lock can be waiting for that exit, since an update the settlement commits into a room
+// whose worker is leaving is stored on the settlement's own goroutine once the worker has gone
+// (ygo's persistStranded). A compaction that waited for the lock would wait for itself. Compaction
+// is housekeeping, and the next one folds what a skipped one would have.
+func compactIfIdle(ctx context.Context) context.Context {
+	return context.WithValue(ctx, compactIfIdleKey{}, true)
+}
+
+// errRoomLockBusy is a room lock another holder has, for work that does not wait for it.
+var errRoomLockBusy = errors.New("document room lock is held")
+
 func (p *PgVersioned) withRoomLock(ctx context.Context, room string, fn func(*pgxpool.Conn) error) error {
+	return p.lockRoom(ctx, room, true, fn)
+}
+
+// lockRoom runs fn holding a pooled connection and the room's advisory lock. When wait is false
+// it takes neither lock another holder has, and returns errRoomLockBusy instead.
+func (p *PgVersioned) lockRoom(ctx context.Context, room string, wait bool, fn func(*pgxpool.Conn) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	value, _ := p.locks.LoadOrStore(room, &sync.Mutex{})
 	lock := value.(*sync.Mutex)
-	lock.Lock()
+	if wait {
+		lock.Lock()
+	} else if !lock.TryLock() {
+		return errRoomLockBusy
+	}
 	defer lock.Unlock()
 
 	conn, err := p.pool().Acquire(ctx)
@@ -664,8 +698,18 @@ func (p *PgVersioned) withRoomLock(ctx context.Context, room string, fn func(*pg
 	// reads through them, never through a second pooled connection.
 	ctx, releaseMark := store.HoldsConnection(ctx)
 	defer releaseMark()
-	if _, err := conn.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, room); err != nil {
-		return fmt.Errorf("lock document room: %w", err)
+	if wait {
+		if _, err := conn.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, room); err != nil {
+			return fmt.Errorf("lock document room: %w", err)
+		}
+	} else {
+		var locked bool
+		if err := conn.QueryRow(ctx, `select pg_try_advisory_lock(hashtext($1))`, room).Scan(&locked); err != nil {
+			return fmt.Errorf("lock document room: %w", err)
+		}
+		if !locked {
+			return errRoomLockBusy
+		}
 	}
 	defer func() { _, _ = conn.Exec(context.Background(), `select pg_advisory_unlock(hashtext($1))`, room) }()
 	return fn(conn)

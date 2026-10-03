@@ -156,6 +156,21 @@ func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 	return tree, nil
 }
 
+// lockedTreeOf reads doc's tree from a copy of its state taken under the document's lock
+// (snapshotDocument), so the tree is the document as it stood at one moment. It opens no
+// transaction on doc, since ygo hands the room's persistence an update for every transaction it
+// commits, even one that only reads.
+func lockedTreeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
+	if doc == nil {
+		return nil, errDocUnloaded
+	}
+	copied, err := snapshotDocument(doc)
+	if err != nil {
+		return nil, err
+	}
+	return treeOf(copied)
+}
+
 func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmdoc.Node, error) {
 	if fragment == nil {
 		return nil, errDocUnloaded
@@ -165,6 +180,31 @@ func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmd
 		return nil, documentSchemaError(err)
 	}
 	return tree, nil
+}
+
+// rewriteLive rewrites doc's tree in one transaction tagged with origin. edit is handed the tree as
+// it stands, read inside that transaction, which holds the document's lock, and reports whether it
+// changed the tree; only a changed tree is written. A repair computed on a tree read before the
+// transaction and written back would revert whatever another writer wrote after that read
+// (LEGION-479). It returns the tree as the transaction left it and whether edit changed it.
+func rewriteLive(doc *crdt.Doc, origin any, edit func(live *pmdoc.Node) bool) (*pmdoc.Node, bool, error) {
+	fragment := doc.GetXmlFragment(fragmentName)
+	var live *pmdoc.Node
+	changed := false
+	err := doc.TransactE(func(transaction *crdt.Transaction) error {
+		var readErr error
+		if live, readErr = treeOfTransaction(transaction, fragment); readErr != nil {
+			return readErr
+		}
+		if changed = edit(live); !changed {
+			return nil
+		}
+		return pmdoc.Update(transaction, fragment, live)
+	}, origin)
+	if err != nil {
+		return nil, false, err
+	}
+	return live, changed, nil
 }
 
 func renderTree(tree *pmdoc.Node) (string, error) {

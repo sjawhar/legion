@@ -374,7 +374,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ask.Kind == "approval" {
-		writeError(w, "ASK_KIND_FIXED", http.StatusConflict, "an approval ask's question and options are fixed; revise its document, then hand the request back through dispatch_request_approval")
+		writeError(w, "ASK_KIND_FIXED", http.StatusConflict, "an approval ask's question and options are fixed; revise its document, then, once the human has agreed to every point in it, hand the request back through dispatch_request_approval")
 		return
 	}
 	if actor.Kind == "session" && !ask.Author.SameAs(actor) {
