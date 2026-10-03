@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 
 import { inboxQuery } from "../../api/queries";
 import type { CredentialPendingRow, InboxRow } from "../../api/types";
-import { compareTimestamps } from "../../lib/timestamps";
+import { compareTimestamps, isTimestamp } from "../../lib/timestamps";
 import {
   borderDefault,
   surfaceMutedBg,
@@ -32,8 +32,11 @@ export function waitingOnYou<
 /** Everything the Inbox lists that waits for the viewer - its asks whose turn is theirs, and every
  *  pending credential request, each of which names the viewer as its approver - counted, with when
  *  the oldest of them began waiting (undefined when nothing does). The badges and the banner read
- *  this one rule, so another kind of waiting item is added here once. */
-export function needsYou(
+ *  this one rule, so another kind of waiting item is added here once. A time `compareTimestamps`
+ *  refuses still counts but is never the oldest: the broker's `requested_at` reaches here
+ *  verbatim, and the badges render in the app shell, outside every page's error boundary, so a
+ *  throw here would take down every page. */
+function needsYou(
   asks: readonly InboxRow[],
   credentialRequests: readonly CredentialPendingRow[]
 ): { count: number; oldest: string | undefined } {
@@ -41,10 +44,12 @@ export function needsYou(
     ...waitingOnYou(asks).map((ask) => ask.created_at),
     ...credentialRequests.map((request) => request.requested_at),
   ];
-  const oldest = since.reduce<string | undefined>(
-    (earlier, at) => (earlier === undefined || compareTimestamps(at, earlier) < 0 ? at : earlier),
-    undefined
-  );
+  const oldest = since
+    .filter(isTimestamp)
+    .reduce<string | undefined>(
+      (earlier, at) => (earlier === undefined || compareTimestamps(at, earlier) < 0 ? at : earlier),
+      undefined
+    );
   return { count: since.length, oldest };
 }
 
@@ -69,7 +74,7 @@ export function BlockedOnYou({
   variant?: "banner" | "pill";
 }): ReactNode {
   const { count, oldest } = needsYou(asks, credentialRequests);
-  if (oldest === undefined) return null;
+  if (count === 0) return null;
 
   if (variant === "pill") {
     return (
@@ -91,7 +96,8 @@ export function BlockedOnYou({
       className={`block w-full rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${surfaceMutedBg} ${textSecondaryOnSurfaceMuted}`}
       to="/"
     >
-      Blocked on you: {count} {count === 1 ? "item" : "items"}, oldest {formatAskAge(oldest)}
+      Blocked on you: {count} {count === 1 ? "item" : "items"}
+      {oldest === undefined ? null : `, oldest ${formatAskAge(oldest)}`}
     </Link>
   );
 }

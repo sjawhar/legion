@@ -4,14 +4,18 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { openStreamResponse } from "../../__tests__/sse-test-harness";
 import { api, isRetryableQueryError } from "../../api/client";
 import { refreshQueries } from "../../api/query-refresh";
+import { useEventStream } from "../../api/sse";
+import type { CredentialPendingResponse } from "../../api/types";
 import { Inbox } from "./Inbox";
 
 // A Dispatch with no secrets broker answers the credential-request list with `null`, an answer that
-// holds for the session (the server reads its broker setting at boot). The QueryClient here is
-// main.tsx's own, with no retry delay. Every credential-list call after the first is held open, so
-// a refetch, had one started, would leave the list loading and the empty state off the screen.
+// holds until the page reloads or the event stream reconnects (the server reads its broker setting
+// at boot). The QueryClient here is main.tsx's own, with no retry delay. Every credential-list call
+// after the first is held open, so a refetch, had one started, would leave the list loading and the
+// empty state off the screen.
 const never = () => Promise.withResolvers<never>().promise;
 
 let whoAmI: Mock<typeof api.whoAmI>;
@@ -118,3 +122,79 @@ test("with no broker, a focus, a stream refresh and a return to the Inbox neithe
     view.unmount();
   }
 });
+
+function EventStream(): null {
+  useEventStream();
+  return null;
+}
+
+test("with no broker, a reconnect of the event stream asks the list again once, and a focus does not", async () => {
+  const originalFetch = globalThis.fetch;
+  const streams: string[] = [];
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    if (!String(input).startsWith("/api/v1/events")) return originalFetch(input, init);
+    streams.push(String(input));
+    return Promise.resolve(openStreamResponse(init?.signal));
+  }) as typeof fetch;
+  // The server restarted with a broker: the second answer lists a request, and is held until the
+  // whole-cache refresh the reconnect starts has run.
+  const relisted = Promise.withResolvers<CredentialPendingResponse>();
+  getCredentialPending.mockReturnValueOnce(relisted.promise);
+  const queryClient = productionQueryClient();
+  const view = render(
+    shell(
+      queryClient,
+      <>
+        <EventStream />
+        <Inbox />
+      </>
+    )
+  );
+  try {
+    expect(await screen.findByText("Nothing needs you")).toBeTruthy();
+    await waitFor(() => expect(streams).toHaveLength(1));
+
+    act(() => {
+      focusManager.setFocused(false);
+      focusManager.setFocused(true);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(getCredentialPending).toHaveBeenCalledTimes(1);
+
+    const watch = watchEmptyState();
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await waitFor(() => expect(streams).toHaveLength(2));
+    await waitFor(() => expect(getCredentialPending).toHaveBeenCalledTimes(2));
+    // The reconnect's whole-cache refresh refetches the inbox list; the held answer is not asked a
+    // third time, and nothing blinks while the second call is out.
+    await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    watch.stop();
+    expect(watch.blinks).toBe(0);
+    expect(getCredentialPending).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      relisted.resolve({
+        pending: [
+          {
+            identifiers: ["DEMO_API_KEY"],
+            kind: "agent_secret",
+            record_id: "record-1",
+            requested_at: new Date().toISOString(),
+          },
+        ],
+      });
+    });
+    expect(await screen.findByRole("link", { name: /Secret request.*DEMO_API_KEY/s })).toBeTruthy();
+    expect(screen.queryByText("Nothing needs you")).toBeNull();
+  } finally {
+    view.unmount();
+    globalThis.fetch = originalFetch;
+  }
+}, 10_000);

@@ -20,8 +20,7 @@ import {
   railSecondaryText,
 } from "../../theme/classes";
 import { totalUnreadReplies, unreadRepliesLabel } from "../agents/unread";
-import { useCredentialRequests } from "../credentials/pending";
-import { needsYou } from "../inbox/BlockedOnYou";
+import { useNeedsYouCount } from "../inbox/BlockedOnYou";
 import { buildIssuePath, buildProjectPath, parseIssuePath, parseProjectPath } from "../refs/routes";
 
 /** One rail entry: a key, its title, and the open-ask count when there is one. */
@@ -82,7 +81,7 @@ export function Sidebar({
     queryFn: () => api.listIssues({ pinned: true }),
   });
   const projects = useQuery(projectsQuery());
-  const credentials = useCredentialRequests();
+  const needsYouCount = useNeedsYouCount();
   const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
   const currentIssue = parseIssuePath(location.pathname)?.key;
   const currentProject = parseProjectPath(location.pathname)?.project;
@@ -115,7 +114,6 @@ export function Sidebar({
       </>
     );
   }
-  const needsYouCount = needsYou(inbox.data, credentials.requests).count;
 
   return (
     <>

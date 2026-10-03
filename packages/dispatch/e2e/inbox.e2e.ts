@@ -804,7 +804,8 @@ test("a pending credential request alone is listed, counted, and keeps the empty
 // through leaving the Inbox and coming back. Every credential-list call after the page's first is
 // held, so a refetch of that list, had one put it back to loading, would take the empty state off
 // the screen for as long as the hold lasts. A Dispatch with no secrets broker answers the list
-// `null` for the session and is never asked again; with the fake broker the list keeps its empty
+// `null` and is asked again only when the stream reconnects, over the held answer, so the held
+// second call leaves the empty state on screen; with the fake broker the list keeps its empty
 // answer on screen while a refetch runs. Neither page may log a failed request.
 test("Nothing needs you stays on screen through a focus and a return to the Inbox", async ({
   browser,

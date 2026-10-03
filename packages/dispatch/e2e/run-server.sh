@@ -39,8 +39,12 @@ if [ -z "${DISPATCH_E2E_AGENT_SECRETS_URL+set}" ]; then
   )
 elif [ -n "$DISPATCH_E2E_AGENT_SECRETS_URL" ]; then
   : "${DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE:?DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE must accompany DISPATCH_E2E_AGENT_SECRETS_URL}"
+  # The server reads the file from packages/envoy, where this script changes directory below, so a
+  # path relative to the caller's directory is made absolute first.
+  token_file="$DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE"
+  [[ "$token_file" == /* ]] || token_file="$PWD/$token_file"
   broker_env=(
-    DISPATCH_AGENT_SECRETS_TOKEN_FILE="$DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE"
+    DISPATCH_AGENT_SECRETS_TOKEN_FILE="$token_file"
     DISPATCH_AGENT_SECRETS_URL="$DISPATCH_E2E_AGENT_SECRETS_URL"
   )
 fi
