@@ -327,6 +327,16 @@ esac
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = builder.Process.Kill() })
+	// Start returns once execve has closed the child's close-on-exec pipe, before the kernel has
+	// laid out the new argv: /proc/<pid>/cmdline reads empty until it has, and again across the
+	// script's own `exec -a`, and an empty cmdline reads as not codegraph. A real builder writes its
+	// PID to the lock from its own running code, after its exec has finished, so the lock is written
+	// only once the stand-in is there too: argv[0] is codegraph.
+	waitFor(t, func() bool {
+		cmdline, _ := os.ReadFile("/proc/" + strconv.Itoa(builder.Process.Pid) + "/cmdline")
+		argv0, _, _ := strings.Cut(string(cmdline), "\x00")
+		return argv0 == "codegraph"
+	}, "the stand-in builder to exec as codegraph")
 	lock := filepath.Join(dir, ".codegraph", "codegraph.lock")
 	if err := os.WriteFile(lock, []byte(strconv.Itoa(builder.Process.Pid)), 0o600); err != nil {
 		t.Fatal(err)
