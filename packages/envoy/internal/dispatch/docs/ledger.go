@@ -198,13 +198,12 @@ func (l *Ledger) credit() {
 		if len(write.credits) == 0 {
 			continue
 		}
-		state := l.service.room(artifactID)
-		state.mu.Lock()
+		state := l.service.lockState(artifactID)
 		for key, actor := range write.credits {
 			state.pending[key] = actor
 		}
 		state.lastActor = write.actor
-		state.mu.Unlock()
+		l.service.unlockState(artifactID, state)
 	}
 }
 

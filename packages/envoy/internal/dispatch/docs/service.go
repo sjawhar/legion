@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -35,6 +36,9 @@ var (
 const maxSettleFailures = 3
 
 const (
+	// maxLiveRooms is how many live rooms - ygo's resident rooms, loaded or loading, whoever
+	// opened them - a document socket may find before it is refused a room of its own
+	// (canOpenRoom).
 	maxLiveRooms       = 1_000
 	maxRoomConnections = 1_000
 	// roomIdleTimeout is how long a room stays resident after its last peer leaves (New). A peer
@@ -156,6 +160,13 @@ type Service struct {
 	preloads sync.Map
 }
 
+// roomState is what the service keeps for one document while its room is live in ygo or an
+// operation on the document holds it, and no longer: releaseIfUnusedLocked forgets it once the
+// room has gone and nothing it holds outlasts the room. A released state is no longer the
+// document's, so every lookup that may write one takes it through lockState, which never hands
+// out a released state. What a release drops - the authors of content no settlement versioned
+// yet, the unrecorded marks' first sightings, the closed flag and rendered markdown a load
+// re-reads - is what a restart drops too.
 type roomState struct {
 	mu        sync.Mutex
 	connected map[uint64]model.Actor
@@ -184,9 +195,15 @@ type roomState struct {
 	// arms no second settlement for the document's pending-settlement row (onLoadDocument).
 	settleWarming  bool
 	settleFailures int
-	closed         bool
-	failed         error
-	failedDone     chan struct{}
+	// settling counts the settlements running on this state (settleRoomWithin), which hold it
+	// across their database work.
+	settling   int
+	closed     bool
+	failed     error
+	failedDone chan struct{}
+	// released marks a state the service has forgotten (releaseIfUnusedLocked, evictRoom), so a
+	// lookup that found it before it went takes the document's current state instead.
+	released bool
 }
 
 type documentUpdateClass struct {
@@ -575,6 +592,8 @@ func New(deps Deps) *Service {
 	srv.OnInject = service.allowInject
 	srv.OnLoadDocument = service.onLoadDocument
 	srv.OnLastPeer = service.settleLastPeer
+	// ygo calls it once for every room it retires, whichever way: the idle sweep, CloseRoom.
+	srv.OnUnloadDocument = service.releaseUnloadedRoom
 
 	return service
 }
@@ -798,9 +817,8 @@ func (s *Service) scheduleSettle(room string) {
 	if s.stopping.Load() || s.quiescing.Load() || s.shuttingDown(room) {
 		return
 	}
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	s.scheduleSettleLocked(room, state)
 }
 
@@ -828,6 +846,9 @@ func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay
 	s.registerSettleTimer(timerID)
 	timer := time.AfterFunc(delay, func() {
 		defer s.settleWG.Done()
+		// Deferred before the timer's own unregistration, so it runs after it: an armed timer is
+		// something its state holds (unusedLocked).
+		defer s.releaseIfUnused(room)
 		defer s.unregisterSettleTimer(timerID)
 		if current, _ := s.rooms.Load(room); current != state {
 			s.scheduleSettle(room)
@@ -908,9 +929,8 @@ func (s *Service) scheduleSettleAfterAppend(room string) {
 	if s.stopping.Load() || s.shuttingDown(room) {
 		return
 	}
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	if s.isSettleTimerArmed(state.settle) {
 		return
 	}
@@ -921,16 +941,14 @@ func (s *Service) retrySettleSoon(room string) {
 	if s.stopping.Load() || s.shuttingDown(room) {
 		return
 	}
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	s.scheduleSettleAfterLocked(room, state, 10*time.Millisecond)
 }
 
 func (s *Service) retrySettle(room string, generation uint64, err error) {
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	s.retrySettleLocked(room, state, generation, err)
 }
 
@@ -1018,13 +1036,18 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		}
 		s.retrySettle(room, generation, err)
 	}
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockState(room)
 	if s.stopping.Load() || state.closed || state.failed != nil || state.gen != generation {
-		state.mu.Unlock()
+		s.unlockState(room, state)
 		return
 	}
+	state.settling++
 	state.mu.Unlock()
+	defer func() {
+		state.mu.Lock()
+		state.settling--
+		s.unlockState(room, state)
+	}()
 	if s.shuttingDown(room) && s.srv.GetDoc(room) == nil {
 		return
 	}
@@ -1544,14 +1567,10 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 		report.Err = fmt.Errorf("recover document: %w", err)
 		return report
 	}
-	state := s.room(artifactID)
-	state.mu.Lock()
 	if s.stopping.Load() {
-		state.mu.Unlock()
 		report.Skipped = "service stopping"
 		return report
 	}
-	state.mu.Unlock()
 
 	backfillCtx := withOwnerVerified(ctx)
 	// The backfill writes the same closure the settlement does, so its row is classified the same
@@ -1657,9 +1676,11 @@ func waitGroup(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
-// SetIssueClosed refreshes the closed state every room of an issue remembers. Its caller runs
-// it after its own transaction has committed, and it takes that caller's context so the pool
-// can see it: a caller that ever runs it with a transaction still open is refused, not wedged.
+// SetIssueClosed refreshes the closed state every room of an issue remembers, and closes them when
+// the issue closes. A document with no state has no room to tell: its next load reads the issue.
+// Its caller runs it after its own transaction has committed, and it takes that caller's context
+// so the pool can see it: a caller that ever runs it with a transaction still open is refused, not
+// wedged.
 func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bool) {
 	rooms, err := s.documentRooms(ctx, "the issue's document rooms", `
 		select id::text from artifacts where issue_key = $1 and kind = 'doc'
@@ -1673,15 +1694,18 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 		return
 	}
 	for _, room := range rooms {
-		state := s.room(room)
-		state.mu.Lock()
-		changed := state.closed != closed
-		state.closed = closed
-		if closed && changed {
-			state.gen++
-			s.stopSettleTimer(state.settle)
+		state := s.lockExistingState(room)
+		changed := true
+		if state != nil {
+			changed = state.closed != closed
+			state.closed = closed
+			if closed && changed {
+				state.gen++
+				s.stopSettleTimer(state.settle)
+			}
+			s.unlockState(room, state)
 		}
-		state.mu.Unlock()
+		// A room still loading has no state yet, and is closed once it has loaded.
 		if closed && changed {
 			_ = s.srv.CloseRoom(room, true)
 		}
@@ -1692,11 +1716,8 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 // durable document without treating the room as failed. No production code calls it: it exists
 // so tests, including those in package api, can force a room to reload.
 func (s *Service) Evict(_ context.Context, artifactID string) error {
-	value, _ := s.rooms.Load(artifactID)
-	var state *roomState
-	if value != nil {
-		state = value.(*roomState)
-		state.mu.Lock()
+	state := s.lockExistingState(artifactID)
+	if state != nil {
 		state.gen++
 		s.stopSettleTimer(state.settle)
 		state.mu.Unlock()
@@ -1711,7 +1732,12 @@ func (s *Service) evictRoom(room string, state *roomState) error {
 	// state during the close is re-armed by its own timer (see scheduleSettleAfterLocked).
 	err := s.srv.CloseRoom(room, true)
 	if state != nil {
-		s.rooms.CompareAndDelete(room, state)
+		state.mu.Lock()
+		if !state.released {
+			state.released = true
+			s.rooms.CompareAndDelete(room, state)
+		}
+		state.mu.Unlock()
 	}
 	if err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
 		return fmt.Errorf("evict live document: %w", err)
@@ -1720,9 +1746,8 @@ func (s *Service) evictRoom(room string, state *roomState) error {
 }
 
 func (s *Service) failRoom(room string, cause error) {
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	s.failRoomLocked(room, state, cause)
 }
 
@@ -1844,9 +1869,13 @@ func WithoutRecoveryWait(ctx context.Context) context.Context {
 	return context.WithValue(ctx, withoutRecoveryWait{}, true)
 }
 
+// roomClosed is whether room's state remembers its issue closed. A document with no state remembers
+// nothing, and its caller reads the issue (allowInject).
 func (s *Service) roomClosed(room string) bool {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockExistingState(room)
+	if state == nil {
+		return false
+	}
 	defer state.mu.Unlock()
 	return state.closed
 }
@@ -1885,20 +1914,94 @@ func (s *Service) issueOpen(ctx context.Context, q Queryer, artifactID string) (
 	return open, nil
 }
 
-func (s *Service) room(name string) *roomState {
-	value, _ := s.rooms.LoadOrStore(name, &roomState{
-		connected:       make(map[uint64]model.Actor),
-		pending:         make(map[string]model.Actor),
-		pendingVersions: make(map[int]versionPending),
-		unrecorded:      make(map[pmdoc.MarkRef]time.Time),
-	})
-	return value.(*roomState)
+// lockState returns room's state locked, creating it when the service holds none. It never returns
+// a released state: one forgotten after its lookup found it is skipped for the document's current
+// one, so nothing written to a state is lost to a release. The caller unlocks it with unlockState,
+// which forgets a state that turns out to hold nothing.
+func (s *Service) lockState(room string) *roomState {
+	for {
+		value, ok := s.rooms.Load(room)
+		if !ok {
+			value, _ = s.rooms.LoadOrStore(room, &roomState{
+				connected:       make(map[uint64]model.Actor),
+				pending:         make(map[string]model.Actor),
+				pendingVersions: make(map[int]versionPending),
+				unrecorded:      make(map[pmdoc.MarkRef]time.Time),
+			})
+		}
+		state := value.(*roomState)
+		state.mu.Lock()
+		if !state.released {
+			return state
+		}
+		state.mu.Unlock()
+	}
+}
+
+// lockExistingState is lockState for a caller with nothing to record when the service holds no
+// state for room: it returns nil rather than create one.
+func (s *Service) lockExistingState(room string) *roomState {
+	for {
+		value, ok := s.rooms.Load(room)
+		if !ok {
+			return nil
+		}
+		state := value.(*roomState)
+		state.mu.Lock()
+		if !state.released {
+			return state
+		}
+		state.mu.Unlock()
+	}
+}
+
+// unlockState unlocks state, room's, forgetting it first when it holds nothing
+// (releaseIfUnusedLocked).
+func (s *Service) unlockState(room string, state *roomState) {
+	s.releaseIfUnusedLocked(room, state)
+	state.mu.Unlock()
+}
+
+// releaseIfUnused forgets room's state when it holds nothing (releaseIfUnusedLocked).
+func (s *Service) releaseIfUnused(room string) {
+	if state := s.lockExistingState(room); state != nil {
+		s.unlockState(room, state)
+	}
+}
+
+// releaseUnloadedRoom is ygo's OnUnloadDocument: the room has gone, so its state goes too unless
+// something still holds it, whose end releases it instead.
+func (s *Service) releaseUnloadedRoom(_ context.Context, room string) {
+	s.releaseIfUnused(room)
+}
+
+// releaseIfUnusedLocked forgets state, room's, once ygo holds no room for it - none loaded or
+// loading - and it holds nothing that outlasts the room: no open writer, settlement, armed
+// settlement timer, connected browser, update the room's persistence has not taken, version whose
+// authors wait on its commit, or failure being recovered from (a failed room's eviction removes
+// its state itself, evictRoom). Its caller holds state.mu.
+//
+// A room's load attaches to the state it finds (onLoadDocument takes it through lockState), and
+// ygo publishes the loading room before it calls that hook, so a state a load attached to is never
+// released while the room is live, and one released first is skipped by the load's lookup.
+func (s *Service) releaseIfUnusedLocked(room string, state *roomState) {
+	if state.released || s.srv.GetDoc(room) != nil || !s.unusedLocked(state) || slices.Contains(s.srv.Rooms(), room) {
+		return
+	}
+	state.released = true
+	s.rooms.CompareAndDelete(room, state)
+}
+
+// unusedLocked is whether state holds nothing that outlasts its room. Its caller holds state.mu.
+func (s *Service) unusedLocked(state *roomState) bool {
+	return state.liveWriter == nil && state.settling == 0 && state.failed == nil &&
+		len(state.connected) == 0 && state.pendingUpdates == 0 && state.durableAppends.Load() == 0 &&
+		len(state.pendingVersions) == 0 && !s.isSettleTimerArmed(state.settle)
 }
 
 func (s *Service) recordUpdateClass(room string, update []byte, contentChanged, durable bool) {
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	state.updateClasses = append(state.updateClasses, documentUpdateClass{
 		update: append([]byte(nil), update...), contentChanged: contentChanged, durable: durable,
 	})
@@ -1909,9 +2012,11 @@ func (s *Service) recordUpdateClass(room string, update []byte, contentChanged, 
 }
 
 func (s *Service) consumeUpdateClass(room string, update []byte) (bool, bool, bool) {
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockExistingState(room)
+	if state == nil {
+		return true, false, false
+	}
+	defer s.unlockState(room, state)
 	for index, class := range state.updateClasses {
 		if !bytes.Equal(class.update, update) {
 			continue
@@ -1924,18 +2029,26 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (bool, bool, bo
 }
 
 func (s *Service) hasPendingUpdates(room string) bool {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockExistingState(room)
+	if state == nil {
+		return false
+	}
 	defer state.mu.Unlock()
 	return state.pendingUpdates > 0
 }
 
+// finishDurableAppend ends a durable append recordUpdateClass counted. The state that counted it
+// holds it until then (unusedLocked), so it is the state found here.
 func (s *Service) finishDurableAppend(room string) {
-	s.room(room).durableAppends.Add(-1)
+	if state := s.lockExistingState(room); state != nil {
+		state.durableAppends.Add(-1)
+		s.unlockState(room, state)
+	}
 }
 
 func (s *Service) hasDurableAppend(room string) bool {
-	return s.room(room).durableAppends.Load() > 0
+	value, ok := s.rooms.Load(room)
+	return ok && value.(*roomState).durableAppends.Load() > 0
 }
 func (s *Service) waitForPendingUpdates(ctx context.Context, room string) error {
 	for s.hasPendingUpdates(room) {
@@ -1964,16 +2077,12 @@ func (s *Service) shuttingDown(room string) bool {
 	return ok
 }
 
+// canOpenRoom is whether a document socket may open room: one already live, or a new one while
+// fewer than maxLiveRooms rooms are live. A document whose room has gone counts for nothing,
+// whatever the service once kept for it.
 func (s *Service) canOpenRoom(room string) bool {
-	if _, exists := s.rooms.Load(room); exists {
-		return true
-	}
-	count := 0
-	s.rooms.Range(func(_, _ any) bool {
-		count++
-		return count < maxLiveRooms
-	})
-	return count < maxLiveRooms
+	live := s.srv.Rooms()
+	return len(live) < maxLiveRooms || slices.Contains(live, room)
 }
 
 func (s *Service) canAddConnection() bool {

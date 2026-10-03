@@ -2372,10 +2372,19 @@ func (s *blockingFirstAppendStore) AppendUpdateWithClass(ctx context.Context, ro
 	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
 }
 
-// recordActor makes actor a pending author of room's next version, and its latest editor.
+// room is the state the service holds for room now, created when it holds none, for a test to read
+// or arrange under its lock.
+func (s *Service) room(name string) *roomState {
+	state := s.lockState(name)
+	state.mu.Unlock()
+	return state
+}
+
+// recordActor makes actor a pending author of room's next version, and its latest editor, as the
+// room's update observer does while the room is live. It keeps the state even for a room that is
+// not, which the observer never needs to.
 func (s *Service) recordActor(room string, actor model.Actor) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockState(room)
 	state.pending[actorKey(actor)] = actor
 	state.lastActor = new(actor)
 	state.mu.Unlock()

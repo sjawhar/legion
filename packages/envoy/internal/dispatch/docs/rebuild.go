@@ -104,10 +104,9 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if markdown == nil || canonical == latest.markdown {
 		return report, VersionResult{Version: latest.Version}, nil
 	}
-	state := s.room(artifactID)
-	state.mu.Lock()
+	state := s.lockState(artifactID)
 	capture, authors := captureAuthors(state, nil, &actor)
-	state.mu.Unlock()
+	s.unlockState(artifactID, state)
 	written, err := s.writeVersionTx(ctx, tx, artifactID, canonical, tree, actor, &versionWrite{
 		authors: authors,
 		capture: &capture,

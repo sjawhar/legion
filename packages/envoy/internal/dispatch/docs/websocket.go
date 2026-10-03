@@ -427,8 +427,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	default:
 		contentMarkdown = &markdown
 	}
-	state := s.room(room)
-	state.mu.Lock()
+	// The room this load publishes holds the state it takes from here until ygo retires it
+	// (releaseIfUnusedLocked).
+	state := s.lockState(room)
 	state.closed = !open
 	state.contentMarkdown = contentMarkdown
 	// The document owes a settlement no settlement committed: one a shutdown's budget cut short,
@@ -439,7 +440,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if state.failed == nil && owed && !state.settleWarming {
 		s.scheduleSettleLocked(room, state)
 	}
-	state.mu.Unlock()
+	s.unlockState(room, state)
 	replica := &renderedReplica{}
 	doc.OnUpdate(func(update []byte, origin any) {
 		// A published write's update is already durable. Its suppression slot is finished here,
@@ -512,10 +513,9 @@ func (r *renderedReplica) catchUp(room string, live *crdt.Doc) {
 func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {
 	markdown, err := renderDocument(replica)
 	if err != nil {
-		state := s.room(room)
-		state.mu.Lock()
+		state := s.lockState(room)
 		state.contentMarkdown = nil
-		state.mu.Unlock()
+		s.unlockState(room, state)
 		if errors.Is(err, ErrDocOutsideSchema) {
 			slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
 		} else {
@@ -523,9 +523,8 @@ func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {
 		}
 		return true
 	}
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	if state.contentMarkdown != nil && *state.contentMarkdown == markdown {
 		return false
 	}
@@ -547,9 +546,8 @@ func (s *Service) creditContentChange(room string, origin any) {
 		return
 	}
 	value, service := s.serviceOrigins.Load(origin)
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
 	if service {
 		if actor, credited := value.(*model.Actor); credited && actor != nil {
 			state.pending[actorKey(*actor)] = *actor
@@ -578,27 +576,32 @@ func (s *Service) creditContentChange(room string, origin any) {
 // observed while it is connected (creditContentChange), never for connecting or for an agent's
 // edit.
 func (s *Service) addConnection(room string, id uint64, actor model.Actor) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockState(room)
 	state.connected[id] = actor
-	state.mu.Unlock()
+	s.unlockState(room, state)
 }
 
+// removeConnection forgets a browser that left room, and with the last one, once ygo has retired
+// the room, the room's state (releaseIfUnusedLocked). A document without state has none to forget.
 func (s *Service) removeConnection(room string, id uint64) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockExistingState(room)
+	if state == nil {
+		return
+	}
 	delete(state.connected, id)
-	state.mu.Unlock()
+	s.unlockState(room, state)
 }
 
 func (s *Service) settleLastPeer(_ context.Context, room string) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockExistingState(room)
+	if state == nil {
+		return
+	}
 	if !s.stopSettleTimer(state.settle) {
-		state.mu.Unlock()
+		s.unlockState(room, state)
 		return
 	}
 	generation := state.gen
-	state.mu.Unlock()
+	s.unlockState(room, state)
 	s.settleRoom(room, generation)
 }
