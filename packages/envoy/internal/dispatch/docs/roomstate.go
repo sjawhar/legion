@@ -170,23 +170,21 @@ func (s *Service) unusedLocked(state *roomState) bool {
 		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.pendingVersions) == 0
 }
 
-func (s *Service) recordUpdateClass(room string, update []byte, contentChanged, durable bool, credit settlementCredit, creditVersion uint64) {
+func (s *Service) recordUpdateClass(room string, update []byte, class documentUpdateClass) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
-	state.updateClasses = append(state.updateClasses, documentUpdateClass{
-		update: append([]byte(nil), update...), contentChanged: contentChanged, durable: durable,
-		credit: credit, creditVersion: creditVersion,
-	})
+	class.update = append([]byte(nil), update...)
+	state.updateClasses = append(state.updateClasses, class)
 	state.pendingUpdates++
-	if durable {
+	if class.durable {
 		state.durableAppends.Add(1)
 	}
 }
 
-func (s *Service) consumeUpdateClass(room string, update []byte) (bool, bool, settlementCredit, uint64, bool) {
+func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdateClass, bool) {
 	state := s.lockExistingState(room)
 	if state == nil {
-		return true, false, settlementCredit{}, 0, false
+		return documentUpdateClass{contentChanged: true}, false
 	}
 	defer s.unlockState(room, state)
 	for index, class := range state.updateClasses {
@@ -195,9 +193,9 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (bool, bool, se
 		}
 		state.updateClasses = append(state.updateClasses[:index], state.updateClasses[index+1:]...)
 		state.pendingUpdates--
-		return class.contentChanged, class.durable, class.credit, class.creditVersion, true
+		return class, true
 	}
-	return true, false, settlementCredit{}, 0, false
+	return documentUpdateClass{contentChanged: true}, false
 }
 
 func (s *Service) hasPendingUpdates(room string) bool {

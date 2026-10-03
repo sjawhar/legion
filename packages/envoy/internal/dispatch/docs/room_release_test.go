@@ -150,8 +150,7 @@ func TestClosingAnIssueReleasesItsUnsettledDocuments(t *testing.T) {
 // lookup hands out, so the write the lookup was for lands on the document's current state: here a
 // seed's author, which the document's settlement attributes its ask blocks to.
 func TestAStateReleasedAsALookupFindsItTakesNoWrite(t *testing.T) {
-	service, _ := newRoomReleaseService(t)
-	const id = "00000000-0000-4000-8000-000000000514"
+	service, id := newTestService(t)
 	actor := model.Actor{Kind: "session", ID: "seeding-session"}
 	released := false
 	service.afterStateLookup = func(room string) {

@@ -8,4 +8,4 @@
 -- row. Existing rows have no authors to preserve: before this migration a process restart already
 -- made their attribution unavailable.
 alter table doc_settlements_pending
-  add column settlement_authors jsonb not null default '{"pending": []}';
+  add column settlement_authors jsonb not null default '{"pending": {}}';

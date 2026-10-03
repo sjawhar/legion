@@ -2,52 +2,48 @@ package docs
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// settlementCredit is the authors a pending settlement still needs. Pending are the people its
-// version credits; LastActor is the latest edit source used by ask reconciliation and events when
-// no version is written. It lives beside the pending settlement so closing a document's issue, a
-// room release or a restart cannot lose its attribution before that settlement commits.
+// settlementCredit is the authors a pending settlement still needs. Pending are keyed by actor,
+// so an update can merge them in PostgreSQL with JSONB's object concatenation. LastActor is the
+// latest edit source used by ask reconciliation and events when no version is written. It lives
+// beside the pending settlement so closing a document's issue, a room release or a restart cannot
+// lose its attribution before that settlement commits.
 type settlementCredit struct {
-	Pending   []model.Actor `json:"pending"`
-	LastActor *model.Actor  `json:"last_actor,omitempty"`
+	Pending   map[string]model.Actor `json:"pending"`
+	LastActor *model.Actor           `json:"last_actor,omitempty"`
 }
 
-func (state *roomState) settlementCreditLocked() settlementCredit {
-	credit := settlementCredit{Pending: actorSlice(state.pending)}
-	if state.lastActor != nil {
-		actor := *state.lastActor
+func settlementCreditFor(pending map[string]model.Actor, lastActor *model.Actor) settlementCredit {
+	credit := settlementCredit{Pending: make(map[string]model.Actor, len(pending))}
+	for _, actor := range pending {
+		credit.Pending[settlementCreditKey(actor)] = actor
+	}
+	if lastActor != nil {
+		actor := *lastActor
 		credit.LastActor = &actor
 	}
 	return credit
 }
 
-func (credit settlementCredit) empty() bool {
-	return len(credit.Pending) == 0 && credit.LastActor == nil
+func settlementCreditKey(actor model.Actor) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(actorKey(actor)))
 }
 
-func mergeSettlementCredit(first, second settlementCredit) settlementCredit {
-	pending := make(map[string]model.Actor, len(first.Pending)+len(second.Pending))
-	for _, actor := range first.Pending {
-		pending[actorKey(actor)] = actor
-	}
-	for _, actor := range second.Pending {
-		pending[actorKey(actor)] = actor
-	}
-	merged := settlementCredit{Pending: actorSlice(pending), LastActor: first.LastActor}
-	if second.LastActor != nil {
-		actor := *second.LastActor
-		merged.LastActor = &actor
-	}
-	return merged
+func (state *roomState) settlementCreditLocked() settlementCredit {
+	return settlementCreditFor(state.pending, state.lastActor)
+}
+
+func (credit settlementCredit) empty() bool {
+	return len(credit.Pending) == 0 && credit.LastActor == nil
 }
 
 func (state *roomState) mergeSettlementCreditLocked(credit settlementCredit) {
@@ -85,18 +81,6 @@ func (s *Service) persistSettlementCredit(ctx context.Context, room string, cred
 		return fmt.Errorf("commit settlement credit: %w", err)
 	}
 	return nil
-}
-
-// recordSettlementCredit retains a committed write's attribution when persisting it fails only by
-// leaving the room state unsettled; the committed document itself must still be published. A later
-// close retries the record before it releases that state. When the issue is already closed, a
-// successful record clears exactly the credit snapshot it received.
-func (s *Service) recordSettlementCredit(ctx context.Context, room string, credit settlementCredit, creditVersion uint64) {
-	if err := s.persistSettlementCredit(ctx, room, credit); err != nil {
-		slog.Error("dispatch: record document settlement authors", "room", room, "error", err)
-		return
-	}
-	s.settlementCreditPersisted(room, creditVersion)
 }
 
 // settlementCreditPersisted releases authors from an already-closed document only when its state
@@ -139,31 +123,25 @@ func pendingSettlementCredit(ctx context.Context, q Queryer, room string) (bool,
 // only for a newly appended document update; recording authors after its transaction committed or
 // while closing an issue must not make an old row wait another resumption age.
 func upsertSettlementCredit(ctx context.Context, tx pgx.Tx, room string, credit settlementCredit, updateMarkedAt bool) error {
-	var encoded []byte
-	err := tx.QueryRow(ctx, `
-		select settlement_authors from doc_settlements_pending where artifact_id = $1
-	`, room).Scan(&encoded)
-	var existing settlementCredit
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-	case err != nil:
-		return fmt.Errorf("read the document's pending settlement authors: %w", err)
-	default:
-		if err := json.Unmarshal(encoded, &existing); err != nil {
-			return fmt.Errorf("decode the document's pending settlement authors: %w", err)
-		}
-	}
-	merged := mergeSettlementCredit(existing, credit)
-	encoded, err = json.Marshal(merged)
+	encoded, err := json.Marshal(credit)
 	if err != nil {
 		return fmt.Errorf("encode the document's pending settlement authors: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		insert into doc_settlements_pending (artifact_id, settlement_authors) values ($1, $2)
+		insert into doc_settlements_pending (artifact_id, settlement_authors) values ($1, $2::jsonb)
 		on conflict (artifact_id) do update set
-			settlement_authors = excluded.settlement_authors,
+			settlement_authors = jsonb_strip_nulls(jsonb_build_object(
+				'pending',
+				coalesce(doc_settlements_pending.settlement_authors->'pending', '{}'::jsonb) ||
+					excluded.settlement_authors->'pending',
+				'last_actor',
+				coalesce(
+					excluded.settlement_authors->'last_actor',
+					doc_settlements_pending.settlement_authors->'last_actor'
+				)
+			)),
 			marked_at = case when $3 then now() else doc_settlements_pending.marked_at end
-	`, room, encoded, updateMarkedAt); err != nil {
+	`, room, string(encoded), updateMarkedAt); err != nil {
 		return fmt.Errorf("record the document's pending settlement: %w", err)
 	}
 	return nil
