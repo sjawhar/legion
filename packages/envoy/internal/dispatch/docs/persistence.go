@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -90,7 +91,11 @@ func (p *PgVersioned) AppendUpdateWithClass(ctx context.Context, room string, up
 
 // AppendUpdateWithSettlementCredit validates and stores one incremental V1 update with the authors
 // its pending settlement must retain if the room goes before it runs.
-func (p *PgVersioned) AppendUpdateWithSettlementCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit settlementCredit) (persistence.Version, error) {
+func (p *PgVersioned) AppendUpdateWithSettlementCredit(ctx context.Context, room string, update []byte, contentChanged bool, encodedCredit []byte) (persistence.Version, error) {
+	var credit settlementCredit
+	if err := json.Unmarshal(encodedCredit, &credit); err != nil {
+		return 0, fmt.Errorf("decode document settlement authors: %w", err)
+	}
 	return p.appendUpdate(ctx, room, update, contentChanged, credit)
 }
 
