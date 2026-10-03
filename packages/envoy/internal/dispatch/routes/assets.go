@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	maxRetainedAssetSize     int64 = 8 << 20
-	retainedAssetFetchTimeout      = 3 * time.Second
+	maxRetainedAssetSize      int64 = 8 << 20
+	retainedAssetFetchTimeout       = 3 * time.Second
 )
 
 // ErrAssetNotFound distinguishes an absent retained asset from a store failure.
