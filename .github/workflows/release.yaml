@@ -43,8 +43,7 @@ concurrency:
 jobs:
   changes:
     runs-on: ubuntu-24.04
-    # Job-level permissions replace the workflow's: the checkout, and the run list the base step
-    # reads.
+    # contents: read is for the checkout; actions: read is for the run list the base step reads.
     permissions:
       contents: read
       actions: read
@@ -161,8 +160,9 @@ jobs:
       github.ref == 'refs/heads/main' &&
       (needs.changes.outputs.legion == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
-    # The workflow's own grants, plus the attestations API for the archives' provenance below
-    # (id-token is already one of them: it is the Sigstore signing certificate's OIDC token).
+    # contents: write creates the GitHub release (`gh release create`, below); id-token and
+    # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
+    # signing certificate's OIDC token). The tag push uses the deploy key, not either scope.
     permissions:
       contents: write
       id-token: write
@@ -293,9 +293,9 @@ jobs:
     uses: ./.github/workflows/worker-image.yaml
     # No `secrets:`: the called workflow reads only GITHUB_TOKEN, which it receives automatically;
     # `inherit` would hand DEPLOY_KEY and every other repository secret to a job that runs a
-    # PR-authored Dockerfile. Job-level permissions replace the top-level set for this job and must
-    # cover every scope worker-image.yaml's own `permissions:` block declares. The release note, the
-    # one step needing contents: write, is worker_image_release_note below.
+    # PR-authored Dockerfile. This job's permissions must cover every scope worker-image.yaml's own
+    # `permissions:` block declares. The release note, the one step needing contents: write, is
+    # worker_image_release_note below.
     permissions:
       contents: read
       packages: write
