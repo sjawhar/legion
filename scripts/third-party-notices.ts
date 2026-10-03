@@ -1,7 +1,7 @@
 // The license notices of the third-party packages a bundle inlines. A bundle is a copy of every
 // package it inlines, and most of their licenses (MIT, BSD, ISC, Apache-2.0) require shipping their
 // notices with every copy, so a build that writes a bundle writes this beside it.
-import { readdir, readFile, realpath } from "node:fs/promises";
+import { readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 
 const LICENSE_FILE = /^(licen[cs]e|copying|notice)([.-].*)?$/i;
@@ -11,6 +11,7 @@ interface BundledPackage {
   name: string;
   version: string;
   license: string | null;
+  source: string | null;
   files: { name: string; text: string }[];
 }
 
@@ -56,12 +57,20 @@ async function readPackage(root: string): Promise<BundledPackage> {
     name?: string;
     version?: string;
     license?: string | { type?: string };
+    licenses?: { type?: string }[];
+    repository?: string | { url?: string };
+    homepage?: string;
   };
   if (!manifest.name || !manifest.version) {
     throw new Error(`${root}/package.json names no package name and version`);
   }
+  // `licenses`, an array of `{ type }`, is npm's older form of the field (format@0.2.2 still uses
+  // it); more than one entry offers a choice of them.
+  const legacy = (manifest.licenses ?? []).flatMap((entry) => (entry.type ? [entry.type] : []));
   const license =
-    typeof manifest.license === "string" ? manifest.license : (manifest.license?.type ?? null);
+    typeof manifest.license === "string"
+      ? manifest.license
+      : (manifest.license?.type ?? (legacy.length > 0 ? legacy.join(" OR ") : null));
   const names = (await readdir(root)).filter((name) => LICENSE_FILE.test(name)).sort();
   const files = await Promise.all(
     names.map(async (name) => ({ name, text: (await readFile(join(root, name), "utf8")).trim() }))
@@ -72,7 +81,13 @@ async function readPackage(root: string): Promise<BundledPackage> {
         "find its terms before bundling it"
     );
   }
-  return { name: manifest.name, version: manifest.version, license, files };
+  // Where a recipient gets the package's source, which a copyleft license such as EPL-2.0 (elkjs, in
+  // the Dispatch web bundle) requires the notices to say.
+  const source =
+    (typeof manifest.repository === "string" ? manifest.repository : manifest.repository?.url) ??
+    manifest.homepage ??
+    null;
+  return { name: manifest.name, version: manifest.version, license, source, files };
 }
 
 /**
@@ -97,6 +112,7 @@ export async function thirdPartyNotices(inputs: Iterable<string>, base: string):
   const sorted = [...packages].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   const sections = sorted.map(([key, bundled]) => {
     const lines = [key, `License: ${bundled.license ?? "(not declared in package.json)"}`];
+    if (bundled.source !== null) lines.push(`Source: ${bundled.source}`);
     if (bundled.files.length === 0) {
       lines.push(
         "",
@@ -115,4 +131,19 @@ export async function thirdPartyNotices(inputs: Iterable<string>, base: string):
     sections.join(rule) +
     "\n"
   );
+}
+
+// `bun scripts/third-party-notices.ts <metafile> <out>` writes the notices for a `bun build
+// --metafile=<metafile>` run in the current directory, which the metafile's input paths are
+// relative to.
+if (import.meta.main) {
+  const [metafile, out] = process.argv.slice(2);
+  if (!metafile || !out) {
+    process.stderr.write("usage: bun scripts/third-party-notices.ts <metafile> <out>\n");
+    process.exit(2);
+  }
+  const { inputs } = JSON.parse(await readFile(metafile, "utf8")) as {
+    inputs: Record<string, unknown>;
+  };
+  await writeFile(out, await thirdPartyNotices(Object.keys(inputs), process.cwd()));
 }
