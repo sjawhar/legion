@@ -165,13 +165,16 @@ opened its ask. A document holds one open request. A new version moves it to tha
 its thread and summary, and leaves it waiting on you, as a human's reply in its thread does; a move
 your own edit made sends you no event, and `dispatch_read` and `dispatch_doc_read` show it as
 `Approval: awaiting, waiting on agent`. Call again when "Approval of a spec" in `skill://dispatch`
-allows: that hands the same request back to the human, reworded first when `summary` is new. While
-it waits on the human, a call with the same `summary`, or none, changes nothing, and one with a
-different `summary` is refused, since it would rewrite the card they are reading. The answer
-reaches you as `artifact.approved` or `artifact.changes_requested` with the pinned `version` and
-closes the request, so the next call opens a new one; `changes_requested` carries the reason,
-which is your next piece of work. Those reads show the document's approval state; `stale` means
-it was approved and then edited.
+allows: that hands the same request back to the human, reworded first when `summary` is new. Your
+own reply in its thread hands it back too, with no call and the summary it already holds, unless
+you post it with `reply_to_ask` and `turn: "agent"` (`reply_to` carries no turn, so its reply takes
+the default, `human`) or a new version has moved the request since your last
+`dispatch_request_approval`. While it waits on the human, a call with the same `summary` changes
+nothing, and one with a different `summary` is refused, since it would rewrite the card they are
+reading. The answer reaches you as `artifact.approved` or `artifact.changes_requested` with the
+pinned `version` and closes the request, so the next call opens a new one; `changes_requested`
+carries the reason, which is your next piece of work. Those reads show the document's approval
+state; `stale` means it was approved and then edited.
 
 ## A document that is reloading
 

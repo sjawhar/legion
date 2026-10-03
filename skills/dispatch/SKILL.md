@@ -39,11 +39,13 @@ When a session has Dispatch, a design change needing the human's choices is brai
 issue's spec, not chat or a repository design document. The first version holds only established
 facts and every ready question, each a decision block at the end of the section that sets it up; a
 question waits only when it depends on an answer still open. Each next version replies in each
-human comment's thread (`dispatch_comment` with `reply_to`), folds the answers into the surrounding
-text while their decision blocks stay, in the human's words (or the option they chose) with the
-date, and adds the questions they open. Approval is requested at the end, not after each section,
-when nothing in the spec is new to the human. Before you write a spec's first version, and again
-before each next turn, read [Brainstorming in the spec](skill://dispatch/references/brainstorming.md):
+human comment's thread (`dispatch_comment` with `reply_to`; under an open ask whose next move is
+yours, such as an approval request you must revise or hand back, `reply_to_ask` with
+`turn: "agent"`, since a default-turn reply hands it back to the human), folds the answers into the
+surrounding text while their decision blocks stay, in the human's words (or the option they chose)
+with the date, and adds the questions they open. Approval is requested at the end, not after each
+section, when nothing in the spec is new to the human. Before you write a spec's first version, and
+again before each next turn, read [Brainstorming in the spec](skill://dispatch/references/brainstorming.md):
 each step, and a worked example.
 
 ## Writing for the human

@@ -15,6 +15,10 @@ goes out at once, whatever its stage.
    nothing past those questions.
 2. **The human answers or comments.** Reply to each human comment in its thread
    (`dispatch_comment` with `reply_to`), then rewrite the passage the answer or the comment changes.
+   Under an open ask whose next move is yours, such as the approval request you must revise or
+   hand back, reply with `reply_to_ask` and `turn: "agent"` instead: a `reply_to` reply takes the
+   default turn, which hands the request back to the human unchanged, and a call with a corrected
+   `summary` is refused while it waits on them.
 3. **Each next version folds the answers in and adds what they open.** Keep each answered
    decision block where it is, fold its answer into the surrounding text in the human's words with
    the date (an answer that is only a chosen option as

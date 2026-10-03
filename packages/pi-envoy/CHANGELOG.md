@@ -22,7 +22,9 @@
   `legion-architect` describe the approval request as Dispatch keeps it: a new version moves the
   open request and leaves it waiting on the agent, whose next request, once the human has agreed
   to every point in the new version, hands the same request back; an answer closes it, so the
-  request after an answer opens a new one.
+  request after an answer opens a new one. A reply under an open ask whose next move is the
+  agent's, such as an approval request it must revise or hand back, goes with `reply_to_ask` and
+  `turn: "agent"`, since a default-turn reply hands the request back to the human unchanged.
 - The plugin speaks one daemon (LEGION-223): every Legion session boots through the Go daemon's
   claim routes (`claims/register`, `claims/ready`) and mints its grants there, whatever its
   environment holds. The TypeScript daemon's client, its `legion` tool (`spawn_worker`,
