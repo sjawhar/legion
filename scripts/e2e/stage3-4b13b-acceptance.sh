@@ -19,25 +19,50 @@
 # It never merges into sjawhar/legion-smoke's main: each proof PR is retargeted to a scratch base
 # branch before any merge, and the scratch base is deleted at the end.
 #
-# Run it as `bash scripts/e2e/stage3-4b13b-acceptance.sh`, with the Stage 3 proof's two required
-# inputs, LEGION_E2E_MODEL_GATEWAY_URL and SMOKE_UPSTREAM_NATS (scripts/e2e/README.md), and three of
-# its own, since it creates no Docker container: ACCEPT_PG_CONTAINER and ACCEPT_PG_PORT name a running
-# Postgres container (user postgres, password ci) in which the daemon and Dispatch take their own
-# databases, and ACCEPT_NATS_BIN a nats-server binary it runs natively. The binary under test is
-# stamped (vcs.revision and main.revision) and the run's scratch workspace is always kept; phase
-# workers, which act on the daemon's assignment alone when no instruction reaches them, are
-# instructed by a background watcher the moment each assignment arrives, and the script asserts what
-# the daemon did rather than the order it expected.
+# Run it as `bash scripts/e2e/stage3-4b13b-acceptance.sh` from the operator's own Oh My Pi session,
+# with the Stage 3 proof's two required inputs, LEGION_E2E_MODEL_GATEWAY_URL and SMOKE_UPSTREAM_NATS
+# (scripts/e2e/README.md), and three of its own, since it creates no Docker container:
+# ACCEPT_PG_CONTAINER and ACCEPT_PG_PORT name a running Postgres container (user postgres, password
+# ci) in which the daemon and Dispatch take their own databases, and ACCEPT_NATS_BIN a nats-server
+# binary it runs natively. Its GitHub writes are the Stage 3 proof human's, the devbox gh acting as
+# the sjawhar-agent App, so the session is not a Legion pane and carries no personal GH_TOKEN:
+# `prerequisites` refuses to start otherwise (require_proof_human, lib/workflow.sh). The binary
+# under test is stamped (vcs.revision and main.revision) and the run's scratch workspace is always
+# kept; phase workers, which act on the daemon's assignment alone when no instruction reaches them,
+# are instructed by a background watcher the moment each assignment arrives, and the script asserts
+# what the daemon did rather than the order it expected.
 set -Eeuo pipefail
 
 root=${ACCEPT_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
+# The key command's record is read with this script's own reader: an ACCEPT_ROOT from before the
+# record has no reader to run.
+unserved_reader=$(cd "$(dirname "$0")" && pwd)/lib/model-gateway-unserved.sh
 base_rev=${ACCEPT_BASE_REV:-5ca2e53c}
 stamp=$(date +%s)
 work=$(mktemp -d /tmp/legion-accept4b13b.XXXXXXXX)
 evidence=${ACCEPT_EVIDENCE_DIR:-$work/evidence}
+# Refused before anything is written into the evidence directory or any trap is set
+# (lib/model-gateway-unserved.sh --fresh).
+if ! reason=$(bash "$unserved_reader" --fresh "$evidence"); then
+  echo "FAIL setup: $reason" >&2
+  rmdir "$work"
+  exit 1
+fi
 mkdir -p "$evidence/logs" "$evidence/transcripts"
+# Every line of the run also goes to $evidence/transcript.log (lib/transcript.sh), so the driver and
+# its cleanup, which closes the proof's pull requests, never fail on a write whoever is reading. The
+# evidence is under $work by default, and the sweeps in services-stopped and cleanup SIGKILL every
+# process whose command line names $work (run_processes, lib/rig.sh), so the tee gets the transcript
+# as fd 8, never by path. The tee keeps the copy it forked with, and the driver closes its own so
+# nothing it starts inherits it. The lib is this script's own, not ACCEPT_ROOT's.
+exec 8>>"$evidence/transcript.log"
+# shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
+. "$(dirname "$0")/lib/transcript.sh"
+transcript_to /dev/fd/8
+exec 8>&-
 ok=
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 project="AC$(( ($$ + stamp) % 100000000 ))"
 project=${project:0:10}
 ptoken=${project,,}
@@ -68,21 +93,25 @@ audited=
 soft_failures="$evidence/soft-failures.txt"
 : >"$soft_failures"
 
-begin() { check=$1; printf '== %s  (%s)\n' "$check" "$(date -u +%T)"; }
+begin() { check=$1; TZ=UTC printf -v check_started '%(%FT%TZ)T' -1; printf '== %s  (%s)\n' "$check" "$(date -u +%T)"; }
 note() { printf '   %s\n' "$*"; }
 pass() { printf 'ok %s\n' "$check"; }
 fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 # soft records a failed assertion and lets the run go on, so one run yields every observation; the
-# run ends non-zero naming each one.
-soft() { printf 'SOFT-FAIL %s: %s\n' "$check" "$*" | tee -a "$soft_failures" >&2; }
+# run ends non-zero naming each one. It remembers the first soft-failing check and when it began,
+# for a soft ending's notes.
+first_soft_check=
+first_soft_since=
+soft() {
+  printf 'SOFT-FAIL %s: %s\n' "$check" "$*" | tee -a "$soft_failures" >&2
+  [ -n "$first_soft_check" ] || { first_soft_check=$check first_soft_since=$check_started; }
+}
 # shellcheck source=/dev/null
 . "$root/scripts/e2e/lib/rig.sh"
 # shellcheck source=/dev/null
 . "$root/scripts/e2e/lib/omp-home.sh"
 # shellcheck source=/dev/null
 . "$root/scripts/e2e/lib/workflow.sh"
-# shellcheck source=/dev/null
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 # The daemon's database is this run's own in the shared Postgres container, read with the host psql.
 db_value() { PGPASSWORD=$(cat "$work/postgres-password") psql -h 127.0.0.1 -p "$port_pg" -U "$pg_user" -d "$legion_db" -tAc "$1"; }
 
@@ -93,7 +122,7 @@ collect_transcripts() {
 }
 
 cleanup() {
-  local p
+  local status=$? p
   set +e
   # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
   # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
@@ -125,12 +154,25 @@ cleanup() {
   github_cleanup
   printf "the run's scratch workspace, kept for review, is %s\n" "$work" >&2
   printf "the run's evidence is %s\n" "$evidence" >&2
+  # A diagnostic for a failed run, hard or soft: it never sets the status. A hard failure's notes
+  # are for its check. A run that ends on its soft failures sets ok after its last check, once every
+  # pane has stopped, so its notes are for its first soft-failing check, from that check's start. A
+  # run that sets ok with no soft failure and still exits non-zero (its PASS line could not be
+  # written) failed no check, and gets none. A hangup, an interrupt or a termination (129, 130,
+  # 143, as trapped below) stopped the run and gets none.
+  if [ "$status" != 0 ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
+    local since=$check_started failed=$check
+    [ -z "${ok:-}" ] || { since=$first_soft_since failed=$first_soft_check; }
+    [ -z "$failed" ] || bash "$unserved_reader" --notes "$evidence/model-gateway" "$since" "$failed" >&2 || true
+  fi
   return 0
 }
 # github_cleanup closes every proof PR still open, deletes every proof head branch, and deletes the
-# scratch base. Nothing here touches the smoke main.
+# scratch base. Nothing here touches the smoke main, and nothing runs unless require_proof_human
+# passed: a refused run's gh acts as someone else.
 github_cleanup() {
   local n b
+  [ -n "$proof_human" ] || return 0
   [ -n "${main_sha:-}" ] || return 0
   for n in $(gh -R "$repo" pr list --state open --limit 100 --json number,headRefName \
     --jq ".[] | select(.headRefName | startswith(\"legion/$project-\")) | .number" 2>/dev/null); do
@@ -564,7 +606,6 @@ merger_self_posted() {
         ((.arguments.body // ((.arguments.content // "{}") | fromjson? // {} | .body) // "") | ltrimstr(" ") | startswith("READY")))
     | {name, arguments}]' "$f"
 }
-notice_line() { { claim_session_text "$1" "$2" || true; } | grep -F '"customType":"envoy-message"' | grep -F -- "$3" || true; }
 notices_at_least() { [ "$(notice_deliveries "$1" "$2" "$3")" -ge "$4" ]; }
 # phase_finished_line ISSUE PHASE: the architect's delivered phase-finished notice for PHASE.
 phase_finished_line() { notice_line "$1" architect "$(notice_needle phase-finished "$1")" | grep -F -- "phase: $2" | head -1 || true; }
@@ -589,6 +630,7 @@ begin prerequisites
 for tool in go psql jq curl ss tmux bun mise secrets gh jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -x "$nats_bin" ] || fail "no native nats-server at $nats_bin"
 real_gh=$(mise which gh) || fail "mise has no gh"
+require_proof_human
 gh api "repos/$repo" --jq .name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
 head_commit=$(jj -R "$root" log -r @- --no-graph -T commit_id)
 note "head under test: $head_commit ($(jj -R "$root" log -r @- --no-graph -T 'description.first_line()'))"
@@ -618,8 +660,7 @@ nats_url='^([A-Za-z][A-Za-z0-9+.-]*://)?([^@/?#,[:space:]]+@)?[A-Za-z0-9_-]+(\.[
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token" &&
   printf 'ci' >"$work/postgres-password")
 chmod 0600 "$work"/*token "$work/envoy-auth-header" "$work/postgres-password"
-(cd "$root/packages/daemon-go" && go build -ldflags "-X main.revision=$head_commit" -o "$work/legion" ./cmd/legion)
-stage_role_prompts "$root" "$work"
+(cd "$root/packages/daemon" && go build -ldflags "-X main.revision=$head_commit" -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
 {
   printf 'head under test %s\n' "$head_commit"
@@ -650,7 +691,7 @@ SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
 until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
-pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
+pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 cat >"$work/instructions.md" <<'EOF'
 # Acceptance proof instructions
@@ -681,23 +722,28 @@ pass
 begin prompts-rewritten-on-boot
 pdir="$state/prompts/go"
 parts=()
-for part in "$root/packages/daemon-go/internal/prompts/go/"*.md; do parts+=("$(basename "$part")"); done
+for part in "$root/packages/daemon/internal/prompts/go/"*.md; do parts+=("$(basename "$part")"); done
 for f in "${parts[@]}"; do
-  cmp -s "$pdir/$f" "$root/packages/daemon-go/internal/prompts/go/$f" || fail "$pdir/$f is not the head's embedded $f"
+  cmp -s "$pdir/$f" "$root/packages/daemon/internal/prompts/go/$f" || fail "$pdir/$f is not the head's embedded $f"
 done
-note "all ${#parts[@]} Go prompt parts in $pdir equal the head's packages/daemon-go/internal/prompts/go/* (${parts[*]})"
-jj -R "$root" file show -r "$base_rev" root:packages/daemon-go/internal/prompts/go/merger.md >"$evidence/merger.base.md"
+note "all ${#parts[@]} Go prompt parts in $pdir equal the head's packages/daemon/internal/prompts/go/* (${parts[*]})"
+# The daemon's package directory was renamed after the default base revision, so the base's
+# merger.md is found at whichever package path that revision has, and must be exactly one. jj
+# prints the paths it lists relative to the working directory, hence the listing from the root.
+base_merger=$(cd "$root" && jj file list -r "$base_rev" 'root-glob:"packages/*/internal/prompts/go/merger.md"')
+[ -n "$base_merger" ] && [ "$(wc -l <<<"$base_merger")" = 1 ] || fail "the base revision $base_rev holds '$base_merger' for packages/*/internal/prompts/go/merger.md, want exactly one file"
+jj -R "$root" file show -r "$base_rev" "root:$base_merger" >"$evidence/merger.base.md"
 [ -s "$evidence/merger.base.md" ] || fail "the base revision's merger.md read back empty"
 cmp -s "$evidence/merger.base.md" "$pdir/merger.md" && fail "the base merger.md equals the head's; nothing to prove"
 stat -c '%n %.9Y' "$pdir"/*.md >"$evidence/prompts-mtime-before.txt"
 cp "$evidence/merger.base.md" "$pdir/merger.md"
 # negative control: the stale part is observably different before the restart
-cmp -s "$pdir/merger.md" "$root/packages/daemon-go/internal/prompts/go/merger.md" && fail "the planted stale merger.md equals the embedded one"
+cmp -s "$pdir/merger.md" "$root/packages/daemon/internal/prompts/go/merger.md" && fail "the planted stale merger.md equals the embedded one"
 note "planted the base ($base_rev) merger.md: $(grep -c 'publish READY yourself' "$pdir/merger.md" || true) line(s) telling the merger it publishes nothing and to send ready:true, $(wc -c <"$pdir/merger.md") bytes"
 sleep 1.1
 stop_daemon
 start_daemon keep
-cmp -s "$pdir/merger.md" "$root/packages/daemon-go/internal/prompts/go/merger.md" || fail "the restarted daemon left the stale merger.md in place"
+cmp -s "$pdir/merger.md" "$root/packages/daemon/internal/prompts/go/merger.md" || fail "the restarted daemon left the stale merger.md in place"
 stat -c '%n %.9Y' "$pdir"/*.md >"$evidence/prompts-mtime-after.txt"
 unchanged=$(join <(sort "$evidence/prompts-mtime-before.txt") <(sort "$evidence/prompts-mtime-after.txt") | awk '$2 == $3' | wc -l)
 changed=$(join <(sort "$evidence/prompts-mtime-before.txt") <(sort "$evidence/prompts-mtime-after.txt") | awk '$2 != $3 {print $1}')
@@ -1084,9 +1130,9 @@ grant_mtime() { stat -c %.9Y "$1" 2>/dev/null || printf 'none\n'; }
 grant_changed() { [ "$(grant_mtime "$1")" != "$2" ]; }
 begin ready-cap-refused-at-the-boundary
 merger_omp=$(omp_descendant "$(claim_pane_pid "$root1" merger)") || fail "$root1's merger pane has no OMP process"
-# Under the Go daemon the pane's exec environment names no LEGION_GRANT_FILE: the plugin sets it in
-# its own process.env after registration (pi-envoy src/legion/go-bootstrap.ts), as
-# <LEGION_STATE_DIR>/secrets/<claim token>-grant, which /proc/<pid>/environ never shows.
+# The pane's LEGION_GRANT_FILE is <LEGION_STATE_DIR>/secrets/<claim token>-grant, the file the
+# daemon names on the pane and the plugin writes a grant into before each bash command (pi-envoy
+# extensions/legion.ts).
 merger_state=$(pane_value "$merger_omp" LEGION_STATE_DIR)
 merger_ws=$(readlink "/proc/$merger_omp/cwd")
 [ -n "$merger_state" ] || fail "$root1's merger pane names no LEGION_STATE_DIR"

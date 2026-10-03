@@ -16,12 +16,67 @@ import (
 )
 
 // lazyAwareTable is goldmark's table extension with its paragraph transformer held off lazy
-// continuation lines and off a header line holding one pipe alone (lazyTableRows).
+// continuation lines and off a header line holding one pipe alone (lazyTableRows), and without its
+// AST transformer, whose work parseSource does itself (unescapeTablePipes).
 type lazyAwareTable struct{}
 
 // tableTransformer is goldmark's table paragraph transformer, which lazyTableRows runs where
 // findTableRows reads a table the budget pays for.
 var tableTransformer = extension.NewTableParagraphTransformer()
+
+// unescapeTablePipes takes the backslash out of every escaped pipe in a table cell's code span, as
+// goldmark's table AST transformer does (extension/table.go:299-342 at v1.8.6). pmdoc does not
+// register that transformer: goldmark runs it inside its parse, before parseSource checks the
+// nesting bounds, and it recurses through every cell holding a backtick before an escaped pipe and
+// checks each code span text it meets against every escaped pipe in the document, time quadratic
+// in a table of them. In a cell every `|` is one a backslash escapes, since any other ends the
+// cell, and a code span opens with a backtick, which goldmark's row reader needs before an escaped
+// pipe to record it (parseRow): so the escaped pipes it records inside a code span's text are
+// exactly the `\|` that text holds. Each text is split around the backslash of each one, which it
+// drops, as goldmark splits it. Run once the bounds hold, it walks the blocks and each cell once.
+func unescapeTablePipes(root ast.Node, source []byte) {
+	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		switch {
+		case !entering:
+			return ast.WalkContinue, nil
+		case node.Kind() == extensionast.KindTableCell:
+			_ = ast.Walk(node, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+				if entering && node.Kind() == ast.KindCodeSpan {
+					unescapeCodeSpanPipes(node, source)
+					return ast.WalkSkipChildren, nil
+				}
+				return ast.WalkContinue, nil
+			})
+			return ast.WalkSkipChildren, nil
+		case node.Type() == ast.TypeInline:
+			return ast.WalkSkipChildren, nil
+		}
+		return ast.WalkContinue, nil
+	})
+}
+
+// unescapeCodeSpanPipes splits each text of span around the backslash of every `\|` it holds,
+// dropping the backslash, with the nodes goldmark's transformer makes.
+func unescapeCodeSpanPipes(span ast.Node, source []byte) {
+	for child := span.FirstChild(); child != nil; {
+		next := child.NextSibling()
+		if text, ok := child.(*ast.Text); ok {
+			rest := text
+			for index := text.Segment.Start + 1; index < text.Segment.Stop; index++ {
+				if source[index] != '|' || source[index-1] != '\\' {
+					continue
+				}
+				before := ast.NewRawTextSegment(rest.Segment.WithStop(index - 1))
+				after := ast.NewRawTextSegment(rest.Segment.WithStart(index))
+				span.InsertAfter(span, rest, before)
+				span.InsertAfter(span, before, after)
+				span.RemoveChild(span, rest)
+				rest = after
+			}
+		}
+		child = next
+	}
+}
 
 // maxTablePaddingCells is how many empty cells the tables in the markdown one caller write sends
 // - a document, the operations of an edit batch, an accepted suggestion - may have added to their
@@ -98,22 +153,19 @@ func recordTablePadding(pc parser.Context, padding tablePadding) bool {
 }
 
 func (lazyAwareTable) Extend(m goldmark.Markdown) {
-	m.Parser().AddOptions(
-		parser.WithParagraphTransformers(util.Prioritized(lazyTableRows{table: tableTransformer}, 200)),
-		parser.WithASTTransformers(util.Prioritized(extension.NewTableASTTransformer(), 0)),
-	)
+	m.Parser().AddOptions(parser.WithParagraphTransformers(util.Prioritized(lazyTableRows{table: tableTransformer}, 200)))
 }
 
 // lazyTableRows keeps a table's header and delimiter rows off lazy continuation lines, and opens
 // no table whose header line holds one pipe and nothing else but spaces and tabs. In GFM, and in
 // the browser editor's parser, a line that continues a paragraph in a list item, a quote or a
 // footnote definition without that container's prefix only continues the paragraph; goldmark's
-// transformer reads a paragraph's lines as rows wherever they came from, so `- a\n|-|` became a
-// table in the list item. A lazy line is one the reader began at its line start although the
-// paragraph's first line began after a container's prefix. The browser editor's parser reads a
-// header line of a lone `|` as text, so `|\n-|` is the paragraph `| -|`, where goldmark read a
-// table of one empty cell. Where goldmark would read a table (findTableRows), the budget pays for
-// its padded cells before goldmark's transformer builds them.
+// transformer reads a paragraph's lines as rows wherever they came from, so `- a\n|-|` would
+// become a table in the list item. A lazy line is one the reader began at its line start
+// although the paragraph's first line began after a container's prefix. The browser editor's
+// parser reads a header line of a lone `|` as text, so `|\n-|` is the paragraph `| -|`, where
+// goldmark reads a table of one empty cell. Where goldmark would read a table (findTableRows),
+// the budget pays for its padded cells before goldmark's transformer builds them.
 type lazyTableRows struct{ table parser.ParagraphTransformer }
 
 func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc parser.Context) {
@@ -212,6 +264,15 @@ func tableDelimiterWidth(segment gmtext.Segment, source []byte) (int, bool) {
 }
 
 func tableRowWidth(segment gmtext.Segment, source []byte) int {
+	width := 0
+	rowCells(segment, source, func(int, []byte) { width++ })
+	return width
+}
+
+// rowCells calls visit with each cell goldmark's transformer splits a table line into (parseRow):
+// its first `|` and its last dropped, whatever stands before either, and a cell ending at each
+// other `|` with no backslash right before it.
+func rowCells(segment gmtext.Segment, source []byte, visit func(index int, value []byte)) {
 	segment = segment.TrimLeftSpace(source)
 	segment = segment.TrimRightSpace(source)
 	line := segment.Value(source)
@@ -222,16 +283,14 @@ func tableRowWidth(segment gmtext.Segment, source []byte) int {
 	if limit > 0 && line[limit-1] == '|' {
 		limit--
 	}
-	width := 0
-	for position < limit {
-		width++
+	for index := 0; position < limit; index++ {
 		closure := position
 		for closure < limit && (line[closure] != '|' || closure > 0 && line[closure-1] == '\\') {
 			closure++
 		}
+		visit(index, line[position:closure])
 		position = closure + 1
 	}
-	return width
 }
 
 // transform is goldmark's table transformer, reading the paragraph's lines with their indentation
@@ -260,25 +319,43 @@ func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 	lazyStarts, _ := lazy.([]int)
 	node.SetLines(tabExpandedLines(lines, reader.Source()))
 	t.table.Transform(node, reader, pc)
+	var table *extensionast.Table
+	rowStarts, rowSegments := starts, segments
 	if node.Parent() != nil {
-		if kept := node.Lines().Len(); kept == len(starts) {
+		kept := node.Lines().Len()
+		if kept == len(starts) {
 			node.SetLines(lines)
-		} else if table, ok := node.NextSibling().(*extensionast.Table); ok {
-			markLazyRows(table, starts[kept:], lazyStarts)
-			markBlockRows(table, segments[kept:], reader.Source())
+			return
 		}
-		return
+		next, ok := node.NextSibling().(*extensionast.Table)
+		if !ok {
+			return
+		}
+		table, rowStarts, rowSegments = next, starts[kept:], segments[kept:]
+	} else {
+		place := parent.FirstChild()
+		if previous != nil {
+			place = previous.NextSibling()
+		}
+		placed, ok := place.(*extensionast.Table)
+		if !ok {
+			return
+		}
+		placed.SetPos(start)
+		placed.SetAttribute(blankAfterAttr, blank)
+		table = placed
 	}
-	place := parent.FirstChild()
-	if previous != nil {
-		place = previous.NextSibling()
-	}
-	if table, ok := place.(*extensionast.Table); ok {
-		table.SetPos(start)
-		table.SetAttribute(blankAfterAttr, blank)
-		markLazyRows(table, starts, lazyStarts)
-		markBlockRows(table, segments, reader.Source())
-	}
+	markRows(table, rowStarts, lazyStarts, rowSegments, reader.Source())
+}
+
+// markRows marks table with what its rows hold that the browser editor's parser reads otherwise
+// (markLazyRows, markBlockRows, markWideRows) and puts back a closing pipe that parser reads as
+// text (keepEscapedClosingPipes). starts and lines are the table's lines from its header row on.
+func markRows(table *extensionast.Table, starts, lazy []int, lines []gmtext.Segment, source []byte) {
+	markLazyRows(table, starts, lazy)
+	markBlockRows(table, lines, source)
+	markWideRows(table, lines, source)
+	keepEscapedClosingPipes(table, lines, source)
 }
 
 // lazyRowAttr marks a table a lazy continuation line is a body row of (markLazyRows): goldmark
@@ -407,6 +484,88 @@ func markBlockRows(table *extensionast.Table, lines []gmtext.Segment, source []b
 			table.SetAttribute(blockRowAttr, true)
 			return
 		}
+	}
+}
+
+// wideRowAttr marks a table one of whose body rows holds text in a cell past its delimiter row,
+// with the first such row (markWideRows). Goldmark drops the cells past the table's width, where
+// the browser editor's parser keeps them, so the row would be stored without their text. A cell
+// ends at every `|` not written `\|`, inside code and links too, so a code span holding a bare `|`
+// in a row that already fills its table makes one.
+var wideRowAttr = []byte("pmdoc-wide-row")
+
+// wideRow is the first body row markWideRows found holding text past its table's width: how many
+// cells it holds, the table's width, and the row's opening words, which name it. It is the reason
+// the refusal walk gives (blockRefusal), which also records whether the table is the document's
+// first block; a bare-row insert answers that table's refusal, the rows it parses under a header
+// of its own, as ErrTableWidth instead (parseTableRows).
+type wideRow struct {
+	cells, width int
+	opening      string
+	firstBlock   bool
+}
+
+func (row wideRow) Error() string {
+	return fmt.Sprintf("a table row holding %d cells where its table has %d, written \"%s\": a cell ends at every | not written \\|, in code and links too, and goldmark drops the cells past the table's width, which the browser editor's parser keeps; write a | inside a cell as \\|, or give the header and delimiter rows as many cells as the row", row.cells, row.width, row.opening)
+}
+
+// markWideRows marks table (wideRowAttr) where one of its body rows - the lines past its header
+// and delimiter rows, the first two of lines - holds text in a cell past the table's delimiter
+// row, each row split as goldmark's transformer splits it (rowCells). A row whose cells past the
+// width are all blank loses no text where goldmark drops them, and is read at the table's width.
+// It is the one place a row's width is judged, for a whole document and for bare rows alike.
+func markWideRows(table *extensionast.Table, lines []gmtext.Segment, source []byte) {
+	width := len(table.Alignments)
+	for index := 2; index < len(lines); index++ {
+		line := tabExpandedLine(lines[index], source)
+		cells, text := 0, false
+		rowCells(line, source, func(cell int, value []byte) {
+			cells++
+			text = text || cell >= width && !util.IsBlank(value)
+		})
+		if text {
+			// Trimmed as rowCells trims it, so a space outside ASCII, a cell's text, is quoted.
+			written := line.TrimLeftSpace(source)
+			written = written.TrimRightSpace(source)
+			table.SetAttribute(wideRowAttr, wideRow{cells: cells, width: width, opening: openingWords(string(written.Value(source)))})
+			return
+		}
+	}
+}
+
+// keepEscapedClosingPipes puts a row's closing `|` back into its last cell where an odd run of
+// backslashes escapes it. Goldmark's transformer drops a row's last `|` whatever stands before
+// it, so `| x | y \|` read `y \`, where the browser editor's parser, which pairs backslashes
+// before a pipe, reads the pipe as the cell's text: `y |`. After an even run the pipe closes the
+// row in both. lines are the table's lines from its header row on; the delimiter row, the second,
+// is no row of the table.
+func keepEscapedClosingPipes(table *extensionast.Table, lines []gmtext.Segment, source []byte) {
+	index := 0
+	for row := table.FirstChild(); row != nil; row, index = row.NextSibling(), index+1 {
+		line := index
+		if index > 0 {
+			line++
+		}
+		segment := tabExpandedLine(lines[line], source)
+		segment = segment.TrimRightSpace(source)
+		value := segment.Value(source)
+		if len(value) < 2 || value[len(value)-1] != '|' || !escapedByBackslashes(value, len(value)-1) {
+			continue
+		}
+		// The last written cell holds the backslash, so it is never empty; a row writing past the
+		// table's width (`| x | y | z \|` under two columns), which the refusal walk refuses, has
+		// no such cell.
+		written := tableRowWidth(segment, source)
+		if written > row.ChildCount() {
+			continue
+		}
+		cell := row.FirstChild()
+		for range written - 1 {
+			cell = cell.NextSibling()
+		}
+		last := cell.Lines().At(cell.Lines().Len() - 1)
+		last.Stop = segment.Stop
+		cell.Lines().Set(cell.Lines().Len()-1, last)
 	}
 }
 

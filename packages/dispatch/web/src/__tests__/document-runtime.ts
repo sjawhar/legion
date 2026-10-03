@@ -37,9 +37,13 @@ export interface FakeDocumentRuntime {
   admit(readOnly: boolean): void;
   connections: FakeConnection[];
   editors: FakeEditor[];
+  /** The server refuses the current socket because the stored document is outside the Proof
+   * schema; a destroyed provider hears nothing more, so earlier connections are not told. */
+  refuse(): void;
   runtime: DocumentRuntimeValue;
   status(state: ConnectionState): void;
   sync(): void;
+  text: string;
 }
 
 const blockSchema = {
@@ -96,12 +100,6 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       viewProps: { nodeViews: {} },
     };
     root.textContent = options.ydoc.getXmlFragment("prosemirror").toString();
-    const transaction = {
-      docChanged: false,
-      removeMark() {
-        return transaction;
-      },
-    };
     const handle = {
       applyRemoteMarks(metadata: Record<string, StoredMark>) {
         editor.remoteMarks.push(metadata);
@@ -120,6 +118,11 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         return new Map<string, number>();
       },
       removeMark() {},
+      retypeMark() {
+        return { refused: "missing" as const };
+      },
+      setActiveBlocks() {},
+      setActiveMarks() {},
       setMarkdown(markdown: string) {
         editor.markdown = markdown;
         root.textContent = markdown;
@@ -134,7 +137,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         setProps(next: Record<string, unknown>) {
           Object.assign(editor.viewProps, next);
         },
-        state: { doc: { descendants() {} }, tr: transaction },
+        state: { doc: { descendants() {} } },
       },
     } as unknown as EditorHandle;
     editors.push(editor);
@@ -149,6 +152,9 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
     },
     connections,
     editors,
+    refuse() {
+      callbacks.at(-1)?.onOutsideSchema();
+    },
     runtime: { blockSchema, createEditor, loadTransport: async () => connect },
     status(state) {
       for (const callback of callbacks) {
@@ -160,5 +166,6 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         callback.onSynced();
       }
     },
+    text: seed.text ?? "",
   };
 }

@@ -5,20 +5,22 @@ import { MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { ApiError, api } from "../../api/client";
-import type { Comment, InboxRow, Issue } from "../../api/types";
+import type { Comment, CredentialPendingRow, InboxRow, Issue } from "../../api/types";
 import { userPreferenceStorageKey } from "../shell/userPreference";
 import { Inbox } from "./Inbox";
 
-// Every Inbox reads the signed-in login. Each open ask card also reads its owner's subscribers
-// and its backlinks; the shared fixtures keep unrelated failure assertions focused on the action
-// each test drives.
+// Every Inbox reads the signed-in login and the credential requests waiting on it. Each open ask
+// card also reads its owner's subscribers and its backlinks; the shared fixtures keep unrelated
+// failure assertions focused on the action each test drives.
 let whoAmI: Mock<typeof api.whoAmI>;
 let getIssueSubscribers: Mock<typeof api.getIssueSubscribers>;
 let getArtifactSubscribers: Mock<typeof api.getArtifactSubscribers>;
 let getReferences: Mock<typeof api.getReferences>;
+let getCredentialPending: Mock<typeof api.getCredentialPending>;
 beforeEach(() => {
   window.localStorage.clear();
   whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "Alice" });
+  getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue({ pending: [] });
   getIssueSubscribers = spyOn(api, "getIssueSubscribers").mockResolvedValue([]);
   getArtifactSubscribers = spyOn(api, "getArtifactSubscribers").mockResolvedValue([]);
   getReferences = spyOn(api, "getReferences").mockResolvedValue({
@@ -28,6 +30,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   whoAmI.mockRestore();
+  getCredentialPending.mockRestore();
   getIssueSubscribers.mockRestore();
   getArtifactSubscribers.mockRestore();
   getReferences.mockRestore();
@@ -482,6 +485,64 @@ test("Inbox preserves server priority order within Waiting on you", async () => 
   } finally {
     emptyView.unmount();
     emptyInbox.mockRestore();
+  }
+});
+
+function secretRequest(overrides: Partial<CredentialPendingRow> = {}): CredentialPendingRow {
+  return {
+    identifiers: ["DEMO_API_KEY"],
+    kind: "agent_secret",
+    record_id: "record-1",
+    requested_at: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+    ...overrides,
+  };
+}
+
+test("a credential request alone is listed and on the banner, and nothing says nothing needs you", async () => {
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  getCredentialPending.mockResolvedValue({ pending: [secretRequest()] });
+  const { unmount } = renderInbox();
+  try {
+    const request = await screen.findByRole("link", { name: /Secret request.*DEMO_API_KEY/s });
+    expect(request.getAttribute("href")).toBe("/credentials/record-1");
+    expect(screen.getByText("Blocked on you: 1 item, oldest 3h")).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Inbox empty state" })).toBeNull();
+    expect(screen.queryByText("Nothing needs you")).toBeNull();
+  } finally {
+    unmount();
+    getInbox.mockRestore();
+  }
+});
+
+test("the banner counts credential requests beside the asks waiting on you, oldest of either", async () => {
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([
+    issueAsk({ created_at: new Date().toISOString() }),
+  ]);
+  getCredentialPending.mockResolvedValue({
+    pending: [
+      secretRequest({ requested_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString() }),
+    ],
+  });
+  const { unmount } = renderInbox();
+  try {
+    await screen.findByRole("link", { name: /Secret request.*DEMO_API_KEY/s });
+    expect(await screen.findByText("Blocked on you: 2 items, oldest 2d")).toBeTruthy();
+  } finally {
+    unmount();
+    getInbox.mockRestore();
+  }
+});
+
+test("a credential list that fails to load keeps the Inbox from saying nothing needs you", async () => {
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  getCredentialPending.mockRejectedValue(new ApiError(503, { code: "AGENT_SECRETS_UNAVAILABLE" }));
+  const { unmount } = renderInbox();
+  try {
+    expect(await screen.findByText("Couldn't load credential requests.")).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Inbox empty state" })).toBeNull();
+  } finally {
+    unmount();
+    getInbox.mockRestore();
   }
 });
 
@@ -1487,7 +1548,7 @@ test("an agent's reply on a snoozed row leaves it in Later and off Waiting on yo
     expect(rowIds()).toEqual([]);
 
     // The agent answers: the turn is the reader's again and the row carries the agent's reply -
-    // exactly the change that used to pull a deferred ask back onto the list.
+    // exactly the change that could pull a deferred ask back onto the list.
     act(() => {
       queryClient.setQueryData<InboxRow[]>(
         ["inbox"],

@@ -135,18 +135,18 @@ func oauthStart(t *testing.T, handler http.Handler) (string, *http.Cookie) {
 
 func TestOAuthStateCookieMatchesCookieMode(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		env    string
-		secure bool
+		name     string
+		insecure bool
+		secure   bool
 	}{
 		{name: "TLS default", secure: true},
-		{name: "HTTP development mode", env: "1", secure: false},
+		{name: "HTTP development mode", insecure: true, secure: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("DISPATCH_INSECURE_COOKIE", tc.env)
 			users := &memoryUserStore{users: map[string]*auth.User{}}
 			handler, ctx := newTestRouter(t, users, map[string]struct{}{"sjawhar": {}})
 			ctx.HTTPClient = callbackHTTPClient{login: "sjawhar"}
+			ctx.InsecureCookie = tc.insecure
 
 			state, nonce := oauthStart(t, handler)
 			if nonce.Secure != tc.secure {
@@ -159,6 +159,16 @@ func TestOAuthStateCookieMatchesCookieMode(t *testing.T) {
 			handler.ServeHTTP(response, callback)
 			if response.Code != http.StatusFound {
 				t.Fatalf("OAuth callback status = %d body=%s, want %d", response.Code, response.Body.String(), http.StatusFound)
+			}
+			issued := false
+			for _, cookie := range response.Result().Cookies() {
+				issued = issued || cookie.Name == "dsession"
+				if cookie.Secure != tc.secure {
+					t.Errorf("callback cookie %s Secure = %t, want %t", cookie.Name, cookie.Secure, tc.secure)
+				}
+			}
+			if !issued {
+				t.Errorf("callback set no dsession cookie: %v", response.Result().Cookies())
 			}
 		})
 	}
@@ -289,7 +299,7 @@ func TestCookieIdentityRechecksAllowedLogins(t *testing.T) {
 	}
 	handler := New(ctx)
 	request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key"))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key", true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}
@@ -359,18 +369,6 @@ func TestAuthStartEvictsExpiredPendingStates(t *testing.T) {
 	}
 }
 
-func TestBuildAppContextRejectsMalformedRepoProjectMapping(t *testing.T) {
-	_, err := BuildAppContext(AppContextOptions{
-		SigningKey:   "signing-key",
-		Users:        &memoryUserStore{users: map[string]*auth.User{}},
-		Identity:     identity.HeaderIdentity{Header: "X-Dispatch-User"},
-		RepoProjects: "not-a-repo-project-mapping",
-	})
-	if err == nil || !strings.Contains(err.Error(), "DISPATCH_REPO_PROJECTS") {
-		t.Fatalf("error: got %v, want malformed DISPATCH_REPO_PROJECTS rejection", err)
-	}
-}
-
 func TestStaticHandlerServesSpaShellForUnknownRoute(t *testing.T) {
 	webDist := t.TempDir()
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
@@ -409,6 +407,70 @@ func TestStaticHandlerServesIndexAtRoot(t *testing.T) {
 	}
 	if response.Body.String() != "<!doctype html>" {
 		t.Fatalf("root body: got %q, want dashboard shell", response.Body.String())
+	}
+}
+
+func TestStaticHandlerServesDistDirectorySpelledThroughDotDot(t *testing.T) {
+	parent := t.TempDir()
+	webDist := filepath.Join(parent, "web", "dist")
+	for _, dir := range []string{webDist, filepath.Join(parent, "web", "build")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("make %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	// The directory as an operator can spell it from a sibling package, never cleaned:
+	// DISPATCH_WEB_DIST="$PWD/../dispatch/web/dist" run from packages/envoy.
+	sep := string(filepath.Separator)
+	context.WebDistDir = filepath.Join(parent, "web", "build") + sep + ".." + sep + "dist"
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusOK || response.Body.String() != "<!doctype html>" {
+		t.Fatalf("root through %q: got %d %q, want 200 and the dashboard shell", context.WebDistDir, response.Code, response.Body.String())
+	}
+}
+
+// The static handler is called directly, not through the router's mux: the mux redirects a path
+// holding `..` before any handler runs, so only the handler's own rooted clean of the request path
+// is under test here. A request whose `..` would climb out of the dist directory answers exactly as
+// a file missing inside it does, so a file outside it is neither served nor told apart from one
+// that is not there.
+func TestStaticHandlerKeepsRequestsInsideTheDistDirectory(t *testing.T) {
+	parent := t.TempDir()
+	webDist := filepath.Join(parent, "dist")
+	if err := os.MkdirAll(webDist, 0o700); err != nil {
+		t.Fatalf("make %s: %v", webDist, err)
+	}
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "secret.txt"), []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	_, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+	static := &router{ctx: context}
+	serve := func(path string) *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		static.staticHandler(response, httptest.NewRequest(http.MethodGet, path, nil))
+		return response
+	}
+
+	missing := serve("/absent.txt")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("a file missing from the dist directory: got %d %q, want 404", missing.Code, missing.Body.String())
+	}
+	for _, path := range []string{"/../secret.txt", "/%2e%2e/secret.txt", "/../absent.txt"} {
+		t.Run(path, func(t *testing.T) {
+			response := serve(path)
+			if response.Code != missing.Code || response.Body.String() != missing.Body.String() {
+				t.Fatalf("%s: got %d %q, want the dist directory's own missing-file answer %d %q", path, response.Code, response.Body.String(), missing.Code, missing.Body.String())
+			}
+		})
 	}
 }
 
@@ -527,6 +589,107 @@ func TestStaticHandlerServesBuiltAssets(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/missing.js", nil))
 	if response.Code != http.StatusNotFound || response.Body.String() != "{\"error\":\"not found\"}\n" {
 		t.Fatalf("missing asset: status %d body %q", response.Code, response.Body.String())
+	}
+}
+
+// A page's HTML names the hashed assets of the build that wrote it. A browser that keeps an
+// index.html by heuristic freshness (it carries Last-Modified) runs an older build's page after a
+// deploy and asks for assets the server no longer has, so every HTML answer, the SPA fallback
+// included, makes the browser revalidate. Vite's hashed output never changes under its name, so
+// it may be kept for a year without asking. A missing asset's 404 must never carry that, or the
+// browser would keep the failure. Every other file keeps net/http's own answer.
+func TestStaticHandlerCacheControl(t *testing.T) {
+	webDist := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(webDist, "assets"), 0o700); err != nil {
+		t.Fatalf("make assets dir: %v", err)
+	}
+	for name, body := range map[string]string{
+		"index.html":              "<!doctype html>",
+		"favicon.svg":             "<svg/>",
+		"assets/index-abc123.js":  "console.log(1)",
+		"assets/index-abc123.css": "body{}",
+	} {
+		if err := os.WriteFile(filepath.Join(webDist, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+
+	for _, tc := range []struct {
+		path         string
+		status       int
+		cacheControl string
+	}{
+		{path: "/", status: http.StatusOK, cacheControl: pageCacheControl},
+		{path: "/issues/CORE-1", status: http.StatusOK, cacheControl: pageCacheControl},
+		{path: "/agents/broadcasts/5f0c", status: http.StatusOK, cacheControl: pageCacheControl},
+		{path: "/assets/index-abc123.js", status: http.StatusOK, cacheControl: assetCacheControl},
+		{path: "/assets/index-abc123.css", status: http.StatusOK, cacheControl: assetCacheControl},
+		{path: "/assets/index-missing.js", status: http.StatusNotFound, cacheControl: ""},
+		{path: "/favicon.svg", status: http.StatusOK, cacheControl: ""},
+		{path: "/favicon.ico", status: http.StatusOK, cacheControl: ""},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			if response.Code != tc.status {
+				t.Fatalf("%s: status %d, want %d; body=%s", tc.path, response.Code, tc.status, response.Body.String())
+			}
+			if got := response.Header().Values("Cache-Control"); strings.Join(got, ", ") != tc.cacheControl {
+				t.Fatalf("%s: Cache-Control %q, want %q", tc.path, got, tc.cacheControl)
+			}
+		})
+	}
+}
+
+// The servers behind one load balancer can hold different builds, and a page's file time says
+// nothing about which build wrote it: a rollback serves an older file. So a page revalidates by
+// its bytes. The browser's own page is answered 304, still to be revalidated next time; any other
+// page it holds - another build's, or one cached with only a Last-Modified, whatever that time -
+// is answered with this server's page.
+func TestStaticHandlerRevalidatesPagesByContent(t *testing.T) {
+	webDist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+	get := func(path string, header http.Header) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		for name, values := range header {
+			request.Header[name] = values
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	first := get("/", nil)
+	etag := first.Header().Get("ETag")
+	if first.Code != http.StatusOK || etag == "" || first.Header().Get("Last-Modified") != "" {
+		t.Fatalf("page: status %d ETag %q Last-Modified %q, want 200 with an ETag and no Last-Modified", first.Code, etag, first.Header().Get("Last-Modified"))
+	}
+	if shell := get("/issues/CORE-1", nil).Header().Get("ETag"); shell != etag {
+		t.Fatalf("SPA shell ETag %q, want the page's %q", shell, etag)
+	}
+
+	same := get("/issues/CORE-1", http.Header{"If-None-Match": {etag}})
+	if same.Code != http.StatusNotModified || same.Header().Get("Cache-Control") != pageCacheControl {
+		t.Fatalf("revalidating this build's page: status %d Cache-Control %q, want 304 and %q", same.Code, same.Header().Get("Cache-Control"), pageCacheControl)
+	}
+
+	later := time.Now().Add(24 * time.Hour).UTC().Format(http.TimeFormat)
+	for name, header := range map[string]http.Header{
+		"another build's page":            {"If-None-Match": {`"another-build"`}, "If-Modified-Since": {later}},
+		"a page cached by its time alone": {"If-Modified-Since": {later}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := get("/", header)
+			if response.Code != http.StatusOK || response.Body.String() != "<!doctype html>" {
+				t.Fatalf("%s: status %d body %q, want 200 and this server's page", name, response.Code, response.Body.String())
+			}
+		})
 	}
 }
 
@@ -741,7 +904,7 @@ func TestLogoutRevokesCopiedSessionCookie(t *testing.T) {
 		t.Fatalf("build context: %v", err)
 	}
 	handler := New(ctx)
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key"))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key", true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}
@@ -785,7 +948,7 @@ func TestCookieAuthenticatedUnsafeRequestsRequireSameOrigin(t *testing.T) {
 		if err != nil {
 			t.Fatalf("build context: %v", err)
 		}
-		cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key"))
+		cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key", true))
 		if err != nil {
 			t.Fatalf("parse session cookie: %v", err)
 		}

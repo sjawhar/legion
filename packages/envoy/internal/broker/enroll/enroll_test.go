@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,26 +91,42 @@ func mintCredential(t *testing.T, svc *Service, operator, service *string, host 
 	return Credential{ID: id, Operator: operator, Service: service, Host: host}
 }
 
-func TestCreateSucceedsForMatchingOperatorAndRejectsMismatch(t *testing.T) {
+// TestAnOperatorCredentialEnrollsItsOwnOperator: a personal launcher credential's operator is the
+// email of the person who approved its machine login, and every enrollment it makes records that
+// person. A stated operator must name the same person, in any casing; one that names anyone else is
+// refused; an enrollment that states none is that person's all the same.
+func TestAnOperatorCredentialEnrollsItsOwnOperator(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
-	cred := mintCredential(t, svc, str("sjawhar"), nil, "devbox")
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
 
-	enr, err := svc.Create(ctx, cred, Enrollment{
-		Kind: "box", RuntimeID: "box-sjawhar-1", Operator: str("sjawhar"), Thumbprint: "tp-match",
-	})
-	if err != nil {
-		t.Fatalf("Create(matching operator): %v", err)
-	}
-	if enr.ID == uuid.Nil || enr.Existing {
-		t.Fatalf("Create(matching operator) = %+v, want a fresh enrollment", enr)
+	for i, tc := range []struct {
+		name   string
+		stated *string
+	}{
+		{"the credential's email", str("ada@example.com")},
+		{"that email in other casing", str(" Ada@Example.COM ")},
+		{"no operator", nil},
+	} {
+		runtimeID := fmt.Sprintf("host-ada-%d", i)
+		enr, err := svc.Create(ctx, cred, Enrollment{Kind: "host", RuntimeID: runtimeID, Operator: tc.stated, Thumbprint: "tp-" + runtimeID})
+		if err != nil {
+			t.Fatalf("Create(stating %s): %v", tc.name, err)
+		}
+		if enr.ID == uuid.Nil || enr.Existing || enr.Operator == nil || *enr.Operator != "ada@example.com" {
+			t.Fatalf("Create(stating %s) = %+v, want a fresh enrollment of ada@example.com", tc.name, enr)
+		}
+		stored, err := svc.Get(ctx, enr.ID.String())
+		if err != nil || stored.Operator == nil || *stored.Operator != "ada@example.com" {
+			t.Fatalf("Get(enrollment stating %s) = %+v %v, want operator ada@example.com", tc.name, stored, err)
+		}
 	}
 
-	_, err = svc.Create(ctx, cred, Enrollment{
-		Kind: "box", RuntimeID: "box-mallory-1", Operator: str("mallory"), Thumbprint: "tp-mallory",
+	_, err := svc.Create(ctx, cred, Enrollment{
+		Kind: "host", RuntimeID: "host-mallory", Operator: str("mallory@example.com"), Thumbprint: "tp-mallory",
 	})
 	if !errors.Is(err, ErrOperatorMismatch) {
-		t.Fatalf("Create(operator mismatch) = %v, want ErrOperatorMismatch", err)
+		t.Fatalf("Create(another person's email) = %v, want ErrOperatorMismatch", err)
 	}
 }
 
@@ -119,10 +137,10 @@ func TestOperatorCredentialRefusesPodEnrollment(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
 	issuer, key := withPodVerifier(t, svc)
-	cred := mintCredential(t, svc, str("sjawhar"), nil, "devbox")
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
 
 	_, err := svc.Create(ctx, cred, Enrollment{
-		Kind: "pod", RuntimeID: "pod-op-1", Operator: str("sjawhar"), Thumbprint: "tp-op-pod",
+		Kind: "pod", RuntimeID: "pod-op-1", Operator: str("ada@example.com"), Thumbprint: "tp-op-pod",
 		PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", "pod-op-1"),
 	})
 	if !errors.Is(err, ErrOperatorMismatch) {
@@ -147,7 +165,7 @@ func TestServiceCredentialEnrolsPodOnlyWithNoOperator(t *testing.T) {
 
 	// Refuses any non-nil operator, even for kind: pod.
 	_, err = svc.Create(ctx, cred, Enrollment{
-		Kind: "pod", RuntimeID: "pod-uid-1", Operator: str("sjawhar"),
+		Kind: "pod", RuntimeID: "pod-uid-1", Operator: str("ada@example.com"),
 		Thumbprint: "tp-1", PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", "pod-uid-1"),
 	})
 	if !errors.Is(err, ErrOperatorMismatch) {
@@ -170,14 +188,14 @@ func TestServiceCredentialEnrolsPodOnlyWithNoOperator(t *testing.T) {
 func TestCreateIsIdempotentAndRefusesConflictingThumbprint(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
-	cred := mintCredential(t, svc, str("sjawhar"), nil, "devbox")
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
 
-	first, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-idem-1", Operator: str("sjawhar"), Thumbprint: "tp-same"})
+	first, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-idem-1", Operator: str("ada@example.com"), Thumbprint: "tp-same"})
 	if err != nil {
 		t.Fatalf("Create(first): %v", err)
 	}
 
-	again, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-idem-1", Operator: str("sjawhar"), Thumbprint: "tp-same"})
+	again, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-idem-1", Operator: str("ada@example.com"), Thumbprint: "tp-same"})
 	if err != nil {
 		t.Fatalf("Create(retry, same thumbprint): %v", err)
 	}
@@ -185,7 +203,7 @@ func TestCreateIsIdempotentAndRefusesConflictingThumbprint(t *testing.T) {
 		t.Fatalf("Create(retry) = %+v, want Existing=true and ID=%s", again, first.ID)
 	}
 
-	_, err = svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-idem-1", Operator: str("sjawhar"), Thumbprint: "tp-different"})
+	_, err = svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-idem-1", Operator: str("ada@example.com"), Thumbprint: "tp-different"})
 	if !errors.Is(err, ErrAlreadyEnrolled) {
 		t.Fatalf("Create(retry, different thumbprint) = %v, want ErrAlreadyEnrolled", err)
 	}
@@ -199,8 +217,8 @@ func TestIdempotentRetryNeedsOnlyOneConnection(t *testing.T) {
 	svc := newService(t, "pool_max_conns=1")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cred := mintCredential(t, svc, str("sjawhar"), nil, "devbox")
-	in := Enrollment{Kind: "box", RuntimeID: "box-one-conn", Operator: str("sjawhar"), Thumbprint: "tp-one-conn"}
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	in := Enrollment{Kind: "box", RuntimeID: "box-one-conn", Operator: str("ada@example.com"), Thumbprint: "tp-one-conn"}
 	first, err := svc.Create(ctx, cred, in)
 	if err != nil {
 		t.Fatalf("Create(first): %v", err)
@@ -219,8 +237,8 @@ func TestIdempotentRetryNeedsOnlyOneConnection(t *testing.T) {
 func TestRevokeThenLookupReportsNotLive(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
-	cred := mintCredential(t, svc, str("sjawhar"), nil, "devbox")
-	enr, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-revoke-1", Operator: str("sjawhar"), Thumbprint: "tp-revoke"})
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	enr, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-revoke-1", Operator: str("ada@example.com"), Thumbprint: "tp-revoke"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -229,7 +247,7 @@ func TestRevokeThenLookupReportsNotLive(t *testing.T) {
 		t.Fatalf("Lookup(before revoke) = live=%v err=%v, want live=true", live, err)
 	}
 
-	if err := svc.Revoke(ctx, cred, enr.ID.String(), "sjawhar"); err != nil {
+	if err := svc.Revoke(ctx, cred, enr.ID.String(), "ada@example.com"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 
@@ -245,7 +263,7 @@ func TestRevokeNonexistentEnrollmentReturnsErrNotLive(t *testing.T) {
 	ctx := context.Background()
 	id := uuid.New().String()
 
-	if err := svc.Revoke(ctx, Credential{}, id, "sjawhar"); !errors.Is(err, ErrNotLive) {
+	if err := svc.Revoke(ctx, Credential{}, id, "ada@example.com"); !errors.Is(err, ErrNotLive) {
 		t.Fatalf("Revoke(nonexistent) = %v, want ErrNotLive", err)
 	}
 
@@ -263,16 +281,16 @@ func TestRevokeNonexistentEnrollmentReturnsErrNotLive(t *testing.T) {
 func TestRevokeTwiceReturnsErrNotLive(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
-	cred := mintCredential(t, svc, str("sjawhar"), nil, "devbox")
-	enr, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-revoke-twice", Operator: str("sjawhar"), Thumbprint: "tp-revoke-twice"})
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	enr, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-revoke-twice", Operator: str("ada@example.com"), Thumbprint: "tp-revoke-twice"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := svc.Revoke(ctx, cred, enr.ID.String(), "sjawhar"); err != nil {
+	if err := svc.Revoke(ctx, cred, enr.ID.String(), "ada@example.com"); err != nil {
 		t.Fatalf("Revoke(first): %v", err)
 	}
-	if err := svc.Revoke(ctx, cred, enr.ID.String(), "sjawhar"); !errors.Is(err, ErrNotLive) {
+	if err := svc.Revoke(ctx, cred, enr.ID.String(), "ada@example.com"); !errors.Is(err, ErrNotLive) {
 		t.Fatalf("Revoke(second) = %v, want ErrNotLive", err)
 	}
 
@@ -292,8 +310,8 @@ func TestRevokeTwiceReturnsErrNotLive(t *testing.T) {
 func TestRevokeRevokesLiveGrantsUnderEnrollment(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
-	cred := mintCredential(t, svc, str("sjawhar"), nil, "devbox")
-	enr, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-revoke-grant", Operator: str("sjawhar"), Thumbprint: "tp-revoke-grant"})
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	enr, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-revoke-grant", Operator: str("ada@example.com"), Thumbprint: "tp-revoke-grant"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -309,7 +327,7 @@ func TestRevokeRevokesLiveGrantsUnderEnrollment(t *testing.T) {
 		t.Fatalf("insert grant fixture: %v", err)
 	}
 
-	if err := svc.Revoke(ctx, cred, enr.ID.String(), "sjawhar"); err != nil {
+	if err := svc.Revoke(ctx, cred, enr.ID.String(), "ada@example.com"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 
@@ -318,28 +336,28 @@ func TestRevokeRevokesLiveGrantsUnderEnrollment(t *testing.T) {
 	if err := svc.Store.Pool.QueryRow(ctx, `select revoked_at, revoked_by from grants where id=$1`, grantID).Scan(&revokedAt, &revokedBy); err != nil {
 		t.Fatalf("read grant: %v", err)
 	}
-	if revokedAt == nil || revokedBy == nil || *revokedBy != "sjawhar" {
-		t.Fatalf("grant revoked_at=%v revoked_by=%v, want both set with revoked_by=sjawhar", revokedAt, revokedBy)
+	if revokedAt == nil || revokedBy == nil || *revokedBy != "ada@example.com" {
+		t.Fatalf("grant revoked_at=%v revoked_by=%v, want both set with revoked_by=ada@example.com", revokedAt, revokedBy)
 	}
 }
 
-// TestRevokeRefusesWrongOperator is the regression for the review's Critical finding: Revoke had
-// no ownership check at all, so any live launcher credential could revoke any enrollment by
-// guessing or knowing its id. An operator A credential must not be able to revoke operator B's
-// enrollment, and the enrollment must remain untouched (still live) afterward.
+// TestRevokeRefusesWrongOperator is the regression for the review's Critical finding: without an
+// ownership check in Revoke, any live launcher credential could revoke any enrollment by guessing
+// or knowing its id. An operator A credential must not be able to revoke operator B's enrollment,
+// and the enrollment must remain untouched (still live) afterward.
 func TestRevokeRefusesWrongOperator(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
 
-	credB := mintCredential(t, svc, str("bob"), nil, "bobs-box")
-	enrB, err := svc.Create(ctx, credB, Enrollment{Kind: "box", RuntimeID: "box-bob-1", Operator: str("bob"), Thumbprint: "tp-bob"})
+	credB := mintCredential(t, svc, str("bob@example.com"), nil, "bobs-box")
+	enrB, err := svc.Create(ctx, credB, Enrollment{Kind: "box", RuntimeID: "box-bob-1", Operator: str("bob@example.com"), Thumbprint: "tp-bob"})
 	if err != nil {
 		t.Fatalf("Create(bob's enrollment): %v", err)
 	}
 
-	credA := mintCredential(t, svc, str("alice"), nil, "alices-box")
+	credA := mintCredential(t, svc, str("alice@example.com"), nil, "alices-box")
 
-	if err := svc.Revoke(ctx, credA, enrB.ID.String(), "alice"); !errors.Is(err, ErrOperatorMismatch) {
+	if err := svc.Revoke(ctx, credA, enrB.ID.String(), "alice@example.com"); !errors.Is(err, ErrOperatorMismatch) {
 		t.Fatalf("Revoke(alice's credential, bob's enrollment) = %v, want ErrOperatorMismatch", err)
 	}
 
@@ -388,9 +406,9 @@ func TestRevokeRefusesOperatorCredentialForPodEnrollment(t *testing.T) {
 		t.Fatalf("Create(pod): %v", err)
 	}
 
-	opCred := mintCredential(t, svc, str("sjawhar"), nil, "devbox")
+	opCred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
 
-	if err := svc.Revoke(ctx, opCred, enr.ID.String(), "sjawhar"); !errors.Is(err, ErrOperatorMismatch) {
+	if err := svc.Revoke(ctx, opCred, enr.ID.String(), "ada@example.com"); !errors.Is(err, ErrOperatorMismatch) {
 		t.Fatalf("Revoke(operator credential, pod enrollment) = %v, want ErrOperatorMismatch", err)
 	}
 	if _, live, err := svc.Lookup(ctx, enr.ID.String()); err != nil || !live {
@@ -448,9 +466,9 @@ func TestPodEnrollmentRejectsBadOrMismatchedToken(t *testing.T) {
 func TestCreateRetriesWhenConflictingRowIsRevokedBeforeRecovery(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
-	cred := mintCredential(t, svc, str("sjawhar"), nil, "devbox")
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
 
-	first, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-race-1", Operator: str("sjawhar"), Thumbprint: "tp-race-first"})
+	first, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-race-1", Operator: str("ada@example.com"), Thumbprint: "tp-race-first"})
 	if err != nil {
 		t.Fatalf("Create(first): %v", err)
 	}
@@ -466,7 +484,7 @@ func TestCreateRetriesWhenConflictingRowIsRevokedBeforeRecovery(t *testing.T) {
 		}
 	}
 
-	second, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-race-1", Operator: str("sjawhar"), Thumbprint: "tp-race-second"})
+	second, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-race-1", Operator: str("ada@example.com"), Thumbprint: "tp-race-second"})
 	if err != nil {
 		t.Fatalf("Create(second, races a concurrent revoke): %v", err)
 	}
@@ -511,9 +529,9 @@ func TestLookupRejectsNonUUIDWithoutError(t *testing.T) {
 func TestSessionID(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
-	cred := mintCredential(t, svc, str("sjawhar"), nil, "devbox")
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
 
-	withSession, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-with-session", Operator: str("sjawhar"), Thumbprint: "tp-with-session", SessionID: str("session-123")})
+	withSession, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-with-session", Operator: str("ada@example.com"), Thumbprint: "tp-with-session", SessionID: str("session-123")})
 	if err != nil {
 		t.Fatalf("Create(withSession): %v", err)
 	}
@@ -521,7 +539,7 @@ func TestSessionID(t *testing.T) {
 		t.Fatalf("SessionID(withSession) = %q, %v, want %q, nil", got, err, "session-123")
 	}
 
-	noSession, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-no-session", Operator: str("sjawhar"), Thumbprint: "tp-no-session"})
+	noSession, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-no-session", Operator: str("ada@example.com"), Thumbprint: "tp-no-session"})
 	if err != nil {
 		t.Fatalf("Create(noSession): %v", err)
 	}
@@ -541,19 +559,29 @@ func TestSessionID(t *testing.T) {
 	}
 }
 
-// insertPendingRequest writes a pending request row under enrollmentID the way requests.Machine
-// would, so these tests can watch what ending an enrollment does to it.
+// insertPendingRequest writes a pending request row under enrollmentID and its credential-request
+// record, linked as requests.Machine.createPending links them, so these tests can watch what
+// ending an enrollment does to both.
 func insertPendingRequest(t *testing.T, svc *Service, enrollmentID uuid.UUID) string {
 	t.Helper()
+	ctx := context.Background()
 	id := uuid.NewString()
-	if _, err := svc.Store.Pool.Exec(context.Background(), `insert into requests (id, enrollment_id, reason, state, allowed_approver, rules_version, lifetime_seconds, pending_expires_at)
-		values ($1,$2,'need it','pending','sjawhar','v',3600, now() + interval '1 hour')`, id, enrollmentID); err != nil {
+	recordID := strings.ReplaceAll(id, "-", "")
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, enrollment_id, expires_at)
+		values ($1,'body','agent_secret','ada@example.com',$2, now() + interval '1 hour')`, recordID, enrollmentID); err != nil {
+		t.Fatalf("insert record: %v", err)
+	}
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into requests (id, enrollment_id, reason, state, allowed_approver, rules_version, lifetime_seconds, pending_expires_at, record_id)
+		values ($1,$2,'need it','pending','ada@example.com','v',3600, now() + interval '1 hour', $3)`, id, enrollmentID, recordID); err != nil {
 		t.Fatalf("insert pending request: %v", err)
 	}
 	return id
 }
 
-func requestState(t *testing.T, svc *Service, id string) (state, decidedBy string, audits int) {
+// requestState reads what ending an enrollment left on request id: its state and who decided it,
+// its request.cancelled audit rows, and its record's terminal event as "<event> by <actor>" (""
+// for none).
+func requestState(t *testing.T, svc *Service, id string) (state, decidedBy string, audits int, recordEvent string) {
 	t.Helper()
 	ctx := context.Background()
 	if err := svc.Store.Pool.QueryRow(ctx, `select state, coalesce(decided_by, '') from requests where id=$1`, id).Scan(&state, &decidedBy); err != nil {
@@ -562,17 +590,22 @@ func requestState(t *testing.T, svc *Service, id string) (state, decidedBy strin
 	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from audit where kind='request.cancelled' and request_id=$1`, id).Scan(&audits); err != nil {
 		t.Fatalf("count request.cancelled audit rows: %v", err)
 	}
-	return state, decidedBy, audits
+	if err := svc.Store.Pool.QueryRow(ctx, `select coalesce((select ev.event || ' by ' || ev.actor from credential_request_events ev
+		join requests r on r.record_id = ev.record_id where r.id=$1), '')`, id).Scan(&recordEvent); err != nil {
+		t.Fatalf("read the record's event: %v", err)
+	}
+	return state, decidedBy, audits, recordEvent
 }
 
 // TestRevokeCancelsPendingRequests pins that ending an enrollment withdraws what it was still
-// waiting on: every pending request under it is cancelled, with its own audit row, in the same
-// transaction as the revoke.
+// waiting on: every pending request under it is cancelled, with its own audit row and a cancelled
+// event on its record (so the approver's pending list stops offering it), in the same transaction
+// as the revoke.
 func TestRevokeCancelsPendingRequests(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
-	cred := mintCredential(t, svc, str("sjawhar"), nil, "devbox")
-	enr, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-cancel", Operator: str("sjawhar"), Thumbprint: "tp-cancel"})
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	enr, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-cancel", Operator: str("ada@example.com"), Thumbprint: "tp-cancel"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -580,8 +613,8 @@ func TestRevokeCancelsPendingRequests(t *testing.T) {
 	if err := svc.Revoke(ctx, cred, enr.ID.String(), "launcher:test"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	if state, by, audits := requestState(t, svc, requestID); state != "cancelled" || by != "launcher:test" || audits != 1 {
-		t.Fatalf("pending request after revoke: state=%s decided_by=%s audit rows=%d, want cancelled by launcher:test with one audit row", state, by, audits)
+	if state, by, audits, event := requestState(t, svc, requestID); state != "cancelled" || by != "launcher:test" || audits != 1 || event != "cancelled by launcher:test" {
+		t.Fatalf("pending request after revoke: state=%s decided_by=%s audit rows=%d record event=%q, want cancelled by launcher:test with one audit row and a cancelled record event", state, by, audits, event)
 	}
 }
 
@@ -589,12 +622,12 @@ func TestRevokeCancelsPendingRequests(t *testing.T) {
 // is dead to Create: re-enrolling the same key mints a fresh enrollment (never the dead one back
 // as Existing), re-enrolling a different key is not refused as already enrolled, and the lapsed
 // enrollment is ended — revoked with an enrollment.expired audit row and its pending requests
-// cancelled.
+// cancelled, each with a cancelled event on its record.
 func TestLapsedLeaseReleasesTheRuntimeID(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
-	cred := mintCredential(t, svc, str("sjawhar"), nil, "devbox")
-	in := Enrollment{Kind: "box", RuntimeID: "box-lapse", Operator: str("sjawhar"), Thumbprint: "tp-lapse"}
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	in := Enrollment{Kind: "box", RuntimeID: "box-lapse", Operator: str("ada@example.com"), Thumbprint: "tp-lapse"}
 	lapse := func(id uuid.UUID) {
 		t.Helper()
 		if _, err := svc.Store.Pool.Exec(ctx, `update enrollments set lease_expires_at = now() - interval '1 minute' where id=$1`, id); err != nil {
@@ -626,8 +659,8 @@ func TestLapsedLeaseReleasesTheRuntimeID(t *testing.T) {
 	if !revoked || expiredAudits != 1 {
 		t.Fatalf("lapsed enrollment revoked=%v enrollment.expired audit rows=%d, want revoked with one", revoked, expiredAudits)
 	}
-	if state, by, audits := requestState(t, svc, pending); state != "cancelled" || by != "broker" || audits != 1 {
-		t.Fatalf("pending request of the lapsed enrollment: state=%s decided_by=%s audit rows=%d, want cancelled by broker", state, by, audits)
+	if state, by, audits, event := requestState(t, svc, pending); state != "cancelled" || by != "broker" || audits != 1 || event != "cancelled by broker" {
+		t.Fatalf("pending request of the lapsed enrollment: state=%s decided_by=%s audit rows=%d record event=%q, want cancelled by broker with a cancelled record event", state, by, audits, event)
 	}
 
 	lapse(sameKey.ID)
@@ -639,6 +672,49 @@ func TestLapsedLeaseReleasesTheRuntimeID(t *testing.T) {
 	}
 	if rotated.Existing || rotated.ID == sameKey.ID {
 		t.Fatalf("Create(different key after lapse) = %+v, want a fresh enrollment", rotated)
+	}
+}
+
+// TestEndLapsedEndsEveryLapsedEnrollmentAcrossBatches pins that one EndLapsed call ends every
+// lapsed enrollment however many there are (more than one batch's worth here), leaves a live one
+// alone, and that a second call finds nothing left to end.
+func TestEndLapsedEndsEveryLapsedEnrollmentAcrossBatches(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	live, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-live", Operator: str("ada@example.com"), Thumbprint: "tp-live"})
+	if err != nil {
+		t.Fatalf("Create(live): %v", err)
+	}
+	lapsed := lapsedBatch + 20
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, thumbprint, launcher_credential_id, lease_expires_at)
+		select gen_random_uuid(), 'box', 'box-batch-'||g, 'ada@example.com', 'tp-batch-'||g, $1, now() - interval '1 minute'
+		from generate_series(1, $2::int) g`, cred.ID, lapsed); err != nil {
+		t.Fatalf("insert lapsed enrollments: %v", err)
+	}
+
+	ended, err := svc.EndLapsed(ctx)
+	if err != nil {
+		t.Fatalf("EndLapsed: %v", err)
+	}
+	if len(ended) != lapsed {
+		t.Fatalf("EndLapsed ended %d enrollments, want all %d lapsed ones", len(ended), lapsed)
+	}
+	var unended, expiredAudits int
+	if err := svc.Store.Pool.QueryRow(ctx, `select (select count(*) from enrollments where runtime_id like 'box-batch-%' and revoked_at is null),
+		(select count(*) from audit where kind='enrollment.expired' and actor='broker')`).Scan(&unended, &expiredAudits); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if unended != 0 || expiredAudits != lapsed {
+		t.Fatalf("after EndLapsed: %d lapsed enrollments still unrevoked, %d enrollment.expired audit rows; want 0 and %d", unended, expiredAudits, lapsed)
+	}
+	if _, err := svc.Renew(ctx, live.ID.String()); err != nil {
+		t.Fatalf("the live enrollment must be untouched and still renew: %v", err)
+	}
+
+	again, err := svc.EndLapsed(ctx)
+	if err != nil || len(again) != 0 {
+		t.Fatalf("a second EndLapsed = %d ended, %v; want nothing left to end", len(again), err)
 	}
 }
 
@@ -663,5 +739,106 @@ func TestPodEnrollmentRecordsTheVerifiedSubject(t *testing.T) {
 	}
 	if subject == nil || *subject != "system:serviceaccount:legion:worker" {
 		t.Fatalf("stored subject = %v, want the token's system:serviceaccount:legion:worker, never the caller's", subject)
+	}
+}
+
+// TestEachSlotOfAPodIsAnEnrollmentOfItsOwn pins per-slot uniqueness: two roles in one pod, and two
+// generations of one role, are distinct live enrollments under one launcher credential and one pod
+// UID; a retry in a slot with its own key gets that slot's enrollment back, a different key in a
+// live slot is refused, the slotless enrollment of the same pod is a third identity, and revoking
+// one slot leaves the others live.
+func TestEachSlotOfAPodIsAnEnrollmentOfItsOwn(t *testing.T) {
+	svc := newService(t)
+	issuer, key := withPodVerifier(t, svc)
+	ctx := context.Background()
+	cred := mintCredential(t, svc, nil, str("legion-daemon"), "cluster")
+	const podUID = "pod-uid-roles"
+	pod := func(slot, thumbprint string) Enrollment {
+		return Enrollment{
+			Kind: "pod", RuntimeID: podUID, Slot: slot, Thumbprint: thumbprint,
+			PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", podUID),
+		}
+	}
+	ids := map[uuid.UUID]string{}
+	for _, in := range []Enrollment{
+		pod("implementer-g1", "tp-implementer-g1"),
+		pod("reviewer-g1", "tp-reviewer-g1"),
+		pod("implementer-g2", "tp-implementer-g2"),
+		pod("", "tp-no-slot"),
+	} {
+		enr, err := svc.Create(ctx, cred, in)
+		if err != nil || enr.Existing {
+			t.Fatalf("Create(slot %q) = %+v, %v; want a fresh enrollment", in.Slot, enr, err)
+		}
+		ids[enr.ID] = in.Slot
+		got, err := svc.Get(ctx, enr.ID.String())
+		if err != nil || got.Slot != in.Slot || got.RuntimeID != podUID {
+			t.Fatalf("Get(slot %q) = %+v, %v; want runtime %s in that slot", in.Slot, got, err, podUID)
+		}
+	}
+	if len(ids) != 4 {
+		t.Fatalf("enrollments %v, want four distinct ids", ids)
+	}
+	var implementerG1 uuid.UUID
+	for id, slot := range ids {
+		if slot == "implementer-g1" {
+			implementerG1 = id
+		}
+	}
+
+	again, err := svc.Create(ctx, cred, pod("implementer-g1", "tp-implementer-g1"))
+	if err != nil || !again.Existing || again.ID != implementerG1 {
+		t.Fatalf("Create(implementer-g1 retry, same key) = %+v, %v; want Existing %s", again, err, implementerG1)
+	}
+	if _, err := svc.Create(ctx, cred, pod("implementer-g1", "tp-copied")); !errors.Is(err, ErrAlreadyEnrolled) {
+		t.Fatalf("Create(implementer-g1, a different key) = %v, want ErrAlreadyEnrolled", err)
+	}
+
+	if err := svc.Revoke(ctx, cred, implementerG1.String(), "launcher:"+cred.ID.String()); err != nil {
+		t.Fatalf("Revoke(implementer-g1): %v", err)
+	}
+	for id, slot := range ids {
+		_, live, err := svc.Lookup(ctx, id.String())
+		if err != nil || live != (id != implementerG1) {
+			t.Fatalf("Lookup(slot %q) live = %v, %v after revoking implementer-g1 alone", slot, live, err)
+		}
+	}
+}
+
+// TestASlotIsRefusedOffAPodAndWhenMalformed pins the slot's validation: a slot on a box or host
+// enrollment, or one that does not match record.ValidSlot, is ErrInvalidSlot and writes no row;
+// and a pod's runtime id stays the pod UID its token proves, never a UID composed with a role.
+func TestASlotIsRefusedOffAPodAndWhenMalformed(t *testing.T) {
+	svc := newService(t)
+	issuer, key := withPodVerifier(t, svc)
+	ctx := context.Background()
+	operatorCred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	serviceCred := mintCredential(t, svc, nil, str("legion-daemon"), "cluster")
+
+	for _, kind := range []string{"box", "host"} {
+		_, err := svc.Create(ctx, operatorCred, Enrollment{Kind: kind, RuntimeID: kind + "-slot", Operator: str("ada@example.com"), Thumbprint: "tp-" + kind, Slot: "implementer-g1"})
+		if !errors.Is(err, ErrInvalidSlot) {
+			t.Fatalf("Create(%s with a slot) = %v, want ErrInvalidSlot", kind, err)
+		}
+	}
+	for _, slot := range []string{"Implementer-g1", "1mplementer", "-implementer", "implementer_g1", "a" + strings.Repeat("b", 63)} {
+		_, err := svc.Create(ctx, serviceCred, Enrollment{
+			Kind: "pod", RuntimeID: "pod-uid-bad-slot", Thumbprint: "tp-bad-slot", Slot: slot,
+			PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", "pod-uid-bad-slot"),
+		})
+		if !errors.Is(err, ErrInvalidSlot) {
+			t.Fatalf("Create(pod, slot %q) = %v, want ErrInvalidSlot", slot, err)
+		}
+	}
+	_, err := svc.Create(ctx, serviceCred, Enrollment{
+		Kind: "pod", RuntimeID: "pod-uid-composed/implementer", Thumbprint: "tp-composed", Slot: "implementer-g1",
+		PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", "pod-uid-composed"),
+	})
+	if !errors.Is(err, ErrPodIdentity) {
+		t.Fatalf("Create(pod, runtime id composed with a role) = %v, want ErrPodIdentity", err)
+	}
+	var n int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from enrollments`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("enrollments written by refused creates = %d (%v), want none", n, err)
 	}
 }

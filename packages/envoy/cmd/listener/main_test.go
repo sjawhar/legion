@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,112 +27,10 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
-
-var (
-	sharedListenerNATSOnce sync.Once
-	sharedListenerNATSURI  string
-	sharedListenerNATSErr  error
-	// sharedListenerNATSContainer is the container the tests share, which TestMain terminates.
-	sharedListenerNATSContainer *tcnats.NATSContainer
-)
-
-func sharedListenerTestNATSURI(t *testing.T) string {
-	t.Helper()
-	sharedListenerNATSOnce.Do(func() {
-		ctx := context.Background()
-		ctr, err := tcnats.Run(ctx, testnats.Image)
-		if err != nil {
-			sharedListenerNATSErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
-			return
-		}
-		sharedListenerNATSURI, sharedListenerNATSErr = ctr.ConnectionString(ctx)
-		if sharedListenerNATSErr != nil {
-			sharedListenerNATSErr = errors.Join(sharedListenerNATSErr, testcontainers.TerminateContainer(ctr))
-			return
-		}
-		sharedListenerNATSContainer = ctr
-	})
-	if sharedListenerNATSErr != nil {
-		t.Fatalf("failed to start shared NATS: %v", sharedListenerNATSErr)
-	}
-	return sharedListenerNATSURI
-}
-
-func clearKVBucket(t *testing.T, conn *natsgo.Conn, bucket string) {
-	t.Helper()
-	js, err := conn.JetStream(natsgo.MaxWait(10 * time.Second))
-	if err != nil {
-		t.Fatalf("failed to open JetStream: %v", err)
-	}
-	kv, err := js.KeyValue(bucket)
-	if errors.Is(err, natsgo.ErrBucketNotFound) {
-		return
-	}
-	if err != nil {
-		t.Fatalf("failed to open bucket %s: %v", bucket, err)
-	}
-	keys, err := kv.Keys()
-	if errors.Is(err, natsgo.ErrNoKeysFound) {
-		return
-	}
-	if err != nil {
-		t.Fatalf("failed to list bucket %s keys: %v", bucket, err)
-	}
-	for _, key := range keys {
-		if err := kv.Delete(key); err != nil && !errors.Is(err, natsgo.ErrKeyNotFound) {
-			t.Fatalf("failed to delete key %s from bucket %s: %v", key, bucket, err)
-		}
-	}
-}
-
-func resetListenerTestState(t *testing.T, conn *natsgo.Conn) {
-	t.Helper()
-	js, err := conn.JetStream(natsgo.MaxWait(10 * time.Second))
-	if err != nil {
-		t.Fatalf("failed to open JetStream: %v", err)
-	}
-	if err := js.PurgeStream(bus.Stream); err != nil && !errors.Is(err, natsgo.ErrStreamNotFound) {
-		t.Fatalf("failed to purge stream %s: %v", bus.Stream, err)
-	}
-	clearKVBucket(t, conn, store.Bucket)
-	clearKVBucket(t, conn, store.RoleBucket)
-	if err := js.DeleteKeyValue(session.SessionBucket); err != nil &&
-		!errors.Is(err, natsgo.ErrBucketNotFound) && !errors.Is(err, natsgo.ErrStreamNotFound) {
-		t.Fatalf("failed to reset session bucket: %v", err)
-	}
-}
-
-func TestResetListenerTestStateRecreatesSessionBucket(t *testing.T) {
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("connect bus: %v", err)
-	}
-	defer client.Close()
-	resetListenerTestState(t, client.Conn)
-
-	if _, err := session.OpenSessionRegistry(
-		client.Conn,
-		session.WithSessionReplicas(1),
-		session.WithSessionTTL(100*time.Millisecond),
-	); err != nil {
-		t.Fatalf("open short-lived session registry: %v", err)
-	}
-	resetListenerTestState(t, client.Conn)
-
-	registry, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
-	if err != nil {
-		t.Fatalf("open reset session registry: %v", err)
-	}
-	if got := registry.TTL(); got != 5*time.Minute {
-		t.Fatalf("session bucket TTL = %s, want %s", got, 5*time.Minute)
-	}
-}
 
 func TestStartingGate_Closed_Returns503(t *testing.T) {
-	var handler startingGate
+	handler := newStartingGate("v1", logging.NewWithWriter("test", io.Discard))
 
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, httptest.NewRequest("GET", "/v1/interests/subscribe", nil))
@@ -147,43 +46,9 @@ func TestStartingGate_Closed_Returns503(t *testing.T) {
 	}
 }
 
-// TestOpenListener_PublishesOnlyOnceTheRoutesServe holds the order /healthz depends on: the
-// dependencies are published, which turns /healthz healthy, only after both gates serve their
-// routes, so a probe that reads healthy never meets a 503 "service starting" from a webhook or /v1.
-func TestOpenListener_PublishesOnlyOnceTheRoutesServe(t *testing.T) {
-	var webhookGate, v1Gate startingGate
-	hooks := []webhookRoute{{"/webhook/github", func(*bus.Client, *cistore.Store) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	}}}
-	openWebhooks(&webhookGate, hooks, nil, nil)
-	published := false
-	openListener(&v1Gate, &listenerDeps{}, "test-machine", logging.New("test"), func(*listenerDeps) {
-		published = true
-		// A real /v1 route answers a wrong method with 405 before it reads any dependency; a
-		// mux without the /v1 routes would answer 404, and a gate that has not opened answers 503.
-		for _, probe := range []struct {
-			gate         *startingGate
-			method, path string
-			want         int
-		}{
-			{&webhookGate, http.MethodPost, "/webhook/github", http.StatusOK},
-			{&v1Gate, http.MethodGet, "/v1/interests/unsubscribe", http.StatusMethodNotAllowed},
-		} {
-			recorder := httptest.NewRecorder()
-			probe.gate.ServeHTTP(recorder, httptest.NewRequest(probe.method, probe.path, nil))
-			if recorder.Code != probe.want {
-				t.Errorf("%s %s when the dependencies were published: status = %d, want %d; body = %s", probe.method, probe.path, recorder.Code, probe.want, recorder.Body.String())
-			}
-		}
-	})
-	if !published {
-		t.Fatal("openListener never published the dependencies")
-	}
-}
-
 func TestStartingGate_Open_PassesThrough(t *testing.T) {
 	var called bool
-	var handler startingGate
+	handler := newStartingGate("v1", logging.NewWithWriter("test", io.Discard))
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/interests/subscribe", func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -199,6 +64,52 @@ func TestStartingGate_Open_PassesThrough(t *testing.T) {
 	}
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+}
+
+// A gate's refusals are the listener's only record of a caller it turned away while starting, so
+// each refused request logs one line naming the gate, the method and the path, and a request the
+// open gate serves logs nothing.
+func TestStartingGateLogsEachRefusedRequest(t *testing.T) {
+	var buf bytes.Buffer
+	gate := newStartingGate("v1", logging.NewWithWriter("test", &buf))
+
+	rr := httptest.NewRecorder()
+	gate.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/messages/send", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("closed gate: status %d, want 503", rr.Code)
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("one refused request logged %d lines, want 1:\n%s", len(lines), buf.String())
+	}
+	var record map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
+		t.Fatalf("the refusal line is not JSON: %v\n%s", err, lines[0])
+	}
+	for field, want := range map[string]string{
+		"msg":    "request refused while starting",
+		"level":  "WARN",
+		"gate":   "v1",
+		"method": http.MethodPost,
+		"path":   "/v1/messages/send",
+	} {
+		if record[field] != want {
+			t.Fatalf("the refusal line's %s = %v, want %q: %s", field, record[field], want, lines[0])
+		}
+	}
+
+	buf.Reset()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/send", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	gate.open(mux)
+	rr = httptest.NewRecorder()
+	gate.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/messages/send", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("open gate: status %d, want 200", rr.Code)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("a request the open gate served logged:\n%s", buf.String())
 	}
 }
 
@@ -259,8 +170,7 @@ func TestFullMux_StartingState(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthzHandler(&state))
 
-	var v1 startingGate
-	mux.Handle("/v1/", &v1)
+	mux.Handle("/v1/", newStartingGate("v1", logging.NewWithWriter("test", io.Discard)))
 
 	t.Run("healthz returns 200 starting", func(t *testing.T) {
 		rr := httptest.NewRecorder()
@@ -397,12 +307,11 @@ func TestPublishHandler_RejectsInvalidSource(t *testing.T) {
 func setupPublishTestClient(t *testing.T, options ...bus.ConnectOption) *bus.Client {
 	t.Helper()
 	options = append([]bus.ConnectOption{bus.WithReplicas(1)}, options...)
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, options...)
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, options...)
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	resetListenerTestState(t, client.Conn)
 	return client
 }
 
@@ -1189,12 +1098,11 @@ func TestRoleSetHandler_SetsRole(t *testing.T) {
 
 func setupAdminTestRegistry(t *testing.T, interests map[string][]string) *store.Registry {
 	t.Helper()
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	resetListenerTestState(t, client.Conn)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to create registry: %v", err)
@@ -1311,12 +1219,11 @@ func TestAdminInterestsHandler_MethodNotAllowed(t *testing.T) {
 
 func setupSessionsTest(t *testing.T, interests map[string][]string, ports map[string]int) (*store.Registry, *session.SessionRegistry) {
 	t.Helper()
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	resetListenerTestState(t, client.Conn)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to create registry: %v", err)
@@ -1398,12 +1305,11 @@ func TestSessionsHandler_JoinsRegistries(t *testing.T) {
 }
 
 func TestSessionsHandler_IncludesTitle(t *testing.T) {
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	resetListenerTestState(t, client.Conn)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to create registry: %v", err)
@@ -1755,14 +1661,12 @@ func TestIdempotencyKey_BackwardsCompat(t *testing.T) {
 }
 
 func TestDurableConsumerRestart(t *testing.T) {
-	publisher, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	publisher, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect publisher bus: %v", err)
 	}
 	t.Cleanup(publisher.Close)
-	resetListenerTestState(t, publisher.Conn)
-
-	firstListener, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	firstListener, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect first listener bus: %v", err)
 	}
@@ -1872,7 +1776,7 @@ func TestDurableConsumerRestart(t *testing.T) {
 		t.Fatalf("publish third failed: %v", err)
 	}
 
-	secondListener, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	secondListener, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect second listener bus: %v", err)
 	}
@@ -1909,7 +1813,7 @@ func TestDurableConsumerRestart(t *testing.T) {
 // subscription before re-subscribing. A fresh consumer must therefore be
 // created server-side and bound, so that unsubscribe never resets the cursor.
 func TestDurableConsumerSurvivesUnsubscribe(t *testing.T) {
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
 	}
@@ -1951,7 +1855,7 @@ func TestDurableConsumerSurvivesUnsubscribe(t *testing.T) {
 // WARN. It acks explicitly, one message at a time. Each durable here also carries a drifted ack
 // wait, which the refusal must leave as it is: a refused durable is never corrected.
 func TestASettingNATSCannotChangeOnTheListenerDurableIsRefused(t *testing.T) {
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
 	}
@@ -2038,6 +1942,9 @@ func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
 	if !strings.Contains(output.String(), consumer) || !strings.Contains(output.String(), "heartbeat") {
 		t.Fatalf("the listener's output does not name the refused durable and its heartbeat:\n%s", output.String())
 	}
+	if strings.Contains(output.String(), "envoy-listener /v1 open") {
+		t.Fatalf("the listener opened /v1 before it refused the durable:\n%s", output.String())
+	}
 	for _, bucket := range []string{store.Bucket, session.SessionBucket, cistore.Bucket} {
 		if _, err := client.JS().KeyValue(bucket); !errors.Is(err, natsgo.ErrBucketNotFound) {
 			t.Fatalf("KV bucket %s after the refused start: %v, want not found: the refusal came after the cache warm-ups", bucket, err)
@@ -2050,7 +1957,7 @@ func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
 // deliver inbox can never deliver again; left subscribed, each rebuild adds one more SUB the
 // connection carries until the process exits.
 func TestRebuildingALostDurableConsumerReplacesItsSubscription(t *testing.T) {
-	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
 	}
@@ -2101,7 +2008,7 @@ func TestRebuildingALostDurableConsumerReplacesItsSubscription(t *testing.T) {
 // listener must be rejected, not delete the consumer to steal the binding —
 // stealing resets the durable cursor and replays the full retention window.
 func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
-	first, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	first, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect first bus: %v", err)
 	}
@@ -2129,7 +2036,7 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	second, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	second, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect second bus: %v", err)
 	}
@@ -2150,6 +2057,239 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 	}
 	if !info.PushBound {
 		t.Fatalf("first listener lost its binding after rejected second bind: %+v", info)
+	}
+}
+
+// durableHeldElsewhere creates consumer as a listener creates it and binds it from a client of its
+// own on uri, as the task a rolling deploy replaces holds the durable, and waits until the server
+// shows it push-bound. Closing the returned client is that task's exit.
+func durableHeldElsewhere(t *testing.T, uri, consumer string) (*bus.Client, *natsgo.Subscription) {
+	t.Helper()
+	old, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect the old task: %v", err)
+	}
+	t.Cleanup(old.Close)
+	holder, err := startListenerSubscription(old, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
+	if err != nil {
+		t.Fatalf("bind the durable as the old task: %v", err)
+	}
+	waitFor(t, 5*time.Second, "the old task's durable to become push-bound", func() bool {
+		info, err := old.JS().ConsumerInfo(bus.Stream, consumer)
+		return err == nil && info.PushBound
+	})
+	return old, holder
+}
+
+// waitFor polls cond every 50 ms until it holds, and fails the test as waiting for desc once
+// timeout passes.
+func waitFor(t *testing.T, timeout time.Duration, desc string, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(timeout); !cond(); {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", desc)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// bindOutcome is what a bindListenerDurable run in a goroutine returned, and when.
+type bindOutcome struct {
+	bind durableBind
+	err  error
+	at   time.Time
+}
+
+// The replacement polls the durable while the old task holds it, so it binds within one interval of
+// the old task's exit rather than at the end of a backoff that grows with each attempt.
+func TestBindListenerDurableBindsWithinOneIntervalOfRelease(t *testing.T) {
+	uri := testnats.URL(t)
+	const consumer = "listener-bind-on-release"
+	old, _ := durableHeldElsewhere(t, uri, consumer)
+	replacement, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect the replacement: %v", err)
+	}
+	t.Cleanup(replacement.Close)
+
+	done := make(chan bindOutcome, 1)
+	go func() {
+		bind, err := bindListenerDurable(context.Background(), replacement, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() },
+			logging.NewWithWriter("test", io.Discard), 50*time.Millisecond, 10*time.Second)
+		done <- bindOutcome{bind, err, time.Now()}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case outcome := <-done:
+		t.Fatalf("the replacement returned while the old task held the durable: %+v", outcome)
+	default:
+	}
+	released := time.Now()
+	old.Close()
+	select {
+	case outcome := <-done:
+		if outcome.err != nil {
+			t.Fatalf("bind after the old task's exit: %v", outcome.err)
+		}
+		if after := outcome.at.Sub(released); after > 500*time.Millisecond {
+			t.Fatalf("the replacement bound %s after the old task's exit, want within 500 ms at a 50 ms interval", after)
+		}
+		if outcome.bind.attempts < 2 {
+			t.Fatalf("the bind took %d attempts, want the refused ones before the release counted too", outcome.bind.attempts)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the replacement never bound the released durable")
+	}
+	if !replacement.SubOK() {
+		t.Fatal("SubOK is false after the bind")
+	}
+}
+
+// A durable still held at the deadline ends the bind with the exhaustion sentinel, carrying the
+// bind's own refusal, and the holder keeps its binding: the bind never deletes the durable to take
+// it (TestBoundDurableConsumerIsNotStolen).
+func TestBindListenerDurableGivesUpAtTheDeadline(t *testing.T) {
+	uri := testnats.URL(t)
+	const consumer = "listener-bind-deadline"
+	old, holder := durableHeldElsewhere(t, uri, consumer)
+	replacement, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect the replacement: %v", err)
+	}
+	t.Cleanup(replacement.Close)
+
+	bind, err := bindListenerDurable(context.Background(), replacement, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() },
+		logging.NewWithWriter("test", io.Discard), 50*time.Millisecond, 200*time.Millisecond)
+	if !errors.Is(err, errListenerDurableBindExhausted) {
+		t.Fatalf("bind against a durable held past the deadline: %v, want errListenerDurableBindExhausted", err)
+	}
+	if !strings.Contains(err.Error(), "consumer is already bound to a subscription") {
+		t.Fatalf("the exhaustion %q does not carry the bind's own refusal", err)
+	}
+	if bind.attempts < 2 || bind.waited < 200*time.Millisecond {
+		t.Fatalf("the bind gave up after %d attempts in %s, want several over the 200 ms deadline", bind.attempts, bind.waited)
+	}
+	if !holder.IsValid() {
+		t.Fatal("the old task's subscription is gone")
+	}
+	info, err := old.JS().ConsumerInfo(bus.Stream, consumer)
+	if err != nil || !info.PushBound {
+		t.Fatalf("the old task's durable after the replacement gave up: %+v %v, want still push-bound", info, err)
+	}
+	if replacement.SubOK() {
+		t.Fatal("SubOK reports a durable the replacement never bound")
+	}
+}
+
+// A signal during the wait ends the bind at once, without waiting for the next attempt, so the
+// listener's ordered shutdown starts while ECS's stop timeout still runs.
+func TestBindListenerDurableStopsWhenTheContextEnds(t *testing.T) {
+	uri := testnats.URL(t)
+	const consumer = "listener-bind-cancelled"
+	durableHeldElsewhere(t, uri, consumer)
+	replacement, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect the replacement: %v", err)
+	}
+	t.Cleanup(replacement.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan bindOutcome, 1)
+	go func() {
+		bind, err := bindListenerDurable(ctx, replacement, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() },
+			logging.NewWithWriter("test", io.Discard), 2*time.Second, 10*time.Second)
+		done <- bindOutcome{bind, err, time.Now()}
+	}()
+	time.Sleep(120 * time.Millisecond)
+	cancelled := time.Now()
+	cancel()
+	select {
+	case outcome := <-done:
+		if !errors.Is(outcome.err, context.Canceled) {
+			t.Fatalf("bind after the context ended: %v, want context.Canceled", outcome.err)
+		}
+		if after := outcome.at.Sub(cancelled); after > 500*time.Millisecond {
+			t.Fatalf("the bind returned %s after the context ended, want at once rather than at its next 2 s attempt", after)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the bind never returned after the context ended")
+	}
+}
+
+// A durable no retry can bind ends the bind at the first attempt with the refusal, which main exits
+// on at once, never with the exhaustion that waits out the deadline.
+func TestBindListenerDurablePassesARefusalThrough(t *testing.T) {
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	const consumer = "listener-bind-refused"
+	config := natsgo.ConsumerConfig{Durable: consumer, DeliverSubject: natsgo.NewInbox()}
+	applyListenerConsumerPolicy(&config, bus.StreamSubjects())
+	config.Heartbeat = 5 * time.Second
+	if _, err := client.JS().AddConsumer(bus.Stream, &config); err != nil {
+		t.Fatalf("add a durable with a heartbeat: %v", err)
+	}
+
+	bind, err := bindListenerDurable(context.Background(), client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() },
+		logging.NewWithWriter("test", io.Discard), 50*time.Millisecond, 10*time.Second)
+	if !errors.Is(err, errListenerDurableRefused) || errors.Is(err, errListenerDurableBindExhausted) {
+		t.Fatalf("bind of a refused durable: %v, want errListenerDurableRefused alone", err)
+	}
+	if bind.attempts != 1 {
+		t.Fatalf("the bind made %d attempts at a refused durable, want 1", bind.attempts)
+	}
+}
+
+// A listener waiting out the task that holds its durable already serves /v1 and its role lane from
+// the interest, session and role stores, which its reconnect hook moves onto each new connection.
+// When nats.go gives up on the connection and the bus dials a replacement during that wait, the
+// durable's bind is still refused there, and the stores must move all the same: left on the closed
+// connection, every role lookup fails with "nats: connection closed", so the role lane reports
+// each role message it takes as delivery_failed until the durable binds.
+func TestTheStoresFollowAConnectionReplacedWhileTheDurableIsHeld(t *testing.T) {
+	uri := testnats.URL(t)
+	const (
+		machineID = "replaced-during-bind"
+		holderID  = "ses_replaced_during_bind"
+		role      = "replaced-during-bind-role"
+	)
+	consumer := "listener-" + machineID
+	durableHeldElsewhere(t, uri, consumer)
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect the replacement: %v", err)
+	}
+	t.Cleanup(client.Close)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the interest registry: %v", err)
+	}
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open the session registry: %v", err)
+	}
+	caches := listenerCaches(registry, sessions, nil)
+	client.AddReconnectHook(func(conn *natsgo.Conn) error { return rewatchListenerKVWatchers(conn, caches) })
+	if _, err := client.SubscribeCore(contracts.RoleTopicPrefix+">", func(*natsgo.Msg) {}, "envoy-listener-"+machineID); err != nil {
+		t.Fatalf("open the role lane: %v", err)
+	}
+	if _, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() }); err == nil {
+		t.Fatal("bound a durable the old task holds")
+	}
+	if _, err := registry.SetRole(holderID, machineID, role, false); err != nil {
+		t.Fatalf("claim %s: %v", role, err)
+	}
+
+	client.Conn.Close()
+	waitFor(t, 30*time.Second, "the role holder to be read on the replacement connection", func() bool {
+		holder, err := registry.RoleHolder(role)
+		return err == nil && holder == holderID
+	})
+	if client.SubOK() {
+		t.Fatal("SubOK reports the durable bound while the old task holds it")
 	}
 }
 
@@ -2337,6 +2477,63 @@ func TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException(t *testing.
 	}
 }
 
+// A role message can reach a listener whose session cache has not yet seen the holder another
+// listener registered and gave the role a moment ago: during a rolling deploy the old task and the
+// replacement share the machine's role lane, and each takes some of its messages. The holder is live
+// in the session bucket, so the message is forwarded to it and the claim stays. Releasing the claim
+// on the cache's word reports this message delivery_failed and leaves every later one no_holder until
+// the holder claims again.
+func TestListenerDeliveryHandler_RoleLaneForwardsToAHolderItsSessionCacheHasNotSeen(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const (
+		holderID = "ses_unseen_holder"
+		role     = "unseen-holder"
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := harness.sessions.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("warm the session cache: %v", err)
+	}
+	harness.sessions.StopWatch()
+	claimant, err := session.OpenSessionRegistry(harness.client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open the claimant's session registry: %v", err)
+	}
+	if err := claimant.Put(holderID, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register the holder: %v", err)
+	}
+	if _, err := harness.registry.SetRole(holderID, "test-machine", role, false); err != nil {
+		t.Fatalf("claim the role: %v", err)
+	}
+	var forwardedTo []string
+	cfg := harness.config
+	cfg.forwardRole = func(subject string, _ contracts.Envelope, _ time.Duration) error {
+		forwardedTo = append(forwardedTo, subject)
+		return nil
+	}
+	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "unseen-holder-delivery")
+	item.Payload = `{"type":"worker-queued"}`
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush exception probe: %v", err)
+	}
+
+	coreNATSDeliveryHandler(cfg)(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+	if len(forwardedTo) != 1 || forwardedTo[0] != contracts.AgentSubject(holderID) {
+		t.Fatalf("the role message was forwarded to %v, want once to %s", forwardedTo, contracts.AgentSubject(holderID))
+	}
+	if message, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("a forwarded role message emitted an exception (or the probe failed): %v %v", message, err)
+	}
+	if holder, err := harness.registry.RoleHolder(role); err != nil || holder != holderID {
+		t.Fatalf("the claim after the delivery = %q, %v; want %s's", holder, err, holderID)
+	}
+}
+
 func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "forward-publish-error"
@@ -2383,9 +2580,8 @@ func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *t
 // hasCapability, api.go) before forwarding to the holder: a role-lane envelope whose payload
 // carries a targeted Dispatch frame naming a mode the current holder does not advertise is
 // refused with delivery_failed, exactly like a stale or unreachable holder, rather than
-// reaching a holder that cannot execute it. This closes the consistency gap the send-boundary
-// fix left open: role forwarding never goes through /v1/messages/send, so it previously
-// bypassed the guard entirely.
+// reaching a holder that cannot execute it. Role forwarding never goes through
+// /v1/messages/send, so without its own guard it would bypass the send boundary's entirely.
 func TestListenerDeliveryHandler_RoleForwardRefusesUnadvertisedDeliveryMode(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "refuse-unadvertised-mode"
@@ -2762,7 +2958,7 @@ func TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode(t *testin
 	if strings.Contains(body, `test_messages_naked 1`) {
 		t.Fatalf("terminal refusal must not NAK the fanout envelope, got %s", body)
 	}
-	if logs := harness.logs.String(); strings.Contains(logs, "listener exception publish failed") {
+	if logs := harness.logs.String(); strings.Contains(logs, exceptionPublishFailedLine) {
 		t.Fatalf("capability refusal must publish its exception successfully:\n%s", logs)
 	}
 }
@@ -3321,11 +3517,9 @@ func exceptionRecipient(t *testing.T, exception contracts.Envelope) string {
 }
 
 func TestHealthzConsumerLag(t *testing.T) {
-	natsURI := sharedListenerTestNATSURI(t)
+	natsURI := testnats.URL(t)
 	conn := testnats.Connect(t, natsURI)
 	defer conn.Close()
-
-	resetListenerTestState(t, conn)
 
 	// Create a bus client
 	client, err := bus.ConnectOwningStream([]string{natsURI})
@@ -3453,8 +3647,7 @@ func TestMetrics_NotGatedByReadiness(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", met.Handler())
-	var v1 startingGate
-	mux.Handle("/v1/", &v1)
+	mux.Handle("/v1/", newStartingGate("v1", logging.NewWithWriter("test", io.Discard)))
 
 	// /metrics must return 200 before deps are set (startup).
 	rr := httptest.NewRecorder()
@@ -3951,20 +4144,8 @@ func setupTestNATS(t *testing.T) *bus.Client {
 	return client
 }
 
-// TestMain terminates the NATS container this package's tests share once they have all run.
-// Nothing else would: CI disables Ryuk, and without it a container outlives the test binary.
-func TestMain(m *testing.M) {
-	code := m.Run()
-	if sharedListenerNATSContainer != nil {
-		if err := testcontainers.TerminateContainer(sharedListenerNATSContainer); err != nil {
-			fmt.Fprintf(os.Stderr, "terminate the shared NATS container: %v\n", err)
-			if code == 0 {
-				code = 1
-			}
-		}
-	}
-	os.Exit(code)
-}
+// TestMain removes the NATS server the package's tests share (testnats.Main).
+func TestMain(m *testing.M) { os.Exit(testnats.Main(m)) }
 
 // endInterestWatcherWhileConnected ends the interest registry's KV watcher while NATS stays
 // connected: deleting the bucket's stream makes the watcher's ordered consumer fail to reset.
@@ -4112,7 +4293,7 @@ func consumerCreates(t *testing.T, conn *natsgo.Conn, consumer string) *atomic.I
 // setting NATS can update is corrected once and then left alone. A correction that updated on
 // every start would pass every other test, while every listener start rewrote its durable.
 func TestTheDriftCorrectionWritesADurableOnlyWhenThePolicyChangesIt(t *testing.T) {
-	uri := sharedListenerTestNATSURI(t)
+	uri := testnats.URL(t)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)

@@ -1,10 +1,6 @@
 import { expect, test } from "bun:test";
-import {
-  canSubmitComposer,
-  composerReferences,
-  hasUnsavedInput,
-} from "../conversation/MentionComposer";
-import { buildIssuePath } from "../refs/routes";
+import { canSubmitComposer, hasUnsavedInput } from "../conversation/MentionComposer";
+import { buildIssuePath, composerReferences } from "../refs/routes";
 
 test("composer turns typed dispatch and pasted same-origin links into reference chips", () => {
   expect(
@@ -34,8 +30,9 @@ test("composer emits canonical browser routes for versioned dispatch references"
 });
 
 test("composer holds Save until every image upload settles", () => {
-  expect(canSubmitComposer("comment", "See image", "", false, 1)).toBe(false);
-  expect(canSubmitComposer("comment", "See image", "", false, 0)).toBe(true);
+  // A draft nothing refuses (`draftRefusal` returned no reason) still waits on its upload.
+  expect(canSubmitComposer(undefined, false, 1)).toBe(false);
+  expect(canSubmitComposer(undefined, false, 0)).toBe(true);
 });
 
 test("hasUnsavedInput counts a suggestion's optional reason even with no replacement typed", () => {

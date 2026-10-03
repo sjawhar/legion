@@ -2,20 +2,26 @@
 // BROKER_TEST_DATABASE_URL server, dropped when the test ends. Every broker package's tests run
 // against one server at once, and the poller's passes act on every row of their tables, so tests
 // that shared tables would act on each other's rows; with a schema per test no test can see
-// another's rows, in its own package, a sibling package, or a concurrent run of either. It is an
+// another's rows, in its own package, a sibling package, or a concurrent run of either. It also
+// writes the rows only a database writer other than the broker could (Exec, ForgeRequestSignature,
+// CopyAsOtherKind), for the tests that pin what a release or an authentication refuses. It is an
 // ordinary package rather than a _test.go file so every broker package can import it.
 package storetest
 
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
 )
 
@@ -91,4 +97,94 @@ func admin(t testing.TB, databaseURL, statement string) {
 	if _, err := conn.Exec(ctx, statement); err != nil {
 		t.Fatalf("%s: %v", statement, err)
 	}
+}
+
+// Exec is a tamper that runs statements as a writer other than the broker would: $1 is the
+// record id wherever a statement names it, and an update must change exactly one row.
+func Exec(statements ...string) func(t testing.TB, st *store.Store, recordID string) {
+	return func(t testing.TB, st *store.Store, recordID string) {
+		t.Helper()
+		for _, statement := range statements {
+			var args []any
+			if strings.Contains(statement, "$1") {
+				args = []any{recordID}
+			}
+			tag, err := st.Pool.Exec(context.Background(), statement, args...)
+			if err != nil {
+				t.Fatalf("%s: %v", statement, err)
+			}
+			if strings.HasPrefix(statement, "update") && tag.RowsAffected() != 1 {
+				t.Fatalf("%s changed %d rows, want 1", statement, tag.RowsAffected())
+			}
+		}
+	}
+}
+
+// ForgeRequestSignature writes a copy of record recordID whose embedded request object carries an
+// altered signature, under the id its own body hashes to (the append-only trigger refuses updates,
+// not inserts), with an approved event by the record's own approver, and returns the copy's id.
+// Every link of that chain but the requester's signature holds, so only the request object's
+// re-verification can refuse it.
+func ForgeRequestSignature(t testing.TB, st *store.Store, recordID string) string {
+	t.Helper()
+	body, kind := readRecord(t, st, recordID)
+	parts := strings.Split(body.Request, ".")
+	if len(parts) != 3 {
+		t.Fatalf("request object has %d parts, want 3", len(parts))
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil || len(signature) == 0 {
+		t.Fatalf("decode request object signature: %v", err)
+	}
+	signature[0] ^= 0xff
+	parts[2] = base64.RawURLEncoding.EncodeToString(signature)
+	body.Request = strings.Join(parts, ".")
+	return insertApprovedCopy(t, st, recordID, body, kind)
+}
+
+// CopyAsOtherKind writes a copy of record recordID under the other record kind ('agent_secret'
+// for a 'launcher_credential' record, and the reverse), its body differing only in an expiry one
+// second later so it hashes to an id of its own, with an approved event by the record's own
+// approver, and returns the copy's id. Every link of that chain holds but the kind, so only a
+// chain verifier's scope to its own kind can refuse it.
+func CopyAsOtherKind(t testing.TB, st *store.Store, recordID string) string {
+	t.Helper()
+	body, kind := readRecord(t, st, recordID)
+	body.ExpiresAt = body.ExpiresAt.Add(time.Second)
+	other := "agent_secret"
+	if kind == other {
+		other = "launcher_credential"
+	}
+	return insertApprovedCopy(t, st, recordID, body, other)
+}
+
+func readRecord(t testing.TB, st *store.Store, recordID string) (record.Body, string) {
+	t.Helper()
+	var canonical, kind string
+	if err := st.Pool.QueryRow(context.Background(), `select body, kind from credential_requests where id=$1`, recordID).Scan(&canonical, &kind); err != nil {
+		t.Fatalf("read record %s: %v", recordID, err)
+	}
+	body, err := record.ParseBody(canonical)
+	if err != nil {
+		t.Fatalf("parse record %s: %v", recordID, err)
+	}
+	return body, kind
+}
+
+// insertApprovedCopy writes body as a record of kind under the id it hashes to, its other columns
+// copied from recordID, with an approved event by the body's approver, and returns the copy's id.
+func insertApprovedCopy(t testing.TB, st *store.Store, recordID string, body record.Body, kind string) string {
+	t.Helper()
+	ctx := context.Background()
+	copyID := body.ID()
+	if _, err := st.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, enrollment_id, code, created_at, expires_at)
+		select $2, $3, $4, approver, enrollment_id, code, created_at, expires_at from credential_requests where id=$1`,
+		recordID, copyID, body.Canonical(), kind); err != nil {
+		t.Fatalf("insert record copy: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, `insert into credential_request_events (record_id, event, login, actor) values ($1, 'approved', $2, $3)`,
+		copyID, body.Approver, "human:"+body.Approver); err != nil {
+		t.Fatalf("insert record copy's approval: %v", err)
+	}
+	return copyID
 }

@@ -20,6 +20,38 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+test("database reset clears fake Envoy subscribers before the next issue", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const staleIssue = await createIssue({ project: "CORE", title: "Stale subscriber" });
+  await setLiveSessions([{ session_id: "stale-session", title: "Stale session" }]);
+  await setInterests([
+    {
+      session_id: "stale-session",
+      topics: [
+        `notifications.dispatch.issue.${staleIssue.key}`,
+        `notifications.dispatch.issue.${staleIssue.key}.>`,
+      ],
+    },
+  ]);
+  await resetDatabase();
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "No stale subscriber" });
+  expect(issue.key).toBe(staleIssue.key);
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    const subscribers = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === `/api/v1/issues/${issue.key}/subscribers`
+    );
+    await page.goto(`/issues/${issue.key}`);
+    expect((await subscribers).status()).toBe(200);
+    await expect(page.getByRole("button", { name: "Subscribers: 0" })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
 test("issue header closes an issue and reopens it into Backlog", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Close from the header" });
@@ -185,13 +217,17 @@ test("issue header copies its key and persists its title, status, and route", as
     // The same button copies the dispatch:// reference under Ctrl/Cmd.
     await copyKey.click({ modifiers: ["ControlOrMeta"] });
     await expect.poll(copied).toEqual([issue.key, `dispatch://${issue.key}`]);
-    await page.getByText("Message route:", { exact: true }).hover();
-    await page.getByText("Message route:", { exact: true }).evaluate((label) => {
+    const routeLabel = page.getByText("Message route:", { exact: true });
+    await routeLabel.hover();
+    // The screenshot shows the hint as a fixed box under its label. The box sits over the header's
+    // controls, so the hint gets its own style back before anything below is clicked.
+    const hintStyle = await routeLabel.evaluate((label) => {
       const hintId = label.getAttribute("aria-describedby");
       const hint = hintId === null ? null : document.getElementById(hintId);
       if (hint === null) {
         throw new Error("Message route hint is missing");
       }
+      const style = hint.getAttribute("style");
       const labelBox = label.getBoundingClientRect();
       Object.assign(hint.style, {
         background: "Canvas",
@@ -212,12 +248,24 @@ test("issue header copies its key and persists its title, status, and route", as
         width: "18rem",
         zIndex: "50",
       });
+      return style;
     });
     await page.screenshot({
       path: testInfo.outputPath(
         `issue-header-${testInfo.project.name === "iphone" ? "390" : "1280"}.png`
       ),
     });
+    await routeLabel.evaluate((label, style) => {
+      const hint = document.getElementById(label.getAttribute("aria-describedby") ?? "");
+      if (hint === null) {
+        throw new Error("Message route hint is missing");
+      }
+      if (style === null) {
+        hint.removeAttribute("style");
+      } else {
+        hint.setAttribute("style", style);
+      }
+    }, hintStyle);
     await heading.click();
     const issueTitle = page.getByLabel("Issue title");
     await issueTitle.fill("First decision revised");
@@ -570,18 +618,16 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
 }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Subscriber removal" });
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([{ session_id: "e2e-unsub-session", title: "Worker (e2e)" }]);
-    await setInterests([
-      {
-        session_id: "e2e-unsub-session",
-        topics: [
-          `notifications.dispatch.issue.${issue.key}`,
-          `notifications.dispatch.issue.${issue.key}.>`,
-        ],
-      },
-    ]);
-  }
+  await setLiveSessions([{ session_id: "e2e-unsub-session", title: "Worker (e2e)" }]);
+  await setInterests([
+    {
+      session_id: "e2e-unsub-session",
+      topics: [
+        `notifications.dispatch.issue.${issue.key}`,
+        `notifications.dispatch.issue.${issue.key}.>`,
+      ],
+    },
+  ]);
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
@@ -591,9 +637,7 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
     await page.getByRole("button", { name: "Subscribers: 1" }).click();
     const subscribedAgents = page.getByRole("region", { name: "Subscribed agents" });
     await expect(subscribedAgents.getByText("Worker (e2e)", { exact: true })).toBeVisible();
-    if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await expect(subscribedAgents.locator("[title='Live']")).toHaveCount(1);
-    }
+    await expect(subscribedAgents.locator("[title='Live']")).toHaveCount(1);
 
     await subscribedAgents.getByRole("button", { name: "Unsubscribe" }).click();
     const dialog = page.getByRole("dialog", { name: "Unsubscribe" });
@@ -604,13 +648,11 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
 
     await expect(page.getByRole("region", { name: "Subscribed agents" })).toHaveCount(0);
 
-    if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await expect
-        .poll(async () =>
-          (await getUnsubscribeCalls()).some((call) => call.session_id === "e2e-unsub-session")
-        )
-        .toBe(true);
-    }
+    await expect
+      .poll(async () =>
+        (await getUnsubscribeCalls()).some((call) => call.session_id === "e2e-unsub-session")
+      )
+      .toBe(true);
 
     await expect
       .poll(async () =>
@@ -628,7 +670,6 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
 });
 
 async function subscribeSession(issueKey: string): Promise<void> {
-  if (process.env.PLAYWRIGHT_BASE_URL) return;
   await setLiveSessions([{ session_id: "e2e-session", title: "e2e-session-title" }]);
   await setInterests([
     {
@@ -809,7 +850,7 @@ test("issue header gives the title the row's free space beside a short details l
     // A busy details line (whose-turn badge, one label, Route, Subscribers) that fits beside a
     // 12rem title but not beside the whole title: just below 1280 the title must keep at least
     // half the card rather than share the row and drop to its minimum. The line without the
-    // GitHub link is the one that used to squeeze (with the link it was too wide to share).
+    // GitHub link is the one that could squeeze (with the link it is too wide to share).
     await patchIssue(issue.key, {
       labels: ["api"],
       title: "Migrate the issue header to a single row",

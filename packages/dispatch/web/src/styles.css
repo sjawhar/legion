@@ -18,6 +18,12 @@
   }
 }
 
+/* A control that cannot be pressed: `disabled`, or refused with `aria-disabled` so it stays in the
+   tab order and its reason reaches a keyboard (`components/RefusableButton.tsx`). The button
+   composites in `theme/classes.ts` paint both through this one state, so a hover written
+   `not-refused:hover:` never lights a refused button, and no look has to be stated twice. */
+@custom-variant refused (&:is(:disabled, [aria-disabled="true"]));
+
 /* Dispatch has no theme toggle: every surface follows the OS `prefers-color-scheme`, which is
    exactly Tailwind v4's default `dark:` variant (a `@media (prefers-color-scheme: dark)` query,
    built into `@import "tailwindcss"` with no `@custom-variant` override here). Components import

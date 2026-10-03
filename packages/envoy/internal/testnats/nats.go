@@ -6,16 +6,21 @@
 // timeout removes itself, so a later start, finding it removing, fails ("unexpected container status
 // removing"). Tests that stop, restart or configure their server still start their own (Start,
 // StartRestartable); while the shared server runs, the reaper stays connected for them too.
+//
+// Each test gets the shared server as the user of a JetStream account no earlier test used (URL),
+// so no test ever deletes and recreates a stream another test made. nats-server moves a deleted
+// stream's directory aside and removes it from a background goroutine; a second delete of the same
+// name before that goroutine has run leaves the stream's files where they were while it answers
+// success, and the next create of that name recovers the deleted stream's messages. Every account
+// keeps its streams in a directory of its own, so the names one test uses cannot reach another.
 package testnats
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"os"
 	"regexp"
 	"strings"
@@ -35,20 +40,20 @@ import (
 const Image = "nats:2.10"
 
 var (
-	// held is locked by the test using the shared server, from URL until the test's cleanups have
-	// run, so no two tests share its state. holder names that test, so that a second take by it or
-	// by one of its subtests, which would wait on itself, fails instead.
-	held     sync.Mutex
-	holderMu sync.Mutex
-	holder   string
-
-	mainRuns      bool
-	sharedOnce    sync.Once
-	shared        *tcnats.NATSContainer
-	sharedURI     string
-	sharedMonitor string
-	sharedErr     error
+	mainRuns   bool
+	sharedOnce sync.Once
+	shared     *accountServer
+	sharedErr  error
 )
+
+// firstAccounts is how many accounts the shared server starts with. Every time a test asks for
+// one past them, the server doubles them by a reload: a server's start time grows faster than its
+// account count (0.9 s for 1,000 on a loaded devbox, 26 s for 5,000). The reload's wait,
+// connectTimeout, caps that growth: at half a CPU, doubling 4,096 accounts took 36 s and 65 s in
+// two measurements, so the test that asks for account 4,097 fails. A package run takes one account
+// for each test and subtest that asks (103 for cmd/listener, 64 for internal/store), so -count=40
+// of cmd/listener in one binary reaches the ceiling.
+const firstAccounts = 256
 
 // init runs in every test binary that imports this package, whichever helper its tests use. Every
 // server these helpers start has no users unless a test configures some, and nats.go refuses an
@@ -66,7 +71,7 @@ func Main(m *testing.M) int {
 	mainRuns = true
 	code := m.Run()
 	if shared != nil {
-		if err := testcontainers.TerminateContainer(shared); err != nil {
+		if err := testcontainers.TerminateContainer(shared.ctr); err != nil {
 			fmt.Fprintf(os.Stderr, "remove the package's shared NATS container: %v\n", err)
 			if code == 0 {
 				code = 1
@@ -76,145 +81,118 @@ func Main(m *testing.M) int {
 	return code
 }
 
-// URL returns the package's shared NATS server with no stream on it, so none of a previous test's
-// streams, KV buckets, consumers or messages, and holds it for t until t ends. The reset waits for
-// the server to report no client connection first: a previous test that published without
-// waiting for acks leaves messages the server still routes after the test ends, into a stream
-// this test recreates.
+// URL returns the package's shared NATS server as the user of a JetStream account no earlier test
+// used, so none of a previous test's streams, KV buckets, consumers or messages is there, and no
+// stream name another test deleted can be recovered under it. A test gets one account however
+// often it asks, so every connection it makes reaches the same streams; each subtest is a test of
+// its own and gets its own account, since subtests that each delete and recreate one name in a
+// shared account would race as tests did on a shared server.
+// When the test ends, its account's streams are deleted to free their storage; nothing creates a
+// stream in that account again, so a delete that leaves files behind reaches no test.
 func URL(t testing.TB) string {
 	t.Helper()
 	if !mainRuns {
 		t.Fatal("testnats: the package's TestMain must return testnats.Main(m), which removes the shared NATS container")
 	}
-	take(t)
-	sharedOnce.Do(func() {
-		ctx := context.Background()
-		ctr, err := tcnats.Run(ctx, Image, tcnats.WithArgument("http_port", "8222"))
-		if err != nil {
-			sharedErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
-			return
-		}
-		shared = ctr
-		if sharedURI, sharedErr = ctr.ConnectionString(ctx); sharedErr != nil {
-			return
-		}
-		sharedMonitor, sharedErr = monitor(ctr)
-	})
+	sharedOnce.Do(func() { shared, sharedErr = startAccountServer(firstAccounts) })
 	if sharedErr != nil {
 		t.Fatalf("start the shared NATS: %v", sharedErr)
 	}
-	drained(t)
-	conn := Connect(t, sharedURI)
+	return shared.url(t)
+}
+
+// accountServer is a NATS server that hands each test a JetStream account no earlier test used.
+type accountServer struct {
+	ctr  *tcnats.NATSContainer
+	host string
+
+	mu sync.Mutex
+	// declared is how many accounts the server's configuration declares, and handedOut how many of
+	// them it has handed to a test. handedOut only grows: an account is never handed out twice.
+	declared  int
+	handedOut int
+	// holders maps each test holding an account to that account's URL.
+	holders map[string]string
+}
+
+// startAccountServer starts a server declaring accounts accounts. Its log carries no -DV protocol
+// trace, since a reload's outcome is read from the log.
+func startAccountServer(accounts int) (*accountServer, error) {
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, Image,
+		testcontainers.WithCmd("-js"),
+		tcnats.WithConfigFile(strings.NewReader(accountsConfig(accounts))))
+	if err != nil {
+		return nil, errors.Join(err, testcontainers.TerminateContainer(ctr))
+	}
+	host, err := ctr.PortEndpoint(ctx, "4222/tcp", "")
+	if err != nil {
+		return nil, errors.Join(err, testcontainers.TerminateContainer(ctr))
+	}
+	return &accountServer{ctr: ctr, host: host, declared: accounts, holders: map[string]string{}}, nil
+}
+
+// url is URL on s.
+func (s *accountServer) url(t testing.TB) string {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if uri, ok := s.holders[t.Name()]; ok {
+		return uri
+	}
+	if s.handedOut == s.declared {
+		if outcome := reload(t, s.ctr, accountsConfig(2*s.declared)); outcome != reloaded {
+			t.Fatalf("NATS refused %d accounts: %s", 2*s.declared, outcome)
+		}
+		s.declared *= 2
+	}
+	s.handedOut++
+	account := s.handedOut
+	uri := fmt.Sprintf("nats://t%d:t%d@%s", account, account, s.host)
+	// Wait for the account to answer, after the start or the reload that declared it.
+	Connect(t, uri).Close()
+	name := t.Name()
+	s.holders[name] = uri
+	t.Cleanup(func() {
+		s.mu.Lock()
+		delete(s.holders, name)
+		s.mu.Unlock()
+		deleteStreams(t, uri)
+	})
+	return uri
+}
+
+// accountsConfig declares accounts T1 to Tn, each with JetStream and one user, tn, whose password
+// is its name.
+func accountsConfig(n int) string {
+	var config strings.Builder
+	config.WriteString("accounts {\n")
+	for account := 1; account <= n; account++ {
+		fmt.Fprintf(&config, "  T%d: { jetstream: enabled, users: [ { user: t%d, password: t%d } ] }\n", account, account, account)
+	}
+	config.WriteString("}\n")
+	return config.String()
+}
+
+// deleteStreams deletes every stream in the account uri names, as its test ends.
+func deleteStreams(t testing.TB, uri string) {
+	t.Helper()
+	conn := Connect(t, uri)
 	defer conn.Close()
 	js, err := conn.JetStream()
 	if err != nil {
-		t.Fatalf("open JetStream on the shared NATS: %v", err)
+		t.Errorf("open JetStream to delete the test's streams: %v", err)
+		return
 	}
 	var streams []string
 	for name := range js.StreamNames() {
 		streams = append(streams, name)
 	}
 	for _, name := range streams {
-		if err := js.DeleteStream(name); err != nil {
-			t.Fatalf("empty the shared NATS of stream %s: %v", name, err)
+		if err := js.DeleteStream(name); err != nil && !errors.Is(err, natsgo.ErrStreamNotFound) {
+			t.Errorf("delete the test's stream %s: %v", name, err)
 		}
 	}
-	// The legacy stream listing drops a request that failed or timed out and closes empty, so the
-	// account says whether the server is empty.
-	info, err := js.AccountInfo()
-	if err != nil {
-		t.Fatalf("read the shared NATS's account after emptying it: %v", err)
-	}
-	if info.Streams != 0 {
-		t.Fatalf("the shared NATS still holds %d streams after emptying it", info.Streams)
-	}
-	return sharedURI
-}
-
-// take holds the shared server for t until t ends, refusing a take by the test already holding it
-// or by one of its subtests, which would wait for itself for the whole test binary's timeout.
-func take(t testing.TB) {
-	t.Helper()
-	holderMu.Lock()
-	current := holder
-	holderMu.Unlock()
-	if current != "" && (t.Name() == current || strings.HasPrefix(t.Name(), current+"/")) {
-		t.Fatalf("testnats: %s already holds the shared NATS server, so %s would wait for itself: take it once per test, through URL", current, t.Name())
-	}
-	held.Lock()
-	holderMu.Lock()
-	holder = t.Name()
-	holderMu.Unlock()
-	t.Cleanup(func() {
-		holderMu.Lock()
-		holder = ""
-		holderMu.Unlock()
-		held.Unlock()
-	})
-}
-
-// drained waits, within connectTimeout, for the shared server's monitoring endpoint to report no
-// client connection, and fails naming the connections left when it does not.
-func drained(t testing.TB) {
-	t.Helper()
-	deadline := time.Now().Add(connectTimeout)
-	for {
-		connections, err := clientConnections()
-		if err == nil && len(connections) == 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			if err != nil {
-				t.Fatalf("read the shared NATS's connections before emptying it: %v", err)
-			}
-			t.Fatalf("the shared NATS still has %d client connections %v from a previous test after %s", len(connections), connections, connectTimeout)
-		}
-		time.Sleep(retryInterval)
-	}
-}
-
-// monitorClient bounds each monitoring request, so one the server never answers cannot outlast the
-// drain's own bound.
-var monitorClient = &http.Client{Timeout: 5 * time.Second}
-
-// clientConnections lists the shared server's open client connections, each by id and name.
-func clientConnections() ([]string, error) {
-	response, err := monitorClient.Get(sharedMonitor + "/connz")
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s/connz answered %s", sharedMonitor, response.Status)
-	}
-	var connz struct {
-		Connections []struct {
-			CID  uint64 `json:"cid"`
-			Name string `json:"name"`
-		} `json:"connections"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&connz); err != nil {
-		return nil, fmt.Errorf("decode %s/connz: %w", sharedMonitor, err)
-	}
-	connections := make([]string, 0, len(connz.Connections))
-	for _, c := range connz.Connections {
-		connections = append(connections, fmt.Sprintf("%d %q", c.CID, c.Name))
-	}
-	return connections, nil
-}
-
-// monitor returns the base URL of a container's NATS monitoring endpoint.
-func monitor(ctr *tcnats.NATSContainer) (string, error) {
-	ctx := context.Background()
-	host, err := ctr.Host(ctx)
-	if err != nil {
-		return "", err
-	}
-	port, err := ctr.MappedPort(ctx, "8222/tcp")
-	if err != nil {
-		return "", err
-	}
-	return "http://" + host + ":" + port.Port(), nil
 }
 
 // Start runs a NATS test container on Image, removed when the test ends (even when its start
@@ -263,42 +241,53 @@ func StartNkeyGranted(t testing.TB, user string, allow ...string) *NkeyGrant {
 
 // Grant replaces the user's publish grant with allow and has the server reload its configuration,
 // as an operator changing a grant does: the server keeps its connections and applies the new grant
-// to them. It returns once the server reports the outcome of this reload, not an earlier one - it
-// waits for one more outcome line than the server's log held before the signal - and fails the
-// test, with the server's reason, when the server refused the new configuration.
+// to them. It fails the test, with the server's reason, when the server refused the new
+// configuration.
 func (g *NkeyGrant) Grant(t testing.TB, allow ...string) {
 	t.Helper()
+	if outcome := reload(t, g.ctr, publishGrantConfig(g.user, allow)); outcome != reloaded {
+		t.Fatalf("NATS refused the new grant %q: %s", allow, outcome)
+	}
+}
+
+// reloaded is the reload outcome nats-server logs when it took the new configuration.
+const reloaded = "Reloaded server configuration"
+
+// reloadOutcome matches each line nats-server logs when a reload ends: done, or refused with its
+// reason.
+var reloadOutcome = regexp.MustCompile(reloaded + `|Failed to reload server configuration: [^\r\n]*`)
+
+// reload writes config as ctr's configuration file and signals the server to reload it, as an
+// operator does: the server keeps its connections. It returns this reload's outcome (reloaded, or
+// the server's refusal) once the server has logged it, not an earlier one's: it waits for one more
+// outcome line than the server's log held before the signal.
+func reload(t testing.TB, ctr *tcnats.NATSContainer, config string) string {
+	t.Helper()
 	ctx := context.Background()
-	earlier := len(g.reloadOutcomes(t))
-	if err := g.ctr.CopyToContainer(ctx, []byte(publishGrantConfig(g.user, allow)), "/etc/nats.conf", 0o644); err != nil {
-		t.Fatalf("write the new grant: %v", err)
+	earlier := len(reloadOutcomes(t, ctr))
+	if err := ctr.CopyToContainer(ctx, []byte(config), "/etc/nats.conf", 0o644); err != nil {
+		t.Fatalf("write the new configuration: %v", err)
 	}
 	docker, err := testcontainers.NewDockerClientWithOpts(ctx)
 	if err != nil {
 		t.Fatalf("docker client: %v", err)
 	}
 	defer docker.Close()
-	if err := docker.ContainerKill(ctx, g.ctr.GetContainerID(), "HUP"); err != nil {
+	if err := docker.ContainerKill(ctx, ctr.GetContainerID(), "HUP"); err != nil {
 		t.Fatalf("signal NATS to reload: %v", err)
 	}
-	reloaded := wait.ForLog(reloadOutcome.String()).AsRegexp().WithOccurrence(earlier + 1).WithStartupTimeout(connectTimeout)
-	if err := reloaded.WaitUntilReady(ctx, g.ctr); err != nil {
+	done := wait.ForLog(reloadOutcome.String()).AsRegexp().WithOccurrence(earlier + 1).WithStartupTimeout(connectTimeout)
+	if err := done.WaitUntilReady(ctx, ctr); err != nil {
 		t.Fatalf("NATS did not report reloading its configuration: %v", err)
 	}
 	// This reload's outcome is the one after the earlier ones, whatever may have followed it.
-	if outcome := g.reloadOutcomes(t)[earlier]; outcome != "Reloaded server configuration" {
-		t.Fatalf("NATS refused the new grant %q: %s", allow, outcome)
-	}
+	return reloadOutcomes(t, ctr)[earlier]
 }
 
-// reloadOutcome matches each line nats-server logs when a reload ends: done, or refused with its
-// reason.
-var reloadOutcome = regexp.MustCompile(`Reloaded server configuration|Failed to reload server configuration: [^\r\n]*`)
-
-// reloadOutcomes lists the reload outcomes the server's log reports so far, oldest first.
-func (g *NkeyGrant) reloadOutcomes(t testing.TB) []string {
+// reloadOutcomes lists the reload outcomes ctr's log reports so far, oldest first.
+func reloadOutcomes(t testing.TB, ctr *tcnats.NATSContainer) []string {
 	t.Helper()
-	logs, err := g.ctr.Logs(context.Background())
+	logs, err := ctr.Logs(context.Background())
 	if err != nil {
 		t.Fatalf("read NATS's log: %v", err)
 	}
@@ -486,4 +475,54 @@ func waitForJetStream(t testing.TB, check func() error) {
 		time.Sleep(retryInterval)
 	}
 	t.Fatalf("JetStream was not ready within %s: %v", connectTimeout, err)
+}
+
+// nats-server answers a stream create it could not make a file store for with streamStoreFailed,
+// under the stream-create error code; RecreateKeyValue retries that answer for up to
+// recreateTimeout.
+const (
+	streamStoreFailed     = "error creating store for stream"
+	streamCreateErrorCode = natsgo.ErrorCode(10049)
+	recreateTimeout       = 10 * time.Second
+)
+
+// RecreateKeyValue creates the KV bucket config names in place of one the test has just deleted,
+// and returns it.
+//
+// nats-server answers a stream delete before it is done with the account's directories: a
+// goroutine of its own then removes the account's streams directory, which it can only do once
+// that directory is empty, so only when the deleted stream was the account's last (stream.go,
+// stop, v2.10 through v2.15). A create that arrives before that goroutine has run can lose the
+// directory between making it and making its stream's own inside it: the server logs "could not
+// create storage directory - mkdir .../streams/<stream>: no such file or directory" and answers
+// the create "error creating store for stream". No API says when the goroutine has run, so the
+// create is retried on exactly that answer, every retryInterval; any other error fails the test
+// at once.
+func RecreateKeyValue(t testing.TB, js natsgo.JetStreamContext, config *natsgo.KeyValueConfig) natsgo.KeyValue {
+	t.Helper()
+	var kv natsgo.KeyValue
+	err := retryStreamStoreFailure(func() error {
+		var err error
+		kv, err = js.CreateKeyValue(config)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("recreate KV bucket %s: %v", config.Bucket, err)
+	}
+	return kv
+}
+
+// retryStreamStoreFailure runs create again while it fails with the server's stream store
+// failure, for up to recreateTimeout, and returns its last error.
+func retryStreamStoreFailure(create func() error) error {
+	deadline := time.Now().Add(recreateTimeout)
+	for {
+		err := create()
+		var apiErr *natsgo.APIError
+		storeFailed := errors.As(err, &apiErr) && apiErr.ErrorCode == streamCreateErrorCode && apiErr.Description == streamStoreFailed
+		if !storeFailed || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(retryInterval)
+	}
 }

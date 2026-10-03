@@ -60,7 +60,8 @@ type contractRig struct {
 }
 
 // newContractRig mounts a real broker (brokertest.NewRig) and serves this package's own Server
-// on a real unix socket, its Broker pointed at that real broker's URL and OperatorFile. Every
+// on a real unix socket, its Broker pointed at that real broker's URL and OperatorFile, both
+// logging to logBuf through one logger, as cmd/agent-secrets-helper wires them. Every
 // socket/registry/operator artifact lives under its own TempDir, never under $HOME — the caller
 // is expected to have set HOME to a separate, otherwise-untouched TempDir of its own so it can
 // later assert nothing wrote there.
@@ -71,12 +72,13 @@ func newContractRig(t *testing.T) *contractRig {
 	logBuf := &syncBuffer{}
 	sessionsPath := filepath.Join(artifacts, "sessions.json")
 	cr := &contractRig{broker: broker, sessionsPath: sessionsPath, logBuf: logBuf}
+	log := slog.New(slog.NewTextHandler(logBuf, nil))
 	cr.srv = &Server{
 		Registry: NewRegistry(sessionsPath),
-		Broker:   &Broker{URL: broker.URL, OperatorFile: broker.OperatorFile, HTTP: http.DefaultClient},
+		Broker:   &Broker{URL: broker.URL, OperatorFile: broker.OperatorFile, HTTP: http.DefaultClient, Log: log},
 		Hostname: "contract-test-host",
 		PeerOf:   PeerOf,
-		Log:      slog.New(slog.NewTextHandler(logBuf, nil)),
+		Log:      log,
 		MinRenew: 50 * time.Millisecond,
 	}
 	cr.sock = filepath.Join(artifacts, "helper.sock")
@@ -126,22 +128,8 @@ func waitForIssued(t *testing.T, b *Broker) {
 	t.Fatalf("login never reached issued: %+v", b.LoginStatus())
 }
 
-// --- wire-shape mirrors (contract v9), for decoding the real broker's own responses ---
-
-type contractChallenges struct {
-	Approve string `json:"approve"`
-}
-
-type contractLookupResponse struct {
-	RecordID   string              `json:"record_id"`
-	State      string              `json:"state"`
-	Challenges *contractChallenges `json:"challenges"`
-}
-
-type contractApproveResponse struct {
-	State        string  `json:"state"`
-	CredentialID *string `json:"credential_id"`
-}
+// --- wire-shape mirrors of the shared broker contract
+// (dispatch://AGENTC-393/artifact/plan-overview-md), for decoding the real broker's responses ---
 
 type contractSelfResponse struct {
 	EnrollmentID string `json:"enrollment_id"`
@@ -160,13 +148,13 @@ func contractDecode[T any](t *testing.T, body []byte) T {
 
 // TestContractLoginApprovalEnrollSignAndExpiry drives helper.Broker/Server against a real broker
 // (brokertest.NewRig) end to end: Broker.Login -> a human approves the pending machine login
-// through the real UI routes with a real WebAuthn assertion -> LoginStatus reaches issued ->
-// EnrollBox mints a live enrollment -> a session register (the existing path) enrolls kind host
-// -> sign produces a proof the real broker's own /v1/enrollments/self accepts -> the launcher
-// credential is expired by direct SQL -> the next EnrollBox names the login command again. It
-// also proves the machine key, the session key, and every proof this test produced never touch
-// disk (neither an arbitrary $HOME nor the registry's own persisted sessions.json state file) or
-// a log line.
+// through the real UI routes, by its typed code and the operator's login -> LoginStatus reaches
+// issued -> EnrollBox mints a live enrollment -> a session register (the existing path) enrolls
+// kind host -> sign produces a proof the real broker's own /v1/enrollments/self accepts -> the
+// launcher credential is expired by direct SQL -> the next EnrollBox names the login command
+// again. It also proves the machine key, the session key, and every proof this test produced
+// never touch disk (neither an arbitrary $HOME nor the registry's own persisted sessions.json
+// state file) or a log line.
 func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -184,29 +172,7 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	}
 
 	// --- approve (human/operator side, over the rig's own UI-bearer HTTP calls) ---
-	status, body := cr.broker.UI(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
-	if status != http.StatusOK {
-		t.Fatalf("POST /v1/machine-logins/lookup = %d: %s", status, body)
-	}
-	looked := contractDecode[contractLookupResponse](t, body)
-	if looked.State != "pending" || looked.Challenges == nil || looked.Challenges.Approve == "" {
-		t.Fatalf("lookup = %+v, want pending with an approve challenge", looked)
-	}
-	challenge, err := base64.RawURLEncoding.DecodeString(looked.Challenges.Approve)
-	if err != nil {
-		t.Fatalf("decode approve challenge: %v", err)
-	}
-	assertion := cr.broker.Approver.Assert(t, brokertest.RPID, brokertest.Origin, challenge)
-	status, body = cr.broker.UI(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
-		map[string]any{"assertion": json.RawMessage(assertion), "code": code})
-	if status != http.StatusOK {
-		t.Fatalf("approve machine record = %d: %s", status, body)
-	}
-	approved := contractDecode[contractApproveResponse](t, body)
-	if approved.State != "approved" || approved.CredentialID == nil || *approved.CredentialID == "" {
-		t.Fatalf("approve response = %+v, want state=approved with a credential_id", approved)
-	}
-	credentialID := *approved.CredentialID
+	credentialID := cr.broker.DecideMachineLogin(t, code, true)
 
 	// --- LoginStatus reaches issued ---
 	waitForIssued(t, b)
@@ -247,7 +213,7 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	if !signed.OK || signed.Proof == "" || signed.EnrollmentID != reg.EnrollmentID {
 		t.Fatalf("sign: %+v", signed)
 	}
-	status, body = cr.broker.Req(t, http.MethodGet, "/v1/enrollments/self", map[string]string{"Proof": signed.Proof}, nil)
+	status, body := cr.broker.Req(t, http.MethodGet, "/v1/enrollments/self", map[string]string{"Proof": signed.Proof}, nil)
 	if status != http.StatusOK {
 		t.Fatalf("GET /v1/enrollments/self (real broker) = %d: %s", status, body)
 	}
@@ -279,8 +245,8 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	if b.cred.Load() != nil {
 		t.Fatal("an expired credential (401 LAUNCHER_INVALID) must clear the in-memory credential")
 	}
-	if status := cr.call(t, Request{Op: "login-status"}); !status.OK || status.LoginState != "expired" {
-		t.Fatalf("login-status after the broker refused the expired credential: %+v, want expired", status)
+	if status := cr.call(t, Request{Op: "login-status"}); !status.OK || status.LoginState != "expired" || !status.LoginRefused {
+		t.Fatalf("login-status after the broker refused the expired credential: %+v, want expired and refused", status)
 	}
 
 	// --- neither the machine key, the session key, nor any proof this test produced ever
@@ -299,7 +265,7 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 			}
 		}
 	}
-	for _, token := range []string{code, signed.Proof, string(assertion)} {
+	for _, token := range []string{code, signed.Proof} {
 		if token != "" && strings.Contains(logText, token) {
 			t.Fatalf("a bearer-shaped token appears in the log verbatim: %q", token)
 		}
@@ -342,5 +308,76 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	}
 	if files != 0 {
 		t.Fatalf("nothing must ever write under HOME; found %d file(s)", files)
+	}
+}
+
+// TestContractARefusedLauncherCredentialIsAnErrorAndTheHelperKeepsServing reproduces a machine
+// login dying under a running helper, against a real broker: the credential passes its expiry
+// on the broker (direct SQL, as BROKER_LAUNCHER_CREDENTIAL_SECONDS elapsing would) and a session
+// registers after it. The helper keeps serving — register, sessions and login-status all answer —
+// but says at ERROR that the broker refused the credential and that the session cannot enroll and
+// why, where a minute-by-minute stream of retry warnings once hid it for hours.
+func TestContractARefusedLauncherCredentialIsAnErrorAndTheHelperKeepsServing(t *testing.T) {
+	cr := newContractRig(t)
+	b := cr.srv.Broker
+	code, err := b.Login(context.Background(), cr.srv.Hostname)
+	if err != nil {
+		t.Fatalf("Broker.Login: %v", err)
+	}
+	credentialID := cr.broker.DecideMachineLogin(t, code, true)
+	waitForIssued(t, b)
+	if _, err := cr.broker.Store.Pool.Exec(context.Background(),
+		`update launcher_credentials set expires_at = now() - interval '1 minute' where id = $1::uuid`, credentialID); err != nil {
+		t.Fatalf("expire launcher credential: %v", err)
+	}
+
+	if reg := cr.call(t, Request{Op: "register"}); !reg.OK || reg.EnrollmentID != "" {
+		t.Fatalf("register after the credential expired: %+v; want OK and not enrolled", reg)
+	}
+	const cannotEnroll = `level=ERROR msg="session cannot enroll: the helper holds no launcher credential; run: agent-secrets launcher login, and have a human approve it"`
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(cr.logBuf.String(), cannotEnroll) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no ERROR says the session cannot enroll; log:\n%s", cr.logBuf.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	log := cr.logBuf.String()
+	refused := `level=ERROR msg="the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)" credential_id=` + credentialID + " code=LAUNCHER_INVALID"
+	why := `why="the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch)"`
+	if !strings.Contains(log, refused) || !strings.Contains(log, why) {
+		t.Fatalf("log:\n%s\nwant %s, and the session's error naming %s", log, refused, why)
+	}
+	if strings.Contains(log, `level=WARN msg="enroll failed; retrying"`) {
+		t.Fatalf("a missing credential is an ERROR, never a retry warning; log:\n%s", log)
+	}
+
+	if sessions := cr.call(t, Request{Op: "sessions"}); !sessions.OK || len(sessions.Sessions) != 1 || sessions.Sessions[0].State != "enrolling" {
+		t.Fatalf("sessions after the refusal: %+v; want the one session, still enrolling", sessions)
+	}
+	if status := cr.call(t, Request{Op: "login-status"}); !status.OK || status.LoginState != "expired" || !status.LoginRefused || status.CredentialDropped != dropRefused || status.CredentialHeld {
+		t.Fatalf("login-status after the refusal: %+v; want expired, refused by the broker, none held", status)
+	}
+}
+
+// TestContractLoginStatusNamesWhenTheLauncherCredentialExpires: the real broker's issued poll
+// carries the minted credential's expiry, and login-status hands it on, so a human sees the
+// deadline for the next machine login before the credential lapses.
+func TestContractLoginStatusNamesWhenTheLauncherCredentialExpires(t *testing.T) {
+	cr := newContractRig(t)
+	b := cr.srv.Broker
+	code, err := b.Login(context.Background(), cr.srv.Hostname)
+	if err != nil {
+		t.Fatalf("Broker.Login: %v", err)
+	}
+	credentialID := cr.broker.DecideMachineLogin(t, code, true)
+	waitForIssued(t, b)
+	var minted time.Time
+	if err := cr.broker.Store.Pool.QueryRow(context.Background(), `select expires_at from launcher_credentials where id = $1::uuid`, credentialID).Scan(&minted); err != nil {
+		t.Fatalf("read the minted credential's expiry: %v", err)
+	}
+	status := cr.call(t, Request{Op: "login-status"})
+	if want := minted.UTC().Format(time.RFC3339); !status.OK || !status.CredentialHeld || status.CredentialExpiresAt != want {
+		t.Fatalf("login-status: %+v; want the credential held, expiring at %s", status, want)
 	}
 }

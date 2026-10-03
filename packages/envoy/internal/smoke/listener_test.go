@@ -4,7 +4,7 @@
 // Verifies critical endpoints work end-to-end with a real NATS server via testcontainers.
 //
 // ENVOY_SMOKE_IMAGE names the already-built listener image to run. This test never builds one:
-// a build inside `go test` spends the test's deadline, which is what LEGION-361 removed. Unset,
+// a build inside `go test` spends the test's deadline (LEGION-361). Unset,
 // the test fails immediately and prints the build command, so a lane that loses its build step
 // — a rename, a typo, a new workflow — goes red instead of quietly building again.
 package smoke
@@ -76,10 +76,11 @@ func TestSmoke(t *testing.T) {
 			"ENVOY_API_TOKEN": smokeAPIToken,
 		}),
 		testcontainers.WithExposedPorts("9020/tcp"),
-		// /healthz answers 200 from the moment the port binds: "starting" until NATS init completes,
-		// then "healthy" (a liveness answer, docs/solutions/envoy/async-health-startup-pattern.md).
-		// /v1 opens only when init completes, so the subtests below start once the body says
-		// "healthy"; a 200 alone released them into the /v1 503 "service starting" window.
+		// /healthz answers 200 from the moment the port binds: "starting" until the durable consumer
+		// binds, then "healthy" (a liveness answer, docs/solutions/envoy/async-health-startup-pattern.md).
+		// /v1 answers 503 "service starting" until NATS is connected and the interest and session
+		// caches are warm, so the subtests below start once the body says "healthy"; a 200 alone
+		// released them into that window.
 		testcontainers.WithWaitStrategy(
 			wait.ForHTTP("/healthz").
 				WithPort("9020/tcp").

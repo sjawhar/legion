@@ -48,7 +48,7 @@ async function runSession(
   steps: readonly Step[],
   options: { readonly dispatch: boolean; readonly summary?: string }
 ): Promise<{ readonly turns: Request[]; readonly summaries: Request[] }> {
-  const { home, workspace, sessions } = await ompRoot("dispatch-first-omp-", cleanup);
+  const { home, workspace, sessions } = await ompRoot(binary, "dispatch-first-omp-", cleanup);
 
   let answered = 0;
   const { requests, base } = serveStandin(cleanup, (url, body) => {

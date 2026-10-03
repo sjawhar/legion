@@ -12,47 +12,20 @@
 //
 // Comparing a tree against another is what it is for: run it on this head and on the base, and
 // read the two lines it prints for the queued writer.
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
 import { expect, test } from "@playwright/test";
 
-import { createComment, createIssue, createProject } from "./api";
+import {
+  baseUrl,
+  createComment,
+  createIssue,
+  createProject,
+  getArtifactText,
+  userHeaders,
+} from "./api";
 import { documentEditor } from "./editor";
-import { dispatchPort } from "./harness-ports";
+import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
-
-const execFileAsync = promisify(execFile);
-const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${dispatchPort}`;
-
-/** The database this probe may write to, resolved as `seed.ts` resolves it: a deployed server's
- * own `PLAYWRIGHT_DATABASE_URL`, else the `DATABASE_URL` this run supplied. It never falls back
- * to libpq's default, because this probe installs a `doc_updates` trigger and cancels a
- * backend. */
-function databaseUrl(): string {
-  const deployed = process.env.PLAYWRIGHT_BASE_URL
-    ? process.env.PLAYWRIGHT_DATABASE_URL
-    : undefined;
-  const url = deployed ?? process.env.DATABASE_URL;
-  if (url === undefined || url.trim() === "") {
-    throw new Error(
-      "PLAYWRIGHT_DATABASE_URL or DATABASE_URL must name the database for the failed-room probe"
-    );
-  }
-  return url;
-}
-
-async function sql(statement: string): Promise<string> {
-  const { stdout } = await execFileAsync("psql", [
-    databaseUrl(),
-    "-v",
-    "ON_ERROR_STOP=1",
-    "-tAc",
-    statement,
-  ]);
-  return stdout.trim();
-}
 
 /** Holds the room's next durable append inside its `doc_updates` insert for this long, which is
  * how the probe gets a writer it can cancel while it owns the room. Every `doc_updates` insert
@@ -118,7 +91,7 @@ async function anchoredComment(issueKey: string, body: string, quote: string): P
   const started = Date.now();
   const response = await fetch(`${baseUrl}/api/v1/issues/${issueKey}/comments`, {
     body: JSON.stringify({ anchor: { artifact: "spec", quote }, body }),
-    headers: { "Content-Type": "application/json", "X-Dispatch-User": "alice" },
+    headers: { "Content-Type": "application/json", ...(await userHeaders("alice")) },
     method: "POST",
     signal: AbortSignal.timeout(30_000),
   });
@@ -194,9 +167,9 @@ test("a writer inside the docs layer when its room fails is told, and the room r
   console.log(
     `FAILED-ROOM queued status=${behind.status} code=${behind.code} in ${behind.seconds}s`
   );
-  // The writer that was inside the docs layer when the room failed is told so. Before the fix it
-  // waited for a recovery that could not finish while it held what that recovery needs, and its
-  // client gave up at 30 s.
+  // The writer that was inside the docs layer when the room failed is told so, rather than
+  // waiting for a recovery that cannot finish while it holds what that recovery needs until its
+  // client gives up at 30 s.
   expect(holder.status).toBe(503);
   expect(holder.code).toBe("DOC_SERVICE_UNAVAILABLE");
   // The one behind it has two correct outcomes: told the same way, or admitted after the room
@@ -218,12 +191,7 @@ test("a writer inside the docs layer when its room fails is told, and the room r
   );
   expect(recovered.status).toBe(201);
 
-  const artifacts = await fetch(`${baseUrl}/api/v1/issues/${issue.key}`, {
-    headers: { "X-Dispatch-User": "alice" },
-  }).then((response) => response.json() as Promise<{ artifacts: { id: string }[] }>);
-  const text = await fetch(`${baseUrl}/api/v1/artifacts/${artifacts.artifacts[0].id}/text`, {
-    headers: { "X-Dispatch-User": "alice" },
-  }).then((response) => response.json() as Promise<{ markdown: string }>);
+  const text = await getArtifactText(issue.primary_artifact_id);
   console.log(`FAILED-ROOM document text=${JSON.stringify(text.markdown)}`);
   // The room reloaded from its durable copy with the browser's own paragraph in it, which is the
   // half of the recovery no status code shows.

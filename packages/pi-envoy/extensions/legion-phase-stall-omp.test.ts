@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -15,7 +16,7 @@ import {
 // The phase-stall follow-up on the real Oh My Pi (src/legion/phase-stall.ts): only the real binary
 // shows when the host fires `session_stop`, how it turns the returned follow-up into the next turn,
 // what the model is sent, and that the transcript keeps the state a resumed worker restores.
-// LEGION_TEST_OMP names the binary: the fork pin in packages/daemon/src/daemon/omp-pin.ts, which
+// LEGION_TEST_OMP names the binary: the fork pin in the repository's .omp-pin, which
 // CI's pi-envoy job installs; on the devbox, `mise where <pin>`/bin/omp. A run without one skips,
 // except on GitHub Actions, where a skip would hide the only run of the check on the host that
 // ships it (GITHUB_ACTIONS, not CI: agent harnesses on the devbox export CI=true).
@@ -25,6 +26,14 @@ import {
 // The WAITING self-check case below fails if that ever changes.
 const omp = process.env.LEGION_TEST_OMP;
 const onActions = process.env.GITHUB_ACTIONS === "true";
+/** The daemon's golden registration answer (`packages/daemon/internal/api`), so a field the daemon
+ * adds to it reaches the stub below. */
+const registered: Record<string, unknown> = JSON.parse(
+  readFileSync(
+    path.resolve(import.meta.dir, "../../contracts/fixtures/daemon-api/register.json"),
+    "utf8"
+  )
+);
 
 interface Pane {
   /** Every request the stand-in served: the model gateway's, the daemon's, and the listener's. */
@@ -93,11 +102,11 @@ interface PaneOptions {
 
 /**
  * Runs one implementer pane on the real Oh My Pi until its run settles: the Legion and Envoy
- * extensions from this checkout, booted against a stand-in for the TypeScript daemon's worker
- * routes and the Envoy listener (no NATS: the Envoy extension then skips inbound delivery, and
- * the role claim is two listener calls), with a stand-in model gateway that answers the pane's
- * turns from `replies`, and a stand-in `legion` on PATH that records what it was run with. The
- * daemon's assignment arrives as the RPC `prompt`, as both daemons deliver it.
+ * extensions from this checkout, booted against a stand-in for the daemon's claim routes and the
+ * Envoy listener (no NATS: the Envoy extension then skips inbound delivery, and the role claim is
+ * two listener calls), with a stand-in model gateway that answers the pane's turns from
+ * `replies`, and a stand-in `legion` on PATH that records what it was run with. The daemon's
+ * assignment arrives as the RPC `prompt`.
  */
 async function runPane(
   binary: string,
@@ -105,7 +114,7 @@ async function runPane(
   options: PaneOptions = {}
 ): Promise<Pane> {
   const legionPane = options.legion ?? true;
-  const { root, home, workspace, sessions } = await ompRoot("legion-phase-stall-", cleanup);
+  const { root, home, workspace, sessions } = await ompRoot(binary, "legion-phase-stall-", cleanup);
   const state = path.join(root, "state");
   const bin = path.join(root, "bin");
   const legionLog = path.join(root, "legion.log");
@@ -170,15 +179,18 @@ async function runPane(
         })),
       });
     }
-    if (url.pathname === "/legion/v1/worker/started") {
+    if (url.pathname === "/legion/v1/claims/register") {
       return Response.json({
-        roleToken: "legion-stall-stall-2-implementer",
+        ...registered,
+        claimToken: "legion-stall-stall-2-implementer",
+        tree: "STALL-1",
+        issue: "STALL-2",
+        role: "implementer",
+        generation: 1,
         secret: "stall-secret",
-        gitName: "Legion Worker",
-        gitEmail: "worker@example.test",
       });
     }
-    if (url.pathname === "/legion/v1/worker/ready") return Response.json({});
+    if (url.pathname === "/legion/v1/claims/ready") return new Response(null, { status: 204 });
     if (url.pathname === "/legion/v1/grants") {
       grants += 1;
       return Response.json({
@@ -345,7 +357,7 @@ test.skipIf(omp === undefined && !onActions)(
     // The worker registered through the daemon's routes, and its handoff_complete minted a grant.
     expect(
       pane.requests.map((request) => request.path).filter((p) => p.startsWith("/legion/"))
-    ).toEqual(["/legion/v1/worker/started", "/legion/v1/worker/ready", "/legion/v1/grants"]);
+    ).toEqual(["/legion/v1/claims/register", "/legion/v1/claims/ready", "/legion/v1/grants"]);
     const turns = pane.turns();
     // Three turns in one run: the text-only one, the follow-up's, and the reply to the tool result.
     // None after: the handoff closed the phase, so the last settle sent nothing.

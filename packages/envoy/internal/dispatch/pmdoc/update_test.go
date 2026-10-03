@@ -3,7 +3,6 @@ package pmdoc
 import (
 	"bytes"
 	"encoding/base64"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -189,18 +188,7 @@ func hasMark(node *Node, markType string) bool {
 
 func decodeWithYProsemirror(t *testing.T, update []byte) *Node {
 	t.Helper()
-	if _, err := exec.LookPath("bun"); err != nil {
-		if os.Getenv("CI") == "" {
-			t.Skip("bun is not on PATH; cross-language decoder is required in CI")
-		}
-		t.Fatalf("bun is required in CI: %v", err)
-	}
-
-	encoded := base64.StdEncoding.EncodeToString(update)
-	output, stderr, err := runDecoder("decode.ts", encoded)
-	if err != nil {
-		t.Fatalf("run decode.ts: %v\nstderr:\n%s", err, stderr)
-	}
+	output := genResult(t, "decode.ts", update)
 	t.Log("y-prosemirror decoded with decode.ts")
 
 	decoded, err := FromJSON(output)
@@ -210,16 +198,45 @@ func decodeWithYProsemirror(t *testing.T, update []byte) *Node {
 	return decoded
 }
 
-func runDecoder(script, encoded string) ([]byte, []byte, error) {
-	cmd := exec.Command("bun", "run", script, encoded)
-	cmd.Dir = filepath.Join("gen")
-	output, err := cmd.Output()
-	var stderr []byte
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		stderr = exitErr.Stderr
+// genResult runs gen/<script> on the base64 of update and returns what the script wrote to the
+// file it is given as its last argument. A gen script hands its result back in a file, never on
+// stdout, which a Bun script can cut short while exiting 0
+// (docs/solutions/testing/bun-console-log-drops-what-a-full-non-blocking-pipe-cannot-take-and-exits-0.md),
+// so anything it prints to stdout fails the test rather than going unread, as does exiting 0
+// without creating the file. A file the script created and left empty passes that check; the
+// test's own check of the result is what fails on it.
+func genResult(t *testing.T, script string, update []byte) []byte {
+	t.Helper()
+	if _, err := exec.LookPath("bun"); err != nil {
+		if os.Getenv("CI") == "" {
+			t.Skipf("bun is not on PATH; %s is required in CI", script)
+		}
+		t.Fatalf("bun is required in CI: %v", err)
 	}
-	return output, stderr, err
+	out := filepath.Join(t.TempDir(), "result")
+	cmd := genScript(script, base64.StdEncoding.EncodeToString(update), out)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("%s: %v\nstderr:\n%s", script, err, stderr.Bytes())
+	}
+	if len(stdout) > 0 {
+		t.Fatalf("%s printed %d bytes to stdout, which nothing reads: a gen script writes its result to the file it is given\nstderr:\n%s", script, len(stdout), stderr.Bytes())
+	}
+	result, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("%s exited 0 without writing its result to the file it is given: %v\nstderr:\n%s", script, err, stderr.Bytes())
+	}
+	return result
+}
+
+// genScript is the command that runs gen/<script> with args, as every test that reads the
+// browser editor's engine runs it.
+func genScript(script string, args ...string) *exec.Cmd {
+	cmd := exec.Command("bun", append([]string{"run", script}, args...)...)
+	cmd.Dir = "gen"
+	return cmd
 }
 
 // Every null attribute Go writes into the live document survives the browser editor: loaded as its
@@ -230,12 +247,6 @@ func runDecoder(script, encoded string) ([]byte, []byte, error) {
 // holds "none", and a code block with no language and an image with no title come back holding ""
 // unless the read gives "" back as null (liveNulls).
 func TestNullAttributesSurviveABrowserEdit(t *testing.T) {
-	if _, err := exec.LookPath("bun"); err != nil {
-		if os.Getenv("CI") == "" {
-			t.Skip("bun is not on PATH; the browser editor's sync is required in CI")
-		}
-		t.Fatalf("bun is required in CI: %v", err)
-	}
 	written, err := Parse("| a | b | c |\n| --- | :---: | ---: |\n| d | e | f |\n\n```\ncode\n```\n\n![alt](src.png) tail\n")
 	if err != nil {
 		t.Fatal(err)
@@ -249,14 +260,7 @@ func TestNullAttributesSurviveABrowserEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	output, stderr, err := runDecoder("edit-blocks.ts", base64.StdEncoding.EncodeToString(crdt.EncodeStateAsUpdateV1(doc, nil)))
-	if err != nil {
-		t.Fatalf("run edit-blocks.ts: %v\nstderr:\n%s", err, stderr)
-	}
-	update, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(output)))
-	if err != nil {
-		t.Fatalf("edit-blocks.ts output: %v\n%s", err, output)
-	}
+	update := genResult(t, "edit-blocks.ts", crdt.EncodeStateAsUpdateV1(doc, nil))
 	edited := crdt.New()
 	if err := crdt.ApplyUpdateV1(edited, update, nil); err != nil {
 		t.Fatal(err)
@@ -360,5 +364,44 @@ func TestUpdatePreservesMarksAcrossAstralEdit(t *testing.T) {
 	}
 	if decoded := decodeWithYProsemirror(t, crdt.EncodeStateAsUpdateV1(doc, nil)); !decoded.Equal(want) {
 		t.Fatal("y-prosemirror decoded tree differs after astral edit")
+	}
+}
+
+// A run carrying two comments is written as two Y attribute keys, read back as both, decoded by
+// y-prosemirror as both, and rewritten as nothing.
+func TestUpdateWritesEachOfTwoMarksOfOneTypeOnOneRun(t *testing.T) {
+	bob := Mark{Type: "proofComment", Attrs: Attrs{"id": "c1", "by": "user:bob"}}
+	alice := Mark{Type: "proofComment", Attrs: Attrs{"id": "c2", "by": "user:alice"}}
+	want := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
+		{Type: "text", Text: "quick ", Marks: []Mark{bob}},
+		{Type: "text", Text: "brown", Marks: []Mark{bob, alice}},
+		{Type: "text", Text: " fox", Marks: []Mark{alice}},
+	}}}}
+	doc := crdt.New()
+	frag := doc.GetXmlFragment("prosemirror")
+	var err error
+	doc.Transact(func(txn *crdt.Transaction) { err = Update(txn, frag, want) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(frag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Equal(want) {
+		gotJSON, _ := got.JSON()
+		t.Fatalf("read back %s", gotJSON)
+	}
+	if decoded := decodeWithYProsemirror(t, crdt.EncodeStateAsUpdateV1(doc, nil)); !decoded.Equal(want) {
+		decodedJSON, _ := decoded.JSON()
+		t.Fatalf("y-prosemirror decoded %s", decodedJSON)
+	}
+	before := crdt.EncodeStateAsUpdateV1(doc, nil)
+	doc.Transact(func(txn *crdt.Transaction) { err = Update(txn, frag, got) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := crdt.EncodeStateAsUpdateV1(doc, nil); !bytes.Equal(before, after) {
+		t.Fatalf("Update wrote %d new bytes for an equal tree", len(after)-len(before))
 	}
 }

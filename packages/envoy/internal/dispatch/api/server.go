@@ -2,11 +2,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -72,8 +73,8 @@ type Deps struct {
 	// deployment with no NATS, where the viewer route answers 503 rather than hanging.
 	AgentStream agentstream.Source
 	// AgentSecrets relays the credential-request UI to the secrets broker; nil (the broker URL
-	// is unconfigured) means the feature is off, and every handler that needs it answers
-	// 404 FEATURE_OFF.
+	// is unconfigured) means the feature is off: the pending list answers null, and every other
+	// handler that needs it answers 404 FEATURE_OFF.
 	AgentSecrets *agentsecrets.Client
 	// Lifetime bounds work a handler starts and does not wait for: it is the process's own
 	// context, cancelled when the server is shutting down, so a deploy stops a broadcast's
@@ -85,14 +86,16 @@ type Deps struct {
 
 // DepsInput contains raw boot values used to construct API dependencies.
 type DepsInput struct {
-	Store           *store.Store
-	Identity        identity.Identity
-	AllowedLogins   map[string]struct{}
-	AgentToken      string
-	RepoProjectsRaw string
-	DefaultProject  string
-	ServerURL       string
-	EnvoyURL        string
+	Store          *store.Store
+	Identity       identity.Identity
+	AllowedLogins  map[string]struct{}
+	AgentToken     string
+	DefaultProject string
+	ServerURL      string
+	EnvoyURL       string
+	// EnvoyToken is the bearer the listener client sends (cmd/dispatch: ENVOY_TOKEN); empty sends
+	// none.
+	EnvoyToken string
 	// EnvoyTimeout replaces the listener client's window. Zero keeps the client's own default;
 	// a test exercising a receipt timeout sets a short one rather than waiting that out.
 	EnvoyTimeout time.Duration
@@ -116,9 +119,6 @@ type DepsInput struct {
 
 // NewDeps parses boot configuration once and returns API dependencies.
 func NewDeps(input DepsInput) (Deps, error) {
-	if _, err := ParseRepoProjects(input.RepoProjectsRaw); err != nil {
-		return Deps{}, err
-	}
 	defaultProject := strings.TrimSpace(input.DefaultProject)
 	if defaultProject != "" && !projectKeyPattern.MatchString(defaultProject) {
 		return Deps{}, fmt.Errorf("invalid DISPATCH_DEFAULT_PROJECT %q (expected project key)", defaultProject)
@@ -137,7 +137,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 	}
 	var envoyClient *envoy.Client
 	if envoyURL := strings.TrimSpace(input.EnvoyURL); envoyURL != "" {
-		var options []envoy.Option
+		options := []envoy.Option{envoy.WithToken(input.EnvoyToken)}
 		if input.EnvoyTimeout > 0 {
 			options = append(options, envoy.WithTimeout(input.EnvoyTimeout))
 		}
@@ -216,17 +216,22 @@ type queryer interface {
 // already holds one of its transactions (store.ErrNestedAcquire): one caller, one connection is
 // what keeps the pool from deadlocking, and a handler that breaks it fails here instead of in
 // production.
+//
+// Every route refuses a path or query parameter holding U+0000 or a byte that is not UTF-8 before
+// its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body, and the
+// document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
 func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{deps: deps}
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
 	for _, route := range routes {
-		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(route.Handler))
+		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(s.refuseUnstorableParameters(route.Pattern, route.Handler)))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {
-		mux.Handle("GET /ws/doc/{room}", trackTransactions(websocket.ServeHTTP))
+		const pattern = "/ws/doc/{room}"
+		mux.Handle("GET "+pattern, trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP))))
 	}
 }
 
@@ -248,10 +253,62 @@ func errorf(status int, code, format string, args ...any) *apiError {
 	return &apiError{status: status, code: code, message: fmt.Sprintf(format, args...)}
 }
 
+// The codes writeHandlerError answers a document it cannot read or serve and an unclassified
+// failure with, which a comment's or ask's single read also carries as anchor_block_error
+// (anchorBlock).
+const (
+	codeDocSchema             = "DOC_SCHEMA"
+	codeDocServiceUnavailable = "DOC_SERVICE_UNAVAILABLE"
+	codeDocumentUnloadable    = "DOCUMENT_UNLOADABLE"
+	codeInternal              = "INTERNAL"
+)
+
+// documentErrorCode names an error a document operation returns when it could not read or serve
+// the document, and is empty for any other error. writeHandlerError and anchorBlock both name a
+// document error by it, and both in one order, so the two cannot name one error differently.
+//
+// A room or store that could not serve the document is DOC_SERVICE_UNAVAILABLE whatever failed it,
+// so both take that code before any branch that reads the error's cause. A failed room carries the
+// error another operation failed it with - settlement's schema refusal, a settlement that failed
+// three times (its warm-up refused because the issue had closed, among others), a writer's commit
+// that failed or its client cancelled, a store write or load that failed, a history that did not
+// decode - and that error says nothing of this request: the caller retries once the room is
+// evicted, and its retry meets the document itself.
+//
+// A stored history this request itself could not decode is DOCUMENT_UNLOADABLE, the state a
+// rebuild repairs. A tree outside the schema is DOC_SCHEMA, which both take only after the
+// branches that name the caller's own input or a block the document does not hold, so a refusal
+// whose reason the renderer gave (an ask block that cannot render) stays that refusal.
+func documentErrorCode(err error) string {
+	switch {
+	case errors.Is(err, docs.ErrServiceUnavailable):
+		return codeDocServiceUnavailable
+	case errors.Is(err, docs.ErrDocumentUnloadable):
+		return codeDocumentUnloadable
+	case errors.Is(err, docs.ErrDocSchema):
+		return codeDocSchema
+	}
+	return ""
+}
+
 func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	var apiErr *apiError
 	if errors.As(err, &apiErr) {
 		writeError(w, apiErr.code, apiErr.status, apiErr.message)
+		// A 500 the handler named is a server fault like any other, so the operator's log shows it.
+		if apiErr.status == http.StatusInternalServerError {
+			slog.Error("dispatch: API handler failed", "code", apiErr.code, "error", err)
+		}
+		return
+	}
+	documentCode := documentErrorCode(err)
+	switch documentCode {
+	case codeDocServiceUnavailable:
+		writeError(w, documentCode, http.StatusServiceUnavailable, docs.ErrServiceUnavailable.Error())
+		return
+	case codeDocumentUnloadable:
+		writeError(w, documentCode, http.StatusConflict, docs.ErrDocumentUnloadable.Error())
+		slog.Warn("dispatch: API document history cannot load", "error", err)
 		return
 	}
 	// The edit route's own ambiguity error names the operation and the quote; the bare pmdoc one
@@ -351,8 +408,22 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, "INVALID_MARKDOWN", http.StatusBadRequest, err.Error())
 		return
 	}
-	if errors.Is(err, docs.ErrDocSchema) {
-		writeError(w, "DOC_SCHEMA", http.StatusInternalServerError, err.Error())
+	if errors.Is(err, docs.ErrDocumentTooLarge) {
+		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, err.Error())
+		slog.Warn("dispatch: API refused a document over the update item cap", "error", err)
+		return
+	}
+	// A tree outside the schema that the document holds answers 409 with its one message, the same
+	// on every route whatever the route wrapped it in (docs.OutsideSchemaError). Any other schema
+	// refusal is a tree an operation produced, which is the server's fault.
+	if documentCode == codeDocSchema {
+		var outside *docs.OutsideSchemaError
+		if errors.As(err, &outside) {
+			writeError(w, documentCode, http.StatusConflict, outside.Error())
+			slog.Warn("dispatch: API document outside Proof schema", "error", err)
+			return
+		}
+		writeError(w, documentCode, http.StatusInternalServerError, err.Error())
 		slog.Error("dispatch: API document outside Proof schema", "error", err)
 		return
 	}
@@ -360,15 +431,11 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, "ISSUE_CLOSED", http.StatusConflict, err.Error())
 		return
 	}
-	if errors.Is(err, docs.ErrServiceUnavailable) {
-		writeError(w, "DOC_SERVICE_UNAVAILABLE", http.StatusServiceUnavailable, docs.ErrServiceUnavailable.Error())
-		return
-	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, "NOT_FOUND", http.StatusNotFound, "not found")
 		return
 	}
-	writeError(w, "INTERNAL", http.StatusInternalServerError, "internal server error")
+	writeError(w, codeInternal, http.StatusInternalServerError, "internal server error")
 	slog.Error("dispatch: API handler failed", "error", err)
 }
 
@@ -383,13 +450,11 @@ func writeAmbiguousTarget(w http.ResponseWriter, message string, candidates []pm
 }
 
 func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
-	authorization := strings.TrimSpace(r.Header.Get("Authorization"))
-	if authorization != "" {
-		token, ok := strings.CutPrefix(authorization, "Bearer ")
-		if !ok || token == "" {
+	if token, present := auth.BearerToken(r); present {
+		if token == "" {
 			return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
 		}
-		if matchesSharedAgentToken(token, s.deps.AgentToken) {
+		if auth.MatchesSharedAgentToken(token, s.deps.AgentToken) {
 			return model.Actor{}, false, nil
 		}
 		if s.deps.OIDC != nil && oidc.LooksLikeJWT(token) {
@@ -412,10 +477,6 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 		return model.Actor{}, false, err
 	}
 	return model.Actor{Kind: "user", ID: login}, true, nil
-}
-
-func matchesSharedAgentToken(token, configured string) bool {
-	return configured != "" && subtle.ConstantTimeCompare([]byte(token), []byte(configured)) == 1
 }
 
 // serviceTokenActor authenticates a JWT-shaped bearer as a Kubernetes pod's
@@ -555,13 +616,17 @@ func (maxBytesDiscarder) Header() http.Header             { return nil }
 func (maxBytesDiscarder) Write(value []byte) (int, error) { return len(value), nil }
 func (maxBytesDiscarder) WriteHeader(int)                 {}
 
+// decodeJSON decodes r's body, one JSON value of at most maxJSONRequestBytes, into value, which
+// declares every member the body may carry. A string the body holds anywhere that carries U+0000
+// is refused, naming where it stands (unstorableJSON).
 func decodeJSON(r *http.Request, value any) error {
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || (contentType != "application/json" && !strings.HasSuffix(contentType, "+json")) {
 		return errorf(http.StatusUnsupportedMediaType, "JSON_CONTENT_TYPE", "JSON mutations require Content-Type application/json")
 	}
 	r.Body = http.MaxBytesReader(maxBytesDiscarder{}, r.Body, maxJSONRequestBytes)
-	decoder := json.NewDecoder(r.Body)
+	var read bytes.Buffer
+	decoder := json.NewDecoder(io.TeeReader(r.Body, &read))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
 		var maxBytes *http.MaxBytesError
@@ -572,6 +637,9 @@ func decodeJSON(r *http.Request, value any) error {
 	}
 	if decoder.More() {
 		return errorf(http.StatusBadRequest, "INVALID_JSON", "request body must contain one JSON value")
+	}
+	if refusal := unstorableJSON("", read.Bytes()); refusal != nil {
+		return refusal
 	}
 	return nil
 }

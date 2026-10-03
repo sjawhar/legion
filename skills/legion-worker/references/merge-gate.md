@@ -71,31 +71,33 @@ completion leaves the issue in reviewing until you finish.
   First `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
   "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`, whose output is quoted
   in READY (an empty output is quoted as `no file changes above the approved head`); then the same
-  with `'~docs/solutions'` appended, which must print nothing. The merger always posts
-  `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` (the shape
-  `packages/pi-envoy/roles/merger.md` defines), its summary, and the PR body's gate facts as a
-  `dispatch_message` on the issue. When the `Legion addressing` line names a merge queue, it also
-  publishes the same packet there with `envoy_publish`; a 404 means the Dispatch message remains
-  the durable notice and the merger stays idle. The READY packet names both the implementer's and
-  tester's `E2E` lines; a missing one is reported to the architect instead of published. Legion
-  never merges.
+  with `'~docs/solutions'` appended, which must print nothing. *The READY packet*: the merger
+  always posts `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
+  (the shape `packages/daemon/internal/prompts/roles/merger.md` defines), then the PR body's
+  `Outcome:` line and its `Not proven / risk:` value — every bullet under that label joined with
+  `; ` on the one READY line, or `none` — quoted from the `## For the reviewer` block at that same
+  head (or one line saying the body carries no brief — the packet still publishes), then the
+  `--summary` output and the PR body's gate facts, as a `dispatch_message` on the issue. When the
+  `Legion addressing` line names a merge queue, it also publishes the same packet there with
+  `envoy_publish`; a 404 means the Dispatch message remains the durable notice and the merger
+  stays idle. The READY packet names both the implementer's and tester's `E2E` lines; a missing
+  one is reported to the architect instead of published. Legion never merges.
 
 ## After the human merge
 
-- **After a human merges, the implementer verifies in production.** Sami, 2026-09-13,
-  verbatim: "the agent that developed it should be responsible for testing in production."
+- **After a human merges, the implementer verifies in production.**
   The architect sends the implementer back once the merge lands; the implementer watches the
   deploy slot that carries the merge to `production-apply` (or the equivalent publish step),
   drives the changed path in production through the user's own access path, and records the
   observation on the PR and the issue before the architect signs off. A staging pass is not
-  this: on 2026-09-12 a slot's entire staging gate passed at 00:02Z and its production-apply
-  failed at 00:12Z on a resource staging never runs. If the slot fails on the change, the
-  implementer owns the fix and the next slot.
+  this, since a staging gate does not run every resource production does. If the slot fails on
+  the change, the implementer owns the fix and the next slot.
   The record has three places: the PR body's `Production:` line, one pull-request comment
   carrying the Legion footer, and a `dispatch_message` on the issue — the reviewer and merger
   read GitHub, the architect reads the issue. When the deploy that carries the merge has not
   happened (a shared profile still holding the previous plugin release, a daemon still running
-  the previous commit, a slot nobody has run), open a `dispatch_ask` naming the exact install or
-  restart step, with options for its outcomes, keep the `Production:` line at `pending <what is
-  missing>`, and complete the check once the human answers that it is done. Never record a
-  staging pass as the production check, and never let the architect sign off on a `pending` line.
+  the previous commit, a slot nobody has run), open a `dispatch_ask` that starts with the
+  production gap and why it matters, then names the required install or restart step, its risk,
+  and outcome-named options. Keep the `Production:` line at `pending <what is missing>`, and
+  complete the check once the human answers. Never record a staging pass as the production check,
+  and never let the architect sign off on a `pending` line.

@@ -1,0 +1,4 @@
+# The link screenshots.sh and walkthrough.sh make to packages/dispatch's node_modules, the one
+# installed copy of @playwright/test, and Playwright's own output.
+node_modules
+test-results/

@@ -26,11 +26,13 @@ function formatLifetime(seconds: number): string {
   return `${seconds} second${seconds === 1 ? "" : "s"}`;
 }
 
+/** One label and value; the value wraps inside its grid cell, so a 64-hex rules version or a long
+ *  host name never runs into the fact beside it or widens a narrow page. */
 function Fact({ children, label }: { children: ReactNode; label: string }): ReactNode {
   return (
     <div>
       <dt className={textMutedOnCanvas}>{label}</dt>
-      <dd className={`font-medium ${textPrimaryOnCanvas}`}>{children}</dd>
+      <dd className={`break-words font-medium ${textPrimaryOnCanvas}`}>{children}</dd>
     </div>
   );
 }
@@ -38,9 +40,10 @@ function Fact({ children, label }: { children: ReactNode; label: string }): Reac
 /**
  * The broker's facts about a credential record, then the agent's stated reason as plain text
  * (no markdown pipeline - a `<blockquote>` with `whitespace-pre-wrap` renders it verbatim), then,
- * for a machine (`launcher_credential`) record, the sentence explaining what approving it grants.
- * Shared by `CredentialRecordPage` and `MachineLoginPage`, which both show this same layout
- * before their own (page-specific) decision/action controls.
+ * for a pending machine (`launcher_credential`) record, the sentence explaining what approving it
+ * grants. A pod enrollment's slot (`implementer-g3`) is its own fact, since several slots of one
+ * pod share the same enrollment line. Shared by `CredentialRecordPage` and `MachineLoginPage`,
+ * which both show this same layout before their own (page-specific) decision/action controls.
  */
 export function CredentialRecordFacts({ record }: { record: CredentialRecord }): ReactNode {
   return (
@@ -53,8 +56,9 @@ export function CredentialRecordFacts({ record }: { record: CredentialRecord }):
         <Fact label="Enrollment">
           {record.enrollment === null
             ? "—"
-            : `${record.enrollment.kind} · ${record.enrollment.runtime_id} · ${record.enrollment.operator ?? "—"}`}
+            : `${record.enrollment.kind} · ${record.enrollment.runtime_id} · ${record.enrollment.operator || "—"}`}
         </Fact>
+        {record.enrollment?.slot ? <Fact label="Worker slot">{record.enrollment.slot}</Fact> : null}
         <Fact label="Lifetime">{formatLifetime(record.lifetime_seconds)}</Fact>
         <Fact label="Requested">
           <Timestamp at={record.requested_at} />
@@ -77,7 +81,7 @@ export function CredentialRecordFacts({ record }: { record: CredentialRecord }):
           </blockquote>
         </div>
       )}
-      {record.kind === "launcher_credential" ? (
+      {record.kind === "launcher_credential" && record.state === "pending" ? (
         <p className={`text-sm font-medium ${textPrimaryOnCanvas}`}>
           Approving lets {record.identifiers[0]} start agent sessions as you.
         </p>

@@ -47,7 +47,7 @@ async function issueCommentPayload(page: Page, issueKey: string): Promise<Record
 }
 
 test.beforeEach(async () => {
-  await Promise.all([resetDatabase(), setLiveSessions([])]);
+  await resetDatabase();
 });
 
 test("E1 and E2: explicit role mentions deliver once while /btw without a mention stays a plain comment", async ({
@@ -118,8 +118,8 @@ test("E7b and Retry: removing a prefilled mention creates a plain reply, and ret
 }) => {
   await setLiveSessions([planner]);
   // The mention's first delivery has to FAIL for a retry to be offered at all: a same-mode
-  // retry of a delivery that landed is a duplicate the stream drops, so the row no longer
-  // carries a Retry (LEGION-271).
+  // retry of a delivery that landed is a repeat that is recognised and dropped, so the row no
+  // longer carries a Retry (LEGION-271).
   await setSessionSendStatus("planner", 404);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Reply behavior" });
@@ -165,11 +165,11 @@ test("E7b and Retry: removing a prefilled mention creates a plain reply, and ret
   }
 });
 
-// LEGION-271. A mention retried in its own mode inside the stream's duplicate window reaches the
-// agent no second time: Dispatch records the attempt `sent` with `duplicate`, and the row must
-// say so. Reading the state alone would tell a human the mention was delivered when nothing left
-// the listener - the same false "it was delivered" the targeted-message card was changed to
-// avoid. The stand-in listener models the stream's suppression, so this renders the real path.
+// LEGION-271. A mention retried in its own mode inside the stream's duplicate window is one the
+// stream already held: it stores nothing new, and the publish still reaches the agent's subject.
+// Dispatch records the attempt `sent` with `duplicate`, and the row must say so, since the state
+// alone would read as a fresh delivery. The stand-in listener answers `duplicate` for a repeated
+// key as the listener does, so this renders the real path.
 test("a duplicated mention delivery says the listener already had it, and offers no safe retry", async ({
   browser,
 }) => {
@@ -191,7 +191,7 @@ test("a duplicated mention delivery says the listener already had it, and offers
     await page.goto(`/issues/${issue.key}/conversation`);
     const deliveries = page.getByRole("list", { name: "Mention deliveries" });
     await expect(deliveries).toContainText(
-      "Delivered; the listener already had this message, so it wasn't sent again"
+      "Delivered by an earlier attempt, so not delivered again"
     );
     // The promise belongs to a retry that can still be made safely; this attempt already
     // reached the listener, so neither the sentence nor the button may appear for it.

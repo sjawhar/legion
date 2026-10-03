@@ -9,18 +9,22 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 type fakeStreamInfo struct {
@@ -316,19 +320,19 @@ func TestSendHandlerAllowsAdvertisedFrameModeAndUntaggedSends(t *testing.T) {
 	}
 }
 
-// TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames proves the listener refuses --
-// rather than silently allowing, as it once did -- a send whose targeted frame claims
+// TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames proves the listener refuses, rather
+// than silently allows, a send whose targeted frame claims
 // delivery (the exact "delivery" key is present) but whose mode cannot be read as a single,
 // unambiguous, non-empty string: an empty delivery object, a non-string mode, an empty mode
 // string, a delivery value that is not even an object, and a same-key-different-case sibling
 // key at either level. Presence of the exact "delivery" key is itself a claim that this send
 // is targeted; an unreadable or ambiguous claim is refused, never defaulted open the way a
 // send with no "delivery" key at all is (see TestSendHandlerAllowsAdvertisedFrameModeAnd
-// UntaggedSends). The case-variant case reproduces a second independent review's finding: the
-// guard used to decode the payload into a Go struct, whose case-insensitive key matching could
-// read a same-key-different-case sibling ("Delivery") instead of the exact "delivery" key the
-// receiving client actually executes, so an attacker could hide an unadvertised real mode
-// ("btw", exact key) behind an advertised decoy in the wrong-cased key ("aside", sibling key).
+// UntaggedSends). The case-variant case is why the guard never decodes the payload into a Go
+// struct: case-insensitive key matching could read a same-key-different-case sibling
+// ("Delivery") instead of the exact "delivery" key the receiving client actually executes, so an
+// attacker could hide an unadvertised real mode ("btw", exact key) behind an advertised decoy in
+// the wrong-cased key ("aside", sibling key).
 func TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
@@ -378,9 +382,9 @@ func TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames(t *testing.T) {
 // TestSendHandlerRefusesAModeThatIsNotADeliveryMode proves the listener decides what a delivery
 // mode is, rather than deferring to what the target session advertises. `capabilities` is an
 // open string list the session itself writes at registration, so "no session advertises a bogus
-// capability" was an assumption about every present and future client, not a property of this
-// boundary. A session that advertises "agentstream" and a frame claiming that mode used to pass
-// both checks and reach the receiver; now the mode itself is refused, as the Dispatch server's
+// capability" is an assumption about every present and future client, not a property of this
+// boundary. A session that advertises "agentstream" and a frame claiming that mode would pass
+// both checks and reach the receiver, so the mode itself is refused, as the Dispatch server's
 // own `validDelivery` refuses it.
 func TestSendHandlerRefusesAModeThatIsNotADeliveryMode(t *testing.T) {
 	client := setupPublishTestClient(t)
@@ -792,6 +796,274 @@ func TestRoleHolderLapsedResponseDoesNotInventLastSeen(t *testing.T) {
 	}
 }
 
+// trailingListeners opens two listeners' stores on one NATS account: claimant, through which a
+// holder registers and claims a role, and observer, whose session cache stops following the session
+// bucket once it is warm. The stopped watcher stands in for one that has not yet delivered what the
+// claimant just wrote: either way the observer's cache answers from what it last applied, while a
+// role claim is read from the role bucket itself. During a rolling deploy the old task is the
+// observer of every claim the replacement accepts.
+func trailingListeners(t *testing.T) (claimant, observer *listenerDeps) {
+	t.Helper()
+	client := setupPublishTestClient(t)
+	open := func(name string) *listenerDeps {
+		t.Helper()
+		registry, err := store.Open(client.Conn, store.WithReplicas(1))
+		if err != nil {
+			t.Fatalf("open the %s's interest registry: %v", name, err)
+		}
+		sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+		if err != nil {
+			t.Fatalf("open the %s's session registry: %v", name, err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := sessions.WaitForCacheReady(ctx); err != nil {
+			t.Fatalf("warm the %s's session cache: %v", name, err)
+		}
+		return &listenerDeps{client: client, registry: registry, sessions: sessions}
+	}
+	claimant, observer = open("claimant"), open("observer")
+	observer.sessions.StopWatch()
+	return claimant, observer
+}
+
+// claimRole registers sessionID through d and has it claim role, as a session's plugin does.
+func claimRole(t *testing.T, d *listenerDeps, sessionID, role string) {
+	t.Helper()
+	if err := d.sessions.Put(sessionID, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register %s: %v", sessionID, err)
+	}
+	recorder := httptest.NewRecorder()
+	roleSetHandler(d, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+		strings.NewReader(fmt.Sprintf(`{"session_id":%q,"role":%q}`, sessionID, role))))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("%s claims %s: status %d %s", sessionID, role, recorder.Code, recorder.Body.String())
+	}
+}
+
+// A listener's session cache trails the session bucket, so a holder another listener registered and
+// gave a role a moment ago can be in the bucket and not yet in this listener's cache. A lookup there
+// answers that holder. Releasing the claim as lapsed on the cache's word deletes the claim the other
+// listener just wrote, and every later lookup and role message finds the role unclaimed until its
+// holder claims it again. Once the holder has left the bucket, the same lookup still releases it, and
+// so it does for a holder no session can register as: an id outside nats.go's key alphabet, which an
+// earlier build or a direct bucket write can leave in a claim.
+func TestARoleLookupWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testing.T) {
+	claimant, observer := trailingListeners(t)
+	lookup := func(role string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		roleGetHandler(observer).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/"+role, nil))
+		return recorder
+	}
+
+	claimRole(t, claimant, "ses_fresh_holder", "fresh-claim")
+	if answer := lookup("fresh-claim"); answer.Code != http.StatusOK || !strings.Contains(answer.Body.String(), `"holder":"ses_fresh_holder"`) {
+		t.Fatalf("GET /v1/roles/fresh-claim on a listener whose session cache trails the bucket: status %d %s, want 200 naming ses_fresh_holder", answer.Code, answer.Body.String())
+	}
+	if holder, err := claimant.registry.RoleHolder("fresh-claim"); err != nil || holder != "ses_fresh_holder" {
+		t.Fatalf("the fresh claim after the lookup = %q, %v; want ses_fresh_holder's", holder, err)
+	}
+
+	claimRole(t, claimant, "ses_gone_holder", "lapsed-claim")
+	if err := claimant.sessions.Delete("ses_gone_holder"); err != nil {
+		t.Fatalf("end ses_gone_holder's session: %v", err)
+	}
+	if answer := lookup("lapsed-claim"); answer.Code != http.StatusNotFound || !strings.Contains(answer.Body.String(), "claim released") {
+		t.Fatalf("GET /v1/roles/lapsed-claim for a holder gone from the bucket: status %d %s, want 404 releasing the claim", answer.Code, answer.Body.String())
+	}
+	if holder, err := claimant.registry.RoleHolder("lapsed-claim"); err != nil || holder != "" {
+		t.Fatalf("the lapsed claim after the lookup = %q, %v; want it released", holder, err)
+	}
+
+	roles, err := claimant.client.JS().KeyValue(store.RoleBucket)
+	if err != nil {
+		t.Fatalf("open the role bucket: %v", err)
+	}
+	stored, err := json.Marshal(store.RoleClaim{HolderSessionID: "ses:bad", ClaimedAt: time.Now().UnixMilli()})
+	if err != nil {
+		t.Fatalf("encode the ses:bad claim: %v", err)
+	}
+	if _, err := roles.Put("invalid-holder", stored); err != nil {
+		t.Fatalf("store the ses:bad claim: %v", err)
+	}
+	if answer := lookup("invalid-holder"); answer.Code != http.StatusNotFound || !strings.Contains(answer.Body.String(), "claim released") {
+		t.Fatalf("GET /v1/roles/invalid-holder for holder ses:bad, which no session can register as: status %d %s, want 404 releasing the claim", answer.Code, answer.Body.String())
+	}
+	if holder, err := claimant.registry.RoleHolder("invalid-holder"); err != nil || holder != "" {
+		t.Fatalf("the ses:bad claim after the lookup = %q, %v; want it released", holder, err)
+	}
+}
+
+// A soft claim takes a role only from a holder that is gone, and a holder another listener just
+// registered is gone only from this listener's trailing cache, not from the session bucket: the soft
+// claim is refused, naming the live holder.
+func TestASoftClaimWhoseSessionCacheTrailsTheBucketLeavesALiveHolderItsRole(t *testing.T) {
+	claimant, observer := trailingListeners(t)
+	claimRole(t, claimant, "ses_live_holder", "contested")
+	if err := observer.sessions.Put("ses_resumer", session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register ses_resumer: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	roleSetHandler(observer, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+		strings.NewReader(`{"session_id":"ses_resumer","role":"contested","soft":true}`)))
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), `"holder":"ses_live_holder"`) {
+		t.Fatalf("soft claim of a live holder's role on a listener whose session cache trails the bucket: status %d %s, want 409 naming ses_live_holder", recorder.Code, recorder.Body.String())
+	}
+	if holder, err := claimant.registry.RoleHolder("contested"); err != nil || holder != "ses_live_holder" {
+		t.Fatalf("the contested claim after the soft claim = %q, %v; want ses_live_holder's", holder, err)
+	}
+}
+
+// The role reaper runs on every listener, so it reaches claims other listeners accepted: it ends a
+// claim only when the session bucket has lost the holder, not when this listener's trailing cache has
+// yet to see it.
+func TestTheRoleReaperWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testing.T) {
+	claimant, observer := trailingListeners(t)
+	claimRole(t, claimant, "ses_fresh_holder", "fresh-claim")
+	claimRole(t, claimant, "ses_gone_holder", "lapsed-claim")
+	if err := claimant.sessions.Delete("ses_gone_holder"); err != nil {
+		t.Fatalf("end ses_gone_holder's session: %v", err)
+	}
+	live := func(sessionID string) bool {
+		return roleHolderMayBeLive(logging.New("test"), observer.sessions, sessionID)
+	}
+	if reaped, err := observer.registry.ReapRoleClaims(live, observer.sessions.TTL()); err != nil || reaped != 1 {
+		t.Fatalf("reap role claims = %d, %v; want the one claim whose holder left the bucket", reaped, err)
+	}
+	for role, want := range map[string]string{"fresh-claim": "ses_fresh_holder", "lapsed-claim": ""} {
+		if holder, err := claimant.registry.RoleHolder(role); err != nil || holder != want {
+			t.Fatalf("%s after the reaper = %q, %v; want %q", role, holder, err, want)
+		}
+	}
+}
+
+// stalledReadKV is a session bucket whose writes land and whose reads never answer, like a bucket
+// the listener can write through but whose direct get has stopped answering.
+type stalledReadKV struct {
+	nats.KeyValue
+	released <-chan struct{}
+}
+
+func (kv stalledReadKV) Get(string) (nats.KeyValueEntry, error) {
+	<-kv.released
+	return nil, errors.New("the session bucket's read never answered")
+}
+
+// stallSessionReads makes every bucket read of sessions stall until the test ends, keeping its
+// writes, by swapping the handle its (stopped) watcher hands out. A read that does not answer must
+// take nothing from a role holder.
+func stallSessionReads(t *testing.T, sessions *session.SessionRegistry) {
+	t.Helper()
+	released := make(chan struct{})
+	t.Cleanup(func() { close(released) })
+	field := reflect.ValueOf(sessions).Elem().FieldByName("watcher")
+	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
+	stalled := bus.KeyValue{KeyValue: stalledReadKV{KeyValue: watcher.Interface().(*kvwatch.Watcher).KV().KeyValue, released: released}}
+	watcher.Set(reflect.ValueOf(kvwatch.New("session registry", stalled, func(nats.KeyValueEntry) {}, func() {})))
+}
+
+// When the session bucket cannot be read, every path that could take a role from its holder takes
+// nothing, and answers inside its bound (roleHolderReadTimeout, well under the 10 s HTTP write
+// timeout): a lookup answers 500, a soft claim 503, a role delivery reports delivery_failed, and the
+// reaper keeps the claim.
+func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
+	const bound = 5 * time.Second
+	holderOf := func(t *testing.T, d *listenerDeps, role string) string {
+		t.Helper()
+		holder, err := d.registry.RoleHolder(role)
+		if err != nil {
+			t.Fatalf("read the %s claim: %v", role, err)
+		}
+		return holder
+	}
+	t.Run("lookup", func(t *testing.T) {
+		claimant, observer := trailingListeners(t)
+		claimRole(t, claimant, "ses_holder", "unread")
+		stallSessionReads(t, observer.sessions)
+		started := time.Now()
+		recorder := httptest.NewRecorder()
+		roleGetHandler(observer).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/unread", nil))
+		if elapsed := time.Since(started); recorder.Code != http.StatusInternalServerError || elapsed > bound {
+			t.Fatalf("GET /v1/roles/unread while the session bucket cannot be read: status %d %s after %s, want 500 within %s", recorder.Code, recorder.Body.String(), elapsed, bound)
+		}
+		if holder := holderOf(t, claimant, "unread"); holder != "ses_holder" {
+			t.Fatalf("the claim after the lookup is held by %q, want ses_holder", holder)
+		}
+	})
+	t.Run("soft claim", func(t *testing.T) {
+		claimant, observer := trailingListeners(t)
+		claimRole(t, claimant, "ses_holder", "unread")
+		if err := observer.sessions.Put("ses_resumer", session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+			t.Fatalf("register ses_resumer: %v", err)
+		}
+		stallSessionReads(t, observer.sessions)
+		started := time.Now()
+		recorder := httptest.NewRecorder()
+		roleSetHandler(observer, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+			strings.NewReader(`{"session_id":"ses_resumer","role":"unread","soft":true}`)))
+		if elapsed := time.Since(started); recorder.Code != http.StatusServiceUnavailable || elapsed > bound {
+			t.Fatalf("soft claim while the session bucket cannot be read: status %d %s after %s, want 503 within %s", recorder.Code, recorder.Body.String(), elapsed, bound)
+		}
+		if holder := holderOf(t, claimant, "unread"); holder != "ses_holder" {
+			t.Fatalf("the claim after the soft claim is held by %q, want ses_holder", holder)
+		}
+	})
+	t.Run("role delivery", func(t *testing.T) {
+		harness := newListenerDeliveryHarness(t, nil)
+		claimant := &listenerDeps{client: harness.client, registry: harness.registry}
+		var err error
+		if claimant.sessions, err = session.OpenSessionRegistry(harness.client.Conn, session.WithSessionReplicas(1)); err != nil {
+			t.Fatalf("open the claimant's session registry: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := harness.sessions.WaitForCacheReady(ctx); err != nil {
+			t.Fatalf("warm the session cache: %v", err)
+		}
+		harness.sessions.StopWatch()
+		claimRole(t, claimant, "ses_holder", "unread")
+		stallSessionReads(t, harness.sessions)
+		var forwards atomic.Int32
+		cfg := harness.config
+		cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+			forwards.Add(1)
+			return nil
+		}
+		item := listenerTestEnvelope(contracts.RoleTopicPrefix+"unread", "unread-holder-delivery")
+		probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+		if err != nil {
+			t.Fatalf("subscribe exception probe: %v", err)
+		}
+		t.Cleanup(func() { _ = probe.Unsubscribe() })
+		if err := harness.client.Conn.Flush(); err != nil {
+			t.Fatalf("flush exception probe: %v", err)
+		}
+		started := time.Now()
+		coreNATSDeliveryHandler(cfg)(&nats.Msg{Data: marshalListenerEnvelope(t, item)})
+		if elapsed := time.Since(started); elapsed > bound || forwards.Load() != 0 {
+			t.Fatalf("role delivery while the session bucket cannot be read took %s and forwarded %d times, want none within %s", elapsed, forwards.Load(), bound)
+		}
+		assertDeliveryException(t, probe, item, "delivery_failed")
+		if holder := holderOf(t, claimant, "unread"); holder != "ses_holder" {
+			t.Fatalf("the claim after the delivery is held by %q, want ses_holder", holder)
+		}
+	})
+	t.Run("reaper", func(t *testing.T) {
+		claimant, observer := trailingListeners(t)
+		claimRole(t, claimant, "ses_holder", "unread")
+		stallSessionReads(t, observer.sessions)
+		live := func(sessionID string) bool {
+			return roleHolderMayBeLive(logging.New("test"), observer.sessions, sessionID)
+		}
+		if reaped, err := observer.registry.ReapRoleClaims(live, observer.sessions.TTL()); err != nil || reaped != 0 {
+			t.Fatalf("reap role claims while the session bucket cannot be read = %d, %v; want none", reaped, err)
+		}
+		if holder := holderOf(t, claimant, "unread"); holder != "ses_holder" {
+			t.Fatalf("the claim after the reaper is held by %q, want ses_holder", holder)
+		}
+	})
+}
+
 func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
@@ -1124,6 +1396,27 @@ func TestRoleSetHandlerSoftClaim(t *testing.T) {
 			t.Fatalf("holder after refused claim = %q, %v; want ses_fork_child", holder, err)
 		}
 	})
+
+	t.Run("a holder no session can register as is superseded", func(t *testing.T) {
+		// ses:bad is outside nats.go's key alphabet, so no session registers under it, and its
+		// interest can be neither read nor written (bus.ErrInvalidKey). An earlier build's
+		// bare-string claim, or a direct bucket write, can still name it as the holder.
+		roles, err := client.JS().KeyValue(store.RoleBucket)
+		if err != nil {
+			t.Fatalf("open the role bucket: %v", err)
+		}
+		if _, err := roles.Put("legacy", []byte("ses:bad")); err != nil {
+			t.Fatalf("store the bare-string ses:bad claim: %v", err)
+		}
+		rec := post(`{"session_id":"ses_heir","role":"legacy","soft":true}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+		}
+		holder, err := registry.RoleHolder("legacy")
+		if err != nil || holder != "ses_heir" {
+			t.Fatalf("holder after soft claim over ses:bad = %q, %v; want ses_heir", holder, err)
+		}
+	})
 }
 
 func TestSubscribeHandlerWarnsWhenGitHubRepositoryIsUnwired(t *testing.T) {
@@ -1337,7 +1630,7 @@ func TestSubscribeHandlerFailsWhenSessionRegistryPutFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
 	}
-	routeClient, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	routeClient, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open session registry connection: %v", err)
 	}
@@ -1603,16 +1896,16 @@ func TestMessageHandlersAnswerAMessageNATSCannotTakeWholeWith413(t *testing.T) {
 
 // A session id or role a caller names becomes a KV key, and a key NATS would refuse (one long enough
 // to take its subject past the server's protocol line, which would close the connection every
-// subscription and watcher of the listener runs on, or one holding an empty token, which no stream
-// matches) is the caller's to fix: every /v1 route that reads or writes one answers 413 or 400, as
-// for a message NATS cannot take, and the connection stays up.
+// subscription and watcher of the listener runs on, one holding an empty token, which no stream
+// matches, or one outside nats.go's key alphabet, which nats.go refuses before sending anything) is
+// the caller's to fix: every /v1 route that reads or writes one answers 413 or 400, as for a message
+// NATS cannot take, and the connection stays up.
 func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
-	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.Connect([]string{testnats.URL(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
-	resetListenerTestState(t, client.Conn)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open registry: %v", err)
@@ -1642,6 +1935,13 @@ func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
 		{"read a long role", http.MethodGet, "/v1/roles/" + long, "", http.StatusRequestEntityTooLarge},
 		{"claim a long role", http.MethodPost, "/v1/roles/set", `{"session_id":"ses_live","role":"` + longRole + `"}`, http.StatusRequestEntityTooLarge},
 		{"publish to a long role", http.MethodPost, "/v1/messages/publish", `{"topic":"notifications.role.` + longRole + `","message":"hi"}`, http.StatusRequestEntityTooLarge},
+		{"subscribe a session id outside the key alphabet", http.MethodPost, "/v1/interests/subscribe", `{"session_id":"ses:bad","self_subscribed":true}`, http.StatusBadRequest},
+		{"unsubscribe a session id outside the key alphabet", http.MethodPost, "/v1/interests/unsubscribe", `{"session_id":"ses:bad","topics":["notifications.agent.x"]}`, http.StatusBadRequest},
+		{"read the interests of a session id outside the key alphabet", http.MethodGet, "/v1/interests/ses:bad", "", http.StatusBadRequest},
+		{"remove the interests of a session id outside the key alphabet", http.MethodDelete, "/v1/interests/ses:bad", "", http.StatusBadRequest},
+		{"remove a session id outside the key alphabet", http.MethodDelete, "/v1/sessions/ses:bad", "", http.StatusBadRequest},
+		{"read a role outside the key alphabet", http.MethodGet, "/v1/roles/bad:role", "", http.StatusBadRequest},
+		{"publish to a role outside the key alphabet", http.MethodPost, "/v1/messages/publish", `{"topic":"notifications.role.bad:role","message":"hi"}`, http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
@@ -1777,6 +2077,55 @@ func TestPublishHandler_RejectsReservedDedupeKeyPrefix(t *testing.T) {
 	}
 }
 
+// A dispatch envelope's dedupe key is recognised by every host as the Dispatch event it names, and
+// Dispatch's outbox numbers its keys in sequence, so a key a caller chose there would make a host
+// drop the real event when it arrives. The key is still the caller's on any other source.
+func TestPublishHandler_RefusesAChosenKeyOnADispatchEnvelope(t *testing.T) {
+	client := setupPublishTestClient(t)
+	state := &listenerDeps{client: client}
+	const topic = "notifications.dispatch.issue.SQUAT-1.comment.created"
+	probe, err := client.Conn.SubscribeSync(topic)
+	if err != nil {
+		t.Fatalf("subscribe topic probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	publish := func(body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(body)))
+		return recorder
+	}
+
+	refused := publish(`{"topic":"` + topic + `","source":"dispatch","message":"squat","dedupe_key":"dispatch-1000"}`)
+	if refused.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", refused.Code, refused.Body.String())
+	}
+	var response apiError
+	if err := json.NewDecoder(refused.Body).Decode(&response); err != nil {
+		t.Fatalf("decode 400 body: %v", err)
+	}
+	if response.Error != "dedupe_key cannot be chosen for a dispatch envelope" || len(response.Expected) != 1 || response.Expected[0] != "dedupe_key" {
+		t.Fatalf("400 body = %+v", response)
+	}
+	if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, nats.ErrTimeout) {
+		t.Fatalf("a refused publish must publish nothing: %v", err)
+	}
+
+	for _, body := range []string{
+		`{"topic":"` + topic + `","source":"dispatch","message":"no chosen key"}`,
+		`{"topic":"` + topic + `","source":"agent","message":"a re-send","dedupe_key":"dispatch-1000"}`,
+	} {
+		if recorder := publish(body); recorder.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200; body = %s", body, recorder.Code, recorder.Body.String())
+		}
+		if _, err := probe.NextMsg(5 * time.Second); err != nil {
+			t.Fatalf("%s: read published envelope: %v", body, err)
+		}
+	}
+}
+
 // The mutual-exclusion rule is publish's alone: send ignores dedupe_key as it
 // ignores any field it does not read, so a body carrying both keys is still a
 // send keyed by its idempotency_key (LEGION-108, architect ruling).
@@ -1823,9 +2172,10 @@ func TestRegisterV1Routes_UnknownRouteReturnsJSONError(t *testing.T) {
 
 // LEGION-271. The send handler publishes before it answers, so a caller whose window expires
 // cannot tell whether the message landed. Its retry under the same idempotency key is a
-// JetStream duplicate and reaches the agent no second time; the answer has to say so, or
+// JetStream duplicate, which the stream stores no second time; the answer has to say so, or
 // Dispatch records the retry as an ordinary send and the attempt history claims a delivery that
-// never happened. An agent-sourced send carries no MsgId, so it can never be one.
+// never happened. A send under a key its caller chose carries no MsgId, so it can never be one;
+// a key minted once for its message can.
 func TestSendHandler_ReportsAJetStreamDuplicate(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
@@ -1864,11 +2214,22 @@ func TestSendHandler_ReportsAJetStreamDuplicate(t *testing.T) {
 		t.Fatalf("a different idempotency key must not answer duplicate: %+v", fresh)
 	}
 
-	// An agent-sourced send carries no MsgId, so the stream cannot recognise a repeat.
+	// An agent-sourced send under a key its caller chose carries no MsgId, so the stream cannot
+	// recognise a repeat.
 	const agentSend = `{"target_session":"ses_target","source":"agent","message":"ship it","idempotency_key":"agent-dup:steer"}`
 	send(t, agentSend)
 	if repeated := send(t, agentSend); repeated.Duplicate {
-		t.Fatalf("an agent-sourced send cannot be a duplicate: %+v", repeated)
+		t.Fatalf("an agent-sourced send under its caller's own key cannot be a duplicate: %+v", repeated)
+	}
+
+	// The shared transport mints a UUID idempotency key once per message and re-sends under it only
+	// when the answer to a send that landed was lost, so that key names its event.
+	const transportSend = `{"target_session":"ses_target","source":"agent","message":"ship it","idempotency_key":"3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"}`
+	if first := send(t, transportSend); first.Duplicate {
+		t.Fatalf("first transport send reported a duplicate; the stream held nothing")
+	}
+	if repeated := send(t, transportSend); !repeated.Duplicate {
+		t.Fatalf("the transport's re-send under its minted key must answer duplicate: %+v", repeated)
 	}
 }
 func TestMessageHandlersRejectPresentEmptyOptionalFields(t *testing.T) {

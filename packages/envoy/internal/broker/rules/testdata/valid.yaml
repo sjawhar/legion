@@ -30,24 +30,3 @@ secrets:
       methods: [GET, POST]
       header: Authorization
       header_format: "Bearer {value}"
-approvers:                      # the WebAuthn origin, AAGUID allowlist, and per-login attested
-                                 # key material every approver: operator/login:<name> resolves to;
-                                 # never cryptographically verified here (see rules.go)
-  origin: https://dispatch.test
-  aaguids:
-    - "ee882879-721c-4913-9775-3dfcce97072a"
-  logins:
-    sjawhar:
-      keys:
-        - credential_id: "sjawhar-cred-1"
-          registration:
-            challenge_nonce: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            response: {id: "sjawhar-cred-1"}
-          seed: true
-    alice:
-      keys:
-        - credential_id: "alice-cred-1"
-          registration:
-            challenge_nonce: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-            response: {id: "alice-cred-1"}
-          seed: true

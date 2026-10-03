@@ -5,6 +5,7 @@ import { Link, useLocation } from "react-router-dom";
 import { api } from "../../api/client";
 import type { Artifact, IssueReferences } from "../../api/types";
 import { TruncatedText } from "../../components/TruncatedText";
+import { compareTimestamps } from "../../lib/timestamps";
 import {
   badgePrimary,
   borderDefault,
@@ -225,7 +226,7 @@ export function ArtifactsTab(): ReactNode {
         }
         const leftUpdated = left.versions.at(-1)?.created_at ?? left.created_at;
         const rightUpdated = right.versions.at(-1)?.created_at ?? right.created_at;
-        return rightUpdated.localeCompare(leftUpdated);
+        return compareTimestamps(rightUpdated, leftUpdated) || left.id.localeCompare(right.id);
       }),
     [artifacts.data]
   );

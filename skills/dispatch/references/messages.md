@@ -6,7 +6,8 @@ human messages you directly from the Agents page.
 ## Targeted agent messages
 
 A human — or any bearer caller over HTTP, such as a test rig — can target the issue message at a
-live Envoy session or role as **BTW**, **Aside**, or **Steer**. The incoming Dispatch frame names
+live Envoy session or role as **BTW**, **Aside**, or **Steer** (the dashboard calls a steer
+**Send**). The incoming Dispatch frame names
 the issue and includes a `reply_with` hint (`{ tool, args }`, ready to issue on any host); reply on the same open issue with the existing
 tool, never a new targeted send:
 
@@ -32,9 +33,17 @@ target only a session that advertises the mode you want. Sending to a session wi
 
 ## Answering a direct message
 
-A human can also message you directly from the **Agents** page, with no issue at all. That frame
-names no issue and its `reply_with` hint carries none either; answer it with the message's bare
-id in `in_reply_to`, alone:
+A human can also message you directly from the **Agents** page, with no issue at all. On Oh My
+Pi, a person's **Send** or **Aside** arrives as their own user message, exactly as if they had
+typed it at your terminal: your Envoy plugin takes it only once Dispatch accepts it as a person's
+own fresh message to you, and injects the text Dispatch stored. Answer it in the conversation as
+you would anything typed, with no `dispatch_message`; the Agents page shows your conversation
+live, so they read your answer there.
+
+Everything else still arrives as a Dispatch frame: a **BTW**, a broadcast, a direct message on a
+host that takes no user turn from its plugin (Claude Code), and one Dispatch did not accept.
+That frame names no issue and its `reply_with` hint carries none either; answer it with the
+message's bare id in `in_reply_to`, alone:
 
 ```ts
 dispatch_message({

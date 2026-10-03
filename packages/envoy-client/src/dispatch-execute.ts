@@ -6,6 +6,7 @@ import type {
   Ask,
   AskRead,
   AskUrgency,
+  BlockPath,
   Comment,
   CommentRead,
   CreateAskInput,
@@ -37,10 +38,12 @@ import {
   ASK_URGENCIES,
   actorLabel,
   claimHolds,
+  DEFAULT_ISSUE_PAGE_LIMIT,
   dispatchToolSchema,
   dispatchToolSpecs,
   itemFromSearch,
   overCapMessage,
+  PROJECT_KEY_PATTERN,
   serviceSubjectLabel,
   snippetText,
   zodSchemaApi,
@@ -57,7 +60,12 @@ import {
   resolveCwdRepo,
   resolveOrigin,
 } from "./dispatch-cwd";
-import { DispatchClient, DispatchServiceError, type GraphReferencesQuery } from "./dispatch-http";
+import {
+  DispatchClient,
+  DispatchGatewayError,
+  DispatchServiceError,
+  type GraphReferencesQuery,
+} from "./dispatch-http";
 import {
   dispatchChildRef,
   dispatchDocumentRef,
@@ -177,13 +185,28 @@ function renderAdvice(
   const openAsks = advice.your_open_asks;
   const writesSinceHuman = advice.session_writes_since_human;
   const lines: string[] = [];
+  const unparsed = advice.unparsed_openers;
+  if (
+    unparsed !== undefined &&
+    unparsed.count > 0 &&
+    (tool === "dispatch_issue" || tool === "dispatch_artifact")
+  ) {
+    const quoted = unparsed.examples.map((example) => JSON.stringify(example)).join(", ");
+    const subject =
+      unparsed.count === 1
+        ? "1 typed-block opening in this document is text, not a block"
+        : `${unparsed.count} typed-block openings in this document are text, not blocks`;
+    lines.push(
+      `${subject}: ${quoted}. An opening like \`:::ask{…}\` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the \`dispatch\` skill, "Decision blocks".`
+    );
+  }
   if (
     advice.decision_blocks === 0 &&
     opts.isPrimarySpec === true &&
     (tool === "dispatch_issue" || tool === "dispatch_artifact")
   ) {
     lines.push(
-      'No decision blocks in this spec — nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
+      'This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
     );
   }
 
@@ -858,7 +881,7 @@ async function resolveOwnerArguments(
     problems.push("exactly one of issue and project is required");
   }
   if (typeof projectArgument === "string") {
-    if (!/^[A-Z][A-Z0-9]{1,9}$/.test(projectArgument)) {
+    if (!PROJECT_KEY_PATTERN.test(projectArgument)) {
       problems.push("project must be a project key such as CORE");
     }
     const refDocument = ref?.owner.kind === "project" ? (ref.artifact ?? ref.id) : undefined;
@@ -1016,7 +1039,7 @@ async function resolveArtifact(
     const routed = await client
       .getProjectArtifact(owner.project, artifactReference)
       .catch((error: unknown) => {
-        if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
+        if (!dispatchAnswered(error, 404)) throw error;
         return undefined;
       });
     if (canonical && routed !== undefined) return { owner, artifact: routed };
@@ -1134,17 +1157,21 @@ function toolActor(origin: DispatchOrigin, input: ExecuteDispatchToolInput): Act
   };
 }
 
-/** One line describing a document's approval, or undefined for a draft nobody has asked about. */
+/** One line describing a document's approval, or undefined for a draft nobody has asked about. An
+ *  awaiting approval says whom its request waits on: the agent once a version moved it, the
+ *  agent's own revision included, which sends that agent no event. */
 function approvalLine(artifact: Pick<Artifact, "approval">): string | undefined {
   const approval = artifact.approval;
   if (approval === undefined || approval.state === "draft") return undefined;
   switch (approval.state) {
-    case "awaiting":
-      return `Approval: awaiting (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
+    case "awaiting": {
+      const turn = approval.waiting_on === undefined ? "" : `, waiting on ${approval.waiting_on}`;
+      return `Approval: awaiting${turn} (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
+    }
     case "approved":
       return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
     case "stale":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}) - request approval again`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}) - request approval again once the human has agreed to every point in this version`;
     case "changes_requested":
       return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
   }
@@ -1312,11 +1339,12 @@ function referenceLines(edges: readonly GraphEdge[] | string): string[] {
   });
 }
 
-/** How a read degrades a graph or closure section the server cannot serve. */
+/**
+ * How a read degrades a graph or closure section the server cannot serve. Dispatch's own 404 is a
+ * server without the route; any other failure, a gateway's 404 page included, is named.
+ */
 function unavailableReason(error: unknown): string {
-  return error instanceof DispatchServiceError && error.status === 404
-    ? "unavailable"
-    : `unavailable: ${messageFor(error)}`;
+  return dispatchAnswered(error, 404) ? "unavailable" : `unavailable: ${messageFor(error)}`;
 }
 
 async function graphEdges(
@@ -1369,6 +1397,7 @@ function eventHead(event: Event): string | undefined {
     case "ask.opened":
     case "ask.anchor_refreshed":
     case "ask.edited":
+    case "ask.handed_back":
     case "ask.resolved":
       return textHead(event.payload.question);
     case "ask.answered":
@@ -1432,6 +1461,7 @@ function askSummary({ ask, replies }: AskRead, graph: readonly string[]): string
   ]);
   return [
     `Question: ${ask.question}`,
+    ...anchorLines(ask),
     "Options:",
     ...(ask.options.length === 0
       ? ["- none"]
@@ -1504,12 +1534,12 @@ export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: strin
 function commentSummary({ comment, replies }: CommentRead, graph: readonly string[]): string {
   const root = [
     `${comment.id} · ${actorText(comment.author)}`,
-    ...(comment.anchor?.quote === undefined ? [] : [`> ${comment.anchor.quote}`]),
+    ...anchorLines(comment),
     `Body: ${comment.body}`,
   ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} · ${actorText(reply.author)}`,
-    ...(reply.anchor?.quote === undefined ? [] : [`> ${reply.anchor.quote}`]),
+    ...anchorLines(reply),
     `Body: ${reply.body}`,
   ]);
   return [
@@ -1519,6 +1549,45 @@ function commentSummary({ comment, replies }: CommentRead, graph: readonly strin
     ...(chain.length === 0 ? ["- none"] : chain),
     ...graph,
   ].join("\n");
+}
+
+/** An anchored record's quote, then where its block stands: the position, or why the read could
+ *  not place it. A record without an anchor prints neither. */
+function anchorLines(
+  record: Pick<Comment, "anchor" | "anchor_block" | "anchor_block_error">
+): string[] {
+  return [
+    ...(record.anchor?.quote === undefined ? [] : [`> ${record.anchor.quote}`]),
+    ...(record.anchor_block === undefined
+      ? []
+      : [`Position: ${positionText(record.anchor_block)}`]),
+    ...(record.anchor_block_error === undefined
+      ? []
+      : [`Position: unavailable (${record.anchor_block_error})`]),
+  ];
+}
+
+/** Where an anchor's block stands. Every node from the top-level block down reads `type[index]`;
+ *  in a table the row and cell read instead as `row 5 (Red-teamer loop), column Due`: the row's
+ *  index (0 is the header), labelled by its cells before the anchored column — blank cells and
+ *  bare numbers dropped, since a `#` column repeats the index — and the column's header, or its
+ *  index where no header cell covers it. */
+export function positionText(block: BlockPath): string {
+  const { table, path } = block;
+  const segments = path.map((entry) => `${entry.type}[${entry.index}]`);
+  if (table === undefined || table.row === null) return segments.join(" › ");
+  const tableAt = path.findIndex((entry) => entry.type === "table");
+  const cells = table.cells ?? [];
+  const label = (table.column === null ? cells : cells.slice(0, table.column))
+    .map((cell) => cell.trim())
+    .filter((cell) => cell !== "" && !/^\d+$/.test(cell))
+    .join(" · ");
+  const row = label === "" ? `row ${table.row}` : `row ${table.row} (${label})`;
+  const header = table.header === null || table.header === "" ? String(table.column) : table.header;
+  return [
+    ...segments.slice(0, tableAt + 1),
+    table.column === null ? row : `${row}, column ${header}`,
+  ].join(" › ");
 }
 
 function messageSummary({ message, replies }: MessageRead, graph: readonly string[]): string {
@@ -1560,12 +1629,7 @@ async function openArtifactMarks(
     .map((ask) => `ask ${ask.id}`);
   const commentsResult = await commentsResultPromise;
   if (commentsResult.status === "rejected") {
-    if (
-      commentsResult.reason instanceof DispatchServiceError &&
-      commentsResult.reason.status === 404
-    ) {
-      return marks;
-    }
+    if (dispatchAnswered(commentsResult.reason, 404)) return marks;
     throw commentsResult.reason;
   }
   return [
@@ -1578,6 +1642,149 @@ async function openArtifactMarks(
   ];
 }
 
+/** The asks of the document's `ask` blocks. An issue lists them under the issue, since the artifact
+ * route refuses an issue document; an unlinked document lists its own. */
+async function blockAsks(
+  client: DispatchClient,
+  resolved: ResolvedArtifact,
+  state?: "all" | "open" | "answered"
+): Promise<Array<Ask & { readonly block_id: string }>> {
+  const asks = await (resolved.issue === undefined
+    ? client.getArtifactAsks(resolved.artifact.id, state)
+    : client.listIssueAsks(resolved.issue.key, state));
+  return asks.filter(
+    (ask): ask is Ask & { readonly block_id: string } =>
+      typeof ask.block_id === "string" && ask.block_artifact?.id === resolved.artifact.id
+  );
+}
+
+/**
+ * Refuses an approval request while the document holds an open decision block. A request names
+ * the latest version, and a new version moves it to that version and leaves it waiting on its
+ * agent, so a request over a block the human has yet to answer leaves their turn the moment they
+ * answer it. The live document's `ask` blocks are judged by the latest version, the one the
+ * request would name: a block that version shows open counts as open even when its ask is already
+ * answered or closed, since that answer reaches a version only when the document settles, about
+ * two seconds later, or with the next edit (the agent's fold of the answer into the text). A block
+ * not yet in that version counts as open too. A block removed from the document is not judged
+ * here; `refuseRemovingOpenDecisionBlocks` keeps one whose ask is open in it. A document already
+ * approved at its latest version is left to the server, which answers with that approval.
+ */
+async function refuseOpenDecisionBlocks(
+  client: DispatchClient,
+  tool: string,
+  resolved: ResolvedArtifact
+): Promise<void> {
+  const artifact = resolved.artifact;
+  const latest = artifact.approval?.latest_version;
+  // No approval state means no document version to approve: the server's own refusal says so.
+  if (latest === undefined || latest < 1 || artifact.approval?.state === "approved") return;
+  const blocks = (await client.artifactBlocks(artifact.id)).filter((block) => block.type === "ask");
+  if (blocks.length === 0) return;
+  const [documentAsks, version] = await Promise.all([
+    blockAsks(client, resolved),
+    client.docRead(artifact.id, latest),
+  ]);
+  const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
+  const lines = version.markdown.split("\n");
+  const open = blocks.flatMap((block) => {
+    const ask = asks.get(block.id);
+    const named =
+      ask === undefined
+        ? `block ${block.id}`
+        : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
+    // The block's opening lines, `:::ask{#<id> … state="…"}`. Every match counts, so a line that
+    // quotes the opener (in code, say) can add an open block but never hide one; a block none of
+    // whose lines carries a state is open.
+    const states = lines
+      .filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`))
+      .map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
+    if (states.length === 0) return [`${named}, which version ${latest} does not hold yet`];
+    if (!states.includes("open") && states.some((state) => state !== undefined)) return [];
+    if (ask === undefined) return [`${named}, whose ask Dispatch has not opened yet`];
+    if (ask.state === "open") return [named];
+    // An answered block's answer is folded in; a waived one (resolved) gets the decision written in.
+    const next =
+      ask.state === "answered"
+        ? "fold the answer into the text"
+        : "write the decision into the text";
+    return [
+      `${named}, ${ask.state} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`,
+    ];
+  });
+  if (open.length === 0) return;
+  const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
+  throw new Error(
+    [
+      `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
+      ...open.map((line) => `- ${line}`),
+      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason) and write their decision into the text with dispatch_doc_edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human.",
+    ].join("\n")
+  );
+}
+
+/**
+ * Refuses a document edit that would take a decision block out of the document while its ask is
+ * open: a `delete` of the block or of a block holding it, or a `retype` of it into another type.
+ * The edit writes its version at once; about two seconds later settlement retracts the ask in the
+ * system's name and writes no version, so the human's question leaves the Inbox unanswered and an
+ * approval request made after it names a version with no open block for
+ * `refuseOpenDecisionBlocks` to find. An `insert` in the same batch that carries the block's id
+ * does not exempt it: telling a block written back from an opener quoted in code needs the
+ * server's parser, so the executor fails closed, as `refuseOpenDecisionBlocks` does for a quoted
+ * opener. An open block is reworded with `replace`, moved with `move`, or, when this session asked
+ * it, has its question, options, urgency or multiple changed with `dispatch_edit_ask`; each keeps
+ * it. Costs nothing for an edit with no such operation, then one
+ * `GET /artifacts/{id}/blocks`, and the owner's asks only when an operation reaches an `ask` block.
+ */
+async function refuseRemovingOpenDecisionBlocks(
+  client: DispatchClient,
+  tool: string,
+  resolved: ResolvedArtifact,
+  ops: readonly EditOp[]
+): Promise<void> {
+  const removing = ops.filter(
+    (operation) =>
+      operation.block !== undefined &&
+      (operation.op === "delete" || (operation.op === "retype" && operation.type !== "ask"))
+  );
+  if (removing.length === 0) return;
+  const artifact = resolved.artifact;
+  const blocks = await client.artifactBlocks(artifact.id);
+  const askBlocks = blocks.filter((block) => block.type === "ask");
+  const removed = new Set<string>();
+  for (const operation of removing) {
+    const target = blocks.find((block) => block.id === operation.block);
+    if (target === undefined) continue;
+    // A delete takes every block inside the one it names; a retype changes only that block.
+    for (const block of askBlocks) {
+      if (
+        block.id === target.id ||
+        (operation.op === "delete" && block.from >= target.from && block.to <= target.to)
+      ) {
+        removed.add(block.id);
+      }
+    }
+  }
+  if (removed.size === 0) return;
+  const asks = await blockAsks(client, resolved, "open");
+  const open = asks.filter((ask) => removed.has(ask.block_id));
+  if (open.length === 0) return;
+  const [what, question] =
+    open.length === 1
+      ? ["a decision block whose ask is", "question"]
+      : [`${open.length} decision blocks whose asks are`, "questions"];
+  throw new Error(
+    [
+      `${tool} was not called: it would remove ${what} still open, and the human's ${question} would leave their Inbox unanswered.`,
+      ...open.map(
+        (ask) => `- ${JSON.stringify(ask.question)} (block ${ask.block_id}, ask ${ask.id})`
+      ),
+      "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it.",
+    ].join("\n")
+  );
+}
+
 /**
  * A Dispatch refusal carrying its own code in the message the host shows: the code
  * (ISSUE_CLAIMED, CLAIM_CONTENDED, EXTERNAL_LINK_TAKEN, ...) is the part an agent acts on, and
@@ -1587,17 +1794,68 @@ async function openArtifactMarks(
  * `throw refusalWithCode(error)` rethrows it untouched. This returns rather than throws: a
  * helper that never returns leaves its switch case with no visible terminator, which Biome's
  * noFallthroughSwitchClause rejects.
+ *
+ * A gateway's answer stays a `DispatchGatewayError`, and the caller's account of what its call did
+ * joins it in one sentence. Where the request may have reached Dispatch (`mayHaveReachedDispatch`),
+ * the client's advice could judge only from the method (a write is told to check whether it took
+ * effect), so that account, which knows what its call did, takes its place and must say what to do;
+ * otherwise the request never reached Dispatch, and the account follows the client's advice.
  */
-function refusalWithCode(error: unknown, suffix = ""): unknown {
+function refusalWithCode(error: unknown, ...clauses: string[]): unknown {
+  const suffix = clauses.filter((clause) => clause !== "").join("; ");
+  const joined = suffix === "" ? "" : `; ${suffix}`;
+  if (error instanceof DispatchGatewayError) {
+    let told = error.message;
+    if (joined !== "") {
+      told = error.mayHaveReachedDispatch
+        ? `${error.answer}${joined}`
+        : `${error.answer}, so ${error.advice}${joined}`;
+    }
+    return new DispatchGatewayError(
+      error.status,
+      error.answer,
+      error.advice,
+      `${error.code}: ${told}`
+    );
+  }
   if (!(error instanceof DispatchServiceError)) return error;
   return new DispatchServiceError(
     error.code,
     error.status,
-    `${error.code}: ${error.message}${suffix}`,
+    `${error.code}: ${error.message}${joined}`,
     error.candidates,
     error.current,
     error.mismatches
   );
+}
+
+/** Whether Dispatch itself answered `status`; a gateway's answer of that status says nothing it decided. */
+function dispatchAnswered(error: unknown, status: number): error is DispatchServiceError {
+  return error instanceof DispatchServiceError && error.fromDispatch && error.status === status;
+}
+
+/**
+ * Whether a write that failed with `error` may have taken effect anyway. Only an answer sent
+ * before the write could apply proves it did not: Dispatch's own refusal (a 4xx), or a gateway's
+ * answer that never reached Dispatch (`mayHaveReachedDispatch`). Dispatch's own 5xx can come after
+ * it committed, and a timeout or a transport error says nothing either way.
+ */
+function writeMayHaveLanded(error: unknown): boolean {
+  if (error instanceof DispatchGatewayError) return error.mayHaveReachedDispatch;
+  return !(error instanceof DispatchServiceError) || error.status >= 500;
+}
+
+/**
+ * An error that is no refusal (a timeout, a transport error) with `account`, the caller's clause
+ * on what its call did, after its message: joined to it with "; ", or as a sentence of its own
+ * after a message that ends one ("The operation timed out.", "… able to access the url?").
+ */
+function withAccount(error: unknown, account: string): Error {
+  const message = messageFor(error);
+  const told = /[.!?]$/.test(message)
+    ? `${message} ${account.charAt(0).toUpperCase()}${account.slice(1)}`
+    : `${message}; ${account}`;
+  return new Error(told, { cause: error });
 }
 
 /** Validate and execute one native Dispatch tool against the JSON HTTP API. */
@@ -1827,7 +2085,13 @@ export async function executeDispatchTool(
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id),
           };
         } catch (error) {
-          throw refusalWithCode(error, "; the reason was not posted, so the close was not sent");
+          // The close's PATCH below follows the same rule: only an answer sent before the reason
+          // could be stored proves it was not posted.
+          const told = writeMayHaveLanded(error)
+            ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again"
+            : "the reason was not posted, so the close was not sent";
+          if (error instanceof DispatchServiceError) throw refusalWithCode(error, told);
+          throw withAccount(error, told);
         }
       }
       // The server replaces the whole link set; the common call is "link the pull request
@@ -1851,24 +2115,26 @@ export async function executeDispatchTool(
         });
       } catch (error) {
         // A URL links exactly one issue. A server from before EXTERNAL_LINK_TAKEN answers the
-        // unique-index violation with 500 INTERNAL, which names nothing; say what it means.
+        // unique-index violation with 500 INTERNAL, which names nothing; say what it means. A
+        // gateway's 500 page is not that answer, and gets no such reading.
         const taken =
-          error instanceof DispatchServiceError && error.status === 500 && newLinks.length > 0
-            ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)`
+          dispatchAnswered(error, 500) && newLinks.length > 0
+            ? `one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)`
             : "";
         if (closingNote === undefined) throw refusalWithCode(error, taken);
         // The reason is on the issue, so a blind retry would post it a second time: the error
-        // says where the first one is. Only a 4xx is a refusal that proves the issue is still
-        // open; after a 5xx, a timeout, or a transport error the close may have landed anyway.
-        const refused = error instanceof DispatchServiceError && error.status < 500;
-        const posted = `; the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
-        const landed = refused
-          ? `${posted} but the issue did not close. Retrying this call posts its reason again, so fix what refused the close, then retry with a reason that points at message ${closingNote.id}`
-          : `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`;
-        if (error instanceof DispatchServiceError) throw refusalWithCode(error, taken + landed);
-        throw new Error(`${error instanceof Error ? error.message : String(error)}${landed}`, {
-          cause: error,
-        });
+        // says where the first one is, and whether the close may have landed anyway. A gateway's
+        // timeout or rate limit refused nothing there is to fix.
+        const posted = `the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
+        const fix =
+          error instanceof DispatchGatewayError && error.transient
+            ? ""
+            : "fix what refused the close, then ";
+        const landed = writeMayHaveLanded(error)
+          ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`
+          : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
+        if (error instanceof DispatchServiceError) throw refusalWithCode(error, taken, landed);
+        throw withAccount(error, landed);
       }
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
       const changes = [
@@ -1979,19 +2245,25 @@ export async function executeDispatchTool(
       const updatedSince = optionalString(args, "updated_since");
       // The zod spec already refused anything but one of ISSUE_ROUTE_STATUSES.
       const routeStatus = optionalString(args, "route_status") as IssueRouteStatus | undefined;
-      const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
-      const offset = Math.max(optionalNumber(args, "offset") ?? 0, 0);
-      const issues = await client.listIssues({
-        project,
-        ...(status === undefined ? {} : { status }),
-        ...(parent === undefined ? {} : { parent }),
-        ...(label === undefined ? {} : { label }),
-        ...(priority === undefined ? {} : { priority }),
-        ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
-        ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
-      });
-      const total = issues.length;
-      const rows = issues.slice(offset, offset + limit).map((row) => ({
+      const page = await client.listIssuePage(
+        {
+          project,
+          ...(status === undefined ? {} : { status }),
+          ...(parent === undefined ? {} : { parent }),
+          ...(label === undefined ? {} : { label }),
+          ...(priority === undefined ? {} : { priority }),
+          ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
+          ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
+        },
+        // The tool's schema has already refused a limit outside 1..MAX_ISSUE_PAGE_LIMIT and a
+        // negative or fractional offset.
+        {
+          limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
+          offset: optionalNumber(args, "offset") ?? 0,
+        }
+      );
+      const { total, limit, offset } = page;
+      const rows = page.issues.map((row) => ({
         key: row.key,
         title: row.title,
         status: row.status,
@@ -2214,9 +2486,12 @@ export async function executeDispatchTool(
           (comment.advice?.your_open_asks?.some((ask) => ask.id === replyToAsk) ?? false),
       });
       if (replyToAsk !== undefined) {
-        // The server records turn only on a reply to an open ask, so a non-null turn is exactly
-        // "the ask is open and now waits on <turn>"; a reply under a closed ask reports no state.
-        const askState = comment.turn === null ? "" : `; ask now waiting on ${comment.turn}`;
+        // The server answers whom the ask waits on now that this comment is its newest reply. It
+        // differs from this comment's turn for an agent reply on a moved approval request.
+        const askState =
+          comment.ask_waiting_on === undefined
+            ? ""
+            : `; ask now waiting on ${comment.ask_waiting_on}`;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner)}`,
@@ -2226,7 +2501,9 @@ export async function executeDispatchTool(
             ...commentDetails,
             ask: replyToAsk,
             follows: { ask: replyToAsk },
-            ...(comment.turn === null ? {} : { ask_waiting_on: comment.turn }),
+            ...(comment.ask_waiting_on === undefined
+              ? {}
+              : { ask_waiting_on: comment.ask_waiting_on }),
             ...(comment.advice === undefined ? {} : { advice: comment.advice }),
           },
         };
@@ -2349,6 +2626,7 @@ export async function executeDispatchTool(
       const summary = optionalString(args, "summary");
       const { precondition: rawPrecondition } = args;
       const precondition = rawPrecondition as EditPrecondition | undefined;
+      await refuseRemovingOpenDecisionBlocks(client, input.tool, resolved, ops);
       const edited = await client.docEdit(resolved.artifact.id, {
         ops,
         ...(summary === undefined ? {} : { summary }),
@@ -2374,13 +2652,15 @@ export async function executeDispatchTool(
       // A change the live document no longer carries: a browser deletion that landed after this
       // edit's version was rendered and before it reached the room, which is past undoing, so the
       // version records text the live document does not have (LEGION-269). `null` is a check that
-      // reached no verdict; an older server omits the field and reads as it always did.
+      // reached no verdict - the room is reloading, or holds a tree past the schema's depth bound,
+      // which a re-read answers DOC_SCHEMA for; an older server omits the field and reads as it
+      // always did.
       const lostOps = edited.lost_ops;
       const lostText =
         lostOps === undefined || (lostOps !== null && lostOps.length === 0)
           ? ""
           : lostOps === null
-            ? "; could not confirm this edit survived, because the live document is being reloaded — re-read it"
+            ? "; could not confirm this edit survived, because the live document is being reloaded or holds a tree too deep to read — re-read it"
             : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote — re-read the document`;
       const applied = `${head}${unchangedText}${lostText}`;
       const adviceLines = renderAdvice(
@@ -2458,10 +2738,14 @@ export async function executeDispatchTool(
           ? ownerArguments.ref.id
           : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
-      const result = await client.requestApproval(resolved.artifact.id, { actor });
+      await refuseOpenDecisionBlocks(client, input.tool, resolved);
+      const result = await client.requestApproval(resolved.artifact.id, {
+        actor,
+        summary: stringArg(args, "summary"),
+      });
       if (result.ask === null) {
         return {
-          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version.`,
+          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version, once the human has agreed to every point in it.`,
           details: {
             ...(resolved.owner.kind === "project"
               ? documentResultDetails(resolved.artifact)
@@ -2472,8 +2756,13 @@ export async function executeDispatchTool(
         };
       }
       const details = await followedAskDetails(client, result.ask, resolved.artifact);
+      // A call that opened, reworded or handed back the request says so; one that found it already
+      // waiting on the human says nothing changed, so a retry never reads as a fresh hand-back.
+      const outcome = result.recorded
+        ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).`
+        : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you.`;
       return {
-        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
+        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and an edit after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
       };
     }
@@ -2694,7 +2983,7 @@ async function resolveExistingIssue(
   try {
     return await client.resolveIssue(issueReference);
   } catch (error) {
-    if (error instanceof DispatchServiceError && error.status === 404) {
+    if (dispatchAnswered(error, 404)) {
       throw new Error(
         `no Dispatch issue is linked to ${issueReference}; create it first with ` +
           `dispatch_issue({ external: "${issueReference}", ... })`

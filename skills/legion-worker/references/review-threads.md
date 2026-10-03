@@ -14,7 +14,8 @@ Every path it cites is in sjawhar/legion.
   `Accepted:` — the opener's own follow-up included — leaves the thread open, because resolution
   considers only the newest comment). The review App can reply on a thread but cannot resolve it:
   GitHub grants resolving a review thread to the pull request's author, and the implementer opens
-  every Legion pull request (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps).
+  every Legion pull request (`docs/site/src/content/docs/legion/running-legion.md`, "The two
+  GitHub Apps").
   When `LEGION_GRANT_FILE` or `LEGION_GRANT` is set, use `legion threads resolve --pr <number> --repo <owner>/<repo>`.
   When neither is set, add `--gh` to that command, which applies the fallback's rule below through
   your own `gh`; where no `legion` command is installed, use `gh api graphql` with the session's
@@ -68,9 +69,7 @@ Every path it cites is in sjawhar/legion.
   hand — never skip it silently. The merger runs the command once more before publishing READY
   and does not publish while any `left open` line remains. That run is where every accepted
   thread's resolution is guaranteed, since the merge queue's gate counts the unresolved threads at
-  the head. Where no `.legion/` deletion push follows the last review round (the Go daemon, before
-  Stage 7), the reviewer's `Accepted:` replies to that round come after the implementer's last
-  run, and this run is the only one that resolves them.
+  the head. Acceptances posted after the implementer's last run are resolved here.
 
 - **The reviewer, on a re-review.** When you re-review after a corrective push, answer every
   thread you opened, and every thread a bot opened that is none of Legion's role Apps, in one of
@@ -81,6 +80,5 @@ Every path it cites is in sjawhar/legion.
   opener's (read the newest comments with `gh api graphql`, never from the PR body). Another
   opener's thread that a person resolved with GitHub's button, with no `Accepted:`, gates nothing:
   neither `legion threads resolve` nor the merge queue's gate counts a resolved thread. Resolution
-  is the pull request author's App's, so your approval never waits on it. Where no `.legion/`
-  deletion push follows your last round (the Go daemon, before Stage 7), the next run is the
-  merger's before READY, a phase that starts only after your approval.
+  is the pull request author's App's, so your approval never waits on it. The merger resolves
+  accepted threads that remain open before publishing READY.

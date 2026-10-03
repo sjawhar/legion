@@ -56,9 +56,10 @@ func TestSendDistinguishesAReceiptTimeoutFromARefusal(t *testing.T) {
 	}
 }
 
-// LEGION-271. The listener answers a send JetStream already held with duplicate: true, and that
-// is the only thing telling Dispatch its retry changed nothing on the agent's subject. An older
-// listener omits the field, which reads as false.
+// LEGION-271. The listener answers a send JetStream already held with duplicate: true: the stream
+// stored nothing new, and the publish still reached the agent's subject. That flag is the only
+// thing telling Dispatch its retry was a repeat. An older listener omits the field, which reads as
+// false.
 func TestSendCarriesTheListenersDuplicateVerdict(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
@@ -158,7 +159,6 @@ func TestSessionsMapsListenerRowsAndDefaultsMissingSlices(t *testing.T) {
 }
 
 func TestSessionsSendsEnvoyToken(t *testing.T) {
-	t.Setenv("ENVOY_TOKEN", "listener-token")
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer listener-token" {
 			t.Errorf("Authorization = %q, want Bearer listener-token", got)
@@ -168,7 +168,7 @@ func TestSessionsSendsEnvoyToken(t *testing.T) {
 	}))
 	defer listener.Close()
 
-	sessions, err := New(listener.URL).Sessions(context.Background())
+	sessions, err := New(listener.URL, WithToken("listener-token")).Sessions(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,14 +252,27 @@ func TestInterestReturnsOneSessionsTopics(t *testing.T) {
 	}
 }
 
+// A session id the listener refuses as a KV key (400: outside nats.go's key alphabet or holding an
+// empty token; 413: too long) names no interest a read can find, as an unknown one does, so a
+// subscriber removal pending on such an id completes rather than wait on the listener forever.
 func TestInterestReportsNotFoundForAnUnknownSession(t *testing.T) {
-	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer listener.Close()
-
-	if _, err := New(listener.URL).Interest(context.Background(), "ghost"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
+	for _, tc := range []struct {
+		session string
+		status  int
+	}{
+		{"ghost", http.StatusNotFound},
+		{"ses:bad", http.StatusBadRequest},
+		{"sess..x", http.StatusBadRequest},
+		{"long", http.StatusRequestEntityTooLarge},
+	} {
+		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+		}))
+		_, err := New(listener.URL).Interest(context.Background(), tc.session)
+		listener.Close()
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("%d for %s: err = %v, want ErrNotFound", tc.status, tc.session, err)
+		}
 	}
 }
 
@@ -308,7 +321,6 @@ func TestRoleAndSendPreserveTheListenerDeliveryContract(t *testing.T) {
 	// A non-loopback listener requires the bearer on every /v1 call; the send is the one that
 	// reaches a live agent, so an unauthenticated send fails delivery in production while
 	// every read succeeds.
-	t.Setenv("ENVOY_TOKEN", "listener-token")
 	var sent map[string]any
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer listener-token" {
@@ -328,15 +340,16 @@ func TestRoleAndSendPreserveTheListenerDeliveryContract(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
+	client := New(listener.URL, WithToken("listener-token"))
 
-	holder, err := New(listener.URL).Role(context.Background(), "legion-planner")
+	holder, err := client.Role(context.Background(), "legion-planner")
 	if err != nil {
 		t.Fatalf("get role: %v", err)
 	}
 	if holder.SessionID != "s1" || holder.Title != "planner" || !reflect.DeepEqual(holder.Capabilities, []string{"aside", "btw"}) {
 		t.Fatalf("holder = %#v", holder)
 	}
-	result, err := New(listener.URL).Send(context.Background(), SendInput{
+	result, err := client.Send(context.Background(), SendInput{
 		TargetSession:  "s1",
 		Message:        "Can this ship?",
 		Payload:        json.RawMessage(`{"event":{"type":"message.created"},"delivery":{"attempt":1,"mode":"btw"}}`),

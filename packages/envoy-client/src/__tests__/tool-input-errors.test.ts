@@ -3,14 +3,14 @@ import { dispatchToolSchema, dispatchToolSpecs, zodSchemaApi } from "@legion/con
 import { z } from "zod";
 import { formatZodIssues, ToolInputError } from "../tool-input-errors";
 
-function schemaFor(name: string): z.ZodType {
+function specFor(name: string) {
   const spec = dispatchToolSpecs.find((candidate) => candidate.name === name);
   if (!spec) throw new Error(`missing ${name}`);
-  return dispatchToolSchema(spec, zodSchemaApi(z), { strict: true });
+  return spec;
 }
 
 function problemsFor(name: string, args: unknown): string[] {
-  const schema = schemaFor(name);
+  const schema: z.ZodType = dispatchToolSchema(specFor(name), zodSchemaApi(z), { strict: true });
   const parsed = schema.safeParse(args, { reportInput: true });
   if (parsed.success) throw new Error("expected the call to be refused");
   return formatZodIssues(parsed.error.issues, schema);
@@ -36,7 +36,7 @@ describe("ToolInputError", () => {
         "- a",
         "- b",
         "- Allowed keys: issue, project, artifact, ref, question, options, multiple, urgency, anchor",
-        '- Example: dispatch_ask({"issue":"DSP-1","question":"Ship this?"})',
+        `- Example: dispatch_ask(${JSON.stringify(specFor("dispatch_ask").example)})`,
       ].join("\n")
     );
   });
@@ -69,6 +69,9 @@ describe("formatZodIssues", () => {
     ]);
     expect(problemsFor("dispatch_resolve_ask", { ask: "a", kind: "no", reason: "r" })).toEqual([
       'kind must be one of retracted|resolved; got "no"',
+    ]);
+    expect(problemsFor("dispatch_request_approval", { issue: "DSP-42" })).toEqual([
+      "summary is required (string)",
     ]);
   });
 

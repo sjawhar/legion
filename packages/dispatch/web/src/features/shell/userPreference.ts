@@ -23,7 +23,6 @@ type UserPreferenceIdentity = "failed" | "pending" | "resolved";
 interface UserPreferenceOptions<T> {
   failed?: T;
   pending?: T;
-  refreshOn?: unknown;
 }
 
 function preferenceValue<T>(
@@ -45,6 +44,8 @@ function preferenceValue<T>(
 /**
  * Reads a browser preference for a resolved signed-in identity. Pending and failed identity use
  * the caller's explicit fallback when one differs from `read(null)`; neither state persists.
+ * `read` runs when the hook mounts and when the signed-in identity or `preference` changes, and
+ * at no other time: a `read` that consults other state sees that state as it was then.
  */
 export function useUserPreference<T>(
   preference: UserPreference,
@@ -60,15 +61,12 @@ export function useUserPreference<T>(
   readRef.current = read;
   const optionsRef = useRef(options);
   optionsRef.current = options;
-  const refreshOn = identity === "resolved" ? options?.refreshOn : undefined;
   const [value, setValue] = useState(() =>
     preferenceValue(identity, login, preference, readRef.current, optionsRef.current)
   );
   useEffect(() => {
-    // A caller can opt into a re-read when an authenticated default changes.
-    void refreshOn;
     setValue(preferenceValue(identity, login, preference, readRef.current, optionsRef.current));
-  }, [identity, login, preference, refreshOn]);
+  }, [identity, login, preference]);
   const setAndPersist = useCallback(
     (next: T) => {
       setValue(next);

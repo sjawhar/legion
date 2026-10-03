@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { type ReactNode, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
@@ -59,11 +59,13 @@ const createdComment: Comment = {
 function renderComposer(
   options: {
     agents?: readonly Agent[];
+    anchor?: { artifact: string; mark_id: string; quote: string };
     carried?: CarriedDraft;
     edit?: { body: string; id: string };
     initialMentions?: readonly { target: string; title: string }[];
     onCarry?: (draft: CarriedDraft) => void;
     onCancelReply?: () => void;
+    onKindChange?: (kind: "ask" | "comment" | "suggestion") => string | undefined;
     onSent?: () => void;
     owner?: ComposerOwner;
     replyTo?: {
@@ -84,12 +86,14 @@ function renderComposer(
       <QueryClientProvider client={queryClient}>
         <MentionComposer
           agents={options.agents}
+          anchor={options.anchor}
           carried={options.carried}
           edit={options.edit}
           initialMentions={options.initialMentions}
           onCancelReply={options.onCancelReply}
           onCarry={options.onCarry}
           onClose={() => {}}
+          onKindChange={options.onKindChange}
           onSent={options.onSent ?? (() => {})}
           owner={options.owner ?? { issueKey: "CORE-1", kind: "issue" }}
           replyTo={
@@ -280,16 +284,55 @@ test("reopening the same reply restores its canonical prefills after cancel", as
   }
 });
 
-test("a token-only direct-session draft cannot submit an empty message", () => {
+/** Send's refusal as a reader meets it: `aria-disabled`, and the reason on `title` and in the
+ *  element `aria-describedby` names. */
+interface SendRefusal {
+  readonly description: string | null;
+  readonly disabled: string | null;
+  readonly title: string | null;
+}
+
+function sendRefusal(): SendRefusal {
+  const send = screen.getByRole("button", { name: "Send" });
+  const describedBy = send.getAttribute("aria-describedby");
+  return {
+    description:
+      describedBy === null ? null : (document.getElementById(describedBy)?.textContent ?? null),
+    disabled: send.getAttribute("aria-disabled"),
+    title: send.getAttribute("title"),
+  };
+}
+
+/** Presses Send both ways a reader can - the button, and Ctrl+Enter in the box - then waits a
+ *  task. TanStack awaits `onMutate` before it calls the mutation function, so an API spy read
+ *  straight after the press shows no call whether or not Send refused. */
+async function pressSend(field: HTMLElement): Promise<void> {
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  fireEvent.keyDown(field, { ctrlKey: true, key: "Enter" });
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, 20);
+  await promise;
+}
+
+test("a token-only direct-session draft cannot submit an empty message, and Send says why", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue({} as never);
   const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
 
   try {
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "/btw " } });
-    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "/aside " } });
-    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
+    const field = screen.getByLabelText("Comment");
+    for (const command of ["/btw", "/aside"]) {
+      fireEvent.change(field, { target: { value: `${command} ` } });
+      const reason = `Type the message after ${command}.`;
+      expect(sendRefusal()).toEqual({ description: reason, disabled: "true", title: reason });
+      await pressSend(field);
+      expect(createAgentMessage).not.toHaveBeenCalled();
+      expect(screen.queryByRole("button", { name: "Sending…" })).toBeNull();
+    }
+    fireEvent.change(field, { target: { value: "/btw status?" } });
+    expect(sendRefusal()).toEqual({ description: null, disabled: null, title: null });
   } finally {
     view.unmount();
+    createAgentMessage.mockRestore();
   }
 });
 
@@ -408,7 +451,8 @@ test("a command on a plain legacy reply stays verbatim and sends no delivery", a
   }
 });
 
-test("a token-only targeted legacy reply cannot submit", () => {
+test("a token-only targeted legacy reply cannot submit, and Send says why", async () => {
+  const createMessage = spyOn(api, "createMessage").mockResolvedValue({} as never);
   const { view } = renderComposer({
     replyTo: {
       author: "Planner",
@@ -420,10 +464,16 @@ test("a token-only targeted legacy reply cannot submit", () => {
   });
 
   try {
-    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "/btw " } });
-    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(true);
+    const field = screen.getByLabelText("Comment");
+    fireEvent.change(field, { target: { value: "/btw " } });
+    const reason = "Type the message after /btw.";
+    expect(sendRefusal()).toEqual({ description: reason, disabled: "true", title: reason });
+    await pressSend(field);
+    expect(createMessage).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Sending…" })).toBeNull();
   } finally {
     view.unmount();
+    createMessage.mockRestore();
   }
 });
 
@@ -534,6 +584,9 @@ test("opening autocomplete refetches live agents before selecting a canonical ta
 });
 
 test("an accepted mention survives its target going offline before Send", async () => {
+  // Typing @ refetches the live agents (the test above). That refetch answers what the cache
+  // already holds, so Planner goes offline only when this test takes it out of the list.
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([planner]);
   const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
@@ -554,6 +607,7 @@ test("an accepted mention survives its target going offline before Send", async 
   try {
     const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
     fireEvent.change(field, { target: { value: "@" } });
+    await waitFor(() => expect(listAgents).toHaveBeenCalledTimes(1));
     await screen.findByRole("option", { name: "Planner" });
     fireEvent.click(screen.getByRole("option", { name: "Planner" }));
     act(() => queryClient.setQueryData(["agents"], []));
@@ -567,6 +621,7 @@ test("an accepted mention survives its target going offline before Send", async 
     );
   } finally {
     view.unmount();
+    listAgents.mockRestore();
     createComment.mockRestore();
   }
 });
@@ -741,11 +796,45 @@ test("a direct-session reply warns before sending when the target does not adver
 
   try {
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Ship it." } });
-    expect(screen.getByText(/Worker does not advertise Steer/)).toBeTruthy();
+    expect(screen.getByText(/Worker does not advertise Send/)).toBeTruthy();
   } finally {
     view.unmount();
   }
 });
+
+// The warning's way out names only a mode the session takes: a Claude Code session advertises
+// Aside alone, so offering it /btw would suggest a send that fails the same way.
+for (const [name, capabilities, suggestion] of [
+  [
+    "an aside-only session is offered /aside",
+    ["aside"],
+    "Prefix with /aside to send it as an Aside instead.",
+  ],
+  ["a BTW-only session is offered /btw", ["btw"], "Prefix with /btw to send it as a BTW instead."],
+  [
+    "a session taking both is offered both",
+    ["aside", "btw"],
+    "Prefix with /btw or /aside to send it as a BTW or an Aside instead.",
+  ],
+  ["a session taking neither is offered nothing", [], undefined],
+] as const) {
+  test(`when a session does not advertise Send, ${name}`, () => {
+    const session: Agent = { ...worker, capabilities: [...capabilities] };
+    const { view } = renderComposer({
+      agents: [session],
+      owner: { kind: "session", sessionId: "B" },
+    });
+
+    try {
+      fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Ship it." } });
+      const warning = screen.getByText(/Worker does not advertise Send, so sending it records/);
+      if (suggestion === undefined) expect(warning.textContent).not.toContain("Prefix with");
+      else expect(warning.textContent).toContain(suggestion);
+    } finally {
+      view.unmount();
+    }
+  });
+}
 
 test("mentioning two targets that both lack the outbound mode names both in the warning", async () => {
   const { view } = renderComposer({ agents: [planner, worker] });
@@ -762,7 +851,7 @@ test("mentioning two targets that both lack the outbound mode names both in the 
     await screen.findByRole("option", { name: "Worker" });
     fireEvent.click(screen.getByRole("option", { name: "Worker" }));
     await waitFor(() => expect(field.value).toBe("@Planner x @Worker"));
-    expect(screen.getByText(/Planner and Worker do not advertise Steer/)).toBeTruthy();
+    expect(screen.getByText(/Planner and Worker do not advertise Send/)).toBeTruthy();
   } finally {
     view.unmount();
   }
@@ -955,6 +1044,82 @@ test("Discard clears the draft and its records, wherever the host takes focus", 
 
     expect(field.value).toBe("");
     expect(carriedDrafts.at(-1)).toEqual({ body: "", mentions: [] });
+  } finally {
+    view.unmount();
+  }
+});
+
+test("the kind switch hands the pick to the host and shows why the host refused it", () => {
+  const picks: string[] = [];
+  const { view } = renderComposer({
+    anchor: { artifact: "artifact-1", mark_id: "m-1", quote: "brown" },
+    onKindChange: (next) => {
+      picks.push(next);
+      return next === "suggestion"
+        ? "A suggestion needs whole words inside one table cell."
+        : undefined;
+    },
+  });
+
+  try {
+    const kinds = screen.getByRole("group", { name: "Kind" });
+    const pressed = (name: string) =>
+      within(kinds).getByRole("button", { name }).getAttribute("aria-pressed");
+
+    fireEvent.click(within(kinds).getByRole("button", { name: "Suggest" }));
+    expect(picks).toEqual(["suggestion"]);
+    expect(screen.getByRole("status").textContent).toBe(
+      "A suggestion needs whole words inside one table cell."
+    );
+    // The kind is the host's: a refused pick leaves the pressed button where it was.
+    expect(pressed("Comment")).toBe("true");
+    expect(pressed("Suggest")).toBe("false");
+
+    fireEvent.click(within(kinds).getByRole("button", { name: "Ask" }));
+    expect(picks).toEqual(["suggestion", "ask"]);
+    expect(screen.queryByRole("status")).toBeNull();
+    // ...and an accepted pick shows only once the host answers through `kind`.
+    expect(pressed("Comment")).toBe("true");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a refusal belongs to the mark it answered: a newer anchor leaves it behind", () => {
+  function Host(): ReactNode {
+    const [markId, setMarkId] = useState("m-1");
+    return (
+      <>
+        <button onClick={() => setMarkId("m-2")} type="button">
+          Replace mark
+        </button>
+        <MentionComposer
+          anchor={{ artifact: "artifact-1", mark_id: markId, quote: "brown" }}
+          onClose={() => {}}
+          onKindChange={() => "Not this one."}
+          onSent={() => {}}
+          owner={{ issueKey: "CORE-1", kind: "issue" }}
+        />
+      </>
+    );
+  }
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <QueryClientProvider client={queryClient}>
+        <Host />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const kinds = screen.getByRole("group", { name: "Kind" });
+    fireEvent.click(within(kinds).getByRole("button", { name: "Suggest" }));
+    expect(screen.getByRole("status").textContent).toBe("Not this one.");
+    fireEvent.click(screen.getByRole("button", { name: "Replace mark" }));
+    expect(screen.queryByRole("status")).toBeNull();
   } finally {
     view.unmount();
   }

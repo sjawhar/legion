@@ -578,7 +578,11 @@ func (r *renderer) writeText(value string) {
 
 func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix string, context escapeContext) {
 	if nodeHasMark(node, "inlineCode") {
-		// A code span's text is written as it is; a line feed in it still ends a line.
+		// A code span's text is written as it is; a line feed in it still ends a line. In a table
+		// cell each pipe is written `\|`, which both parsers read back as the code's pipe. Code
+		// holding an odd run of backslashes before a pipe has no spelling the browser editor's
+		// parser reads back: it removes one backslash before a pipe and ends the cell after an even
+		// run, so such code is written as Parse reads it back, and that parser splits the cell there.
 		value := escapeTablePipes(node.Text, context.tableCell)
 		endsLine := false
 		for {
@@ -602,6 +606,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 	}
 
 	value := node.Text
+	context.scan = newForwardScan(value)
 	segmentStart := 0
 	// Where the current line's text begins inside this node, or -1 when it began in an earlier
 	// one: lineStart for a line of its own whose first character is yet to be judged, and

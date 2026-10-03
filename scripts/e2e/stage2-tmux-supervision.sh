@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stage 2's gate for the Go coordinator: supervision on tmux, proven against the real things. The
-# Go daemon launches a real Oh My Pi — the pinned build (packages/daemon/src/daemon/omp-pin.ts)
+# Go daemon launches a real Oh My Pi — the pinned build (.omp-pin)
 # with this checkout's plugin in an isolated OMP profile — in panes of its private tmux server,
 # against a real Envoy listener and NATS on the host and a real Postgres. Every gate behaviour is
 # one named check that prints what it observed; the first check that does not hold ends the run
@@ -29,6 +29,17 @@ unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE NATS_DAEMON_NKEY_SEED NATS_DAEMON_NKEY_
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e2.$$.XXXXXXXX")
+# Every line of the run also goes to $work/transcript.log (lib/transcript.sh), so the driver and its
+# cleanup, which stops the panes and removes both containers, never fail on a write whoever is
+# reading. The transcript is in the work directory, kept with it on a failure, and cleanup SIGKILLs
+# every process whose command line names that directory (run_processes), so the tee gets the
+# transcript as fd 8, never by path. The tee keeps the copy it forked with, and the driver closes
+# its own so nothing it starts inherits it.
+exec 8>>"$work/transcript.log"
+# shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
+. "$root/scripts/e2e/lib/transcript.sh"
+transcript_to /dev/fd/8
+exec 8>&-
 ok=
 daemon_pid=
 deadline_pid=
@@ -45,16 +56,16 @@ omp_home=$work/omp-home
 profile_agent=$omp_home/.omp/profiles/$profile/agent
 daemon_log=$work/daemon.log
 check=setup
+TZ=UTC printf -v check_started '%(%FT%TZ)T' -1 # when the current check began (lib/model-gateway-unserved.sh)
 timeout_hook=
 # shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
 . "$root/scripts/e2e/lib/omp-home.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 # ---- reporting and waiting ------------------------------------------------------------------------
 
 begin() {
   check=$1
+  TZ=UTC printf -v check_started '%(%FT%TZ)T' -1
   echo "== $check"
 }
 note() { echo "   $*"; }
@@ -106,7 +117,7 @@ run_processes() {
   done
 }
 cleanup() {
-  local p
+  local status=$? p
   stop_pid "$daemon_pid"
   stop_pid "$deadline_pid"
   for p in "$ptoken" "$deadline_ptoken"; do
@@ -119,7 +130,11 @@ cleanup() {
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else
-    echo "the run's workspace is $work (daemon log: $daemon_log; model key command log: $work/model-gateway/hawk-token.log)"
+    echo "the run's workspace is $work (transcript: $work/transcript.log; daemon log: $daemon_log; model key command log: $work/model-gateway/hawk-token.log)"
+    # A diagnostic: it never sets the run's status (errexit is on here). A hangup, an interrupt or
+    # a termination (129, 130, 143, as trapped below) stopped the run and gets none; a child a signal
+    # killed, which is a failure, still does.
+    [[ $status =~ ^(129|130|143)$ ]] || bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$work/model-gateway" "$check_started" "$check" >&2 || true
   fi
   return 0
 }
@@ -241,7 +256,7 @@ export TMUX_TMPDIR=$work/tmux   # so are the daemons' private tmux servers
 # The daemon receives the ordinary operator PATH, including any OMP wrapper it holds. It must
 # resolve the configured tool's executable itself; this proof checks the OMP child is that pinned
 # binary, rather than repairing PATH before the daemon sees it.
-pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
+pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 omp_bin=$(mise where "$pin")/bin
 [ -x "$omp_bin/omp" ] || fail "mise has no omp executable for $pin under $omp_bin"
@@ -254,8 +269,7 @@ profile_omp() { HOME="$omp_home" OMP_PROFILE="$profile" "$omp_bin/omp" "$@"; }
 port=$(bash "$root/scripts/e2e/lib/free-port.sh") || fail "no free port for the daemon"
 deadline_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port") || fail "no free port for the second daemon"
 envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port") || fail "no free port for the Envoy listener"
-(cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
-stage_role_prompts "$root" "$work"
+(cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 # The binary under proof, checkable after the run: the source it was built from, what a changed
 # working copy held (a negative control's), and its hash (lib/built-from.sh).
@@ -295,8 +309,8 @@ envoy_role() { curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$envoy_
 # The branch plugin, packed as the release packs it, into this run's own OMP profile.
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
-want_contract=$(jq -r .legion.goDaemonApiVersion "$root/packages/pi-envoy/package.json")
-echo "plugin: $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile (goDaemonApiVersion $want_contract)"
+want_contract=$(jq -r .legion.daemonApiVersion "$root/packages/pi-envoy/package.json")
+echo "plugin: $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile (daemonApiVersion $want_contract)"
 
 (umask 077 && printf 'stage2-operator-%s\n' "$project" >"$work/operator-token")
 cat >"$work/legion.yaml" <<EOF
@@ -328,9 +342,9 @@ EOF
 begin gate-refuses-another-contract
 cp -p "$work/plugin/package.json" "$work/manifest.orig"
 bad_contract=$((want_contract + 1))
-jq --argjson v "$bad_contract" '.legion.goDaemonApiVersion = $v' "$work/manifest.orig" >"$work/plugin/package.json"
-note "the installed manifest now declares goDaemonApiVersion $bad_contract (the checkout's is $want_contract)"
-expect_refusal contract "speaks Go daemon API contract $bad_contract; this daemon requires $want_contract"
+jq --argjson v "$bad_contract" '.legion.daemonApiVersion = $v' "$work/manifest.orig" >"$work/plugin/package.json"
+note "the installed manifest now declares daemonApiVersion $bad_contract (the checkout's is $want_contract)"
+expect_refusal contract "speaks daemon API contract $bad_contract; this daemon requires $want_contract"
 cp -p "$work/manifest.orig" "$work/plugin/package.json"
 cmp -s "$work/manifest.orig" "$work/plugin/package.json" || fail "the installed manifest was not restored"
 pass
@@ -347,18 +361,18 @@ pass
 
 begin gate-refuses-a-missing-skill
 # The gate's load probe resolves every skill Legion's prompts load through the pane's own Oh My Pi.
-# The installed plugin without the rubric its thermonuclear-deep-review agent loads is refused,
-# naming the skill and the agent definition that loads it.
+# The installed plugin without the rubric that its thermonuclear-deep-review agent and the
+# reviewer's role prompt load is refused, naming the skill and both files that load it.
 mv "$work/plugin/dist/skills/thermonuclear-deep-review" "$work/rubric.aside"
-expect_refusal missing-skill "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md)"
+expect_refusal missing-skill "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md, roles/core/reviewer.md)"
 mv "$work/rubric.aside" "$work/plugin/dist/skills/thermonuclear-deep-review"
 [ -f "$work/plugin/dist/skills/thermonuclear-deep-review/SKILL.md" ] || fail "the rubric was not restored"
 pass
 
-begin gate-refuses-a-skill-only-the-role-prompts-load
+begin gate-refuses-a-skill-only-a-role-prompt-loads
 # The gate also resolves the skills the daemon's role prompts load, beside the plugin's own:
 # legion-controller is loaded by roles/controller-root.md alone, so only a gate that reads the
-# daemon's roles directory can refuse the plugin without it.
+# daemon's own role prompts can refuse the plugin without it.
 mv "$work/plugin/dist/skills/legion-controller" "$work/controller-skill.aside"
 expect_refusal prompt-only-skill "finds no skill legion-controller (loaded by roles/controller-root.md)"
 mv "$work/controller-skill.aside" "$work/plugin/dist/skills/legion-controller"
@@ -392,7 +406,7 @@ expected_omp=$(readlink -f "$omp_bin/omp")
 jq -R -e --arg binary "$expected_omp" '
   fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes" and (.invocation | contains($binary)))
 ' "$daemon_log" >/dev/null || fail "the daemon did not log the pinned OMP binary $expected_omp for its boot probes and panes"
-note "$(jq -R -c 'fromjson? | select(.msg | startswith("boot gate")) | {msg, version, goDaemonApiVersion}' "$daemon_log" | sed -n 1p)"
+note "$(jq -R -c 'fromjson? | select(.msg | startswith("boot gate")) | {msg, version, daemonApiVersion}' "$daemon_log" | sed -n 1p)"
 note "$(jq -R -c 'fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes") | {msg, invocation}' "$daemon_log" | sed -n 1p)"
 c1=$(claims spawn --json --tree S2-1 --issue S2-1 --role architect --prompt-file "$work/architect.md" | jq -r .token)
 until_true 240 "claim $c1 to be ready" claim_is "$c1" '.state == "ready"'

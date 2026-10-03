@@ -4,12 +4,24 @@ Part of `skill://legion-worker`. Read it before you write or edit any line of th
 body, put a `proof` array in a handoff, verify another phase's proof, or run the simplify pass.
 Every path it cites is in sjawhar/legion.
 
-## The READY format
+## The pull request body template
 
-The implementer writes the PR body in the READY format from the moment the PR opens, and every
+The implementer writes the PR body from this template from the moment the PR opens, and every
 later phase keeps it current rather than replacing it:
 
 ```
+## For the reviewer
+
+**Outcome:** <one sentence a user of this repository would recognise: what someone can now do, or what stops going wrong>
+**Why:** <the problem, one or two sentences, ending with the Dispatch key in parentheses — the key only, never a URL>
+**Change:**
+- <two to five bullets, each one behaviour a user or operator meets, never a file name>
+**Look at first:** <one to three `path:line` places where a wrong decision would hurt> (the reviewer writes this line)
+**Proven by:** <the `E2E (implementer)` line's surface and run, one line>
+**Not proven / risk:**
+- <one line per claim recorded as unproven before READY>, or the single word `none` (the reviewer writes this line; `none` is invalid while such a claim stands)
+**Size:** <files changed, +added/−removed>
+
 ## Verification
 
 **CI:** `Tests` run <run-id> — jobs lint, typecheck, test all success at <head-sha>; `PR Title` run <run-id> — job pr-title success at <head-sha>.
@@ -28,10 +40,10 @@ left open <thread URL> — newest reply by <login> is not its opener's or the Le
 <verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
 
 **E2E (implementer):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
-Negative control: <deliberately broken input> → <refusal or failure observed>.
+Negative control: <deliberately broken input or call> → <refusal or failure observed>.
 
 **E2E (tester):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
-Negative control: <deliberately broken input> → <refusal or failure observed>.
+Negative control: <deliberately broken input or call> → <refusal or failure observed>.
 Verified the implementer's proof by <re-running its command | driving the same surface independently>.
 
 **Production:** <what was checked in production, how, what was observed> — merge commit <sha>.
@@ -42,26 +54,35 @@ Verified the implementer's proof by <re-running its command | driving the same s
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
 ```
 
+## The brief for the human
+
+`## For the reviewer` is written for the person who merges; `## Verification` below it stays the
+ledger the reviewer and merger check against GitHub. The implementer writes `Outcome`, `Why`,
+`Change`, `Proven by`, and `Size` when the pull request opens, and keeps them true after every
+push; `Outcome` is a sentence a user of the repository would recognise, never "fix bug" or a file
+name, and `Why` ends with the Dispatch key, never a URL. The reviewer writes `Look at first` and
+`Not proven / risk` at each round, into the live body (`legion gh -- api
+repos/{owner}/{repo}/pulls/{number} --jq .body`, edit, then `--method PATCH ... -F body=@body.md`);
+`Not proven / risk` copies every claim recorded as unproven before READY — the tester's
+`failures`, the reviewer's own review, any proof-check comment already on the pull request —
+word for word, and `none` is a finding while one stands. The merger quotes `Outcome` and
+`Not proven / risk` from the body at the published head in the READY packet
+(*The READY packet* in `skill://legion-worker/references/merge-gate.md`); a stale `Outcome` that no
+longer describes the diff is a finding against the implementer, not a line the merger rewrites.
+
 ## What a proof is
 
 **A proof** is the changed behaviour exercised on the surface a user reaches it through, recorded
 as the exact command or run id, what was observed, the head SHA, and one negative control —
-a deliberately broken input and the refusal or failure observed. The surface is
+a deliberately broken input or call and the refusal or failure observed. The surface is
 **production-like** — the repository's real-process test harness and fixtures, a sandbox
 repository, a real browser, a devN stack, staging, or a local stack with real migrations, one that
 has the resource the change touches — and each `E2E` line carries a **link** to that run,
 screenshot, or e2e; human review does not replace user-facing verification, and a green unit suite
-is not it. A unit or integration test is a regression lock, never proof of a criterion. Sami,
-2026-09-13, verbatim: "They need to test everything in a production-like
-environment before merging, and it is the agent that develops the feature that is responsible
-for doing that. If there's anything blocking that, we need to fix it: if it's infrastructure, we
-need to fix it; if it's tooling, we need to develop it; if it's skills, we need to fix the skills
-... it should not require deploying to production to realize your feature doesn't work."
-Evidence for the rule: in the week of 2026-09-08 three surfaces merged green and were wrong on
-inspection (the Astrolabe IPI stack, Dispatch on ECS, the candidate flow), and on 2026-09-12 six
-deploy slots died on code first executed after merge, including a production-only ECS bootstrap
-the whole staging gate never ran. The implementer's proof and the tester's proof below are both
-this proof.
+is not it. A unit or integration test is a regression lock, never proof of a criterion. The agent
+that develops the change proves it this way before the merge, and whatever blocks that proof is
+fixed, not skipped (*When no surface reaches the changed path*, below). The implementer's proof
+and the tester's proof below are both this proof.
 
 ## The rules every phase's evidence follows
 
@@ -98,8 +119,8 @@ this proof.
   diff gets none.** It is scoped to the pull request's own diff, at the head where the last review
   round closed: nothing applied leaves that head final; applied → the applied head is the final
   head: CI runs on it, the pair runs once on it, and the E2E proof re-runs on it for the surface
-  the simplify diff touched (Sami, 2026-09-13: test on the real surface before merging, no
-  shortcuts — a refactor that "preserves behaviour" is a claim until it is executed). That cost is
+  the simplify diff touched, since a refactor that "preserves behaviour" is a claim until it is
+  executed. That cost is
   why 0-applied is the expected outcome and a pass that applies is spent sparingly. At the applied
   head the implementer re-cites the `CI` line and re-runs its own proof into `E2E (implementer)`,
   and the tester re-runs its proof for the touched surface into `E2E (tester)`, before the
@@ -116,10 +137,8 @@ No surface reaches the changed path is a report to the architect, never a reason
 Say which surface is missing and what it would have to do — a rig that can spawn the role, a
 sandbox that holds the resource, a credential, a command that does not exist yet — and send it to
 the architect with `envoy_publish` to its role topic. The architect creates a child issue in this
-tree to build it (infrastructure, tooling, or a skill) and resumes you once it lands. Sami,
-2026-09-13, verbatim: "If there's anything blocking that, we need to fix it: if it's
-infrastructure, we need to fix it; if it's tooling, we need to develop it; if it's skills, we need
-to fix the skills." A code path whose first execution would be after the merge — a deploy
+tree to build it (infrastructure, tooling, or a skill) and resumes you once it lands. A code path
+whose first execution would be after the merge — a deploy
 workflow's inline step, a post-merge helper, a production-only resource — is untested until you
 have executed it somewhere production-like; completing with a unit-test-only handoff is the
 failure this rule exists to stop.

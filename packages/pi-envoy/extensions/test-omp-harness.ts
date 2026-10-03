@@ -2,11 +2,12 @@
 // dispatch-first-omp.test.ts): a stand-in server that is the model gateway and whatever else a test
 // answers, a profile whose every model role is that stand-in, and one `omp --mode rpc` child with
 // only this checkout's extensions loaded. The profile format, the flags and the RPC stream are the
-// Oh My Pi pin's (packages/daemon/src/daemon/omp-pin.ts), so a pin bump that changes one is fixed
+// Oh My Pi pin's (the repository's .omp-pin), so a pin bump that changes one is fixed
 // here once.
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { linkOmpNatives } from "./test-omp-natives";
 
 export interface Request {
   readonly path: string;
@@ -20,8 +21,13 @@ export type Block =
 /** What a test undoes after each case, run last first. */
 export type Cleanup = (() => Promise<void>)[];
 
-/** A scratch root with the profile's home, the session's workspace and its transcript directory. */
+/**
+ * A scratch root with the profile's home, the session's workspace and its transcript directory.
+ * The home's Oh My Pi natives are hardlinks to `binary`'s one cached copy (test-omp-natives.ts), so
+ * a case writes none of them.
+ */
 export async function ompRoot(
+  binary: string,
   prefix: string,
   cleanup: Cleanup
 ): Promise<{
@@ -38,6 +44,7 @@ export async function ompRoot(
   for (const directory of [path.join(home, ".omp", "agent"), workspace, sessions]) {
     await mkdir(directory, { recursive: true });
   }
+  await linkOmpNatives(binary, home);
   return { root, home, workspace, sessions };
 }
 

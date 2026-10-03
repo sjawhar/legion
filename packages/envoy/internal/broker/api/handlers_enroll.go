@@ -3,20 +3,68 @@ package api
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
-// createEnrollmentBody is POST /v1/enrollments's exact contract v9 shape: the v8 "approver" field
-// is gone — the rules pick a request's approver at request time, never at enrollment.
+// createEnrollmentBody is POST /v1/enrollments's body (the AGENTC-393 overview document's
+// enrollment route). It names no approver: the rules pick a request's approver at request time,
+// never at enrollment. slot is optional and pod-only: omitted or "" is the runtime's one
+// enrollment, and a slot names one of several independent enrollments of the same pod
+// (enroll.Enrollment.Slot), chosen by the launcher whose proof authenticates the call.
 type createEnrollmentBody struct {
-	Kind       string  `json:"kind"`
-	RuntimeID  string  `json:"runtime_id"`
-	Operator   *string `json:"operator"`
-	Thumbprint string  `json:"thumbprint"`
-	SessionID  *string `json:"session_id"`
-	PodToken   *string `json:"pod_token"`
+	// What the session is: "box" (a container), "host" (a process on a machine) or "pod".
+	Kind string `json:"kind"`
+	// The session's runtime: a pod's UID, a box's container id, or a host session's
+	// host:pid:start time. A launcher enrolls one live session per runtime id (and slot).
+	RuntimeID string `json:"runtime_id"`
+	// A pod only, optional: which of the pod's independent enrollments this is.
+	Slot string `json:"slot"`
+	// Optional: the operator the session runs for. The broker records the machine credential's own
+	// operator whatever is sent, and refuses any other login. Absent or null for a pod.
+	Operator *string `json:"operator"`
+	// The RFC 7638 JWK thumbprint of the session's P-256 signing key.
+	Thumbprint string `json:"thumbprint"`
+	// Optional: the Envoy session the broker notifies when one of this session's pending requests
+	// expires.
+	SessionID *string `json:"session_id"`
+	// A pod only: its projected service-account token, which proves the runtime id is its UID.
+	PodToken *string `json:"pod_token"`
+}
+
+// enrollmentResponse is POST /v1/enrollments's answer: 201 for a new enrollment, 200 when the same
+// key is already enrolled in that runtime and slot.
+type enrollmentResponse struct {
+	// The enrollment's id, which the session's Proof headers name.
+	EnrollmentID string `json:"enrollment_id"`
+	// When the enrollment's lease lapses unless the session renews it.
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	// The pod slot it holds; null for every enrollment without one.
+	Slot *string `json:"slot"`
+}
+
+// leaseResponse is POST /v1/enrollments/{id}/renew's answer.
+type leaseResponse struct {
+	// When the renewed lease lapses.
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+}
+
+// selfResponse is GET /v1/enrollments/self's answer: the calling session as the broker knows it.
+type selfResponse struct {
+	// The session's enrollment id.
+	EnrollmentID string `json:"enrollment_id"`
+	// The session's live grants, soonest to expire first.
+	Grants []requests.Grant `json:"grants"`
+	// "box", "host" or "pod".
+	Kind string `json:"kind"`
+	// When the session's lease lapses unless it is renewed.
+	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+	// The person the session runs for; null for a pod.
+	Operator *string `json:"operator"`
+	// The pod slot it holds; null for every enrollment without one.
+	Slot *string `json:"slot"`
 }
 
 // createEnrollment authenticates by launcher proof now (payload carries "lid"), never a bearer
@@ -35,12 +83,16 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 	result, err := s.deps.Enroll.Create(r.Context(), cred, enroll.Enrollment{
 		Kind:       body.Kind,
 		RuntimeID:  body.RuntimeID,
+		Slot:       body.Slot,
 		Operator:   body.Operator,
 		Thumbprint: body.Thumbprint,
 		SessionID:  body.SessionID,
 		PodToken:   derefOr(body.PodToken, ""),
 	})
 	switch {
+	case errors.Is(err, enroll.ErrInvalidSlot):
+		writeError(w, http.StatusBadRequest, "INVALID_SLOT", err.Error())
+		return
 	case errors.Is(err, enroll.ErrOperatorMismatch):
 		writeError(w, http.StatusForbidden, "OPERATOR_MISMATCH", err.Error())
 		return
@@ -59,9 +111,10 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 	if result.Existing {
 		status = http.StatusOK
 	}
-	writeJSON(w, status, map[string]any{
-		"enrollment_id":    result.ID.String(),
-		"lease_expires_at": result.LeaseExpires,
+	writeJSON(w, status, enrollmentResponse{
+		EnrollmentID:   result.ID.String(),
+		LeaseExpiresAt: result.LeaseExpires,
+		Slot:           strPtr(result.Slot),
 	})
 }
 
@@ -111,7 +164,7 @@ func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id stri
 		writeInternal(w, "renew enrollment", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"lease_expires_at": expires})
+	writeJSON(w, http.StatusOK, leaseResponse{LeaseExpiresAt: expires})
 }
 
 func (s *server) readSelf(w http.ResponseWriter, r *http.Request, id string) {
@@ -133,12 +186,13 @@ func (s *server) readSelf(w http.ResponseWriter, r *http.Request, id string) {
 	if grants == nil {
 		grants = []requests.Grant{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"enrollment_id":    enr.ID.String(),
-		"kind":             enr.Kind,
-		"operator":         enr.Operator,
-		"lease_expires_at": enr.LeaseExpires,
-		"grants":           grants,
+	writeJSON(w, http.StatusOK, selfResponse{
+		EnrollmentID:   enr.ID.String(),
+		Grants:         grants,
+		Kind:           enr.Kind,
+		LeaseExpiresAt: enr.LeaseExpires,
+		Operator:       enr.Operator,
+		Slot:           strPtr(enr.Slot),
 	})
 }
 

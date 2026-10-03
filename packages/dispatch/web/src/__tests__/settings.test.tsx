@@ -32,6 +32,7 @@ test("human users manage repository project mappings from the settings route", a
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([mapping]);
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
@@ -77,6 +78,7 @@ test("human users manage repository project mappings from the settings route", a
     getInbox.mockRestore();
     listRepoProjects.mockRestore();
     listAgentTokens.mockRestore();
+    getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
     listProjects.mockRestore();
     putRepoProject.mockRestore();
@@ -94,6 +96,7 @@ test("repository settings retries a failed mapping query", async () => {
     .mockRejectedValueOnce(new Error("network"))
     .mockResolvedValueOnce([]);
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
@@ -123,6 +126,7 @@ test("repository settings retries a failed mapping query", async () => {
     getInbox.mockRestore();
     listRepoProjects.mockRestore();
     listAgentTokens.mockRestore();
+    getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
     listProjects.mockRestore();
   }
@@ -137,6 +141,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([]);
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects")
     .mockResolvedValueOnce([core])
@@ -178,6 +183,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
     getMyState.mockRestore();
     listRepoProjects.mockRestore();
     listAgentTokens.mockRestore();
+    getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
     listProjects.mockRestore();
     createProject.mockRestore();
@@ -192,6 +198,7 @@ test("creating a project with a taken key shows the server's error inline", asyn
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([]);
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([core]);
   const createProject = spyOn(api, "createProject").mockRejectedValue(
@@ -225,6 +232,7 @@ test("creating a project with a taken key shows the server's error inline", asyn
     getMyState.mockRestore();
     listRepoProjects.mockRestore();
     listAgentTokens.mockRestore();
+    getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
     listProjects.mockRestore();
     createProject.mockRestore();
@@ -250,6 +258,7 @@ test("a human adds an architecture source and the verified row appears", async (
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([]);
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources")
     .mockResolvedValueOnce([])
     .mockResolvedValue([architectureSource]);
@@ -295,6 +304,7 @@ test("a human adds an architecture source and the verified row appears", async (
     getInbox.mockRestore();
     listRepoProjects.mockRestore();
     listAgentTokens.mockRestore();
+    getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
     listProjects.mockRestore();
     putArchitectureSource.mockRestore();
@@ -308,6 +318,7 @@ test("a failed architecture source access check shows the server's reason inline
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([]);
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
@@ -350,6 +361,7 @@ test("a failed architecture source access check shows the server's reason inline
     getInbox.mockRestore();
     listRepoProjects.mockRestore();
     listAgentTokens.mockRestore();
+    getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
     listProjects.mockRestore();
     putArchitectureSource.mockRestore();

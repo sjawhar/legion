@@ -39,7 +39,8 @@ func readBack(doc *Node, spanCells int) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ParseRendering(r.b.String())
+	back, err := ParseRendering(r.b.String())
+	return back, renderedNesting(doc, err)
 }
 
 // NewMisread names how after, which a write made from before, reads back otherwise where before
@@ -233,7 +234,7 @@ func selfDifference(want, got *Node, ignore skip) ownDifference {
 	}
 	own := ownDifference{attribute: attributeReason(want, got, ignore)}
 	if isTextblock(want.Type) && !ignore.text && !inlineEqual(want.Children, got.Children) {
-		wanted, read := textContent(want), textContent(got)
+		wanted, read := TextContent(want), TextContent(got)
 		own.text = fmt.Sprintf("%s reads back holding %q, not %q", blockName(want.Type), read, wanted)
 		own.textDiffers = differingSpan(wanted, read)
 	}

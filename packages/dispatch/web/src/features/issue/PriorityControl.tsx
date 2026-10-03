@@ -47,8 +47,8 @@ export function PriorityControl({
  * reaches it through the focused card.
  *
  * The host passes the write when it has other ways to set the same priority: the issue page
- * creates one for the page and shares it with the keyboard's `0`–`3`, so one refusal is
- * reported once, here, by the control the reader is looking at.
+ * creates one for the page and shares it with the keyboard's `0`–`3` and the palette's Set
+ * priority rows, so one refusal is reported once, here, by the control the reader is looking at.
  */
 export function PriorityEditor({
   disabled = false,

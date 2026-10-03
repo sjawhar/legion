@@ -14,23 +14,40 @@ unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE
 # DATABASE_URL is the one required caller input. The harness has no fake
 # Postgres and e2e/seed.ts truncates the named database before every scenario,
 # so silently selecting a shared default would make the destructive write
-# target ambiguous. The three ports are shared harness inputs because the
+# target ambiguous. The four ports are shared harness inputs because the
 # Playwright config and its helpers resolve them too.
 : "${DATABASE_URL:?DATABASE_URL must name an isolated Dispatch e2e database}"
 database_url="$DATABASE_URL"
 e2e_port="${DISPATCH_E2E_PORT:-8777}"
 fake_envoy_port="${FAKE_ENVOY_PORT:-9021}"
 fake_github_port="${FAKE_GITHUB_PORT:-9022}"
+fake_broker_port="${FAKE_BROKER_PORT:-9024}"
 
-# Resolve the concrete Go executable before hiding HOME. A mise shim can use
-# the caller's configuration here, but the hermetic server process invokes the
-# resolved Go binary directly and never asks mise to choose a version.
-go_binary="$(go env GOROOT)/bin/go"
-
-# `go run` still compiles the concrete server command, so provide its build
-# and module caches explicitly rather than letting Go derive them from HOME.
-go_cache="${GOCACHE:-$(go env GOCACHE)}"
-go_mod_cache="${GOMODCACHE:-$(go env GOMODCACHE)}"
+# The secrets broker the server relays credential requests to, read before
+# the sweep below drops every DISPATCH_* variable. DISPATCH_E2E_AGENT_SECRETS_URL
+# is the harness's one switch, which e2e/harness-broker.ts reads the same way
+# (no colon, so empty and unset differ): unset is e2e/fake-broker.ts with a
+# throwaway UI bearer; empty is no broker, the credential feature off, as in a
+# deployment that configures none; a URL is a broker the caller runs, whose
+# bearer stays in DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE, which the server reads
+# itself, so no argv carries it.
+broker_env=()
+if [ -z "${DISPATCH_E2E_AGENT_SECRETS_URL+set}" ]; then
+  broker_env=(
+    DISPATCH_AGENT_SECRETS_TOKEN=e2e-broker-token
+    DISPATCH_AGENT_SECRETS_URL="http://127.0.0.1:$fake_broker_port"
+  )
+elif [ -n "$DISPATCH_E2E_AGENT_SECRETS_URL" ]; then
+  : "${DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE:?DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE must accompany DISPATCH_E2E_AGENT_SECRETS_URL}"
+  # The server reads the file from packages/envoy, where this script changes directory below, so a
+  # path relative to the caller's directory is made absolute first.
+  token_file="$DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE"
+  [[ "$token_file" == /* ]] || token_file="$PWD/$token_file"
+  broker_env=(
+    DISPATCH_AGENT_SECRETS_TOKEN_FILE="$token_file"
+    DISPATCH_AGENT_SECRETS_URL="$DISPATCH_E2E_AGENT_SECRETS_URL"
+  )
+fi
 
 mapfile -t inherited < <(compgen -e)
 for name in "${inherited[@]}"; do
@@ -41,37 +58,48 @@ done
 
 # Architecture-source access checks run against the fake GitHub listener with
 # throwaway App credentials: a fresh RSA key per run (nothing secret to
-# commit), a dummy client secret because LoadAppFromEnv requires one whenever
-# the client id is set, and the trusted-header ack the server demands when App
-# credentials meet header identity. The fresh signing key makes the cookie
-# layer just as isolated; nothing reaches the caller's persistent data dir.
+# commit), and a dummy client secret because LoadAppFromEnv requires one
+# whenever the client id is set. Identity is the production cookie: the server
+# mints it at its dev sign-in route (DISPATCH_DEV_SIGNIN=1) with a signing key it
+# generates for this process alone, so no key is passed and nothing reaches the
+# caller's persistent data dir; DISPATCH_INSECURE_COOKIE=1 keeps the cookie
+# usable over plain HTTP in every engine. DISPATCH_SERVER_URL stays
+# http://127.0.0.1:$e2e_port: it is the origin the CSRF guard compares writes
+# against, the only Host the router serves under the flag, and the Playwright
+# config's baseURL. The flag also refuses a DATABASE_URL whose host is not
+# loopback or a unix socket.
 app_pem_b64="$(openssl genrsa 2048 2>/dev/null | base64 -w0)"
-signing_key="$(openssl rand -hex 32)"
 
 cd "$(dirname "$0")/../../envoy"
+# Build first, in the caller's toolchain environment, and exec the binary itself. A server
+# started as `go run` is the go command's child; the go command ignores only SIGINT and SIGQUIT,
+# so a SIGTERM to it ends the go command and leaves the server listening. Playwright kills the
+# whole process group and the skill-scenarios rig the whole process tree, but a caller that
+# signals the one pid it started (`kill $!`) needs that pid to be the server. One binary per
+# checkout, built under a lock so two harnesses starting at once serialise: Go rewrites it only
+# when the source changed, and a running server keeps the inode it started from.
+flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
 exec env \
+  "${broker_env[@]}" \
   DATABASE_URL="$database_url" \
   DISPATCH_AGENT_TOKEN=e2e-token \
   DISPATCH_ALLOWED_LOGINS=alice,bob \
   DISPATCH_APP_CLIENT_ID=Iv1.e2efake \
   DISPATCH_APP_CLIENT_SECRET=e2e-dummy-secret \
   DISPATCH_APP_PEM_B64="$app_pem_b64" \
+  DISPATCH_DEV_SIGNIN=1 \
   DISPATCH_GITHUB_API_BASE="http://127.0.0.1:$fake_github_port" \
-  DISPATCH_IDENTITY=header:X-Dispatch-User \
-  DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
+  DISPATCH_IDENTITY=cookie \
+  DISPATCH_INSECURE_COOKIE=1 \
   DISPATCH_LISTEN_HOST=127.0.0.1 \
   DISPATCH_NATS_DISABLED=1 \
   DISPATCH_PORT="$e2e_port" \
   DISPATCH_SERVER_URL="http://127.0.0.1:$e2e_port" \
-  DISPATCH_SIGNING_KEY="$signing_key" \
   DISPATCH_TEST_HOOKS=1 \
   DISPATCH_WEB_DIST=../dispatch/web/dist \
   ENVOY_URL="http://127.0.0.1:$fake_envoy_port" \
   HOME=/nonexistent \
-  GOCACHE="$go_cache" \
-  GOMODCACHE="$go_mod_cache" \
-  GOENV=off \
   XDG_CACHE_HOME=/nonexistent \
   XDG_CONFIG_HOME=/nonexistent \
   XDG_DATA_HOME=/nonexistent \
-  "$go_binary" run ./cmd/dispatch
+  ./dispatch-e2e

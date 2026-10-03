@@ -5,13 +5,10 @@ import (
 	"errors"
 
 	"net/http"
-	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
@@ -224,14 +221,7 @@ func writeBrowserDocument(t *testing.T, documentService *docs.Service, artifactI
 	if err != nil {
 		t.Fatalf("parse the browser's document: %v", err)
 	}
-	sockets := &servedSockets{finished: make(map[string]chan struct{})}
-	server := httptest.NewServer(sockets.serve(documentService.ServeHTTP))
-	t.Cleanup(server.Close)
-	peer := &syncedPeer{
-		wsURL: "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID, sockets: sockets,
-		headers: http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID: artifactID, doc: crdt.New(),
-	}
-	peer.connect(t)
+	peer := connectBrowserPeer(t, documentService, artifactID)
 	t.Cleanup(peer.close)
 	peer.edit(t, func(tree *pmdoc.Node) error {
 		tree.Children = written.Children
@@ -298,9 +288,9 @@ func TestSuggestionActionsAreRefusedOnlyForAnAskAnAcceptBroke(t *testing.T) {
 }
 
 // A block replacement over a callout's only paragraph lands inside the callout, as ProseMirror's
-// fit puts it there, so the callout keeps its id, kind and title whatever the blocks are. The fit
-// once climbed out of the callout and replaced it with the blocks, which both parsers read back as
-// written, so nothing downstream could notice the callout was gone.
+// fit puts it there, so the callout keeps its id, kind and title whatever the blocks are. A fit
+// that climbed out of the callout and replaced it with the blocks would read back as written in
+// both parsers, so nothing downstream could notice the callout was gone.
 func TestSuggestionAcceptKeepsTheCalloutItLandsIn(t *testing.T) {
 	for _, test := range []struct{ name, replaceWith, body string }{
 		{name: "a rule", replaceWith: "***\n", body: "---\n"},
@@ -343,7 +333,7 @@ func TestSuggestionAcceptKeepsTheCalloutItLandsIn(t *testing.T) {
 
 // Two paragraphs over a word of an answered ask's question land inside the ask, as ProseMirror's
 // fit puts them there: the ask's content rule allows a question of several paragraphs. The ask
-// keeps its id, its options, its row and its answer. The fit once climbed out of the ask and split
+// keeps its id, its options, its row and its answer. A fit that climbed out of the ask would split
 // it, leaving the answered row on "Which" and the options under a minted id as a new open ask "?".
 func TestSuggestionAcceptKeepsTheAskItLandsIn(t *testing.T) {
 	handler, _ := blockAskHandler(t)
@@ -542,10 +532,10 @@ const askSpec = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\
 // Every accept refused for what it would write leaves the document byte-identical, the
 // suggestion's mark in place, and the comment open and unactioned.
 //   - An ask holds paragraphs and at most one bullet list. A question given a code block would leave
-//     an ask settlement cannot read; the splice once fitted it by replacing the whole block, so the
-//     question someone may be waiting on vanished. It is refused with settlement's reason, alone or
-//     beside another ask that was already malformed (that one is not the accept's, the ask it
-//     breaks is), and so is the same text through the edit route.
+//     an ask settlement cannot read; a splice that fitted it by replacing the whole block would
+//     make the question someone may be waiting on vanish. It is refused with settlement's
+//     reason, alone or beside another ask that was already malformed (that one is not the
+//     accept's, the ask it breaks is), and so is the same text through the edit route.
 //   - A replacement that leaves a paragraph after an ask's options, or a second bullet list in
 //     it, breaks the ask's content rule, paragraph+ bullet_list?; settlement's parse takes it, but
 //     the browser editor drops such an ask from the shared document when it renders it, and
@@ -554,12 +544,12 @@ const askSpec = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\
 //   - A replacement carrying an ask under a1's id would write two asks with one id, and the id
 //     repair keeps the id for the first in document order, handing a1's row and answer to the new
 //     ask; the write's block-id check refuses it before the ask check runs.
-//   - A code block over a table cell's whole text fits nowhere; the splice's schema error once
-//     reached the handler as a 500.
+//   - A code block over a table cell's whole text fits nowhere; the splice's schema error is a
+//     refusal, never a 500.
 //   - Inline text over a range that runs into an ask or callout from the text before it, at any
 //     depth (in a blockquote, a list item, a callout), would join the two and leave that block
-//     empty (the engine drops it, which for an ask retracts it); the splice's schema error once
-//     reached the handler as a 500.
+//     empty (the engine drops it, which for an ask retracts it); the splice's schema error is a
+//     refusal, never a 500.
 func TestSuggestionAcceptRefusals(t *testing.T) {
 	codeQuestion := "Which?\n\n```\ncode\n```\n"
 	for _, test := range []struct {

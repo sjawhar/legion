@@ -4,7 +4,6 @@
 package api
 
 import (
-	"encoding/base64"
 	"errors"
 	"net/http"
 
@@ -12,12 +11,14 @@ import (
 )
 
 type lookupMachineLoginBody struct {
+	// The XXXX-XXXX confirmation code the machine shows, as the approver typed it.
 	Code string `json:"code"`
 }
 
 // lookupMachineLogin resolves a pending machine login by its human-readable confirmation code —
 // the operator's dashboard never needs the machine's opaque pending id — and is the only route
-// that hands out a machine record's approve/deny challenges (ruling 13).
+// that selects a machine record. Deciding it takes the same code again (CODE_REQUIRED /
+// CODE_MISMATCH), so a direct link to the record can never approve it (ruling 13).
 func (s *server) lookupMachineLogin(w http.ResponseWriter, r *http.Request) {
 	var body lookupMachineLoginBody
 	if !readJSON(w, r, &body, "INVALID_LOOKUP") {
@@ -41,11 +42,5 @@ func (s *server) lookupMachineLogin(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, "read credential request", err)
 		return
 	}
-	resp := buildRecordResponse(detail)
-	ch := challengesResp{
-		Approve: base64.RawURLEncoding.EncodeToString(view.ApproveChallenge),
-		Deny:    base64.RawURLEncoding.EncodeToString(view.DenyChallenge),
-	}
-	resp.Challenges = &ch
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, buildRecordResponse(detail))
 }

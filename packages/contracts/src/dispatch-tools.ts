@@ -1,3 +1,4 @@
+import { DEFAULT_ISSUE_PAGE_LIMIT, MAX_ISSUE_PAGE_LIMIT } from "./dispatch-api";
 import type { SchemaApi, SchemaNode, ToolArgumentsShape } from "./tool-schema";
 
 export interface DispatchToolSpec {
@@ -33,6 +34,15 @@ const ISSUE_REFERENCE =
 
 const OWNER_REFERENCE =
   "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
+
+const ASK_QUESTION_CONTRACT =
+  "The question carries the problem the reader recognises and why it matters now, what constrains " +
+  "the answer, and the recommendation with its reason. It asks how to solve the problem or which " +
+  "outcome is wanted; never enumerate choices in the question.";
+
+const ASK_OPTIONS_CONTRACT =
+  "Options carry the genuinely different approaches. Each option has a label, and its description " +
+  "says what that approach costs.";
 
 function documentOwnerValidation(
   requireArtifact: boolean,
@@ -159,27 +169,31 @@ function componentsArgument<E extends SchemaNode<E>>(z: SchemaApi<E>): E {
     );
 }
 
-export const SPEC_SECTIONS = [
-  "Summary",
-  "New since we talked",
-  "Acceptance",
-  "Requirements",
-  "Design",
-  "Errors",
-  "Testing",
-  "Rejected",
-] as const;
-
-const SPEC_WRITING_GUIDANCE =
-  `When writing a spec, use these sections in order: ${SPEC_SECTIONS.join(", ")}. ` +
-  "Write for a reader who has not seen the code: plain sentences, every identifier expanded on " +
-  "first use, no coined shorthand; see skills/dispatch Writing for the human and Writing a spec.";
+const SPEC_WRITING_POINTER =
+  'Write a spec as the "Writing a spec" section of skill://dispatch says.';
 
 /** Ask urgency levels the Dispatch server accepts, in ascending order. */
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 
 /** Longest ask question the Dispatch server accepts, in characters. */
 export const ASK_QUESTION_MAX = 800;
+
+/**
+ * Longest `dispatch_search` query (`GET /api/v1/search`'s `q`, trimmed), in UTF-16 units. The
+ * query rides in the URL beside `project` and `limit`, so this refusal and `project`'s key rule
+ * are what keep the tool's URL under the load balancer's limit; `packages/contracts/AGENTS.md`
+ * "Search limits" owns that budget. Generated into Go as `contracts.SearchQueryMax`, which the
+ * server enforces.
+ */
+export const SEARCH_QUERY_MAX = 1000;
+
+/** What a refusal over `SEARCH_QUERY_MAX` tells the caller to send instead; generated into Go
+ *  as `contracts.SearchQueryHint`, so the tool and the server word it once. */
+export const SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
+
+/** A whole project key, as the Dispatch server creates them (`projectKeyPattern`, and the
+ *  `projects.key` check constraint). */
+export const PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
 
 /** Issue lifecycle statuses the Dispatch server accepts (`model.IssueStatuses`), in lifecycle order. */
 export const ISSUE_STATUSES = [
@@ -234,7 +248,7 @@ export const dispatchToolSpecs = [
         .optional(),
       spec: z
         .string()
-        .describe(`Optional initial primary-document markdown. ${SPEC_WRITING_GUIDANCE}`)
+        .describe(`Optional initial primary-document markdown. ${SPEC_WRITING_POINTER}`)
         .optional(),
       labels: z
         .array(z.string({ min: 1, max: 40 }), { max: 20 })
@@ -381,14 +395,35 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_ask",
-    example: { issue: "DSP-1", question: "Ship this?" },
+    example: {
+      issue: "DSP-1",
+      question:
+        "The release cannot pass its review gate because the revised plan is unreviewed. " +
+        "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+      options: [
+        {
+          label: "Review the revised plan",
+          description: "Delays release for review but keeps the release gate.",
+        },
+        {
+          label: "Release without review",
+          description: "Ships sooner but bypasses the review gate.",
+        },
+      ],
+    },
     description:
-      "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " +
-      "use dispatch_message instead. A to-do a human must complete is a question phrased as that to-do, with the options you want (for example Done / Can't). " +
-      "Anything you are blocked on a human for, including a credential or grant to renew, an approval, or a decision, is an ask, never a message. " +
+      "Open a durable, answerable decision on an issue or project document. Do not use it for a " +
+      "status update or discussion; use dispatch_message instead. " +
+      ASK_QUESTION_CONTRACT +
+      " " +
+      ASK_OPTIONS_CONTRACT +
+      " For an action only a human can perform, state what it changes and risks as constraints. " +
+      "Anything you are blocked on a human for, including a credential or grant to renew, an " +
+      "approval, or a decision, is an ask, never a message. " +
       "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " +
-      `reference — it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} ` +
-      `characters and has at most 8 options. ${OWNER_REFERENCE}`,
+      `reference — it must be answerable from its own text and anchor alone, never "see above". ` +
+      `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters ` +
+      `and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -401,17 +436,17 @@ export const dispatchToolSpecs = [
         .optional(),
       question: z
         .string({ max: ASK_QUESTION_MAX })
-        .describe(`Decision question, at most ${ASK_QUESTION_MAX} characters.`),
+        .describe(`${ASK_QUESTION_CONTRACT} At most ${ASK_QUESTION_MAX} characters.`),
       options: z
         .array(
           z.object({
             label: z.string().describe("Selectable option label."),
-            description: z.string().describe("Optional option context.").optional(),
+            description: z.string().optional().describe("What this option costs."),
           }),
           { max: 8 }
         )
-        .describe("Up to 8 choices, each an object { label, description? } (never a bare string).")
-        .optional(),
+        .optional()
+        .describe(`${ASK_OPTIONS_CONTRACT} Up to 8 objects { label, description? }.`),
       multiple: z.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z.enum(ASK_URGENCIES).describe("Optional decision urgency.").optional(),
       anchor: z
@@ -432,19 +467,33 @@ export const dispatchToolSpecs = [
     name: "dispatch_edit_ask",
     example: {
       ask: "01234567-0000-4000-8000-000000000001",
-      question: "Ship the revised plan?",
+      question:
+        "The release cannot pass its review gate because the revised plan is unreviewed. " +
+        "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+      options: [
+        {
+          label: "Review the revised plan",
+          description: "Delays release for review but keeps the release gate.",
+        },
+        {
+          label: "Release without review",
+          description: "Ships sooner but bypasses the review gate.",
+        },
+      ],
     },
     description:
       "Edit an open question in place. Use it to correct or refine the same decision; retract the " +
-      "old ask and open a new one when the decision itself changes. Previous text remains in the " +
-      "event log. Only the asking session can edit it; answered or resolved asks cannot be edited. " +
-      "An ask that lives as an `ask` block in a document is written in the document too, changing " +
-      "only the fields you name - pass urgency alone and the question's wording, formatting, links " +
-      "and comment anchors are untouched - so the edit writes a document version and closes a " +
-      "spec's design gate until that version is " +
-      "approved; text the block cannot carry back unchanged is refused, naming the field - an " +
-      'option label containing ": ", the separator between a label and its description, is one ' +
-      "example.",
+      "old ask and open a new one when the decision itself changes. " +
+      ASK_QUESTION_CONTRACT +
+      " " +
+      ASK_OPTIONS_CONTRACT +
+      " Previous text remains in the event log. Only the asking session can edit it; answered or " +
+      "resolved asks cannot be edited. An ask that lives as an `ask` block in a document is written " +
+      "in the document too, changing only the fields you name - pass urgency alone and the " +
+      "question's wording, formatting, links and comment anchors are untouched - so the edit " +
+      "writes a document version and closes a spec's design gate until that version is approved; " +
+      "text the block cannot carry back unchanged is refused, naming the field - an option label " +
+      'containing ": ", the separator between a label and its description, is one example.',
     arguments: (z) => ({
       ask: z
         .string()
@@ -453,18 +502,22 @@ export const dispatchToolSpecs = [
         ),
       question: z
         .string({ max: ASK_QUESTION_MAX })
-        .describe(`Replacement decision question, at most ${ASK_QUESTION_MAX} characters.`)
-        .optional(),
+        .optional()
+        .describe(
+          `${ASK_QUESTION_CONTRACT} Replaces the ask's question; at most ${ASK_QUESTION_MAX} characters.`
+        ),
       options: z
         .array(
           z.object({
             label: z.string().describe("Selectable option label."),
-            description: z.string().describe("Optional option context.").optional(),
+            description: z.string().optional().describe("What this option costs."),
           }),
           { max: 8 }
         )
-        .describe("Replacement choices, at most 8.")
-        .optional(),
+        .optional()
+        .describe(
+          `${ASK_OPTIONS_CONTRACT} Replaces the ask's options; up to 8 objects { label, description? }.`
+        ),
       multiple: z.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z.enum(ASK_URGENCIES).describe("Replacement decision urgency.").optional(),
     }),
@@ -679,13 +732,13 @@ export const dispatchToolSpecs = [
       "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " +
       "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', and a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
       "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " +
-      "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
+      "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
       'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' +
       "Optionally require the state just read: precondition selects exactly one of a document token from dispatch_doc_read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " +
       "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch_doc_read between them. " +
       "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " +
       "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " +
-      `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
+      `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -815,13 +868,20 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_request_approval",
-    example: { issue: "DSP-1" },
+    example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
     description:
-      "Ask a human to approve a document at its current version - the exception path for a spec " +
-      "that departs from what was settled or proposes children, not a step for every issue. Opens an " +
-      "approval ask (Approve / Request changes) in the human's Inbox; the answer pins a review to the " +
-      "document version and arrives as artifact.approved or artifact.changes_requested. A later edit " +
-      "makes an approval stale; request again for the new version. Idempotent while a request is open. " +
+      "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " +
+      "Request changes) in the human's Inbox whose question names the document and version, " +
+      "followed by the summary; the answer pins a review to that version and arrives as " +
+      "artifact.approved or artifact.changes_requested. A later version carries the same open " +
+      "request forward and leaves it waiting on you; once the revision is complete and the human " +
+      "has agreed to every point in it, call this again to hand that request back. The request " +
+      "carries nothing new. A call while it already waits on the human hands nothing back: the " +
+      "same summary changes nothing, and a different one is refused, since it would rewrite the " +
+      "card the human is reading. " +
+      "Refused, with nothing sent, while the document holds an open decision block, even when a " +
+      "human asked for approval: the refusal names each block; ask the human to answer or waive " +
+      "it first. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -832,6 +892,11 @@ export const dispatchToolSpecs = [
           "Project document artifact id, slug, or filename; primary document by default for an issue."
         )
         .optional(),
+      summary: z
+        .string({ min: 1 })
+        .describe(
+          "What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question. Request approval only once the human has agreed to every point in the document."
+        ),
     }),
     validation: documentOwnerValidation(true),
   },
@@ -840,7 +905,7 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1", name: "design.md", content: "# Design\n" },
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
-      "dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. " +
+      "dispatch_doc_edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
       "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
       `${OWNER_REFERENCE}`,
     arguments: (z) => ({
@@ -881,6 +946,11 @@ export const dispatchToolSpecs = [
       "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " +
       "or project plus artifact; or message alone, which reads a human's direct message to this session and every " +
       "reply to it (they belong to no issue). " +
+      "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " +
+      "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " +
+      "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " +
+      "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " +
+      "needs a rebuild) or `INTERNAL`. " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
       OWNER_REFERENCE,
@@ -908,18 +978,30 @@ export const dispatchToolSpecs = [
       'Websearch syntax: "quoted phrase", -excluded, OR.',
     arguments: (z) => ({
       query: z
-        .string({ min: 2 })
-        .describe("Keyword, phrase, or websearch expression; at least 2 characters."),
+        .string({
+          min: 2,
+          max: SEARCH_QUERY_MAX,
+          maxHint: SEARCH_QUERY_HINT,
+        })
+        .describe(`Keyword, phrase, or websearch expression; 2 to ${SEARCH_QUERY_MAX} characters.`),
       project: z.string().describe("Optional project key to search within.").optional(),
       limit: z
         .number({ int: true, min: 1, max: 50 })
         .describe("Maximum results, 1-50; default 20.")
         .optional(),
     }),
+    // An empty project searches every project, as the server reads it.
+    validation: {
+      check: (value) => {
+        const { project } = value as { readonly project?: unknown };
+        return typeof project !== "string" || project === "" || PROJECT_KEY_PATTERN.test(project);
+      },
+      message: "project must be a project key such as CORE",
+    },
   },
   {
     name: "dispatch_issues",
-    example: { project: "AGENTC", limit: 250, offset: 250 },
+    example: { project: "PROJ", limit: 250, offset: 250 },
     description:
       "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " +
       "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " +
@@ -930,9 +1012,12 @@ export const dispatchToolSpecs = [
       "session that is not running at the moment of the read, whatever its priority. A restarting " +
       "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " +
       "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " +
-      "Rows are paged after the server returns the full response: limit sets the page size (default 50, " +
-      "max 250) and offset selects where it starts (default 0), so repeat with the next offset to " +
-      "enumerate every matching issue.",
+      "Dispatch pages the list: limit sets the page size (default " +
+      `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` +
+      "(default 0), and the answer names how many issues match, so repeat with the next offset to " +
+      "walk every matching issue. A walk is exact only while the list does not change: an issue " +
+      "that enters or leaves what the filters match, or whose status or rank changes, between two " +
+      "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
     arguments: (z) => ({
       project: z.string().describe("Project key to list issues from."),
       status: z.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -958,8 +1043,8 @@ export const dispatchToolSpecs = [
         )
         .optional(),
       limit: z
-        .number({ int: true, min: 1, max: 250 })
-        .describe("Maximum rows, 1-250; default 50.")
+        .number({ int: true, min: 1, max: MAX_ISSUE_PAGE_LIMIT })
+        .describe(`Maximum rows, 1-${MAX_ISSUE_PAGE_LIMIT}; default ${DEFAULT_ISSUE_PAGE_LIMIT}.`)
         .optional(),
       offset: z
         .number({ int: true, min: 0 })

@@ -99,15 +99,15 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "STREAM_UNSUPPORTED", http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
-	// A cold client (no since= and no Last-Event-ID) used to fetch its own head
-	// via a separate GET /api/v1/events/head request, then open this connection
-	// with since=<that head>. An event whose id was allocated before that first
-	// request read the head, but committed after the head response and before
-	// this connection's Subscribe below, was excluded from catch-up (id <= since)
-	// and missed by the subscription (registered too late) — lost forever. This
-	// handler now IS the client's only request for a cold start: subscribing
-	// before computing its own head closes that gap, since anything committing
-	// after Subscribe lands in the channel regardless of its id (see below).
+	// This handler IS a cold client's (no since= and no Last-Event-ID) only request.
+	// A client that fetched its own head via a separate request and then opened
+	// this connection with since=<that head> would lose an event whose id was
+	// allocated before that request read the head but committed after the head
+	// response and before this connection's Subscribe below: excluded from
+	// catch-up (id <= since) and missed by the subscription (registered too
+	// late). Subscribing before computing its own head closes that gap, since
+	// anything committing after Subscribe lands in the channel regardless of its
+	// id (see below).
 	subscription, cancel := s.deps.Events.Subscribe()
 	defer cancel()
 	if !sinceProvided {
@@ -126,9 +126,9 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	// query — a still-open transaction that grabbed an earlier id is exactly the
 	// case the subscription above (taken before any catch-up query runs) exists to
 	// cover. Page through the full backlog here without ever closing the stream: a
-	// capped page used to end the stream and force a client reconnect, but that
-	// left a gap between "read this page" and "reopen a new subscription" where a
-	// low id could commit and be missed by both the next page's `id > cursor` query
+	// capped page that ended the stream and forced a client reconnect would leave
+	// a gap between "read this page" and "reopen a new subscription" where a low
+	// id could commit and be missed by both the next page's `id > cursor` query
 	// (cursor has already moved past it) and the old subscription (already
 	// cancelled). Keeping one subscription live across every page closes that gap.
 	cursor := since
@@ -297,7 +297,7 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 	payloads := []map[string]any{}
 	for index := range events {
 		switch events[index].Type {
-		case "ask.opened", "ask.anchor_refreshed", "ask.answered", "ask.resolved", "ask.edited":
+		case "ask.opened", "ask.anchor_refreshed", "ask.answered", "ask.resolved", "ask.edited", "ask.handed_back":
 		default:
 			continue
 		}
@@ -333,7 +333,7 @@ func (s *server) attachAskAnchorArtifacts(ctx context.Context, events []model.Ev
 	payloads := map[string][]map[string]any{}
 	for index := range events {
 		switch events[index].Type {
-		case "ask.opened", "ask.anchor_refreshed", "ask.answered", "ask.resolved", "ask.edited":
+		case "ask.opened", "ask.anchor_refreshed", "ask.answered", "ask.resolved", "ask.edited", "ask.handed_back":
 		default:
 			continue
 		}

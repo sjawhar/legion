@@ -36,15 +36,3 @@ secrets:
     delivery: inject
     max_lifetime_seconds: 43200
     requesters: []
-approvers:
-  origin: https://dispatch.test
-  aaguids:
-    - "ee882879-721c-4913-9775-3dfcce97072a"
-  logins:
-    sjawhar:
-      keys:
-        - credential_id: "sjawhar-cred-1"
-          registration:
-            challenge_nonce: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            response: {id: "sjawhar-cred-1"}
-          seed: true
