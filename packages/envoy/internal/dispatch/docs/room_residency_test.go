@@ -445,57 +445,57 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	if logged := logs.String(); logged != "" {
 		t.Errorf("a healthy room under concurrent writes logged:\n%s", logged)
 	}
-	room := service.srv.GetDoc(artifactID)
-	listed, ok := service.replicas.Load(weak.Make(room))
-	if !ok {
-		t.Fatal("the written room lists no replica")
-	}
-	replica := listed.(*renderedReplica)
-	replica.mu.Lock()
-	content := replica.markdown
-	replica.mu.Unlock()
-	live, err := snapshotDocument(room)
-	if err != nil {
+	// The observer's last rendering is the room's: an update that changes nothing a rendering
+	// carries, made once the writers have stopped, is recorded as no content change.
+	if err := service.ProjectMark(ctx, artifactID, "after-the-writers", MarkRecord{
+		Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
+	}, bob); err != nil {
 		t.Fatal(err)
 	}
-	want, err := renderDocument(live)
-	if err != nil {
+	stored, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := service.waitForPendingUpdates(stored, artifactID); err != nil {
 		t.Fatal(err)
 	}
-	if content == nil {
-		t.Errorf("the observer's last rendering is unset, want the room's %q", want)
-	} else if *content != want {
-		t.Errorf("the observer's last rendering = %q, want the room's %q", *content, want)
+	if err := service.waitForDurableAppends(stored, artifactID); err != nil {
+		t.Fatal(err)
+	}
+	var changed bool
+	if err := service.store.Pool.QueryRow(ctx, `
+		select content_changed from doc_updates where artifact_id = $1 order by version desc limit 1
+	`, artifactID).Scan(&changed); err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Error("a margin projection made once the writers stopped was recorded as a content change, so the observer's last rendering was not the room's")
 	}
 	t.Logf("%d peer writes and %d projections", writes.Load(), projections.Load())
 }
 
-// A room's reads walk the replica its update observer keeps (readLive), and the replica goes with
-// the room: it holds a whole copy of the room's document, so a listing that outlived the room would
-// keep that copy for every room the server has ever evicted.
+// A room's reads walk a replica of their own (readLive), and the replica goes with the room: it
+// holds a whole copy of the room's document, so a listing that outlived the room would keep that
+// copy for every room the server has ever evicted.
 func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
 	ctx := context.Background()
-	// A write the room's update observer sees, which makes its replica.
-	if err := service.ProjectMark(ctx, artifactID, "projection", MarkRecord{
-		Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
-	}, model.Actor{Kind: "user", ID: "bob"}); err != nil {
+	// A read that loads the room, which makes the replica the room's reads walk.
+	if _, err := service.docTree(ctx, artifactID); err != nil {
 		t.Fatal(err)
 	}
 	// The listing's key holds the room's document weakly, as the listing does.
 	key := weak.Make(service.srv.GetDoc(artifactID))
 	listed, ok := service.replicas.Load(key)
 	if !ok {
-		t.Fatal("the written room lists no replica")
+		t.Fatal("the read room lists no replica")
 	}
-	replica := listed.(*renderedReplica)
-	replica.mu.Lock()
-	held := replica.doc != nil
-	replica.mu.Unlock()
+	reads := listed.(*replica)
+	reads.mu.Lock()
+	held := reads.doc != nil
+	reads.mu.Unlock()
 	if !held {
-		t.Fatal("the written room's replica holds no copy")
+		t.Fatal("the read room's replica holds no copy")
 	}
 
 	if err := service.Evict(ctx, artifactID); err != nil {
@@ -508,10 +508,11 @@ func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
 	})
 }
 
-// A tree a read of a resident room returns is its reader's to change. The read walks the room's
-// replica (readLive), which every later read walks too, so a tree that held the replica's own mark
-// attributes or attribute values would carry its reader's edit into the next read: a link reading
-// back with the target the reader wrote, an answered ask with the choice it wrote.
+// A tree a read of a resident room returns is its reader's to change. The read walks the replica
+// the room's reads keep (readLive), which every later read walks too, so a tree that held the
+// replica's own mark attributes or attribute values would carry its reader's edit into the next
+// read: a link reading back with the target the reader wrote, an answered ask with the choice it
+// wrote.
 func TestEditingALiveReadsTreeChangesNoLaterRead(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -524,8 +525,7 @@ Which transport should we expose?
 see [link](https://a.example/) here
 `)
 	ctx := context.Background()
-	// The ask is answered as settlement answers it, in a write the room's update observer sees,
-	// which makes the replica the reads walk.
+	// The ask is answered as settlement answers it.
 	if err := service.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		ask := doc.GetXmlFragment(fragmentName).Children()[0].(*crdt.YXmlElement)
 		transact(func(txn *crdt.Transaction) {
@@ -535,6 +535,7 @@ see [link](https://a.example/) here
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// The first read makes the replica the later ones walk.
 	before, err := service.Text(ctx, artifactID)
 	if err != nil {
 		t.Fatal(err)
