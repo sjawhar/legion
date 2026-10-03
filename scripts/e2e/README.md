@@ -649,14 +649,15 @@ hold none of the spec's blocks open, read from the version itself by the block i
 block asks, because Dispatch indexes a block as an ask only when it settles the document, after
 the edit that wrote it. An approval row follows versions in place, so `ask.opened` records its
 first hand-back and each `ask.handed_back` a later one; an `ask.edited` only rewords the request.
-The answer-time rule judges a hand-back no human answered: it must not come before a human answered
-one of the spec's blocks, which catches a request made while the choice was still prose or sent in
-parallel with the edit that wrote the block. A request the human answered is left to the version
-rule, so the flow `legion-architect` prescribes after Request changes (the revision raises a block,
-the human answers it, and the architect requests approval again, which opens a new request since
-Request changes answered the old one) passes; the trade-off is that a
-premature request the human answered with Request changes no longer fails the run, since the human
-caught it. It keeps the issue's asks as `<issue>-asks.json`, approval events as
+The answer-time rule judges every hand-back against the human's first turn on it (an answer to its
+request, or a human's reply in the request's thread before the request is handed back again): no
+block raised before that turn may be answered after the hand-back. That catches a request made
+while the choice was still prose, or sent in parallel with the edit that wrote the block. A block
+raised after the human's turn takes up what they said, so the flows the dispatch skill and
+`legion-architect` prescribe pass: the human replies in the request's thread, or answers Request
+changes; the revision raises a block; the human answers it; and the architect hands the request
+back, or requests approval again, which opens a new request since Request changes answered the old
+one. It keeps the issue's asks as `<issue>-asks.json`, approval events as
 `<issue>-events.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as
 `<issue>-gate-verdict.json`.
 

@@ -287,7 +287,8 @@ describe("design-gate-verdict.jq", () => {
 
   // The flow legion-architect prescribes: the human answers the version-3 request with Request
   // changes, the revision raises a second block, the human answers it, and the architect requests
-  // again. The version-3 request was answered, so only its version judges it.
+  // again. The block came after the human's answer to the version-3 request, so it is no sign that
+  // request was early.
   test("a request the human answered with Request changes is not early for a block the revision raised", () => {
     const raised = {
       ...block,
@@ -306,6 +307,87 @@ describe("design-gate-verdict.jq", () => {
       blocks: 2,
       early: [],
     });
+  });
+
+  // The architect raised the second block itself after requesting, before the human answered the
+  // request with Request changes, so the request came before that choice was settled.
+  test("a block raised before the human answered a request with Request changes makes it early", () => {
+    const raised = {
+      ...block,
+      block_id: "block-2",
+      question: "Which date format?",
+      created_at: "2026-09-30T10:07:00Z",
+      answer: { at: "2026-09-30T10:15:00Z" },
+    };
+    const atThree = { ...approval(3, "2026-09-30T10:06:00Z", "answered"), id: "approval-3" };
+    const atSix = { ...approval(6, "2026-09-30T10:16:00Z", "answered"), id: "approval-6" };
+    const events = [
+      { type: "ask.opened", created_at: atThree.created_at, payload: atThree },
+      { type: "ask.answered", created_at: "2026-09-30T10:08:00Z", payload: atThree },
+      { type: "ask.opened", created_at: atSix.created_at, payload: atSix },
+      { type: "ask.answered", created_at: atSix.created_at, payload: atSix },
+    ];
+    expect(
+      verdict(
+        [block, atThree, raised, atSix],
+        [specAt(3, "answered"), specAt(6, "answered")],
+        6,
+        events
+      ).early
+    ).toEqual(["version 3: Which date format?"]);
+  });
+
+  // One request that follows its document (#1671): opened at version 1, handed back at version 4
+  // and approved there, with the given replies in its thread. The human answered a block about the
+  // deployment window, which a version after the request raised.
+  function followedRequest(replies: ReadonlyArray<{ at: string; by: "user" | "session" }>) {
+    const request = (version: number) => ({
+      id: "approval-1",
+      kind: "approval",
+      block_id: null,
+      question: `Approve spec.md (version ${version})? Proposes the file under docs/smoke/.`,
+      approval: { artifact_id: "spec-1", name: "spec.md", version, requested_version: version },
+    });
+    const raised = {
+      ...block,
+      question: "Which deployment window?",
+      created_at: "2026-09-30T10:02:02Z",
+      answer: { at: "2026-09-30T10:03:00Z" },
+    };
+    const asks = [raised, { ...request(4), state: "answered", created_at: "2026-09-30T10:00:00Z" }];
+    const events = [
+      { type: "ask.opened", created_at: "2026-09-30T10:00:00Z", payload: request(1) },
+      ...replies.map(({ at, by }) => ({
+        type: "comment.created",
+        created_at: at,
+        actor: { kind: by, id: by === "user" ? "alice" : "session-a" },
+        payload: { id: `comment-${at}`, ask_id: "approval-1" },
+      })),
+      { type: "ask.handed_back", created_at: "2026-09-30T10:05:00Z", payload: request(4) },
+      { type: "ask.answered", created_at: "2026-09-30T10:06:00Z", payload: request(4) },
+    ];
+    return verdict(asks, [specAt(1, null), specAt(4, "answered")], 4, events);
+  }
+
+  // The flow the dispatch skill prescribes for a request the human comments on: reply in the
+  // thread, write their point as a decision block, fold its answer in and hand the request back.
+  test("a request the human replied to is not early for the block the reply raised", () => {
+    expect(followedRequest([{ at: "2026-09-30T10:01:00Z", by: "user" }])).toEqual({
+      request: "Approve spec.md (version 4)? Proposes the file under docs/smoke/.",
+      summarized: true,
+      blocks: 1,
+      early: [],
+    });
+  });
+
+  test("a request is early for a block raised with no human turn on it first", () => {
+    const early = ["version 1: Which deployment window?"];
+    // No reply, only the agent's own, a human's that came after the block, and one after the
+    // request was handed back again.
+    expect(followedRequest([]).early).toEqual(early);
+    expect(followedRequest([{ at: "2026-09-30T10:01:00Z", by: "session" }]).early).toEqual(early);
+    expect(followedRequest([{ at: "2026-09-30T10:02:30Z", by: "user" }]).early).toEqual(early);
+    expect(followedRequest([{ at: "2026-09-30T10:05:30Z", by: "user" }]).early).toEqual(early);
   });
 
   // Dispatch writes a list item that opens with code on its marker line, so a fence reader takes
