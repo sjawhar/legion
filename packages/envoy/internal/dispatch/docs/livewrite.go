@@ -121,12 +121,12 @@ func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 			state.liveWriter = write
 			state.gen++
 			state.settleDeferred = s.stopSettleTimer(state.settle)
-			state.mu.Unlock()
+			s.unlockState(artifactID, state)
 			write.state = state
 			break
 		}
 		done := state.liveWriter.done
-		state.mu.Unlock()
+		s.unlockState(artifactID, state)
 		select {
 		case <-done:
 		case <-ctx.Done():
@@ -146,7 +146,7 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 			return nil
 		}
 		writer := state.liveWriter
-		state.mu.Unlock()
+		s.unlockState(artifactID, state)
 		if writer == nil {
 			return nil
 		}

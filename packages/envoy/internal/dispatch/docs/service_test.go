@@ -2381,13 +2381,13 @@ func (s *Service) room(name string) *roomState {
 }
 
 // recordActor makes actor a pending author of room's next version, and its latest editor, as the
-// room's update observer does while the room is live. It keeps the state even for a room that is
-// not, which the observer never needs to.
+// room's update observer does (creditContentChange).
 func (s *Service) recordActor(room string, actor model.Actor) {
 	state := s.lockState(room)
 	state.pending[actorKey(actor)] = actor
 	state.lastActor = new(actor)
-	state.mu.Unlock()
+	state.unsettled = true
+	s.unlockState(room, state)
 }
 
 func seedServiceText(t *testing.T, service *Service, artifactID, markdown string) {

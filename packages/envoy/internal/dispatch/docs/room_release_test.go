@@ -64,14 +64,14 @@ func TestDocumentsOpenAfterMoreThanTheRoomCapWereTouched(t *testing.T) {
 	waitFor(t, 30*time.Second, "the untouched document's room to go idle", func() bool {
 		return len(service.srv.Rooms()) == written
 	})
-	assertPerDocumentStateFollowsLiveRooms(t, service)
+	waitForStateToFollowLiveRooms(t, service)
 }
 
 // Rooms the API opens - an agent's write, a read that warms the room - with no peer ever joining
 // are evicted on the idle schedule too, so touching more documents than the cap through the API
 // alone leaves a new document openable and the service's per-document maps empty once they idle.
 func TestRoomsTheAPIOpenedReleaseTheCapOnceIdle(t *testing.T) {
-	t.Skip("LEGION-484: ygo never idle-stamps a room an Apply opened with no peer; #1723 pins the ygo release whose Apply stamps it, and deletes this skip")
+	t.Skip("LEGION-484: ygo never idle-stamps a room an Apply opened with no peer until the ygo release #1723 pins; whichever of #1723 and the PR adding this test merges second deletes this skip")
 	service, database := newRoomReleaseService(t)
 	ids := createDocuments(t, database, maxLiveRooms+51)
 	touched, untouched := ids[:len(ids)-1], ids[len(ids)-1]
@@ -98,7 +98,97 @@ func TestRoomsTheAPIOpenedReleaseTheCapOnceIdle(t *testing.T) {
 	waitFor(t, 30*time.Second, "the untouched document's room to go idle", func() bool {
 		return len(service.srv.Rooms()) == 0
 	})
-	assertPerDocumentStateFollowsLiveRooms(t, service)
+	waitForStateToFollowLiveRooms(t, service)
+}
+
+// A document opened and left without an edit never armed a settlement, so its state holds no
+// timer, and it goes with its room even while another document's settlement timer sits between its
+// registration and its attachment, which the register holds as a nil entry.
+func TestAStateWithNoTimerIsReleasedWhileAnotherRoomArmsOne(t *testing.T) {
+	service, _ := newRoomReleaseService(t)
+	const id = "00000000-0000-4000-8000-000000000513"
+	timerID := service.nextSettleTimer.Add(1)
+	service.registerSettleTimer(timerID)
+	t.Cleanup(func() { service.unregisterSettleTimer(timerID) })
+	state := service.lockState(id)
+	service.unlockState(id, state)
+	if _, kept := service.rooms.Load(id); kept {
+		t.Fatal("a state holding nothing, for a document with no room, was kept while another room's timer was being armed")
+	}
+}
+
+// A document written through the API whose issue closes before its settlement runs settles nothing
+// while the issue is closed, so its state goes with its room; its pending-settlement row stays, and
+// settles it once the issue reopens or its room next loads.
+func TestClosingAnIssueReleasesItsUnsettledDocuments(t *testing.T) {
+	service, database := newRoomReleaseService(t)
+	service.settle = time.Hour // the issue closes before any settlement runs
+	ctx := context.Background()
+	ids := createDocuments(t, database, 3)
+	for _, id := range ids {
+		appendThroughAPI(t, service, id)
+		service.ScheduleSettlement(id)
+	}
+	if _, err := database.Pool.Exec(ctx, `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
+		t.Fatalf("close the documents' issue: %v", err)
+	}
+	service.SetIssueClosed(ctx, "DOC-1", true)
+	waitFor(t, 30*time.Second, "the closed issue's rooms to close", func() bool {
+		return len(service.srv.Rooms()) == 0
+	})
+	waitForStateToFollowLiveRooms(t, service)
+	var owed int
+	if err := database.Pool.QueryRow(ctx, `
+		select count(*) from doc_settlements_pending where artifact_id::text = any($1)
+	`, ids).Scan(&owed); err != nil {
+		t.Fatalf("read the documents' pending settlements: %v", err)
+	}
+	if owed != len(ids) {
+		t.Fatalf("%d of %d closed documents still owe their settlement, want all", owed, len(ids))
+	}
+}
+
+// A state forgotten between a lookup finding it and the lookup taking its lock is never the one the
+// lookup hands out, so the write the lookup was for lands on the document's current state: here a
+// seed's author, which the document's settlement attributes its ask blocks to.
+func TestAStateReleasedAsALookupFindsItTakesNoWrite(t *testing.T) {
+	service, _ := newRoomReleaseService(t)
+	const id = "00000000-0000-4000-8000-000000000514"
+	actor := model.Actor{Kind: "session", ID: "seeding-session"}
+	released := false
+	service.afterStateLookup = func(room string) {
+		if room != id || released {
+			return
+		}
+		released = true
+		service.releaseIfUnused(room)
+	}
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the seeding transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	_, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	ledger.seeded(id, actor)
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the seeding transaction: %v", err)
+	}
+	if !released {
+		t.Fatal("the seed's credit looked the document's state up without the release in between")
+	}
+	value, held := service.rooms.Load(id)
+	if !held {
+		t.Fatal("the seed's author reached no state the service holds")
+	}
+	state := value.(*roomState)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.released || state.lastActor == nil || *state.lastActor != actor || !state.unsettled {
+		t.Fatalf("the document's state: released=%t lastActor=%v unsettled=%t, want the seed's author waiting for a settlement",
+			state.released, state.lastActor, state.unsettled)
+	}
 }
 
 // newRoomReleaseService is a document service whose rooms idle out a second after their last
@@ -270,11 +360,31 @@ func leaveDocument(connection *gws.Conn) {
 	_ = connection.Close()
 }
 
-// assertPerDocumentStateFollowsLiveRooms checks that every map the service keeps per document holds
-// the live rooms at most: room state for each live room and nothing else, and nothing in the maps
-// that last only while an operation runs.
-func assertPerDocumentStateFollowsLiveRooms(t *testing.T, service *Service) {
+// waitForStateToFollowLiveRooms waits until every map the service keeps per document holds the
+// live rooms at most - room state for each live room and nothing else, and nothing in the maps that
+// last only while an operation runs - and fails naming what is left when that does not come. ygo
+// takes a room out of its map before the room's persistence worker drains and OnUnloadDocument
+// releases the state, so this holds a few milliseconds after the room count does.
+func waitForStateToFollowLiveRooms(t *testing.T, service *Service) {
 	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		problems := perDocumentStateProblems(service)
+		if len(problems) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			for _, problem := range problems {
+				t.Error(problem)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func perDocumentStateProblems(service *Service) []string {
+	var problems []string
 	live := map[string]bool{}
 	for _, room := range service.srv.Rooms() {
 		live[room] = true
@@ -288,8 +398,8 @@ func assertPerDocumentStateFollowsLiveRooms(t *testing.T, service *Service) {
 		return true
 	})
 	if detached > 0 || states != len(live) {
-		t.Errorf("the service keeps state for %d documents, %d of them with no live room, want state for the %d live rooms alone",
-			states, detached, len(live))
+		problems = append(problems, fmt.Sprintf("the service keeps state for %d documents, %d of them with no live room, want state for the %d live rooms alone",
+			states, detached, len(live)))
 	}
 	for name, registry := range map[string]*sync.Map{
 		"conditional edit gates": &service.conditionalGates,
@@ -297,7 +407,7 @@ func assertPerDocumentStateFollowsLiveRooms(t *testing.T, service *Service) {
 		"rebuilds":               &service.rebuilding,
 	} {
 		registry.Range(func(key, _ any) bool {
-			t.Errorf("the service's %s keep document %s", name, key)
+			problems = append(problems, fmt.Sprintf("the service's %s keep document %s", name, key))
 			return true
 		})
 	}
@@ -305,13 +415,14 @@ func assertPerDocumentStateFollowsLiveRooms(t *testing.T, service *Service) {
 	suppressed := len(service.suppressed)
 	service.suppressMu.Unlock()
 	if suppressed != 0 {
-		t.Errorf("the service holds persistence-suppression slots for %d documents, want none", suppressed)
+		problems = append(problems, fmt.Sprintf("the service holds persistence-suppression slots for %d documents, want none", suppressed))
 	}
 	persistence := service.persistence.(*PgVersioned)
 	persistence.locksMu.Lock()
 	locks := len(persistence.locks)
 	persistence.locksMu.Unlock()
 	if locks != 0 {
-		t.Errorf("the document store keeps a room lock for %d documents nothing holds, want none", locks)
+		problems = append(problems, fmt.Sprintf("the document store keeps a room lock for %d documents nothing holds, want none", locks))
 	}
+	return problems
 }
