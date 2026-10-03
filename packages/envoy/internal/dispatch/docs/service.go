@@ -575,16 +575,19 @@ func New(deps Deps) *Service {
 // is left of that deadline, so a caller's deadline has to exceed it.
 const ShutdownDrainBudget = 5 * time.Second
 
-// Shutdown stops queued settlements, runs the settlement of each loaded room whose document owes
-// one inside the drain budget, closes the editors connected to each room once its settlement has
-// returned, joins the settlements and evictions already running, and flushes ygo's document
-// persistence workers.
+// Shutdown stops queued settlements and runs one worker per loaded room inside the drain budget:
+// it waits for the durable appends the room had queued when Shutdown began, reads whether the
+// room's document owes a settlement, settles it if so, and closes the editors connected to the
+// room once that settlement has returned. Shutdown then joins the settlements and evictions already
+// running and flushes ygo's document persistence workers.
 //
-// A room with an editor connected is settled while it is still loaded and only then closed: ygo's
-// CloseRoom evicts the room as it closes its peers, and a settlement does not load a room during
-// shutdown, so a room closed first would leave its settlement to the next process. An edit made
-// while its room settles is left to that process too, and so is the settlement of a room whose
-// editor keeps sending updates until it is closed.
+// Each room spends the budget on its own work alone: a room whose queued append is slow to store
+// leaves only its own settlement to the next process, never another room's. A room with an editor
+// connected is settled while it is still loaded and only then closed: ygo's CloseRoom evicts the
+// room as it closes its peers, and a settlement does not load a room during shutdown, so a room
+// closed first would leave its settlement to the next process. An edit made while its room settles
+// is left to that process too, and so is the settlement of a room whose editor keeps sending
+// updates until it is closed.
 //
 // A settlement the budget cuts short is not lost. Its database work is cancelled and its
 // transaction rolls back, and the pending-settlement row the document's updates wrote
@@ -618,38 +621,44 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.stopAllSettleTimers()
 	drainCtx, cancelDrain := context.WithTimeout(ctx, ShutdownDrainBudget)
 	defer cancelDrain()
-	// drainErr is a durable append the budget did not see through, which Shutdown cannot leave to
-	// a later load; a settlement it cuts short it can.
-	var drainErr error
 	rooms := make([]string, 0, len(loaded))
 	for _, room := range loaded {
 		rooms = append(rooms, room.name)
-		// Only the appends queued before Shutdown began: an editor still connected keeps queueing
-		// more, and one that never stops would hold this wait, and every room's settlement behind
-		// it, for the whole budget.
-		if err := s.waitForDurableAppendsQueued(drainCtx, room.name, room.state, room.appends); err != nil {
-			slog.Warn("dispatch: stop document settlement before durable append drain", "room", room.name, "error", err)
-			drainErr = err
-		}
 	}
-	// Only a document that owes a settlement is settled. One whose updates have all been settled
-	// would spend the budget repeating that work - a 1 MiB document's for seconds, one at a time
-	// per issue, since each holds the issue's row - and push the settlement that is owed past it.
-	// When the read fails every room is settled, since nothing says which can be skipped.
-	owed, err := s.roomsOwingSettlement(drainCtx, rooms)
-	if err != nil {
-		slog.Warn("dispatch: read the documents owing a settlement before shutdown", "error", err)
-	}
-	finished := make(chan struct{}, len(loaded))
-	running := 0
+	var (
+		mu sync.Mutex
+		// owed is whether each room's document owed a settlement; a room missing from it could
+		// not read that.
+		owed = make(map[string]bool, len(loaded))
+		// drainErr is a durable append the budget did not see through, which Shutdown cannot
+		// leave to a later load; a settlement it cuts short it can.
+		drainErr error
+		workers  sync.WaitGroup
+	)
 	for _, room := range loaded {
-		settles := owed == nil || owed[room.name]
-		if !settles && !room.connected {
-			continue
-		}
-		running++
+		workers.Add(1)
 		go func() {
-			defer func() { finished <- struct{}{} }()
+			defer workers.Done()
+			// Only the appends queued before Shutdown began: an editor still connected keeps
+			// queueing more, and one that never stops would hold this wait for the whole budget.
+			settles := false
+			if err := s.waitForDurableAppendsQueued(drainCtx, room.name, room.state, room.appends); err != nil {
+				slog.Warn("dispatch: stop document settlement before durable append drain", "room", room.name, "error", err)
+				mu.Lock()
+				drainErr = err
+				mu.Unlock()
+			} else if owes, err := settlementPending(drainCtx, s.store.Pool, room.name); err != nil {
+				// Nothing says the settlement can be skipped, so it runs.
+				slog.Warn("dispatch: read whether the document owes a settlement before shutdown", "room", room.name, "error", err)
+				settles = true
+			} else {
+				// A document whose updates have all been settled would spend the budget
+				// repeating that work - a 1 MiB document's for seconds, holding the issue's row.
+				mu.Lock()
+				owed[room.name] = owes
+				mu.Unlock()
+				settles = owes
+			}
 			if settles {
 				s.settleRoomWithin(drainCtx, room.name, room.generation)
 			}
@@ -663,13 +672,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	// The budget ending does not end this wait: a cancelled settlement may still be rendering,
 	// which no context interrupts, and the store has to outlast it, and its room's editors are
 	// closed once it has returned, so their updates reach the store.
-	for ; running > 0; running-- {
-		select {
-		case <-finished:
-		case <-ctx.Done():
-			s.stopAccepting()
-			return settlementsUnconfirmed(ctx.Err(), owed, rooms)
-		}
+	waitGroup(ctx, &workers)
+	if err := ctx.Err(); err != nil {
+		s.stopAccepting()
+		// A worker may still be running, so its outcome is read under its lock.
+		mu.Lock()
+		defer mu.Unlock()
+		return settlementsUnconfirmed(err, owed, rooms)
 	}
 	// A settlement that a timer, or a room's last browser leaving, started before the timers
 	// stopped runs under no budget of its own; it gets what is left of this one before the gate
@@ -716,9 +725,9 @@ func (s *Service) roomsOwingSettlement(ctx context.Context, rooms []string) (map
 	return pending, nil
 }
 
-// reportShutdownSettlements logs, for each document that owed a settlement when Shutdown's
-// settlements started, whether it settled or is left to resume, and whether the drain budget ended
-// first. owed is nil when Shutdown could not read it, and then only the documents left are named.
+// reportShutdownSettlements logs, for each document that owed a settlement when its Shutdown worker
+// read it, whether it settled or is left to resume, and whether the drain budget ended first. A room
+// missing from owed could not read whether it owed one, and is named only when it is left.
 func (s *Service) reportShutdownSettlements(ctx context.Context, owed map[string]bool, rooms []string, budgetEnded bool) {
 	left, err := s.roomsOwingSettlement(ctx, rooms)
 	if err != nil {
@@ -737,12 +746,12 @@ func (s *Service) reportShutdownSettlements(ctx context.Context, owed map[string
 }
 
 // settlementsUnconfirmed is the error of a Shutdown whose caller's deadline passed before it could
-// read back which settlements committed. It names the documents that owed one, every room when
-// that read failed too; each that did not settle resumes from its pending-settlement row.
+// read back which settlements committed. It names the documents that owed one, and each room that
+// could not read whether it did; each that did not settle resumes from its pending-settlement row.
 func settlementsUnconfirmed(cause error, owed map[string]bool, rooms []string) error {
 	named := make([]string, 0, len(rooms))
 	for _, room := range rooms {
-		if owed == nil || owed[room] {
+		if owes, read := owed[room]; !read || owes {
 			named = append(named, room)
 		}
 	}
