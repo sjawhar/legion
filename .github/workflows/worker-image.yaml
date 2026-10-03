@@ -53,6 +53,7 @@ on:
       - packages/proof-editor/package.json
       - packages/dispatch/package.json
       - packages/envoy/internal/dispatch/pmdoc/gen/package.json
+      - docs/site/package.json
       - packages/daemon/**
       - packages/pi-envoy/**
       - packages/envoy-client/**

@@ -1,0 +1,78 @@
+name: Docs
+
+# Builds the documentation site (docs/site) on every pull request that could change it, and
+# publishes it to GitHub Pages (https://sjawhar.github.io/legion/) on every push to main. The site's
+# reference pages are generated from packages/ and skills/ at build time, so those paths rebuild it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/site/**"
+      - "packages/**"
+      - "skills/**"
+      - ".github/workflows/docs.yaml"
+  pull_request:
+    paths:
+      - "docs/site/**"
+      - "packages/**"
+      - "skills/**"
+      - ".github/workflows/docs.yaml"
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-bun
+      # Astro runs on Node.js (22.12 or newer).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      # docs/site/scripts/build-binaries.sh builds the Go binaries the reference generators run.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/daemon-go/go.mod
+          cache-dependency-path: |
+            packages/daemon-go/go.sum
+            packages/envoy/go.sum
+      - run: bun install --frozen-lockfile
+      - name: Lint the docs site
+        run: bun run lint
+        working-directory: docs/site
+      - name: Typecheck the docs site
+        run: bun run typecheck
+        working-directory: docs/site
+      # Generates the reference pages, then builds the site; starlight-links-validator fails it on a
+      # broken internal link.
+      - name: Build the docs site
+        run: bun run docs:build
+      - if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs/site/dist
+
+  deploy:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    # One deployment at a time, and a queued one is never cancelled half-way.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v6
+      - id: deployment
+        uses: actions/deploy-pages@v5
