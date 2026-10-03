@@ -4,7 +4,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
-import { chromium, type Locator, type Page } from "@playwright/test";
+import type { Browser, Locator, Page } from "@playwright/test";
 
 import {
   assertScreenClean,
@@ -16,6 +16,7 @@ import {
   type Viewport,
   WORK,
   waitForSettled,
+  withinStepTimeout,
 } from "./harness";
 
 /** Every set writes `<SHOTS_ROOT>/<set>/<id>.png`, which the site serves at
@@ -52,33 +53,43 @@ export interface ShotSet<Seeded> {
   readonly allowEmpty?: readonly string[];
 }
 
-/** Resets and seeds the harness, takes every shot in `set` (or those `only` names), and returns
- *  one line per shot that failed. A failed shot leaves what the page showed in `.work/`. Every
- *  shot's `prepare` runs, in order, whether or not the shot is taken. */
+/** Resets and seeds the harness, takes every shot in `set` (or those `only` names) in `browser`,
+ *  and returns one line per shot that failed. A failed shot leaves what the page showed in
+ *  `.work/`. Every shot's `prepare` runs, in order, whether or not the shot is taken. The reset
+ *  and seed, and each shot, get STEP_TIMEOUT_MS; one that runs past it ends the run with a
+ *  HarnessHang naming it and what it was doing. */
 export async function runShotSet<Seeded>(
   harness: Harness,
+  browser: Browser,
   set: ShotSet<Seeded>,
   only?: ReadonlySet<string>
 ): Promise<string[]> {
   if (!set.shots.some((shot) => only === undefined || only.has(shot.id))) return [];
-  await harness.reset();
-  const seeded = await set.seed();
+  const seeded = await withinStepTimeout(
+    () => `${set.set}: the reset and seed`,
+    harness.reset().then(() => set.seed())
+  );
   const failures: string[] = [];
-  const browser = await chromium.launch();
-  try {
-    for (const shot of set.shots) {
+  for (const shot of set.shots) {
+    let doing = "its prepare";
+    const capture = async () => {
       await shot.prepare?.(seeded);
-      if (only !== undefined && !only.has(shot.id)) continue;
+      if (only !== undefined && !only.has(shot.id)) return;
       const out = join(SHOTS_ROOT, set.set, `${shot.id}.png`);
       mkdirSync(dirname(out), { recursive: true });
+      doing = "opening its page";
       const context = await newViewerContext(browser, harness.baseURL, shot);
       const page = await context.newPage();
       const errors = pageErrors(page);
       try {
         await page.goto(typeof shot.route === "string" ? shot.route : shot.route(seeded));
+        doing = "its ready";
         await shot.ready(page, seeded);
+        doing = "its steps";
         await shot.steps?.(page, seeded);
+        doing = "waiting for the page to settle";
         await waitForSettled(page);
+        doing = "the screen check and the capture";
         await assertScreenClean(page, errors, [
           ...(set.allowEmpty ?? []),
           ...(shot.allowEmpty ?? []),
@@ -87,6 +98,7 @@ export async function runShotSet<Seeded>(
         await (shot.element?.(page, seeded) ?? page).screenshot(options);
         console.log(`${set.set}/${shot.id}: ${relative(REPO, out)}`);
       } catch (error) {
+        doing = "keeping what its page showed";
         const failed = join(WORK, "failed-shots", `${set.set}-${shot.id}.png`);
         await page.screenshot({ path: failed }).catch(() => undefined);
         failures.push(
@@ -94,11 +106,11 @@ export async function runShotSet<Seeded>(
             `(the page as it was: ${relative(REPO, failed)})`
         );
       } finally {
+        doing = "closing its page";
         await context.close();
       }
-    }
-  } finally {
-    await browser.close();
+    };
+    await withinStepTimeout(() => `${set.set}/${shot.id}, in ${doing}`, capture());
   }
   return failures;
 }

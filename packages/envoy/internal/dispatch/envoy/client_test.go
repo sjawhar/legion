@@ -252,14 +252,27 @@ func TestInterestReturnsOneSessionsTopics(t *testing.T) {
 	}
 }
 
+// A session id the listener refuses as a KV key (400: outside nats.go's key alphabet or holding an
+// empty token; 413: too long) names no interest a read can find, as an unknown one does, so a
+// subscriber removal pending on such an id completes rather than wait on the listener forever.
 func TestInterestReportsNotFoundForAnUnknownSession(t *testing.T) {
-	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer listener.Close()
-
-	if _, err := New(listener.URL).Interest(context.Background(), "ghost"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
+	for _, tc := range []struct {
+		session string
+		status  int
+	}{
+		{"ghost", http.StatusNotFound},
+		{"ses:bad", http.StatusBadRequest},
+		{"sess..x", http.StatusBadRequest},
+		{"long", http.StatusRequestEntityTooLarge},
+	} {
+		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+		}))
+		_, err := New(listener.URL).Interest(context.Background(), tc.session)
+		listener.Close()
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("%d for %s: err = %v, want ErrNotFound", tc.status, tc.session, err)
+		}
 	}
 }
 

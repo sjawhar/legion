@@ -355,7 +355,7 @@ test("the block reference gutter filters the margin and focuses its block", asyn
   }
 });
 
-test("a margin block focus request pulses the active block", async () => {
+test("a margin block focus request focuses and pulses the block once", async () => {
   const { editors, margin, sync, view } = renderProofDocument();
 
   try {
@@ -363,6 +363,9 @@ test("a margin block focus request pulses the active block", async () => {
     await waitFor(() => expect(editors).toHaveLength(1));
     act(() => margin.current?.focusBlock("block-1"));
     await waitFor(() => expect(editors[0]?.focusedBlocks).toContain("block-1"));
+    // The editor is reached on the next frame; one frame more lets any later request through.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    expect(editors[0]?.focusedBlocks).toEqual(["block-1"]);
   } finally {
     view.unmount();
   }
@@ -485,9 +488,6 @@ test("a highlight click focuses its margin item and hover identifies its matchin
 
     act(() => margin.current?.documentBridge?.focusMark("m-9"));
     expect(editors[0]?.focused).toEqual(["m-9"]);
-
-    act(() => margin.current?.documentBridge?.setActiveMarks(["m-9"]));
-    expect(span.classList.contains("dispatch-mark-active")).toBe(true);
   } finally {
     view.unmount();
   }

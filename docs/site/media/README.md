@@ -7,7 +7,7 @@ everything needed to record them again.
 
 | File | What it is |
 | --- | --- |
-| `harness.ts` | Boots Dispatch the way its e2e suite does (`packages/dispatch/e2e/run-server.sh` with the fake Envoy and fake GitHub, each browser signed in at the server's dev sign-in route), seeds example data, and checks a page is ready and clean before a capture. |
+| `harness.ts` | Boots Dispatch the way its e2e suite does (`packages/dispatch/e2e/run-server.sh` with the fake Envoy, fake GitHub and fake secrets broker, each browser signed in at the server's dev sign-in route), seeds example data, and checks a page is ready and clean before a capture. |
 | `shot-runner.ts` | Takes a set of declared screenshots against the harness. |
 | `shots.config.ts` | The Dispatch set. |
 | `legion/` | The Legion section's set (`shots.config.ts`), and the example issues its screenshots and its walkthrough follow through Legion (`journey.ts`). |
@@ -30,9 +30,10 @@ bun install
 The first command installs the workspace, the second builds the dashboard the harness serves and
 the browser it is captured in. You also need Go, `psql`, and a Postgres database the run may
 truncate, named by `DATABASE_URL`.
-The harness listens on 8786, 9086 and 9087 (`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`,
-`FAKE_GITHUB_PORT` move them) and refuses to start if one is taken. Every row it writes is example
-data; nothing here reaches a real Dispatch, Envoy or GitHub.
+The harness listens on 8786, 9086, 9087 and 9088 (`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`,
+`FAKE_GITHUB_PORT` and `FAKE_BROKER_PORT` move them) and refuses to start if one is taken. Every
+row it writes is example data; nothing here reaches a real Dispatch, Envoy, GitHub or secrets
+broker.
 
 ## Screenshots
 
@@ -71,6 +72,12 @@ Before every capture the runner waits for loading skeletons, images and fonts, t
 screen showing an error (any visible `role="alert"`), the not-found page, an uncaught page
 exception, or an empty state the shot does not allow. A refused shot fails the run, and what the
 page showed is kept in `.work/failed-shots/`.
+
+A shot, from its `prepare` to its capture, has two minutes, and so does a set's reset and seed. One
+that takes longer ends the run with a message naming the shot and what it was doing, and has the
+Dispatch server write every goroutine's stack to the end of `.work/harness/dispatch.log`, which
+shows what the server was waiting on. CI keeps `.work/failed-shots/` and `.work/harness/` from a
+failed run.
 
 ### A section's own set
 

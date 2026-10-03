@@ -29,9 +29,15 @@ is still yours, the row shows a chip such as `Planner replied`. Each card also s
 
 Within each section, higher priority comes first and unset priority last. The banner at the top,
 for example `Blocked on you: 2 items, oldest 6h`, counts the asks waiting on you in the view you are
-looking at.
+looking at, and every credential request waiting on you.
 
 ![The Inbox with its two sections, the Mine and Everyone switch, and the Blocked on you banner](/legion/media/dispatch/inbox.png)
+
+A credential request is an agent asking you to let it use a secret, or a machine asking to start
+agent sessions as you. Pending ones are listed under **Credential requests**, above the sections,
+and each links to the page where you approve or deny it. They count toward **Needs you** and the
+banner like an ask that waits on you. The Inbox says `Nothing needs you` only when it lists no ask
+and no credential request.
 
 ### Mine and Everyone
 
