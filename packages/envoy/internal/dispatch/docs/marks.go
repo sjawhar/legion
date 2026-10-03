@@ -144,7 +144,7 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 		return pmdoc.Range{}, err
 	}
 	if err := pmdoc.MarkRange(txn, fragment, range_, spec.pmMark()); err != nil {
-		return pmdoc.Range{}, docSchema(err)
+		return pmdoc.Range{}, documentSchemaError(err)
 	}
 	return range_, nil
 }
@@ -294,7 +294,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if !splice {
 			var unmarkErr error
 			transact(func(txn *crdt.Transaction) {
-				unmarkErr = docSchema(pmdoc.Unmark(txn, fragment, string(MarkSuggestion), id))
+				unmarkErr = documentSchemaError(pmdoc.Unmark(txn, fragment, string(MarkSuggestion), id))
 			})
 			if unmarkErr != nil {
 				return unmarkErr
@@ -888,7 +888,7 @@ func (s *Service) unmarkExpired(room string, expired []pmdoc.MarkRef) error {
 					continue
 				}
 				if err := pmdoc.Unmark(txn, fragment, mark.Type, mark.ID); err != nil {
-					sweepErr = docSchema(err)
+					sweepErr = documentSchemaError(err)
 					return
 				}
 			}

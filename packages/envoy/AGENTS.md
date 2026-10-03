@@ -470,8 +470,8 @@ write reaches the room, `recordPublishedLoss` reads it again: nothing can be und
 response is `200` with `lost_ops` naming the operations whose text the live document does not
 carry, `[]` when everything survived, and `null` when no verdict was reached: the publish failed
 and the room is reloading, or the room holds a tree past the schema's depth bound, which a re-read
-answers with `500 DOC_SCHEMA`. An operation's text counts as surviving while it is live inside an
-element carrying the block id it was written into - any such element, since a browser move can
+answers with `409 DOC_SCHEMA` and the repair. An operation's text counts as surviving while it is
+live inside an element carrying the block id it was written into - any such element, since a browser move can
 leave an id on two until `EnsureBlockIDs` repairs it - so a concurrent range delete around the
 agent's own insertion, or a keystroke in the same paragraph, is an ordinary success, while a
 deleted paragraph, a deleted ancestor and a browser move that strands the run in another block are
