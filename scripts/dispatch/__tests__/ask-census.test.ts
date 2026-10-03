@@ -4,6 +4,7 @@ import {
   DISPATCH_TOOL_DEADLINE_MS,
   DispatchClient,
 } from "../../../packages/envoy-client/src/dispatch-http.ts";
+import { runJq } from "../../e2e/lib/run-jq.ts";
 import {
   applyCodes,
   censusIssues,
@@ -47,20 +48,11 @@ const since1671: ApprovalHistoryEvent[] = [
 
 /** The approval requests `drive_gated_spec` in the stage 4b proof reads from the same events. */
 function stage4bRequests(events: readonly unknown[], artifactId: string): number {
-  const run = Bun.spawnSync(
-    [
-      "jq",
-      "-L",
-      join(import.meta.dir, "..", "..", "e2e", "lib"),
-      "--arg",
-      "artifact",
-      artifactId,
-      'include "design-gate-approval-requests"; approval_requests($artifact) | length',
-    ],
-    { stdin: new TextEncoder().encode(JSON.stringify(events)) }
+  const library = join(import.meta.dir, "..", "..", "e2e", "lib");
+  const program = 'include "design-gate-approval-requests"; approval_requests($artifact) | length';
+  return Number(
+    runJq(["-L", library, "--arg", "artifact", artifactId, program], JSON.stringify(events))
   );
-  if (run.exitCode !== 0) throw new Error(`jq exited ${run.exitCode}: ${run.stderr.toString()}`);
-  return Number(run.stdout.toString());
 }
 
 const from = "2026-10-01T00:00:00.000Z";

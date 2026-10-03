@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
+import { runJq } from "./run-jq.ts";
 
 const library = fileURLToPath(new URL(".", import.meta.url));
 const program = fileURLToPath(new URL("./design-gate-verdict.jq", import.meta.url));
@@ -59,9 +60,8 @@ function verdict(
   approved = 5,
   events = approvalEvents(asks)
 ): Verdict {
-  const run = Bun.spawnSync(
+  const stdout = runJq(
     [
-      "jq",
       "-c",
       "-s",
       "-L",
@@ -75,14 +75,9 @@ function verdict(
       "-f",
       program,
     ],
-    {
-      stdin: new TextEncoder().encode(
-        [asks, events, ...versions].map((value) => JSON.stringify(value)).join("\n")
-      ),
-    }
+    [asks, events, ...versions].map((value) => JSON.stringify(value)).join("\n")
   );
-  if (run.exitCode !== 0) throw new Error(`jq exited ${run.exitCode}: ${run.stderr.toString()}`);
-  return JSON.parse(run.stdout.toString());
+  return JSON.parse(stdout);
 }
 
 const block = {
