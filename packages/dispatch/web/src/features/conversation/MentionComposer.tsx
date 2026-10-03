@@ -391,11 +391,18 @@ interface MentionComposerProps {
    *  out (`useSending`), from Send's own task on. That decides only what the reader sees: the
    *  request is frozen when Send starts (`SentRequest`), whatever those controls do. */
   readonly mutationKey?: MutationKey;
+  /** Ends the reply. An inline reply's Cancel reply also drops its draft, and a refusal with it,
+   *  as the thread it answers closes: a host that keeps the composer mounted while the thread is
+   *  closed (the margin's cards) would otherwise show it again. */
   readonly onCancelReply?: () => void;
   readonly onClose: () => void;
   readonly onSent: () => void;
   readonly owner: ComposerOwner;
   readonly replyTo?: ReplyTarget | null;
+  /** Told whether the composer holds a send of its own - out, or refused and not yet sent again
+   *  or dropped - and told it no longer does once it unmounts, so a host can keep in place what
+   *  would otherwise unmount the composer under that send. */
+  readonly onHoldingChange?: (holding: boolean) => void;
   readonly saveEdit?: (id: string, body: string) => Promise<unknown>;
   /** Shows the Comment / Suggest / Ask switch and hands each pick to the host, which answers
    *  through `kind` - a selected document mark is the only surface where the kind can change, and
@@ -419,6 +426,7 @@ export function MentionComposer({
   mutationKey,
   onCancelReply,
   onClose,
+  onHoldingChange,
   onKindChange,
   onSent,
   owner,
@@ -634,6 +642,27 @@ export function MentionComposer({
   // Closed or finishing, with no send out and no refusal to show: nothing of this composer is on
   // screen.
   const dormant = (closed || finishing) && !sending && refusal === undefined;
+  /** Ends the reply; an inline reply's draft and refusal end with it (`onCancelReply`). */
+  const cancelReply = () => {
+    if (inline) {
+      clearDraft();
+      save.reset();
+      late.reset();
+    }
+    onCancelReply?.();
+  };
+  // The Escape listener below reads it as it stands, so it is not re-bound each render for it.
+  const cancelReplyNow = useRef(cancelReply);
+  cancelReplyNow.current = cancelReply;
+  // Whether this composer holds a send of its own, told to the host (`onHoldingChange`), which
+  // is read as it stands so a host's new callback is no change of hold.
+  const holding = sending || refusal !== undefined;
+  const reportHolding = useRef(onHoldingChange);
+  reportHolding.current = onHoldingChange;
+  useEffect(() => {
+    reportHolding.current?.(holding);
+  }, [holding]);
+  useEffect(() => () => reportHolding.current?.(false), []);
   useEffect(() => {
     const form = formRef.current;
     if (form === null || dormant) return;
@@ -651,7 +680,7 @@ export function MentionComposer({
       }
       if (replyTo !== null) {
         event.preventDefault();
-        onCancelReply?.();
+        cancelReplyNow.current();
         return;
       }
       event.stopPropagation();
@@ -673,7 +702,6 @@ export function MentionComposer({
     confirmingDiscard,
     // A dormant composer renders no form; the one it renders when it wakes takes the listener.
     dormant,
-    onCancelReply,
     onClose,
     referencePickerOpen,
     replacement,
@@ -942,7 +970,7 @@ export function MentionComposer({
           <button
             aria-label="Cancel reply"
             className={`inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg text-lg leading-none disabled:cursor-not-allowed disabled:opacity-50 md:min-h-8 md:min-w-8 ${textMutedOnSurfaceMuted}`}
-            onClick={onCancelReply}
+            onClick={cancelReply}
             type="button"
           >
             ×

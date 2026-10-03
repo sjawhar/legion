@@ -217,6 +217,18 @@ navigates away from the document. Issue margins additionally show Pinned and the
 pinned events retain their original event body and have an `Unpin` action, so a pin made before a
 comment lifecycle event began folding into its comment turn remains removable.
 
+A margin thread's own reply holds its draft and refusal while its send is out, as every composer
+does. The margin expands one thread at a time, so a card keeps its reply composer from its first
+expansion on, hidden while collapsed (`keepReplyComposer` on `ThreadCard`): opening another thread
+leaves the reply, a send it has out and that send's refusal for the reader's return. A thread whose
+reply holds a send of its own - out, or refused and not yet sent again or dropped
+(`onHoldingChange` on `MentionComposer`) -
+stays in the list it was in, open or resolved, whoever resolves or reopens it, the reader's own
+Resolve included (`held` on `useMarginItems`), since moving it between the lists would remount its
+card. An inline reply's Cancel reply drops the draft and any refusal with it. On a phone the
+thread fills the screen instead, and its Back and Escape wait for its reply until the send's
+deadline, as a Conversation phone thread's do.
+
 The composer a selection-bar action opens is anchored to the provisional mark the editor wrote, and
 the margin owns that mark from then on (`margin-context.tsx`): its Comment / Suggest / Ask switch
 retypes the mark through `ProofEditorHandle.retypeMark` so the server verifies a mark of the kind

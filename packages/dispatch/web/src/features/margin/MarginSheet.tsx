@@ -1,3 +1,4 @@
+import type { MutationKey } from "@tanstack/react-query";
 import { type ReactNode, type RefObject, useRef } from "react";
 
 import type { Artifact, Ask, Event } from "../../api/types";
@@ -40,6 +41,8 @@ export interface MarginSheetModel {
     onComposerKindChange: (kind: ComposerKind) => string | undefined;
     onEdit: (id: string, body: string) => Promise<unknown>;
     onRetryAction: () => void;
+    /** A card's reply composer holds a send of its own, or no longer does. */
+    onReplyHolding: (key: string, holding: boolean) => void;
     onUnpin: (eventId: number) => void;
     onRetryAnsweredAsk: (() => void) | undefined;
     onRetryComments: () => void;
@@ -90,8 +93,14 @@ export interface MarginSheetModel {
     showResolved: boolean;
   };
   sheet: {
+    /** Back and Escape: refused while the thread's card has its reply out, until the send's
+     *  deadline, since leaving would unmount the composer that holds it. */
     closeThread: () => void;
     expanded: boolean;
+    /** The name of the phone thread card's reply send. */
+    replyKey: MutationKey;
+    /** That reply is out: Back holds. */
+    replySending: boolean;
     thread: Thread | undefined;
     toggle: (expanded?: boolean) => void;
   };
@@ -351,6 +360,7 @@ export function MarginSheet({
               onAction={actions.onAction}
               onEdit={actions.onEdit}
               onRetryAction={actions.onRetryAction}
+              onReplyHolding={actions.onReplyHolding}
               onRetryAnsweredAsk={actions.onRetryAnsweredAsk}
               onRetryComments={actions.onRetryComments}
               onSelectCard={onSelectCard}
@@ -379,7 +389,8 @@ export function MarginSheet({
           >
             <header className={`flex items-center border-b px-4 py-3 ${borderDefault}`}>
               <button
-                className={`min-h-11 text-sm font-medium ${textPrimaryOnSurface}`}
+                className={`min-h-11 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${textPrimaryOnSurface}`}
+                disabled={sheet.replySending}
                 onClick={sheet.closeThread}
                 type="button"
               >
@@ -407,6 +418,7 @@ export function MarginSheet({
                 onToggle={sheet.closeThread}
                 owner={owner}
                 pendingAction={pendingActionIds.has(phoneThread.key)}
+                replyMutationKey={sheet.replyKey}
                 thread={phoneThread}
                 viewerLogin={viewerLogin}
               />

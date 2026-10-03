@@ -55,6 +55,7 @@ interface CommentsTabProps {
   onAction: (id: string, action: MarginItemAction) => void;
   onEdit: (id: string, body: string) => Promise<unknown>;
   onRetryAction: () => void;
+  onReplyHolding: (key: string, holding: boolean) => void;
   onRetryAnsweredAsk: (() => void) | undefined;
   onRetryComments: () => void;
   onSelectCard: (id: string, blockID: string | undefined) => void;
@@ -178,6 +179,7 @@ export function CommentsTab({
   onEdit,
   onRetryAction,
   onRetryAnsweredAsk,
+  onReplyHolding,
   onRetryComments,
   onSelectCard,
   onToggleResolved,
@@ -258,6 +260,7 @@ export function CommentsTab({
               onAction={onAction}
               onEdit={onEdit}
               onRetryAction={onRetryAction}
+              onReplyHolding={onReplyHolding}
               onSelect={onSelectCard}
               onToggle={onToggleThread}
               onToggleResolved={onToggleResolved}

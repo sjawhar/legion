@@ -1,5 +1,5 @@
 import type { MutationKey } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { Link } from "react-router-dom";
 
 import type { Suggestion } from "../../api/types";
@@ -85,11 +85,18 @@ export interface ThreadCardProps {
   expanded: boolean;
   hovered: boolean;
   isClosed: boolean;
+  /** The card keeps its reply composer from its first expansion on, hidden while collapsed, so a
+   *  host that collapses it for another thread - the margin, which expands one at a time - leaves
+   *  its draft, a send it has out and that send's refusal for when it is expanded again. */
+  keepReplyComposer?: boolean;
   onAction(id: string, action: MarginItemAction): void;
   onEdit(id: string, body: string): Promise<unknown>;
   onRetryAction(): void;
   onSelect?(): void;
   onToggle(): void;
+  /** Told whether the reply composer holds a send of its own (`onHoldingChange` on
+   *  `MentionComposer`), so the host can keep the card in place while it does. */
+  onReplyHolding?(holding: boolean): void;
   owner: MarginOwner;
   /** This thread's action is saving, or waiting its turn behind another thread's save. The
    *  buttons stay enabled meanwhile - a disabled button drops the focus it holds and turns a
@@ -203,11 +210,13 @@ export function ThreadCard({
   expanded,
   hovered,
   isClosed,
+  keepReplyComposer = false,
   onAction,
   onEdit,
   onRetryAction,
   onSelect,
   onToggle,
+  onReplyHolding,
   owner,
   selected = false,
   showReference = true,
@@ -225,6 +234,10 @@ export function ThreadCard({
   const root = thread.root.comment;
   const rootSuggestion = root.suggestion;
   const terminalSuggestion = rootSuggestion !== null && rootSuggestion.accepted !== null;
+  // Whether the card has been expanded: a card that keeps its reply composer mounts it then.
+  const [replyOpened, setReplyOpened] = useState(expanded);
+  if (expanded && !replyOpened) setReplyOpened(true);
+  const replyMounted = expanded || (keepReplyComposer && replyOpened);
   // The server refuses accept and reject on an orphaned anchor (409 ANCHOR_ORPHANED), so the
   // card offers neither; the thread is closed with Resolve like a comment.
   const actionableSuggestion =
@@ -421,31 +434,6 @@ export function ThreadCard({
                 ))}
               </ol>
             )}
-            {/* Mounted on a closed issue too, where the composer shows only a reply of its own
-                still out or its refusal (`closed`), and otherwise renders nothing, its frame with
-                it; and on a decided suggestion's thread, which offers no reply, where it shows
-                the same and still sends (`finishing`), so a reply out when anyone accepts or
-                rejects the suggestion keeps its draft and a refusal until it lands or the reader
-                cancels it. `contents`, so the composer's own box is the one laid out. */}
-            <div className="contents" hidden={hideReplyComposer}>
-              <MentionComposer
-                closed={isClosed}
-                finishing={terminalSuggestion}
-                frame={composerClassName}
-                inline
-                kind="comment"
-                mutationKey={replyMutationKey}
-                onCancelReply={onToggle}
-                onClose={onToggle}
-                onSent={() => {}}
-                owner={
-                  owner.kind === "issue"
-                    ? { issueKey: owner.key, kind: "issue" }
-                    : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
-                }
-                replyTo={{ author: "", excerpt: "", id: root.id, parentKind: "comment" }}
-              />
-            </div>
           </>
         ) : (
           <button
@@ -505,6 +493,37 @@ export function ThreadCard({
             </span>
           </button>
         )}
+        {/* Mounted while the card is expanded, and from its first expansion on where the card
+            keeps it (`keepReplyComposer`), hidden while collapsed; one place in the card, so
+            collapsing and expanding never remount it. Mounted on a closed issue too, where the
+            composer shows only a reply of its own still out or its refusal (`closed`), and
+            otherwise renders nothing, its frame with it; and on a decided suggestion's thread,
+            which offers no reply, where it shows the same and still sends (`finishing`), so a
+            reply out when anyone accepts or rejects the suggestion keeps its draft and a refusal
+            until it lands or the reader cancels it. `contents`, so the composer's own box is the
+            one laid out. */}
+        {replyMounted ? (
+          <div className="contents" hidden={!expanded || hideReplyComposer}>
+            <MentionComposer
+              closed={isClosed}
+              finishing={terminalSuggestion}
+              frame={composerClassName}
+              inline
+              kind="comment"
+              mutationKey={replyMutationKey}
+              onCancelReply={onToggle}
+              onClose={onToggle}
+              onHoldingChange={onReplyHolding}
+              onSent={() => {}}
+              owner={
+                owner.kind === "issue"
+                  ? { issueKey: owner.key, kind: "issue" }
+                  : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
+              }
+              replyTo={{ author: "", excerpt: "", id: root.id, parentKind: "comment" }}
+            />
+          </div>
+        ) : null}
         {expanded ? null : renderDeliveries?.(root)}
         {actionFailure === undefined ? null : (
           <div className="mt-2">

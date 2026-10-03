@@ -26,6 +26,9 @@ interface ThreadListProps {
   onAction(id: string, action: MarginItemAction): void;
   onEdit(id: string, body: string): Promise<unknown>;
   onRetryAction(): void;
+  /** A card's reply composer holds a send of its own, or no longer does: the margin keeps that
+   *  thread where it is while it does. */
+  onReplyHolding(key: string, holding: boolean): void;
   onSelect(id: string, blockID: string | undefined): void;
   onToggle(key: string): void;
   onToggleResolved(): void;
@@ -109,6 +112,7 @@ export function ThreadList({
   onAction,
   onEdit,
   onRetryAction,
+  onReplyHolding,
   onSelect,
   onToggle,
   onToggleResolved,
@@ -192,10 +196,14 @@ export function ThreadList({
       onEditingChange={onEditingChange}
       hovered={hoveredItemId === thread.key || hoveredMarkId === threadMarkId(thread)}
       isClosed={isClosed}
+      // One thread is expanded at a time, so expanding another collapses this card: it keeps
+      // its reply composer, and what that composer holds, for the reader's return.
+      keepReplyComposer
       key={thread.key}
       onAction={onAction}
       onEdit={onEdit}
       onRetryAction={onRetryAction}
+      onReplyHolding={(holding) => onReplyHolding(thread.key, holding)}
       onSelect={() => onSelect(thread.key, thread.anchor?.block_id ?? undefined)}
       onToggle={() => onToggle(thread.key)}
       owner={owner}

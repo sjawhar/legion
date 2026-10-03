@@ -1,5 +1,5 @@
 import { itemFromSearch } from "@legion/contracts";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { type MutationKey, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 
@@ -7,6 +7,7 @@ import { api } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
 import { whoAmIQuery } from "../../api/queries";
 import type { UserState } from "../../api/types";
+import { useSending } from "../../hooks/useSending";
 import { isRetractedAsk } from "../conversation/conversation-model";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import { eventItemId, stateForIssue } from "../issue/pins";
@@ -104,6 +105,33 @@ export function useMarginSheet(): MarginSheetModel {
   const [savingCommentEditId, setSavingCommentEditId] = useState<string>();
   const [sheetThreadKey, setSheetThreadKey] = useState<string>();
   const [showResolved, setShowResolved] = useState(false);
+  // Threads whose card's reply composer holds a send of its own: each stays where it is
+  // (`useMarginItems`'s `held`), whoever resolves it meanwhile.
+  const [heldReplies, setHeldReplies] = useState<ReadonlySet<string>>(() => new Set());
+  const onReplyHolding = useCallback((key: string, holding: boolean) => {
+    setHeldReplies((current) => {
+      if (current.has(key) === holding) return current;
+      const next = new Set(current);
+      if (holding) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  }, []);
+  // The phone margin thread's card names its reply's send, so the thread's Back and Escape hold
+  // while it is out: leaving would unmount the composer that holds it. No thread has the empty
+  // key, so with none open nothing matches.
+  const sheetReplyKey = useMemo<MutationKey>(
+    () => ["margin-thread-reply", sheetThreadKey ?? ""],
+    [sheetThreadKey]
+  );
+  const { sending: sheetReplySending, sendingNow: sheetReplySendingNow } = useSending(
+    sheetReplyKey,
+    { untilDeadline: true }
+  );
+  const closeThread = useCallback(() => {
+    if (sheetReplySendingNow()) return;
+    setSheetThreadKey(undefined);
+  }, [sheetReplySendingNow]);
   const marginRef = useRef<HTMLElement>(null);
   const issue = useQuery({
     enabled: issueKey !== undefined,
@@ -175,7 +203,9 @@ export function useMarginSheet(): MarginSheetModel {
     retryComments,
     retryItem,
     threads,
-  } = useMarginItems(owner, tab, visibleArtifact, markPlacements, blockPlacements, blockFilterId);
+  } = useMarginItems(owner, tab, visibleArtifact, markPlacements, blockPlacements, blockFilterId, {
+    held: heldReplies,
+  });
   const onEdit = useCallback(
     async (id: string, body: string) => {
       setSavingCommentEditId(id);
@@ -311,10 +341,10 @@ export function useMarginSheet(): MarginSheetModel {
       const nextExpanded = expanded ?? !sheetExpanded;
       setExpandedOwnerId(nextExpanded ? ownerId : undefined);
       if (!nextExpanded) {
-        setSheetThreadKey(undefined);
+        closeThread();
       }
     },
-    [ownerId, sheetExpanded]
+    [closeThread, ownerId, sheetExpanded]
   );
   // A composer's close and save name the compose they belong to, so a send of a compose the reader
   // left behind, landing after a newer one opened, closes and settles nothing of the newer one.
@@ -552,6 +582,7 @@ export function useMarginSheet(): MarginSheetModel {
       onEdit,
       onUnpin: unpin,
       onRetryAction: retryItem,
+      onReplyHolding,
       onRetryAnsweredAsk: retryAnsweredAsk,
       onRetryComments: retryComments,
       onRetryIssue: () => void issue.refetch(),
@@ -601,8 +632,10 @@ export function useMarginSheet(): MarginSheetModel {
       showResolved,
     },
     sheet: {
-      closeThread: () => setSheetThreadKey(undefined),
+      closeThread,
       expanded: sheetExpanded,
+      replyKey: sheetReplyKey,
+      replySending: sheetReplySending,
       thread: sheetThreadKey === undefined ? undefined : threadsByKey.get(sheetThreadKey),
       toggle: toggleSheet,
     },
