@@ -70,14 +70,15 @@ func tokenInFreshProcess(t *testing.T, cfg Config, env ...string) childResult {
 // CUSTOM_AUTH, then RespondToAuthChallenge with the pod's service-account token as the answer.
 // accessToken, when set, is the access token every sign-in returns in place of access-<n>.
 type fakeCognito struct {
-	t             *testing.T
-	mu            sync.Mutex
-	signIn        int
-	refuse        bool
-	refusalCode   string
-	challengeName string
-	accessToken   string
-	calls         atomic.Int32
+	t               *testing.T
+	mu              sync.Mutex
+	signIn          int
+	refuse          bool
+	refusalCode     string
+	challengeName   string
+	accessToken     string
+	responsePadding int
+	calls           atomic.Int32
 }
 
 func (f *fakeCognito) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -128,10 +129,14 @@ func (f *fakeCognito) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.accessToken != "" {
 			token = f.accessToken
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"AuthenticationResult": map[string]any{
+		response, _ := json.Marshal(map[string]any{"AuthenticationResult": map[string]any{
 			"AccessToken": token, "RefreshToken": "refresh-never-kept", "IdToken": "id-never-kept",
 			"ExpiresIn": 3600, "TokenType": "Bearer",
 		}})
+		_, _ = w.Write(response)
+		if f.responsePadding > 0 {
+			_, _ = w.Write([]byte(strings.Repeat(" ", f.responsePadding)))
+		}
 	default:
 		f.t.Errorf("unexpected Cognito call %q", target)
 		w.WriteHeader(http.StatusBadRequest)
@@ -255,15 +260,29 @@ func TestTokenRefusesAnAccessTokenThatIsNotOneLine(t *testing.T) {
 	}
 }
 
-// An endpoint that streams an oversized answer is refused once the cap is passed, before the pod's
-// memory fills.
+// An endpoint response longer than maxResponseBytes is refused before it fills the pod's memory,
+// whether the excess bytes are part of the JSON answer or trailing padding after a valid answer.
 func TestTokenRefusesAResponseLongerThanTheCap(t *testing.T) {
-	server := httptest.NewServer(&fakeCognito{t: t, accessToken: strings.Repeat("a", 16*maxResponseBytes)})
-	defer server.Close()
+	for _, tc := range []struct {
+		name    string
+		cognito *fakeCognito
+	}{
+		{name: "oversized access token", cognito: &fakeCognito{accessToken: strings.Repeat("a", 16*maxResponseBytes)}},
+		{name: "valid answer plus padding", cognito: &fakeCognito{responsePadding: 2 * maxResponseBytes}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.cognito.t = t
+			server := httptest.NewServer(tc.cognito)
+			defer server.Close()
 
-	token, err := Token(context.Background(), testConfig(t, server.URL))
-	if token != "" || err == nil {
-		t.Fatalf("Token = %q, %v; want no token and a refusal", token, err)
+			token, err := Token(context.Background(), testConfig(t, server.URL))
+			if token != "" || err == nil {
+				t.Fatalf("Token = %q, %v; want no token and a refusal", token, err)
+			}
+			if !strings.Contains(err.Error(), "longer than 64 KiB") {
+				t.Fatalf("Token error %q; want the fixed response-cap refusal", err)
+			}
+		})
 	}
 }
 

@@ -13,6 +13,7 @@
 package modeltoken
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -35,6 +36,8 @@ import (
 // maxResponseBytes caps one Cognito response: both answers fit in a few KiB, so a longer one is a
 // broken or hostile endpoint, refused before it fills the pod's memory.
 const maxResponseBytes = 64 << 10
+
+var errResponseTooLarge = errors.New("the endpoint's answer is longer than 64 KiB")
 
 // Config is one sign-in's settings, each a flag of the operator's apiKey command, so this public
 // repository names no pool, client or user.
@@ -80,21 +83,28 @@ func httpClient() (*http.Client, error) {
 	}, nil
 }
 
-// cappedTransport hands back each response with its body capped at maxResponseBytes.
+// cappedTransport reads each response through a maxResponseBytes+1 LimitReader, refusing an
+// overflow before the SDK can accept a valid prefix and ignore trailing bytes.
 type cappedTransport struct{ http.RoundTripper }
 
 func (c cappedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	response, err := c.RoundTripper.RoundTrip(request)
-	if err == nil {
-		response.Body = struct {
-			io.Reader
-			io.Closer
-		}{
-			Reader: io.LimitReader(response.Body, maxResponseBytes),
-			Closer: response.Body,
-		}
+	if err != nil {
+		return nil, err
 	}
-	return response, err
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	closeErr := response.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if len(body) > maxResponseBytes {
+		return nil, errResponseTooLarge
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	return response, nil
 }
 
 // signIn is Cognito's custom authentication: InitiateAuth names the user, and the custom challenge is
@@ -158,6 +168,8 @@ func cognitoError(operation string, err error) error {
 	var response *smithyhttp.ResponseError
 	var dial *net.OpError
 	switch {
+	case errors.Is(err, errResponseTooLarge):
+		return fmt.Errorf("Cognito %s: %w", operation, errResponseTooLarge)
 	case errors.As(err, &refusal):
 		if code := refusal.ErrorCode(); isErrorCode(code) {
 			return fmt.Errorf("Cognito %s refused: %s", operation, code)
