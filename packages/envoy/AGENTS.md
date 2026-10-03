@@ -87,7 +87,11 @@ deadline: `cmd/dispatch` gives document shutdown a 10 s context of its own,
 `documentShutdownTimeout`, started once HTTP shutdown has returned within its 5 s,
 `httpShutdownTimeout`; every open event stream ends at the signal through `api.Deps.Lifetime`, so
 HTTP shutdown waits only for the requests in flight); a settled document's repeat would spend the
-budget for nothing. It cancels the
+budget for nothing. A room with an editor connected (a spec tab holds the document's websocket) is
+settled while it is still loaded, and its editors are closed only once that settlement has returned:
+ygo's `CloseRoom` evicts the room as it closes them, and a settlement does not load a room during
+shutdown, so closing the room first would leave its settlement to the next process. An edit an
+editor makes while its room settles is left to the next process the same way. Shutdown cancels the
 database work of any settlement the budget cuts short so its transaction rolls back, and logs for
 each document that owed one whether it settled or was left to resume (`dispatch: document settled
 before shutdown`, `dispatch: document settlement left to resume after shutdown` with

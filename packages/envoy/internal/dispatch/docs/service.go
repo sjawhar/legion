@@ -579,14 +579,21 @@ func New(deps Deps) *Service {
 	return service
 }
 
-// shutdownDrainBudget bounds the part of Shutdown that waits on document work - connected peers
-// closing, queued durable appends landing, and the settlements owed - inside whatever deadline its
-// caller passes.
+// shutdownDrainBudget bounds the part of Shutdown that waits on document work - queued durable
+// appends landing and the settlements owed - inside whatever deadline its caller passes. A
+// settlement it cuts short, and the close of its room's editors that follows it, get what is left
+// of that deadline.
 const shutdownDrainBudget = 5 * time.Second
 
 // Shutdown stops queued settlements, runs the settlement of each loaded room whose document owes
-// one inside the drain budget, joins the settlements and evictions already running, and flushes
-// ygo's document persistence workers.
+// one inside the drain budget, closes the editors connected to each room once its settlement has
+// returned, joins the settlements and evictions already running, and flushes ygo's document
+// persistence workers.
+//
+// A room with an editor connected is settled while it is still loaded and only then closed: ygo's
+// CloseRoom evicts the room as it closes its peers, and a settlement does not load a room during
+// shutdown, so a room closed first would leave its settlement to the next process. An edit made
+// while its room settles is left to that process too.
 //
 // A settlement the budget cuts short is not lost. Its database work is cancelled and its
 // transaction rolls back, and the pending-settlement row the document's updates wrote
@@ -616,24 +623,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.stopAllSettleTimers()
 	drainCtx, cancelDrain := context.WithTimeout(ctx, shutdownDrainBudget)
 	defer cancelDrain()
-	// drainErr is a peer or a durable append the budget did not see through, which Shutdown
-	// cannot leave to a later load; a settlement it cuts short it can.
+	// drainErr is a durable append the budget did not see through, which Shutdown cannot leave to
+	// a later load; a settlement it cuts short it can.
 	var drainErr error
-	for _, room := range connectedRooms {
-		closed := make(chan error, 1)
-		go func(room string) {
-			closed <- s.srv.CloseRoom(room, true)
-		}(room)
-		select {
-		case err := <-closed:
-			if err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
-				slog.Warn("dispatch: close document peers before shutdown", "room", room, "error", err)
-			}
-		case <-drainCtx.Done():
-			slog.Warn("dispatch: peer close exceeded shutdown budget", "room", room, "error", drainCtx.Err())
-			drainErr = drainCtx.Err()
-		}
-	}
 	rooms := make([]string, 0, len(pending))
 	for _, settlement := range pending {
 		rooms = append(rooms, settlement.room)
@@ -650,10 +642,31 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	if err != nil {
 		slog.Warn("dispatch: read the documents owing a settlement before shutdown", "error", err)
 	}
+	connected := make(map[string]bool, len(connectedRooms))
+	for _, room := range connectedRooms {
+		connected[room] = true
+	}
 	finished := make(chan string, len(pending))
 	running := make(map[string]bool, len(pending))
+	peersClosed := make(chan string, len(connectedRooms))
+	closing := make(map[string]bool, len(connectedRooms))
+	// closePeers closes the editors connected to room, which evicts it. It runs only once room's
+	// settlement has returned, if it had one: CloseRoom does not wait for a settlement committing
+	// into the room it retires.
+	closePeers := func(room string) {
+		closing[room] = true
+		go func() {
+			if err := s.srv.CloseRoom(room, true); err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
+				slog.Warn("dispatch: close document peers before shutdown", "room", room, "error", err)
+			}
+			peersClosed <- room
+		}()
+	}
 	for _, settlement := range pending {
 		if owed != nil && !owed[settlement.room] {
+			if connected[settlement.room] {
+				closePeers(settlement.room)
+			}
 			continue
 		}
 		running[settlement.room] = true
@@ -663,14 +676,23 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}(settlement.room, settlement.generation)
 	}
 	budget := drainCtx.Done()
-	for len(running) > 0 {
+	for len(running) > 0 || len(closing) > 0 {
 		select {
 		case room := <-finished:
 			delete(running, room)
+			if connected[room] {
+				closePeers(room)
+			}
+		case room := <-peersClosed:
+			delete(closing, room)
 		case <-budget:
 			// The cancelled settlements still have to return: one may be rendering, which
-			// no context interrupts, and the store has to outlast it.
+			// no context interrupts, and the store has to outlast it. A room's editors are
+			// still closed once its settlement has, so their updates reach the store.
 			budget = nil
+			for room := range closing {
+				slog.Warn("dispatch: peer close exceeded shutdown budget", "room", room, "error", drainCtx.Err())
+			}
 		case <-ctx.Done():
 			s.stopAccepting()
 			return settlementsUnconfirmed(ctx.Err(), owed, rooms)

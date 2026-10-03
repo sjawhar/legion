@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -16,8 +17,13 @@ import (
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
+	ygsync "github.com/reearth/ygo/sync"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -127,6 +133,52 @@ func TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument(t *tes
 	process.waitExit(t, "SIGTERM")
 	t.Logf("released the issue lock with %d waiting on it; exited %v after SIGTERM", waiting, time.Since(signalled))
 	process.checkSettledAtShutdown(t, database, artifactID)
+}
+
+// A deploy usually finds someone with a document open: the spec tab holds the document's websocket,
+// so its room is loaded with an editor connected, and what that editor last typed is owed a
+// settlement for two seconds (docs.Deps.Settle's default). The document service settles the room
+// while it is still loaded, and only then closes the editor's connection, so the edit is versioned,
+// credited to the editor, before the process exits rather than when someone next opens the spec.
+func TestSIGTERMWithAnEditorConnectedSettlesItsDocumentBeforeExit(t *testing.T) {
+	database := storetest.Open(t)
+	process := startDispatchProcess(t, buildDispatch(t), database.Pool.Config().ConnString())
+	process.waitHealthy(t)
+	_, artifactID := process.createIssue(t)
+	editor := process.openEditor(t, artifactID, "before\n")
+	// The spec the issue was created with is owed a settlement of its own; once that has run, the
+	// pending-settlement row the editor's keystrokes write is theirs alone.
+	waitForSettlementOwed(t, database, artifactID, false)
+	editor.replaceText(t, "before", "after")
+	waitForSettlementOwed(t, database, artifactID, true)
+
+	signalled := time.Now()
+	if err := process.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM: %v", err)
+	}
+	process.waitExit(t, "SIGTERM")
+	exited := time.Since(signalled)
+	t.Logf("exited %v after SIGTERM", exited)
+	select {
+	case closed := <-editor.ended:
+		t.Logf("the editor's connection ended %v after SIGTERM", closed.Sub(signalled))
+	case <-time.After(5 * time.Second):
+		t.Errorf("the editor's connection was still open 5s after Dispatch exited")
+	}
+	if exited >= promptShutdown {
+		t.Errorf("Dispatch exited %v after SIGTERM, want under %v", exited, promptShutdown)
+	}
+	process.checkSettledAtShutdown(t, database, artifactID)
+	number, markdown, authors := latestVersion(t, database, artifactID)
+	if number != 2 || markdown != "after\n" || !strings.Contains(authors, `"`+dispatchTestLogin+`"`) {
+		t.Errorf("the document's latest version is %d holding %q by %s, want version 2 holding the editor's edit, %q, credited to %s",
+			number, markdown, authors, "after\n", dispatchTestLogin)
+	}
+	for _, line := range strings.Split(process.output.String(), "\n") {
+		if strings.Contains(line, "room="+artifactID) {
+			t.Logf("Dispatch logged: %s", line)
+		}
+	}
 }
 
 // checkSettledAtShutdown requires the exited process to have stopped in order with the document's
@@ -321,6 +373,104 @@ func (p *dispatchProcess) openStream(t *testing.T, path string) <-chan streamEnd
 	return ended
 }
 
+// editor is a signed-in spec tab: a writable connection to a document's room that applies every
+// update the room sends, as the dashboard's provider does.
+type editor struct {
+	artifactID string
+	doc        *crdt.Doc
+	writes     sync.Mutex
+	connection *gws.Conn
+	// answers carries the content of each sync step 2 the room sends, once it is applied.
+	answers chan []byte
+	// ended receives when the connection ended.
+	ended chan time.Time
+}
+
+// openEditor connects an editor to the document at the schema version the dashboard presents, so
+// the room takes its edits, and returns once the editor's copy of the document renders want.
+func (p *dispatchProcess) openEditor(t *testing.T, artifactID, want string) *editor {
+	t.Helper()
+	url := "ws://127.0.0.1:" + strconv.Itoa(p.port) + "/ws/doc/" + artifactID + "?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+	connection, response, err := gws.DefaultDialer.Dial(url, http.Header{"X-Dispatch-User": []string{dispatchTestLogin}})
+	if err != nil {
+		t.Fatalf("connect an editor to the document: response=%#v err=%v", response, err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	e := &editor{
+		artifactID: artifactID, doc: crdt.New(), connection: connection,
+		answers: make(chan []byte, 16), ended: make(chan time.Time, 1),
+	}
+	go func() {
+		docstest.Drain(connection, e.doc, e.write, func(content []byte) {
+			select {
+			case e.answers <- content:
+			default:
+			}
+		})
+		e.ended <- time.Now()
+	}()
+	deadline := time.After(10 * time.Second)
+	for e.markdown() != want {
+		if err := e.write(ygsync.EncodeSyncStep1(crdt.New())); err != nil {
+			t.Fatalf("ask the room for the document: %v", err)
+		}
+		select {
+		case <-e.answers:
+		case <-e.ended:
+			t.Fatalf("the editor's connection closed before the room sent the document:\n%s", p.output.String())
+		case <-deadline:
+			t.Fatalf("the room never sent the editor the document:\n%s", p.output.String())
+		}
+	}
+	return e
+}
+
+func (e *editor) write(syncMessage []byte) error {
+	return docstest.WriteFrame(&e.writes, e.connection, e.artifactID, syncMessage)
+}
+
+// markdown renders the editor's copy of the document, read under its lock while the room's updates
+// apply, or "" while the copy holds no document it can render.
+func (e *editor) markdown() string {
+	fragment := e.doc.GetXmlFragment("prosemirror")
+	var rendered string
+	e.doc.Transact(func(txn *crdt.Transaction) {
+		tree, err := pmdoc.ReadInTransaction(txn, fragment)
+		if err != nil {
+			return
+		}
+		rendered, _ = pmdoc.Render(tree)
+	}, nil)
+	return rendered
+}
+
+// replaceText types replacement over the first paragraph's text, old, in one keystroke's
+// transaction, and sends the room the update it made.
+func (e *editor) replaceText(t *testing.T, old, replacement string) {
+	t.Helper()
+	fragment := e.doc.GetXmlFragment("prosemirror")
+	var changeErr error
+	update := docstest.Transact(e.doc, func(txn *crdt.Transaction) {
+		tree, err := pmdoc.ReadInTransaction(txn, fragment)
+		if err != nil {
+			changeErr = err
+			return
+		}
+		if len(tree.Children) == 0 || len(tree.Children[0].Children) != 1 || tree.Children[0].Children[0].Text != old {
+			changeErr = fmt.Errorf("the document's first paragraph does not hold only %q", old)
+			return
+		}
+		tree.Children[0].Children[0].Text = replacement
+		changeErr = pmdoc.Update(txn, fragment, tree)
+	})
+	if changeErr != nil || update == nil {
+		t.Fatalf("the editor's edit: update=%d bytes err=%v", len(update), changeErr)
+	}
+	if err := e.write(ygsync.EncodeUpdate(update)); err != nil {
+		t.Fatalf("send the editor's edit: %v", err)
+	}
+}
+
 // waitExit waits up to 30 s for Dispatch to exit, and fails the test with its output when it is
 // still running; after names what it was waiting on.
 func (p *dispatchProcess) waitExit(t *testing.T, after string) {
@@ -387,6 +537,33 @@ func settlementOwed(t *testing.T, database *store.Store, artifactID string) bool
 		t.Fatalf("read the pending settlement: %v", err)
 	}
 	return owed
+}
+
+// waitForSettlementOwed waits up to 10 s for the document's pending-settlement row to be there, or
+// gone.
+func waitForSettlementOwed(t *testing.T, database *store.Store, artifactID string, owed bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for settlementOwed(t, database, artifactID) != owed {
+		if time.Now().After(deadline) {
+			t.Fatalf("the document's pending-settlement row was not %s within 10s", map[bool]string{true: "there", false: "gone"}[owed])
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// latestVersion is the number, markdown and authors (JSON) of the document's latest version.
+func latestVersion(t *testing.T, database *store.Store, artifactID string) (int, string, string) {
+	t.Helper()
+	var number int
+	var markdown, authors string
+	if err := database.Pool.QueryRow(context.Background(), `
+		select number, coalesce(markdown, ''), authors::text
+		from artifact_versions where artifact_id = $1 order by number desc limit 1
+	`, artifactID).Scan(&number, &markdown, &authors); err != nil {
+		t.Fatalf("read the document's latest version: %v", err)
+	}
+	return number, markdown, authors
 }
 
 func freeTCPPort(t *testing.T) int {
