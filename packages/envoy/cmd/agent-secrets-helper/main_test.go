@@ -5,6 +5,8 @@ package main
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -67,5 +69,74 @@ func TestServeStartsWithoutCredentialAndAnswersSessions(t *testing.T) {
 	}
 	if !resp.OK {
 		t.Fatalf("sessions must succeed even with no machine credential yet: %+v", resp)
+	}
+}
+
+// TestServeNamesTheSignalItStopsOn: a SIGTERM from anything but systemd (a test rig's
+// `pkill -f "agent-secrets-helper serve"` matches the unit's helper too) stops the helper as
+// systemd's own stop does, with exit 0, since a non-zero exit would leave every stop failed. The
+// unit's journal then says only that it ended, so the helper's last line names the signal, the
+// sessions it had and whether it held a launcher credential.
+func TestServeNamesTheSignalItStopsOn(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "agent-secrets-helper")
+	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	stderr, err := os.Create(filepath.Join(dir, "stderr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
+	logged := func() string {
+		b, err := os.ReadFile(stderr.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	sock := filepath.Join(dir, "run", "helper.sock")
+	cmd := exec.Command(binary, "serve")
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + dir, "AGENT_SECRETS_URL=http://127.0.0.1:1",
+		"AGENT_SECRETS_HELPER_SOCK=" + sock, "AGENT_SECRETS_OPERATOR_FILE=" + filepath.Join(dir, "operator")}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = cmd.Process.Kill()
+			<-exited
+		}
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if resp, err := helper.Call(sock, helper.Request{Op: "sessions"}, time.Second); err == nil && resp.OK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the helper never answered on %s; stderr:\n%s", sock, logged())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-exited:
+		stopped = true
+		if err != nil {
+			t.Fatalf("serve after SIGTERM: %v; want exit 0, as a requested stop. stderr:\n%s", err, logged())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("serve did not stop on SIGTERM; stderr:\n%s", logged())
+	}
+	const want = `level=WARN msg="agent-secrets-helper stopping on a signal" signal=terminated sessions=0 launcher_credential=false`
+	if !strings.Contains(logged(), want) {
+		t.Fatalf("stderr after SIGTERM:\n%s\nwant a line carrying %s", logged(), want)
 	}
 }

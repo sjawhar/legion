@@ -83,7 +83,11 @@ func main() {
 // ever been installed. There is no startup gate on TokenFile/OperatorFile: the unit never exits
 // for want of a credential; a login is a separate ceremony (`agent-secrets launcher login`) run
 // against the already-listening socket, and a missing or empty OperatorFile only surfaces later,
-// informatively, the first time Login actually needs it for its login_hint.
+// informatively, the first time Login actually needs it for its login_hint. SIGINT or SIGTERM
+// stops it, from systemd or from anything else that signals it, and it exits 0, as a requested
+// stop does, after a WARN line naming the signal, how many sessions it had registered and whether
+// it held a launcher credential, which the next start does not have: the journal says why it
+// stopped even when the unit's own log says only that it ended.
 func serve(cfg config) error {
 	if strings.TrimSpace(cfg.URL) == "" {
 		return errors.New("AGENT_SECRETS_URL is required (the secrets broker, e.g. https://secrets.internal.example)")
@@ -112,8 +116,20 @@ func serve(cfg config) error {
 		Log:      log,
 		MinRenew: 30 * time.Second,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
+	go func() {
+		select {
+		case sig := <-signals:
+			log.Warn("agent-secrets-helper stopping on a signal", "signal", sig.String(),
+				"sessions", len(srv.Registry.List()), "launcher_credential", srv.Broker.HasCredential())
+			stop()
+		case <-ctx.Done():
+		}
+	}()
 	srv.Recover(ctx)
 	// The version says which release a restart came up on. The credential's state is logged where
 	// it changes (the Broker's machine-login and refusal lines); a restart never holds one here.
