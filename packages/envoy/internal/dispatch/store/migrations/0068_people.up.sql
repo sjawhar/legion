@@ -1,4 +1,4 @@
--- 0067_people.up.sql
+-- 0068_people.up.sql
 -- AGENTC-1563: people sign in to Dispatch with Google Workspace through the shared sign-in pool
 -- and are named by lowercase email.
 --

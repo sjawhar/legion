@@ -62,6 +62,16 @@
   `INTERNAL`, the codes the API answers those errors with elsewhere), logged at WARN, and they do
   not wait for a failed document room's recovery; only a request that has itself gone away fails
   them (LEGION-460).
+- `PUT /api/v1/me/agents/{session_id}/state` accepts `read_replies`, the ids of messages that
+  session wrote, and marks those replies read and no other (`user_agent_reply_read`, migration
+  `0067`); `unread_replies` and the conversation window's unread flag leave them out. Opening a
+  broadcast page now clears the answers it shows from the New replies badge and each agent's row,
+  on every tab, while the session's older reply to another message, or one newer than the page
+  shows, still counts. An id may take any form `uuid.Parse` reads; one it cannot read, or one that
+  is not a message that session wrote, is `400 INVALID_STATE`. A request naming only replies
+  already read, or replies the session's read mark has passed, changes nothing and appends no
+  `user_agent_state.updated` event, and a `read_through` deletes the viewer's rows for that
+  session whose replies it reaches (LEGION-485).
 
 ### Changed
 
@@ -76,11 +86,11 @@
   round-trips; a cookie of the earlier shape no longer verifies. Header identity is only for tests
   and local harnesses, requires `DISPATCH_IDENTITY_HEADER_TRUSTED=1`, and never shares a
   deployment with the sign-in pool. Everyone who has signed in is recorded in `people` (migration
-  `0067`), which is the assignee picker's list and the only names an issue may be assigned to. The
+  `0068`), which is the assignee picker's list and the only names an issue may be assigned to. The
   GitHub reads (`/api/github/rest/...`) go to GitHub as the GitHub App installation, GET only and
   only a pull request, an issue or a commit's check runs. `DISPATCH_ALLOWED_LOGINS` and
   `DISPATCH_APP_CLIENT_SECRET` are removed and refused at boot; GitHub OAuth sign-in, the per-user
-  GitHub token table (`users`, dropped by `0067`) and the GraphQL proxy are gone (AGENTC-1563).
+  GitHub token table (`users`, dropped by `0068`) and the GraphQL proxy are gone (AGENTC-1563).
 - A blank approval-request `summary` is refused (`400 SUMMARY_INPUT`) with text that asks for what
   the human is approving, rather than for what the version proposes that the human has not agreed
   to, and the advice in `409 APPROVAL_WAITS_ON_HUMAN` and in an approval ask's `409 ASK_KIND_FIXED`

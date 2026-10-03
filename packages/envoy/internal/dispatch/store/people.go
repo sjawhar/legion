@@ -12,7 +12,7 @@ import (
 )
 
 // PgPeopleStore records the people who have signed in to Dispatch and each pool sign-in's
-// membership (migration 0067).
+// membership (migration 0068).
 type PgPeopleStore struct {
 	pool *Pool
 }
