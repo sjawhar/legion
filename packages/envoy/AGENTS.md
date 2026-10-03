@@ -1908,13 +1908,15 @@ equal to `BROKER_PUBLIC_URL`, `iat`/`exp` within skew and a 600-second cap, a `r
 400 runes with bidi/zero-width categories refused, and `authorization_details` either every entry
 `agent_secret` or exactly one `launcher_credential` entry naming a valid hostname and an optional
 `[a-z0-9-]{1,64}` service).
-`Body.ApproverLogin(login)` is the one approver comparison: a record's approver is resolved when
-the record is created (a secret's owner, `anyone` for a shared human-tier secret, or a machine
-login's `login_hint`, which is never `anyone`), and every decision and every chain re-check
-compares the canonical lowercase login against it, any login but `anyone` itself deciding an
-`anyone` record, a decision recording the canonical
-login it returns. `record.ChainVerifier` (`chain.go`, built per record kind by
-`store.Store.ChainVerifier`, so a record of one kind never backs the other's credential) is
+`Body.ApproverLogin(kind, login)` (`record.MayDecide`) is the one approver comparison: a record's
+approver is resolved when the record is created (a secret's owner, `anyone` for a shared
+human-tier secret, or a machine login's `login_hint`, which is never `anyone`), and every decision
+and every chain re-check compares the canonical lowercase login against it, any login but `anyone`
+itself deciding an `agent_secret` record whose approver is `anyone`, no login deciding a machine
+login whose approver is `anyone` (one a binary from before `Login` refused that hint could have
+opened), and a decision recording the canonical login it returns. `record.ChainVerifier`
+(`chain.go`, built per record kind by `store.Store.ChainVerifier`, whose `Kind` also selects that
+rule, so a record of one kind never backs the other's credential) is
 what "every release re-verifies the whole chain" means in code: given a record id it re-fetches
 the stored body, confirms it still reproduces its own id, re-verifies the embedded request object
 as of the record's own creation time (not now — a request object's ~10-minute `exp` is long past

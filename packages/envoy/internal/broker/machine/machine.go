@@ -247,7 +247,7 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return "", "", err
 	}
 
-	login, err = body.ApproverLogin(login)
+	login, err = body.ApproverLogin(record.KindLauncherCredential, login)
 	if err != nil {
 		return "", "", err
 	}

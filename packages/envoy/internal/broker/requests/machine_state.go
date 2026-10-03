@@ -102,7 +102,7 @@ type Machine struct {
 // NewChainVerifier builds the record.ChainVerifier VerifyChain uses, scoped to agent_secret
 // records.
 func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *record.ChainVerifier {
-	return st.ChainVerifier("agent_secret", audience, skew)
+	return st.ChainVerifier(record.KindAgentSecret, audience, skew)
 }
 
 type enrollmentRow struct {
@@ -437,7 +437,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	if err != nil {
 		return Decision{}, err
 	}
-	login, err = parsed.ApproverLogin(login)
+	login, err = parsed.ApproverLogin(record.KindAgentSecret, login)
 	if err != nil {
 		return Decision{}, err
 	}

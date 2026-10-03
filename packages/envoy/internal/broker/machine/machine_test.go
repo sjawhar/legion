@@ -256,6 +256,37 @@ func TestLoginRefusesAnyoneAsItsOperator(t *testing.T) {
 	}
 }
 
+// TestAMachineLoginNamingAnyoneIsDecidedByNoOne pins the other half: a machine login whose
+// approver is record.AnyoneApprover, which a binary from before Login refused that hint could
+// open, is decided by no login, so no signed-in person can approve another's machine as their own.
+func TestAMachineLoginNamingAnyoneIsDecidedByNoOne(t *testing.T) {
+	svc := newFixture(t)
+	ctx := context.Background()
+	const code = "ABCD-EFGH"
+	body := record.Body{
+		Request:         signMachineLogin(t, record.AnyoneApprover, "example-host-devbox", ""),
+		Approver:        record.AnyoneApprover,
+		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-"},
+		LifetimeSeconds: int(svc.CredentialLifetime.Seconds()),
+		RulesVersion:    svc.Policy.Get().Version,
+		ExpiresAt:       time.Now().Add(svc.PendingTTL).UTC().Truncate(time.Second),
+		Code:            code,
+	}
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, code, expires_at) values ($1,$2,'launcher_credential',$3,$4,$5)`,
+		body.ID(), body.Canonical(), body.Approver, code, body.ExpiresAt); err != nil {
+		t.Fatalf("insert the record an older binary opened: %v", err)
+	}
+	for _, login := range []string{"bob@example.com", record.AnyoneApprover} {
+		if _, _, err := svc.ApplyDecision(ctx, body.ID(), true, login, code); !errors.Is(err, record.ErrNotApprover) {
+			t.Fatalf("ApplyDecision(%q) = %v, want record.ErrNotApprover", login, err)
+		}
+	}
+	var credentials int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from launcher_credentials`).Scan(&credentials); err != nil || credentials != 0 {
+		t.Fatalf("launcher_credentials rows = %d, %v; want none", credentials, err)
+	}
+}
+
 // TestServiceCredentialEnrollsOnlyPods pins that a login whose launcher_credential detail names a
 // service mints a credential with a nil operator (never the approving human's own login), and
 // that this new-flow-minted credential still respects enroll's own authorized() trust boundary:
