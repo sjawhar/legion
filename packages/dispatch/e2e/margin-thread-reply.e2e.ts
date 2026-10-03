@@ -1,9 +1,9 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { createComment, createIssue, createProject, resolveComment } from "./api";
-import { connectedDot, documentEditor, marginCard, openedThreadCard, setSheet } from "./editor";
+import { documentEditor, marginCard, openedThreadCard, openSpec, setSheet } from "./editor";
 import { resetDatabase } from "./seed";
-import { refusePosts } from "./sends";
+import { answeredPost, navigateInApp, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 // A margin thread's own reply holds its draft until the server answers, like every composer.
@@ -33,28 +33,9 @@ async function seed(title: string) {
   return { comments: `**/api/v1/issues/${issue.key}/comments`, first, issueKey: issue.key, second };
 }
 
-async function openSpec(page: Page, issueKey: string): Promise<void> {
-  await page.goto(`/issues/${issueKey}/spec`);
-  await expect(documentEditor(page)).toContainText(spec);
-  await expect(connectedDot(page)).toHaveText("connected");
-}
-
-/** In-app navigation, as a link does: a reload would drop a send with the page. */
-async function navigateInApp(page: Page, path: string): Promise<void> {
-  await page.evaluate((to) => {
-    window.history.pushState(null, "", to);
-    window.dispatchEvent(new PopStateEvent("popstate"));
-  }, path);
-}
-
 /** The refusal `refusePosts` hands the reply, once the page has it. */
 function refusal(page: Page, issueKey: string) {
-  return page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      response.url().endsWith(`/api/v1/issues/${issueKey}/comments`) &&
-      response.status() === 503
-  );
+  return answeredPost(page, `/api/v1/issues/${issueKey}/comments`, 503);
 }
 
 /** On a phone the Thread dialog's Back waits for the reply until the send's deadline; past it,
@@ -95,7 +76,7 @@ test("a margin thread someone else resolves while its reply is out keeps the rep
 
   try {
     const page = await alice.newPage();
-    await openSpec(page, issueKey);
+    await openSpec(page, issueKey, spec);
     const card = await openThread(page, testInfo.project.name, first.id);
     const refuse = await refusePosts(page, comments);
     const { field, form } = await sendReply(card, "Reply under a resolve");
@@ -124,7 +105,7 @@ test("leaving a margin thread while its reply is out keeps the reply's draft and
 
   try {
     const page = await alice.newPage();
-    await openSpec(page, issueKey);
+    await openSpec(page, issueKey, spec);
     const card = await openThread(page, testInfo.project.name, first.id);
     const refuse = await refusePosts(page, comments);
     const { field, form } = await sendReply(card, "Reply left behind");
@@ -162,7 +143,7 @@ test("the reader's own Resolve while a margin reply is out keeps the reply's dra
 
   try {
     const page = await alice.newPage();
-    await openSpec(page, issueKey);
+    await openSpec(page, issueKey, spec);
     const card = await openThread(page, testInfo.project.name, first.id);
     const refuse = await refusePosts(page, comments);
     const { field, form } = await sendReply(card, "Reply under my resolve");
@@ -201,7 +182,7 @@ test("the Pinned tab while a margin thread's reply is out keeps the reply's draf
     const page = await alice.newPage();
     const project = testInfo.project.name;
     if (project === "iphone") await page.clock.install();
-    await openSpec(page, issueKey);
+    await openSpec(page, issueKey, spec);
     await openThread(page, project, first.id);
     const refuse = await refusePosts(page, comments);
     await sendReply(openedThreadCard(page, project, first.id), "Reply under the Pinned tab");
@@ -242,7 +223,7 @@ test("collapsing the margin to its rail while a thread's reply is out keeps the 
   try {
     const page = await alice.newPage();
     await page.setViewportSize({ height: 900, width: 1440 });
-    await openSpec(page, issueKey);
+    await openSpec(page, issueKey, spec);
     const card = await openThread(page, testInfo.project.name, first.id);
     const refuse = await refusePosts(page, comments);
     const { field, form } = await sendReply(card, "Reply under the rail");
@@ -276,7 +257,7 @@ test("leaving the document while a margin thread's reply is out keeps the reply'
   try {
     const page = await alice.newPage();
     const project = testInfo.project.name;
-    await openSpec(page, issueKey);
+    await openSpec(page, issueKey, spec);
     await openThread(page, project, first.id);
     const refuse = await refusePosts(page, comments);
     await sendReply(openedThreadCard(page, project, first.id), "Reply left on another page");
@@ -306,6 +287,34 @@ test("leaving the document while a margin thread's reply is out keeps the reply'
       card.getByRole("list", { name: "Replies" }).getByText("Reply left on another page")
     ).toBeVisible();
     await expect(field).toHaveValue("");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A thread opens with its reply field focused, the second time as much as the first: the reader
+// expands a thread from the keyboard to type into it.
+test("a margin thread expanded a second time from the keyboard has its reply field focused", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "a phone opens a thread in its Thread dialog");
+  const { first, issueKey } = await seed("Reopened from the keyboard");
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issueKey, spec);
+    const card = marginCard(page, first.id);
+    const field = card.getByRole("textbox", { name: "Reply" });
+    for (const expansion of ["first", "second"]) {
+      await card.getByRole("button", { expanded: false }).focus();
+      await page.keyboard.press("Enter");
+      await expect(card).toHaveAttribute("aria-expanded", "true");
+      await expect(field, `the ${expansion} expansion`).toBeFocused();
+      // Escape in the reply cancels it, which collapses the thread.
+      await page.keyboard.press("Escape");
+      await expect(card).toHaveAttribute("aria-expanded", "false");
+    }
   } finally {
     await alice.close();
   }

@@ -26,7 +26,6 @@ test("an issue margin offers Comments and Pinned, Comments first", () => {
         actions: {
           closeComposer: () => {},
           onAction: () => {},
-          onComposerSaved: () => {},
           onComposerKindChange: () => undefined,
           onEdit: async () => undefined,
           onRetryAction: () => {},
@@ -38,7 +37,7 @@ test("an issue margin offers Comments and Pinned, Comments first", () => {
           onToggleThread: () => {},
           onEditingChange: () => {},
         },
-        composers: [],
+        composer: undefined,
         items: {
           actionFailure: undefined,
           answeredAsksPending: false,
@@ -67,7 +66,6 @@ test("an issue margin offers Comments and Pinned, Comments first", () => {
           blockPlacements: new Map(),
           markPlacements: new Map(),
         },
-        replies: { attach: () => () => {}, close: () => {}, entries: [], onHolding: () => {} },
         selection: {
           expandedThreadKey: undefined,
           editingCommentId: undefined,
@@ -119,7 +117,6 @@ test("a document owner shows the Comments tab and comment composer only", () => 
           actions: {
             closeComposer: () => {},
             onAction: () => {},
-            onComposerSaved: () => {},
             onComposerKindChange: () => undefined,
             onEdit: async () => undefined,
             onRetryAction: () => {},
@@ -131,21 +128,13 @@ test("a document owner shows the Comments tab and comment composer only", () => 
             onToggleThread: () => {},
             onEditingChange: () => {},
           },
-          composers: [
-            {
-              anchor: { artifact: specArtifact.id, mark_id: "mark-1", quote: "selected" },
-              held: false,
-              kind: "comment",
-              owner: {
-                artifactId: specArtifact.id,
-                kind: "document",
-                project: "CORE",
-                slug: "design-notes",
-              },
-              seq: 1,
-              turnedAway: false,
-            },
-          ],
+          composer: {
+            anchor: { artifact: specArtifact.id, mark_id: "mark-1", quote: "selected" },
+            kind: "comment",
+            owner: { artifactId: specArtifact.id, kind: "artifact", project: "CORE" },
+            seq: 1,
+            turnedAway: false,
+          },
           items: {
             actionFailure: undefined,
             answeredAsksPending: false,
@@ -181,7 +170,6 @@ test("a document owner shows the Comments tab and comment composer only", () => 
             },
           },
           placement: { blockPlacements: new Map(), markPlacements: new Map() },
-          replies: { attach: () => () => {}, close: () => {}, entries: [], onHolding: () => {} },
           selection: {
             expandedThreadKey: undefined,
             editingCommentId: undefined,
@@ -267,7 +255,6 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
             actions: {
               closeComposer: () => {},
               onAction: () => {},
-              onComposerSaved: () => {},
               onComposerKindChange: () => undefined,
               onEdit: async () => undefined,
               onRetryAction: () => {},
@@ -279,7 +266,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
               onToggleThread: () => {},
               onEditingChange: () => {},
             },
-            composers: [],
+            composer: undefined,
             items: {
               actionFailure: undefined,
               answeredAsksPending: false,
@@ -314,7 +301,6 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
               visibleArtifact: specArtifact,
             },
             placement: { blockPlacements: new Map(), markPlacements: new Map() },
-            replies: { attach: () => () => {}, close: () => {}, entries: [], onHolding: () => {} },
             selection: {
               expandedThreadKey: root.id,
               editingCommentId: undefined,
@@ -417,7 +403,6 @@ test("the standalone document phone sheet shows each suggestion's diff and Accep
               onAction: (id, action) => {
                 actions.push([id, action]);
               },
-              onComposerSaved: () => {},
               onComposerKindChange: () => undefined,
               onEdit: async () => undefined,
               onRetryAction: () => {},
@@ -429,7 +414,7 @@ test("the standalone document phone sheet shows each suggestion's diff and Accep
               onToggleThread: () => {},
               onEditingChange: () => {},
             },
-            composers: [],
+            composer: undefined,
             items: {
               actionFailure: undefined,
               answeredAsksPending: false,
@@ -474,7 +459,6 @@ test("the standalone document phone sheet shows each suggestion's diff and Accep
               },
             },
             placement: { blockPlacements: new Map(), markPlacements: new Map() },
-            replies: { attach: () => () => {}, close: () => {}, entries: [], onHolding: () => {} },
             selection: {
               expandedThreadKey: undefined,
               editingCommentId: undefined,

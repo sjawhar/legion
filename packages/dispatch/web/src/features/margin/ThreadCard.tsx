@@ -29,6 +29,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { useHeldSendsUnder } from "../conversation/held-sends";
 import { MentionComposer } from "../conversation/MentionComposer";
 import { pulseBlock } from "../doc/marks";
 import { actorLabel } from "../refs/actor";
@@ -38,7 +39,16 @@ import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
 import type { CommentActionFailure } from "./useCommentActionQueue";
-import type { MarginItemAction, MarginOwner, Thread, ThreadComment } from "./useMarginItems";
+import {
+  composerOwner,
+  type MarginItemAction,
+  type MarginOwner,
+  type Thread,
+  type ThreadComment,
+} from "./useMarginItems";
+
+/** The name every comment edit's save sits beneath, followed by the comment's id. */
+const COMMENT_EDIT_SEND_KEY: MutationKey = ["comment-edit"];
 
 /** 44 px tall through tablet widths (the compact sheet's `min-height: 44px` rule in `styles.css`
  *  holds until `xl`), 32 px in the desktop margin. */
@@ -79,8 +89,8 @@ export interface ThreadCardProps {
   className?: string;
   composerClassName?: string;
   /** Another composer answers this thread - the Conversation's docked composer, or a phone
-   *  thread's own - so the card's reply composer stays mounted, hidden, keeping its draft and a
-   *  refusal for when that reply ends. */
+   *  thread's own - so the card's reply composer stays mounted, hidden, keeping an unsent draft
+   *  for when that reply ends. */
   hideReplyComposer?: boolean;
   expanded: boolean;
   hovered: boolean;
@@ -97,14 +107,11 @@ export interface ThreadCardProps {
   pendingAction: boolean;
   /** Renders the root and reply delivery attempts where the owner has event-sourced deliveries. */
   renderDeliveries?(comment: ThreadComment): ReactNode;
-  /** Names the reply composer's send, so a host that holds its own Replies while one of its sends
-   *  is out (the Conversation tab) holds them for this one too, and holds the thread open while
-   *  this one is. */
+  /** Names the reply composer's send and the thread the held-send store holds it for, so the
+   *  reply composer that mounts whenever the card expands shows a reply still out, or its refusal
+   *  and draft, whatever unmounted the last one; and a host that holds its own Replies while one
+   *  of its sends is out (the Conversation tab) holds them for this one too. */
   replyMutationKey?: MutationKey;
-  /** The margin's reply composer for this thread (`MarginReplySlot`), shown while the card is
-   *  expanded in place of a composer of the card's own: the margin keeps the composer, so its
-   *  draft, a send it has out and that send's refusal outlive the card. */
-  replySlot?: ReactNode;
   /** Conversation owns the turn-level copy control outside this card. */
   showReference?: boolean;
   /** Document margins pulse an orphaned block; timeline cards link to the document instead. */
@@ -219,7 +226,6 @@ export function ThreadCard({
   pulseOrphanBlock = true,
   renderDeliveries,
   replyMutationKey,
-  replySlot,
   thread,
   viewerLogin,
   editingCommentId: editingId,
@@ -244,17 +250,19 @@ export function ThreadCard({
       : rootSuggestion?.accepted === false
         ? "Rejected"
         : "Resolved";
+  // An edit whose save is out, or was refused, is the held-send store's: its editor stays open on
+  // its comment until the save lands or the reader drops it, whatever closed the card meanwhile.
+  const heldEdits = useHeldSendsUnder(COMMENT_EDIT_SEND_KEY);
+  const editing = (comment: ThreadComment) =>
+    editingId === comment.id || heldEdits.some((held) => held.request.edit?.id === comment.id);
   const renderEditor = (comment: ThreadComment) => (
     <MentionComposer
       edit={{ body: comment.body, id: comment.id }}
       kind="comment"
+      mutationKey={[...COMMENT_EDIT_SEND_KEY, comment.id]}
       onClose={() => setEditingId(undefined)}
       onSent={() => setEditingId(undefined)}
-      owner={
-        owner.kind === "issue"
-          ? { issueKey: owner.key, kind: "issue" }
-          : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
-      }
+      owner={composerOwner(owner)}
       saveEdit={onEdit}
     />
   );
@@ -350,7 +358,7 @@ export function ThreadCard({
         )}
         {expanded ? (
           <>
-            {editingId === root.id ? (
+            {editing(root) ? (
               renderEditor(root)
             ) : (
               <>
@@ -405,7 +413,7 @@ export function ThreadCard({
                     key={reply.id}
                     style={{ marginLeft: "0px" }}
                   >
-                    {editingId === reply.id ? (
+                    {editing(reply) ? (
                       renderEditor(reply)
                     ) : (
                       <>
@@ -419,7 +427,7 @@ export function ThreadCard({
                         {renderDeliveries?.(reply)}
                       </>
                     )}
-                    {editingId === reply.id ? null : (
+                    {editing(reply) ? null : (
                       <div className="mt-2 flex gap-3 text-sm">{editButton(reply)}</div>
                     )}
                   </li>
@@ -485,17 +493,14 @@ export function ThreadCard({
             </span>
           </button>
         )}
-        {/* Mounted while the card is expanded: the margin's own reply composer (`replySlot`),
-            which outlives the card, or else one of the card's. Mounted on a closed issue too,
-            where the composer shows only a reply of its own still out or its refusal (`closed`),
-            and otherwise renders nothing, its frame with it; and on a decided suggestion's
-            thread, which offers no reply, where it shows the same and still sends (`finishing`),
-            so a reply out when anyone accepts or rejects the suggestion keeps its draft and a
-            refusal until it lands or the reader cancels it. `contents`, so the composer's own box
+        {/* Mounted while the card is expanded, under the thread's reply send name, so a reply
+            still out or refused - which the held-send store keeps for the thread - is there each
+            time the card expands. Mounted on a closed issue too, where the composer shows only a
+            reply of its own still out or its refusal (`closed`), and otherwise renders nothing,
+            its frame with it; and on a decided suggestion's thread, which offers no reply, where
+            it shows the same and still sends (`finishing`). `contents`, so the composer's own box
             is the one laid out. */}
-        {!expanded ? null : replySlot !== undefined ? (
-          replySlot
-        ) : (
+        {expanded ? (
           <div className="contents" hidden={hideReplyComposer}>
             <MentionComposer
               closed={isClosed}
@@ -507,15 +512,11 @@ export function ThreadCard({
               onCancelReply={onToggle}
               onClose={onToggle}
               onSent={() => {}}
-              owner={
-                owner.kind === "issue"
-                  ? { issueKey: owner.key, kind: "issue" }
-                  : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
-              }
+              owner={composerOwner(owner)}
               replyTo={{ author: "", excerpt: "", id: root.id, parentKind: "comment" }}
             />
           </div>
-        )}
+        ) : null}
         {expanded ? null : renderDeliveries?.(root)}
         {actionFailure === undefined ? null : (
           <div className="mt-2">

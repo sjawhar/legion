@@ -6,6 +6,7 @@ import { api } from "../../api/client";
 import { inboxQuery, userStateQuery } from "../../api/queries";
 import type { Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
+import type { ComposerOwner } from "../conversation/composer-model";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import { pinnedEventIds } from "../issue/pins";
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
@@ -17,6 +18,13 @@ export type MarginTab = "comments" | "pinned";
 export type MarginOwner =
   | { kind: "issue"; key: string }
   | { kind: "document"; artifactId: string; project: string; slug: string };
+
+/** Where a composer in the margin sends: the margin's issue, or its project document. */
+export function composerOwner(owner: MarginOwner): ComposerOwner {
+  return owner.kind === "issue"
+    ? { issueKey: owner.key, kind: "issue" }
+    : { artifactId: owner.artifactId, kind: "artifact", project: owner.project };
+}
 
 /** The margin's owner, stable while the route and its artifact are: a fresh object here gave
  *  every `owner`-keyed memo, callback and effect in the margin a new identity each render. */

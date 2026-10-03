@@ -84,6 +84,7 @@ import {
   receiptAnsweredWithError,
   withGuidance,
 } from "./delivery";
+import { useHeldSends, useHeldSendsUnder } from "./held-sends";
 import { MentionComposer } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
 import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
@@ -96,7 +97,7 @@ import {
 import { useFollowLatest } from "./use-follow-latest";
 import { useShowActivity, useShowRetracted } from "./use-show-activity";
 import { useAgents } from "./useAgents";
-import { threadReplySendKey, usePhoneThread } from "./usePhoneThread";
+import { threadRepliesSendKey, threadReplySendKey, usePhoneThread } from "./usePhoneThread";
 
 interface FailedStateOperations {
   authoritativeState: UserIssueState | undefined;
@@ -605,7 +606,8 @@ function CommentTurn({
     () => threadReplySendKey(sendKey, item.event.payload.id),
     [item.event.payload.id, sendKey]
   );
-  // Collapse thread unmounts the reply composer, so it waits for the reply only until its deadline.
+  // Collapse thread waits for the reply until its deadline, so its answer lands where it was sent;
+  // past it the reader may leave, and the held-send store keeps the reply for the thread's return.
   const { sending: replySending, sendingNow: replySendingNow } = useSending(replySendKey, {
     untilDeadline: true,
   });
@@ -637,8 +639,8 @@ function CommentTurn({
   const artifactSlug = anchorArtifact?.slug;
   const currentExpanded = forceExpanded || expanded;
   const toggleThread = () => {
-    // A thread whose own reply is out stays open, from Send's own task on: closing it would
-    // unmount the composer that holds the reply, and the draft and a refusal with it.
+    // A thread whose own reply is out stays open, from Send's own task on, until the send's
+    // deadline (`replySendingNow`'s `untilDeadline`).
     if (currentExpanded && replySendingNow()) return;
     if (forceExpanded || (isPhone && !expanded)) {
       onPhoneThreadToggle?.();
@@ -827,10 +829,13 @@ export function ConversationTab({
   // While one is out, every Reply holds, from Send's own task on (`sendingNow`, which matches a key
   // and every key beneath it): a Reply would put its prefill over the draft on its way, or swap the
   // composer that holds it for another. The request itself is frozen when Send starts
-  // (`MentionComposer`), and each composer holds its own draft with its own guard; this decides
-  // what the reader sees.
+  // (`MentionComposer`), and the held-send store holds each send by its name, out or refused,
+  // whatever unmounts its composer; this decides what the reader sees.
   const sendKey = useMemo<MutationKey>(() => ["conversation-composer", issueKey], [issueKey]);
   const { sending: composerSending, sendingNow } = useSending(sendKey);
+  const heldSends = useHeldSends();
+  // Comments whose card's own reply the store holds, out or refused.
+  const heldCardReplies = useHeldSendsUnder(threadRepliesSendKey(sendKey));
   const [failedOps, setFailedOps] = useState<FailedStateOperations>();
   const viewer = useQuery(whoAmIQuery());
   const [retryingFailedOps, setRetryingFailedOps] = useState(false);
@@ -917,16 +922,20 @@ export function ConversationTab({
           (item.event.payload.suggestion !== null &&
             item.event.payload.suggestion.accepted !== null);
         // A comment the reader has in hand stays whatever would drop it - resolved, by them or
-        // anyone, or the resolved filter turned off: its thread open inline or full-screen, or the
-        // phone thread composer holding a reply to it. Dropping it would unmount the thread's reply
-        // composer, and the draft, a send it has out and that send's refusal with it.
-        const inHand = openThreads.has(id) || phone.holds(id);
+        // anyone, or the resolved filter turned off: its thread open inline or full-screen, the
+        // phone thread composer holding a reply to it, or its card's own reply held, out or
+        // refused, for its thread to show again.
+        const inHand =
+          openThreads.has(id) ||
+          phone.holds(id) ||
+          heldCardReplies.some((held) => held.request.replyTo?.id === id);
         return showResolvedComments || !resolved || focused || inHand;
       }),
     [
       focusItemId,
       items,
       openThreads,
+      heldCardReplies,
       phone.holds,
       showActivity,
       showResolvedComments,
@@ -963,8 +972,11 @@ export function ConversationTab({
   });
   const [ownSendCount, setOwnSendCount] = useState(0);
   // The docked composer's reply. A message's Reply answers here at every width, and so does a
-  // comment's above the phone layout.
-  const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null);
+  // comment's above the phone layout. A send the composer holds still answers its reply when the
+  // tab mounts again, so the composer shows it there.
+  const [replyTo, setReplyTo] = useState<ReplyTarget | null>(
+    () => heldSends.get(sendKey)?.request.replyTo ?? null
+  );
   const beginReply = (target: ReplyTarget): boolean => {
     if (sendingNow()) return false;
     setReplyTo(target);

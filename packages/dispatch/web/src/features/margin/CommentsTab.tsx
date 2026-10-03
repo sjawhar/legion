@@ -10,7 +10,7 @@ import {
   textMutedOnSurfaceMuted,
   textPrimaryOnSurface,
 } from "../../theme/classes";
-import type { ComposerAnchor, ComposerKind } from "../conversation/composer-model";
+import type { ComposerAnchor, ComposerKind, ComposerOwner } from "../conversation/composer-model";
 import { MentionComposer } from "../conversation/MentionComposer";
 import { AskCard } from "../inbox/AskCard";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
@@ -19,17 +19,16 @@ import { ThreadList } from "./ThreadList";
 import type { CommentActionFailure } from "./useCommentActionQueue";
 import type { MarginItemAction, MarginOwner, MarkPlacement, Thread } from "./useMarginItems";
 
+/** The composer on the open document: the compose the reader has open, or the one the held-send
+ *  store holds for the document - out, or refused - from Send on. At most one per document. */
 export interface MarginComposer {
   anchor: ComposerAnchor;
-  /** Its send was out when the reader left its document or its issue closed, so it stays until
-   *  that send lands or the reader discards the refusal it hands back. */
-  held: boolean;
   kind: ComposerKind;
-  /** Where its sends go: the owner it was opened under, wherever the margin is now. */
-  owner: MarginOwner;
-  /** The compose this composer belongs to, which names its send (`marginComposeSendKey`). */
-  seq: number;
-  /** A newer selection-bar action had to wait for this compose's send. */
+  /** Where its sends go: the owner it was opened under. */
+  owner: ComposerOwner;
+  /** The open compose it is, until its send holds it. */
+  seq: number | undefined;
+  /** A newer selection-bar action had to wait for its send. */
   turnedAway: boolean;
 }
 
@@ -37,8 +36,6 @@ interface CommentsTabProps {
   actionFailure: CommentActionFailure | undefined;
   answeredAsksPending: boolean;
   artifactSlug: string;
-  /** Takes the margin's reply composer for a thread into its card (`MarginReplySlot`). */
-  attachReply: (key: string, slot: HTMLElement) => () => void;
   asksPending: boolean;
   commentsError: boolean;
   commentsPending: boolean;
@@ -71,29 +68,29 @@ interface CommentsTabProps {
   viewerLogin: string;
 }
 
-/** The composer a selection-bar action opened. `MarginSheet` keeps it mounted for as long as its
- *  compose is open, whatever the margin shows over it - the Pinned tab, a phone margin thread, the
- *  rail the margin collapses to, another document or a page with no margin - so its draft, a send
- *  it has out and that send's refusal stay with it; on a closed issue it shows only that send or
- *  its refusal. While a newer selection-bar action waits on its send, it says so. */
+/** The composer on the open document. `MarginSheet` keeps it mounted, hidden, under the Pinned
+ *  tab, a phone margin thread and the rail the margin collapses to, so an unsent draft stays with
+ *  it; a send it has out, and that send's refusal, are the held-send store's, so they stay with
+ *  the document whatever unmounts the composer. On a closed issue it shows only that send or its
+ *  refusal. While a newer selection-bar action waits on its send, it says so. */
 export function MarginComposerSlot({
   composer,
   hidden,
   isClosed,
   onClose,
   onKindChange,
-  onSent,
 }: {
   composer: MarginComposer;
   hidden: boolean;
   isClosed: boolean;
-  onClose: (seq: number) => void;
+  onClose: (composer: MarginComposer) => void;
   onKindChange: (kind: ComposerKind) => string | undefined;
-  onSent: (seq: number) => void;
 }): ReactNode {
-  const sendKey = useMemo(() => marginComposeSendKey(composer.seq), [composer.seq]);
+  const sendKey = useMemo(
+    () => marginComposeSendKey(composer.anchor.artifact),
+    [composer.anchor.artifact]
+  );
   const { sending } = useSending(sendKey);
-  const { owner } = composer;
   return (
     // The margin scrolls this into its scrollport when it opens: a composer the reader started
     // from the document renders at the top of the margin's scroll content, which can be thousands
@@ -111,13 +108,9 @@ export function MarginComposerSlot({
         frame="pt-3"
         kind={composer.kind}
         mutationKey={sendKey}
-        onClose={() => onClose(composer.seq)}
-        onSent={() => onSent(composer.seq)}
-        owner={
-          owner.kind === "issue"
-            ? { issueKey: owner.key, kind: "issue" }
-            : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
-        }
+        onClose={() => onClose(composer)}
+        onSent={() => {}}
+        owner={composer.owner}
         replyTo={null}
         onKindChange={onKindChange}
       />
@@ -161,7 +154,6 @@ export function CommentsTab({
   actionFailure,
   answeredAsksPending,
   artifactSlug,
-  attachReply,
   asksPending,
   commentsError,
   commentsPending,
@@ -261,7 +253,6 @@ export function CommentsTab({
               onAction={onAction}
               onEdit={onEdit}
               onRetryAction={onRetryAction}
-              attachReply={attachReply}
               onSelect={onSelectCard}
               onToggle={onToggleThread}
               onToggleResolved={onToggleResolved}

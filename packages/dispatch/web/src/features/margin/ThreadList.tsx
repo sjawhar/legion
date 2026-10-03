@@ -1,6 +1,6 @@
 import { type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import { MarginReplySlot } from "./MarginReply";
+import { marginReplySendKey } from "./margin-context";
 import { ThreadCard } from "./ThreadCard";
 import type { CommentActionFailure } from "./useCommentActionQueue";
 import {
@@ -13,8 +13,6 @@ import {
 
 interface ThreadListProps {
   actionFailure: CommentActionFailure | undefined;
-  /** Takes the margin's reply composer for a thread into its card's slot (`MarginReplySlot`). */
-  attachReply(key: string, slot: HTMLElement): () => void;
   artifactSlug: string;
   expandedThreadKey: string | undefined;
   editingCommentId: string | undefined;
@@ -99,7 +97,6 @@ function regionOrigin(region: HTMLElement): number {
 
 export function ThreadList({
   actionFailure,
-  attachReply,
   artifactSlug,
   expandedThreadKey,
   editingCommentId,
@@ -205,7 +202,7 @@ export function ThreadList({
       owner={owner}
       selected={selectedItemId === thread.key}
       pendingAction={pendingActionIds.has(thread.key)}
-      replySlot={<MarginReplySlot attach={attachReply} threadKey={thread.key} />}
+      replyMutationKey={marginReplySendKey(thread.key)}
       thread={thread}
       viewerLogin={viewerLogin}
     />

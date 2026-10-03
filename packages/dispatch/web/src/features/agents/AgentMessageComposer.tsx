@@ -1,13 +1,5 @@
 import { type MutationKey, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  type ReactNode,
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { api } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
@@ -25,6 +17,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import type { ReplyTarget } from "../conversation/composer-model";
+import { useHeldSends } from "../conversation/held-sends";
 import { MentionComposer } from "../conversation/MentionComposer";
 import { focusOnDocument } from "../shell/roving";
 import { AGENT_ROW_SELECTOR, ISSUE_PICKER_SELECTOR } from "./keyboard";
@@ -36,21 +29,20 @@ export interface AgentReply {
   readonly target: ReplyTarget;
 }
 
-/** The name of an agent row's send. The row reads it (`useSending`) to hold what a message on
- *  its way has already fixed - the picker and the Reply buttons - and the composer names its send
- *  with it, so the two keys cannot drift apart. It belongs to one mount of the row: a row that
- *  unmounts mid-send (its session left the registry, or the reader left the page) comes back with
- *  a fresh composer, which holds nothing for a send it did not make. */
-export function useAgentSendKey(sessionID: string): MutationKey {
-  const mount = useId();
-  return useMemo(() => ["agent-composer", sessionID, mount], [sessionID, mount]);
+/** The name of an agent row's send, which names the session it is held for: the row reads it
+ *  (`useSending`) to hold what a message on its way has already fixed - the picker and the Reply
+ *  buttons - and the composer names its send with it, so the two keys cannot drift apart. A row
+ *  that mounts again while its send is out, or after it was refused - the reader came back to the
+ *  page - shows that send (`useComposerSend`), and holds for it. */
+export function agentSendKey(sessionID: string): MutationKey {
+  return ["agent-composer", sessionID];
 }
 
 /**
  * An agent row's composer: the issue picker and the `MentionComposer` it addresses. The row keeps
- * it mounted from its first open on, collapsed or moved, so the draft, the send in flight, its
- * refusal and its uploads each live in one place - here and in `MentionComposer` - and never have
- * to be carried from one instance to another.
+ * it mounted from its first open on, collapsed or moved, so an unsent draft, the issue picked and
+ * its uploads stay with it; a send it has out, and that send's refusal, are the held-send store's,
+ * which keeps them for the session whatever unmounts the row.
  */
 export function AgentMessageComposer({
   agent,
@@ -71,17 +63,23 @@ export function AgentMessageComposer({
    *  which is NOT one level out; that case is filtered below. */
   onClose: () => void;
   replyTo: AgentReply | null;
-  /** The row's `useAgentSendKey`, which names the composer's send. */
+  /** The row's `agentSendKey`, which names the composer's send. */
   sendKey: MutationKey;
 }): ReactNode {
   const queryClient = useQueryClient();
+  const store = useHeldSends();
   const { sending, sendingNow } = hold;
-  const [issueKey, setIssueKey] = useState("");
+  // The issue a held send went to - out, or refused - is the one the picker names when the row
+  // mounts again, so what the toggle says and where Retry sends stay one issue.
+  const [issueKey, setIssueKey] = useState(() => {
+    const held = store.get(sendKey)?.request;
+    return held?.replyTo === null && held.owner.kind === "issue" ? held.owner.issueKey : "";
+  });
   const [issuePickerOpen, setIssuePickerOpen] = useState(false);
-  // `MentionComposer` calls `onSent` and then `onClose` on a successful send (its save's
-  // `onSuccess`), and a reader who has just sent a message is still writing to this agent: moving
-  // focus to the row would turn their next letters into `x` / `i` / `Shift+P` shortcuts. The flag
-  // is set on the way past `onSent` and consumed by the `onClose` that follows it.
+  // `MentionComposer` calls `onSent` and then `onClose` on a successful send, and a reader who has
+  // just sent a message is still writing to this agent: moving focus to the row would turn their
+  // next letters into `x` / `i` / `Shift+P` shortcuts. The flag is set on the way past `onSent`
+  // and consumed by the `onClose` that follows it.
   const sentJustNow = useRef(false);
   const box = useRef<HTMLDivElement>(null);
   // `MentionComposer` disables its control fieldset while a send is in flight, including this

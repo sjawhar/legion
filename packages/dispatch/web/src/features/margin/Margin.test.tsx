@@ -753,6 +753,7 @@ function fakeBridge(retype: (markId: string, kind: string) => RetypeOutcome): {
   const retyped: [string, string][] = [];
   return {
     bridge: {
+      artifactId: "artifact-1",
       focusBlock() {},
       focusMark() {},
       removeMark(markId) {
@@ -1141,6 +1142,116 @@ test("a compose left mid-send keeps its draft, its refusal and its mark for the 
     expect(fake.removed).toEqual([]);
     expect(fake.held.at(-1)).toBe("m-1");
     expect(screen.getByLabelText("First composer outcome").textContent).toBe("saved");
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+    getInbox.mockRestore();
+    listIssueAsks.mockRestore();
+    getMyState.mockRestore();
+    listComments.mockRestore();
+    createComment.mockRestore();
+  }
+});
+
+// Two composes, each on its own document, each with its send out: the reader goes back and forth
+// between the documents. Whichever document is shown, a newer selection-bar action there waits on
+// that document's own send - never another document's, and never none - so its send's outcome
+// lands on the compose and the mark it was sent from.
+test("a newer compose on a document whose send is out waits on it, after visits to another document with a send out", async () => {
+  const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["issue", secondIssue.key], secondIssue);
+  const getIssue = spyOn(api, "getIssue").mockImplementation(async (key) =>
+    key === "CORE-2" ? secondIssue : issue
+  );
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listComments = spyOn(api, "listComments").mockResolvedValue([]);
+  const firstSend = Promise.withResolvers<Comment>();
+  const secondSend = Promise.withResolvers<Comment>();
+  const sends = [firstSend.promise, secondSend.promise];
+  const createComment = spyOn(api, "createComment").mockImplementation(() => {
+    const next = sends.shift();
+    if (next === undefined) throw new Error("no send left to answer");
+    return next;
+  });
+
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <RegisterBridge bridge={fake.bridge} />
+          <MarkComposerProbe />
+          <SecondDocumentCompose />
+          <NavigateToSecondIssue />
+          <NavigateToFirstIssue />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  const goTo = async (document: "first" | "second", quote: string) => {
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: document === "first" ? "Back to the first issue" : "Open second issue",
+      })
+    );
+    const shown = await screen.findByRole("form", { name: "Comment composer" });
+    await waitFor(() => expect(within(shown).getByText(quote)).toBeTruthy());
+  };
+
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
+    const first = await screen.findByRole("form", { name: "Comment composer" });
+    fireEvent.change(within(first).getByLabelText("Comment"), {
+      target: { value: "On the first" },
+    });
+    fireEvent.click(within(first).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Open second issue" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull()
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Compose on the second document" }));
+    const second = await screen.findByRole("form", { name: "Comment composer" });
+    fireEvent.change(within(second).getByLabelText("Comment"), {
+      target: { value: "On the second" },
+    });
+    fireEvent.click(within(second).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+
+    await goTo("first", "selected");
+    await goTo("second", "elsewhere");
+    await goTo("first", "selected");
+
+    fireEvent.click(screen.getByRole("button", { name: "Compose second" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Second composer outcome").textContent).toBe(
+        "the open composer's send is out"
+      )
+    );
+    expect(fake.removed).toEqual(["m-2"]);
+    const shown = screen.getByRole("form", { name: "Comment composer" });
+    expect(within(shown).getByText("selected")).toBeTruthy();
+    expect(within(shown).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("On the first");
+    expect(
+      screen.getByText("Still sending this one. Select the text again once it's sent.")
+    ).toBeTruthy();
+
+    await act(async () => {
+      firstSend.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      await firstSend.promise.catch(() => {});
+    });
+    const refused = await screen.findByText("Couldn't send — the server is down");
+    const back = screen.getByRole("form", { name: "Comment composer" });
+    expect(back.contains(refused)).toBe(true);
+    expect(within(back).getByText("selected")).toBeTruthy();
+    expect(within(back).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("On the first");
   } finally {
     view.unmount();
     getIssue.mockRestore();

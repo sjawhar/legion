@@ -8,7 +8,8 @@ import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { type FakeDocumentRuntime, fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api } from "../../api/client";
 import type { Artifact, Ask, IssueDetails } from "../../api/types";
-import { MarginProvider, useMargin } from "../margin/margin-context";
+import { heldSends } from "../conversation/held-sends";
+import { MarginProvider, marginComposeSendKey, useMargin } from "../margin/margin-context";
 import type { MarkPlacement } from "../margin/useMarginItems";
 import { RefPreviewHost } from "../refs/RefPreview";
 import { colorForLogin } from "./connection";
@@ -89,7 +90,7 @@ function renderProofDocument({
                 seq: number;
               }
             | undefined;
-          settleCompose(outcome: "saved" | "cancelled", seq: number): void;
+          cancelCompose(seq: number): void;
         }
       | undefined,
   };
@@ -596,12 +597,27 @@ test("ProofDocument links to the current version when a historic version is unav
 });
 
 test("a selection-bar action opens the margin composer for the mark and settles the library promise", async () => {
-  const { editors, margin, sync, view } = renderProofDocument();
-  /** Settles the compose the margin has open, as its composer does. */
-  const settleOpenCompose = (outcome: "saved" | "cancelled") => {
+  const queryClient = createQueryClient();
+  const { editors, margin, sync, view } = renderProofDocument({ queryClient });
+  const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
+  const openCompose = () => {
     const open = margin.current?.pendingCompose;
     if (open === undefined) throw new Error("expected an open compose");
-    margin.current?.settleCompose(outcome, open.seq);
+    return open;
+  };
+  /** Sends the compose the margin has open, as its composer's Send does: from then on the
+   *  compose is its send's, and the library's promise resolves. */
+  const sendOpenCompose = () => {
+    const { anchor, kind } = openCompose();
+    heldSends(queryClient).send(marginComposeSendKey(anchor.artifact), {
+      anchor,
+      ask: { multiple: false, options: [], urgency: "med" },
+      draft: { body: "Why?", mentions: [], replacement: "" },
+      edit: undefined,
+      kind,
+      owner: { issueKey: "CORE-1", kind: "issue" },
+      replyTo: null,
+    });
   };
 
   try {
@@ -626,8 +642,10 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       anchor: { artifact: artifact.id, mark_id: "m-9", quote: "brown" },
       kind: "comment",
     });
-    act(() => settleOpenCompose("saved"));
+    act(() => sendOpenCompose());
     await expect(comment).resolves.toBeUndefined();
+    // The send lands before the next selection-bar action, which would otherwise wait on it.
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
 
     let suggest: Promise<void> | undefined;
     act(() => {
@@ -640,8 +658,9 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       throw new Error("The suggestion action did not return a promise.");
     }
     expect(margin.current?.pendingCompose?.kind).toBe("suggestion");
-    act(() => settleOpenCompose("saved"));
+    act(() => sendOpenCompose());
     await expect(suggest).resolves.toBeUndefined();
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
 
     let ask: Promise<void> | undefined;
     act(() => {
@@ -654,7 +673,7 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       throw new Error("The ask action did not return a promise.");
     }
     expect(margin.current?.pendingCompose?.kind).toBe("ask");
-    act(() => settleOpenCompose("cancelled"));
+    act(() => margin.current?.cancelCompose(openCompose().seq));
     await expect(ask).rejects.toThrow("composer closed");
 
     let unsupported: unknown;
@@ -671,6 +690,7 @@ test("a selection-bar action opens the margin composer for the mark and settles 
     );
   } finally {
     view.unmount();
+    createComment.mockRestore();
   }
 });
 

@@ -860,10 +860,10 @@ test.describe("agents page", () => {
     }
   });
 
-  // A message on its way holds the picker and Reply of the row that sent it. A reader who leaves
-  // the page mid-send and comes back gets a new row, with a composer of its own and no send of its
-  // own out, so it holds nothing: the send it lost goes on without it.
-  test("a row back after the reader left mid-send holds nothing for the send it lost", async ({
+  // A message on its way holds the picker and Reply of the row that sent it, and its draft, until
+  // the server answers. A reader who leaves the page mid-send and comes back finds the row holding
+  // the same send - the draft, the picker and Reply held - and its answer lands there.
+  test("a row back after the reader left mid-send holds the send it left, which then lands there", async ({
     browser,
   }) => {
     const issueKey = await seedAgents();
@@ -900,11 +900,15 @@ test.describe("agents page", () => {
       await page.keyboard.press("a");
       await row.getByRole("button", { exact: true, name: "Planner" }).click();
 
-      await expect(field).toBeEnabled();
+      await expect(field).toBeDisabled();
+      await expect(field).toHaveValue("Status please");
+      await expect(toggle).toBeDisabled();
+      await expect(reply).toBeDisabled();
+      send.release();
       await expect(field).toHaveValue("");
+      await expect(field).toBeEnabled();
       await expect(toggle).toBeEnabled();
       await expect(reply).toBeEnabled();
-      send.release();
       expect(send.posts()).toBe(1);
     } finally {
       await context.close();

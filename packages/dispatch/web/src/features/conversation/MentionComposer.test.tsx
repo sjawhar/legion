@@ -1620,3 +1620,116 @@ test("a pick in the paste's own task cannot move the upload", async () => {
     uploadArtifact.mockRestore();
   }
 });
+
+const threadReplyKey: MutationKey = ["conversation-composer", "CORE-1", "thread-card", "root"];
+
+/** A host that takes its reply composer off the page and puts it back, as a thread collapsing and
+ *  opening again does: the composer unmounts and a new one mounts under the same send name. */
+function renderRemountedReply() {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const invalidated = spyOn(queryClient, "invalidateQueries");
+  function Host(): ReactNode {
+    const [shown, setShown] = useState(true);
+    return (
+      <>
+        <button onClick={() => setShown((current) => !current)} type="button">
+          {shown ? "Collapse thread" : "Expand thread"}
+        </button>
+        {shown ? (
+          <MentionComposer
+            inline
+            mutationKey={threadReplyKey}
+            onClose={() => {}}
+            onSent={() => {}}
+            owner={{ issueKey: "CORE-1", kind: "issue" }}
+            replyTo={{ author: "", excerpt: "", id: "root", parentKind: "comment" }}
+          />
+        ) : null}
+      </>
+    );
+  }
+  const view = render(
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <QueryClientProvider client={queryClient}>
+        <Host />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  const toggle = () =>
+    fireEvent.click(screen.getByRole("button", { name: /^(Collapse|Expand) thread$/ }));
+  return { invalidated, toggle, view };
+}
+
+// A composer holds its send whatever unmounts it: one that mounts under the name of a send still
+// out shows that send, held, and one that mounts after the send was refused shows the draft it
+// sent beside the refusal, whose Retry sends it to the same reply.
+test("a reply composer mounted again while its send is out holds it, and then shows its refusal", async () => {
+  const refused = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment")
+    .mockReturnValueOnce(refused.promise)
+    .mockResolvedValueOnce(createdComment);
+  const { toggle, view } = renderRemountedReply();
+
+  try {
+    fireEvent.change(screen.getByLabelText("Reply"), { target: { value: "Out of view" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    toggle();
+    toggle();
+    expect(screen.getByLabelText<HTMLTextAreaElement>("Reply").value).toBe("Out of view");
+    expect(holdControls().disabled).toBe(true);
+
+    toggle();
+    await act(async () => {
+      refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      await refused.promise.catch(() => {});
+    });
+    toggle();
+    expect(screen.getByText("Couldn't send — the server is down")).toBeTruthy();
+    expect(screen.getByLabelText<HTMLTextAreaElement>("Reply").value).toBe("Out of view");
+    expect(holdControls().disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    expect(createComment.mock.calls[1]).toEqual([
+      "CORE-1",
+      { body: "Out of view", reply_to: "root" },
+    ]);
+    await waitFor(() => expect(screen.getByLabelText<HTMLTextAreaElement>("Reply").value).toBe(""));
+    expect(screen.queryByText("Couldn't send — the server is down")).toBeNull();
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+// A send that lands while its composer is off the page has landed: what it wrote is refreshed,
+// and the composer that mounts next starts empty, holding nothing.
+test("a reply that lands while its composer is unmounted refreshes the thread and leaves nothing held", async () => {
+  const answer = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(answer.promise);
+  const { invalidated, toggle, view } = renderRemountedReply();
+
+  try {
+    fireEvent.change(screen.getByLabelText("Reply"), { target: { value: "Landed out of view" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    toggle();
+    await act(async () => {
+      answer.resolve(createdComment);
+      await answer.promise;
+    });
+    const refreshed = invalidated.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey));
+    expect(refreshed).toContain(JSON.stringify(["comments", "CORE-1"]));
+
+    toggle();
+    expect(screen.getByLabelText<HTMLTextAreaElement>("Reply").value).toBe("");
+    expect(holdControls().disabled).toBe(false);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});

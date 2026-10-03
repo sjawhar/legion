@@ -16,7 +16,6 @@ import {
 } from "react";
 
 import { ApiError, api, apiErrorMessage } from "../../api/client";
-import { agentMessagesQuery } from "../../api/queries";
 import type { Agent, AskOption, AskUrgency } from "../../api/types";
 import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
@@ -24,7 +23,6 @@ import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useFootInset } from "../../hooks/useFootInset";
-import { pastDeadlineKey } from "../../hooks/useSending";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   badgeMed,
@@ -77,12 +75,11 @@ import {
   deliveryPlan,
   mentionText,
   SEND_DEADLINE_MS,
-  SendDeadlineError,
   type SentRequest,
-  sendWithinDeadline,
   survivingMentions,
 } from "./send-request";
 import { useAgents } from "./useAgents";
+import { useComposerSend } from "./useComposerSend";
 
 interface TextEditRange {
   readonly end: number;
@@ -387,22 +384,21 @@ interface MentionComposerProps {
   readonly seedMentions?: readonly { readonly target: string; readonly title: string }[];
   readonly inline?: boolean;
   readonly kind?: ComposerKind;
-  /** Names the send, so a host can hold its own controls - a Reply, an issue picker - while it is
-   *  out (`useSending`), from Send's own task on. That decides only what the reader sees: the
-   *  request is frozen when Send starts (`SentRequest`), whatever those controls do. */
+  /** Names the send and the target it is held for (`useComposerSend`): a composer that mounts
+   *  under a name whose send is out, or was refused, shows that send and its draft, and a host
+   *  can hold its own controls - a Reply, an issue picker - while it is out (`useSending`), from
+   *  Send's own task on. That decides only what the reader sees: the request is frozen when Send
+   *  starts (`SentRequest`), whatever those controls do. A composer with none names its sends
+   *  after its own mount. */
   readonly mutationKey?: MutationKey;
   /** Ends the reply. An inline reply's Cancel reply also drops its draft, and a refusal with it,
-   *  as the thread it answers closes: a host that keeps the composer mounted while the thread is
-   *  closed (the margin's cards) would otherwise show it again. */
+   *  as the thread it answers closes: the reply composer that mounts when the thread opens again
+   *  would otherwise show it. */
   readonly onCancelReply?: () => void;
   readonly onClose: () => void;
   readonly onSent: () => void;
   readonly owner: ComposerOwner;
   readonly replyTo?: ReplyTarget | null;
-  /** Told whether the composer holds a send of its own - out, or refused and not yet sent again
-   *  or dropped - and told it no longer does once it unmounts, so a host can keep in place what
-   *  would otherwise unmount the composer under that send. */
-  readonly onHoldingChange?: (holding: boolean) => void;
   readonly saveEdit?: (id: string, body: string) => Promise<unknown>;
   /** Shows the Comment / Suggest / Ask switch and hands each pick to the host, which answers
    *  through `kind` - a selected document mark is the only surface where the kind can change, and
@@ -426,15 +422,39 @@ export function MentionComposer({
   mutationKey,
   onCancelReply,
   onClose,
-  onHoldingChange,
   onKindChange,
   onSent,
   owner,
   replyTo = null,
   saveEdit,
 }: MentionComposerProps): ReactNode {
-  // Only the mount reads it, so it is computed once rather than on every keystroke.
-  const [initial] = useState(() => seededDraft(seedMentions, undefined, owner));
+  // This composer's send, held by its target rather than by this mount (`useComposerSend`): a
+  // composer that mounts where a send is out, or was refused, shows that send and its draft.
+  // `landed` and `replaceDraft` are declared below, and run only once a send settles.
+  const outgoing = useComposerSend(mutationKey, {
+    landed: (sent) => landed(sent),
+    refused: (held) => replaceDraft(held.draft.draft),
+  });
+  // Only the mount reads it, so it is computed once rather than on every keystroke: the held
+  // send's draft, or what the channel seeds.
+  const [initial] = useState(() => {
+    const held = outgoing.held?.draft;
+    if (held !== undefined) {
+      return {
+        ask: held.ask,
+        body: held.draft.body,
+        mentions: [...held.draft.mentions],
+        replacement: held.draft.replacement,
+      };
+    }
+    const seeded = seededDraft(seedMentions, undefined, owner);
+    return {
+      ask: undefined,
+      body: edit?.body ?? seeded.body,
+      mentions: seeded.mentions,
+      replacement: "",
+    };
+  });
   const textarea = useRef<HTMLTextAreaElement>(null);
   const replacementTextarea = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
@@ -442,12 +462,14 @@ export function MentionComposer({
   const lastFocusedField = useRef<HTMLElement | null>(null);
   const optionLabelRefs = useRef<Array<HTMLInputElement | null>>([]);
   const focusAddedOption = useRef(false);
-  const previousBody = useRef(edit?.body ?? initial.body);
+  const previousBody = useRef(initial.body);
   const pendingTextEdit = useRef<{ before: string; range: TextEditRange } | undefined>(undefined);
   const previousReply = useRef<string | undefined>(undefined);
+  // Whether this mount took a held send's draft, which the reply prefill must not replace.
+  const mountedHeld = useRef(outgoing.held !== undefined);
   const queryClient = useQueryClient();
-  const [body, setBody] = useState(edit?.body ?? initial.body);
-  const [replacement, setReplacement] = useState("");
+  const [body, setBody] = useState(initial.body);
+  const [replacement, setReplacement] = useState(initial.replacement);
   const [mentions, setMentions] = useState<AcceptedMention[]>(initial.mentions);
   /** Puts a whole draft in the field at once - its text, mentions, and replacement in step with
    *  the request that supplied them - where the reader did not type it, so their next edit is
@@ -458,9 +480,17 @@ export function MentionComposer({
     setMentions([...draft.mentions]);
     setReplacement(draft.replacement ?? "");
   }, []);
-  const [askOptions, setAskOptions] = useState<AskOptionDraft[]>(() => [emptyAskOption()]);
-  const [multiple, setMultiple] = useState(false);
-  const [urgency, setUrgency] = useState<AskUrgency>("med");
+  const [askOptions, setAskOptions] = useState<AskOptionDraft[]>(() =>
+    initial.ask === undefined || initial.ask.options.length === 0
+      ? [emptyAskOption()]
+      : initial.ask.options.map((option) => ({
+          ...emptyAskOption(),
+          description: option.description ?? "",
+          label: option.label,
+        }))
+  );
+  const [multiple, setMultiple] = useState(initial.ask?.multiple ?? false);
+  const [urgency, setUrgency] = useState<AskUrgency>(initial.ask?.urgency ?? "med");
   const [referencePickerOpen, setReferencePickerOpen] = useState(false);
   const [autocomplete, setAutocomplete] = useState<{ query: string; start: number }>();
   const [pendingUploads, setPendingUploads] = useState(0);
@@ -500,9 +530,6 @@ export function MentionComposer({
     setAskOptions([emptyAskOption()]);
   };
   const references = useMemo(() => composerReferences(body), [body]);
-  // This composer's own hold, from Send's task until the server answers. It is never shared: a
-  // composer that mounts while another one's send is out holds nothing for it.
-  const submitGuard = useSubmitGuard();
   const uploadRetryGuard = useSubmitGuard();
   const editBody = edit?.body;
 
@@ -511,7 +538,10 @@ export function MentionComposer({
   // seed in place (`seededDraft`), the way a reply edits it: a remount would part the draft from
   // this composer's own send, its refusal and its uploads. A layout effect, so no frame shows the
   // old seed under the new channel; the reply prefill, a passive effect, still lands after it.
-  const seedKey = [owner.kind, ...seedMentions.map((mention) => mention.target)].join("\n");
+  const seedKey = useMemo(
+    () => [owner.kind, ...seedMentions.map((mention) => mention.target)].join("\n"),
+    [owner.kind, seedMentions]
+  );
   const seededFor = useRef(seedKey);
   // biome-ignore lint/correctness/useExhaustiveDependencies: `seedKey` is the trigger; the draft, the seed and the owner are read as they stand at the change
   useLayoutEffect(() => {
@@ -519,8 +549,12 @@ export function MentionComposer({
     seededFor.current = seedKey;
     replaceDraft(seededDraft(seedMentions, { body, mentions }, owner));
   }, [seedKey]);
+  // An edit's body is the draft when the edit opens, and again whenever the comment it edits
+  // changes - never over the held draft a mount took.
+  const editedFrom = useRef(editBody);
   useEffect(() => {
-    if (editBody === undefined) return;
+    if (editBody === undefined || editedFrom.current === editBody) return;
+    editedFrom.current = editBody;
     replaceDraft({ body: editBody, mentions: [] });
   }, [editBody, replaceDraft]);
   useEffect(() => {
@@ -536,12 +570,19 @@ export function MentionComposer({
     if (suppliedAgents === undefined && autocompleteOpen) void live.refetch();
   }, [autocompleteOpen, live.refetch, suppliedAgents]);
   useEffect(() => {
+    // A mount that took a held send's draft keeps it: the prefill is for a new reply.
+    const tookHeldDraft = mountedHeld.current;
+    mountedHeld.current = false;
     if (replyTo === null) {
       previousReply.current = undefined;
       return;
     }
     if (previousReply.current === replyTo.id) return;
     previousReply.current = replyTo.id;
+    if (tookHeldDraft) {
+      textarea.current?.focus();
+      return;
+    }
     const initial = replyTo.mentions ?? [];
     const deduplicated = initial.filter(
       (mention, index) =>
@@ -566,79 +607,15 @@ export function MentionComposer({
     textarea.current?.focus();
   }, [replaceDraft, replyTo]);
 
-  /** A send the server took. The caches refreshed are the ones the send wrote, named by its own
-   *  request. The draft is the composer's own, so it clears to what the channel it addresses now
+  /** A send the server took, while this composer is mounted: the store has refreshed what it
+   *  wrote. The draft is the composer's own, so it clears to what the channel it addresses now
    *  seeds. */
-  const landed = ({ anchor: sentAnchor, edit: sentEdit, owner: sentOwner }: SentRequest) => {
+  const landed = ({ edit: sentEdit }: SentRequest) => {
     clearDraft();
     onSent();
-    if (sentOwner.kind === "session") {
-      void queryClient.invalidateQueries({
-        queryKey: agentMessagesQuery(sentOwner.sessionId).queryKey,
-      });
-    } else {
-      void queryClient.invalidateQueries({
-        queryKey:
-          sentOwner.kind === "issue"
-            ? ["comments", sentOwner.issueKey]
-            : ["artifact", sentOwner.artifactId, "comments"],
-      });
-      void queryClient.invalidateQueries({ queryKey: ["inbox"] });
-      if (sentAnchor !== undefined) {
-        void queryClient.invalidateQueries({
-          queryKey: ["artifact", sentAnchor.artifact, "blocks"],
-        });
-      }
-      if (sentOwner.kind === "issue") {
-        void queryClient.invalidateQueries({ queryKey: ["events", sentOwner.issueKey] });
-        void queryClient.invalidateQueries({ queryKey: ["issue", sentOwner.issueKey] });
-      } else {
-        void queryClient.invalidateQueries({ queryKey: ["artifact", sentOwner.artifactId] });
-        void queryClient.invalidateQueries({
-          queryKey: ["project", sentOwner.project, "artifacts"],
-        });
-      }
-    }
     if (!inline && sentEdit === undefined) onClose();
   };
-  // A send past its deadline, waiting for its answer under `pastDeadlineKey`. The composer still
-  // holds its draft, and a host's hold on the send's name - a Reply, an issue pick - still counts
-  // it. Only a hold `untilDeadline` lets go - a host's Back, Escape and Collapse thread - so a
-  // request the server never answers cannot keep the reader in front of it.
-  const late = useMutation({
-    mutationFn: ({ answer }: { answer: Promise<unknown>; sent: SentRequest }) => answer,
-    mutationKey: mutationKey === undefined ? undefined : pastDeadlineKey(mutationKey),
-    onError: (_error, { sent }) => replaceDraft(sent.draft),
-    onSettled: () => submitGuard.release(),
-    onSuccess: (_data, { sent }) => landed(sent),
-  });
-  const save = useMutation({
-    mutationFn: sendWithinDeadline,
-    mutationKey,
-    onError: (error, sent) => {
-      // Past its deadline the request is not refused: it goes on as `late`, whose answer is the
-      // send's outcome.
-      if (error instanceof SendDeadlineError) {
-        late.mutate({ answer: error.answer, sent });
-        return;
-      }
-      // A refusal restores the complete draft the request turned down, not a later edit: its
-      // body, accepted mentions, and suggestion replacement stay in step for Retry or editing.
-      replaceDraft(sent.draft);
-    },
-    onSettled: (_data, error) => {
-      if (!(error instanceof SendDeadlineError)) submitGuard.release();
-    },
-    onSuccess: (_data, sent) => landed(sent),
-  });
-  const sending = save.isPending || late.isPending;
-  // What the server refused, for the reader: a deadline is not a refusal, and the answer that
-  // follows one is.
-  const refusal = late.isError
-    ? late.error
-    : save.isError && !(save.error instanceof SendDeadlineError)
-      ? save.error
-      : undefined;
+  const { late, refusal, sending } = outgoing;
   // Closed or finishing, with no send out and no refusal to show: nothing of this composer is on
   // screen.
   const dormant = (closed || finishing) && !sending && refusal === undefined;
@@ -646,23 +623,22 @@ export function MentionComposer({
   const cancelReply = () => {
     if (inline) {
       clearDraft();
-      save.reset();
-      late.reset();
+      outgoing.discard();
     }
     onCancelReply?.();
   };
   // The Escape listener below reads it as it stands, so it is not re-bound each render for it.
   const cancelReplyNow = useRef(cancelReply);
   cancelReplyNow.current = cancelReply;
-  // Whether this composer holds a send of its own, told to the host (`onHoldingChange`), which
-  // is read as it stands so a host's new callback is no change of hold.
-  const holding = sending || refusal !== undefined;
-  const reportHolding = useRef(onHoldingChange);
-  reportHolding.current = onHoldingChange;
-  useEffect(() => {
-    reportHolding.current?.(holding);
-  }, [holding]);
-  useEffect(() => () => reportHolding.current?.(false), []);
+  // What the reader wrote over a refusal goes back to the held send as this composer unmounts
+  // (`keep`, which a send still out ignores), so the composer that mounts next shows it.
+  const keepDraft = useRef(() => {});
+  keepDraft.current = () =>
+    outgoing.keep({
+      ask: { multiple, options: submittedAskOptions(askOptions), urgency },
+      draft: { body, mentions, replacement },
+    });
+  useEffect(() => () => keepDraft.current(), []);
   useEffect(() => {
     const form = formRef.current;
     if (form === null || dormant) return;
@@ -863,21 +839,20 @@ export function MentionComposer({
   const canSubmit = canSubmitComposer(submitReason, sending, pendingUploads);
   /** Sends the draft as it stands, its whole request frozen here (`sentRequest`), so nothing done
    *  after this call can change where it goes. Until the server answers, one fieldset holds every
-   *  control that could change or discard the draft; the submit guard covers that hold in this
-   *  task before React can disable the fieldset. */
+   *  control that could change or discard the draft; the held send covers that hold in this task
+   *  before React can disable the fieldset. */
   const send = () =>
-    submitGuard.guard(() => {
+    outgoing.send(() => {
       setConfirmingDiscard(false);
       setAutocomplete(undefined);
       setReferencePickerOpen(false);
-      late.reset();
-      save.mutate(sentRequest());
+      return sentRequest();
     });
   /** The hold on the draft from Send's own task on, before React can disable the fieldset: the
    *  fieldset's capture stops every key, click, input and change bound for a control in it - so
    *  Escape raises no Discard prompt and Ctrl+K opens no picker over a draft that is out. */
   const stopHeldComposerInput = (event: SyntheticEvent) => {
-    if (!submitGuard.held()) return;
+    if (!outgoing.sendingNow()) return;
     event.preventDefault();
     event.stopPropagation();
   };
@@ -891,8 +866,7 @@ export function MentionComposer({
    *  was about. */
   const discard = () => {
     clearDraft();
-    save.reset();
-    late.reset();
+    outgoing.discard();
     setConfirmingDiscard(false);
     onClose();
   };
@@ -1299,7 +1273,7 @@ export function MentionComposer({
         </>
       )}
       {/* Past its deadline a send is still the server's: no Retry, which would post it twice. */}
-      {late.isPending ? (
+      {late ? (
         <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
           Still sending — the server has not answered in {SEND_DEADLINE_MS / 1000} seconds. The
           draft stays here until it does.

@@ -54,6 +54,7 @@ import {
 import { resolveAuthor } from "../conversation/authors";
 import type { ReplyTarget } from "../conversation/composer-model";
 import { capabilityLabel, MODE_LABELS } from "../conversation/delivery";
+import { useHeldSends } from "../conversation/held-sends";
 import { firstLine, replyQuoteText } from "../conversation/ReplyQuote";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";
@@ -66,7 +67,7 @@ import { Timestamp } from "../refs/Timestamp";
 import { closestMatching, focusOnDocument } from "../shell/roving";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
-import { AgentMessageComposer, type AgentReply, useAgentSendKey } from "./AgentMessageComposer";
+import { AgentMessageComposer, type AgentReply, agentSendKey } from "./AgentMessageComposer";
 import { deliveryAttempts } from "./attempts";
 import { type BroadcastSend, BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
 import { useBroadcastComposition } from "./broadcast-composition";
@@ -573,10 +574,22 @@ function AgentRow({
   const unreadReplies =
     useQuery(userAgentStateQuery()).data?.[agent.session_id]?.unread_replies ?? 0;
   const [expanded, setExpanded] = useState(false);
-  const [replyTo, setReplyTo] = useState<AgentReply | null>(null);
+  // A send the row's composer holds - out, or refused - still answers its reply when the row
+  // mounts again, so the row restores the reply it was sent as.
+  const heldSends = useHeldSends();
+  const [replyTo, setReplyTo] = useState<AgentReply | null>(() => {
+    const held = heldSends.get(agentSendKey(agent.session_id))?.request;
+    return held === undefined || held.replyTo === null
+      ? null
+      : {
+          issueKey: held.owner.kind === "issue" ? held.owner.issueKey : null,
+          target: held.replyTo,
+        };
+  });
   // The conversation and the composer mount on the first open and stay mounted, hidden while the
-  // row is collapsed: the draft, a send in flight, its refusal, an upload, the unread set and what
-  // the reader unfolded each have one owner, which a collapse no more discards than a pin does.
+  // row is collapsed: an unsent draft, an upload, the unread set and what the reader unfolded each
+  // have one owner, which a collapse no more discards than a pin does. A send and its refusal are
+  // the held-send store's.
   const [opened, setOpened] = useState(false);
   if (expanded && !opened) setOpened(true);
   const detailsId = useId();
@@ -708,9 +721,9 @@ function AgentRow({
   );
 }
 
-/** What a row shows once opened: its conversation and its composer. It owns the row's send name,
- *  so a row never opened watches no send, and holds every Reply while that send is out, from
- *  Send's own task on. */
+/** What a row shows once opened: its conversation and its composer. It reads the row's send, so
+ *  a row never opened watches no send, and holds every Reply while that send is out, from Send's
+ *  own task on. */
 function AgentRowDetails({
   agent,
   expanded,
@@ -728,7 +741,7 @@ function AgentRowDetails({
   replyTo: AgentReply | null;
   setReplyTo: (reply: AgentReply | null) => void;
 }): ReactNode {
-  const sendKey = useAgentSendKey(agent.session_id);
+  const sendKey = useMemo(() => agentSendKey(agent.session_id), [agent.session_id]);
   const hold = useSending(sendKey);
   return (
     <div className={`border-t px-4 pb-4 ${borderDefault}`} hidden={!expanded} id={id}>

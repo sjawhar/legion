@@ -383,6 +383,7 @@ export function ProofDocument({
                 }
                 setSearchHighlights(handle.view.dom, highlightTermRef.current);
                 marginRef.current.registerDocument({
+                  artifactId: artifact.id,
                   focusBlock: (blockId) => {
                     requestAnimationFrame(() => handle.focusBlock(blockId));
                   },

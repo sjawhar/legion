@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
 import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -2428,13 +2428,13 @@ test("a registry poll that fails keeps every row and what it holds, and says so"
   }
 });
 
-// A row whose session leaves the registry unmounts, and the send it had out goes on without it.
-// The row that comes back has a composer of its own, with no send of its own out, so it holds
-// nothing: its picker and its field are the reader's at once.
-test("a row back after its session left mid-send holds nothing for the send it did not make", async () => {
-  const held = Promise.withResolvers<Message>();
+// A row whose session leaves the registry unmounts; the send it had out is the held-send store's,
+// which holds it for the session. The row that comes back shows that send, held - its picker and
+// its draft - until it lands, and then they are the reader's.
+test("a row back after its session left mid-send holds the send it left until it lands", async () => {
+  const sent = Promise.withResolvers<Message>();
   const page = renderAgents({ issues: [coreIssue] });
-  page.createAgentMessage.mockImplementationOnce(() => held.promise);
+  page.createAgentMessage.mockImplementationOnce(() => sent.promise);
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
@@ -2461,14 +2461,25 @@ test("a row back after its session left mid-send holds nothing for the send it d
     const back = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
     expect(back).not.toBe(planner);
     expand(back, "Planner");
-    expect(
-      (within(back).getByRole("button", { name: "Choose issue" }) as HTMLButtonElement).disabled
-    ).toBe(false);
-    expect(
-      (within(back).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement).disabled
-    ).toBe(false);
+    const choose = () =>
+      within(back).getByRole("button", { name: "Choose issue" }) as HTMLButtonElement;
+    const field = () =>
+      within(back).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
+    // The composer holds its draft through its control fieldset.
+    const held = () => field().closest("fieldset")?.disabled;
+    expect(choose().disabled).toBe(true);
+    expect(held()).toBe(true);
+    expect(field().value).toBe("Status please");
+
+    await act(async () => {
+      sent.resolve(message("Status please"));
+      await sent.promise;
+    });
+    await waitFor(() => expect(choose().disabled).toBe(false));
+    expect(held()).toBe(false);
+    expect(field().value).toBe("");
   } finally {
-    held.resolve(message("Status please"));
+    sent.resolve(message("Status please"));
     page.view.unmount();
     page.restore();
   }

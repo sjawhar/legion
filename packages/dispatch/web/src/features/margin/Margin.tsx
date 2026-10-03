@@ -53,34 +53,27 @@ export function Margin({
     onWidthChange?.(clampMarginWidth(nextWidth));
   };
   const hasMargin = routeHasMargin(pathname, search);
-  // Collapsed to its rail, the margin stays mounted under it, hidden: an open composer - its
-  // draft, a send it has out and that send's refusal - is still there when the margin comes back.
+  // Collapsed to its rail, the margin stays mounted under it, hidden: an open composer's unsent
+  // draft is still there when the margin comes back.
   const railShown = !isCompactViewport && collapsed && hasMargin;
-  // Each compose the margin publishes - a new one, the open one brought back for a selection-bar
-  // action that had to wait for its send, or a held one the reader came back to - is the reader's
-  // to see, so the rail opens for it; collapsing the rail with a compose open keeps it collapsed.
-  const { pendingCompose } = useMargin();
-  const shownCompose = useRef(pendingCompose);
+  // Each compose the margin shows - a new one, one a newer selection-bar action had to wait on,
+  // or one held for the document the reader came back to - is the reader's to see, so the rail
+  // opens for it; collapsing the rail with a compose open keeps it collapsed.
+  const { shownCompose } = useMargin();
+  const handledCompose = useRef(shownCompose);
   useEffect(() => {
-    if (pendingCompose === shownCompose.current) return;
-    shownCompose.current = pendingCompose;
-    if (pendingCompose !== undefined && railShown) onCollapsedChange?.(false);
-  }, [onCollapsedChange, pendingCompose, railShown]);
+    if (shownCompose === handledCompose.current) return;
+    handledCompose.current = shownCompose;
+    if (shownCompose !== undefined && railShown) onCollapsedChange?.(false);
+  }, [onCollapsedChange, railShown, shownCompose]);
 
   // A margin is a property of a document surface. On a route that has none - the Inbox, a
   // project, Settings, Agents - the desktop column takes no width at all, rather than spending
   // 384 px, a third of a 1280 px viewport, saying so in a sentence. The reader's own collapse
   // preference is untouched, so it returns as they left it on the next issue or document.
-  // `routeHasMargin` is the one answer the shell reserves its gutter from too. A composer held for
-  // a send that was out when the reader left its document keeps the margin mounted there, hidden,
-  // so that composer's draft and refusal are there when the reader comes back; so does a thread's
-  // reply held for a send of its own (`MarginReply`).
-  if (
-    !isCompactViewport &&
-    !hasMargin &&
-    model.composers.length === 0 &&
-    model.replies.entries.length === 0
-  ) {
+  // `routeHasMargin` is the one answer the shell reserves its gutter from too. A send the margin
+  // had out when the reader left is the held-send store's, which keeps it for their return.
+  if (!isCompactViewport && !hasMargin) {
     return null;
   }
 

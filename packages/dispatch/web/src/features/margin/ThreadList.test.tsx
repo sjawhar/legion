@@ -72,7 +72,6 @@ function list(overrides: Partial<ComponentProps<typeof ThreadList>> = {}) {
           onAction={() => {}}
           onEdit={async () => undefined}
           onRetryAction={() => {}}
-          attachReply={() => () => {}}
           onSelect={() => {}}
           onToggle={() => {}}
           onToggleResolved={() => {}}
@@ -162,7 +161,6 @@ test("an anchored card keeps its identity when its mark placement arrives after 
             onAction={() => {}}
             onEdit={async () => undefined}
             onRetryAction={() => {}}
-            attachReply={() => () => {}}
             onSelect={() => {}}
             onToggle={() => {}}
             onToggleResolved={() => {}}
