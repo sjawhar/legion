@@ -9,7 +9,8 @@ everything needed to record them again.
 | --- | --- |
 | `harness.ts` | Boots Dispatch the way its e2e suite does (`packages/dispatch/e2e/run-server.sh` with the fake Envoy and fake GitHub, each browser signed in at the server's dev sign-in route), seeds example data, and checks a page is ready and clean before a capture. |
 | `shot-runner.ts` | Takes a set of declared screenshots against the harness. |
-| `shots.config.ts` | The Dispatch and Legion sets. |
+| `shots.config.ts` | The Dispatch set. |
+| `legion/` | The Legion section's set (`shots.config.ts`), and the example issues its screenshots and its walkthrough follow through Legion (`journey.ts`). |
 | `shots.ts` | Takes every set: `shots.config.ts` and each `<section>/shots.config.ts`. |
 | `narration.ts` | `NARRATION_VOICE`, the one voice every video is narrated in, and the call that speaks a section's text. |
 | `recording.ts` | What a walkthrough file declares, and the helpers its browser sections act with: the drawn pointer, `pointTo`, `ring`, `highlight`, `scrollBy` and `linger`. |
@@ -76,7 +77,7 @@ page showed is kept in `.work/failed-shots/`.
 A section that needs screens of its own adds `docs/site/media/<section>/shots.config.ts`, whose
 default export is a `ShotSet` (or a list of them) from `shot-runner.ts`. Its `seed` resets nothing
 itself: the runner resets the database before each set. Seed through the e2e suite's own helpers
-with `dispatchApi()` and `fakeEnvoy()` from `harness.ts`, as `shots.config.ts` does. `shots.ts`
+with `dispatchApi()` and `fakeEnvoy()` from `harness.ts`, as `legion/journey.ts` does. `shots.ts`
 finds the file without being told.
 
 ## Narrated walkthroughs
@@ -88,9 +89,12 @@ so a weak one is re-recorded without touching the rest. Rebuild a video with:
 DATABASE_URL=<database> ELEVENLABS_API_KEY=<key> bun docs/site/media/walkthrough.ts answer-an-ask
 ```
 
-The walkthroughs so far are `answer-an-ask` and `broadcast-and-replies`. A build writes
+The walkthroughs so far are `answer-an-ask`, `broadcast-and-replies`, `legion-issue-journey`, and
+two made only of casts, `legion-state` and `legion-controller`. A build writes
 `docs/site/public/media/videos/<name>.mp4`, captions in `<name>.vtt` from the narration, and a
-poster frame in `<name>.jpg`. Commit all three with the walkthrough file. A page embeds them as:
+poster frame in `<name>.jpg`: the video's first frame, or its last when the walkthrough sets
+`poster: "last"`, as a cast that opens on an empty prompt does. Commit all three with the
+walkthrough file. A page embeds them as:
 
 ```html
 <video controls preload="metadata" poster="/legion/media/videos/answer-an-ask.jpg" src="/legion/media/videos/answer-an-ask.mp4">
@@ -146,6 +150,8 @@ Add a section to a walkthrough's `sections`:
   A section that ends on a click (a send, a link) waits here for what the click starts, so its
   clip ends on the click and the next section opens on the loaded page rather than its loading
   skeleton.
+- `allowEmpty` (optional): the `aria-label`s of empty states the section may start or end on,
+  such as the Inbox once its last ask is answered.
 - `narration`: the lines the narrator says, each `{ at, text }`, where `at` is seconds into the
   clip or the name of a cue. Write them after the clip is cut, to its measured length; each claims
   only what the screen shows, and is said after the action it names.
@@ -180,6 +186,13 @@ the crate named `agg` is a different program), at the recording's own pace with 
 frame, keeps `window` (seconds of the drawn recording, all of it when omitted), letterboxes it to
 the video's frame and narrates it like any other section. An erroring command on screen is a
 re-recording, not a trim. A walkthrough made only of casts needs no harness and no `seed`.
+
+The Legion casts run against a live daemon: `walkthroughs/legion-operator/record-casts.sh` builds
+one on example data, in the shape `scripts/e2e/controller-start-tmux.sh` builds, and records both
+from it into that directory, `state.cast` first and then `controller.cast`, whose controller
+registers with the daemon the first one read. `legion-state` and `legion-controller` render them.
+It needs Go, Docker, `jq`, curl, tmux, Bun, mise, jj and asciinema, and checks for each before it
+starts.
 
 ### Before you commit a video
 

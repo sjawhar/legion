@@ -284,7 +284,7 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 		return Enrollment{}, false, err
 	}
 	if !live {
-		if err := endEnrollment(ctx, tx, existing.ID.String(), "broker", "enrollment.expired", "its lease lapsed"); err != nil {
+		if _, _, err := endLapsed(ctx, tx, existing.ID.String()); err != nil {
 			return Enrollment{}, false, err
 		}
 		return Enrollment{}, true, tx.Commit(ctx)
@@ -298,42 +298,105 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 
 // endEnrollment ends enrollment id inside tx: it is marked revoked, every live grant under it is
 // revoked, and every request still pending under it is cancelled — an approval must never land
-// on a session that has ended — with one audit row per cancelled request and one kind row for
-// the enrollment. The caller holds the enrollment row's lock.
-func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason string) error {
+// on a session that has ended — with its audit row and its record's cancelled event
+// (store.EndPendingRequests, so no approver's pending list keeps showing it), and one kind row
+// for the enrollment. It reports how many grants it revoked and requests it cancelled. The caller
+// holds the enrollment row's lock.
+func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason string) (grantsRevoked int64, requestsCancelled int, err error) {
 	if _, err := tx.Exec(ctx, `update enrollments set revoked_at=now() where id=$1`, id); err != nil {
-		return err
+		return 0, 0, err
 	}
-	if _, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where enrollment_id=$1 and revoked_at is null`, id, actor); err != nil {
-		return err
+	tag, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where enrollment_id=$1 and revoked_at is null`, id, actor)
+	if err != nil {
+		return 0, 0, err
 	}
 	detail := "the requesting enrollment ended: " + reason
-	rows, err := tx.Query(ctx, `update requests set state='cancelled', decided_at=now(), decided_by=$2, decision_detail=$3
-		where enrollment_id=$1 and state='pending' returning id`, id, actor, detail)
+	cancelled, err := store.EndPendingRequests(ctx, tx, store.RequestsOfEnrollment, id, store.RequestEnd{
+		State: "cancelled", Actor: actor, DecidedBy: &actor, Detail: detail, AuditDetail: map[string]any{"reason": detail},
+	})
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
-	var cancelled []string
-	for rows.Next() {
-		var requestID string
-		if err := rows.Scan(&requestID); err != nil {
-			rows.Close()
-			return err
+	if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ($1,$2,$3, jsonb_build_object('reason',$4::text))`, kind, id, actor, reason); err != nil {
+		return 0, 0, err
+	}
+	return tag.RowsAffected(), len(cancelled), nil
+}
+
+// endLapsed ends an enrollment whose lease lapsed: endEnrollment with actor broker and an
+// enrollment.expired audit row, for recoverConflict and the sweep alike.
+func endLapsed(ctx context.Context, tx pgx.Tx, id string) (grantsRevoked int64, requestsCancelled int, err error) {
+	return endEnrollment(ctx, tx, id, "broker", "enrollment.expired", "its lease lapsed")
+}
+
+// LapsedEnrollment is one enrollment EndLapsed ended.
+type LapsedEnrollment struct {
+	ID                string
+	Kind              string
+	RuntimeID         string
+	Slot              string
+	LeaseExpires      time.Time
+	GrantsRevoked     int64
+	RequestsCancelled int
+}
+
+// lapsedBatch is how many lapsed enrollments EndLapsed ends in one transaction.
+const lapsedBatch = 100
+
+// EndLapsed ends every enrollment whose lease has lapsed and that nothing has ended yet: a pod that
+// is gone, a box whose launcher stopped renewing, a host session whose helper died. Each is ended
+// as Revoke ends one (endEnrollment, actor "broker", an enrollment.expired audit row), so its
+// grants are revoked and its pending requests cancelled and dropped from the approver's list,
+// rather than waiting there for their own expiry with an approval that could grant nothing.
+//
+// Lapsed means what Lookup means by not live: lease_expires_at no later than Postgres's now(). A
+// session that keeps renewing keeps its lease ahead of now() and is never selected, and Renew
+// refuses an enrollment once its lease has lapsed, so ending one takes nothing a session could
+// still use. Rows a concurrent Renew or Revoke has locked are skipped (the next sweep sees them
+// as they are then), and an ended row has revoked_at set and is never selected again, so a sweep
+// that finds nothing changes nothing. It works in batches of lapsedBatch, each one transaction,
+// and returns what it ended.
+func (s *Service) EndLapsed(ctx context.Context) ([]LapsedEnrollment, error) {
+	var ended []LapsedEnrollment
+	for {
+		batch, err := s.endLapsedBatch(ctx)
+		ended = append(ended, batch...)
+		if err != nil || len(batch) < lapsedBatch {
+			return ended, err
 		}
-		cancelled = append(cancelled, requestID)
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
+}
+
+func (s *Service) endLapsedBatch(ctx context.Context) ([]LapsedEnrollment, error) {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
 	}
-	for _, requestID := range cancelled {
-		if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, actor, detail) values ('request.cancelled',$1,$2,$3, jsonb_build_object('reason',$4::text))`,
-			id, requestID, actor, detail); err != nil {
-			return err
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `select id, kind, runtime_id, slot, lease_expires_at from enrollments
+		where revoked_at is null and lease_expires_at <= now()
+		order by lease_expires_at limit $1 for update skip locked`, lapsedBatch)
+	if err != nil {
+		return nil, err
+	}
+	batch, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (LapsedEnrollment, error) {
+		var e LapsedEnrollment
+		err := row.Scan(&e.ID, &e.Kind, &e.RuntimeID, &e.Slot, &e.LeaseExpires)
+		return e, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i := range batch {
+		batch[i].GrantsRevoked, batch[i].RequestsCancelled, err = endLapsed(ctx, tx, batch[i].ID)
+		if err != nil {
+			return nil, err
 		}
 	}
-	_, err = tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ($1,$2,$3, jsonb_build_object('reason',$4::text))`, kind, id, actor, reason)
-	return err
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return batch, nil
 }
 
 func (s *Service) Renew(ctx context.Context, id string) (time.Time, error) {
@@ -397,7 +460,7 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	if revokedAt != nil {
 		return ErrNotLive
 	}
-	if err := endEnrollment(ctx, tx, id, by, "enrollment.revoked", "revoked by its launcher"); err != nil {
+	if _, _, err := endEnrollment(ctx, tx, id, by, "enrollment.revoked", "revoked by its launcher"); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

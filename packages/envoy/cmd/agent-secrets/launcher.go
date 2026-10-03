@@ -19,6 +19,11 @@ func cmdLauncher(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	switch args[0] {
+	case "-h", "-help", "--help":
+		writeCommandHelp(stderr, lookupCommand("launcher login"))
+		fmt.Fprintln(stderr)
+		writeCommandHelp(stderr, lookupCommand("launcher login-status"))
+		return 0
 	case "login":
 		return cmdLauncherLogin(args[1:], stdout, stderr)
 	case "login-status":
@@ -33,8 +38,12 @@ func cmdLauncher(args []string, stdout, stderr io.Writer) int {
 // login, prints the broker's confirmation code for the operator to type on the Dispatch
 // credential page, then polls the helper until the login reaches a terminal state.
 func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets launcher login: unexpected argument %q\n", args[0])
+	flagArgs, positional := splitArgs(args, nil)
+	if err := newFlagSet("launcher login", stderr).Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets launcher login: unexpected argument %q\n", positional[0])
 		return exitUsageError
 	}
 	sock, _ := helperSocket()
@@ -87,17 +96,26 @@ func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
 // "denied", "expired", or "none" when no login has run). A re-login that was denied, expired
 // unapproved or is still pending leaves the credential an earlier login installed in place, and
 // the helper keeps enrolling sessions with it, so that still prints "issued" and exits 0, and
-// stderr names the most recent login and its code. A helper from before credential_held reports
+// stderr names the most recent login and its code. While a credential is held, stderr also says
+// when it expires and how long that is from now: the broker mints no renewal, so before then a
+// new machine login a human approves must replace it (the helper warns in its journal a day ahead
+// and drops the credential at that moment). A helper or broker from before the expiry was
+// reported gets a line saying it is unknown. A helper from before credential_held reports
 // only the most recent login, which reads "issued" exactly while its credential is held. The
-// helper reports a credential the broker refused as "expired", the word the dotfiles launcher
-// gate matches, until a login starts or settles (a login still pending reads "pending"), and
-// when it says so (login_refused) stderr says the broker refused it and why that can happen. Any
-// other "expired" gets the neutral line: a login that expired before anyone approved it reads the
-// same, and so does a refused credential on a helper from before login_refused, which keeps
-// running until it restarts. Every answer with no credential says on stderr what to do about it.
+// helper reports a credential it dropped, because the broker refused it or it reached its expiry,
+// as "expired", the word the dotfiles launcher gate matches, until a login starts or settles (a
+// login still pending reads "pending"). Every answer with no credential says on stderr why, in
+// the words the helper's journal uses for the same answer (helper.NoCredentialReason): the cause
+// the helper names (credential_dropped), a broker refusal on a helper from before that field,
+// which sets login_refused only for one, and otherwise the most recent login's state; and what to
+// do about it.
 func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets launcher login-status: unexpected argument %q\n", args[0])
+	flagArgs, positional := splitArgs(args, nil)
+	if err := newFlagSet("launcher login-status", stderr).Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets launcher login-status: unexpected argument %q\n", positional[0])
 		return exitUsageError
 	}
 	sock, _ := helperSocket()
@@ -125,18 +143,45 @@ func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
 		case "expired":
 			fmt.Fprintf(stderr, "agent-secrets launcher login-status: the most recent machine login (code %s) expired before anyone approved it; %s\n", resp.Code, held)
 		}
+		fmt.Fprintln(stderr, "agent-secrets launcher login-status: "+credentialExpiry(resp.CredentialExpiresAt, time.Now()))
 		return 0
 	}
 	fmt.Fprintln(stdout, state)
-	switch {
-	case state == "pending":
-		fmt.Fprintf(stderr, "agent-secrets launcher login-status: a machine login is waiting for approval (code %s)\n", resp.Code)
-	case state == "none":
-		fmt.Fprintln(stderr, "agent-secrets launcher login-status: no machine login has run on this helper; run: agent-secrets launcher login")
-	case resp.LoginRefused:
-		fmt.Fprintln(stderr, "agent-secrets launcher login-status: the broker refused this machine's launcher credential (expired, revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login")
-	default:
-		fmt.Fprintf(stderr, "agent-secrets launcher login-status: the last machine login is %s; run: agent-secrets launcher login\n", state)
+	reason := helper.NoCredentialReason(resp.LoginState, resp.LoginRefused, resp.CredentialDropped)
+	if state == "pending" {
+		fmt.Fprintf(stderr, "agent-secrets launcher login-status: %s (code %s)\n", reason, resp.Code)
+	} else {
+		fmt.Fprintf(stderr, "agent-secrets launcher login-status: %s; run: agent-secrets launcher login\n", reason)
 	}
 	return 1
+}
+
+// credentialExpiry is login-status's line about when the held launcher credential expires.
+func credentialExpiry(expiresAt string, now time.Time) string {
+	if expiresAt == "" {
+		return "the helper does not know when the launcher credential expires (it, or its broker, is older than this client)"
+	}
+	at, err := time.Parse(time.RFC3339, expiresAt)
+	if err != nil {
+		return fmt.Sprintf("the helper reported an unreadable launcher credential expiry %q", expiresAt)
+	}
+	left := at.Sub(now)
+	if left <= 0 {
+		return fmt.Sprintf("the launcher credential expired at %s; run: agent-secrets launcher login", expiresAt)
+	}
+	return fmt.Sprintf("the launcher credential expires at %s (in %s); the broker has no renewal, so a new machine login a human approves must replace it before then", expiresAt, roughDuration(left))
+}
+
+// roughDuration is d to the minute, with days: 6d23h59m, 3h5m, 0m.
+func roughDuration(d time.Duration) string {
+	minutes := int(d / time.Minute)
+	days, hours := minutes/(24*60), minutes/60%24
+	switch {
+	case days > 0:
+		return fmt.Sprintf("%dd%dh%dm", days, hours, minutes%60)
+	case hours > 0:
+		return fmt.Sprintf("%dh%dm", hours, minutes%60)
+	default:
+		return fmt.Sprintf("%dm", minutes)
+	}
 }
