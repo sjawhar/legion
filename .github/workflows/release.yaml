@@ -112,13 +112,14 @@ jobs:
             # The Go `legion` the legion job releases and worker.Dockerfile's go stage compiles: its
             # module, which embeds the role prompts, the modules go.work binds it to (packages/envoy
             # is also copied whole into the image for the agent-secrets binary it builds,
-            # AGENTC-393), and the script that writes its notices.
+            # AGENTC-393), and the notices scripts that change its archives or worker image.
             legion:
               - 'packages/daemon/**'
               - 'go.work'
               - 'go.work.sum'
               - 'packages/envoy/**'
               - 'scripts/go-third-party-notices.sh'
+              - 'scripts/assemble-third-party-notices.sh'
             envoy_plugin:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'
@@ -196,11 +197,14 @@ jobs:
             PREV_VERSION="${PREV_TAG#legion-v}"
           fi
           # The binary embeds its prompts (internal/prompts/roles and go), so a docs: commit there
-          # still releases. release-bump.sh reads a --patch-path only when it is also one of the
-          # paths after --.
+          # still releases. Notices scripts are runtime inputs of the release archive and worker
+          # image, so any change to one needs a new tag rather than a CI-only rebuild.
+          # release-bump.sh reads a --patch-path only when it is also one of the paths after --.
           VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" \
             --patch-path packages/daemon/internal/prompts/roles/ --patch-path packages/daemon/internal/prompts/go/ \
-            -- packages/daemon/ packages/daemon/internal/prompts/roles/ packages/daemon/internal/prompts/go/)
+            --patch-path scripts/go-third-party-notices.sh --patch-path scripts/assemble-third-party-notices.sh \
+            -- packages/daemon/ packages/daemon/internal/prompts/roles/ packages/daemon/internal/prompts/go/ \
+            scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh)
 
           if [ "$VERSION" = "empty" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -338,16 +342,21 @@ jobs:
         run: |
           # The package's prepack copies skills/ into the tarball (package.json "prepack"), where
           # OpenCode loads it as the plugin's skills, so a commit there releases whatever its type.
+          # Its notices generator is another shipped build input, so it gets the same patch release.
           PREV_TAG=$(git tag -l 'opencode-legion-envoy-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
             # When no release tag exists, seed from the published npm version so
             # an already-published version is never recomputed. Once a release
             # tags successfully, this branch stops running.
             PREV_VERSION=$(npm view @sjawhar/opencode-legion-envoy version 2>/dev/null || echo "0.0.0")
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD --patch-path skills/ -- packages/envoy-plugin/ packages/contracts/ packages/envoy-client/ skills/)
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD \
+              --patch-path skills/ --patch-path scripts/third-party-notices.ts \
+              -- packages/envoy-plugin/ packages/contracts/ packages/envoy-client/ skills/ scripts/third-party-notices.ts)
           else
             PREV_VERSION="${PREV_TAG#opencode-legion-envoy-v}"
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" --patch-path skills/ -- packages/envoy-plugin/ packages/contracts/ packages/envoy-client/ skills/)
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" \
+              --patch-path skills/ --patch-path scripts/third-party-notices.ts \
+              -- packages/envoy-plugin/ packages/contracts/ packages/envoy-client/ skills/ scripts/third-party-notices.ts)
           fi
 
           if [ "$VERSION" = "empty" ]; then
@@ -442,17 +451,22 @@ jobs:
         id: version
         run: |
           # prepack.sh copies skills/ into dist/skills, which every Oh My Pi session loads as the
-          # plugin's skills, so a commit there releases whatever its type.
+          # plugin's skills, so a commit there releases whatever its type. Its notices generator is
+          # another shipped build input, so it gets the same patch release.
           PREV_TAG=$(git tag -l 'pi-legion-envoy-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
             # When no release tag exists, seed from the published npm version so
             # an already-published version is never recomputed. Once a release
             # tags successfully, this branch stops running.
             PREV_VERSION=$(npm view @sjawhar/pi-legion-envoy version 2>/dev/null || echo "0.0.0")
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD --patch-path skills/ -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ skills/)
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD \
+              --patch-path skills/ --patch-path scripts/third-party-notices.ts \
+              -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ skills/ scripts/third-party-notices.ts)
           else
             PREV_VERSION="${PREV_TAG#pi-legion-envoy-v}"
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" --patch-path skills/ -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ skills/)
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" \
+              --patch-path skills/ --patch-path scripts/third-party-notices.ts \
+              -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ skills/ scripts/third-party-notices.ts)
           fi
 
           if [ "$VERSION" = "empty" ]; then

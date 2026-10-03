@@ -297,7 +297,13 @@ jobs:
 
           CURRENT="${LATEST_TAG#legion-envoy-v}"
           CURRENT="${CURRENT%%-*}"
-          VERSION=$(.github/scripts/release-bump.sh "$CURRENT" "${LATEST_TAG}..HEAD" -- packages/envoy/ packages/contracts/)
+          # Every notices script changes an artifact this release publishes: the web app in the
+          # image, the Go archives, or the image assembly. They therefore take a patch release.
+          VERSION=$(.github/scripts/release-bump.sh "$CURRENT" "${LATEST_TAG}..HEAD" \
+            --patch-path scripts/third-party-notices.ts --patch-path scripts/go-third-party-notices.sh \
+            --patch-path scripts/assemble-third-party-notices.sh \
+            -- packages/envoy/ packages/contracts/ scripts/third-party-notices.ts \
+            scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh)
 
           if [ "$VERSION" = "empty" ]; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
