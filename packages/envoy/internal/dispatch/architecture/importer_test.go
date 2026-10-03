@@ -660,31 +660,41 @@ func TestSyncRejectsBinaryFilesOnTheRow(t *testing.T) {
 // YAML spells U+0000 in plain ASCII ("\0", "\x00", "\u0000"), so a file the byte check passes can
 // still decode to front matter PostgreSQL cannot store. Each decoded string is checked as well, and
 // the problem is named on the row as a binary file's is, not an internal error escaping the
-// projection.
+// projection. An unknown key reaches KnownFields before that check, so recordFailure writes its
+// error through text.StorableReplacement before it reaches last_error or the sync_failed event.
 func TestSyncRejectsAFrontMatterNulOnTheRow(t *testing.T) {
 	ctx := context.Background()
-	for field, matter := range map[string]string{
-		"title":      `title: "Ser\0ver"`,
-		"parent":     `parent: "a\x00pi"`,
-		"depends_on": `depends_on: ["st\u0000ore"]`,
-		"paths":      `paths: ["src/\0x"]`,
+	for _, test := range []struct {
+		field, matter, want string
+		replacement         bool
+	}{
+		{"title", `title: "Ser\0ver"`, "server.md: front matter title must be valid UTF-8 text without NUL characters", false},
+		{"parent", `parent: "a\x00pi"`, "server.md: front matter parent must be valid UTF-8 text without NUL characters", false},
+		{"depends_on", `depends_on: ["st\u0000ore"]`, "server.md: front matter depends_on must be valid UTF-8 text without NUL characters", false},
+		{"paths", `paths: ["src/\0x"]`, "server.md: front matter paths must be valid UTF-8 text without NUL characters", false},
+		{"key", `"\0": value`, "server.md: front matter", true},
 	} {
-		t.Run(field, func(t *testing.T) {
+		t.Run(test.field, func(t *testing.T) {
 			files := validFiles()
-			files["server.md"] = "---\n" + matter + "\n---\nThe server.\n"
+			files["server.md"] = "---\n" + test.matter + "\n---\nThe server.\n"
 			importer, database := newImporterFixture(t, &fakeSource{t: t, files: files})
 			source, err := importer.Sync(ctx, "CORE")
 			if err == nil {
 				t.Fatal("front matter holding a NUL was accepted")
 			}
-			want := "server.md: front matter " + field + " must be valid UTF-8 text without NUL characters"
-			if source.Project == "" || source.LastError == nil || !strings.Contains(*source.LastError, want) {
-				t.Fatalf("row after sync: %+v err=%v, want last_error naming %q", source, err, want)
+			if source.Project == "" || source.LastError == nil || !strings.Contains(*source.LastError, test.want) {
+				t.Fatalf("row after sync: %+v err=%v, want last_error naming %q", source, err, test.want)
+			}
+			if strings.IndexByte(*source.LastError, 0) >= 0 {
+				t.Fatalf("last_error %q holds a raw U+0000", *source.LastError)
+			}
+			if test.replacement && !strings.Contains(*source.LastError, "\uFFFD") {
+				t.Fatalf("last_error %q does not write the front-matter key's U+0000 as U+FFFD", *source.LastError)
 			}
 			if got := componentRows(t, database); len(got) != 0 {
 				t.Fatalf("a rejected set was projected: %#v", got)
 			}
-			if got := projectEvents(t, database); len(got) != 1 || !strings.HasPrefix(got[0], "architecture.sync_failed ") {
+			if got := projectEvents(t, database); len(got) != 1 || !strings.HasPrefix(got[0], "architecture.sync_failed ") || strings.IndexByte(got[0], 0) >= 0 || test.replacement && !strings.Contains(got[0], "\uFFFD") {
 				t.Fatalf("events = %#v", got)
 			}
 		})

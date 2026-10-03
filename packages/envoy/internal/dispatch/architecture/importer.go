@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // SourceDir is the fixed directory an architecture source's model is read
@@ -495,7 +496,7 @@ func (i *Importer) recordFailure(ctx context.Context, source model.ArchitectureS
 const maxFailureMessage = 4 << 10
 
 func capFailureMessage(failure error) string {
-	message := failure.Error()
+	message := text.StorableReplacement(failure.Error())
 	if len(message) <= maxFailureMessage {
 		return message
 	}

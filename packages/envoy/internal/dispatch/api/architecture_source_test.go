@@ -467,6 +467,22 @@ func TestArchitectureSourceSyncRoute(t *testing.T) {
 		t.Fatalf("front matter NUL response: %+v", body)
 	}
 
+	// An unknown front-matter key that YAML decodes to U+0000 reaches KnownFields before Parse can
+	// name a decoded value. The recorded failure is made storable before it reaches the row/event,
+	// so this route is still the same 200 with last_error (LEGION-527).
+	fake.commit = "sha-nul-key"
+	fake.files = map[string]string{"api.md": "---\n\"\\0\": value\n---\nThe API.\n", "store.md": "---\ntitle: Store\n---\nThe store.\n"}
+	key := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects/CORE/architecture-source/sync", nil, "alice")
+	if key.Code != http.StatusOK {
+		t.Fatalf("front matter key spelling a NUL: status=%d body=%s", key.Code, key.Body.String())
+	}
+	if err := json.NewDecoder(key.Body).Decode(&body); err != nil {
+		t.Fatalf("decode front matter NUL key response: %v", err)
+	}
+	if body.LastError == nil || !strings.Contains(*body.LastError, "api.md: front matter") || strings.IndexByte(*body.LastError, 0) >= 0 || body.LastCommit == nil || *body.LastCommit != "sha-one" {
+		t.Fatalf("front matter NUL key response: %+v", body)
+	}
+
 	// A credential- or branch-shaped failure is the one 409: something a human
 	// must fix in GitHub or Settings.
 	fake.branchMissing = true
