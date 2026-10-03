@@ -96,6 +96,7 @@ import {
 import { useFollowLatest } from "./use-follow-latest";
 import { useShowActivity, useShowRetracted } from "./use-show-activity";
 import { useAgents } from "./useAgents";
+import { threadReplySendKey, usePhoneThread } from "./usePhoneThread";
 
 interface FailedStateOperations {
   authoritativeState: UserIssueState | undefined;
@@ -524,12 +525,6 @@ function CommentDeliveryList({
     </ul>
   );
 }
-/** The name of a comment thread card's own reply composer's send: beneath the tab's `sendKey`, so
- *  the tab's Replies hold while it is out as they do for the tab's own composers, and its own, so
- *  the thread can tell that its reply is the one out. */
-function threadReplySendKey(sendKey: MutationKey, commentId: string): MutationKey {
-  return [...sendKey, "thread-card", commentId];
-}
 
 function CommentTurn({
   actionFailure,
@@ -835,8 +830,9 @@ export function ConversationTab({
   visible,
 }: ConversationTabProps): ReactNode {
   const queryClient = useQueryClient();
-  // Every composer this tab shows names its send with `sendKey`, or beneath it: the docked one and
-  // a phone thread's with the key itself, a thread card's inline reply with `threadReplySendKey`.
+  // Every composer this tab shows names its send with `sendKey`, or beneath it: the docked one
+  // with the key itself, the phone thread's composer and a thread card's inline reply beneath it
+  // (`usePhoneThread`'s `composerKey`, `threadReplySendKey`).
   // While one is out, every Reply holds, from Send's own task on (`sendingNow`, which matches a key
   // and every key beneath it): a Reply would put its prefill over the draft on its way, or swap the
   // composer that holds it for another. The request itself is frozen when Send starts
@@ -903,10 +899,7 @@ export function ConversationTab({
     [items]
   );
   const isPhoneViewport = useMediaQuery(PHONE_VIEWPORT_QUERY);
-  const [phoneThreadId, setPhoneThreadId] = useState<string>();
-  // The phone thread composer's reply: on a phone, a comment's Reply answers in the comment's
-  // thread, by a composer of its own, so the docked composer's draft and reply stay as they were.
-  const [threadReplyTo, setThreadReplyTo] = useState<ReplyTarget | null>(null);
+  const phone = usePhoneThread({ isPhoneViewport, sendKey, sendingNow });
   // The comments whose thread the reader has open inline.
   const [openThreads, setOpenThreads] = useState<ReadonlySet<string>>(() => new Set());
   const setThreadOpen = useCallback((id: string, open: boolean) => {
@@ -936,81 +929,31 @@ export function ConversationTab({
         // anyone, or the resolved filter turned off: its thread open inline or full-screen, or the
         // phone thread composer holding a reply to it. Dropping it would unmount the thread's reply
         // composer, and the draft, a send it has out and that send's refusal with it.
-        const inHand = openThreads.has(id) || id === phoneThreadId || id === threadReplyTo?.id;
+        const inHand = openThreads.has(id) || phone.holds(id);
         return showResolvedComments || !resolved || focused || inHand;
       }),
     [
       focusItemId,
       items,
       openThreads,
-      phoneThreadId,
+      phone.holds,
       showActivity,
       showResolvedComments,
       showRetracted,
-      threadReplyTo,
     ]
   );
-  // The thread card's own reply composer lives in the thread view, so the view holds open - Back
-  // and Escape both - while that reply is out, as the card's own Collapse does on a wider screen.
-  const phoneThreadReplyKey = useMemo(
-    () => threadReplySendKey(sendKey, phoneThreadId ?? ""),
-    [phoneThreadId, sendKey]
-  );
-  const { sending: phoneThreadReplySending, sendingNow: phoneThreadReplySendingNow } = useSending(
-    phoneThreadReplyKey,
-    { untilDeadline: true }
-  );
-  // The phone thread composer names its send beneath the tab's, so every Reply holds for it as for
-  // the docked composer's, and the thread view can tell its send from the docked one's.
-  const phoneComposerKey = useMemo<MutationKey>(() => [...sendKey, "phone-thread"], [sendKey]);
-  const { sending: phoneComposerSending } = useSending(phoneComposerKey, { untilDeadline: true });
-  const threadComposerSending = phoneComposerSending && threadReplyTo !== null;
-  // Set when the viewport widened past the phone layout while a send from the thread view was
-  // out - its card's own reply, or the thread composer's: the view stays open, full-screen at any
-  // width, until the reader leaves it with Back, so the send's draft and its refusal stay where
-  // the reader was. A widening with nothing out closes the view, as it always has.
-  const [phoneThreadOutlived, setPhoneThreadOutlived] = useState(false);
-  const keepsPhoneThread =
-    isPhoneViewport || phoneThreadOutlived || phoneThreadReplySending || threadComposerSending;
   const phoneThread = useMemo(
     () =>
-      phoneThreadId === undefined || !keepsPhoneThread
+      phone.id === undefined
         ? undefined
         : shown.find(
             (item): item is Extract<ConversationItem, { kind: "comment" }> =>
-              item.kind === "comment" && item.event.payload.id === phoneThreadId
+              item.kind === "comment" && item.event.payload.id === phone.id
           ),
-    [keepsPhoneThread, phoneThreadId, shown]
+    [phone.id, shown]
   );
-  useEffect(() => {
-    if (isPhoneViewport || phoneThreadOutlived) return;
-    if (phoneThreadId !== undefined && phoneThreadReplySending) {
-      setPhoneThreadOutlived(true);
-      return;
-    }
-    if (threadComposerSending && threadReplyTo !== null) {
-      // The view that stays is the thread the composer's send answers, even one the reader had
-      // left with Back: on a wider screen nothing else would show that send's outcome.
-      setPhoneThreadId(threadReplyTo.id);
-      setPhoneThreadOutlived(true);
-      return;
-    }
-    if (phoneThreadId !== undefined) setPhoneThreadId(undefined);
-  }, [
-    isPhoneViewport,
-    phoneThreadId,
-    phoneThreadOutlived,
-    phoneThreadReplySending,
-    threadComposerSending,
-    threadReplyTo,
-  ]);
-  const closePhoneThread = () => {
-    if (phoneThreadReplySendingNow()) return;
-    setPhoneThreadId(undefined);
-    setPhoneThreadOutlived(false);
-  };
   const phoneThreadDialog = useDialog<HTMLElement>({
-    onClose: closePhoneThread,
+    onClose: phone.close,
     open: phoneThread !== undefined,
   });
   const commentActions = useCommentActionQueue({
@@ -1025,14 +968,8 @@ export function ConversationTab({
     setReplyTo(target);
     return true;
   };
-  const beginThreadReply = (target: ReplyTarget): boolean => {
-    if (sendingNow()) return false;
-    setThreadReplyTo(target);
-    setPhoneThreadId(target.id);
-    return true;
-  };
   const phoneReplyTargetsThread =
-    phoneThread !== undefined && threadReplyTo?.id === phoneThread.event.payload.id;
+    phoneThread !== undefined && phone.replyTo?.id === phoneThread.event.payload.id;
   const itemSeqs = useMemo(
     () => shown.flatMap((item) => ("lastSeq" in item ? [item.lastSeq] : [])),
     [shown]
@@ -1473,7 +1410,7 @@ export function ConversationTab({
                 agents={agents}
                 issueArtifacts={issueArtifacts}
                 isPhone={isPhoneViewport}
-                onPhoneThreadToggle={() => setPhoneThreadId(item.event.payload.id)}
+                onPhoneThreadToggle={() => phone.open(item.event.payload.id)}
                 onAction={(id, kind) => commentActions.mutateItem({ id, kind })}
                 current={item.id === targetTurnId}
                 disabled={hasFailedOps}
@@ -1485,7 +1422,7 @@ export function ConversationTab({
                 item={item}
                 key={item.id}
                 onPin={onPin}
-                onReply={isPhoneViewport ? beginThreadReply : beginReply}
+                onReply={isPhoneViewport ? phone.beginReply : beginReply}
                 pinned={pinned}
                 register={registerObserved}
                 replyDisabled={composerSending}
@@ -1560,7 +1497,7 @@ export function ConversationTab({
       {/* The thread view stays mounted, hidden, while its reply composer holds a reply: Back, or
           another comment's thread, leaves that composer - its draft, a send it has out and the
           send's refusal - where reopening the comment's thread finds it. */}
-      {phoneThread === undefined && threadReplyTo === null ? null : (
+      {phoneThread === undefined && phone.replyTo === null ? null : (
         <section
           aria-label="Thread"
           aria-modal="true"
@@ -1572,8 +1509,8 @@ export function ConversationTab({
           <header className={`flex items-center border-b px-4 py-3 ${borderDefault}`}>
             <button
               className={`min-h-11 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${textPrimaryOnSurface}`}
-              disabled={phoneThreadReplySending}
-              onClick={closePhoneThread}
+              disabled={phone.cardReplySending}
+              onClick={phone.close}
               type="button"
             >
               Back
@@ -1602,7 +1539,7 @@ export function ConversationTab({
                 isPhone
                 key={phoneThread.id}
                 onAction={(id, kind) => commentActions.mutateItem({ id, kind })}
-                onPhoneThreadToggle={closePhoneThread}
+                onPhoneThreadToggle={phone.close}
                 onRetryAction={commentActions.retryItem}
                 pendingAction={commentActions.pendingActionIds.has(phoneThread.event.payload.id)}
                 onPin={() =>
@@ -1611,7 +1548,7 @@ export function ConversationTab({
                     op: isPinnedEvent(dismissed, phoneThread.pinEventId) ? "unpin" : "pin",
                   }))
                 }
-                onReply={beginThreadReply}
+                onReply={phone.beginReply}
                 pinned={isPinnedEvent(issueState.dismissed, phoneThread.pinEventId)}
                 replyDisabled={composerSending}
                 sendKey={sendKey}
@@ -1619,7 +1556,7 @@ export function ConversationTab({
               />
             </ol>
           )}
-          {threadReplyTo === null ? null : (
+          {phone.replyTo === null ? null : (
             // `empty:hidden`: on a closed issue the composer renders nothing unless it holds a
             // send or its refusal, and its frame goes with it.
             <div
@@ -1628,15 +1565,15 @@ export function ConversationTab({
             >
               <MentionComposer
                 closed={isClosed}
-                mutationKey={phoneComposerKey}
-                onCancelReply={() => setThreadReplyTo(null)}
-                onClose={() => setThreadReplyTo(null)}
+                mutationKey={phone.composerKey}
+                onCancelReply={phone.endReply}
+                onClose={phone.endReply}
                 onSent={() => {
-                  setThreadReplyTo(null);
+                  phone.endReply();
                   setOwnSendCount((count) => count + 1);
                 }}
                 owner={{ issueKey, kind: "issue" }}
-                replyTo={threadReplyTo}
+                replyTo={phone.replyTo}
               />
             </div>
           )}
