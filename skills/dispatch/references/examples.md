@@ -1,7 +1,8 @@
-# Before and after: a decision block, a message, and a draft
+# Before and after: a decision block, a reply, a message, and a draft
 
-`skill://dispatch` sends you here for worked examples: a design decision in its document, a
-message that should not be sent, and a draft placed where the human reads it.
+`skill://dispatch` sends you here for worked examples: a design decision in its document, a reply
+that names its mechanism, a message that should not be sent, and a draft placed where the human
+reads it.
 
 ## Before / after
 
@@ -101,3 +102,31 @@ dispatch_ask({
   ref: "dispatch://OPS-52/artifact/cu-update-2026-09-15-md",
 })
 ```
+
+## Naming the mechanism
+
+Before — a reply explaining a design paraphrases its tool, its route and its event away, so the
+reader has to ask which tool, and how Legion "notices" anything:
+
+```text
+Today, when a spec is ready, the architect tells Legion so with a dedicated call on its Legion
+tool, and Legion then waits for your approval. This change removes that call, because Legion will
+notice your approval of the spec by itself.
+```
+
+After — the reader's sentence first, then each mechanism by its real name, with how it works in a
+clause:
+
+```text
+For you nothing changes: you still click Approve on the spec. What goes is a step the architect
+takes today: it calls `register_gate` on its `legion` tool, which posts to the daemon's
+`POST /legion/v1/gates/register` route and names the spec document and the version that gate the
+tree. The daemon opens the gate when Dispatch emits `artifact.approved` for that document at that
+version, which Dispatch does when you click Approve on the request the architect opened with
+`dispatch_request_approval`. Without `register_gate`, the daemon reads the issue's primary
+document from Dispatch itself and waits for the same event.
+```
+
+"A dedicated call", "tells" and "notice" each stood for something the reader can search for, find
+in a log, or set. None is a noun anyone coined, so each is named; the clause after each name is
+what keeps the reply readable on a phone.

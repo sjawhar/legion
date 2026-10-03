@@ -38,8 +38,9 @@ goes out at once, whatever its stage.
 ## Coming to terms
 
 The conversation comes to terms in both directions. Explain what the code does today, plainly
-enough for the human to react to, and ask; the human's model comes out of those reactions, and so
-do corrections to it. Neither your model nor theirs is the starting truth.
+enough for the human to react to and with each tool, event and route it uses named exactly (as
+"Writing for the human" in `skill://dispatch` says), and ask; the human's model comes out of those
+reactions, and so do corrections to it. Neither your model nor theirs is the starting truth.
 
 ## A worked example
 

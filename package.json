@@ -6,6 +6,7 @@
     ]
   },
   "version": "0.16.1",
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Autonomous development swarm using Oh My Pi agents",
   "private": true,

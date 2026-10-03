@@ -15,8 +15,8 @@ event intake, process lifecycle, credentials, and role delivery.
 | `legion-oracle/` | any role doing research | repository-grounded research |
 | `legion-retro/` | the implementer, at retro | the pre-merge retrospective and its Dispatch message |
 | `legion-worker/` | planner, implementer, tester, reviewer, merger | the phase contracts: handoffs, GitHub identity, PR body and READY discipline, the merge-gate order |
-| `thermonuclear-code-quality/` | the `thermonuclear-code-quality` agent | the maintainability rubric of the reviewer's pair |
-| `thermonuclear-deep-review/` | the `thermonuclear-deep-review` agent, and the reviewer (the Security Guidelines) | the correctness rubric of the reviewer's pair, with its tagged, diff-triggered Security Guidelines and the attack on the PR body's claims |
+| `thermonuclear-code-quality/` | the `thermonuclear-code-quality` agent | the maintainability rubric of the reviewer's pair (adapted from the MIT-licensed Thermos plugin in `cursor/plugins`; `LICENSE` beside it) |
+| `thermonuclear-deep-review/` | the `thermonuclear-deep-review` agent, and the reviewer (the Security Guidelines) | the correctness rubric of the reviewer's pair, with its tagged, diff-triggered Security Guidelines and the attack on the PR body's claims (adapted from the MIT-licensed Thermos plugin in `cursor/plugins`; `LICENSE` beside it) |
 
 The owning skill above is where each contract is defined; a role prompt that needs a contract from its own seat points there or restates only its own step. This file lists and does not restate.
 A Legion prompt (a skill here, a role prompt, or an agent definition in `packages/pi-envoy/agents/`) names a task agent only as `task(agent="<name>")` and a skill it tells the model to load only as `skill://<name>`. Those are the two forms the Go daemon's boot gate and `legion probe-image` resolve through Oh My Pi, refusing by name one it cannot find; a dispatch or a load written any other way goes unchecked. An agent or skill Legion's prompts name is shipped here or in `packages/pi-envoy/agents/`, unless Oh My Pi bundles it.
