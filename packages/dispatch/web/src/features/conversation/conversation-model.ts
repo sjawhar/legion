@@ -25,7 +25,15 @@ export type CommentEvent = Extract<
 export type CommentDeliveryEvent = Extract<Event, { type: "comment.delivery" }>;
 export type AskEvent = Extract<
   Event,
-  { type: "ask.opened" | "ask.anchor_refreshed" | "ask.edited" | "ask.answered" | "ask.resolved" }
+  {
+    type:
+      | "ask.opened"
+      | "ask.anchor_refreshed"
+      | "ask.edited"
+      | "ask.handed_back"
+      | "ask.answered"
+      | "ask.resolved";
+  }
 >;
 
 interface Turn {
@@ -138,6 +146,7 @@ function isAskEvent(event: Event): event is AskEvent {
     event.type === "ask.opened" ||
     event.type === "ask.anchor_refreshed" ||
     event.type === "ask.edited" ||
+    event.type === "ask.handed_back" ||
     event.type === "ask.answered" ||
     event.type === "ask.resolved"
   );
@@ -263,6 +272,8 @@ export function activityDescription(
         : `re-anchored an ask after an edit: “${event.payload.question}”`;
     case "ask.edited":
       return `edited the question "${event.payload.question}"`;
+    case "ask.handed_back":
+      return `handed “${event.payload.question}” back for approval`;
     case "ask.answered":
       return `answered “${event.payload.question}”`;
     case "message.created":
@@ -355,7 +366,8 @@ export function buildConversationItems({
         existing.ask = event.payload;
         existing.lastSeq = event.seq;
       }
-      if (event.type !== "ask.edited") continue;
+      // A rewording or a hand-back is also an activity line; other ask events are the card alone.
+      if (event.type !== "ask.edited" && event.type !== "ask.handed_back") continue;
     }
 
     if (isConversationComment(event)) {

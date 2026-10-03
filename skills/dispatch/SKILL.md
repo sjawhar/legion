@@ -379,11 +379,13 @@ See [Following](#following) for why you receive what happens to asks you open an
 
 Approval is a property of a document, not a question you phrase: a human approves a specific
 version, the way a pull-request review approves a commit, and any later version makes that
-approval stale. Answering a decision block writes a new version, so request approval only when
-all three hold: every decision block is settled, which means answered and folded into the text, or
-waived as the next paragraph says; the human has agreed to every point in the spec; and the current
-version has not been approved. A Legion root spec under an armed design gate always goes to approval
-once all three hold (`skill://legion-architect`).
+approval stale. A later version also moves an open request to that version and leaves it waiting
+on you until you request again, which hands the same request back to the human. Answering a
+decision block writes a new version, so request approval only when all three hold: every decision
+block is settled, which means answered and folded into the text, or waived as the next paragraph
+says; the human has agreed to every point in the spec; and the current version has not been
+approved. A Legion root spec under an armed design gate always goes to approval once all three
+hold (`skill://legion-architect`).
 
 When all three hold, request it in the pass that finishes the spec: a design waiting with nothing in
 the human's Inbox waits on nobody. When a human asks for approval while a block is open, do not

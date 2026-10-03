@@ -644,6 +644,10 @@ func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
 		{name: "text from the header row's last cell into the first body row's first cell", spec: "| AAA | BBB |\n| :--- | :--- |\n| CCC | DDD |\n", quote: "BB CC", with: "x", want: "| AAA | BxC |\n| :--- | :--- |\n| DDD |  |\n"},
 		{name: "a list from a body cell into the next row's cell", spec: "| H | I |\n| :--- | :--- |\n| c | aa |\n| bb e | f |\n", quote: "aa bb", with: "- a", says: "writes a bullet list in this table cell, which the document cannot read back there (the table row's end reads back as a table cell)"},
 		{name: "a list over a table's first header cell", spec: "| Body. | b |\n| :---: | --- |\n| x | y |\n", quote: "Body.", with: "- a", says: "writes a bullet list in this table header, which the document cannot read back there"},
+		// Its own markdown nests 50 quotes, within the bound, but it lands in a quote 60 deep, so
+		// the document it would store nests 110: the refusal names that depth, not a line of the
+		// stored markdown, which nobody wrote.
+		{name: "quotes landing in a quote 60 deep, past 100 blocks", spec: strings.Repeat("> ", 60) + "Body.\n", quote: "Body.", with: strings.Repeat("> ", 50) + "x", says: "writes a blockquote in this blockquote, which the document cannot read back there (outside Proof schema: the result nests 110 blocks inside one another; a document nests at most 100 blocks"},
 		{name: "text ending in a break over code that already ends in one", spec: "Intro.\n\n```\nabc\n```\n", quote: "abc", emptied: "abc", refill: "abc\n", with: "xyz\n", want: "Intro.\n\n```\nxyz\n\n```\n"},
 		{name: "text beside code the document already writes with ending breaks", spec: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n\n```\nc\n```\n:::\n", quote: "Body.", emptied: "c", refill: "c\n\n", with: "Changed.", want: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nChanged.\n\n```\nc\n\n\n```\n:::\n"},
 		{name: "text in a paragraph already reading back with a literal backslash", spec: "Body. more\\\nxyz\n\nAfter.\n", quote: "Body.", emptied: "xyz", with: "Changed.", want: "Changed. more\\\n\n\nAfter.\n"},

@@ -873,10 +873,12 @@ export const dispatchToolSpecs = [
       "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " +
       "Request changes) in the human's Inbox whose question names the document and version, " +
       "followed by the summary; the answer pins a review to that version and arrives as " +
-      "artifact.approved or artifact.changes_requested. A later version makes an approval stale, " +
-      "and writing it retracts an open request for an older version; request again for the new " +
-      "one once the human has agreed to every point in it. A repeat at the version an open " +
-      "request names returns that request unchanged. " +
+      "artifact.approved or artifact.changes_requested. A later version carries the same open " +
+      "request forward and leaves it waiting on you; once the revision is complete and the human " +
+      "has agreed to every point in it, call this again to hand that request back. The request " +
+      "carries nothing new. A call while it already waits on the human hands nothing back: the " +
+      "same summary changes nothing, and a different one is refused, since it would rewrite the " +
+      "card the human is reading. " +
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +

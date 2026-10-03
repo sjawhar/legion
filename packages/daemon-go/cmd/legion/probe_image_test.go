@@ -50,13 +50,13 @@ esac
 	return path
 }
 
-// thisBinarysContract is the Go daemon API contract this binary speaks, as a manifest writes it.
-var thisBinarysContract = strconv.Itoa(api.GoDaemonAPIVersion)
+// thisBinarysContract is the daemon API contract this binary speaks, as a manifest writes it.
+var thisBinarysContract = strconv.Itoa(api.DaemonAPIVersion)
 
 // inImage sets this process's environment to the worker image's: a HOME whose `legion` profile
-// links the plugin, its manifest declaring Go contract goContract, and LEGION_OMP_PATH set to omp.
-// It answers the plugin root a pod loads, which every probe-image run is given.
-func inImage(t *testing.T, goContract, omp string) string {
+// links the plugin, its manifest declaring contract, and LEGION_OMP_PATH set to omp. It answers
+// the plugin root a pod loads, which every probe-image run is given.
+func inImage(t *testing.T, contract, omp string) string {
 	t.Helper()
 	t.Setenv("LEGION_ROLE_PROMPTS_DIR", testRolePromptsDir(t))
 	home := t.TempDir()
@@ -64,7 +64,7 @@ func inImage(t *testing.T, goContract, omp string) string {
 	if err := os.MkdirAll(unpacked, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	manifest := `{"name":"@sjawhar/pi-legion-envoy","version":"1.57.0","legion":{"daemonApiVersion":8,"goDaemonApiVersion":` + goContract + `}}`
+	manifest := `{"name":"@sjawhar/pi-legion-envoy","version":"1.57.0","legion":{"daemonApiVersion":` + contract + `}}`
 	if err := os.WriteFile(filepath.Join(unpacked, "package.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestProbeImagePrintsTheOKLineWithThisBinarysContract(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("probe-image exited %d: %s", code, stderr)
 	}
-	if want := "probe-image: OK (" + omp + ") session-storage=probed agent-models=resolved go-daemon-api-version=" + thisBinarysContract + "\n"; stdout != want {
+	if want := "probe-image: OK (" + omp + ") session-storage=probed agent-models=resolved daemon-api-version=" + thisBinarysContract + "\n"; stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
 }
@@ -110,14 +110,14 @@ func TestProbeImageHoldsThePluginToTheContractItIsAskedFor(t *testing.T) {
 	omp := imageOmp(t)
 	root := inImage(t, "2", omp)
 
-	code, stdout, stderr := probeImage("--plugin-root", root, "--go-daemon-api-version", "2")
-	if code != 0 || !strings.HasSuffix(stdout, " go-daemon-api-version=2\n") {
-		t.Fatalf("probe-image --go-daemon-api-version 2 over a plugin declaring 2 = %d %q %q, want the OK line confirming 2", code, stdout, stderr)
+	code, stdout, stderr := probeImage("--plugin-root", root, "--daemon-api-version", "2")
+	if code != 0 || !strings.HasSuffix(stdout, " daemon-api-version=2\n") {
+		t.Fatalf("probe-image --daemon-api-version 2 over a plugin declaring 2 = %d %q %q, want the OK line confirming 2", code, stdout, stderr)
 	}
 
-	code, stdout, stderr = probeImage("--plugin-root", root, "--go-daemon-api-version", "4")
-	if code != 1 || stdout != "" || !strings.Contains(stderr, "speaks Go daemon API contract 2; this daemon requires 4") {
-		t.Fatalf("probe-image --go-daemon-api-version 4 over a plugin declaring 2 = %d %q %q, want exit 1 naming both contracts and no OK line", code, stdout, stderr)
+	code, stdout, stderr = probeImage("--plugin-root", root, "--daemon-api-version", "4")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "speaks daemon API contract 2; this daemon requires 4") {
+		t.Fatalf("probe-image --daemon-api-version 4 over a plugin declaring 2 = %d %q %q, want exit 1 naming both contracts and no OK line", code, stdout, stderr)
 	}
 }
 
@@ -127,7 +127,7 @@ func TestProbeImageProbesTheOmpItIsGiven(t *testing.T) {
 
 	code, stdout, stderr := probeImage("--plugin-root", root, "--omp", omp)
 
-	if code != 0 || stdout != "probe-image: OK ("+omp+") session-storage=probed agent-models=resolved go-daemon-api-version="+thisBinarysContract+"\n" {
+	if code != 0 || stdout != "probe-image: OK ("+omp+") session-storage=probed agent-models=resolved daemon-api-version="+thisBinarysContract+"\n" {
 		t.Fatalf("probe-image --omp = %d %q %q, want the OK line naming %s", code, stdout, stderr, omp)
 	}
 }
@@ -140,7 +140,7 @@ func TestProbeImageWithSkipAgentModelsSaysSoOnTheOKLine(t *testing.T) {
 
 	code, stdout, stderr := probeImage("--plugin-root", root, "--skip-agent-models")
 
-	if want := "probe-image: OK (" + omp + ") session-storage=probed agent-models=skipped go-daemon-api-version=" + thisBinarysContract + "\n"; code != 0 || stdout != want {
+	if want := "probe-image: OK (" + omp + ") session-storage=probed agent-models=skipped daemon-api-version=" + thisBinarysContract + "\n"; code != 0 || stdout != want {
 		t.Fatalf("probe-image --skip-agent-models = %d %q %q, want %q", code, stdout, stderr, want)
 	}
 }
@@ -156,7 +156,7 @@ func TestProbeImageNamesTheUserOfTheSeedItsPointerNames(t *testing.T) {
 
 	code, stdout, stderr := probeImage("--plugin-root", root)
 
-	want := "probe-image: nats-nkey-user=" + public + "\nprobe-image: OK (" + omp + ") session-storage=probed agent-models=resolved go-daemon-api-version=" + thisBinarysContract + "\n"
+	want := "probe-image: nats-nkey-user=" + public + "\nprobe-image: OK (" + omp + ") session-storage=probed agent-models=resolved daemon-api-version=" + thisBinarysContract + "\n"
 	if code != 0 || stdout != want || strings.Contains(stdout+stderr, seed) {
 		t.Fatalf("probe-image with a user seed = %d %q %q, want %q and no seed", code, stdout, stderr, want)
 	}
@@ -323,9 +323,9 @@ func TestProbeImageRefusesWithoutAnOmpOrAContract(t *testing.T) {
 
 	t.Setenv("LEGION_OMP_PATH", imageOmp(t))
 	for _, value := range []string{"0", "-1", "3x", "", "99999999999999999999"} {
-		code, stdout, stderr := probeImage("--plugin-root", root, "--go-daemon-api-version", value)
-		if code != 1 || stdout != "" || !strings.Contains(stderr, `--go-daemon-api-version must be a positive integer (got "`+value+`")`) {
-			t.Errorf("probe-image --go-daemon-api-version %q = %d %q %q, want exit 1 refusing the value", value, code, stdout, stderr)
+		code, stdout, stderr := probeImage("--plugin-root", root, "--daemon-api-version", value)
+		if code != 1 || stdout != "" || !strings.Contains(stderr, `--daemon-api-version must be a positive integer (got "`+value+`")`) {
+			t.Errorf("probe-image --daemon-api-version %q = %d %q %q, want exit 1 refusing the value", value, code, stdout, stderr)
 		}
 	}
 }

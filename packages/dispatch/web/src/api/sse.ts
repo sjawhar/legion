@@ -42,6 +42,7 @@ const knownEventTypes: Record<EventType, true> = {
   "ask.opened": true,
   "ask.anchor_refreshed": true,
   "ask.edited": true,
+  "ask.handed_back": true,
   "ask.answered": true,
   "ask.resolved": true,
   "ask.follower_added": true,
@@ -96,6 +97,7 @@ function appendDocumentKey(keys: (readonly unknown[])[], event: Event): void {
   switch (event.type) {
     case "ask.opened":
     case "ask.edited":
+    case "ask.handed_back":
     case "ask.answered":
     case "ask.resolved":
     case "ask.anchor_refreshed":
@@ -156,6 +158,7 @@ function isAskEvent(event: Event): boolean {
     event.type === "ask.opened" ||
     event.type === "ask.anchor_refreshed" ||
     event.type === "ask.edited" ||
+    event.type === "ask.handed_back" ||
     event.type === "ask.answered" ||
     event.type === "ask.resolved" ||
     event.type === "ask.follower_added" ||
@@ -508,12 +511,17 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     event.type === "ask.answered" ||
     event.type === "ask.resolved" ||
     event.type === "ask.edited" ||
+    event.type === "ask.handed_back" ||
     event.type === "ask.anchor_refreshed"
   ) {
     keys.push(["asks", event.issue_key]);
-    // The sidebar's per-project open-ask counts come from GET /projects; an edit or an
-    // anchor refresh changes neither whether the ask is open nor which issue owns it.
-    if (event.type !== "ask.edited" && event.type !== "ask.anchor_refreshed") {
+    // The sidebar's per-project open-ask counts come from GET /projects; an edit, a hand-back or
+    // an anchor refresh changes neither whether the ask is open nor which issue owns it.
+    if (
+      event.type !== "ask.edited" &&
+      event.type !== "ask.handed_back" &&
+      event.type !== "ask.anchor_refreshed"
+    ) {
       keys.push(projectsQuery().queryKey);
     }
     appendDocumentKey(keys, event);

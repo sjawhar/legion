@@ -326,7 +326,7 @@ type plan struct {
 	instructions string
 	// dispatchToken is the Dispatch bearer dispatch_token_file names; "" without Dispatch.
 	dispatchToken string
-	prompts *prompts.Composer
+	prompts       *prompts.Composer
 	// roleReferences are the task agents and skills the state-local role prompt snapshot names
 	// (promptrefs.Roles), which the gate on either runtime resolves beside the plugin's own.
 	roleReferences promptrefs.Names
@@ -457,7 +457,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			prefix:         cfg.OmpLaunchPrefix,
 			timeout:        cfg.SlowCommandTimeout,
 			retry:          bootprobe.Daemon,
-			contract:       api.GoDaemonAPIVersion,
+			contract:       api.DaemonAPIVersion,
 			roleReferences: p.roleReferences,
 			log:            log,
 		}.verify

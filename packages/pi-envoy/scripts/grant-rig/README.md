@@ -17,7 +17,7 @@ listener (inherited `ENVOY_URL`), which collides with nothing.
 
 | file | what it is |
 | --- | --- |
-| `daemon-standin.ts` | Serves the worker boot handshake and the grant routes with the real request and response shapes (`LegionDaemonApi`) and the real grant rule: a grant lives 60 seconds and redeems any number of times while it lives; an unknown or expired id answers 403 `Invalid or expired grant`. Appends one JSON line per request to its log. |
+| `daemon-standin.ts` | Serves the worker's claim routes (`claims/register`, `claims/ready`) and the grant routes with the real request and response shapes (the plugin's grant request, `LegionGoGrantRequest`; the rig `legion` CLI's redemptions, `LegionDaemonApi`) and the real grant rule: a grant lives 60 seconds and redeems any number of times while it lives; an unknown or expired id answers 403 `Invalid or expired grant`. Appends one JSON line per request to its log. |
 | `setup.sh` | Creates the throwaway profile and the scratch state directory (below), in one of two plugin modes. |
 | `run.ts` | `prompt` prints the worker's instructions; `drive` runs the headless leg over Oh My Pi's RPC mode; `tui` runs the terminal leg in a private tmux server; `analyze` scores any transcript. Both legs end with the same table. |
 

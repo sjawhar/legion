@@ -93,11 +93,11 @@ interface PaneOptions {
 
 /**
  * Runs one implementer pane on the real Oh My Pi until its run settles: the Legion and Envoy
- * extensions from this checkout, booted against a stand-in for the TypeScript daemon's worker
- * routes and the Envoy listener (no NATS: the Envoy extension then skips inbound delivery, and
- * the role claim is two listener calls), with a stand-in model gateway that answers the pane's
- * turns from `replies`, and a stand-in `legion` on PATH that records what it was run with. The
- * daemon's assignment arrives as the RPC `prompt`, as both daemons deliver it.
+ * extensions from this checkout, booted against a stand-in for the daemon's claim routes and the
+ * Envoy listener (no NATS: the Envoy extension then skips inbound delivery, and the role claim is
+ * two listener calls), with a stand-in model gateway that answers the pane's turns from
+ * `replies`, and a stand-in `legion` on PATH that records what it was run with. The daemon's
+ * assignment arrives as the RPC `prompt`.
  */
 async function runPane(
   binary: string,
@@ -170,15 +170,17 @@ async function runPane(
         })),
       });
     }
-    if (url.pathname === "/legion/v1/worker/started") {
+    if (url.pathname === "/legion/v1/claims/register") {
       return Response.json({
-        roleToken: "legion-stall-stall-2-implementer",
+        claimToken: "legion-stall-stall-2-implementer",
+        tree: "STALL-1",
+        issue: "STALL-2",
+        role: "implementer",
+        generation: 1,
         secret: "stall-secret",
-        gitName: "Legion Worker",
-        gitEmail: "worker@example.test",
       });
     }
-    if (url.pathname === "/legion/v1/worker/ready") return Response.json({});
+    if (url.pathname === "/legion/v1/claims/ready") return new Response(null, { status: 204 });
     if (url.pathname === "/legion/v1/grants") {
       grants += 1;
       return Response.json({
@@ -345,7 +347,7 @@ test.skipIf(omp === undefined && !onActions)(
     // The worker registered through the daemon's routes, and its handoff_complete minted a grant.
     expect(
       pane.requests.map((request) => request.path).filter((p) => p.startsWith("/legion/"))
-    ).toEqual(["/legion/v1/worker/started", "/legion/v1/worker/ready", "/legion/v1/grants"]);
+    ).toEqual(["/legion/v1/claims/register", "/legion/v1/claims/ready", "/legion/v1/grants"]);
     const turns = pane.turns();
     // Three turns in one run: the text-only one, the follow-up's, and the reply to the tool result.
     // None after: the handoff closed the phase, so the last settle sent nothing.

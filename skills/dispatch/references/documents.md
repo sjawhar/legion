@@ -161,12 +161,17 @@ names each block and its ask. An answer or a `dispatch_resolve_ask` closes the a
 reaches a version only when the document settles, about two seconds later, or with your next
 `dispatch_doc_edit`: fold the answer into the text (or, for a waiver, write the human's decision
 in) before you request. A block written in the last few seconds counts as open before Dispatch has
-opened its ask. A repeat at the same version returns the open request unchanged. A new version
-retracts an open request for an older one, and its `ask.resolved` reaches you: request again for
-the new version when "Approval of a spec" in `skill://dispatch` allows. The answer reaches you as
-`artifact.approved` or `artifact.changes_requested` with the pinned `version`; `changes_requested`
-carries the reason, which is your next piece of work. `dispatch_read` and `dispatch_doc_read` show
-the document's approval state; `stale` means it was approved and then edited.
+opened its ask. A document holds one open request. A new version moves it to that version, keeping
+its thread and summary, and leaves it waiting on you, as a human's reply in its thread does; a move
+your own edit made sends you no event, and `dispatch_read` and `dispatch_doc_read` show it as
+`Approval: awaiting, waiting on agent`. Call again when "Approval of a spec" in `skill://dispatch`
+allows: that hands the same request back to the human, reworded first when `summary` is new. While
+it waits on the human, a call with the same `summary`, or none, changes nothing, and one with a
+different `summary` is refused, since it would rewrite the card they are reading. The answer
+reaches you as `artifact.approved` or `artifact.changes_requested` with the pinned `version` and
+closes the request, so the next call opens a new one; `changes_requested` carries the reason,
+which is your next piece of work. Those reads show the document's approval state; `stale` means
+it was approved and then edited.
 
 ## A document that is reloading
 

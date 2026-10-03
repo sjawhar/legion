@@ -130,25 +130,29 @@ spec.md (document id <UUID>) at version <N> (ask <id>)", followed by the questio
 Inbox shows, and its `details.artifact` / `details.version` carry the same two values. The
 document id is never the slug or file name you passed in (`spec`, `spec.md`): the daemon
 recognizes the document's approval events by that id, and both the `legion` tool and the daemon
-refuse a value that is not a UUID. Calling `dispatch_request_approval` again at the version an
-open request names returns that request unchanged, so it is safe to repeat; once the document has
-a newer version, that request is retracted (its `ask.resolved` reaches you) and the call opens a
-new one at the latest version. If its text instead reads "spec.md (document id <UUID>) is already
-approved at version <N>" — a human approved from the document header before you asked — still
-call `register_gate` with that id and version: the daemon reads the approval from Dispatch as it
-registers, opens the gate, and delivers `design-approved` at once. The same read covers a human
-who answers the question between your `dispatch_request_approval` and `register_gate` calls, so
-an approval is never lost to timing; you never approve anything yourself.
+refuse a value that is not a UUID. Calling `dispatch_request_approval` again while that request
+waits on the human, with the same `summary` or none, changes nothing and returns it (its text says
+it "already waits on the human"), so it is safe to repeat; a different `summary` is refused then.
+A newer version of the spec moves the open request to that version and leaves it waiting on you,
+with no wake when the edit was yours: once the human has agreed to every point in it, call again
+to hand the same request back at the latest version. If its text instead reads "spec.md (document
+id <UUID>) is already approved at version <N>" — a human approved from the document header before
+you asked — still call `register_gate` with that id and version: the daemon reads the approval
+from Dispatch as it registers, opens the gate, and delivers `design-approved` at once. The same
+read covers a human who answers the question between your `dispatch_request_approval` and
+`register_gate` calls, so an approval is never lost to timing; you never approve anything
+yourself.
 
 Then park. Do not release a wave or spawn a Legion role until a later delivered wake shows
 `design-approved` on the root. On `design-changes-requested`, revise the spec (a new version of
-the primary document), request approval again as above, and stay parked. Approval is pinned to
-the spec version: editing the root spec after approval closes the gate again with no wake (you
-made the edit, or the `artifact.version` event on your issue tells you). Request approval again
-as above, and release no new wave and spawn no new role until the next `design-approved` arrives
-— work already in flight continues. Later waves, re-scopes, and integration-failure children that
-leave the root spec untouched need no new approval, and a child issue's spec is never gated: the
-root approval covers the tree.
+the primary document), request approval again as above (the answer closed the last request, so
+this opens a new one), and stay parked. Approval is pinned to the spec version: editing the root
+spec after approval closes the gate again with no wake (you made the edit, or the
+`artifact.version` event on your issue tells you). Request approval again as above, and release
+no new wave and spawn no new role until the next `design-approved` arrives — work already in
+flight continues. Later waves, re-scopes, and integration-failure children that leave the root
+spec untouched need no new approval, and a child issue's spec is never gated: the root approval
+covers the tree.
 
 ## 2. Children in flight
 

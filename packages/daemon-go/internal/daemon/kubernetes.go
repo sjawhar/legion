@@ -92,7 +92,7 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 			return fmt.Errorf("the image probe needs the Agent Sandbox runtime, not %T", rt)
 		}
 		return sandboxed.ProbeImage(ctx, sandbox.ImageProbe{
-			Contract: api.GoDaemonAPIVersion, Budget: cfg.SlowCommandTimeout, Retry: imageProbeRetry,
+			Contract: api.DaemonAPIVersion, Budget: cfg.SlowCommandTimeout, Retry: imageProbeRetry,
 			// The role prompts every pod is handed are this daemon's, inlined at each launch, so the
 			// probe resolves what they name rather than the image's copy.
 			RoleReferences: p.roleReferences,
