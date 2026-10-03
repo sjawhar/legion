@@ -14169,7 +14169,7 @@ var dispatchToolSpecs = [
       spec: z2.string().describe(`Optional initial primary-document markdown. ${SPEC_WRITING_POINTER}`).optional(),
       labels: z2.array(z2.string({ min: 1, max: 40 }), { max: 20 }).describe("Optional initial labels, at most 20 labels of up to 40 characters.").optional(),
       priority: z2.number({ int: true, min: 0, max: 3 }).describe("Optional coarse priority: P0 is highest and P3 is lowest.").optional(),
-      assignee: z2.string().describe("GitHub login of the human who answers this issue's asks; defaults to your owner when you act for a person, else the parent's assignee, else unassigned.").optional(),
+      assignee: z2.string().describe("Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else unassigned.").optional(),
       components: componentsArgument(z2).optional()
     })
   },
@@ -14523,7 +14523,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_whoami",
     example: {},
-    description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase GitHub login of the human whose personal token you run under (the default assignee of issues you create), or null under the shared token.",
+    description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the default assignee of issues you create), or null under the shared token.",
     arguments: () => ({}),
     strict: true
   }

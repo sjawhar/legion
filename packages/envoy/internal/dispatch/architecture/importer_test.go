@@ -160,7 +160,7 @@ func newGitHubClient(t *testing.T, handler http.Handler) *githubapp.Client {
 	pemText := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	client, err := githubapp.New(&auth.AppConfig{ClientID: "Iv1.test", ClientSecret: "secret", PEM: pemText}, server.URL)
+	client, err := githubapp.New(&auth.AppConfig{ClientID: "Iv1.test", PEM: pemText}, server.URL)
 	if err != nil {
 		t.Fatalf("new github client: %v", err)
 	}

@@ -1,25 +1,28 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
-	"sort"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// canonicalLogin is the stored form of a GitHub login: trimmed and lowercased, matching how
-// parseAllowedLogins and the identity implementations compare against the allowlist.
+// canonicalLogin is the stored form of a person's email: trimmed and lowercased, the form the
+// identity implementations name a person by and the people table holds.
 func canonicalLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }
 
 // parseIssueAssignee decodes the tri-state `assignee` field of an issue write. Absent →
 // (nil, false): leave it alone. JSON null → (nil, true): clear it. A string → its canonical
-// login, which must be on the allowlist (400 ASSIGNEE_NOT_ALLOWED otherwise). Anything else →
-// 400 INVALID_ISSUE.
-func (s *server) parseIssueAssignee(raw json.RawMessage) (assignee *string, provided bool, err error) {
+// email, which must name a person who has signed in (400 ASSIGNEE_NOT_ALLOWED otherwise).
+// Anything else → 400 INVALID_ISSUE.
+func (s *server) parseIssueAssignee(ctx context.Context, raw json.RawMessage) (assignee *string, provided bool, err error) {
 	if len(raw) == 0 {
 		return nil, false, nil
 	}
@@ -28,20 +31,26 @@ func (s *server) parseIssueAssignee(raw json.RawMessage) (assignee *string, prov
 	}
 	var login string
 	if err := json.Unmarshal(raw, &login); err != nil {
-		return nil, true, errorf(http.StatusBadRequest, "INVALID_ISSUE", "assignee must be a GitHub login or null")
+		return nil, true, errorf(http.StatusBadRequest, "INVALID_ISSUE", "assignee must be a person's email or null")
 	}
-	canonical, err := s.allowedLogin(login)
+	canonical, err := s.allowedLogin(ctx, login)
 	if err != nil {
 		return nil, true, err
 	}
 	return &canonical, true, nil
 }
 
-// allowedLogin canonicalises login and checks it against the allowlist.
-func (s *server) allowedLogin(login string) (string, error) {
+// allowedLogin canonicalises login and checks that it names a person who has signed in.
+func (s *server) allowedLogin(ctx context.Context, login string) (string, error) {
 	canonical := canonicalLogin(login)
-	if _, allowed := s.deps.AllowedLogins[canonical]; canonical == "" || !allowed {
-		return "", errorf(http.StatusBadRequest, "ASSIGNEE_NOT_ALLOWED", "%q is not a login on the sign-in allowlist", strings.TrimSpace(login))
+	var known bool
+	if canonical != "" {
+		if err := s.deps.Store.Pool.QueryRow(ctx, `select exists(select 1 from people where email = $1)`, canonical).Scan(&known); err != nil {
+			return "", fmt.Errorf("read person %q: %w", canonical, err)
+		}
+	}
+	if !known {
+		return "", errorf(http.StatusBadRequest, "ASSIGNEE_NOT_ALLOWED", "%q has not signed in to Dispatch", strings.TrimSpace(login))
 	}
 	return canonical, nil
 }
@@ -63,16 +72,25 @@ type dispatchUser struct {
 	Login string `json:"login"`
 }
 
-// listUsers returns the allowlist, sorted: the assignee picker's options. Pure config; no DB.
+// listUsers returns everyone who has signed in, sorted by email: the assignee picker's options.
 func (s *server) listUsers(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireHuman(w, r); !ok {
 		return
 	}
-	users := make([]dispatchUser, 0, len(s.deps.AllowedLogins))
-	for login := range s.deps.AllowedLogins {
-		users = append(users, dispatchUser{Login: login})
+	rows, err := s.deps.Store.Pool.Query(r.Context(), `select email from people order by email`)
+	if err != nil {
+		s.writeHandlerError(w, fmt.Errorf("list people: %w", err))
+		return
 	}
-	sort.Slice(users, func(i, j int) bool { return users[i].Login < users[j].Login })
+	users, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (dispatchUser, error) {
+		var user dispatchUser
+		err := row.Scan(&user.Login)
+		return user, err
+	})
+	if err != nil {
+		s.writeHandlerError(w, fmt.Errorf("list people: %w", err))
+		return
+	}
 	WriteJSON(w, http.StatusOK, map[string]any{"users": users})
 }
 
