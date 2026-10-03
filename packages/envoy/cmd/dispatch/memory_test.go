@@ -156,6 +156,80 @@ func TestTwoUploadsAtOnceStayWithinTheMemoryBound(t *testing.T) {
 	}
 }
 
+// A caller's quote is read as markdown when its text alone matches nothing in the document: the
+// `find` of an edit's replace, and the quote a comment or an ask anchors on. Each is caller
+// markdown, as a write's is, so a quote filling the 1 MiB request cap holds at most the bound above
+// a fresh server's idle memory, and is answered. Read with no element limit, a `find` of `- a`
+// lines held over 500 MiB.
+func TestEveryQuoteAtTheCapStaysWithinTheMemoryBound(t *testing.T) {
+	memory := newMemoryHarness(t)
+	setup := memory.start(t)
+	created := setup.send(t, http.MethodPost, "/api/v1/issues", "application/json",
+		strings.NewReader(`{"project":"MEM","title":"Quotes","spec":"Before.\n"}`), http.Header{"X-Dispatch-User": {"alice"}})
+	var issue struct {
+		Key               string `json:"key"`
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}
+	if created.status != http.StatusCreated || json.Unmarshal(created.body, &issue) != nil || issue.PrimaryArtifactID == "" {
+		t.Fatalf("create the quoted issue: status %d body %.300s", created.status, created.body)
+	}
+	setup.stop(t)
+	routes := []struct {
+		name, path string
+		body       func(quote string) map[string]any
+	}{
+		{"an edit's find", "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/edits", func(quote string) map[string]any {
+			return map[string]any{"ops": []map[string]any{{"op": "replace", "find": quote, "with": "x"}}}
+		}},
+		{"a comment's quote", "/api/v1/issues/" + issue.Key + "/comments", func(quote string) map[string]any {
+			return map[string]any{"body": "why", "anchor": map[string]any{"artifact": "spec", "quote": quote}}
+		}},
+		{"an ask's quote", "/api/v1/issues/" + issue.Key + "/asks", func(quote string) map[string]any {
+			return map[string]any{"question": "why?", "anchor": map[string]any{"artifact": "spec", "quote": quote}}
+		}},
+	}
+	for _, unit := range []string{")_", "- a\n"} {
+		for _, route := range routes {
+			t.Run(fmt.Sprintf("%s of %q", route.name, unit), func(t *testing.T) {
+				body := bodyAtTheCap(t, unit, route.body)
+				server := memory.start(t)
+				var answer response
+				peak := server.peakAboveIdle(t, func() {
+					answer = server.send(t, http.MethodPost, route.path, "application/json", bytes.NewReader(body), http.Header{"X-Dispatch-User": {"alice"}})
+				})
+				var refusal struct{ Code, Error string }
+				if answer.status >= 500 || answer.status >= 400 && (json.Unmarshal(answer.body, &refusal) != nil || refusal.Code == "") {
+					t.Fatalf("%s answered %d %.300s, want a success or a 4xx naming its code", route.name, answer.status, answer.body)
+				}
+				t.Logf("%s of %q: %d %s, %d MiB above idle", route.name, unit, answer.status, refusal.Code, peak>>20)
+				if peak > requestMemoryBound {
+					t.Errorf("%s of %q held %d MiB above idle, want at most %d MiB", route.name, unit, peak>>20, requestMemoryBound>>20)
+				}
+			})
+		}
+	}
+}
+
+// bodyAtTheCap is the JSON request body that build makes of the longest quote of unit repeated that
+// fits the 1 MiB request cap.
+func bodyAtTheCap(t *testing.T, unit string, build func(quote string) map[string]any) []byte {
+	t.Helper()
+	encode := func(units int) []byte {
+		body, err := json.Marshal(build(strings.Repeat(unit, units)))
+		if err != nil {
+			t.Fatalf("encode the request: %v", err)
+		}
+		return body
+	}
+	unitBytes := len(encode(1)) - len(encode(0))
+	units := (documentCap - len(encode(0))) / unitBytes
+	body := encode(units)
+	if len(body) > documentCap || documentCap-len(body) >= unitBytes {
+		t.Fatalf("the body of %d units is %d bytes, want the most that fit %d", units, len(body), documentCap)
+	}
+	return body
+}
+
 // memoryShape is a markdown document a memory test uploads.
 type memoryShape struct {
 	name     string

@@ -76,9 +76,12 @@ func readBackPaddingBudget() *TablePaddingBudget {
 }
 
 // quotePaddingBudget is the budget of a quote read as markdown (renderedMarkdownQuote), which
-// matches by text: the cells a short row is padded with hold none, so a quote pads none.
+// matches by text: the cells a short row is padded with hold none, so a quote pads none. A quote is
+// a caller's markdown as much as a write's is - the `find` of an edit, the quote of a comment or an
+// ask - so it makes at most maxWriteElements elements; past them it is no markdown at all, and the
+// lookup matches it by its text alone.
 func quotePaddingBudget() *TablePaddingBudget {
-	return &TablePaddingBudget{limit: 0, scope: "a quote", elements: newElementCount(0)}
+	return &TablePaddingBudget{limit: 0, scope: "a quote", elements: newElementCount(maxWriteElements)}
 }
 
 func (b *TablePaddingBudget) add(padding tablePadding) error {

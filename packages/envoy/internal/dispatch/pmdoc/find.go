@@ -414,7 +414,8 @@ func markdownQuoteMatches(text flattenedText, quote string) []quoteMatch {
 // renderedMarkdownQuote is quote read as markdown, when its text and inline markup differ from
 // quote's own. A quote matches by its text, which a short table row's padded cells do not hold, so
 // its tables are read only while they need no padding (quotePaddingBudget), and a quote each
-// operation of an edit batch resolves costs no padded cell.
+// operation of an edit batch resolves costs no padded cell. A quote that makes more elements than
+// a write may is refused before goldmark builds the rest of it, and reads as no markdown.
 func renderedMarkdownQuote(quote string) (flattenedText, bool) {
 	parsed, err := parseStamped(quote, quotePaddingBudget())
 	if err != nil {
