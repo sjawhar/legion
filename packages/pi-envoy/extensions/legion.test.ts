@@ -10,17 +10,7 @@ import {
   spyOn,
   test,
 } from "bun:test";
-import {
-  access,
-  cp,
-  mkdir,
-  mkdtemp,
-  readdir,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type IssueKey, LEGION_ROLES, type LegionRole, roleToken } from "@legion/contracts";
@@ -1861,38 +1851,6 @@ describe("Legion OMP extension", () => {
       block: true,
       reason: expect.stringContaining("`legion` tool's `handoff_complete`"),
     });
-  });
-  test("ships a roles/<role>.md residue file for every LegionRole", async () => {
-    // The daemon reads packages/pi-envoy/roles/${role}.md for every phase-worker role, including a
-    // sub-architect (internal/prompts, Compose). Phase workers also compose their core and headless
-    // mechanics parts; the sub-architect remains single-file. A missing residue fails the daemon's
-    // boot.
-    for (const role of LEGION_ROLES) {
-      const rolePath = path.join(import.meta.dir, "..", "roles", `${role}.md`);
-      await access(rolePath);
-      // A zero-byte file would pass the existence check above and boot a worker with no
-      // instructions at all -- fail loudly on that instead of leaving it a silent runtime bug.
-      expect((await readFile(rolePath, "utf8")).trim()).not.toBe("");
-    }
-  });
-  test("keeps shared phase-worker mechanics in one fragment and required-skills guidance in the applicable residues", async () => {
-    const rolesDir = path.join(import.meta.dir, "..", "roles");
-    const phaseRoles = ["planner", "implementer", "tester", "reviewer", "merger"] as const;
-    const rolesWithRequiredSkillsSentence = ["implementer", "reviewer", "tester"];
-    const requiredSkillsSentence =
-      "Then read the plan handoff's `requiredSkills` for your role and follow those too.";
-    const mechanics = await readFile(path.join(rolesDir, "mechanics", "headless.md"), "utf8");
-
-    expect(mechanics).toContain("## Step one: find this repository's skills");
-    expect(mechanics).toContain("When your phase is done, stay in this session afterwards:");
-
-    for (const role of phaseRoles) {
-      const residue = await readFile(path.join(rolesDir, `${role}.md`), "utf8");
-      expect(residue).toContain(`# Legion ${role.charAt(0).toUpperCase()}${role.slice(1)}`);
-      expect(residue.includes(requiredSkillsSentence)).toBe(
-        rolesWithRequiredSkillsSentence.includes(role)
-      );
-    }
   });
 
   describe("a phase worker left idle with its phase open", () => {

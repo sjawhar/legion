@@ -15,7 +15,7 @@ held them. The cut that followed deleted them from the fork, so that commit stay
 source however far the fork line moves.
 
 The upstream modules this package imports at runtime come from the git dependency, pinned at
-**06fc1977f1fee637d92c6393965555e88ab9adcb** on the fork's cleaned `library` line. Moving that
+**340653cfaeb52866aabfd2e9d3d1e9f0ba87f2cd** on the fork's cleaned `library` line. Moving that
 pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstream` holds, and
 `tests/upstream-pin.test.ts` is what checks it.
 
@@ -30,20 +30,22 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/lib.css` | The editor stylesheet |
 | `src/tests/*.test.ts` | The suites that came with those files |
 
-Seven files under `src/` are legion's own rather than copies, so the file-by-file audit below does
+Nine files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
 
 | File | What it is |
 | --- | --- |
 | `src/collab-cursor-plugin.ts` | The peer-cursor plugin: y-prosemirror's, except that a peer's caret is not drawn while it sits on the focused local caret, where Chromium and WebKit otherwise drop or misplace typing (LEGION-289); it is also biome-checked |
 | `src/editor/schema/dom-attributes.ts` | `withDomAttributes`, the DOM-output-spec helper lifted out of `block-ids.ts` so the typed-block schema can use it too |
+| `src/editor-highlights.ts` | Presentation-only active and pulse highlights for marks and blocks, drawn as a cached ProseMirror `DecorationSet`, because a host class write on editor DOM is read back as an edit (LEGION-458). The set is mapped through edits inside one node and rebuilt when the active or pulsed set changes, or an edit can change which nodes carry a highlighted id or where a highlighted block ends: a mark or attribute step, inserted content that holds a highlighted target (a collaborator's update replaces the whole document), and, while a block is highlighted, a replace across a node boundary; it is also biome-checked |
 | `src/trailing-newline-input.ts` | Types over a selection that would leave its text block ending in a newline, where Firefox otherwise puts the text before a code block's newline or deletes a paragraph's hard break (LEGION-289); it is also biome-checked |
 | `src/editor/schema/uuid.ts` | `uuidV4`, the block-id default generator: a v4 UUID from `crypto.getRandomValues`, which every browsing context defines, where `crypto.randomUUID` exists only in a secure context, so a document opened over plain HTTP by a LAN address or a host name minted no id (LEGION-461); it is also biome-checked |
-| `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (its removals are of the open composer's own mark, `setComposerMark`, or put straight back, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; a write that cuts into another record's mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
+| `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (it removes no span, as a creation over another record's mark does not since the three declare `excludes: ''`, or puts back what it removes, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; any other removal of a record mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
 | `src/record-mark-retype.ts` | Retyping a provisional record mark for the margin composer's Comment / Suggest / Ask switch, and the precise span-by-span removal behind the handle's `removeMark`, over text and inline atoms such as an image alike (LEGION-363); it is also biome-checked |
+| `src/record-mark-target.ts` | Which mark a click or a hover in the document names: of the mark spans around the target, the record mark whose range is the smallest, the innermost span's among marks the same size, since which of two overlapping record marks nests inside the other follows the order they were made in (LEGION-458); it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Eleven kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Fourteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -64,13 +66,19 @@ cursors through `collabCursorPlugin` from `./collab-cursor-plugin` instead of ca
 `yCursorPlugin` itself; `src/lib.ts` installing `trailingNewlineInputPlugin` from
 `./trailing-newline-input`; `src/lib.ts` installing `recordMarkHistoryPlugin` from
 `./record-mark-history`; `src/lib.ts` routing `removeMark` and the new `retypeMark` through
-`./record-mark-retype`, and the new `setComposerMark` through `./record-mark-history`; and
-annotations, casts and assertions
-that make a file type-check, each of which erases before runtime (below).
+`./record-mark-retype`; `src/lib.ts` installing `editorHighlightsPlugin` and routing
+`setActiveMarks`, `setActiveBlocks`, `focusMark`'s pulse and `focusBlock`'s pulse through
+`./editor-highlights`; `src/dispatch-marks.ts`'s `dispatchAsk` schema declaring `excludes: ''`,
+so two readers' asks may cover the same text, with `removeAskMark` removing that mark's instance
+by id rather than every `dispatchAsk` over its range and the parse runner closing its own span of
+nested asks rather than every open ask (LEGION-458); `src/dispatch-mark-events.ts` reading the mark
+a click or a hover names from `./record-mark-target` rather than taking the innermost mark span,
+so a click on text two record marks cover opens the narrower one (LEGION-458); and annotations,
+casts and assertions that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
-only lines that differ should be the eleven kinds.
+only lines that differ should be the fourteen kinds.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the
@@ -79,6 +87,11 @@ installed dependency and fails when a fix the pinned line carries has gone missi
 `upstream/` stops being what the pinned sources emit. `tests/upstream-boundary.ts` has no
 runtime at all — `bun run typecheck` is what runs it, and it fails when a name crossing the
 boundary is `any` again.
+
+The copied files are proof-sdk's and stay under its MIT license, as does `upstream/`, which tsc
+derives from proof-sdk's pinned sources; `LICENSE` beside this file is that license, taken from the
+fork at 24a5fc94. Legion's own files listed above, `scripts/` and `tests/` are under the
+repository's Apache-2.0 license.
 
 ## The upstream boundary
 
@@ -112,16 +125,25 @@ copied file carries `// @ts-nocheck` any more. `tests/upstream-boundary.ts` is t
 names every binding this package imports across the boundary and fails `bun run typecheck` if
 one of them is `any`.
 
-The pinned source commit carries two fixes, each an open upstream pull request. The Dark Reader
+The pinned source commit carries four fixes, each an open upstream pull request. The Dark Reader
 fix (EveryInc/proof-sdk#81): peer-cursor colours and mark decorations avoid inline `style`
 attributes, because Dark Reader rewrites those attributes inside the contenteditable and
 ProseMirror reads the writes as content mutations. That can cause an endless redraw loop that
 wedges the tab. The proof-mark rendering fix (EveryInc/proof-sdk#82): the five proof marks render
 only their `data-*` attributes, where upstream renders `id`, `kind` and `by` as
-`[object Object]`, and a replace suggestion's widget redraws when its replacement changes.
-`tests/upstream-pin.test.ts` reads or runs the installed modules so a pin that loses either fix
-fails. Moving the pin changes the package dependency, `bun.lock`, `upstream/` and this file's
-source audit references; no Bun patch applies to this source.
+`[object Object]`, and a replace suggestion's widget redraws when its replacement changes. The
+split-mark fix (EveryInc/proof-sdk#83): accept, reject and deleteMark act on each run of a mark
+that other text splits, rather than on one range from its first run to its last, which deleted or
+re-attributed the text between. The overlapping record marks fix (EveryInc/proof-sdk#84):
+`proofComment` and `proofSuggestion` declare `excludes: ''`, so a comment or suggestion over text
+another one covers no longer cuts it out of the overlap; the plugin's removals take the mark with
+the acted-on id rather than every mark of its type over its text, and the markdown parser closes
+the nested span it is closing rather than every open span of the type. `tests/upstream-pin.test.ts`
+reads or runs the installed modules so a pin that loses any of them fails: it reads the Dark Reader
+fix where it lives, renders each proof mark, redraws a revised replacement in a happy-dom view,
+rejects an insert split by another, and comments twice over one word, round-trips that through
+markdown and deletes one of the two. Moving the pin changes the package dependency, `bun.lock`,
+`upstream/` and this file's source audit references; no Bun patch applies to this source.
 
 ## No build step
 
@@ -146,6 +168,7 @@ against the pinned commit stays readable. `assist` matters as much as the other 
 `organizeImports` is a safe fix, so one `biome check --write` or an editor with organize-on-save
 would reorder the copy's imports. `upstream/` is excluded the same way, for the same reason:
 it is tsc's output, not source. Anything legion writes here — `scripts/`, `tests/`,
-`src/collab-cursor-plugin.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
-`src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/tests/harness.ts` — follow the
+`src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
+`src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/record-mark-target.ts`,
+`src/tests/harness.ts` — follow the
 repo's conventions and are checked.

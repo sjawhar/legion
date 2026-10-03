@@ -192,12 +192,14 @@ pick_port dispatch_port
 pick_port fake_envoy_port
 pick_port fake_github_port
 export DISPATCH_E2E_PORT=$dispatch_port FAKE_ENVOY_PORT=$fake_envoy_port FAKE_GITHUB_PORT=$fake_github_port
+# The harness's broker switch (packages/dispatch/e2e/harness-broker.ts), exported so seed.ts's
+# reset reads it as run-server.sh does and leaves alone the fake broker this rig never starts.
+export DISPATCH_E2E_AGENT_SECRETS_URL="$broker_url" DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE="$work/broker-ui-token"
 dispatch_url="http://127.0.0.1:${dispatch_port}"
 note "starting Dispatch at $dispatch_url"
 start_process fake_envoy setsid bun "$root/packages/dispatch/e2e/fake-envoy.ts"
 start_process fake_github setsid bun "$root/packages/dispatch/e2e/fake-github.ts"
-DISPATCH_E2E_AGENT_SECRETS_URL="$broker_url" DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE="$work/broker-ui-token" \
-  start_process dispatch setsid bash "$root/packages/dispatch/e2e/run-server.sh"
+start_process dispatch setsid bash "$root/packages/dispatch/e2e/run-server.sh"
 await_start fake_envoy "$fake_envoy_pid" 0 60 "the fake Envoy" curl -s -o /dev/null "http://127.0.0.1:$fake_envoy_port/"
 await_start fake_github "$fake_github_pid" 0 60 "the fake GitHub" curl -s -o /dev/null "http://127.0.0.1:$fake_github_port/"
 await_start dispatch "$dispatch_pid" 0 600 "Dispatch" curl -sf "$dispatch_url/"

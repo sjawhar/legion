@@ -14,26 +14,41 @@ unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE
 # DATABASE_URL is the one required caller input. The harness has no fake
 # Postgres and e2e/seed.ts truncates the named database before every scenario,
 # so silently selecting a shared default would make the destructive write
-# target ambiguous. The three ports are shared harness inputs because the
+# target ambiguous. The four ports are shared harness inputs because the
 # Playwright config and its helpers resolve them too.
 : "${DATABASE_URL:?DATABASE_URL must name an isolated Dispatch e2e database}"
 database_url="$DATABASE_URL"
 e2e_port="${DISPATCH_E2E_PORT:-8777}"
 fake_envoy_port="${FAKE_ENVOY_PORT:-9021}"
 fake_github_port="${FAKE_GITHUB_PORT:-9022}"
+fake_broker_port="${FAKE_BROKER_PORT:-9024}"
 
-# The docs media rig (docs/site/media/broker/rig.sh) points the server at a secrets broker it
-# started on this machine, read here before the sweep below drops every DISPATCH_* variable; every
-# other run leaves the credential-request feature off (404 FEATURE_OFF). The broker's bearer stays
-# in its file: the server reads DISPATCH_AGENT_SECRETS_TOKEN_FILE itself, so no argv carries it.
+# The secrets broker the server relays credential requests to, read before
+# the sweep below drops every DISPATCH_* variable. DISPATCH_E2E_AGENT_SECRETS_URL
+# is the harness's one switch, which e2e/harness-broker.ts reads the same way
+# (no colon, so empty and unset differ): unset is e2e/fake-broker.ts with a
+# throwaway UI bearer; empty is no broker, the credential feature off, as in a
+# deployment that configures none; a URL is a broker the caller runs, whose
+# bearer stays in DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE, which the server reads
+# itself, so no argv carries it.
 broker_env=()
-if [ -n "${DISPATCH_E2E_AGENT_SECRETS_URL:-}" ]; then
-  : "${DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE:?DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE must accompany DISPATCH_E2E_AGENT_SECRETS_URL}"
+if [ -z "${DISPATCH_E2E_AGENT_SECRETS_URL+set}" ]; then
   broker_env=(
+    DISPATCH_AGENT_SECRETS_TOKEN=e2e-broker-token
+    DISPATCH_AGENT_SECRETS_URL="http://127.0.0.1:$fake_broker_port"
+  )
+elif [ -n "$DISPATCH_E2E_AGENT_SECRETS_URL" ]; then
+  : "${DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE:?DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE must accompany DISPATCH_E2E_AGENT_SECRETS_URL}"
+  # The server reads the file from packages/envoy, where this script changes directory below, so a
+  # path relative to the caller's directory is made absolute first.
+  token_file="$DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE"
+  [[ "$token_file" == /* ]] || token_file="$PWD/$token_file"
+  broker_env=(
+    DISPATCH_AGENT_SECRETS_TOKEN_FILE="$token_file"
     DISPATCH_AGENT_SECRETS_URL="$DISPATCH_E2E_AGENT_SECRETS_URL"
-    DISPATCH_AGENT_SECRETS_TOKEN_FILE="$DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE"
   )
 fi
+
 mapfile -t inherited < <(compgen -e)
 for name in "${inherited[@]}"; do
   case "$name" in

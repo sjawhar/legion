@@ -58,6 +58,33 @@ The ConfigMap carries no `legion.dev/project` label. A live harness run creates 
 run-scoped name and deletes only objects labelled with its own run's project, so it never touches
 this one.
 
+## Signing in as the Legion machine user
+
+A gateway that admits Cognito user tokens takes a token from `legion model-token`, which the worker
+image carries at `/opt/legion/bin/legion`. Oh My Pi runs it as the model `apiKey` and runs it
+again after a 401. It signs in with Cognito's custom authentication (`InitiateAuth` with
+`CUSTOM_AUTH`, then `RespondToAuthChallenge`), answering the challenge with the pod's projected
+service-account token, and prints the access token. It signs in on every run and keeps no token,
+which suits Oh My Pi: Oh My Pi holds the token for the life of its process, so the run after a 401
+brings a token never used, the one a gateway that refuses a spent token accepts. It never keeps or
+uses the refresh or ID token Cognito also returns. A refused sign-in exits 1 with Cognito's error
+code on stderr, never the endpoint's own text, and prints no token. It reaches Cognito directly and
+trusts only the image's certificate store: Oh My Pi runs it with the workspace's `.env` in its
+environment, so no `HTTPS_PROXY`, `SSL_CERT_FILE` or `SSL_CERT_DIR` steers it.
+
+The daemon's image probe runs the command too, so every probe performs a real sign-in.
+
+Every value is the operator's, passed as flags in their own `models.yml`:
+
+```yaml
+    apiKey: "!/opt/legion/bin/legion model-token --region <pool region> --client-id <app client id> --username <machine user> --service-account-token-file /var/run/operator/token"
+```
+
+The service-account token is the projected token `pod.yml` already mounts at
+`/var/run/operator/token`, with the operator's dedicated sign-in audience in place of
+`${MODEL_TOKEN_AUDIENCE}`; `legion start --check-config` refuses that placeholder unfilled. Set
+`X-Api-Key` to the same command.
+
 ## How the pieces compose
 
 `runtime.kubernetes.pod` delivers **files and variables**; `provider_keys` delivers **variables from

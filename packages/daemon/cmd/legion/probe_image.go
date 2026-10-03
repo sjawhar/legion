@@ -41,12 +41,11 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // the probe pod mounts no state volume; with --provider-env-dir, each provider key exported after
 // it as the shim exports them (shim.ReadProviderEnv); and with --role-references, the references
 // of the role prompts the daemon inlines into its pods (promptrefs.Encode's encoding, decoded as
-// the flags are read). Without it, the image resolves the bundle from
-// LEGION_ROLE_PROMPTS_DIR or role-prompts beside its own legion executable before reading the
-// references. When its environment names a NATS nkey seed (a probe pod's NATS_NKEY_SEED_FILE, the
-// providers Secret's key), that seed is read as the daemon reads its own (natsauth.Seed) and must
-// be a user's, and the line before the OK line names that user's public key (bootprobe.NATSUserLine),
-// never the seed, for the daemon to compare with its own.
+// the flags are read). Without it, the probe resolves the references of the role prompts this
+// binary embeds (prompts.RoleReferences). When its environment names a NATS nkey seed (a probe
+// pod's NATS_NKEY_SEED_FILE, the providers Secret's key), that seed is read as the daemon reads its
+// own (natsauth.Seed) and must be a user's, and the line before the OK line names that user's
+// public key (bootprobe.NATSUserLine), never the seed, for the daemon to compare with its own.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("probe-image", "usage: legion probe-image --plugin-root <dir> [flags]", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
@@ -56,7 +55,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	podSafety := flags.Bool("pod-safety", false, "run the probes on a pod's baseline (internal/podsafety), as a pod's shim starts Oh My Pi")
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files NAME=contents the probes' Oh My Pi gets, as a worker's shim exports them")
 	skipAgentModels := flags.Bool("skip-agent-models", false, "leave the prompt-named task agents' models unresolved (the image build's probe)")
-	roleReferences := flags.String("role-references", "", "the task agents and skills the daemon's own role prompts name, resolved in place of the image's roles")
+	roleReferences := flags.String("role-references", "", "the task agents and skills the daemon's own role prompts name, resolved in place of the role prompts this binary embeds")
 	if code, ok := parseFlags(flags, args); !ok {
 		return code
 	}
@@ -69,24 +68,17 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		return 2
 	}
 	// The role prompts a pod is handed: the daemon's, when it passes their references, else the
-	// image's own.
+	// ones this binary embeds.
 	var references promptrefs.Names
-	if *roleReferences != "" {
+	if *roleReferences == "" {
+		references = prompts.RoleReferences()
+	} else {
 		decoded, err := promptrefs.Decode(*roleReferences)
 		if err != nil {
 			fmt.Fprintf(stderr, "legion probe-image: --role-references: %v\n", err)
 			return 1
 		}
 		references = decoded
-	} else {
-		rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
-		if err == nil {
-			references, err = promptrefs.Roles(rolesDir)
-		}
-		if err != nil {
-			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
-			return 1
-		}
 	}
 	invocation := *omp
 	if invocation == "" {
