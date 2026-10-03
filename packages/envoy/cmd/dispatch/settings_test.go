@@ -854,10 +854,11 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1"}); boot.TestSettleDelay != 2*time.Second {
 				t.Errorf("default TestSettleDelay = %v, want 2s", boot.TestSettleDelay)
 			}
-			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "not-a-duration"}, "DISPATCH_TEST_SETTLE_DELAY")
-			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "-1s"}, "DISPATCH_TEST_SETTLE_DELAY")
-			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "0s"}, "DISPATCH_TEST_SETTLE_DELAY")
-			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS")
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_SETTLE_DELAY": invalid},
+					fmt.Sprintf("DISPATCH_TEST_SETTLE_DELAY=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
 	}
 	for _, row := range settings {

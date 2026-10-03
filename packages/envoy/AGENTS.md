@@ -92,15 +92,12 @@ arms the settlement of each document whose row is a minute old and whose issue i
 rolling deploy stops the old task after the new one has started. A closed issue's rooms arm none
 until it reopens. `docs.Service.Shutdown` runs the settlement of each loaded room whose document has
 that row, and no other, inside its 5 s drain budget (`docs.ShutdownDrainBudget`, within the
-caller's deadline: `cmd/dispatch/shutdown.go` gives document shutdown twice that budget,
-`documentShutdownTimeout`, started once HTTP shutdown has returned within its 5 s,
-`httpShutdownTimeout`; every open event stream ends at the signal through `api.Deps.Lifetime`, so
-HTTP shutdown waits only for the requests in flight; the database pool's close gets what is left of
-the document budget, and past it Dispatch exits with any connection still waiting on a database
-that has stopped answering); a settled document's repeat would spend the budget for nothing. Before
-it reads which documents owe a settlement, it waits for the durable appends each room had queued
-when it began, and not for later ones, so an editor that keeps sending updates leaves only its own
-room to resume. A room with an editor connected (a spec tab holds the
+caller's deadline); a settled document's repeat would spend the budget for nothing. Each loaded
+room has a worker of its own that waits for the durable appends the room had queued when Shutdown
+began, and not for later ones, then reads whether the room's document owes a settlement, settles
+it if so, and closes its editors: a room whose queued append is slow to store, or whose editor
+keeps sending updates, spends only its own share of the budget and leaves only its own settlement
+to resume. A room with an editor connected (a spec tab holds the
 document's websocket) is settled while it is still loaded, and its editors are closed only once that
 settlement has returned: ygo's `CloseRoom` evicts the room as it closes them, and a settlement does
 not load a room during shutdown, so closing the room first would leave its settlement to the next
@@ -116,6 +113,23 @@ after shutdown` with `shutdown_budget_ended`). A settlement cut short is not an 
 deadline that passes before Shutdown can read that back is, and its error names the documents that
 owed one. A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on the development
 machine, past that budget.
+
+`cmd/dispatch/shutdown.go` orders the process's shutdown inside `shutdownBudget`, 25 s from SIGTERM,
+which leaves 5 s of `stopGrace` (30 s: ECS's default stop timeout, which Dispatch's task definition
+leaves unset, and `stop_grace_period` in `deploy/compose/dispatch.compose.yml`) for the exit itself.
+Every open event stream ends at the signal through `api.Deps.Lifetime`, so HTTP shutdown waits only
+for the requests in flight, and it waits for them first, for as long as the budget allows. The
+document service starts when they are done, or 15 s after the signal with some still running
+(`httpDrainBeforeDocuments`, `dispatch: settle documents with requests still in flight`), and gets
+`documentShutdownTimeout`, twice its drain budget (10 s). The database pool closes once every
+request has answered and no connection is in use: a request against a database that answers keeps
+its connection until it commits and answers, up to the end of the budget
+(`dispatch: exit at the end of the shutdown budget with requests or database connections still in
+use`). While it waits, the health probe (`store.Pool.Healthy`, two seconds) asks whether the
+database still answers, and once it does not, Dispatch exits without the connections waiting on it
+(`dispatch: exit with database connections still in use once the database stopped answering`), and
+the database rolls back what they held open; with nothing in flight over HTTP that is about 12 s
+after the signal.
 
 A write never puts one block id on two blocks. `EnsureBlockIDs` keeps a repeated id for the first
 holder in document order, and ask rows and anchors are keyed on block ids, so a block written ahead
