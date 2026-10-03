@@ -58,7 +58,6 @@ var thisBinarysContract = strconv.Itoa(api.DaemonAPIVersion)
 // the plugin root a pod loads, which every probe-image run is given.
 func inImage(t *testing.T, contract, omp string) string {
 	t.Helper()
-	t.Setenv("LEGION_ROLE_PROMPTS_DIR", testRolePromptsDir(t))
 	home := t.TempDir()
 	unpacked := filepath.Join(home, "pi-legion-envoy")
 	if err := os.MkdirAll(unpacked, 0o755); err != nil {

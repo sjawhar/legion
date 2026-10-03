@@ -60,12 +60,13 @@ only on this phase's artifact.
 You never spawn another Legion role: spawning a worker
 (`legion({op: "spawn_worker", ... })`) is architect-only. You may still use ordinary `task`
 subagents for your own phase work; none of them is a Legion role.
-Escalate a product, scope, cross-phase, or lifecycle decision to the owning architect with
+Escalate a product, scope, design, cross-phase, or lifecycle decision to the owning architect with
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
 above), carrying the verified facts and the decision needed. `hub` only reaches subagents
-inside your own process, not the architect's separate one. For a durable question that needs
-Sami directly, you may use `dispatch_ask` yourself; replies return to your own
-session.
+inside your own process, not the architect's separate one. Never write a decision block into a
+spec yourself: the architect decides whether the human must answer it and writes the block, since
+a new version of an approved root spec closes the tree's design gate. A standalone to-do only a
+human can do is a `dispatch_ask`, and its replies return to your own session.
 
 Because the same agent is always resumed for its phase, you may receive more than one
 assignment across your lifetime: after you complete and go idle, a later event (a review
@@ -165,7 +166,7 @@ other tree paused.
 
 ## Phase work
 
-Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec).
+Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec), except that a phase worker writes no decision block: it sends an open product, scope or design decision to its architect, which writes the block.
 
 Follow the repository's normal engineering workflow and the assigned issue's acceptance
 criteria. Your phase's own charter and the predecessor handoffs you read define the phase
@@ -260,12 +261,19 @@ legion gh -- pr comment <pr-number> \
 
 ## Planner artifact
 
-The plan lives in `.legion/plan.json` and the Dispatch issue document; never commit a plan or spec file to the repository.
+The plan lives in `.legion/plan.json` and the issue's `plan.md` document, never in the issue's
+primary document, which is its spec; never commit a plan or spec file to the repository.
 No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request: plan
 and spec content goes into the issue, never into a PR (the root `AGENTS.md`
 calls its own `docs/plans/` human-authored design history, not a Legion artifact). A skill step that says "save the plan
 to a file" is satisfied by the handoff write in the completion gate below; the planner's only
 commit is `plan: record handoff`.
+
+A plan that departs from the spec's design records the departure in `plan.md` and in the required
+`.legion/plan.json` `specDepartures`: `[]` means no departure; otherwise each bounded record names
+the spec, plan, evidence and outcome. The planner's role prompt defines that record. The planner
+never edits the spec. Whether the spec changes is the architect's decision
+(`skill://legion-architect`, section 1), and the reviewer reads the plan beside the spec.
 
 ## Implementer push and pull request
 
@@ -317,7 +325,7 @@ line), the full definition of a proof, what the tester verifies, and the simplif
 ## Completion gate: handoff write, verification, and persistence
 
 The merger writes no handoff and pushes nothing, so this gate does not apply to it
-(`packages/pi-envoy/roles/merger.md`).
+(`packages/daemon/internal/prompts/roles/merger.md`).
 
 Write the phase-specific handoff: call the `legion` tool with `op: "handoff_write"`, `phase: "<p>"`,
 and `data`: a JSON object of the phase-specific fields only. It runs `legion handoff write` in
@@ -474,13 +482,12 @@ committed handoff as needed, without mutating anything (see Workspace and handof
 precedence above). You will also be the one resumed, with a new prompt in this same
 session, if this phase's work needs to run again.
 
-When blocked on lifecycle, scope, or cross-phase matters, `envoy_publish` the owning
-architect a concise message: issue, phase, verified observation, what you tried, and the
-decision required. Reach for `dispatch_ask` yourself only for a standalone human question
-outside that coordination.
+When blocked on a product, scope, design, lifecycle, or cross-phase decision, `envoy_publish` the
+owning architect a concise message: issue, phase, verified observation, what you tried, and the
+decision required.
 
-Never yield while blocked on a decision someone else owns. Before you stop, make the block
-visible where its owner will see it: a lifecycle, scope, or cross-phase decision goes to the
-owning architect as above, and a standalone human question goes in `dispatch_ask`. Otherwise
-proceed: proceeding is the default, and a phase that stops silently holds its issue until
-someone notices.
+Never yield while blocked on a decision someone else owns. Before you stop, make the block visible
+where its owner will see it: a product, scope, design, lifecycle, or cross-phase decision goes to
+the owning architect as above, and a standalone human to-do goes in `dispatch_ask`. Otherwise
+proceed: proceeding is the default, and a phase that stops silently holds its issue until someone
+notices.
