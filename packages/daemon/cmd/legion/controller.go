@@ -247,7 +247,7 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 		{"ENVOY_URL", cfg.EnvoyURL},
 		// Every inherited worker-bin is dropped (the shipped pathWithoutWorkerBin), so a start
 		// from inside a Legion pane never puts that pane's shim behind this one.
-		{"PATH", workerBin + separator + bin + separator + workerBinFreePath(os.Getenv("PATH"))},
+		{"PATH", workerBin + separator + bin + separator + workerbin.FreePath(os.Getenv("PATH"))},
 		{"PI_SHELL_PREFIX", shellprefix.For(workerBin, bin)},
 		{"GH_CONFIG_DIR", filepath.Join(stateDir, "gh")},
 		{"GH_TOKEN", ""},

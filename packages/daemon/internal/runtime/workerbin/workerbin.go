@@ -62,6 +62,19 @@ func Path(path, root string) string {
 	return strings.Join(entries, string(filepath.ListSeparator))
 }
 
+// FreePath is path without any entry named DirName, whatever root it is under: the PATH `legion gh`
+// looks for the real gh on, and the one `legion controller start` puts its own directories in front
+// of, so a process started from inside a Legion pane never reaches that pane's shim.
+func FreePath(path string) string {
+	entries := make([]string, 0, len(filepath.SplitList(path)))
+	for _, entry := range filepath.SplitList(path) {
+		if entry != "" && filepath.Base(entry) != DirName {
+			entries = append(entries, entry)
+		}
+	}
+	return strings.Join(entries, string(filepath.ListSeparator))
+}
+
 // installScript writes one 0700 script into a 0700 directory, replacing any earlier one atomically.
 func installScript(dir, name, contents string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
