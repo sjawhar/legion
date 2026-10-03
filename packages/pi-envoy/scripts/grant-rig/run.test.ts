@@ -50,9 +50,27 @@ test("strips an inherited Anthropic key and GitHub token from both worker launch
     ["rpc", true],
     ["tui", false],
   ] as const) {
-    expect(launchArgv({ ...launch, useSecrets }, mode)).toEqual(
+    // `secrets` reads the caller's secretsd configuration; Oh My Pi gets the pane's XDG_CONFIG_HOME.
+    expect(launchArgv({ ...launch, useSecrets }, mode, workerEnv)).toEqual(
       useSecrets
-        ? ["secrets", "GEMINI_API_KEY", "OPENAI_API_KEY", "--", "/opt/omp/bin/omp", "--mode", "rpc"]
+        ? [
+            ...[
+              "env",
+              "-u",
+              "XDG_CONFIG_HOME",
+              "secrets",
+              "GEMINI_API_KEY",
+              "OPENAI_API_KEY",
+              "--",
+            ],
+            ...[
+              "env",
+              `XDG_CONFIG_HOME=${rig}/state/home/.config`,
+              "/opt/omp/bin/omp",
+              "--mode",
+              "rpc",
+            ],
+          ]
         : ["/opt/omp/bin/omp"]
     );
   }

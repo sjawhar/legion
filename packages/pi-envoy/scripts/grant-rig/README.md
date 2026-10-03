@@ -125,7 +125,10 @@ the daemon's own functions:
 | `PATH` | `$RIG/state/worker-bin`, then `$RIG/state/bin`, then the current shell's PATH |
 
 The launch argv is `secrets GEMINI_API_KEY OPENAI_API_KEY -- <omp>`, plus `--mode rpc` for the
-headless leg (`--no-secrets` drops the prefix when the keys are already in the environment). No
+headless leg (`--no-secrets` drops the prefix when the keys are already in the environment).
+`secrets` runs without the pane's `XDG_CONFIG_HOME`, whose directory under `$RIG/state/home` holds
+no secretsd configuration, and Oh My Pi runs with it again (`env -u XDG_CONFIG_HOME secrets … --
+env XDG_CONFIG_HOME=… <omp>`). No
 Anthropic key is injected: omp's anthropic provider gets its gateway token from `!hawk-token` in
 the profile's `models.yml`, and a set `ANTHROPIC_API_KEY` would bypass it.
 

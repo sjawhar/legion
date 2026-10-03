@@ -268,10 +268,23 @@ export function workerPane(
   };
 }
 
-/** The headless leg runs `omp --mode rpc`; the terminal leg runs the interactive `omp`. */
-export function launchArgv(launch: WorkerLaunch, mode: "rpc" | "tui"): string[] {
+/** The headless leg runs `omp --mode rpc`; the terminal leg runs the interactive `omp`. With
+ * secrets, `secrets` fetches the provider keys under the caller's own secretsd configuration (the
+ * pane's `XDG_CONFIG_HOME`, under the daemon's state directory, holds none), and Oh My Pi then runs
+ * under the pane's `XDG_CONFIG_HOME` again. */
+export function launchArgv(
+  launch: WorkerLaunch,
+  mode: "rpc" | "tui",
+  paneEnv: Readonly<Record<string, string>>
+): string[] {
   const omp = mode === "rpc" ? [launch.omp, "--mode", "rpc"] : [launch.omp];
-  return launch.useSecrets ? ["secrets", "GEMINI_API_KEY", "OPENAI_API_KEY", "--", ...omp] : omp;
+  if (!launch.useSecrets) return omp;
+  const configHome = paneEnv.XDG_CONFIG_HOME;
+  if (configHome === undefined) throw new Error("the pane environment names no XDG_CONFIG_HOME");
+  return [
+    ...["env", "-u", "XDG_CONFIG_HOME", "secrets", "GEMINI_API_KEY", "OPENAI_API_KEY", "--"],
+    ...["env", `XDG_CONFIG_HOME=${configHome}`, ...omp],
+  ];
 }
 
 interface DriveResult {
@@ -290,9 +303,10 @@ async function drive(launch: WorkerLaunch, prompt: string, label: string): Promi
   const stderrFile = path.join(runDir, "stderr.log");
   await writeFile(path.join(runDir, "prompt.txt"), `${prompt}\n`);
 
-  const child = Bun.spawn(launchArgv(launch, "rpc"), {
+  const env = workerPane(launch).env;
+  const child = Bun.spawn(launchArgv(launch, "rpc", env), {
     cwd: path.join(launch.rig, "ws"),
-    env: workerPane(launch).env,
+    env,
     stdin: "pipe",
     stdout: "pipe",
     stderr: Bun.file(stderrFile),
@@ -874,6 +888,7 @@ async function driveTui(launch: WorkerLaunch, prompt: string, label: string): Pr
   await Bun.spawn([...TMUX, "kill-server"], { stdout: "ignore", stderr: "ignore" }).exited;
   // A fresh private server inherits this spawn's environment, so the pane gets exactly the
   // headless leg's `workerPane` environment.
+  const env = workerPane(launch).env;
   const server = Bun.spawn(
     [
       ...TMUX,
@@ -887,9 +902,9 @@ async function driveTui(launch: WorkerLaunch, prompt: string, label: string): Pr
       "50",
       "-c",
       path.join(launch.rig, "ws"),
-      ...launchArgv(launch, "tui"),
+      ...launchArgv(launch, "tui", env),
     ],
-    { env: workerPane(launch).env, stdout: "pipe", stderr: "pipe" }
+    { env, stdout: "pipe", stderr: "pipe" }
   );
   if ((await server.exited) !== 0) {
     throw new Error(
