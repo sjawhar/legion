@@ -1,0 +1,47 @@
+---
+title: Troubleshooting
+description: Every message agent-secrets and Dispatch show when the broker refuses something, what causes it, and how to fix it.
+---
+
+Find the message you see. `agent-secrets` prints a broker refusal as `<message> (<CODE>)` and a
+helper refusal as `<CODE>: <message>`; the [error reference](/legion/broker/reference/errors/),
+generated from the code, lists every code.
+
+## The session has no broker identity
+
+| Message | Cause | Fix |
+| --- | --- | --- |
+| `AGENT_SECRETS_URL is required` (exit 2) | The process does not know the broker's address. | Set `AGENT_SECRETS_URL` to the broker's public URL. A command run by `agent-secrets NAME -- …` keeps it. |
+| `no session identity: the key dir … has no key.pem … and no helper socket is set or at …` | The process is neither in a container with a key nor on a machine with a helper. | On a machine, run the agent under `agent-secrets register --exec`; in a container, its launcher must enroll it. |
+| `NOT_A_SESSION: pid … is not inside a registered host session; a session root is started with agent-secrets register --exec -- <agent argv>` | The helper is running, but this process does not descend from a registered session. | Start the agent with `agent-secrets register --wait 10 --exec -- <agent>`. |
+| `NOT_ENROLLED: this session is not enrolled with the broker yet` | The session registered, but the helper has not enrolled it yet: it was started without `--wait`, or the broker was unreachable. | Start sessions with `--wait 10`. If it persists, check the helper's log and that `AGENT_SECRETS_URL` reaches the broker. |
+| `this machine is not logged in to the secrets broker; not an agent session (run: agent-secrets launcher login)` | The helper holds no machine credential: it restarted, or the credential expired. | [Log the machine in](/legion/broker/guides/log-a-machine-in/). |
+| `agent-secrets: helper unreachable at …` | The helper is not running, or the socket path is wrong. | Start `agent-secrets-helper`, or point `AGENT_SECRETS_HELPER_SOCK` at its socket. |
+| `the last machine login is expired; run: agent-secrets launcher login`, or `the broker refused this machine's launcher credential …` (from `launcher login-status`) | The credential expired or was refused: past its lifetime, a clock far off the broker's, or an `AGENT_SECRETS_URL` that is not exactly the broker's public URL. | Fix the clock or the URL if either is wrong, then log in again. |
+| `PROOF_INVALID` | The broker refused the session's signature: the session ended (its lease ran out, or its process exited), the clock is off by more than `BROKER_PROOF_SKEW_SECONDS`, or `AGENT_SECRETS_URL` differs from the broker's public URL. | Start a new session; check the clock and the URL. |
+
+## The request was refused
+
+| Message | Cause | Fix |
+| --- | --- | --- |
+| `request … was denied` (exit 77) | The approver denied it, or the rules deny one of the names for this session. Nothing ran. | Ask the approver, or the rules' owner, why. |
+| `request … is still waiting for approval; nothing was run. Check it with: agent-secrets status …` (exit 75) | Nobody decided within `--wait` (30 minutes by default). | Ask the approver; check with `agent-secrets status`; rerun the command once it is granted. |
+| `request … was expired` or `request … was cancelled` | Nobody decided it within 12 hours, or the session cancelled it (or ended). | Ask again. |
+| `no rule names this secret (UNKNOWN_SECRET)` | The name is not in the broker's rules. | Check the spelling, or ask the rules' owner to add it. |
+| `the requested secrets need different approvers; request them separately (MIXED_APPROVERS)` | One command asked for secrets that different people approve. | Request them in separate commands. |
+| `… not released (proxy-delivery or otherwise unavailable)` | The grant came back without one of the names' values: a `delivery: proxy` secret, which the broker never releases. | Use an `inject` secret. |
+| `grant is expired, revoked, or its session ended (GRANT_NOT_LIVE)` | The grant ended between the decision and the read. | Run the command again to ask anew. |
+| `secret is not in the secrets store (SECRET_NOT_IN_STORE)` | The rules name a `source` the secret store does not hold. | Tell whoever runs the broker; the rules or the store is wrong. |
+| `request object invalid (REQUEST_INVALID)` | The broker could not verify the signed request: usually a clock far off, or an `AGENT_SECRETS_URL` that is not the broker's public URL. | Check the clock and the URL. |
+
+## Approving and logging in, in Dispatch
+
+| Message | Cause | Fix |
+| --- | --- | --- |
+| `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver the request names. | The named approver decides it. |
+| `request is already decided` or `this machine login has already been decided` (`RECORD_TERMINAL`) | It was decided already, or the session that asked has ended. | Nothing to do. |
+| `… expired before its approver acted on it` (`RECORD_TERMINAL`) | A request waits 12 hours, a machine login 15 minutes. | The agent or the machine asks again. |
+| `no pending machine login has this code` (`NO_SUCH_CODE`) | The code is mistyped, already decided, or expired. | Check the code on the machine's terminal; start a new login if it expired. |
+| `confirmation code does not match` (`CODE_MISMATCH`) | The decision carried a different code from the login it names. | Look the code up again and decide from that page. |
+| `this machine login's key already holds a live launcher credential` (`KEY_HOLDS_LIVE_CREDENTIAL`) | The machine signed two logins with one key, and one is already approved. | Deny this one; the machine is already logged in. |
+| No **Credential requests** section and no **Live grants** | Dispatch has no broker connected (`DISPATCH_AGENT_SECRETS_URL` is unset). | See [Operating the broker](/legion/broker/operate/#what-it-depends-on). |
