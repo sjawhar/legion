@@ -24,7 +24,7 @@ const headlessOnly = [
   "spawn_worker",
   "legion-worker",
   // A task subagent the interactive fragment starts dispatches none of its own. The needle is the
-  // boot gate's own form (packages/daemon-go/internal/promptrefs/promptrefs.go), so a dispatch that
+  // boot gate's own form (packages/daemon/internal/promptrefs/promptrefs.go), so a dispatch that
   // carries other arguments is caught too.
   'agent="',
 ];
@@ -154,10 +154,10 @@ const rolePromptFiles = readdirSync(rolesDir, { recursive: true, encoding: "utf8
 );
 
 describe("the planner's plan checks", () => {
-  // The form the boot gate resolves (packages/daemon-go/internal/promptrefs: `agent="<name>"`),
+  // The form the boot gate resolves (packages/daemon/internal/promptrefs: `agent="<name>"`),
   // whatever else a dispatch's parentheses carry. What each shipped agent declares is
   // shipped-agents.test.ts's; the composed planner's dispatch order is
-  // packages/daemon-go/internal/prompts/prompts_test.go's.
+  // packages/daemon/internal/prompts/prompts_test.go's.
   test("every task agent a role prompt dispatches is shipped in agents/", () => {
     const dispatchers = new Map<string, string[]>();
     for (const file of rolePromptFiles)

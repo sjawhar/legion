@@ -1,7 +1,7 @@
 // Package registry is the Go daemon's record of the legions running on this box: which team each
 // one coordinates, the configuration it started from, and where to reach it.
 //
-// The file is `legions-go.json` in the state home: `$XDG_STATE_HOME/legion`, or
+// The file is `legions.json` in the state home: `$XDG_STATE_HOME/legion`, or
 // `~/.local/state/legion` where that variable is unset or relative.
 package registry
 
@@ -21,7 +21,7 @@ import (
 )
 
 // FileName is the registry's name under `<state home>/legion/`.
-const FileName = "legions-go.json"
+const FileName = "legions.json"
 
 // Entry is one running legion: the team it coordinates, the configuration it was started from —
 // which is what `legion restart` starts it again with — the address and process to reach or
@@ -41,9 +41,9 @@ type Entry struct {
 	StartedAt time.Time `json:"startedAt"`
 }
 
-// Path is where the registry lives: `$XDG_STATE_HOME/legion/legions-go.json`, and
-// `<home>/.local/state/legion/legions-go.json` where that variable is unset or relative — the
-// rule the shipped resolver applies (paths.ts:26-31). A nil env reads the process environment.
+// Path is where the registry lives: `$XDG_STATE_HOME/legion/legions.json`, and
+// `<home>/.local/state/legion/legions.json` where that variable is unset or relative. A nil env
+// reads the process environment.
 func Path(env func(string) string, home string) string {
 	if env == nil {
 		env = os.Getenv
@@ -198,7 +198,7 @@ func write(path string, entries []Entry) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("make the legions registry directory %s: %w", dir, err)
 	}
-	temp, err := os.CreateTemp(dir, ".legions-go-*.json")
+	temp, err := os.CreateTemp(dir, ".legions-*.json")
 	if err != nil {
 		return fmt.Errorf("write the legions registry at %s: %w", path, err)
 	}

@@ -42,25 +42,24 @@ func mustClaim(t *testing.T, path string, e Entry) {
 	}
 }
 
-// The Go daemon keeps its own registry file until Stage 7: legions.json is the shipped
-// TypeScript daemon's, and a Go entry written there is a file of another shape to its reader.
-func TestPathIsTheGoDaemonsOwnFileUnderTheStateHome(t *testing.T) {
+// The registry is legions.json under the state home's legion directory.
+func TestPathIsTheRegistryFileUnderTheStateHome(t *testing.T) {
 	env := func(key string) string {
 		if key == "XDG_STATE_HOME" {
 			return "/var/lib/state"
 		}
 		return ""
 	}
-	if got, want := Path(env, "/home/legion"), "/var/lib/state/legion/legions-go.json"; got != want {
+	if got, want := Path(env, "/home/legion"), "/var/lib/state/legion/legions.json"; got != want {
 		t.Fatalf("Path = %q, want %q", got, want)
 	}
 }
 
-// The shipped resolver takes XDG_STATE_HOME only when it is absolute (paths.ts:26-31).
+// XDG_STATE_HOME counts only when it is absolute.
 func TestPathFallsBackToTheHomeStateDirectoryWhenTheStateHomeIsNotAbsolute(t *testing.T) {
 	for _, stateHome := range []string{"", "relative/state"} {
 		env := func(string) string { return stateHome }
-		want := "/home/legion/.local/state/legion/legions-go.json"
+		want := "/home/legion/.local/state/legion/legions.json"
 		if got := Path(env, "/home/legion"); got != want {
 			t.Errorf("Path with XDG_STATE_HOME=%q = %q, want %q", stateHome, got, want)
 		}
@@ -182,7 +181,7 @@ func TestClaimLeavesNoTemporaryFileBehind(t *testing.T) {
 		t.Fatalf("glob the state directory: %v", err)
 	}
 	for _, name := range names {
-		if strings.HasPrefix(filepath.Base(name), ".legions-go-") {
+		if strings.HasPrefix(filepath.Base(name), ".legions-") {
 			t.Errorf("a temporary registry file survived the write: %s", name)
 		}
 	}

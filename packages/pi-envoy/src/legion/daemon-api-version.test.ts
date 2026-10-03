@@ -6,7 +6,7 @@ function json(relative: string): unknown {
   return JSON.parse(readFileSync(path.resolve(import.meta.dir, relative), "utf8"));
 }
 
-// The daemon's boot gate (`packages/daemon-go/internal/daemon/bootgate.go`) holds the manifest's
+// The daemon's boot gate (`packages/daemon/internal/daemon/bootgate.go`) holds the manifest's
 // `legion.daemonApiVersion` to its `DaemonAPIVersion`, which its golden test writes to this
 // fixture: a bump on either side alone fails here or there, never at a boot. The manifest carries
 // that one number and nothing else under `legion`.

@@ -214,7 +214,7 @@ func buildLegionForRealProof(t *testing.T) string {
 	}
 	binary := filepath.Join(t.TempDir(), "legion")
 	command := exec.Command("go", "build", "-o", binary, "./cmd/legion")
-	command.Dir = filepath.Join(root, "packages", "daemon-go")
+	command.Dir = filepath.Join(root, "packages", "daemon")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("build legion binary: %v: %s", err, strings.TrimSpace(string(output)))
 	}

@@ -28,12 +28,12 @@ import { messageFor } from "@legion/envoy-client/errors";
 import type { z } from "zod";
 
 /**
- * The plugin's client for the daemon (`packages/daemon-go`), the one `extensions/legion.ts` boots
+ * The plugin's client for the daemon (`packages/daemon`), the one `extensions/legion.ts` boots
  * every Legion session through.
  *
  * Every response is read through the strict schemas of `@legion/contracts/legion-go-api`, which the
  * daemon's golden tests hold to its own types; the requests are the claim wire of
- * `packages/daemon-go/internal/claim/wire.go`, which refuses a member it does not read. There is no
+ * `packages/daemon/internal/claim/wire.go`, which refuses a member it does not read. There is no
  * secret recovery: the daemon persists a registration's capability before it answers, so a
  * restart forgets no secret.
  */

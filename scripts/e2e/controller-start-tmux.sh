@@ -114,7 +114,7 @@ pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 pick_port daemon_port
 pick_port envoy_port
-(cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
+(cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
 stage_role_prompts "$root" "$work"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 note "legion $("$work/legion" version); OMP pin $pin; daemon port $daemon_port; listener port $envoy_port"
@@ -386,8 +386,8 @@ func main() {
 	}
 }
 GO
-printf '{"Replace":{"%s":"%s"}}' "$root/packages/daemon-go/cmd/liveprobe-accept/main.go" "$work/liveprobe.go" >"$work/overlay.json"
-verdicts=$(cd "$root/packages/daemon-go" && go run -overlay "$work/overlay.json" ./cmd/liveprobe-accept \
+printf '{"Replace":{"%s":"%s"}}' "$root/packages/daemon/cmd/liveprobe-accept/main.go" "$work/liveprobe.go" >"$work/overlay.json"
+verdicts=$(cd "$root/packages/daemon" && go run -overlay "$work/overlay.json" ./cmd/liveprobe-accept \
   "http://127.0.0.1:$envoy_port" "$work/envoy-token" "$ptoken" "$session2" "$session1" 2>"$evidence/checks/liveprobe.log" | tr '\n' ' ')
 [ "$verdicts" = "$session2=alive $session1=gone " ] || fail "verdicts: $verdicts; log $(cat "$evidence/checks/liveprobe.log")"
 note "controller.Prober on the live listener: $verdicts"

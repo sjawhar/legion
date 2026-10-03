@@ -4,8 +4,8 @@ import { LEGION_ROLES } from "./legion-roles";
 /**
  * The Go daemon's HTTP API, as its readers see it.
  *
- * Go owns this wire shape: `packages/daemon-go/internal/api` (`state.go`, `operator.go`) and the
- * claim wire in `packages/daemon-go/internal/claim/wire.go` are the source of truth, and every
+ * Go owns this wire shape: `packages/daemon/internal/api` (`state.go`, `operator.go`) and the
+ * claim wire in `packages/daemon/internal/claim/wire.go` are the source of truth, and every
  * schema here mirrors them field for field. The two are pinned to each other by
  * `packages/contracts/fixtures/daemon-api/*.json`, written by the Go golden tests
  * (`go test ./internal/api/ -update`) and parsed here by `legion-go-api.test.ts` — no generator

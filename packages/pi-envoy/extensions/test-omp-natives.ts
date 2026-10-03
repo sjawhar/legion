@@ -4,7 +4,7 @@
 // setting for that directory short of XDG_DATA_HOME, which moves its whole profile. Each HOME's
 // natives are instead hardlinks to one copy per binary under the user's cache directory.
 //
-// The copy is the one the Go tests keep (packages/daemon-go/internal/testbin/natives.go,
+// The copy is the one the Go tests keep (packages/daemon/internal/testbin/natives.go,
 // testbin.OMPHome): the same directory, name, layout, lock and fill, so a machine holds one copy per
 // pin for both languages and either fills it for the other. A change to one is a change to both.
 import {

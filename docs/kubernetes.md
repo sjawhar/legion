@@ -2,7 +2,7 @@
 
 This runbook covers the worker image, the session store, the Kubernetes runtime, and the operator-launched controller.
 
-The Go coordinator (`packages/daemon-go`, LEGION-208) runs each process as an Agent Sandbox; its live proof is `scripts/e2e/stage4b-sandbox-tree.sh` on the production cluster. The TypeScript daemon (`packages/daemon`) no longer runs on Kubernetes: it refuses `runtime: kubernetes` at config load and names the Go daemon (LEGION-286). Its runtime's section below is kept for reference and goes with `packages/daemon` at Stage 7 (LEGION-223).
+The Go coordinator (`packages/daemon`, LEGION-208) runs each process as an Agent Sandbox; its live proof is `scripts/e2e/stage4b-sandbox-tree.sh` on the production cluster. The TypeScript daemon (`packages/daemon`) no longer runs on Kubernetes: it refuses `runtime: kubernetes` at config load and names the Go daemon (LEGION-286). Its runtime's section below is kept for reference and goes with `packages/daemon` at Stage 7 (LEGION-223).
 
 ## Worker image
 
@@ -12,7 +12,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 - the pinned OMP fork build the daemon's default `omp_invocation` names — resolved at build time with the
   same `mise x github:sjawhar/oh-my-pi@<pin>` mechanism a tmux host uses, from the single pin source
   `.omp-pin`; installed at `/opt/omp/bin/omp` (`LEGION_OMP_PATH`);
-- `legion` (`packages/daemon-go`), compiled from the same commit at `go.work`'s Go version, static, at
+- `legion` (`packages/daemon`), compiled from the same commit at `go.work`'s Go version, static, at
   `/opt/legion/bin/legion` — the `legion` on `PATH` and the image's `ENTRYPOINT` — with the
   `agent-secrets` client beside it at `/opt/legion/bin/agent-secrets`. It links the commit it was built
   from: `docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… version` prints
@@ -23,7 +23,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 - `@bopstack/pi-codegraph` (from npm, pinned) linked into the same OMP profile, backed by the CodeGraph
   CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the `codegraph` tool a tester
   queries for `affected` tests and a reviewer for `impact`/`callers` blast radius (`packages/pi-envoy/roles/core/tester.md`, `core/reviewer.md`);
-- the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file. The Go daemon resolves and validates its bundle at boot from that override or `role-prompts` beside its own executable, then snapshots it into its state directory before a pane can read it. It inlines that snapshot into each pod it runs, and `legion probe-image` resolves the task agents and skills the configured bundle names when it is given no `--role-references` (`packages/daemon-go/cmd/legion/probe_image.go`). The role prompts are not part of the packed plugin (its `files` is `dist`), so the image supplies this explicit copy;
+- the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file. The Go daemon resolves and validates its bundle at boot from that override or `role-prompts` beside its own executable, then snapshots it into its state directory before a pane can read it. It inlines that snapshot into each pod it runs, and `legion probe-image` resolves the task agents and skills the configured bundle names when it is given no `--role-references` (`packages/daemon/cmd/legion/probe_image.go`). The role prompts are not part of the packed plugin (its `files` is `dist`), so the image supplies this explicit copy;
 - OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and
   `git` at `/usr/bin/git` from the `debian:trixie-slim` base — jj's git backend requires git >= 2.42
@@ -57,7 +57,7 @@ version.
 ### The image is probed before it publishes
 
 The daemon refuses to serve unless its OMP exposes `pi.agents` and actually loads `pi-legion-envoy`
-(`packages/daemon-go/internal/daemon/bootgate.go`). The image build's final step runs `legion version`,
+(`packages/daemon/internal/daemon/bootgate.go`). The image build's final step runs `legion version`,
 requiring the commit the workflow built, then `legion probe-image`: the same two probes, run by the
 daemon's own code, plus a third only the image runs — the session-storage probe, which prints
 `session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — with the plugin held to
@@ -71,7 +71,7 @@ leaves those agents' models unresolved (`--skip-agent-models`), printing
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped daemon-api-version=<N>`. The daemon's Agent Sandbox runtime runs the same command in a probe
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
 boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
-tool resolves a subagent's (`packages/daemon-go/internal/runtime/sandbox/probe.go`). To run it yourself:
+tool resolves a subagent's (`packages/daemon/internal/runtime/sandbox/probe.go`). To run it yourself:
 `docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models`
 (`--plugin-root` is required: the plugin root a Sandbox pod loads the plugin from, so the probe loads it the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
@@ -86,7 +86,7 @@ To check a published image's toolchain end to end, Python install included:
 
 `legion.yaml` `runtime.kubernetes.image` accepts only `ghcr.io/sjawhar/legion-worker@sha256:…`. A tag is
 mutable; the daemon must know exactly what it probed, so a tag reference is refused at startup with
-`runtime.kubernetes.image must be pinned by digest (@sha256:…)` (`packages/daemon-go/internal/config/kubernetes.go`).
+`runtime.kubernetes.image must be pinned by digest (@sha256:…)` (`packages/daemon/internal/config/kubernetes.go`).
 
 Where the digest is published:
 
@@ -113,7 +113,7 @@ lockfile, patches and each root workspace's `package.json` (the frozen install);
 whole — the Dockerfile (`packages/daemon/docker/**`), the plugin and what it bundles (`packages/pi-envoy/**`,
 `packages/envoy-client/**`, `packages/contracts/**`), the provisioning code (`packages/workspace/**`) and
 the skills (`skills/**`); the OMP pin (`.omp-pin`); the whole Go module the image compiles `legion` from
-(`packages/daemon-go/**`) and its build inputs; the
+(`packages/daemon/**`) and its build inputs; the
 context's `.dockerignore`; and the workflow itself. What a pod executes is part of the image's behaviour —
 the command a Sandbox pod runs, the launch probes `legion probe-image` runs in the image's final step and in
 the Go daemon's probe Sandbox, and every package they import — so a change to any of it builds the image it
@@ -327,7 +327,7 @@ architect, sub-architect and phase worker gets a `agents.x-k8s.io` `Sandbox` (ku
 LEGION-206), and its pod runs under gVisor on the Legion pool. The Sandbox is named by the claim token,
 `legion-<project>-<issue>-<role>`, and keeps that name across generations: a new generation rotates
 the boot token and takes the Sandbox `Suspended` and then `Running` again
-(`packages/daemon-go/internal/runtime/sandbox`). The daemon runs on a host its pods can reach and
+(`packages/daemon/internal/runtime/sandbox`). The daemon runs on a host its pods can reach and
 serves the worker stream they dial. The controller is `legion controller start` on the operator's
 machine ([Operator-launched controller](#operator-launched-controller)).
 
@@ -358,7 +358,7 @@ worker_stream_port: 13371
 daemon_url: http://<the daemon host's own address>:13370
 ```
 
-`packages/daemon-go/internal/config/kubernetes.go` reads the block and refuses, naming the key:
+`packages/daemon/internal/config/kubernetes.go` reads the block and refuses, naming the key:
 - anything it does not model: `role_profiles`, since each role's requests and limits go under
   `resources`;
 - `gateway`, removed with LEGION-270: a pod's model route is the operator's `pod`;
@@ -529,7 +529,7 @@ The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>
 ### A shell on the tree volume
 
 Some of provisioning's refusals name `jj` commands against the tree's shared clone,
-`-R /legion/repos/github.com/<owner>/<repo>` (`packages/daemon-go/internal/workspace/bookmark.go`):
+`-R /legion/repos/github.com/<owner>/<repo>` (`packages/daemon/internal/workspace/bookmark.go`):
 - a local bookmark deleted and never pushed: restore it, cancel the deletion, or start from main;
 - a conflicted local bookmark: keep an added commit, or start from main.
 
@@ -630,7 +630,7 @@ and jj configuration (a legacy `.jj/workspace-config.toml` included), its remote
 `http.proxy`. git and jj obey all of it — they run hooks, the git jj is told to run, working-copy
 filters and `ext::` transports, and send credentials through the proxy the configuration names —
 so no process that can read the token may touch the tree volume. The Go coordinator's pods
-(`packages/daemon-go`) keep to that with two init containers:
+(`packages/daemon`) keep to that with two init containers:
 
 - **`workspace-fetch`** mounts the provisioning Secret, an in-memory `TMPDIR` of its own, and the
   pod's `feed` `emptyDir`, and runs `legion workspace-init fetch --repo <owner>/<repo> --feed
@@ -644,7 +644,7 @@ so no process that can read the token may touch the tree volume. The Go coordina
   transport, then the workspace add, `update-stale`, and the configuration writes. What a tree agent
   planted can run there, with nothing to take that the agent does not already hold.
 
-`packages/daemon-go/internal/runtime/sandbox/boundary_test.go` runs both containers exactly as the
+`packages/daemon/internal/runtime/sandbox/boundary_test.go` runs both containers exactly as the
 manifest states them against nine such plants, with every one of provisioning's git and jj pins made
 ineffective.
 
@@ -695,7 +695,7 @@ and resource allowance. Nothing in this mode uses a Job, a StatefulSet, or `acti
 ### Configuration
 
 This section is the TypeScript daemon's, which now refuses `runtime: kubernetes` outright, naming the
-Go daemon (LEGION-286); what follows is the block it read before. The Go coordinator (`packages/daemon-go`, LEGION-208)
+Go daemon (LEGION-286); what follows is the block it read before. The Go coordinator (`packages/daemon`, LEGION-208)
 reads the same `runtime.kubernetes` key with different rules, and refuses the examples below as
 written: its runtime selects the Legion pool itself, so `scheduling.node_selector` may not set
 `legion.dev/pool`; `resources` is keyed by role, with no `role_profiles`; `storage_class` is
@@ -703,7 +703,7 @@ required, and a `gateway` block is refused as removed (LEGION-270: a pod's model
 operator's `pod` below); `bind` must be an address pods reach, never `0.0.0.0` or loopback, since every pod
 dials the worker stream at `tcp://<bind>:<worker_stream_port>`; and no Legion URL a pod is handed
 (`daemon_url`, `envoy_url`, `dispatch_url`, each `nats_urls` entry) may name a loopback or
-unspecified host (`packages/daemon-go/internal/config/kubernetes.go`). It also reads
+unspecified host (`packages/daemon/internal/config/kubernetes.go`). It also reads
 `runtime.kubernetes.pod` — `env`, `volumes` (each one `secret`, `config_map`, or `projected`
 source), `volume_mounts` (read-only unless `read_only: false`), and `service_account` — which it
 adds to every pod, the image probe's included, refusing any name or path of Legion's own or the

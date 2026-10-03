@@ -205,7 +205,7 @@ export interface WorkerClaim {
 const RIG_CLAIM: WorkerClaim = { project: "l12rig", issue: "RIG-1", role: "implementer" };
 
 /** The directory name `legion gh` and `legion credential` drop from PATH wherever it occurs
- * (`workerbin.DirName`, packages/daemon-go/internal/runtime/workerbin). */
+ * (`workerbin.DirName`, packages/daemon/internal/runtime/workerbin). */
 const WORKER_BIN = "worker-bin";
 
 /** `shellprefix.For`: the prefix Oh My Pi's bash tool runs before each command, which moves
@@ -217,7 +217,7 @@ function shellPrefix(...dirs: string[]): string {
 }
 
 /** The first executable `tool` on `searchPath`, as the daemon resolves gh, git and jj once at
- * boot (`resolveTools`, packages/daemon-go/internal/daemon/tools.go) and names them on every
+ * boot (`resolveTools`, packages/daemon/internal/daemon/tools.go) and names them on every
  * pane. */
 function resolveTool(tool: string, searchPath: string): string {
   for (const dir of searchPath.split(path.delimiter)) {
@@ -235,7 +235,7 @@ function resolveTool(tool: string, searchPath: string): string {
 }
 
 /** The environment the Legion daemon's tmux runtime gives a phase-worker pane for `claim`
- * (`panePairs`, packages/daemon-go/internal/runtime/tmux/spawn.go), pointed at the scratch state
+ * (`panePairs`, packages/daemon/internal/runtime/tmux/spawn.go), pointed at the scratch state
  * directory and the stand-in daemon, over the caller's own environment: the claim's identity, the
  * daemon URL, the state directory and workspace, the gh, git and jj the daemon resolved,
  * `PI_SHELL_PREFIX`, `LEGION_GRANT_FILE` (`runtime.GrantFile`: `<state>/secrets/<claim>-grant`),

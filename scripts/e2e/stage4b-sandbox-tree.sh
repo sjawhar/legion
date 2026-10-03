@@ -1434,7 +1434,7 @@ pass
 
 begin preflight
 # The runtime identity is the restricted role, and nothing more: the assumed-role pattern Stage 4a's
-# identity check uses (packages/daemon-go/internal/runtime/sandbox/live_install_test.go:52).
+# identity check uses (packages/daemon/internal/runtime/sandbox/live_install_test.go:52).
 who=$(rk auth whoami -o json) || blocked "kubectl auth whoami under $runtime_context failed"
 jq -e '.status.userInfo.username | test(":assumed-role/[A-Za-z0-9+=,.@_-]*legion-daemon/")' <<<"$who" >/dev/null ||
   fail "the runtime identity $(jq -r .status.userInfo.username <<<"$who") is not the assumed Legion daemon role"
@@ -1532,7 +1532,7 @@ note "streaming the run's pods, the nodes' events, and node memory into $evidenc
 pass
 
 begin boot
-(cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
+(cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
 stage_role_prompts "$root" "$work"
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion") || fail "lib/built-from.sh could not say what the run built"
 while IFS= read -r line; do note "$line"; done <<<"$built"

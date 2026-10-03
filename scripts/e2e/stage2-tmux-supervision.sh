@@ -271,7 +271,7 @@ profile_omp() { HOME="$omp_home" OMP_PROFILE="$profile" "$omp_bin/omp" "$@"; }
 port=$(bash "$root/scripts/e2e/lib/free-port.sh") || fail "no free port for the daemon"
 deadline_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port") || fail "no free port for the second daemon"
 envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port") || fail "no free port for the Envoy listener"
-(cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
+(cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
 stage_role_prompts "$root" "$work"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 # The binary under proof, checkable after the run: the source it was built from, what a changed

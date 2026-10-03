@@ -17,8 +17,7 @@ on:
       - "patches/**"
       - "package.json"
       - "bun.lock"
-      - "packages/daemon-go/**"
-      - "packages/daemon/docker/worker.Dockerfile"
+      - "packages/daemon/**"
       - ".github/actions/install-jj/**"
       - ".github/actions/install-uv/**"
       - "go.work"
@@ -49,8 +48,7 @@ on:
       - "patches/**"
       - "package.json"
       - "bun.lock"
-      - "packages/daemon-go/**"
-      - "packages/daemon/docker/worker.Dockerfile"
+      - "packages/daemon/**"
       - ".github/actions/install-jj/**"
       - ".github/actions/install-uv/**"
       - "go.work"
@@ -81,7 +79,7 @@ jobs:
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
       dispatch: ${{ steps.filter.outputs.dispatch }}
-      daemon_go: ${{ steps.filter.outputs.daemon_go }}
+      daemon: ${{ steps.filter.outputs.daemon }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -133,12 +131,12 @@ jobs:
               - '.github/workflows/envoy-and-contracts.yaml'
               # The job also COMPILES TestSmoke, in workspace mode, so the workspace files and
               # every module in it belong here too — `envoy` carried go.work and go.work.sum and
-              # this filter must not be narrower. packages/daemon-go requires testcontainers-go,
+              # this filter must not be narrower. packages/daemon requires testcontainers-go,
               # so its manifests move the smoke's module graph.
               - 'go.work'
               - 'go.work.sum'
-              - 'packages/daemon-go/go.mod'
-              - 'packages/daemon-go/go.sum'
+              - 'packages/daemon/go.mod'
+              - 'packages/daemon/go.sum'
             # The local acceptance run drives the Go listener and renders every frame with the
             # shared TypeScript renderer, so a change to either side, or to the contracts both
             # read, must run it.
@@ -188,17 +186,16 @@ jobs:
               - 'patches/**'
               - 'package.json'
               - 'bun.lock'
-            daemon_go:
-              - 'packages/daemon-go/**'
+            daemon:
+              - 'packages/daemon/**'
               - 'packages/envoy/go.mod'
               - 'packages/envoy/go.sum'
               - 'go.work'
               - 'go.work.sum'
               - 'scripts/e2e/**'
-              # The operator route's pod.yml, which two daemon-go tests load (config, sandbox).
+              # The operator route's pod.yml, which two daemon tests load (config, sandbox).
               - 'deploy/kubernetes/operator-route/**'
-              # The jj and uv its tests drive are the worker image's.
-              - 'packages/daemon/docker/worker.Dockerfile'
+              # The jj and uv its tests drive are the worker image's (packages/daemon/docker).
               - '.github/actions/install-jj/**'
               - '.github/actions/install-uv/**'
               # Stage 3's live proof consumes the Go wire fixtures and the native Dispatch
@@ -620,9 +617,9 @@ jobs:
           name: envoy-e2e-local-evidence-${{ github.run_attempt }}
           path: packages/envoy/out/e2e
 
-  daemon-go:
+  daemon:
     needs: changes
-    if: needs.changes.outputs.daemon_go == 'true'
+    if: needs.changes.outputs.daemon == 'true'
     runs-on: ubuntu-24.04
     services:
       postgres:
@@ -645,12 +642,12 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
-          go-version-file: packages/daemon-go/go.mod
+          go-version-file: packages/daemon/go.mod
       # With the e2e tag, vet also compiles the live proofs behind it (the Stage 4a harness,
       # sandbox/live*_test.go), which run on the devbox against a real cluster.
       - name: Vet the Go daemon, its e2e-tagged live proofs included
         run: go vet -tags e2e ./...
-        working-directory: packages/daemon-go
+        working-directory: packages/daemon
       # Before the tests: the tmux runtime's tests drive a real tmux server and skip without one,
       # and the daemon supervises under tmux and refuses to start without it.
       - name: Install tmux
@@ -670,6 +667,6 @@ jobs:
       - uses: ./.github/actions/install-uv
       - name: Test the Go daemon
         run: go test -count=1 ./...
-        working-directory: packages/daemon-go
+        working-directory: packages/daemon
       - name: Stage 1 live proof
         run: bash scripts/e2e/stage1-skeleton.sh

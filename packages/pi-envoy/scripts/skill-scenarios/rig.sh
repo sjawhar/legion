@@ -581,7 +581,7 @@ run_tester_proof() {
   # The pane the daemon would give the tester, over the base every agent gets: worker.env and
   # system-args. The stand-ins come first, so the gh the pane names is the recording one.
   bun "$here/worker-pane.ts" "$R" "$R/pane.env" "$port" "$profile" "$project" "$worker_key" tester \
-    "$co/packages/pi-envoy/roles" "$co/packages/daemon-go/internal/prompts/go"
+    "$co/packages/pi-envoy/roles" "$co/packages/daemon/internal/prompts/go"
   {
     cat "$R/worker.env" "$services_env"
     echo "GIT_CONFIG_COUNT=0"
@@ -643,7 +643,7 @@ cmd_batch() {
   on_exit stop_batch
   # The Go `legion` a tester-proof run's stand-in and fixture run, built from this checkout once
   # for the whole batch.
-  (cd "$root/packages/daemon-go" && go build -o "$work/bin/legion" ./cmd/legion) || fail "building the Go legion failed"
+  (cd "$root/packages/daemon" && go build -o "$work/bin/legion" ./cmd/legion) || fail "building the Go legion failed"
   services_up
   start=$(date +%s)
   for label in "$@"; do

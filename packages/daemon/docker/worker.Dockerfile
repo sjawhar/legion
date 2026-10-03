@@ -5,7 +5,7 @@
 # it builds from, or dispatched post-merge). Never build it on a workstation — no `docker build`,
 # `docker buildx`, or `docker compose build` (Sami, 2026-09-12); the CI runner is not a workstation.
 #
-# Contents: pinned Bun; the Go `legion` (packages/daemon-go) compiled from this checkout at go.work's
+# Contents: pinned Bun; the Go `legion` (packages/daemon) compiled from this checkout at go.work's
 # Go version, static, at /opt/legion/bin/legion (one binary: worker-shim, workspace-init, credential,
 # gh, handoff, push, probe-image and the daemon's own commands), the first PATH entry and the
 # ENTRYPOINT name, with the `agent-secrets` client beside it; the pinned OMP fork build, resolved with
@@ -26,7 +26,7 @@
 #
 # The `legion` profile carries no model route, and neither does Legion: an operator's pod supplies it
 # (runtime.kubernetes.pod, docs/kubernetes.md). In a pod, the Go `legion` starts Oh My Pi on Legion's
-# pod baseline (packages/daemon-go/internal/podsafety: the worker shim, and `legion probe-image`, each
+# pod baseline (packages/daemon/internal/podsafety: the worker shim, and `legion probe-image`, each
 # with --pod-safety), which names no model, provider or route.
 
 # Pins not derived from daemon code. The OMP fork pin is deliberately NOT an ARG: it is the one line of
@@ -143,18 +143,18 @@ RUN --mount=type=secret,id=github_token \
 
 # ------------------------------------------------------------------------------------------------
 # go: the Go coordinator's `legion`, built as the repository builds it — `go build ./cmd/legion` in
-# packages/daemon-go under go.work, whose other module (packages/envoy) contributes only its go.mod and
+# packages/daemon under go.work, whose other module (packages/envoy) contributes only its go.mod and
 # go.sum to dependency selection — static, so it runs on any base. LEGION_REVISION is the commit the
 # workflow builds; it is linked in so `legion version` names it, and the build refuses without it.
 FROM golang:${GO_VERSION}-alpine AS go
 WORKDIR /src
 COPY go.work go.work.sum ./
-COPY packages/daemon-go/go.mod packages/daemon-go/go.sum packages/daemon-go/
+COPY packages/daemon/go.mod packages/daemon/go.sum packages/daemon/
 COPY packages/envoy/go.mod packages/envoy/go.sum packages/envoy/
 RUN go mod download
-COPY packages/daemon-go packages/daemon-go
+COPY packages/daemon packages/daemon
 COPY packages/envoy packages/envoy
-WORKDIR /src/packages/daemon-go
+WORKDIR /src/packages/daemon
 # Declared here, after the dependency layers, so a new commit re-runs only the compile.
 ARG LEGION_REVISION
 RUN test -n "$LEGION_REVISION" \
@@ -229,7 +229,7 @@ COPY --from=plugin /out/codegraph /opt/codegraph
 # residues — not part of the packed plugin, whose `files` is `dist`): the in-cluster daemon reads the
 # configured parts for each process and concatenates them into its pod command. A standalone `legion`
 # reads them from `role-prompts` beside its own executable unless LEGION_ROLE_PROMPTS_DIR names a
-# bundle, so it names this copy (packages/daemon-go/internal/prompts, ResolveRolePromptsDir — boot
+# bundle, so it names this copy (packages/daemon/internal/prompts, ResolveRolePromptsDir — boot
 # refuses if any prompt part is missing here).
 COPY --from=plugin /repo/packages/pi-envoy/roles /opt/legion/roles
 # OMP_PROFILE=legion: the isolated profile the plugin is linked into (plugins resolve to
@@ -274,7 +274,7 @@ RUN set -eu; \
 # The toolchain goes in after the probe layer, so a new toolchain pin never rebuilds that layer and its
 # natives, and before `legion`, which changes on every commit. It lands outside HOME, in /opt and
 # /usr/local/bin, so no volume a pod mounts under HOME shadows it, and /usr/local/bin is on the image
-# PATH and on every pod's (imagePath, packages/daemon-go/internal/runtime/sandbox/names.go).
+# PATH and on every pod's (imagePath, packages/daemon/internal/runtime/sandbox/names.go).
 COPY --from=toolchain /opt/node /opt/node
 COPY --from=toolchain /opt/aws-cli /opt/aws-cli
 COPY --from=toolchain /out/bin/ /usr/local/bin/
@@ -303,7 +303,7 @@ COPY --from=go /out/legion /opt/legion/bin/legion
 # agent-secrets (packages/envoy/cmd/agent-secrets, AGENTC-393): the pod's secrets client — the shim
 # runs `keygen` before its hello and `renew` after its enrollment, and the agent's tools call it
 # from PATH, which /opt/legion/bin leads in the image and in every worker container (the PATH
-# mainEnvironment sets in packages/daemon-go/internal/runtime/sandbox/manifest.go). The daemon's
+# mainEnvironment sets in packages/daemon/internal/runtime/sandbox/manifest.go). The daemon's
 # Tools.AgentSecrets names this path.
 COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # The final step: the `legion` on the image PATH is this one, it runs on this base, and it names the
@@ -318,7 +318,7 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # (/opt/omp/bin/omp) session-storage=probed agent-models=skipped daemon-api-version=<N>`; the daemon's
 # probe Sandbox runs it again with its own contract, on the pod baseline and under the operator's pod,
 # resolving every agent's model, and refuses a skipped result, before any claim runs on the image
-# (packages/daemon-go/internal/runtime/sandbox/probe.go). It needs the natives step 3 fetched, which
+# (packages/daemon/internal/runtime/sandbox/probe.go). It needs the natives step 3 fetched, which
 # the cached probe layer above carries.
 ARG LEGION_REVISION
 RUN set -eu; \
@@ -331,7 +331,7 @@ RUN set -eu; \
     agent-secrets --help >/dev/null; \
     rm -rf /home/legion/.omp/profiles/legion/logs
 # The Kubernetes runtime sets every container's command explicitly
-# (packages/daemon-go/internal/runtime/sandbox/manifest.go): the init containers run `legion
+# (packages/daemon/internal/runtime/sandbox/manifest.go): the init containers run `legion
 # workspace-init fetch …` and `legion workspace-init provision …`, and the main container runs `legion
 # worker-shim --connect tcp://<daemon>:<worker_stream_port> --boot-token-file … -- omp --mode rpc …`.
 # This ENTRYPOINT therefore only makes `docker run <image> version` and `docker run <image>

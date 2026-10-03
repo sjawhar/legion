@@ -106,14 +106,14 @@ printf 'rig-boot\n' > "$RIG/state/secrets/boot"
 chmod 0600 "$RIG/state/secrets/boot"
 
 # The checkout's own Go `legion`, built beside the state directory as the daemon's own binary is.
-test -f "$SRC/packages/daemon-go/cmd/legion/main.go" || {
-  echo "the checkout has no Go legion to build (packages/daemon-go/cmd/legion): $SRC" >&2
+test -f "$SRC/packages/daemon/cmd/legion/main.go" || {
+  echo "the checkout has no Go legion to build (packages/daemon/cmd/legion): $SRC" >&2
   exit 2
 }
-(cd "$SRC/packages/daemon-go" && go build -o "$RIG/legion" ./cmd/legion)
+(cd "$SRC/packages/daemon" && go build -o "$RIG/legion" ./cmd/legion)
 
 # worker-bin/gh and bin/legion, written as the daemon writes them at boot (workerbin.Install,
-# packages/daemon-go/internal/runtime/workerbin): the `gh` shim drops its own directory from PATH
+# packages/daemon/internal/runtime/workerbin): the `gh` shim drops its own directory from PATH
 # and execs `legion gh`, and the launcher execs the daemon's binary, here the one just built.
 literal() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 mkdir -p "$RIG/state/worker-bin"

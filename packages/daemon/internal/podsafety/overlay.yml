@@ -1,4 +1,4 @@
-# Written by the Go `legion` (packages/daemon-go/internal/podsafety) when Oh My Pi starts in a Legion
+# Written by the Go `legion` (packages/daemon/internal/podsafety) when Oh My Pi starts in a Legion
 # pod, and named first among Oh My Pi's settings overlays (PI_CONFIG_FILES). Oh My Pi ranks every
 # overlay above the settings of the repository the agent works in, and a later overlay above an
 # earlier one, so a repository cannot turn these back on and the operator's own overlay, named after

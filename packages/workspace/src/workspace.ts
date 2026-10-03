@@ -265,7 +265,7 @@ async function ensureRepoClone(
 }
 
 /** Creates the issue workspace where its bookmark `legion/<KEY>` says, deciding exactly as the Go
- * twin does (`createWorkspace`, packages/daemon-go/internal/workspace/bookmark.go). This is the
+ * twin does (`createWorkspace`, packages/daemon/internal/workspace/bookmark.go). This is the
  * one place provisioning creates that bookmark. A workspace that already exists gets no
  * `jj bookmark` command at all (see `provisionIssueWorkspace`): after a pull request merges and
  * GitHub deletes its branch, the fetch drops the tracked local bookmark that still matched it, and

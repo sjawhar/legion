@@ -75,7 +75,7 @@ acknowledged, and a receipt that fails to publish is logged while delivery conti
 
 ## Daemon contract
 
-The plugin speaks to the Legion daemon (`packages/daemon-go`) through
+The plugin speaks to the Legion daemon (`packages/daemon`) through
 `src/legion/daemon-client.ts`, which reads every response through the strict schemas of
 `@legion/contracts/legion-go-api`, and boots every Legion session through the claim session
 (`src/legion/claim-session.ts`) or, for the controller, the controller session
@@ -190,7 +190,7 @@ And the daemon refuses a controller registration whose `pluginContract` is not i
 `notifications.legion.<project>.controller` (`legionControllerNoticeSubject`, the project from
 `LEGION_PROJECT`), then a controller grant per credentialed tool call from the `/grants`
 controller-session form with the secret the registration was issued. What the daemon publishes
-on that topic is listed at `notify.ControllerTopic` (`packages/daemon-go/internal/notify`). The
+on that topic is listed at `notify.ControllerTopic` (`packages/daemon/internal/notify`). The
 subscription lasts while the session holds the controller role (`subscribeLegionNotice`'s
 `whileHolding`): once another live session holds it, the heartbeat's refused re-assertion closes
 it, so a replaced controller stops taking wakes within one heartbeat, and a dropped connection's

@@ -338,7 +338,7 @@ function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): s
   return undefined;
 }
 
-// Read by the daemon's boot gate (packages/daemon-go/internal/daemon/bootgate.go) to prove this
+// Read by the daemon's boot gate (packages/daemon/internal/daemon/bootgate.go) to prove this
 // extension actually loaded from an ambient installed-plugin discovery -- not just that a
 // manifest file exists, which stays true even when the plugin is disabled or unregistered in
 // OMP's own plugin registry.

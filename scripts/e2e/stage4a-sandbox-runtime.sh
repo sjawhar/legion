@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage 4a's gate for the Go coordinator: the Agent Sandbox runtime (packages/daemon-go/internal/
+# Stage 4a's gate for the Go coordinator: the Agent Sandbox runtime (packages/daemon/internal/
 # runtime/sandbox) proven on the production cluster, in namespace `legion`, from the devbox. A Go
 # harness (sandbox/live_test.go, build tag e2e) drives the runtime through the Legion daemon's own
 # restricted identity and hosts the worker stream on the devbox's private address; the pods it
@@ -173,7 +173,7 @@ note "[operator] Secret $providers_secret: one key, stage4a (a random value no r
 pass
 
 begin build
-go -C "$root/packages/daemon-go" test -c -tags e2e -o "$work/stage4a.test" ./internal/runtime/sandbox
+go -C "$root/packages/daemon" test -c -tags e2e -o "$work/stage4a.test" ./internal/runtime/sandbox
 stage_role_prompts "$root" "$work"
 go -C "$root/packages/envoy" build -o "$work/agent-secrets" ./cmd/agent-secrets
 note "built the e2e harness and agent-secrets from the checkout, with role-prompts beside the harness"

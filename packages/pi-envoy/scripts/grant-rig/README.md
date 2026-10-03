@@ -84,7 +84,7 @@ Scratch directory `$RIG` (default `mktemp -d /tmp/l12rig.XXXX`), standing in for
 | --- | --- |
 | `state/secrets/boot` | The worker's boot token (`rig-boot`, mode 0600); the stand-in rejects any other. |
 | `state/secrets/legion-l12rig-rig-1-implementer-grant` | The worker's `LEGION_GRANT_FILE`, written by the extension before each bash command (mode 0600). Never read, printed, or copied by hand. |
-| `legion` | The checkout's Go `legion`, built by `setup.sh` from `packages/daemon-go/cmd/legion`: the daemon's own binary, which `state/bin/legion` execs. |
+| `legion` | The checkout's Go `legion`, built by `setup.sh` from `packages/daemon/cmd/legion`: the daemon's own binary, which `state/bin/legion` execs. |
 | `state/bin/legion` | The launcher the daemon installs at boot (`workerbin.Install`): execs `$RIG/legion`. |
 | `state/bin/record-grant` | Appends `<grant file contents> <mode> <LEGION_GRANT or ->` to `$RIG/seen-grants.log`, so the prompt never names the credential; the third field is what a 1.17.0 (text-delivery) command ran under. |
 | `state/worker-bin/gh` | The `gh` shim the daemon installs at boot (`workerbin.InstallGh`), written by `setup.sh` the same way: drops its own directory from PATH and execs `legion gh`. |
@@ -101,7 +101,7 @@ Scratch directory `$RIG` (default `mktemp -d /tmp/l12rig.XXXX`), standing in for
 every `LEGION_*` and `DISPATCH_*` value, `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST`
 (no Legion pane carries them), and every inherited `worker-bin` PATH entry (a rig started from a
 Legion pane carries that pane's worker-bin first), then adds what the daemon's tmux runtime sets
-for a phase-worker pane (`panePairs`, `packages/daemon-go/internal/runtime/tmux/spawn.go`), which is
+for a phase-worker pane (`panePairs`, `packages/daemon/internal/runtime/tmux/spawn.go`), which is
 the pane's for life, never per command:
 
 | variable | value |

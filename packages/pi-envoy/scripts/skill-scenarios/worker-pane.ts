@@ -5,7 +5,7 @@
 //                `workerEnvironment` over <base env file>, the variables rig.sh gives every agent
 //   system-args  the pane's one `--append-system-prompt` argument, as shell text: the role prompt
 //                files from <roles dir> then the daemon's own from <daemon prompts dir>, in the
-//                order prompts.Compose gives a phase worker (packages/daemon-go/internal/prompts),
+//                order prompts.Compose gives a phase worker (packages/daemon/internal/prompts),
 //                then its addressing sentence (addressingFragment, internal/daemon/specs.go), as
 //                omplaunch.SystemPromptArgument renders them
 //

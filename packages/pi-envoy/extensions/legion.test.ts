@@ -486,7 +486,7 @@ interface ClaimPane {
 }
 
 /** A pane the daemon launched for a claim (a root architect, or a phase worker): the identity
- * variables the tmux runtime sets (`packages/daemon-go/internal/runtime/tmux/spawn.go`'s
+ * variables the tmux runtime sets (`packages/daemon/internal/runtime/tmux/spawn.go`'s
  * `panePairs`), the boot token as a 0600 file behind `LEGION_BOOT_TOKEN_FILE`, and
  * `LEGION_GRANT_FILE` naming `<claim>-grant` beside it, under a state directory of its own. The
  * stub answers `extraRoutes` first, then the daemon's claim routes (`register` and `ready`
@@ -2650,7 +2650,7 @@ describe("Legion OMP extension", () => {
 
 /** The session `legion controller start` launches against the daemon: the `LEGION_CONTROLLER`
  * marker, and the controller capability as a 0600 file behind `LEGION_CONTROLLER_SECRET_FILE`
- * (`packages/daemon-go/cmd/legion/controller.go`). The stub answers the claim registration with
+ * (`packages/daemon/cmd/legion/controller.go`). The stub answers the claim registration with
  * the controller's registration (or `register`'s answer, when it gives one), mints grants (or
  * answers `grant`'s refusal), and 404s every other daemon path as the daemon's catch-all does; its
  * Envoy side keeps a role holder and an interest registry, as the listener does, and names no

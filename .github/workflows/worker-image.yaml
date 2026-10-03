@@ -34,7 +34,7 @@ on:
   # builds from: the root manifest, lockfile, patches and every root workspace's package.json (the plugin
   # stage's frozen install); the packages it copies whole — the Dockerfile (packages/daemon), the plugin
   # (packages/pi-envoy, packages/envoy-client, packages/contracts), the provisioning code
-  # (packages/workspace), the skills, the Go module and its build inputs (packages/daemon-go, go.work,
+  # (packages/workspace), the skills, the Go module and its build inputs (packages/daemon, go.work,
   # go.work.sum), and packages/envoy (copied whole for its agent-secrets binary, AGENTC-393); the OMP
   # pin (.omp-pin); the context's .dockerignore; and this workflow. The final `legion probe-image` runs
   # the image's own `legion` and plugin, so a PR that breaks either fails here instead of merging and
@@ -60,7 +60,7 @@ on:
       - packages/contracts/**
       - packages/workspace/**
       - skills/**
-      - packages/daemon-go/**
+      - packages/daemon/**
       - go.work
       - go.work.sum
       - packages/envoy/**
