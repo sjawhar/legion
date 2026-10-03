@@ -536,7 +536,15 @@ func envGetter(values map[string]string) func(string) string {
 	return func(key string) string { return values[key] }
 }
 
-func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
+// TestMain runs the package's tests, or, run by a memory test with memoryTestServeEnv set, is that
+// test's Dispatch server.
+func TestMain(m *testing.M) {
+	if os.Getenv(memoryTestServeEnv) == "1" {
+		main()
+		os.Exit(0)
+	}
+	os.Exit(storetest.Main(m))
+}
 
 func TestSeedRepoProjectsAddsMissingRowsWithoutOverwritingSettings(t *testing.T) {
 	database := storetest.Open(t)
