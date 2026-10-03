@@ -74,6 +74,13 @@
   passed is neither, though the count leaves it out: a Clear can move back, so the first request
   naming that reply writes its row and appends the event. A `read_through` deletes the viewer's
   rows for that session whose replies it reaches (LEGION-485).
+- A Dispatch document edit's response reports `advice.decision_blocks_added`: how many ask blocks
+  the edited document holds whose block id no ask block in the document before it carried, read
+  from the parsed trees the edit was applied to. A block inserted in a blockquote, on a list item's
+  line or behind four or more colons counts, as does a block retyped into an ask; an opener inside
+  a fence or indented code counts nothing, nor does a block the edit moved or reworded. An issue
+  document's edit carries it beside the issue advice; a project document's edit, which before
+  carried no advice, now carries `advice` holding the count alone (LEGION-470).
 
 ### Changed
 

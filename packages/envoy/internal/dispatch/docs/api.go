@@ -65,10 +65,14 @@ type VersionResult struct {
 // the tree exactly as it found it. Token is that same whole-document identity after the batch,
 // taken from the tree this edit's own transaction wrote while it still held the room's writer
 // slot — never re-read after the commit, where a concurrent writer's change would fold into it —
-// so a caller passes it straight back as the next edit's document precondition.
+// so a caller passes it straight back as the next edit's document precondition. AskBlocksAdded
+// counts the ask blocks the batch left in the document that it did not hold before
+// (addedAskBlocks). Settlement opens an ask for each, except a block written back under the id of
+// an ask the document already holds and settlement leaves closed: answered, or resolved by a person.
 type EditOutcome struct {
-	Applied   int
-	Changed   bool
-	Unchanged []int
-	Token     string
+	Applied        int
+	Changed        bool
+	Unchanged      []int
+	Token          string
+	AskBlocksAdded int
 }

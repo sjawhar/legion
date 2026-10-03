@@ -190,7 +190,15 @@ export interface WriteAdvice {
   readonly issue_status?: IssueStatus;
   readonly session_writes_since_human?: number;
   readonly your_open_asks?: Array<{ id: string; question: string }>;
+  /** The ask blocks in the document an upload or issue creation stored, answered ones included. */
   readonly decision_blocks?: number;
+  /**
+   * A document edit's ask blocks the document before it did not hold, as the server's parser reads
+   * the edited document: one inserted or retyped into an ask counts wherever it lands, a blockquote
+   * or a list item included, and an opener quoted in code counts nothing. On every edit's advice;
+   * absent from a Dispatch server predating it.
+   */
+  readonly decision_blocks_added?: number;
   /**
    * The typed block openings (`:::ask{…}`) the written document holds as text rather than as
    * blocks, outside code: written inside a line, or escaped. `examples` quotes the first few with a

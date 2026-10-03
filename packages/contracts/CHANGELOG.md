@@ -24,6 +24,9 @@
 - Added `ArtifactApproval.waiting_on`, whose move an `awaiting` approval's request waits on, and
   `ApprovalRequestResponse`, the answer of `POST /api/v1/artifacts/{id}/approval-requests`
   (LEGION-470).
+- Added `WriteAdvice.decision_blocks_added`, on a document edit's advice: the ask blocks the edit
+  added, as the server's parser reads the edited document, so a block in a blockquote or a list
+  item counts and an opener quoted in code does not (LEGION-470).
 - `dispatch_request_approval`'s description and `summary` say an approval request carries nothing
   new: the summary says only what the human is approving, a later version leaves the request
   waiting on the agent until it hands the request back once the human has agreed to every point,

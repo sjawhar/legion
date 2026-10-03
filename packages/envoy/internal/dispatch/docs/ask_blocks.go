@@ -363,6 +363,32 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 	return held, err
 }
 
+// addedAskBlocks counts the ask blocks in after whose block id no ask block in before carries: one
+// an edit inserted, or retyped another block into, wherever it lands - a blockquote, a list item -
+// as the parser reads it, so an opener quoted in code adds none. One the edit moved, reworded or
+// left alone keeps its id and counts nothing.
+func addedAskBlocks(before, after *pmdoc.Node) int {
+	held := map[string]struct{}{}
+	pmdoc.Walk(before, func(node *pmdoc.Node) bool {
+		if node.Type == "ask" {
+			id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+			held[id] = struct{}{}
+		}
+		return true
+	})
+	added := 0
+	pmdoc.Walk(after, func(node *pmdoc.Node) bool {
+		if node.Type == "ask" {
+			id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+			if _, kept := held[id]; !kept {
+				added++
+			}
+		}
+		return true
+	})
+	return added
+}
+
 // newAskMarkdown is what an uploaded version can say of an ask, for one refuseChangedAsks call: its
 // rendering alone, taken as an upload is (asUploaded) - without anchor marks, and with its
 // server-owned attributes (`state`, the answer, `invalid`) at their defaults, since an upload's are

@@ -212,9 +212,14 @@ document's `decision_blocks` count and, when it holds any, its `unparsed_openers
 (`{count, examples}`): typed block openings (`:::name{`) in its text outside code, written inside a
 line or escaped, each example quoting the opening with a little of the text before it. A writer who
 meant a block learns it is text; a count of zero alone reads as a document needing no decision
-(LEGION-416). Issue-state advice is computed in the write transaction after its event is appended,
-so it includes that write. Decision blocks and unparsed openers are read from one parse of the
-canonical Markdown after the write transaction commits (`readDocumentBlocks`). Advice queries run
+(LEGION-416). A document edit reports `decision_blocks_added` instead, on an issue document's advice
+and as the whole advice of a project document's edit: the ask blocks the edited tree holds whose
+block id no ask block in the tree before the batch carried (`addedAskBlocks`, counted in the
+transaction that applies the batch), so an inserted or retyped block counts wherever the parser
+reads one and a moved or reworded block does not. Issue-state advice is computed in the write
+transaction after its event is appended, so it includes that write. A stored document's decision
+blocks and unparsed openers are read from one parse of the canonical Markdown after the write
+transaction commits (`readDocumentBlocks`). Advice queries run
 behind a savepoint with a 500 ms
 timeout that is restored before the savepoint is released: one failure is logged and omits
 `advice` without preventing the write from committing. The consecutive-write query materializes
