@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -175,6 +176,9 @@ func firstBlockID(t *testing.T, service *Service, artifactID string) string {
 	return blocks[0].ID
 }
 
+// typists counts, per room, the peers typeIntoDocument has typing into it.
+var typists sync.Map
+
 // typeIntoDocument connects a peer that writes the document as a browser's keystrokes do - a
 // paragraph inserted at the start, a word typed into it, the paragraph deleted, each its own
 // update - round after round until the test ends, waiting a random time up to gap between
@@ -189,6 +193,9 @@ func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID stri
 	first := make(chan struct{})
 	var wrote sync.Once
 	var done sync.WaitGroup
+	value, _ := typists.LoadOrStore(artifactID, new(atomic.Int64))
+	typing := value.(*atomic.Int64)
+	typing.Add(1)
 	done.Go(func() {
 		for {
 			var paragraph *crdt.YXmlElement
@@ -231,10 +238,10 @@ func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID stri
 			}
 		}
 	})
-	// Registered after the peer's connection, so it runs first: the writing ends, and the room
-	// applies the peer's last update and makes every update durable, before the connection
-	// closes. The service's shutdown then has none of the peer's updates left to drain inside its
-	// budget, which a backlog of keystrokes would overrun.
+	// Registered after the peer's connection, so it runs first: the writing ends, the room applies
+	// the peer's last update, and, once no other peer is typing into the room, it makes every
+	// update durable, before the connection closes. The service's shutdown then has none of the
+	// peers' updates left to drain inside its budget, which a backlog of keystrokes would overrun.
 	t.Cleanup(func() {
 		close(stopped)
 		done.Wait()
@@ -244,6 +251,13 @@ func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID stri
 			room := service.srv.GetDoc(artifactID)
 			return room == nil || room.StateVector().Clock(client) >= sent
 		})
+		// The room counts the updates it has not stored across all its peers (pendingUpdates), and
+		// a peer still typing keeps that count above zero for as long as it types whenever the
+		// room stores more slowly than it types, so only the last peer to stop waits for it.
+		if typing.Add(-1) > 0 {
+			return
+		}
+		typists.Delete(artifactID)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
