@@ -28,15 +28,25 @@ const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!
 
 const resolveReviewThreadMutation = `mutation($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } } }`
 
+// threadsCommands is `legion threads`'s subcommands, the one list of them `legion threads --help`
+// names.
+var threadsCommands = map[string]command{
+	"resolve": runResolveThreads,
+}
+
 func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "resolve" {
-		fmt.Fprintln(stderr, "usage: legion threads resolve --pr <number> --repo <owner>/<repo>")
-		return 2
-	}
-	flags := newFlags("threads resolve", stderr)
+	return runSubcommand(ctx, "threads", threadsCommands, args, stdout, stderr)
+}
+
+func runResolveThreads(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := newFlags("threads resolve", "usage: legion threads resolve --pr <number> --repo <owner>/<repo>", stderr)
 	pr := flags.String("pr", "", "pull request number (required)")
 	repo := flags.String("repo", "", "repository owner/name (required)")
-	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
+	}
+	if flags.NArg() != 0 {
+		flags.Usage()
 		return 2
 	}
 	repository, err := ghrepo.Parse("--repo", *repo)

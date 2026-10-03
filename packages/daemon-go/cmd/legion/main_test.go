@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -258,6 +259,94 @@ func TestUnknownSubcommandIsUsageError(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), `unknown command "frobnicate"`) {
 		t.Fatalf("stderr = %q", errb.String())
+	}
+}
+
+// `legion --help` is the one place the commands are listed, which the docs site's CLI reference is
+// generated from: every command, each on a line of its own, on stdout with exit 0; a bare `legion`
+// prints the same list as a usage error.
+func TestHelpListsEveryCommand(t *testing.T) {
+	for _, tc := range []struct {
+		argv   []string
+		code   int
+		stdout bool
+	}{
+		{[]string{"legion", "--help"}, 0, true},
+		{[]string{"legion", "-h"}, 0, true},
+		{[]string{"legion", "help"}, 0, true},
+		{[]string{"legion"}, 2, false},
+	} {
+		var out, errb bytes.Buffer
+		code := run(context.Background(), tc.argv, &out, &errb)
+		listed := errb.String()
+		if tc.stdout {
+			listed = out.String()
+		}
+		if code != tc.code {
+			t.Fatalf("%v = %d, want %d; stderr %q", tc.argv, code, tc.code, errb.String())
+		}
+		for name := range commands {
+			if !strings.Contains(listed, "\n  "+name+" ") {
+				t.Errorf("%v does not list %s: %q", tc.argv, name, listed)
+			}
+		}
+	}
+}
+
+// Every command answers -h, -help and --help with its usage, `usage: legion <command>…`, and exit
+// 0: the docs site's CLI generator fails the build on any other answer.
+func TestEveryCommandAnswersHelp(t *testing.T) {
+	for name := range commands {
+		for _, help := range []string{"-h", "-help", "--help"} {
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", name, help}, &out, &errb)
+			if code != 0 || !usageOf(errb.String(), name) {
+				t.Errorf("legion %s %s = %d, stderr %q; want exit 0 and its usage", name, help, code, errb.String())
+			}
+		}
+	}
+}
+
+// usageOf says whether help begins with the usage line of `legion <words…>`.
+func usageOf(help string, words ...string) bool {
+	line, _, _ := strings.Cut(help, "\n")
+	fields := strings.Fields(line)
+	return len(fields) >= 2+len(words) && slices.Equal(fields[:2+len(words)], append([]string{"usage:", "legion"}, words...))
+}
+
+// A command with subcommands answers --help, exit 0, with a usage line naming every one of them —
+// every key of its table — as `legion <command> a|b|…`, the line the docs site's CLI generator
+// reads each subcommand from; and each subcommand answers --help with its own usage.
+func TestDispatchersAnswerHelpWithTheirSubcommands(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		table   map[string]command
+	}{
+		{"claims", claimsCommands},
+		{"handoff", handoffCommands},
+		{"workspace-init", workspaceInitCommands},
+		{"controller", controllerCommands},
+		{"threads", threadsCommands},
+	} {
+		var out, errb bytes.Buffer
+		code := run(context.Background(), []string{"legion", tc.command, "--help"}, &out, &errb)
+		prefix := "usage: legion " + tc.command + " "
+		line, _, _ := strings.Cut(errb.String(), "\n")
+		if code != 0 || !strings.HasPrefix(line, prefix) {
+			t.Errorf("legion %s --help = %d, stderr %q; want exit 0 and stderr starting %q", tc.command, code, errb.String(), prefix)
+			continue
+		}
+		named := strings.Split(strings.Fields(strings.TrimPrefix(line, prefix))[0], "|")
+		for sub := range tc.table {
+			if !slices.Contains(named, sub) {
+				t.Errorf("legion %s --help names %v, not %s: %q", tc.command, named, sub, line)
+			}
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", tc.command, sub, "--help"}, &out, &errb)
+			if code != 0 || !usageOf(errb.String(), tc.command, sub) {
+				t.Errorf("legion %s %s --help = %d, stderr %q; want exit 0 and its usage", tc.command, sub, code, errb.String())
+			}
+		}
 	}
 }
 

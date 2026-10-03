@@ -963,14 +963,17 @@ func TestControllerStartStateDirectory(t *testing.T) {
 }
 
 func TestControllerStartUsage(t *testing.T) {
-	for _, argv := range [][]string{
-		{"legion", "controller"},
-		{"legion", "controller", "stop"},
-		{"legion", "controller", "start"},
+	for _, tc := range []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"legion", "controller"}, subcommandUsage("controller", controllerCommands)},
+		{[]string{"legion", "controller", "stop"}, `legion controller: unknown subcommand "stop"`},
+		{[]string{"legion", "controller", "start"}, "usage: legion controller start --config <controller.yaml> [--daemon-url <url>]"},
 	} {
 		var out, errb bytes.Buffer
-		if code := run(context.Background(), argv, &out, &errb); code != 2 || !strings.Contains(errb.String(), "usage: legion controller start --config <controller.yaml> [--daemon-url <url>]") {
-			t.Errorf("%v = %d, stderr %q; want the usage and exit 2", argv, code, errb.String())
+		if code := run(context.Background(), tc.argv, &out, &errb); code != 2 || !strings.Contains(errb.String(), tc.want) {
+			t.Errorf("%v = %d, stderr %q; want exit 2 and %q", tc.argv, code, errb.String(), tc.want)
 		}
 	}
 }

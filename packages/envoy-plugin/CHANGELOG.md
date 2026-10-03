@@ -4,6 +4,9 @@
 
 ### Changed
 
+- `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary
+  and no question, and an approval is requested only once the human has agreed to every point in
+  the document (LEGION-475).
 - `dispatch_request_approval` requires `summary`: the proposals in the document's latest version
   the human hasn't already agreed to, in one to three sentences (LEGION-387). The Inbox shows it
   after "Approve spec.md (version N)?", and the result text quotes the question the human sees.
