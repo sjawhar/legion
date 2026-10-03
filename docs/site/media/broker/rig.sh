@@ -292,7 +292,7 @@ cat >&2 <<EOF
 
 rig: ready.
 
-  Dispatch    $DISPATCH_URL  (signed in by the X-Dispatch-User header; the e2e workspace's human is $OPERATOR)
+  Dispatch    $DISPATCH_URL  (sign in as $OPERATOR, the e2e workspace's human, at $DISPATCH_URL/auth/_dev/signin?login=$OPERATOR)
   broker      $BROKER_URL
   agent       $agent_exec bash   (hostname $AGENT_HOST; agent-secrets-helper for $OPERATOR)
   state       $state_file

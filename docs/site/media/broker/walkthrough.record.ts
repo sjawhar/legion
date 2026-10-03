@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 
 import { type Browser, expect, type Locator, type Page, test } from "@playwright/test";
 
+import { signIn } from "../../../../packages/dispatch/e2e/users";
 import { rigState } from "./agent";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -270,10 +271,10 @@ async function browserSection(
 ): Promise<void> {
   const context = await browser.newContext({
     baseURL,
-    extraHTTPHeaders: { "X-Dispatch-User": operator },
     recordVideo: { dir: join(rawDir, ".video"), size: viewport },
     viewport,
   });
+  await signIn(context, operator);
   await context.addInitScript(pointer);
   const created = Date.now();
   const page = await context.newPage();

@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { expect, test } from "@playwright/test";
 
+import { signIn } from "../../../../packages/dispatch/e2e/users";
 import { rigState, startMachineLogin, startSecretRequest, waitForOutput } from "./agent";
 
 const assets = join(dirname(fileURLToPath(import.meta.url)), "../../public/media/broker");
@@ -23,9 +24,9 @@ test("the Dispatch pages a person approves broker requests on", async ({ browser
   const context = await browser.newContext({
     baseURL: rig.dispatchUrl,
     deviceScaleFactor: 2,
-    extraHTTPHeaders: { "X-Dispatch-User": rig.operator },
     viewport: { height: 800, width: 1280 },
   });
+  await signIn(context, rig.operator);
   const page = await context.newPage();
 
   // The machine login: the code the machine printed, looked up and approved.

@@ -16,7 +16,11 @@
     "indentWidth": 2,
     "lineWidth": 100,
     "lineEnding": "lf",
-    "includes": ["**", "!packages/envoy-client/src/__tests__/fixtures/dispatch-tool.schema.json"]
+    "includes": [
+      "**",
+      "!packages/envoy-client/src/__tests__/fixtures/dispatch-tool.schema.json",
+      "!docs/site/public/media/*/*.src/raw/sections.json"
+    ]
   },
   "linter": {
     "enabled": true,

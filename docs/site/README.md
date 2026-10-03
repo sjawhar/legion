@@ -36,7 +36,7 @@ refuses relative links (`errorOnRelativeLinks`, its default) or, with that off, 
 | `generators/` | The reference generators: `<section>-<name>.ts` or `.sh`, run by `scripts/generate.ts`. |
 | `scripts/generate.ts` | Runs every generator before the build, under the contract it documents. |
 | `scripts/build-binaries.sh` | Builds the Go binaries the generators run. The one place module paths are named. |
-| `media/` | Where the scripts that produce screenshots and narrated walkthroughs go; none are in the tree yet, and they arrive with a README saying how to run them. |
+| `media/` | The scripts that produce screenshots and narrated walkthroughs, one directory per section with a README saying how to run them (`media/broker/`). |
 | `public/media/` | Where those scripts' output goes, served at `/legion/media/`. |
 | `astro.config.mjs` | Site URL and base, sidebar, and plugins (Mermaid, the link validator, sidebar labels). |
 

@@ -52,8 +52,10 @@ DATABASE_URL="postgres://postgres@127.0.0.1:55432/dispatch?sslmode=disable" BROK
 
 `$pgbin/pg_ctl -D /tmp/pgdata stop` and removing `/tmp/pgroot` and `/tmp/pgdata` undo it.
 
-Dispatch identifies the person by the `X-Dispatch-User` header, so a browser reaches it through a
-script that sets it (as both specs do) or an extension that adds the header.
+Dispatch signs a person in with its session cookie, which the harness server mints at its dev
+sign-in route: open `http://127.0.0.1:8777/auth/_dev/signin?login=alice` in the browser (by
+`127.0.0.1`, never `localhost`, which the server refuses). Both specs sign in the same way, through
+the e2e harness's `signIn` (`packages/dispatch/e2e/users.ts`).
 
 From a shell on the agent machine (`agent-exec bash`, where `agent-exec` is the script the rig's
 state file names in `BROKER_RIG_AGENT_EXEC`), the flow the walkthrough shows is:
