@@ -14,9 +14,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
-// sharedPromptFiles is the complete role-prompt directory the shipped daemon validates at boot
-// (packages/daemon/src/daemon/environment.ts:45-54). The non-spawned files stay in this list so a
-// broken role bundle fails at boot rather than later when another daemon path needs it.
+// sharedPromptFiles is the complete role-prompt directory the daemon validates at boot. The
+// non-spawned files stay in this list so a broken role bundle fails at boot rather than later when
+// another daemon path needs it.
 var sharedPromptFiles = []string{
 	"architect-root.md",
 	"controller-root.md",

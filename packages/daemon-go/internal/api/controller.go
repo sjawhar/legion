@@ -54,15 +54,14 @@ type ControllerRegisterResponse struct {
 	Secret     string      `json:"secret"`
 }
 
-// controllerSecret is `legion controller start`'s one daemon call (the shipped
-// handleControllerSecret, packages/daemon/src/daemon/api/routes/controller.ts:61-88): the
-// operator's bearer, compared in constant time, buys a fresh controller capability. The mint
-// replaces the previous capability and its registration, and ends every controller grant, so the
-// controller it replaces stops being able to act the moment this answers — last start wins. A
-// request whose plugin contract is not this daemon's is refused before the mint, naming both: the
-// controller it would start is refused at registration, so minting for it would only cut the
-// running controller off (a `legion` binary replaced before its daemon restarted, or the other way
-// round). Every refusal is one log line and mints nothing.
+// controllerSecret is `legion controller start`'s one daemon call: the operator's bearer, compared
+// in constant time, buys a fresh controller capability. The mint replaces the previous capability
+// and its registration, and ends every controller grant, so the controller it replaces stops being
+// able to act the moment this answers — last start wins. A request whose plugin contract is not
+// this daemon's is refused before the mint, naming both: the controller it would start is refused
+// at registration, so minting for it would only cut the running controller off (a `legion` binary
+// replaced before its daemon restarted, or the other way round). Every refusal is one log line and
+// mints nothing.
 func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 	if !s.operatorAuthorized(r) {
 		s.log.Warn("api: refused a controller secret: no operator bearer, or the wrong one")

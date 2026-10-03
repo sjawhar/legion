@@ -22,8 +22,7 @@ import (
 // complete: notifications.envoy.exceptions.<the original role topic>
 // (packages/envoy/cmd/listener/delivery.go, publishDeliveryException). A role topic is outside the
 // notification stream, so the report goes over core NATS and reaches only a subscriber connected
-// when it is sent; the TypeScript daemon subscribes to the same subjects
-// (packages/daemon/src/daemon/events.ts).
+// when it is sent.
 const noticeExceptionSubjects = "notifications.envoy.exceptions." + notify.RoleTopicPrefix + "*"
 
 // The listener's liveness windows for a role holder (packages/envoy/internal/session): a session's

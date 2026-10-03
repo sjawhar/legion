@@ -23,8 +23,7 @@ import (
 // digits is what --daemon-api-version accepts before it is read as a number.
 var digits = regexp.MustCompile(`^[0-9]+$`)
 
-// runProbeImage is `legion probe-image` (packages/daemon/src/cli/index.ts:946-976, cmdProbeImage
-// :355-397), run inside the worker image: by its build's final step
+// runProbeImage is `legion probe-image`, run inside the worker image: by its build's final step
 // (packages/daemon/docker/worker.Dockerfile), and with the daemon's own contract by the daemon's
 // probe Sandbox, which reads the OK line back from the pod's log (internal/runtime/sandbox,
 // ProbeImage). Both pass --plugin-root, the plugin directory a pod loads as its one explicit

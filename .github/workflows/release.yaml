@@ -10,7 +10,6 @@ on:
       - "packages/contracts/package.json"
       - "packages/envoy-client/package.json"
       - "packages/pi-envoy/package.json"
-      - "packages/daemon/package.json"
       - "packages/envoy-plugin/package.json"
       - "packages/claude-envoy/package.json"
       - "packages/proof-editor/package.json"
@@ -30,6 +29,7 @@ on:
       - "packages/workspace/**"
       - "skills/**"
       # The worker image's remaining inputs (worker_image below).
+      - ".omp-pin"
       - ".dockerignore"
       - ".github/workflows/worker-image.yaml"
   workflow_dispatch:
@@ -46,7 +46,7 @@ jobs:
   changes:
     runs-on: ubuntu-24.04
     outputs:
-      cli: ${{ steps.filter.outputs.cli }}
+      legion: ${{ steps.filter.outputs.legion }}
       envoy_plugin: ${{ steps.filter.outputs.envoy_plugin }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
       go: ${{ steps.filter.outputs.go }}
@@ -57,8 +57,14 @@ jobs:
         id: filter
         with:
           filters: |
-            cli:
-              - 'packages/daemon/**'
+            # The Go `legion` the legion job releases: its module, the modules go.work binds it to,
+            # and the role prompts every release archive carries beside the binary.
+            legion:
+              - 'packages/daemon-go/**'
+              - 'go.work'
+              - 'go.work.sum'
+              - 'packages/envoy/**'
+              - 'packages/pi-envoy/roles/**'
             envoy_plugin:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'
@@ -72,17 +78,17 @@ jobs:
               - 'skills/**'
             # The Go `legion` the worker image compiles and its build inputs (worker.Dockerfile's go
             # stage), plus packages/envoy — copied whole for the agent-secrets binary it also builds
-            # (AGENTC-393); only worker_image reads it, since nothing here releases the Go module.
+            # (AGENTC-393).
             go:
               - 'packages/daemon-go/**'
               - 'go.work'
               - 'go.work.sum'
               - 'packages/envoy/**'
-            # The cli stage's frozen install needs the root manifest, lockfile, patches, and each
+            # The plugin stage's frozen install needs the root manifest, lockfile, patches, and each
             # root-workspace manifest. Keep this explicit because a workspace can affect Bun's
-            # install without its source becoming part of the worker image. The context's
-            # .dockerignore and the called workflow change the image too. With cli, pi_envoy and go
-            # this covers every file worker.Dockerfile builds from;
+            # install without its source becoming part of the worker image. The Dockerfile, the OMP
+            # pin, the context's .dockerignore and the called workflow change the image too. With
+            # pi_envoy and go this covers every file worker.Dockerfile builds from;
             # .github/scripts/check-image-trigger-paths.sh fails the build when it misses one.
             worker_image:
               - 'package.json'
@@ -91,7 +97,6 @@ jobs:
               - 'packages/contracts/package.json'
               - 'packages/envoy-client/package.json'
               - 'packages/pi-envoy/package.json'
-              - 'packages/daemon/package.json'
               - 'packages/envoy-plugin/package.json'
               - 'packages/claude-envoy/package.json'
               - 'packages/proof-editor/package.json'
@@ -99,12 +104,19 @@ jobs:
               - 'packages/workspace/package.json'
               - 'packages/envoy/internal/dispatch/pmdoc/gen/package.json'
               - 'docs/site/package.json'
+              - 'packages/daemon/docker/**'
+              - '.omp-pin'
               - '.dockerignore'
               - '.github/workflows/worker-image.yaml'
 
-  cli:
+  # The Go `legion`: linux and darwin archives of the binary with the role prompts it reads beside
+  # itself (role-prompts/, which a standalone `legion` needs unless LEGION_ROLE_PROMPTS_DIR names
+  # another bundle), on a legion-v* tag of the commit the run checked out. Nothing is committed: a
+  # Go module carries no version file, so the tag alone records the version, and `legion version`
+  # names it.
+  legion:
     needs: changes
-    if: needs.changes.outputs.cli == 'true' || github.event_name == 'workflow_dispatch'
+    if: needs.changes.outputs.legion == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -117,99 +129,106 @@ jobs:
       - name: Determine next version
         id: version
         run: |
-          PREV_TAG=$(git tag -l 'cli-v*' --sort=-v:refname | head -1)
+          PREV_TAG=$(git tag -l 'legion-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
-            PREV_VERSION="0.0.0"
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD -- packages/daemon/)
-          else
+            # The first Go release continues the version line of the TypeScript CLI it replaces
+            # (cli-v*), counting the Go module's commits since that CLI's last release.
+            PREV_TAG=$(git tag -l 'cli-v*' --sort=-v:refname | head -1)
+            test -n "$PREV_TAG"
             PREV_VERSION="${PREV_TAG#cli-v}"
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" -- packages/daemon/)
+          else
+            PREV_VERSION="${PREV_TAG#legion-v}"
           fi
+          VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" -- packages/daemon-go/ packages/pi-envoy/roles/)
 
           if [ "$VERSION" = "empty" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "No commits in packages/daemon/ since ${PREV_TAG:-beginning}"
+            echo "No commits in packages/daemon-go/ or packages/pi-envoy/roles/ since $PREV_TAG"
             exit 0
           fi
           if [ "$VERSION" = "none" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice title=No release published::No version-bumping commits since ${PREV_TAG:-beginning}"
-            echo "**No release published** — No version-bumping commits since ${PREV_TAG:-beginning}" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=No release published::No version-bumping commits since $PREV_TAG"
+            echo "**No release published** — No version-bumping commits since $PREV_TAG" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
           {
             echo "version=$VERSION"
-            echo "release_tag=cli-v${VERSION}"
+            echo "release_tag=legion-v${VERSION}"
             echo "skip=false"
           } >> "$GITHUB_OUTPUT"
-          echo "Bumping cli-v${PREV_VERSION} -> cli-v${VERSION}"
-      - uses: ./.github/actions/setup-bun
+          echo "Bumping $PREV_TAG -> legion-v${VERSION}"
+      - uses: actions/setup-go@v5
         if: steps.version.outputs.skip != 'true'
-      - name: Install dependencies
+        with:
+          go-version-file: packages/daemon-go/go.mod
+          cache-dependency-path: |
+            packages/daemon-go/go.sum
+            packages/envoy/go.sum
+      # CGO_ENABLED=0: a static binary, as the worker image builds it, so a linux archive runs on any
+      # distribution. Each archive holds one top-level directory, legion-<os>-<arch>, with `legion`
+      # and `role-prompts/` in it: mise's github backend strips that one directory, leaving the
+      # binary beside its prompts.
+      - name: Build legion
         if: steps.version.outputs.skip != 'true'
-        run: bun install --frozen-lockfile
-      - name: Build CLI
-        if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          bun build \
-            --compile \
-            --target=bun-linux-x64 \
-            --define 'LEGION_VERSION="${{ steps.version.outputs.version }}"' \
-            packages/daemon/src/cli/index.ts \
-            --outfile legion-linux-x64
-          bun build \
-            --compile \
-            --target=bun-darwin-arm64 \
-            --define 'LEGION_VERSION="${{ steps.version.outputs.version }}"' \
-            packages/daemon/src/cli/index.ts \
-            --outfile legion-darwin-arm64
-          bun build \
-            --compile \
-            --target=bun-darwin-x64 \
-            --define 'LEGION_VERSION="${{ steps.version.outputs.version }}"' \
-            packages/daemon/src/cli/index.ts \
-            --outfile legion-darwin-x64
+          mkdir -p out assets
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os=${target%/*}
+            arch=${target#*/}
+            dir="legion-$os-$arch"
+            mkdir -p "out/$dir"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C packages/daemon-go build -buildvcs=false \
+              -ldflags "-X main.revision=$GITHUB_SHA -X main.release=v$VERSION" \
+              -o "$GITHUB_WORKSPACE/out/$dir/legion" ./cmd/legion
+            cp -R packages/pi-envoy/roles "out/$dir/role-prompts"
+            tar czf "assets/$dir.tar.gz" -C out "$dir"
+          done
+          (cd assets && sha256sum -- * > SHA256SUMS)
       - name: Smoke test
         if: steps.version.outputs.skip != 'true'
-        run: ./legion-linux-x64 --help
-      - name: Update daemon package.json version
-        if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' \
-            packages/daemon/package.json > tmp.json \
-            && mv tmp.json packages/daemon/package.json
-      - name: Commit and tag
+          version=$(out/legion-linux-amd64/legion version)
+          echo "$version"
+          test "$version" = "legion v$VERSION commit $GITHUB_SHA"
+      - name: Tag release
         if: steps.version.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.version.outputs.release_tag }}
         run: |
-          .github/scripts/release-push.sh tag packages/daemon \
-            "chore: release cli v${{ steps.version.outputs.version }} [skip ci]" \
-            "cli-v${{ steps.version.outputs.version }}"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            test "$(git rev-list -n 1 "$TAG")" = "$GITHUB_SHA"
+            exit 0
+          fi
+          git tag "$TAG"
+          git push origin "refs/tags/$TAG"
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.release_tag }}
         run: |
-          tag="cli-v${{ steps.version.outputs.version }}"
-          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Release $tag already exists; reusing it"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; reusing it"
           else
-            gh release create "$tag" \
-              legion-* \
+            gh release create "$TAG" \
+              assets/* \
               --repo "${{ github.repository }}" \
-              --title "CLI v${{ steps.version.outputs.version }}" \
+              --title "legion v${{ steps.version.outputs.version }}" \
               --generate-notes \
               --verify-tag
           fi
-      - name: Push version bump
-        if: steps.version.outputs.skip != 'true'
-        run: .github/scripts/release-push.sh push-main packages/daemon "${{ steps.version.outputs.version }}"
 
   worker_image:
-    needs: [changes, cli]
+    needs: [changes, legion]
     if: >-
-      always() && (needs.cli.result == 'success' || needs.cli.result == 'skipped') &&
-      (needs.changes.outputs.cli == 'true' || needs.changes.outputs.pi_envoy == 'true' ||
+      always() && (needs.legion.result == 'success' || needs.legion.result == 'skipped') &&
+      (needs.changes.outputs.legion == 'true' || needs.changes.outputs.pi_envoy == 'true' ||
       needs.changes.outputs.worker_image == 'true' || needs.changes.outputs.go == 'true' ||
       github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/worker-image.yaml
@@ -221,14 +240,12 @@ jobs:
       contents: write
       packages: write
     with:
-      cli_version: ${{ needs.cli.outputs.version }}
-      release_tag: ${{ needs.cli.outputs.release_tag }}
+      legion_version: ${{ needs.legion.outputs.version }}
+      release_tag: ${{ needs.legion.outputs.release_tag }}
 
   envoy_plugin:
-    needs: [changes, cli]
-    if: >-
-      always() && (needs.cli.result == 'success' || needs.cli.result == 'skipped') &&
-      (needs.changes.outputs.envoy_plugin == 'true' || github.event_name == 'workflow_dispatch')
+    needs: changes
+    if: needs.changes.outputs.envoy_plugin == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5

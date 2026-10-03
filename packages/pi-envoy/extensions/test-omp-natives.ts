@@ -175,10 +175,9 @@ async function readBinary(
 }
 
 /**
- * Holds the exclusive flock(2) lock the Go fill takes on `lockFile`, through util-linux `flock` as
- * packages/daemon/src/cli/workspace-init.ts does: the shell prints a line once flock holds the lock
- * and blocks on its stdin, so the lock lasts until the returned release closes that stdin, or until
- * this process dies and the pipe closes.
+ * Holds the exclusive flock(2) lock the Go fill takes on `lockFile`, through util-linux `flock`:
+ * the shell prints a line once flock holds the lock and blocks on its stdin, so the lock lasts
+ * until the returned release closes that stdin, or until this process dies and the pipe closes.
  */
 async function holdLock(lockFile: string): Promise<() => Promise<void>> {
   const holder = Bun.spawn(["flock", "--exclusive", lockFile, "sh", "-c", "echo && read _"], {

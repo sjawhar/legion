@@ -16,8 +16,8 @@ const DeploymentInstructionsFile = "deployment-instructions.md"
 // ReadSecretPointer is the trimmed contents of the file a pointer key names — `variable` is the
 // key as the operator wrote it (`envoy_token_file`, `operator_token_file`), so the refusal reads
 // in their words. A set pointer is authoritative: a missing, unreadable, or blank file is a
-// refusal naming the key and the path, never a fallback to another source
-// (packages/daemon/src/daemon/secrets.ts:10-22). The contents never appear in an error.
+// refusal naming the key and the path, never a fallback to another source. The contents never
+// appear in an error.
 func ReadSecretPointer(variable, file string) (string, error) {
 	contents, err := os.ReadFile(file)
 	if err != nil {
@@ -37,9 +37,8 @@ func ReadSecretPointer(variable, file string) (string, error) {
 // `--operator-token-file`, `nats_nkey_seed_file`). The file is opened once, and the open descriptor
 // must be a regular file whose mode grants its group and others nothing before its trimmed,
 // non-empty contents are read from that same descriptor, so nothing swapped in between a check and
-// a read is ever read, as readOwnerOnlySecretPointer in packages/daemon/src/daemon/secrets.ts does.
-// The open does not block, so a FIFO is refused rather than waited on. The contents never appear in
-// an error.
+// a read is ever read. The open does not block, so a FIFO is refused rather than waited on. The
+// contents never appear in an error.
 func ReadPrivateSecretPointer(variable, file string) (string, error) {
 	return readSecretFile(variable, file, func(os.FileInfo) secretMode { return ownerOnly })
 }
@@ -111,7 +110,7 @@ func readSecretFile(variable, file string, modeFor func(os.FileInfo) secretMode)
 // ReadDeploymentInstructions is the operator's instructions file, refused naming the operator's
 // path when it is missing, unreadable, or blank: a configured file with nothing in it is a
 // misconfiguration, not an empty fragment. It writes nothing, so `legion controller start` runs it
-// before the one daemon call it makes (packages/daemon/src/daemon/deployment-instructions.ts).
+// before the one daemon call it makes.
 func ReadDeploymentInstructions(instructionsPath string) ([]byte, error) {
 	contents, err := os.ReadFile(instructionsPath)
 	if err != nil {
@@ -127,9 +126,8 @@ func ReadDeploymentInstructions(instructionsPath string) ([]byte, error) {
 // `# Deployment instructions (<legionID>)`, a blank line, and its contents verbatim to
 // `<stateDir>/deployment-instructions.md`, returning that path — the file every pane's one
 // `--append-system-prompt` word ends with, `$(cat <this file>)`, so a pane gets exactly what boot
-// read and never the operator's own path, which may change underneath a running daemon
-// (packages/daemon/src/daemon/deployment-instructions.ts:29-46). legionID is `project` as the
-// operator wrote it.
+// read and never the operator's own path, which may change underneath a running daemon. legionID
+// is `project` as the operator wrote it.
 //
 // A file ReadDeploymentInstructions refuses writes nothing.
 func MaterializeDeploymentInstructions(instructionsPath, stateDir, legionID string) (string, error) {

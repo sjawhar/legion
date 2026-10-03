@@ -30,9 +30,8 @@ type BootToken struct {
 // The claim row carries only its current launch's hash, and that is durable: a daemon restarted
 // under a live pane resolves the pane's token from the store, which is how the shim's reconnect
 // hello is accepted after a restart. A token of a launch the claim has since replaced is no longer
-// on the row; this process still recognises it as stale when it saw that launch persisted, which
-// is the shipped daemon's rule too (an in-memory mint record beside the persisted hash —
-// packages/daemon/src/daemon/api.ts:326-341). After a restart such a token is simply unknown.
+// on the row; this process still recognises it as stale when it saw that launch persisted (an
+// in-memory mint record beside the persisted hash). After a restart such a token is simply unknown.
 type BootTokens struct {
 	store BootTokenStore
 

@@ -13,7 +13,7 @@ import {
 const proof = {
   criterion: "1",
   surface: "branch CLI in a scratch workspace",
-  command: "bun packages/daemon/src/cli/index.ts handoff write --phase implement",
+  command: "legion handoff write --phase implement",
   observed: "exit 1 naming proof",
   headSha: "0123456789abcdef0123456789abcdef01234567",
   negativeControl: "the same payload without proof -> exit 1",

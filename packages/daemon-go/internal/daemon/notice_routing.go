@@ -129,13 +129,11 @@ func (r *outbox) readNoticeRoute(ctx context.Context, tx pgx.Tx, key string, rou
 	return route.issues[key], route, nil
 }
 
-// owningArchitect is the architect claim that owns a notice of kind about issue, by the TypeScript
-// daemon's rule (owningArchitect, packages/daemon/src/daemon/legion-state.ts): the nearest issue at
-// or above it, through its parents, whose sub-architect claim runs (runs; one the operator started,
-// and not suspended: the workflow suspends a child's sub-architect when the child leaves, and
-// nothing starts it again for a notice), else the tree root, whose architect is the tree's own
-// claim. A child's close or status change starts at its parent (reduceIssueClosed and
-// reduceChildStatus, packages/daemon/src/daemon/reducers.ts): the child's own sub-architect is
+// owningArchitect is the architect claim that owns a notice of kind about issue: the nearest issue
+// at or above it, through its parents, whose sub-architect claim runs (runs; one the operator
+// started, and not suspended: the workflow suspends a child's sub-architect when the child leaves,
+// and nothing starts it again for a notice), else the tree root, whose architect is the tree's own
+// claim. A child's close or status change starts at its parent: the child's own sub-architect is
 // suspended with it (workflow's leave), and the architect above it decides what the rest of the
 // tree does. The walk stays inside the issue's tree: admission records a Dispatch re-parent as it
 // comes and leaves the issue's tree as it was (admit's recordObservation), so a parent that is not

@@ -61,8 +61,8 @@ type Config struct {
 	// OmpInvocation is the invocation as configured, "" when the file sets none. The OMP launch
 	// fragment a pane runs is resolved from it at boot (`LEGION_OMP_PATH`, or `mise x <tool> --
 	// omp` with mise's absolute path), because resolving it reads the machine, not the file. There
-	// is no Go default: the shipped one is the OMP fork pin, and the pin has one home,
-	// packages/daemon/src/daemon/omp-pin.ts — a second copy here would be a second literal to bump.
+	// is no Go default: the pin has one home, the repository's .omp-pin — a second copy here would
+	// be a second literal to bump.
 	OmpInvocation string
 	// OmpLaunchPrefix is argv prepended to every OMP invocation inside a pane. It may not run
 	// `secrets`: a pane's XDG home is the daemon's isolated one, where the secrets client finds
@@ -194,11 +194,10 @@ var tossedKeys = map[string]string{
 	"resync_interval_seconds":    `the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, "Ported, and tossed")`,
 }
 
-// migrationKeys are the keys the TypeScript loader already refuses with a migration message, mapped
-// to that message verbatim (packages/daemon/src/daemon/config.ts, loadConfigFromFile's migration
-// refusals). The text is kept exactly, including `worker_budget`'s pointer at `worker_cap`, which
-// this loader tosses in turn: an operator who hits the message searches for the same words in
-// either daemon, and the second refusal names the cap's own fate.
+// migrationKeys are the keys refused with a migration message, mapped to that message verbatim.
+// The text is kept exactly, including `worker_budget`'s pointer at `worker_cap`, which this loader
+// tosses in turn: an operator who hits the message searches for the same words, and the second
+// refusal names the cap's own fate.
 var migrationKeys = map[string]string{
 	"dispatch_mcp_url":  "dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)",
 	"dispatch_project":  "dispatch_project was replaced by projects",

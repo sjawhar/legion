@@ -30,8 +30,8 @@ var miseInvocation = regexp.MustCompile(`^mise x (\S+) -- omp$`)
 // for the pane's shell.
 //
 // An empty invocation — the file set no omp_invocation — is refused by name unless LEGION_OMP_PATH
-// is set. The shipped daemon falls back to its pinned default there; the Go daemon holds no copy of
-// the pin, whose one home is packages/daemon/src/daemon/omp-pin.ts.
+// is set. The daemon holds no copy of the OMP fork pin, whose one home is the repository's
+// .omp-pin.
 func ResolveInvocation(invocation string, env func(string) string) (string, error) {
 	configured, err := configuredPath(env, "LEGION_OMP_PATH")
 	if err != nil {

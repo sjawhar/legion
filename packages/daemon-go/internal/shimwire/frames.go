@@ -3,10 +3,10 @@
 // for a frame too large for one line, and the shim-side delivery dedupe.
 //
 // It is shared by `cmd/legion worker-shim` and `internal/stream`, and it is where the protocol's
-// behaviour is kept rather than re-derived at each end. Every rule here is one the shipped
-// TypeScript already enforces — packages/daemon/src/daemon/{line-reader,socket-writer,worker-rpc,
-// worker-stream-listener}.ts and packages/daemon/src/cli/worker-shim.ts — cited at the rule it
-// keeps. The structure is Go's: a TypeScript file is a source of behaviour, never of shape.
+// behaviour is kept rather than re-derived at each end. Every rule here was ported from the
+// TypeScript daemon LEGION-223 removed; a `worker-rpc.ts:N`, `line-reader.ts:N`,
+// `socket-writer.ts:N`, `worker-stream-listener.ts:N` or `worker-shim.ts:N` citation at a rule
+// names that source in this repository's history. The structure is Go's.
 package shimwire
 
 import (

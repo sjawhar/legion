@@ -106,8 +106,7 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 const STOCK_JJ = ["mise", "x", "github:jj-vcs/jj@0.44.0", "--", "jj"];
-const credentialHelper =
-  "!/opt/legion/bin/bun /opt/legion/packages/daemon/src/cli/index.ts credential";
+const credentialHelper = "!/opt/legion/bin/legion credential";
 const SYSTEM_GIT = "/usr/bin/git";
 
 async function runCommand(command: string[], options?: RunCall["opts"]): Promise<RunResult> {

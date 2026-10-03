@@ -31,11 +31,11 @@ import (
 	workershim "github.com/sjawhar/legion/daemon/internal/shim"
 )
 
-// pluginLoadProbe is the Oh My Pi extension the load probe hands `omp models`: the shipped probe
-// (LEGION_LOAD_PROBE, packages/daemon/src/daemon/boot-probes.ts), which prints whether the plugin's
-// `legion.ts` set its load marker (`Symbol.for("legion.pi-envoy.legion-loaded")`,
-// packages/pi-envoy/extensions/legion.ts) — which only a plugin Oh My Pi actually loaded has done
-// — and, beside it, the marker's value: the `import.meta.url` of that `legion.ts`, where the plugin
+// pluginLoadProbe is the Oh My Pi extension the load probe hands `omp models`, which prints
+// whether the plugin's `legion.ts` set its load marker
+// (`Symbol.for("legion.pi-envoy.legion-loaded")`, packages/pi-envoy/extensions/legion.ts) — which
+// only a plugin Oh My Pi actually loaded has done — and, beside it, the marker's value: the
+// `import.meta.url` of that `legion.ts`, where the plugin
 // loaded from. Given LEGION_PROMPT_AGENTS and LEGION_PROMPT_SKILLS (promptrefs), it also resolves
 // those task agents and skills through Oh My Pi's own discovery over the launch's extension roots,
 // as the task tool resolves an agent's name and a `skill://` read a skill's, and prints which it
@@ -77,13 +77,12 @@ const (
 // the daemon opens its store, so no pane launches until it passes, and it
 // runs under the environment a pane will have (tmux.PaneEnvironment: the allow-listed variables,
 // the XDG directories under `<state_dir>/home`), because the daemon's own HOME, profile, and XDG
-// directories are not what a pane's Oh My Pi reads. Two probes, in the shipped gate's order
-// (startDaemonLocked, packages/daemon/src/daemon/index.ts): the contract probe reads the installed
-// manifest and refuses a plugin that does not declare the gate's contract; the load probe runs
-// Oh My Pi the way a pane does and refuses a plugin it did not load — installed but disabled, or
-// not registered — or one it loaded from another root than the manifest the contract probe read,
-// and refuses, by name, a task agent or a skill Legion's prompts name that the same Oh My Pi
-// cannot find, and a task agent it would not run on the agent's own model.
+// directories are not what a pane's Oh My Pi reads. Two probes, in this order: the contract probe
+// reads the installed manifest and refuses a plugin that does not declare the gate's contract; the
+// load probe runs Oh My Pi the way a pane does and refuses a plugin it did not load — installed but
+// disabled, or not registered — or one it loaded from another root than the manifest the contract
+// probe read, and refuses, by name, a task agent or a skill Legion's prompts name that the same Oh
+// My Pi cannot find, and a task agent it would not run on the agent's own model.
 //
 // Inside the worker image the same gate is `legion probe-image` (ProbeImage), which adds the two
 // probes only the image runs: pi.agents and the session-storage setting.
@@ -295,8 +294,7 @@ var (
 //     `$XDG_DATA_HOME/omp/profiles/<name>` for a named one, when that directory already exists
 //     and the XDG data root is on, else the config root (DirResolver's constructor);
 //   - the plugins are `plugins/node_modules` under the data root (getPluginsDir,
-//     getPluginsNodeModules), and the manifest is the package's own `package.json` there
-//     (legionPluginManifestPath, packages/daemon/src/daemon/boot-probes.ts).
+//     getPluginsNodeModules), and the manifest is the package's own `package.json` there.
 //
 // env is all it reads. Before it resolves its directories, Oh My Pi fills XDG_DATA_HOME,
 // PI_CONFIG_DIR and PI_CODING_AGENT_DIR from dotenv files it reads itself (~/.env, the config root's

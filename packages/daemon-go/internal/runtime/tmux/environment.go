@@ -10,9 +10,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 )
 
-// paneEnvAllowList is every variable a pane process reads from the daemon's own environment,
-// verbatim from the shipped PANE_ENV_ALLOW_LIST (packages/daemon/src/daemon/environment.ts:
-// 180-245): Oh My Pi and its plugins (HOME, the XDG base directories, OMP_PROFILE/PI_PROFILE,
+// paneEnvAllowList is every variable a pane process reads from the daemon's own environment: Oh My
+// Pi and its plugins (HOME, the XDG base directories, OMP_PROFILE/PI_PROFILE,
 // SECRETSD_SOCK for the secretsd OMP extension), jj/git/gh, mise and the `mise x` every pane runs,
 // tmux itself (TMUX_TMPDIR, SHELL), locale and proxy policy. Nothing else the daemon was started
 // with reaches the private server or a pane — not its provider keys (those reach OMP alone, as

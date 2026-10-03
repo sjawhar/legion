@@ -23,10 +23,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
-// The image probe (the in-cluster boot probe, packages/daemon/src/daemon/worker-image-probe.ts,
-// as a Sandbox): a daemon off the cluster is not the image its workers run, so it proves the image
-// by running the image's own Go `legion probe-image --daemon-api-version <N>` in a Sandbox of
-// that image, placed as every worker is placed, and reading the OK line back from the pod's log.
+// The image probe, as a Sandbox: a daemon off the cluster is not the image its workers run, so it
+// proves the image by running the image's own `legion probe-image --daemon-api-version <N>` in a
+// Sandbox of that image, placed as every worker is placed, and reading the OK line back from the
+// pod's log.
 // Only a pod on this cluster proves the cluster can pull the image, schedule it on the Legion pool
 // under gVisor, and run its Oh My Pi and plugin there; only the image's CLI can read the image
 // plugin's contract.

@@ -15,7 +15,7 @@ import {
 // The phase-stall follow-up on the real Oh My Pi (src/legion/phase-stall.ts): only the real binary
 // shows when the host fires `session_stop`, how it turns the returned follow-up into the next turn,
 // what the model is sent, and that the transcript keeps the state a resumed worker restores.
-// LEGION_TEST_OMP names the binary: the fork pin in packages/daemon/src/daemon/omp-pin.ts, which
+// LEGION_TEST_OMP names the binary: the fork pin in the repository's .omp-pin, which
 // CI's pi-envoy job installs; on the devbox, `mise where <pin>`/bin/omp. A run without one skips,
 // except on GitHub Actions, where a skip would hide the only run of the check on the host that
 // ships it (GITHUB_ACTIONS, not CI: agent harnesses on the devbox export CI=true).

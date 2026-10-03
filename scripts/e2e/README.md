@@ -147,7 +147,7 @@ What it stands up, all of it the run's own:
   that `HOME` and with `OMP_PROFILE` naming the profile, so the gate and every pane load it, and the
   operator's `~/.omp/profiles` holds none of the run; `profile-stays-in-the-run` checks that last.
 - **OMP**: `omp_invocation: mise x <pin> -- omp`, the pin read from
-  `packages/daemon/src/daemon/omp-pin.ts`. At boot the daemon asks `mise where <pin>` for the
+  `.omp-pin`. At boot the daemon asks `mise where <pin>` for the
   configured tool's executable, then runs that absolute binary under `mise x <pin>` for every boot
   probe and pane. The script deliberately keeps the ordinary daemon `PATH`, where this devbox has
   `~/.dotfiles/shims/omp` first, and checks the boot log's resolved binary, the OMP child's
@@ -1071,8 +1071,7 @@ manifest=$(scripts/e2e/lib/install-plugin-profile.sh --profile legion-e2e-$$ --h
 
 All three flags are required; each refusal names its flag and exits 2. Stdout is exactly one line, the
 installed manifest's path as `HOME=<home> OMP_PROFILE=<name> omp plugin list --json` reports the plugin; that is
-the manifest both daemons' contract gates read under the same profile — the TypeScript daemon's
-(`getPluginsNodeModules()`, `packages/daemon/src/daemon/boot-probes.ts`) and the Go daemon's
+the manifest the daemon's contract gate reads under the same profile
 (`pluginManifestPath`, `packages/daemon-go/internal/daemon/bootgate.go`). Every step's own output
 goes to stderr.
 
@@ -1087,7 +1086,7 @@ strands no `.tgz` in the checkout). Then:
 3. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the tarball's version,
    enabled, and resolving to `<dir>`.
 
-Steps 2 and 3 run the Oh My Pi both daemons pin (`omp-pin.ts`, through `mise x <pin>`) under
+Steps 2 and 3 run the Oh My Pi the daemon pins (`.omp-pin`, through `mise x <pin>`) under
 `HOME=<home>`, from `<dir>`, rather than the `omp` on the caller's `PATH`: an operator's wrapper
 there (the devbox's `~/.dotfiles/shims/omp`) reads its own files from `HOME`, which is the run's.
 

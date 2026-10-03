@@ -1864,9 +1864,9 @@ describe("Legion OMP extension", () => {
   });
   test("ships a roles/<role>.md residue file for every LegionRole", async () => {
     // The daemon reads packages/pi-envoy/roles/${role}.md for every phase-worker role, including a
-    // sub-architect (packages/daemon/src/daemon/processes.ts launchWorker). Phase workers also compose
-    // their core and headless mechanics parts; the sub-architect remains single-file. A missing residue
-    // 500s the spawn.
+    // sub-architect (internal/prompts, Compose). Phase workers also compose their core and headless
+    // mechanics parts; the sub-architect remains single-file. A missing residue fails the daemon's
+    // boot.
     for (const role of LEGION_ROLES) {
       const rolePath = path.join(import.meta.dir, "..", "roles", `${role}.md`);
       await access(rolePath);

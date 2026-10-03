@@ -9,9 +9,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-// Every delivery first hands the agent's working copy its role's App identity, the way the shipped
-// daemon adopts it before an assignment (packages/daemon/src/daemon/processes.ts:1126), so a commit
-// the task makes is authored by the bot rather than by whoever the workspace last named.
+// Every delivery first hands the agent's working copy its role's App identity, so a commit the
+// task makes is authored by the bot rather than by whoever the workspace last named.
 func TestADeliveryAdoptsTheRoleIdentityBeforeThePrompt(t *testing.T) {
 	bot := runtime.GitIdentity{Name: "legion-implementer[bot]", Email: "7+legion-implementer[bot]@users.noreply.github.com"}
 	for _, tc := range []struct {

@@ -105,11 +105,9 @@ func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 
 // addressingFragment is the sentence that tells an agent where it and its peers are reached: its
 // own role topic, the tree architect's, and the project controller's, spelled from the tokens so
-// the model never hand-encodes one (addressingFragment, packages/daemon/src/daemon/processes.ts).
-// The shipped sentence's merge-queue clause is left out: it tells the merger where to publish
-// READY, and under this daemon the merger publishes nothing — the daemon posts the READY packet
-// and publishes it to `projects.<KEY>.merge_queue_role` itself (workflow.Engine.ready,
-// prompts/go/merger.md).
+// the model never hand-encodes one. It names no merge queue: the merger publishes nothing — the
+// daemon posts the READY packet and publishes it to `projects.<KEY>.merge_queue_role` itself
+// (workflow.Engine.ready, prompts/go/merger.md).
 func addressingFragment(project string, c supervise.Claim) (string, error) {
 	architect, err := claim.NewToken(project, c.Tree, claim.RoleArchitect)
 	if err != nil {
@@ -122,9 +120,8 @@ func addressingFragment(project string, c supervise.Claim) (string, error) {
 
 // DesignGateFragment is the sentence a tree's root architect is told after its addressing, and the
 // operator's controller as its launch addressing (`legion controller start`): this project's design
-// gate policy, the "Design gate policy" line the shared role prompts read (designGateFragment,
-// packages/daemon/src/daemon/processes.ts). What each policy asks of the architect under this
-// daemon is in its Go role part (prompts/go/architect-root.md).
+// gate policy, the "Design gate policy" line the shared role prompts read. What each policy asks of
+// the architect is in its Go role part (prompts/go/architect-root.md).
 func DesignGateFragment(policy config.DesignGate) string {
 	return fmt.Sprintf("Design gate policy: `gates.design: %s`.", policy)
 }

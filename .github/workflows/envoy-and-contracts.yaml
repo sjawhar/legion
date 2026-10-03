@@ -25,14 +25,13 @@ on:
       - "go.work.sum"
       - "scripts/e2e/**"
       - "deploy/kubernetes/operator-route/**"
-      - "packages/daemon/src/daemon/omp-pin.ts"
+      - ".omp-pin"
       - ".github/actions/install-omp/**"
       # The envoy-smoke job builds packages/envoy/docker/Dockerfile, so this list owes every
-      # file that build reads: the four below are the ones the entries above do not already
+      # file that build reads: the three below are the ones the entries above do not already
       # cover. .github/scripts/check-image-trigger-paths.sh fails the build when one is missing.
       - ".github/workflows/envoy-and-contracts.yaml"
       - ".dockerignore"
-      - "packages/daemon/package.json"
       - "packages/workspace/package.json"
       - "docs/site/package.json"
   pull_request:
@@ -58,12 +57,11 @@ on:
       - "go.work.sum"
       - "scripts/e2e/**"
       - "deploy/kubernetes/operator-route/**"
-      - "packages/daemon/src/daemon/omp-pin.ts"
+      - ".omp-pin"
       - ".github/actions/install-omp/**"
-      # Same four the push list owes, for the same build.
+      # Same three the push list owes, for the same build.
       - ".github/workflows/envoy-and-contracts.yaml"
       - ".dockerignore"
-      - "packages/daemon/package.json"
       - "packages/workspace/package.json"
       - "docs/site/package.json"
   merge_group:
@@ -127,7 +125,6 @@ jobs:
               - 'patches/**'
               - 'packages/envoy-client/package.json'
               - 'packages/pi-envoy/package.json'
-              - 'packages/daemon/package.json'
               - 'packages/envoy-plugin/package.json'
               - 'packages/claude-envoy/package.json'
               - 'packages/workspace/package.json'
@@ -175,7 +172,7 @@ jobs:
               - 'skills/**'
               # The Oh My Pi pin the real-binary tests run (extensions/legion-phase-stall-omp.test.ts,
               # extensions/dispatch-first-omp.test.ts).
-              - 'packages/daemon/src/daemon/omp-pin.ts'
+              - '.omp-pin'
               - '.github/actions/install-omp/**'
               # The jj its tests drive is the worker image's.
               - 'packages/daemon/docker/worker.Dockerfile'
@@ -216,7 +213,7 @@ jobs:
               - 'skills/**'
               # The Oh My Pi pin the real-binary tests run (internal/podsafety's baseline, the
               # pod agent's argv in internal/runtime/sandbox).
-              - 'packages/daemon/src/daemon/omp-pin.ts'
+              - '.omp-pin'
               - '.github/actions/install-omp/**'
 
   contracts:
@@ -303,7 +300,7 @@ jobs:
       - uses: ./.github/actions/install-jj
       # extensions/legion-phase-stall-omp.test.ts and extensions/dispatch-first-omp.test.ts run the
       # pinned Oh My Pi against stand-ins (extensions/test-omp-harness.ts) and refuse on GitHub Actions
-      # without one. The pin is read from omp-pin.ts, the repository's one copy of it, installed
+      # without one. The pin is read from .omp-pin, the repository's one copy of it, installed
       # through the mise install-jj leaves at ~/.local/bin/mise (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       - run: bun install --frozen-lockfile
@@ -664,7 +661,7 @@ jobs:
       - uses: ./.github/actions/install-jj
       # internal/podsafety's baseline test and the pod agent's argv test run the Oh My Pi the worker
       # image ships, and refuse on GitHub Actions without one. The pin is read from
-      # omp-pin.ts, the repository's one copy of it, installed through the mise above
+      # .omp-pin, the repository's one copy of it, installed through the mise above
       # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       # internal/runtime/sandbox's uv link-mode test installs a wheel with the uv the worker image

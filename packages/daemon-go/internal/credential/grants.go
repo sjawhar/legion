@@ -99,9 +99,7 @@ func (g *Grants) MintController() (Grant, error) {
 }
 
 // RevokeControllers ends every controller grant, so none minted under a controller capability
-// outlives the capability a new mint replaces (the shipped revokeControllerGrants,
-// packages/daemon/src/daemon/api/auth.ts:176-184). A revoked id is unavailable, like one never
-// minted.
+// outlives the capability a new mint replaces. A revoked id is unavailable, like one never minted.
 func (g *Grants) RevokeControllers() {
 	g.mu.Lock()
 	defer g.mu.Unlock()

@@ -65,8 +65,7 @@ func runController(ctx context.Context, args []string, stdout, stderr io.Writer)
 }
 
 // controllerStart is `legion controller start`, the operator's side of a controller the daemon
-// cannot launch itself (LEGION-206 Requirement 11; the shipped cmdControllerStart,
-// packages/daemon/src/cli/controller-start.ts). In order, and nothing is kept, and nothing
+// cannot launch itself (LEGION-206 Requirement 11). In order, and nothing is kept, and nothing
 // but the probe is launched, until the daemon has answered: read the strict operator-side file;
 // refuse an operator token file others can read, a blank or unreadable Envoy or Dispatch token
 // file, a NATS nkey seed file that is blank, unreadable, or holds no nkey user seed, a role-prompt
@@ -301,10 +300,9 @@ func removeDirs(created []string) {
 
 // fetchControllerSecret is `POST /legion/v1/controller/secret` with the operator token as a
 // bearer and the plugin's daemon API contract in the body, answering the capability and the
-// daemon's design gate policy. A failed request names the
-// daemon URL and never tries another address; a refusal quotes the daemon's `error` (the shipped
-// fetchControllerSecret, packages/daemon/src/cli/controller-start.ts). An answer without a known
-// policy is a daemon from before the controller was told it, refused rather than guessed at.
+// daemon's design gate policy. A failed request names the daemon URL and never tries another
+// address; a refusal quotes the daemon's `error`. An answer without a known policy is a daemon
+// from before the controller was told it, refused rather than guessed at.
 func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string, contract int) (string, config.DesignGate, error) {
 	const route = "/legion/v1/controller/secret"
 	status, body, err := operator{base: daemonURL, bearer: operatorToken}.do(ctx, http.MethodPost, route, api.ControllerSecretRequest{PluginContract: contract})

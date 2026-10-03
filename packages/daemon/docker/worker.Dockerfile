@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # Legion worker image: every Legion agent process under `runtime: kubernetes` runs from this image.
 # Build context: the repo root. Built by .github/workflows/worker-image.yaml on the GitHub-hosted runner
-# (called from release.yaml after `cli`, on every head of a pull request against main that touches a file
+# (called from release.yaml after `legion`, on every head of a pull request against main that touches a file
 # it builds from, or dispatched post-merge). Never build it on a workstation — no `docker build`,
 # `docker buildx`, or `docker compose build` (Sami, 2026-09-12); the CI runner is not a workstation.
 #
@@ -29,8 +29,8 @@
 # pod baseline (packages/daemon-go/internal/podsafety: the worker shim, and `legion probe-image`, each
 # with --pod-safety), which names no model, provider or route.
 
-# Pins not derived from daemon code. The OMP fork pin is deliberately NOT an ARG: it is printed from
-# packages/daemon/src/daemon/omp-pin.ts (the single source config.ts's DEFAULT_OMP_INVOCATION uses).
+# Pins not derived from daemon code. The OMP fork pin is deliberately NOT an ARG: it is the one line of
+# the repository's .omp-pin, its only home, which the tools stage copies.
 ARG BUN_VERSION=1.3.14
 ARG MISE_VERSION=v2026.8.12
 # Sami's jj fork: what the dogfood daemon runs on the devbox; same 0.45 line as the jj-lib inside OMP.
@@ -60,7 +60,7 @@ ARG CODEGRAPH_VERSION=1.5.0
 ARG PI_CODEGRAPH_VERSION=0.1.1
 
 # ------------------------------------------------------------------------------------------------
-# plugin: workspace install, the OMP pin, the CodeGraph CLI, and the packed plugin.
+# plugin: workspace install, the CodeGraph CLI, and the packed plugin.
 FROM oven/bun:${BUN_VERSION}-slim AS plugin
 WORKDIR /repo
 # jq: the same omp.extensions rewrite release.yaml's pi_envoy job runs. python3/make/g++: native
@@ -87,7 +87,6 @@ COPY patches patches
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/envoy-client/package.json packages/envoy-client/package.json
 COPY packages/pi-envoy/package.json packages/pi-envoy/package.json
-COPY packages/daemon/package.json packages/daemon/package.json
 COPY packages/envoy-plugin/package.json packages/envoy-plugin/package.json
 COPY packages/claude-envoy/package.json packages/claude-envoy/package.json
 COPY packages/proof-editor/package.json packages/proof-editor/package.json
@@ -99,12 +98,8 @@ RUN bun install --frozen-lockfile
 COPY packages/contracts packages/contracts
 COPY packages/envoy-client packages/envoy-client
 COPY packages/workspace packages/workspace
-COPY packages/daemon packages/daemon
 COPY packages/pi-envoy packages/pi-envoy
 COPY skills skills
-RUN mkdir -p /out \
-    && bun packages/daemon/src/daemon/omp-pin.ts > /out/omp-pin \
-    && test -s /out/omp-pin
 
 # The plugin ships from this checkout with the steps release.yaml's pi_envoy job runs before
 # `bun pm pack` (prepack.sh refuses to pack with the source manifest). The tarball is unpacked into a
@@ -129,7 +124,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 RUN curl -fsSL https://mise.run -o /tmp/mise-install.sh \
     && MISE_VERSION="${MISE_VERSION}" MISE_INSTALL_PATH=/usr/local/bin/mise sh /tmp/mise-install.sh \
     && rm /tmp/mise-install.sh
-COPY --from=plugin /out/omp-pin /omp-pin
+COPY .omp-pin /omp-pin
 # github_token (optional BuildKit secret): mise's github backend reads MISE_GITHUB_TOKEN; a shared
 # builder IP without it can hit GitHub's unauthenticated API limit (403). CI passes secrets.GITHUB_TOKEN;
 # a build without the secret still runs, unauthenticated.

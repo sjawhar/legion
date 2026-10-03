@@ -126,8 +126,7 @@ var (
 
 // dnsName lowercases value, turns every character outside [a-z0-9-] into a dash, collapses dash
 // runs, and trims dashes at either end; past max it keeps a prefix and appends a dash and 8 hex of
-// sha256(value), so two long values that share the prefix still differ (the shipped k8sSlug,
-// packages/daemon/src/daemon/k8s-manifests.ts:52-61).
+// sha256(value), so two long values that share the prefix still differ.
 func dnsName(value string, max int) string {
 	slug := strings.Trim(dashes.ReplaceAllString(notDNS.ReplaceAllString(strings.ToLower(value), "-"), "-"), "-")
 	if len(slug) <= max {

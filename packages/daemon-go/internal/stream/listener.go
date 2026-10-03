@@ -8,9 +8,9 @@
 // the runtime reaches an agent for a graceful stop without importing this package: the Listener
 // is the runtime.Conns it is constructed with.
 //
-// Behaviour is kept from the shipped listener and RPC client —
-// packages/daemon/src/daemon/{worker-stream-listener,worker-rpc}.ts — cited at each rule. The
-// structure is Go's.
+// Behaviour was ported from the TypeScript listener and RPC client LEGION-223 removed; a
+// `worker-stream-listener.ts:N` or `worker-rpc.ts:N` citation at a rule names that source in this
+// repository's history. The structure is Go's.
 package stream
 
 import (

@@ -1,9 +1,9 @@
 import {
   controllerToken,
-  type GrantResponse,
   legionControllerNoticeSubject,
   legionProjectToken,
 } from "@legion/contracts";
+import type { LegionGoGrant } from "@legion/contracts/legion-go-api";
 import { messageFor } from "@legion/envoy-client/errors";
 import pkg from "../../package.json";
 import type { CommandContext, SessionContext } from "../pi-types";
@@ -21,7 +21,7 @@ export interface ControllerSession {
   readonly handleSessionStart: (context: SessionContext) => Promise<void>;
   readonly reclaimAfterSessionChange: (context: SessionContext) => Promise<void>;
   readonly isClaimedSession: (sessionID: string) => boolean;
-  readonly mintGrant: (sessionID: string) => Promise<GrantResponse>;
+  readonly mintGrant: (sessionID: string) => Promise<LegionGoGrant>;
 }
 
 /**
@@ -36,7 +36,7 @@ export function createControllerSession(deps: {
   const { daemon, persistedTranscript } = deps;
   let controllerSessionID: string | undefined;
   let controllerCapability: string | undefined;
-  let mintControllerGrant: (() => Promise<GrantResponse>) | undefined;
+  let mintControllerGrant: (() => Promise<LegionGoGrant>) | undefined;
   // The controller's own transcript as of the last successful claim, which a session navigation
   // compares to decide whether to claim again; a hand-started takeover records none.
   let controllerTranscript: string | undefined;
@@ -152,7 +152,7 @@ export function createControllerSession(deps: {
   const isClaimedSession = (sessionID: string): boolean =>
     controllerSessionID === sessionID && mintControllerGrant !== undefined;
 
-  const mintGrant = async (sessionID: string): Promise<GrantResponse> => {
+  const mintGrant = async (sessionID: string): Promise<LegionGoGrant> => {
     if (controllerSessionID !== sessionID || mintControllerGrant === undefined) {
       throw new Error("Controller session is not registered; cannot mint its grant");
     }

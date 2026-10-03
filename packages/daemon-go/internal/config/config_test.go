@@ -36,10 +36,8 @@ github_apps:
 nats_urls: [nats://127.0.0.1:4222]
 `
 
-// The refusals the shipped loader words itself, quoted here from
-// packages/daemon/src/daemon/config.ts (loadConfigFromFile's refusals of the replaced keys and of
-// app_logins, and parseGates's of gates.merge) so an operator moving from the TypeScript daemon
-// reads the same sentence.
+// The refusals of the replaced keys, of app_logins, and of gates.merge, quoted here so a change to
+// any of them fails a test.
 const (
 	wantDispatchMcpURLMessage  = "dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)"
 	wantDispatchProjectMessage = "dispatch_project was replaced by projects"
@@ -111,11 +109,9 @@ func ignoredLine(key string, stage int) string {
 }
 
 // defaultsFor is the Config minimalFile resolves to on port: every key it leaves out at its default,
-// on the loopback bind and the tmux runtime. The Stage 2 defaults are the shipped loader's (the
-// DEFAULT_ constants in packages/daemon/src/daemon/config.ts, and resolveDaemonConfig's `port + 1`
-// and loopback daemon URL) plus the four keys Stage 2 adds — except omp_invocation, which has none
-// here: the shipped default is the OMP fork pin, whose one home is packages/daemon/src/daemon/
-// omp-pin.ts (docs/solutions/daemon/omp-pin-bump-behavioral-proof.md:29-43).
+// on the loopback bind and the tmux runtime, with the API on port, the worker stream on `port + 1`
+// and a loopback daemon URL — except omp_invocation, which has none: the OMP fork pin's one home
+// is the repository's .omp-pin.
 func defaultsFor(port int) Config {
 	return Config{
 		Project:                                 "DEMO",
@@ -992,10 +988,9 @@ func TestLoadReadsRuntimeAsItsDiscriminator(t *testing.T) {
 	}
 }
 
-// Every top-level key of the shipped schema (CONFIG_SCHEMA, packages/daemon/src/daemon/config.ts:
-// 38 keys, nats_daemon_nkey_seed_file among them since #1494) plus the new postgres_dsn, and the
-// class it is in at Stage 2. No shipped key may fall through to the typo refusal. Stage 2 moved
-// fifteen keys from known-later to modelled.
+// Every top-level key of the earlier schema (38 keys, nats_daemon_nkey_seed_file among them since
+// #1494) plus the new postgres_dsn, and the class it is in at Stage 2. No shipped key may fall
+// through to the typo refusal. Stage 2 moved fifteen keys from known-later to modelled.
 func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 	const (
 		modelled   = "modelled"

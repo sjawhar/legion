@@ -18,8 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// invalidOperatorToken is every operator route's one refusal, the shipped daemon's sentence
-// (packages/daemon/src/daemon/api/routes/controller.ts:87).
+// invalidOperatorToken is every operator route's one refusal.
 const invalidOperatorToken = "Invalid operator token"
 
 // SpawnRequest is the operator's spawn: the claim on Role of Issue, in the tree Tree roots.

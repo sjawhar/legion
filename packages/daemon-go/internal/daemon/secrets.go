@@ -16,10 +16,9 @@ import (
 
 // pruning is store with a claim's secret files removed whenever the claim is written with no
 // process — suspended, failed, retired, or between one launch and the next. The runtime writes a
-// pane's files and never removes them; the daemon, which knows when a claim's process ends, does
-// (as the shipped daemon does — packages/daemon/src/daemon/processes.ts:5258-5280). A launch
-// writes its files after the claim is persisted without a locator, so a relaunch's own files are
-// never the ones removed.
+// pane's files and never removes them; the daemon, which knows when a claim's process ends, does.
+// A launch writes its files after the claim is persisted without a locator, so a relaunch's own
+// files are never the ones removed.
 func pruning(store supervise.Store, dir string, log *slog.Logger) supervise.Store {
 	return pruningStore{Store: store, dir: dir, log: log}
 }

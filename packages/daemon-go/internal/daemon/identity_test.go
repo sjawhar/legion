@@ -14,9 +14,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// A pane commits as its role's App: the launch carries the six variables the shipped daemon sets
-// on every worker pane (gitIdentityEnv, packages/daemon/src/daemon/github-app-env.ts), and a
-// launch whose identity cannot be resolved does not happen.
+// A pane commits as its role's App: the launch carries the six git identity variables every worker
+// pane gets, and a launch whose identity cannot be resolved does not happen.
 func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 	stateDir := t.TempDir()
 	token, err := claim.NewToken("s1", "S1-1", claim.RoleImplementer)

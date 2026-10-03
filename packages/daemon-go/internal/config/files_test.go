@@ -11,7 +11,7 @@ import (
 )
 
 // A set pointer is authoritative: its file's trimmed contents, or a refusal naming the pointer
-// and the path — never a fallback (packages/daemon/src/daemon/secrets.ts:10-22).
+// and the path — never a fallback.
 func TestReadSecretPointer(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "ENVOY_TOKEN")
@@ -46,7 +46,7 @@ func TestReadSecretPointer(t *testing.T) {
 // The operator bearer buys a controller capability and opens every operator route, so the file
 // holding it is held to what the open file is: a regular file only its owner can read, with a
 // token in it. A group- or other-readable copy is refused naming the path and the mode, and a FIFO
-// is refused rather than waited on (readOwnerOnlySecretPointer, packages/daemon/src/daemon/secrets.ts).
+// is refused rather than waited on.
 func TestReadPrivateSecretPointer(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, contents string, mode os.FileMode) string {

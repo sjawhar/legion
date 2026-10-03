@@ -17,8 +17,7 @@ func executable(t *testing.T, dir, name string) string {
 }
 
 // Boot resolves the binaries Legion itself runs once, each by its LEGION_<TOOL>_PATH override or
-// on the daemon's PATH, and names every missing one with its override
-// (packages/daemon/src/daemon/environment.ts:384-409).
+// on the daemon's PATH, and names every missing one with its override.
 func TestResolveToolsPrefersTheOverrideAndNamesEveryMissingTool(t *testing.T) {
 	onPath, elsewhere := t.TempDir(), t.TempDir()
 	executable(t, onPath, "gh")

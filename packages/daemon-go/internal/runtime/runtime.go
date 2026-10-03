@@ -191,8 +191,7 @@ type GitIdentity struct {
 }
 
 // Env is the six variables that make a process commit as id: JJ_USER/JJ_EMAIL, which jj reads
-// over every config scope, and the Git author and committer pairs for plain git
-// (gitIdentityEnv, packages/daemon/src/daemon/github-app-env.ts).
+// over every config scope, and the Git author and committer pairs for plain git.
 func (id GitIdentity) Env() map[string]string {
 	return map[string]string{
 		"JJ_USER": id.Name, "JJ_EMAIL": id.Email,

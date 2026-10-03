@@ -37,8 +37,13 @@ const (
 )
 
 // revision is the commit the binary was built from, linked in by the worker image's build
-// (`-ldflags "-X main.revision=<commit>"`, packages/daemon/docker/worker.Dockerfile); empty otherwise.
+// (packages/daemon/docker/worker.Dockerfile) and the legion release (.github/workflows/release.yaml)
+// with `-ldflags "-X main.revision=<commit>"`; empty otherwise.
 var revision string
+
+// release is the legion-v* version a release binary was built for, linked in by the release
+// workflow with `-ldflags "-X main.release=v<version>"`; empty in every other build.
+var release string
 
 type command func(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
@@ -77,7 +82,9 @@ func run(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
 
 func runVersion(_ context.Context, _ []string, stdout, _ io.Writer) int {
 	version := "(devel)"
-	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
+	if release != "" {
+		version = release
+	} else if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
 		version = info.Main.Version
 	}
 	if revision != "" {

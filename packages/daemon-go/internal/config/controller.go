@@ -17,7 +17,7 @@ import (
 const ControllerConfigExample = "deploy/kubernetes/daemon/controller.yaml.example"
 
 // controllerKeys is every key the operator-side file may carry: the same names as legion.yaml, only
-// the ones the controller needs (packages/daemon/src/cli/controller-start.ts:34-47).
+// the ones the controller needs.
 var controllerKeys = []string{
 	"project", "daemon_url", "operator_token_file", "envoy_url", "envoy_token_file", "nats_urls",
 	"nats_nkey_seed_file", "dispatch_url", "dispatch_token_file", "instructions", "omp_invocation",
@@ -57,8 +57,7 @@ type ControllerConfig struct {
 // It is never the daemon's loader, which runs both GitHub Apps' private_key_command and demands
 // keys the controller never uses. Relative paths resolve against the file's directory; `~` is not
 // expanded. daemonURL, when not "", is `--daemon-url`, which replaces the file's daemon_url and is
-// validated the same way (loadControllerStartConfig and cmdControllerStart's --daemon-url check,
-// packages/daemon/src/cli/controller-start.ts).
+// validated the same way.
 func LoadController(path, daemonURL string) (ControllerConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

@@ -11,7 +11,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 
 - the pinned OMP fork build the daemon's default `omp_invocation` names — resolved at build time with the
   same `mise x github:sjawhar/oh-my-pi@<pin>` mechanism a tmux host uses, from the single pin source
-  `packages/daemon/src/daemon/omp-pin.ts`; installed at `/opt/omp/bin/omp` (`LEGION_OMP_PATH`);
+  `.omp-pin`; installed at `/opt/omp/bin/omp` (`LEGION_OMP_PATH`);
 - `legion` (`packages/daemon-go`), compiled from the same commit at `go.work`'s Go version, static, at
   `/opt/legion/bin/legion` — the `legion` on `PATH` and the image's `ENTRYPOINT` — with the
   `agent-secrets` client beside it at `/opt/legion/bin/agent-secrets`. It links the commit it was built
@@ -86,17 +86,17 @@ To check a published image's toolchain end to end, Python install included:
 
 `legion.yaml` `runtime.kubernetes.image` accepts only `ghcr.io/sjawhar/legion-worker@sha256:…`. A tag is
 mutable; the daemon must know exactly what it probed, so a tag reference is refused at startup with
-`runtime.kubernetes.image must be pinned by digest (@sha256:…)` (`packages/daemon/src/daemon/image-ref.ts`).
+`runtime.kubernetes.image must be pinned by digest (@sha256:…)` (`packages/daemon-go/internal/config/kubernetes.go`).
 
 Where the digest is published:
 
 - the job summary of every `Worker Image` run (Actions → Worker Image → the run → Summary);
-- the body of the `cli-v<version>` GitHub release, under "Worker image", when `release.yaml` released the
-  CLI in the same run (`gh release view cli-v<version> --json body -q .body`);
+- the body of the `legion-v<version>` GitHub release, under "Worker image", when `release.yaml` released
+  `legion` in the same run (`gh release view legion-v<version> --json body -q .body`);
 - `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` for any published tag.
 
 Tags: `sha-<12 hex of the built commit>` on every run (on a pull request that is the PR head, never the
-ephemeral merge commit); `<cli version>` only on `main` when `cli` released that version in the same run.
+ephemeral merge commit); `<legion version>` only on `main` when the `legion` job released that version in the same run.
 Runs from any other ref publish the `sha-` tag only and never touch a release.
 
 ### How it is built — and the iteration rule
@@ -105,15 +105,15 @@ Runs from any other ref publish the `sha-` tag only and never touch a release.
 + `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses), layer cache in GitHub Actions
 cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the workflow's own `GITHUB_TOKEN`
 — no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
-the `cli` job on every `main` push that touches any file the image builds from, (2) on every head of a pull
+the `legion` job on every `main` push that touches any file the image builds from, (2) on every head of a pull
 request against `main` whose diff touches any of those files — building the PR head and publishing `sha-`
 only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`. The
 files the image builds from are every context source `worker.Dockerfile` copies: the root manifest,
 lockfile, patches and each root workspace's `package.json` (the frozen install); the packages it copies
-whole — the daemon the `legion` CLI is compiled from (`packages/daemon/**`, the Dockerfile and the OMP pin
-included), the plugin and what it bundles (`packages/pi-envoy/**`, `packages/envoy-client/**`,
-`packages/contracts/**`), the provisioning code (`packages/workspace/**`) and the skills (`skills/**`); the
-whole Go module the image compiles the Go `legion` from (`packages/daemon-go/**`) and its build inputs; the
+whole — the Dockerfile (`packages/daemon/docker/**`), the plugin and what it bundles (`packages/pi-envoy/**`,
+`packages/envoy-client/**`, `packages/contracts/**`), the provisioning code (`packages/workspace/**`) and
+the skills (`skills/**`); the OMP pin (`.omp-pin`); the whole Go module the image compiles `legion` from
+(`packages/daemon-go/**`) and its build inputs; the
 context's `.dockerignore`; and the workflow itself. What a pod executes is part of the image's behaviour —
 the command a Sandbox pod runs, the launch probes `legion probe-image` runs in the image's final step and in
 the Go daemon's probe Sandbox, and every package they import — so a change to any of it builds the image it
@@ -135,8 +135,8 @@ host to load 646 on 2026-09-12 and the Legion daemon with it (the CI runner is n
 pushing the PR branch (trigger 2) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
 statically (`hadolint`, `actionlint` where installed) and run `bun test` for the TypeScript. Pulling and
 running the published image locally is fine. A failed build is retried with `gh run rerun <run-id> --failed`
-(`--failed` keeps the `cli` job's recorded outputs; a whole-run rerun of a `release.yaml` call re-executes
-`cli` against its own tag and empties `cli_version`) or by pushing the branch again.
+(`--failed` keeps the `legion` job's recorded outputs; a whole-run rerun of a `release.yaml` call re-executes
+`legion` against its own tag and empties `legion_version`) or by pushing the branch again.
 
 The build has no prerequisites outside this repository. After the first push there is one human action: if
 the `legion-worker` GHCR package came out private, an anonymous `docker pull` fails until its visibility is
@@ -467,20 +467,16 @@ then names the same cause as the connection's last error.
 
 Rollout order for the server's `legion-daemon` user (AGENTC-759): the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
-every daemon gets it and restarts, and each boot line must name the daemon's own user: a Go
-daemon's `legion daemon connects to NATS` line reads `paneUser=false`, and a TypeScript daemon's
-`[legion] daemon NATS connects as nkey user U…` line reads `its own daemon user, not the pane user`
-(#1494, `packages/daemon/src/daemon/AGENTS.md`). Only then is the
+every daemon gets it and restarts, and each boot line must name the daemon's own user: the
+daemon's `legion daemon connects to NATS` line reads `paneUser=false` (#1494). Only then is the
 `legion-pane` seed written. A clean boot line proves the user, not every grant: the check before
 the pane seed is written also has each daemon consume a Dispatch and a GitHub event with no error
-line, and searches each daemon's log for `NATS refused the daemon` (either daemon's line), since a missing
-grant on the exceptions lane (`notifications.envoy.exceptions.notifications.role.>`) still boots
-healthy and consumes both events, and that error line is its only sign. The check also has a
-TypeScript daemon send a control directive, since its `legion.ctl` publish is refused only when it
-first sends one (`packages/daemon/src/daemon/AGENTS.md`). `legion-pane` is never granted the daemon's
-subjects above. Reversed, a daemon holding only the `legion-pane` seed connects as `legion-pane`,
-and each refused subject logs the error line above (a refused consumer or subscription never
-delivers).
+line, and searches each daemon's log for `NATS refused the daemon`, since a missing grant on the
+exceptions lane (`notifications.envoy.exceptions.notifications.role.>`) still boots healthy and
+consumes both events, and that error line is its only sign. `legion-pane` is never granted the
+daemon's subjects above. Reversed, a daemon holding only the `legion-pane` seed connects as
+`legion-pane`, and each refused subject logs the error line above (a refused consumer or
+subscription never delivers).
 
 ### Anatomy of a Sandbox pod
 

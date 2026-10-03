@@ -301,6 +301,7 @@ export const LegionGoGrantResponse = z.strictObject({
   grantId: nonEmptyString,
   expiresAt: timestamp,
 });
+export type LegionGoGrant = z.output<typeof LegionGoGrantResponse>;
 /** A GitHub App's git identity, `<slug>[bot]`, with a slug. */
 const appLogin = z.string().regex(/^[^[\]]+\[bot\]$/);
 export const LegionGoGitHubTokenResponse = z.strictObject({

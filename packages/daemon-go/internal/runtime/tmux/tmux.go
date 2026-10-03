@@ -9,8 +9,9 @@
 // launch (its incarnation), and nothing is reported alive, killed, or shared until pid, start
 // ticks, and the OMP command line all check out again.
 //
-// The TypeScript runtime this ports is packages/daemon/src/daemon/{tmux,runtime-tmux,
-// environment}.ts; each behaviour kept cites the file and line it keeps. The structure is Go's.
+// The behaviour was ported from the TypeScript runtime LEGION-223 removed; a `tmux.ts:N` or
+// `runtime-tmux.ts:N` citation at a rule names that runtime's source in this repository's history.
+// The structure is Go's.
 package tmux
 
 import (

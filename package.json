@@ -18,7 +18,6 @@
     "packages/contracts",
     "packages/envoy-client",
     "packages/pi-envoy",
-    "packages/daemon",
     "packages/envoy-plugin",
     "packages/claude-envoy",
     "packages/proof-editor",

@@ -289,8 +289,7 @@ func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 	}()
 }
 
-// adopt hands the working copy the role's App identity before a task reaches the agent, as the
-// shipped daemon does before every assignment (packages/daemon/src/daemon/processes.ts:1126), so
+// adopt hands the working copy the role's App identity before every task reaches the agent, so
 // the task's commits are authored by the bot. A failure keeps the task from being sent.
 func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
 	if m.deps.Identity == nil {

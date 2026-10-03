@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { GrantResponse } from "@legion/contracts";
+import type { LegionGoGrant } from "@legion/contracts/legion-go-api";
 import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
@@ -63,7 +63,7 @@ function needsGrant({ toolName, input }: ToolCallEvent): boolean {
 }
 
 async function wrapWithGrant(
-  mint: () => Promise<GrantResponse>
+  mint: () => Promise<LegionGoGrant>
 ): Promise<ToolCallEventResult | undefined> {
   try {
     await writeMintedGrant(async () => (await mint()).grantId);

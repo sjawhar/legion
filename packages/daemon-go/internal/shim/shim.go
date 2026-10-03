@@ -6,8 +6,9 @@
 // delivery), and outlives any one connection: a dropped stream is redialled, and what OMP says
 // meanwhile waits in a bounded backlog.
 //
-// The behaviour is the shipped shim's `--connect` mode (packages/daemon/src/cli/worker-shim.ts),
-// cited at each rule it keeps; the wire itself is internal/shimwire's.
+// The behaviour was ported from the TypeScript shim's `--connect` mode, which LEGION-223 removed; a
+// `worker-shim.ts:N` citation at a rule names its source in this repository's history. The wire
+// itself is internal/shimwire's.
 package shim
 
 import (

@@ -24,7 +24,7 @@ const probeTimeout = 10 * time.Second
 
 // LivenessWindow is how stale the controller holder's `last_seen` may be before the controller
 // counts as gone: two heartbeats at least, since one would flap on every tick, and never less than
-// the boot timeout — 240 s at the defaults (packages/daemon/src/daemon/runtime-kubernetes.ts:59-69).
+// the boot timeout — 240 s at the defaults.
 func LivenessWindow(bootTimeout time.Duration) time.Duration {
 	return max(bootTimeout, 2*Heartbeat)
 }
@@ -60,8 +60,7 @@ type ProberOptions struct {
 
 // Prober reads an operator-launched controller's liveness from the Envoy role registry, the one
 // record of it the daemon can read: the operator's session is on their own machine, with no
-// process of the daemon's to probe (the shipped probeOperatorController,
-// packages/daemon/src/daemon/runtime-kubernetes.ts:627-675).
+// process of the daemon's to probe.
 type Prober struct {
 	lookup string
 	token  string

@@ -2,7 +2,7 @@
 // dispatch-first-omp.test.ts): a stand-in server that is the model gateway and whatever else a test
 // answers, a profile whose every model role is that stand-in, and one `omp --mode rpc` child with
 // only this checkout's extensions loaded. The profile format, the flags and the RPC stream are the
-// Oh My Pi pin's (packages/daemon/src/daemon/omp-pin.ts), so a pin bump that changes one is fixed
+// Oh My Pi pin's (the repository's .omp-pin), so a pin bump that changes one is fixed
 // here once.
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";

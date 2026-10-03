@@ -16,8 +16,7 @@ var daemonTools = []string{"gh", "git", "jj"}
 func toolEnv(tool string) string { return "LEGION_" + strings.ToUpper(tool) + "_PATH" }
 
 // resolveTools resolves each daemon tool by its LEGION_<TOOL>_PATH override, which must be an
-// absolute executable, or on PATH, and names every missing tool with its override in one error
-// (packages/daemon/src/daemon/environment.ts:384-409).
+// absolute executable, or on PATH, and names every missing tool with its override in one error.
 func resolveTools(lookupEnv func(string) (string, bool)) (map[string]string, error) {
 	path, _ := lookupEnv("PATH")
 	tools := map[string]string{}

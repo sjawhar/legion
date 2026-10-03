@@ -1,9 +1,8 @@
 // Package bootprobe is what Legion's boot probes share: the retry that waits out a probe's
-// transient failures (retryBootProbe, packages/daemon/src/daemon/boot-probes.ts:124-161), and the
-// OK line `legion probe-image` prints inside the worker image, which the daemon's probe Sandbox
-// reads back from the pod's log (internal/runtime/sandbox/probe.go). The daemon's plugin gate,
-// the image's own probe, and the probe Sandbox all run through Run, so a probe's verdict means the
-// same thing wherever it ran.
+// transient failures, and the OK line `legion probe-image` prints inside the worker image, which
+// the daemon's probe Sandbox reads back from the pod's log (internal/runtime/sandbox/probe.go). The
+// daemon's plugin gate, the image's own probe, and the probe Sandbox all run through Run, so a
+// probe's verdict means the same thing wherever it ran.
 package bootprobe
 
 import (

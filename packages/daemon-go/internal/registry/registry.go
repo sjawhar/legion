@@ -1,12 +1,8 @@
 // Package registry is the Go daemon's record of the legions running on this box: which team each
 // one coordinates, the configuration it started from, and where to reach it.
 //
-// The file is the Go daemon's own — `legions-go.json`, never the `legions.json` the shipped
-// TypeScript daemon owns until Stage 7 — because the two shapes are not the same record and that
-// daemon's reader backs up and resets any file it cannot parse
-// (packages/daemon/src/daemon/legions-registry.ts:31-48). The directory it sits in is resolved
-// the way the shipped daemon resolves it (packages/daemon/src/daemon/paths.ts:26-37), so both
-// registries live side by side under one state home until the rename.
+// The file is `legions-go.json` in the state home: `$XDG_STATE_HOME/legion`, or
+// `~/.local/state/legion` where that variable is unset or relative.
 package registry
 
 import (

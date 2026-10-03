@@ -29,7 +29,7 @@ const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> -
 const (
 	// workspaceLostExitCode is the status that tells the runtime the tree volume itself was lost —
 	// neither the shared clone nor the recorded OMP session is on it — rather than that one launch
-	// failed (WORKSPACE_LOST_EXIT_CODE, packages/daemon/src/daemon/runtime.ts).
+	// failed.
 	workspaceLostExitCode = 3
 	// lockWaitEnv bounds how long this init container waits for another pod's provisioning of the
 	// same repository. The daemon sets it on every pod from its own registration deadline, so the
@@ -52,12 +52,11 @@ func (e volumeLostError) Error() string { return string(e) }
 
 // runWorkspaceInit is `legion workspace-init`, the Kubernetes runtime's two init containers, which
 // prepare an issue's jj workspace on the tree's persistent volume before the main container's
-// worker-shim starts (packages/daemon/src/cli/workspace-init.ts). `fetch` is the first: the one
-// process of the pod that holds the provisioning token, in a container that mounts nothing a tree
-// agent can write. `provision` is the second: all the tree volume's work, in a container the
-// provisioning Secret is not mounted in. Each one's log lines go to stdout and its refusals and
-// failures to stderr — together the init log the runtime quotes — with exit 1, or 3 for a lost
-// volume.
+// worker-shim starts. `fetch` is the first: the one process of the pod that holds the provisioning
+// token, in a container that mounts nothing a tree agent can write. `provision` is the second: all
+// the tree volume's work, in a container the provisioning Secret is not mounted in. Each one's log
+// lines go to stdout and its refusals and failures to stderr — together the init log the runtime
+// quotes — with exit 1, or 3 for a lost volume.
 func runWorkspaceInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintf(stderr, "usage: %s\n       %s\n", workspaceFetchUsage, workspaceProvisionUsage)

@@ -105,19 +105,23 @@ chmod 0700 "$RIG/state/secrets"
 printf 'rig-boot\n' > "$RIG/state/secrets/boot"
 chmod 0600 "$RIG/state/secrets/boot"
 
-# The `gh` shim, installed the way the daemon installs it at startup. A checkout without the
-# module (main before LEGION-54) gets none here: its 1.17.x extensions wrote the shim themselves.
-if test -f "$SRC/packages/daemon/src/daemon/worker-bin.ts"; then
-  bun "$SRC/packages/daemon/src/daemon/worker-bin.ts" "$RIG/state" >/dev/null
-fi
+# The checkout's own Go `legion`, built beside the state directory as the daemon's own binary is.
+test -f "$SRC/packages/daemon-go/cmd/legion/main.go" || {
+  echo "the checkout has no Go legion to build (packages/daemon-go/cmd/legion): $SRC" >&2
+  exit 2
+}
+(cd "$SRC/packages/daemon-go" && go build -o "$RIG/legion" ./cmd/legion)
 
-# The checkout's own `legion` command-line tool, the way `<state_dir>/bin/legion` re-execs the
-# daemon's runtime in production.
-cat > "$RIG/state/bin/legion" <<EOF
-#!/bin/sh
-exec "$(command -v bun)" "$SRC/packages/daemon/src/cli/index.ts" "\$@"
-EOF
-chmod 0755 "$RIG/state/bin/legion"
+# worker-bin/gh and bin/legion, written as the daemon writes them at boot (workerbin.Install,
+# packages/daemon-go/internal/runtime/workerbin): the `gh` shim drops its own directory from PATH
+# and execs `legion gh`, and the launcher execs the daemon's binary, here the one just built.
+literal() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+mkdir -p "$RIG/state/worker-bin"
+chmod 0700 "$RIG/state/worker-bin" "$RIG/state/bin"
+printf '#!/bin/sh\nPATH=${PATH#%s}\nexport PATH\nexec legion gh -- "$@"\n' \
+  "$(literal "$RIG/state/worker-bin:")" > "$RIG/state/worker-bin/gh"
+printf '#!/bin/sh\nexec %s "$@"\n' "$(literal "$RIG/legion")" > "$RIG/state/bin/legion"
+chmod 0700 "$RIG/state/worker-bin/gh" "$RIG/state/bin/legion"
 
 # Appends what the calling shell command actually ran under, so the worker prompt never has to
 # name the credential: the grant file's contents and mode (file delivery), then the plain

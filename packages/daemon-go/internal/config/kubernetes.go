@@ -84,8 +84,8 @@ const (
 	poolLabel = "legion.dev/pool"
 )
 
-// imageDigestRef is a reference pinned by digest, the shipped `parseImageDigestRef`
-// (packages/daemon/src/daemon/image-ref.ts): the daemon must know exactly which image it probed.
+// imageDigestRef is a reference pinned by digest: the daemon must know exactly which image it
+// probed.
 var imageDigestRef = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
 
 // AgentSecretsConfig is `runtime.kubernetes.agent_secrets` (AGENTC-393 Plan C): the broker's base

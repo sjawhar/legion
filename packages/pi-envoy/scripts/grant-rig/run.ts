@@ -9,7 +9,7 @@
  *   A. transcript — the model-visible `arguments.command` of every bash tool call holds no
  *      `LEGION_GRANT` mention, and no call needed an `env` argument;
  *   B. stand-in log — exactly one `/legion/v1/grants` mint per bash call, and every
- *      `/git-credential`, `/gh-token`, `/phase/complete` redemption answered 200 with a minted id;
+ *      `/git-credential` and `/gh-token` redemption answered 200 with a minted id;
  *   C. `seen-grants.log` — the grant file each `record-grant` command read held the grant minted
  *      for that command, mode 0600;
  *   D. tool results — `which gh` resolves to the worker shim, `gh --version` prints a version,
@@ -18,8 +18,8 @@
  *      `legion tool_call hook` line per bash tool call;
  *   F. no minted id appears anywhere in the transcript or the OMP log (the stand-in log is the
  *      oracle and is exempt);
- *   G. the `printenv` probe shows the pane's static credential environment: the gh config dir,
- *      empty GH_TOKEN/GITHUB_TOKEN/GH_HOST, and worker-bin first on PATH exactly once.
+ *   G. the environment probe shows the pane's static credential environment: no GH_CONFIG_DIR,
+ *      GH_TOKEN, GITHUB_TOKEN or GH_HOST, and worker-bin first on PATH exactly once.
  *
  * The same `analyze` subcommand scores a transcript produced by the interactive (tmux) leg, so
  * both legs share one counting script. See README.md for the layout `setup.sh` creates.
@@ -33,13 +33,12 @@
  *                      [--label <name>]
  */
 import { randomUUID } from "node:crypto";
+import { accessSync, constants, statSync } from "node:fs";
 import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { type LegionRole, roleToken } from "@legion/contracts";
-import { grantSecretName, secretFilePath } from "../../../daemon/src/daemon/secrets";
-import { pathWithoutWorkerBin } from "../../../daemon/src/daemon/worker-bin";
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /** One credential line as the unfixed hook wrote it (single-quoted), or as a model imitation
@@ -60,25 +59,24 @@ function recordStep(n: number): Step {
   return { n, kind: "bash", command: `record-grant; echo step-${n}` };
 }
 
-/** The static credential environment the daemon puts on a pane, as `printenv` shows it. Names no
- * credential variable. */
+/** The pane's static credential environment, as the shell sees it. Names no credential variable:
+ * the four GitHub variables are absent on a Legion pane (`legion gh` gives its own gh child the
+ * token and the config directory), so each prints empty. */
 const PROBE_COMMAND =
-  'printenv GH_CONFIG_DIR; printf \'GH_TOKEN=%s GITHUB_TOKEN=%s GH_HOST=%s\\n\' "$GH_TOKEN" "$GITHUB_TOKEN" "$GH_HOST"; echo "PATH=$PATH"';
+  'printf \'GH_CONFIG_DIR=%s GH_TOKEN=%s GITHUB_TOKEN=%s GH_HOST=%s\\n\' "$GH_CONFIG_DIR" "$GH_TOKEN" "$GITHUB_TOKEN" "$GH_HOST"; echo "PATH=$PATH"';
+const PROBE_NEEDLE = "GH_CONFIG_DIR=%s";
 
-/** The full headless leg: 34 bash calls and 3 `task` spawns. `short` is the terminal leg: 9
- * bash calls and 1 spawn. Neither prompt names the credential variable or the word `export`.
- * The credential step writes to stdout on purpose: a `> file` redirection trips the profile's
- * bash interceptor ("use the write tool"), and the stand-in's token is a placeholder anyway. */
+/** The full headless leg: 33 bash calls and 3 `task` spawns. `short` is the terminal leg: 8
+ * bash calls and 1 spawn. Neither prompt names the credential variable or the word `export`, nor
+ * `legion handoff complete`, which the extension refuses in a phase worker's shell (its phase
+ * ends through the `legion` tool's `handoff_complete`). The credential step writes to stdout on
+ * purpose: a `> file` redirection trips the profile's bash interceptor ("use the write tool"),
+ * and the stand-in's token is a placeholder anyway. */
 function buildSteps(short: boolean): Step[] {
   const credential = (n: number): Step => ({
     n,
     kind: "bash",
     command: `printf 'protocol=https\\nhost=github.com\\n' | legion credential get; echo exit=$?`,
-  });
-  const handoff = (n: number): Step => ({
-    n,
-    kind: "bash",
-    command: "legion handoff complete --summary 'rig run complete'; echo exit=$?",
   });
   const probe = (n: number): Step => ({ n, kind: "bash", command: PROBE_COMMAND });
   if (short) {
@@ -92,7 +90,6 @@ function buildSteps(short: boolean): Step[] {
       recordStep(7),
       recordStep(8),
       credential(9),
-      handoff(10),
     ];
   }
   const steps: Step[] = [];
@@ -106,13 +103,12 @@ function buildSteps(short: boolean): Step[] {
   for (let n = 20; n <= 28; n++) steps.push(recordStep(n));
   steps.push({ n: 29, kind: "task" });
   for (let n = 30; n <= 32; n++) steps.push(recordStep(n));
-  // Bash calls 30-34 (the three task steps are not bash calls): every `legion` probe runs on the
+  // Bash calls 30-32 (the three task steps are not bash calls): every `legion` probe runs on the
   // 30th or later command, the point at which the 1.17.0 imitation had become routine.
   steps.push(credential(33));
   steps.push({ n: 34, kind: "bash", command: "legion gh -- --version; echo exit=$?" });
   steps.push(credential(35));
   steps.push(recordStep(36));
-  steps.push(handoff(37));
   return steps;
 }
 
@@ -138,7 +134,7 @@ interface RpcChunkSequence {
 }
 
 /** Reassembles protocol v2 `rpc_chunk` lines into one logical frame; anything else parses as
- * is. Validation is the daemon's job (`worker-rpc.ts`) — a rig only needs the payload. */
+ * is. Validation is the worker shim's job — a rig only needs the payload. */
 function createFrameReader(onFrame: (frame: Record<string, unknown>) => void): {
   readonly push: (chunk: Uint8Array) => void;
 } {
@@ -208,13 +204,46 @@ export interface WorkerClaim {
 /** The grant rig's own worker, whose role token collides with no live issue's. */
 const RIG_CLAIM: WorkerClaim = { project: "l12rig", issue: "RIG-1", role: "implementer" };
 
-/** The environment the Legion daemon gives a phase-worker pane for `claim`, pointed at the
- * scratch state directory and the stand-in daemon — including the static credential environment
- * (`ProcessManager.credentialProcessEnvironment`): `LEGION_GRANT_FILE`, `GH_CONFIG_DIR`, the
- * emptied GitHub keys, and worker-bin first on PATH. An inherited `ANTHROPIC_API_KEY`, every
- * `LEGION_*` and `DISPATCH_*` value, and an inherited worker-bin PATH entry are dropped first so
- * worker-bin appears exactly once. The profile's agent directory is under the inherited `HOME`.
- * The skill scenario rig (`../skill-scenarios/rig.sh`) builds its tester pane with it too.
+/** The directory name `legion gh` and `legion credential` drop from PATH wherever it occurs
+ * (`workerbin.DirName`, packages/daemon-go/internal/runtime/workerbin). */
+const WORKER_BIN = "worker-bin";
+
+/** `shellprefix.For`: the prefix Oh My Pi's bash tool runs before each command, which moves
+ * `dirs` back to the front of PATH (an rc file the shell sourced may have put its own first). */
+function shellPrefix(...dirs: string[]): string {
+  const literal = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+  const head = `${dirs.join(path.delimiter)}${path.delimiter}`;
+  return `PATH=${literal(head)}\${PATH#${literal(head)}} &&`;
+}
+
+/** The first executable `tool` on `searchPath`, as the daemon resolves gh, git and jj once at
+ * boot (`resolveTools`, packages/daemon-go/internal/daemon/tools.go) and names them on every
+ * pane. */
+function resolveTool(tool: string, searchPath: string): string {
+  for (const dir of searchPath.split(path.delimiter)) {
+    if (!path.isAbsolute(dir)) continue;
+    const candidate = path.join(dir, tool);
+    try {
+      if (!statSync(candidate).isFile()) continue;
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Not here; the daemon looks in the next PATH entry too.
+    }
+  }
+  throw new Error(`no executable ${tool} on PATH for the pane's LEGION_${tool.toUpperCase()}_PATH`);
+}
+
+/** The environment the Legion daemon's tmux runtime gives a phase-worker pane for `claim`
+ * (`panePairs`, packages/daemon-go/internal/runtime/tmux/spawn.go), pointed at the scratch state
+ * directory and the stand-in daemon, over the caller's own environment: the claim's identity, the
+ * daemon URL, the state directory and workspace, the gh, git and jj the daemon resolved,
+ * `PI_SHELL_PREFIX`, `LEGION_GRANT_FILE` (`runtime.GrantFile`: `<state>/secrets/<claim>-grant`),
+ * and worker-bin then bin first on PATH (`workerbin.Path`). An inherited `ANTHROPIC_API_KEY`,
+ * every `LEGION_*` and `DISPATCH_*` value, the GitHub variables no Legion pane carries, and every
+ * inherited worker-bin PATH entry are dropped first, so worker-bin appears exactly once. The
+ * profile's agent directory is under the inherited `HOME`. The skill scenario rig
+ * (`../skill-scenarios/rig.sh`) builds its tester pane with it too.
  */
 export function workerEnvironment(
   launch: Pick<WorkerLaunch, "rig" | "port" | "profile">,
@@ -226,41 +255,46 @@ export function workerEnvironment(
     if (value === undefined) continue;
     if (key === "ANTHROPIC_API_KEY" || key.startsWith("LEGION_") || key.startsWith("DISPATCH_"))
       continue;
+    if (["GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST"].includes(key)) continue;
     if (key === "OMP_SESSION_ID" || key === "TMUX" || key === "TMUX_PANE") continue;
     env[key] = value;
   }
   const home = env.HOME ?? os.homedir();
   const agentDir = path.join(home, ".omp", "profiles", launch.profile, "agent");
   const stateDir = path.join(launch.rig, "state");
-  // The same strip the daemon applies at its boundary (`resolveDaemonEnvironment`): this rig may
-  // itself run from a Legion pane whose PATH carries a worker-bin entry.
-  const inheritedPath = pathWithoutWorkerBin(env.PATH ?? "");
+  const workerBin = path.join(stateDir, WORKER_BIN);
+  const bin = path.join(stateDir, "bin");
+  // This rig may itself run from a Legion pane whose PATH carries that pane's worker-bin.
+  const inheritedPath = (env.PATH ?? "")
+    .split(path.delimiter)
+    .filter((entry) => entry !== "" && path.basename(entry) !== WORKER_BIN)
+    .join(path.delimiter);
   Object.assign(env, {
     OMP_PROFILE: launch.profile,
     PI_PROFILE: launch.profile,
     PI_CODING_AGENT_DIR: agentDir,
     PI_NOTIFICATIONS: "off",
     PI_NO_TITLE: "1",
-    LEGION_ROLE: claim.role,
     LEGION_TREE: claim.issue,
     LEGION_ISSUE: claim.issue,
+    LEGION_ROLE: claim.role,
     LEGION_GENERATION: "1",
     LEGION_PROJECT: claim.project,
     LEGION_BOOT_TOKEN_FILE: path.join(stateDir, "secrets", "boot"),
     LEGION_DAEMON_URL: `http://127.0.0.1:${launch.port}`,
     LEGION_STATE_DIR: stateDir,
     LEGION_WORKSPACE: path.join(launch.rig, "ws"),
-    LEGION_GRANT_FILE: secretFilePath(
+    LEGION_GH_PATH: resolveTool("gh", inheritedPath),
+    LEGION_GIT_PATH: resolveTool("git", inheritedPath),
+    LEGION_JJ_PATH: resolveTool("jj", inheritedPath),
+    PI_SHELL_PREFIX: shellPrefix(workerBin, bin),
+    GIT_TERMINAL_PROMPT: "0",
+    LEGION_GRANT_FILE: path.join(
       stateDir,
-      grantSecretName(roleToken(claim.project, claim.issue, claim.role))
+      "secrets",
+      `${roleToken(claim.project, claim.issue, claim.role)}-grant`
     ),
-    GH_CONFIG_DIR: path.join(stateDir, "gh"),
-    GH_TOKEN: "",
-    GITHUB_TOKEN: "",
-    GH_HOST: "",
-    PATH: [path.join(stateDir, "worker-bin"), path.join(stateDir, "bin"), inheritedPath].join(
-      path.delimiter
-    ),
+    PATH: [workerBin, bin, inheritedPath].join(path.delimiter),
   });
   return env;
 }
@@ -557,13 +591,12 @@ function parseSeenGrant(line: string): SeenGrant {
 
 /** Verdict G: the probe's output shows the daemon's static credential environment. */
 function probeShowsPaneEnvironment(text: string, rig: string): boolean {
-  const workerBin = path.join(rig, "state", "worker-bin");
+  const workerBin = path.join(rig, "state", WORKER_BIN);
   const pathLine = text.split("\n").find((line) => line.startsWith("PATH="));
   if (!pathLine) return false;
   const entries = pathLine.slice("PATH=".length).split(path.delimiter);
   return (
-    text.includes(path.join(rig, "state", "gh")) &&
-    text.includes("GH_TOKEN= GITHUB_TOKEN= GH_HOST=") &&
+    text.includes("GH_CONFIG_DIR= GH_TOKEN= GITHUB_TOKEN= GH_HOST=") &&
     entries[0] === workerBin &&
     entries.filter((entry) => entry === workerBin).length === 1
   );
@@ -676,14 +709,13 @@ async function analyze(input: {
     const probe = [
       "which gh",
       "gh --version",
-      "printenv GH_CONFIG_DIR",
+      PROBE_NEEDLE,
       "legion credential get",
       "legion gh --",
-      "legion handoff complete",
     ].find((needle) => call.command.includes(needle));
     if (probe) {
       const text = call.result?.text ?? "(no result)";
-      if (probe === "printenv GH_CONFIG_DIR") probeResult = call.result?.text;
+      if (probe === PROBE_NEEDLE) probeResult = call.result?.text;
       results.push(
         `call ${k + 1} [${probe}] isError=${call.result?.isError ?? "?"}: ${text.replaceAll("\n", " | ").slice(0, 300)}`
       );
@@ -691,9 +723,7 @@ async function analyze(input: {
   });
 
   const redemptionLines = standin.filter((line) =>
-    ["/legion/v1/git-credential", "/legion/v1/gh-token", "/legion/v1/phase/complete"].includes(
-      line.path
-    )
+    ["/legion/v1/git-credential", "/legion/v1/gh-token"].includes(line.path)
   );
   const redemptions = redemptionLines.map(
     (line) =>
@@ -703,9 +733,7 @@ async function analyze(input: {
   );
   const redemptionsAll200 =
     redemptionLines.length > 0 && redemptionLines.every((line) => line.status === 200);
-  const probeCalls = calls.filter((call) =>
-    /legion (credential get|gh --|handoff complete)/.test(call.command)
-  );
+  const probeCalls = calls.filter((call) => /legion (credential get|gh --)/.test(call.command));
   const resultsClean =
     probeCalls.length > 0 &&
     probeCalls.every(
@@ -733,7 +761,7 @@ async function analyze(input: {
     `D. legion commands exit=0 and never 'Unable to redeem': ${resultsClean ? "PASS" : "FAIL"}`,
     `E. exactly one hook line per bash call, one parent instance: ${hooksOne && parentInstances.size === 1 ? "PASS" : "FAIL"} (${instances.size} legion extension instances: the parent plus one per task spawn)`,
     `F. no minted id appears in the transcript or the OMP log: ${ran && mintedInOrder.length > 0 && leakedIds.length === 0 ? "PASS" : `FAIL (${leakedIds.length} of ${mintedInOrder.length} minted ids found)`}`,
-    `G. printenv probe shows GH_CONFIG_DIR, empty GH_TOKEN/GITHUB_TOKEN/GH_HOST, worker-bin first on PATH exactly once: ${probeOk ? "PASS" : probeResult === undefined ? "FAIL (no probe result)" : "FAIL"}`,
+    `G. environment probe shows no GH_CONFIG_DIR/GH_TOKEN/GITHUB_TOKEN/GH_HOST, worker-bin first on PATH exactly once: ${probeOk ? "PASS" : probeResult === undefined ? "FAIL (no probe result)" : "FAIL"}`,
   ];
 
   return {
@@ -790,6 +818,27 @@ async function newestFile(directory: string, pattern: RegExp): Promise<string | 
     }
   };
   await walk(directory);
+  return best?.file;
+}
+
+/** A session's own transcript, `<ISO time>_<session id>.jsonl` directly in its working
+ * directory's folder under `sessions/`. A `task` subagent's or the advisor's transcript sits one
+ * level deeper, in the folder named after its parent's, and is never the worker's. */
+const TOP_LEVEL_TRANSCRIPT = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_[0-9a-f-]+\.jsonl$/;
+
+/** The newest top-level session transcript under `sessionsDir`. */
+async function newestTranscript(sessionsDir: string): Promise<string | undefined> {
+  let best: { readonly file: string; readonly mtime: number } | undefined;
+  for (const folder of await readdir(sessionsDir, { withFileTypes: true })) {
+    if (!folder.isDirectory()) continue;
+    const dir = path.join(sessionsDir, folder.name);
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !TOP_LEVEL_TRANSCRIPT.test(entry.name)) continue;
+      const full = path.join(dir, entry.name);
+      const mtime = (await Bun.file(full).stat()).mtimeMs;
+      if (!best || mtime > best.mtime) best = { file: full, mtime };
+    }
+  }
   return best?.file;
 }
 
@@ -896,7 +945,7 @@ async function driveTui(launch: WorkerLaunch, prompt: string, label: string): Pr
   let transcript: string | undefined;
   const deadline = Date.now() + RUN_DEADLINE_MS;
   for (;;) {
-    transcript = await newestFile(sessionsDir, /\.jsonl$/);
+    transcript = await newestTranscript(sessionsDir);
     if (
       transcript &&
       (await Bun.file(transcript).stat()).mtimeMs >= startedAt &&
@@ -935,7 +984,7 @@ async function report(
     "agent",
     "sessions"
   );
-  const transcript = result.sessionFile ?? (await newestFile(sessionsDir, /\.jsonl$/));
+  const transcript = result.sessionFile ?? (await newestTranscript(sessionsDir));
   const logsDir = path.join(os.homedir(), ".omp", "profiles", launch.profile, "logs");
   const ompLog =
     result.pid > 0

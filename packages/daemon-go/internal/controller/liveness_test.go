@@ -52,7 +52,7 @@ func newTestProber(url, token string, bootTimeout time.Duration, log *bytes.Buff
 }
 
 // The window is two plugin heartbeats, never less than the boot timeout: 240 s at the default
-// 120 s boot timeout (packages/daemon/src/daemon/runtime-kubernetes.ts:59-69).
+// 120 s boot timeout.
 func TestLivenessWindowIsTwoHeartbeatsAtLeastTheBootTimeout(t *testing.T) {
 	for _, tc := range []struct{ boot, want time.Duration }{
 		{120 * time.Second, 240 * time.Second},

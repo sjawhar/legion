@@ -7,11 +7,10 @@ import (
 	"testing"
 )
 
-// parseShellEnvironment reads `show-environment -s` output as a whole, never line by line. Every
-// fixture below is one of the shipped parser's (packages/daemon/src/daemon/__tests__/
-// tmux.test.ts:128-253), including the reviewer's multi-line shapes: a PEM whose `=`-padded last
-// line looks like `NAME=`, continuation lines reading `HOME;=x` and `key = value`, and a value
-// that contains the escaped text `"; export HOME;`.
+// parseShellEnvironment reads `show-environment -s` output as a whole, never line by line. The
+// fixtures below include the reviewer's multi-line shapes: a PEM whose `=`-padded last line looks
+// like `NAME=`, continuation lines reading `HOME;=x` and `key = value`, and a value that contains
+// the escaped text `"; export HOME;`.
 func TestParseShellEnvironmentNamesEveryEntry(t *testing.T) {
 	for _, tc := range []struct {
 		name string
