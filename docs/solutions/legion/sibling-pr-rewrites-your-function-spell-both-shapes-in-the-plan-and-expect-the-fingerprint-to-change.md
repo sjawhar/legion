@@ -68,7 +68,7 @@ and the reviewer's round 2 verified the resolution against the plan rather than 
 **Rule.** When `knives`/`legion gh -- pr list` shows another open PR touching the function your
 plan edits, the planner spells out the resolved shape for *both* landing orders as plan steps,
 with the exact expression that differs and the one test file that proves it. The concern goes
-in the plan's `concerns` and the spec, agreed with the architect, so
+in the plan's `concerns` and its `plan.md`, agreed with the architect, so
 the reviewer can hold the resolution to a written target.
 
 ## 2. The rebase itself

@@ -677,8 +677,8 @@ func TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt(t *testing.T) {
 		retire func(service *Service, artifactID string) error
 	}{
 		{"control: nothing closes the room", false, func(*Service, string) error { return nil }},
-		{"CloseRoom closes the room", false, func(service *Service, artifactID string) error {
-			return service.srv.CloseRoom(artifactID, true)
+		{"ygo's CloseRoom closes the room", false, func(service *Service, artifactID string) error {
+			return service.srv.Server.CloseRoom(artifactID, true)
 		}},
 		{"SetIssueClosed closes the room", false, func(service *Service, _ string) error {
 			service.SetIssueClosed(context.Background(), "DOC-1", true)
