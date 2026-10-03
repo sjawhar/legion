@@ -10,9 +10,10 @@ Every cast is rendered through agg with idle time kept, so a cast's seconds are 
 seconds. Every source is normalized to 1280x720 at 30 fps (the browser recordings are that size
 already); each clip is cut hard to its window, with no speed change and no held frame; its audio
 is silence the clip's length with its narration parts laid at their offsets, and the build fails
-when a part runs past the end of its clip or overlaps the next part, or when a browser
-recording's file duration is off its wall-clock length (raw/sections.json) by more than 5%. The
-clips are concatenated into ../walkthrough.mp4.
+when a part runs past the end of its clip or overlaps the next part, or when a section's file
+duration is off its wall-clock length (raw/sections.json): a browser recording outside its
+actions' and its page's lengths by more than 5%, a cast more than 1.5 s shorter than its section
+or any longer. The clips are concatenated into ../walkthrough.mp4.
 
   python3 build.py            # rebuild (renders casts once, into build/)
   python3 build.py --check    # verify the EDL against the footage and narration, write nothing
@@ -37,6 +38,7 @@ W, H, FPS = 1280, 720, 30
 BACKGROUND = "0x272822"  # agg's monokai background, so a terminal's padding is invisible
 AGG = ["agg", "--font-size", "30", "--theme", "monokai", "--idle-time-limit", "3600", "--last-frame-duration", "0"]
 CAPTURE_TOLERANCE = 0.05  # how far a browser recording may fall outside its wall-clock bounds
+CAST_SLACK = 1.5  # how much shorter a cast may be than its section: the recorder's start and exit
 
 
 def run(*argv: str) -> str:
@@ -76,21 +78,26 @@ def normalized(source: str) -> Path:
     return out
 
 
-def capture_rates() -> list[tuple[str, float, float, float]]:
-    """Each browser recording's (file, act seconds, page-life seconds, file seconds), from
-    raw/sections.json, which the recorder writes. A screen capture under load can drop frames
-    into a time-compressed file, shorter than the actions it shows; Playwright records a page from
-    its first frame to its close, so an honest file lies between the two wall clocks. asciinema
-    casts are timing-accurate by construction and are not listed."""
+def capture_rates() -> list[tuple[str, float | None, float, float]]:
+    """Each section's (file, act seconds, wall seconds, file seconds), from raw/sections.json,
+    which the recorder writes. A screen capture under load can drop frames into a time-compressed
+    file, shorter than the actions it shows; Playwright records a page from its first frame to its
+    close, so an honest browser file lies between its actions' and its page's wall clocks. A cast
+    is timing-accurate by construction and spans its section but the recorder's start and exit;
+    it has no act seconds."""
     sections = json.loads((RAW / "sections.json").read_text())
-    return [(s["file"], s["actSeconds"], s["wallSeconds"], duration(RAW / s["file"]))
-            for s in sections if not s["file"].endswith(".cast")]
+    return [(s["file"], s.get("actSeconds"), s["wallSeconds"],
+             cast_duration(RAW / s["file"]) if s["file"].endswith(".cast") else duration(RAW / s["file"]))
+            for s in sections]
 
 
 def check(clips: list[Clip]) -> list[str]:
     problems = []
     for file, act, wall, length in capture_rates():
-        if not act * (1 - CAPTURE_TOLERANCE) <= length <= wall * (1 + CAPTURE_TOLERANCE):
+        if act is None:
+            if not wall - CAST_SLACK <= length <= wall:
+                problems.append(f"{file}: {length:.2f}s of cast for a section that took {wall:.2f}s; re-record it")
+        elif not act * (1 - CAPTURE_TOLERANCE) <= length <= wall * (1 + CAPTURE_TOLERANCE):
             problems.append(f"{file}: {length:.2f}s of footage for {act:.2f}s of actions in a page that lived {wall:.2f}s; re-record it")
     for clip in clips:
         src = RAW / clip.source
@@ -148,7 +155,10 @@ def main() -> int:
         print("build.py: the EDL does not fit the footage and narration:", *problems, sep="\n  ", file=sys.stderr)
         return 1
     for file, act, wall, length in capture_rates():
-        print(f"build.py: {file}: {length:.2f}s of footage; actions {act:.2f}s (x{length / act:.3f}), page life {wall:.2f}s (x{length / wall:.3f})")
+        if act is None:
+            print(f"build.py: {file}: {length:.2f}s of cast; section {wall:.2f}s (x{length / wall:.3f})")
+        else:
+            print(f"build.py: {file}: {length:.2f}s of footage; actions {act:.2f}s (x{length / act:.3f}), page life {wall:.2f}s (x{length / wall:.3f})")
     if "--check" in sys.argv[1:]:
         print(f"build.py: {len(CLIPS)} clips, {sum(c.end - c.start for c in CLIPS):.1f}s, all narration inside its clip")
         return 0

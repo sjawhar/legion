@@ -14,11 +14,13 @@
 // Terminal sections are asciinema casts of one persistent shell on the agent machine (a private
 // tmux server, started without the user's tmux configuration, which can draw the real hostname
 // into a pane border; each cast attaches a client to it, and the shell is typed into with
-// send-keys); browser sections are Playwright recordings at the viewport's size. sections.json
-// records each section's wall-clock length beside its file, the capture-rate check the
-// walkthrough's build compares file durations against. Output goes to WALKTHROUGH_RAW_DIR,
-// default docs/site/public/media/broker/walkthrough.src/raw.
-import { execFileSync } from "node:child_process";
+// send-keys); browser sections are Playwright recordings at the viewport's size, each ending on a
+// result it holds and then finds in its own recording's last frames. sections.json records each
+// section's wall-clock length beside its file, the capture-rate check the walkthrough's build
+// compares file durations against, and how closely each browser section's last frames match its
+// result. Output goes to WALKTHROUGH_RAW_DIR, default
+// docs/site/public/media/broker/walkthrough.src/raw.
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -45,6 +47,10 @@ interface Section {
   wallSeconds: number;
   /** A browser section's scripted actions alone, which its file must at least cover. */
   actSeconds?: number;
+  /** A browser section's result as its recording shows it: the structural similarity of the
+   *  result's region in the file's last frame, and in the frame resultOnCameraSeconds before it,
+   *  to the page's own screenshot of that region (1 is identical). */
+  resultSimilarity?: [number, number];
 }
 const sections: Section[] = [];
 
@@ -168,17 +174,99 @@ const pointer = `
 
 const viewport = { height: 720, width: 1280 };
 
+/** How long a browser section holds on its result, how much of the end of its recording must show
+ *  that result, and how alike the two must be. Under load, the browser's frames reach Playwright's
+ *  recording a second or two after the page shows them, and the frames still in flight when the
+ *  page closes never arrive: a take whose page held a result for 2.5 s ended on the click before
+ *  it, though the assertion on the page passed. So the hold outlasts that lag, and the recording
+ *  itself is checked. Measured on one take: the result's box scored 0.985-0.997 once the result was
+ *  on screen, 0.04-0.70 before it appeared, and 0.88-0.91 with the pointer resting inside it. */
+const resultHoldMs = 5_000;
+const resultOnCameraSeconds = 2.5;
+const resultMinSimilarity = 0.95;
+
+interface ResultFrame {
+  clip: { height: number; width: number; x: number; y: number };
+  reference: string;
+}
+
+/** Holds a page on its result: asserts the result is on screen (inside the viewport, not merely in
+ *  the DOM), moves the pointer off it as a reader would, screenshots the viewport as the frame the
+ *  recording must end on, notes the tight box around the result's text, then waits out
+ *  resultHoldMs. The screenshot is never clipped: Chromium renders a clipped one at the clip's
+ *  size, and the recording shows that render as frames of the clip on grey. */
+async function holdOnResult(page: Page, result: Locator, reference: string): Promise<ResultFrame> {
+  await expect(result).toBeVisible();
+  await expect(result).toBeInViewport({ ratio: 1 });
+  const text = await result.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const { x, y, width, height } = range.getBoundingClientRect();
+    return { height, width, x, y };
+  });
+  await page.mouse.move(text.x + Math.min(text.width / 2, 120), text.y + text.height + 48, {
+    steps: 12,
+  });
+  await sleep(400);
+  // A box inside the viewport, a few pixels around the text, where the comparison looks.
+  const x = Math.max(0, Math.floor(text.x) - 4);
+  const y = Math.max(0, Math.floor(text.y) - 4);
+  const clip = {
+    height: Math.min(viewport.height - y, Math.ceil(text.height) + 8),
+    width: Math.min(viewport.width - x, Math.ceil(text.width) + 8),
+    x,
+    y,
+  };
+  await page.screenshot({ path: reference });
+  await sleep(resultHoldMs);
+  return { clip, reference };
+}
+
+/** The structural similarity (ffmpeg's ssim, 1 is identical) between the frame of `video` at
+ *  `at` seconds and the page's screenshot, both cropped to the result's box, in gray: the
+ *  recording's chroma is subsampled, and cropping it would snap the box to even pixels, a 1-pixel
+ *  shift that scores small text as unlike itself. */
+function similarity(video: string, at: number, result: ResultFrame): number {
+  const box = `crop=${result.clip.width}:${result.clip.height}:${result.clip.x}:${result.clip.y}`;
+  const run = spawnSync(
+    "ffmpeg",
+    [
+      "-nostats",
+      "-ss",
+      at.toFixed(3),
+      "-i",
+      video,
+      "-i",
+      result.reference,
+      "-lavfi",
+      `[0:v]format=gray,${box}[seen];[1:v]format=gray,${box}[shown];[seen][shown]ssim`,
+      "-frames:v",
+      "1",
+      "-f",
+      "null",
+      "-",
+    ],
+    { encoding: "utf8" }
+  );
+  const all = run.stderr.match(/SSIM .*All:([0-9.]+)/);
+  if (run.status !== 0 || all === null) {
+    throw new Error(`ffmpeg could not compare ${video} at ${at}s:\n${run.stderr}`);
+  }
+  return Number(all[1]);
+}
+
 /** Records one browser section: a fresh signed-in context whose recording is saved as `file`, at
  *  the viewport's size (Playwright records a page at its CSS size whatever the device scale, and
- *  pads a larger video with grey). It notes two wall-clock lengths the file's duration must fall
- *  between: the actions alone, and the page's whole life (a slow close adds a still tail, which
- *  the cut drops). */
+ *  pads a larger video with grey). `act` ends by passing the section's result to `hold`
+ *  (holdOnResult), and the saved file fails the section unless its last resultOnCameraSeconds
+ *  show that result. It notes two wall-clock lengths the file's duration must fall between: the
+ *  actions alone, and the page's whole life (a slow close adds a still tail, which the cut drops). */
 async function browserSection(
   browser: Browser,
   file: string,
   operator: string,
   baseURL: string,
-  act: (page: Page) => Promise<void>
+  act: (page: Page, hold: (result: Locator) => Promise<void>) => Promise<void>
 ): Promise<void> {
   const context = await browser.newContext({
     baseURL,
@@ -192,12 +280,36 @@ async function browserSection(
   // Where the drawn pointer starts, so the first move sweeps from it rather than from the corner.
   await page.mouse.move(viewport.width / 2, viewport.height / 2);
   const acting = Date.now();
-  await act(page);
+  let result: ResultFrame | undefined;
+  await act(page, async (locator) => {
+    if (result !== undefined) throw new Error(`${file}: a section holds on one result, its last`);
+    result = await holdOnResult(page, locator, join(rawDir, ".video", `${file}.result.png`));
+  });
+  if (result === undefined) throw new Error(`${file}: the section never held on its result`);
   const actSeconds = (Date.now() - acting) / 1000;
   await context.close();
   const wallSeconds = (Date.now() - created) / 1000;
-  await page.video()?.saveAs(join(rawDir, file));
-  sections.push({ actSeconds, file, wallSeconds });
+  const video = join(rawDir, file);
+  await page.video()?.saveAs(video);
+  const length = Number(
+    execFileSync(
+      "ffprobe",
+      ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", video],
+      { encoding: "utf8" }
+    ).trim()
+  );
+  const resultSimilarity: [number, number] = [
+    similarity(video, length - 0.1, result),
+    similarity(video, length - resultOnCameraSeconds, result),
+  ];
+  sections.push({ actSeconds, file, resultSimilarity, wallSeconds });
+  if (Math.min(...resultSimilarity) < resultMinSimilarity) {
+    throw new Error(
+      `${file}: its last ${resultOnCameraSeconds}s do not show the result the page showed ` +
+        `(similarity ${resultSimilarity.join(", ")}, need ${resultMinSimilarity}); the page's ` +
+        `frame is ${result.reference}; re-record it`
+    );
+  }
 }
 
 /** Moves the pointer to a locator's centre in visible steps. */
@@ -262,7 +374,7 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
       "b1-machine.webm",
       rig.operator,
       rig.dispatchUrl,
-      async (page) => {
+      async (page, hold) => {
         await page.goto("/credentials/machine");
         await expect(page.getByRole("heading", { name: "Enter machine login code" })).toBeVisible();
         await sleep(1_200);
@@ -276,10 +388,7 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
         ).toBeVisible();
         await sleep(3_500);
         await clickVisibly(page, page.getByRole("button", { name: "Approve" }));
-        await expect(
-          page.getByText("Approved. example-host-build can start agent sessions as you.")
-        ).toBeVisible();
-        await sleep(2_500);
+        await hold(page.getByText("Approved. example-host-build can start agent sessions as you."));
       }
     );
 
@@ -323,7 +432,7 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
       "b2-approve.webm",
       rig.operator,
       rig.dispatchUrl,
-      async (page) => {
+      async (page, hold) => {
         await page.goto("/");
         const row = page.getByRole("link", { name: /Secret request.*DEMO_API_KEY/s });
         await expect(row).toBeVisible();
@@ -332,15 +441,15 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
         await expect(page.getByText(reason)).toBeVisible();
         await sleep(4_500);
         await clickVisibly(page, page.getByRole("button", { name: "Approve" }));
-        await expect(page.getByText(/^approved/i)).toBeVisible();
-        await sleep(2_500);
+        await hold(page.getByText(/^approved/i));
       }
     );
 
     // T4: the command ran with the key; the request names who decided it.
     await waitForScreen(/DEMO_API_KEY reached this command/, "the command's output");
     await terminalSection("t4-ran.cast", async () => {
-      await sleep(1_800);
+      // The command's output alone on screen long enough for the video to open on it.
+      await sleep(4_500);
       await type(`agent-secrets status ${requestId}`);
       await enter();
       await waitForScreen(/decided_by: alice/, "who decided");
@@ -348,26 +457,33 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
     });
 
     // B3: from the approved record to Settings, where the grant is listed with its approver.
-    await browserSection(browser, "b3-grants.webm", rig.operator, rig.dispatchUrl, async (page) => {
-      await page.goto(`/credentials/${recordId}`);
-      await expect(page.getByText(/^approved/i)).toBeVisible();
-      await sleep(1_500);
-      await clickVisibly(page, page.getByRole("link", { name: "Settings" }));
-      const grants = page.locator("section[aria-labelledby='credential-grants-heading']");
-      await expect(grants.getByText("DEMO_API_KEY")).toBeVisible();
-      await sleep(1_000);
-      await grants.evaluate((section) =>
-        section.scrollIntoView({ behavior: "smooth", block: "start" })
-      );
-      await sleep(1_500);
-      await pointAt(page, grants.getByRole("cell", { name: "alice", exact: true }));
-      await sleep(2_000);
-      await pointAt(page, grants.getByRole("button", { name: "Revoke" }));
-      await sleep(3_000);
-    });
+    await browserSection(
+      browser,
+      "b3-grants.webm",
+      rig.operator,
+      rig.dispatchUrl,
+      async (page, hold) => {
+        await page.goto(`/credentials/${recordId}`);
+        await expect(page.getByText(/^approved/i)).toBeVisible();
+        await sleep(1_500);
+        await clickVisibly(page, page.getByRole("link", { name: "Settings" }));
+        const grants = page.locator("section[aria-labelledby='credential-grants-heading']");
+        await expect(grants.getByText("DEMO_API_KEY")).toBeVisible();
+        await sleep(1_000);
+        await grants.evaluate((section) =>
+          section.scrollIntoView({ behavior: "smooth", block: "start" })
+        );
+        await sleep(1_500);
+        await pointAt(page, grants.getByRole("cell", { name: "alice", exact: true }));
+        await sleep(2_000);
+        await pointAt(page, grants.getByRole("button", { name: "Revoke" }));
+        await sleep(3_000);
+        await hold(grants.getByRole("row", { name: /DEMO_API_KEY/ }));
+      }
+    );
+    rmSync(join(rawDir, ".video"), { force: true, recursive: true });
   } finally {
     tmux("kill-server");
-    rmSync(join(rawDir, ".video"), { force: true, recursive: true });
     writeFileSync(join(rawDir, "sections.json"), `${JSON.stringify(sections, null, 2)}\n`);
   }
 });

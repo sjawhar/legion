@@ -1,0 +1,45 @@
+[
+  {
+    "file": "t1-login.cast",
+    "wallSeconds": 7.438
+  },
+  {
+    "actSeconds": 17.896,
+    "file": "b1-machine.webm",
+    "resultSimilarity": [
+      0.985573,
+      0.985573
+    ],
+    "wallSeconds": 21.313
+  },
+  {
+    "file": "t2-session.cast",
+    "wallSeconds": 15.85
+  },
+  {
+    "file": "t3-request.cast",
+    "wallSeconds": 13.361
+  },
+  {
+    "actSeconds": 16.99,
+    "file": "b2-approve.webm",
+    "resultSimilarity": [
+      1,
+      1
+    ],
+    "wallSeconds": 18.641
+  },
+  {
+    "file": "t4-ran.cast",
+    "wallSeconds": 14.381
+  },
+  {
+    "actSeconds": 17.664,
+    "file": "b3-grants.webm",
+    "resultSimilarity": [
+      0.99641,
+      0.996327
+    ],
+    "wallSeconds": 20.106
+  }
+]
