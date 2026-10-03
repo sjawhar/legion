@@ -381,6 +381,19 @@ After the first paint, Dispatch warms that schema and headless Markdown engine s
 holds the lazy chunk through an SPA replacement. A stale Vite chunk reloads the page once per
 session (never while the browser is offline — that is an outage, not a deployment); if rendering
 still fails, `MarkdownBody` exposes its literal-text fallback with `data-markdown-fallback`.
+A stale entry chunk reloads the page too, from that same budget. During a rolling deploy the load
+balancer can send a page's HTML to one server and its hashed assets to the other, which never
+built them and answers 404 before any bundle code has run, so `web/index.html` holds an inline
+script that reloads the page when a build script under `/assets/` (the entry chunk, or one it
+imports statically) fails to load. It spends `installChunkFailureRecovery`'s sessionStorage key
+(`CHUNK_RELOAD_STORAGE_KEY`), so the two reload a page at most once per session between them,
+and keeps its offline rule and its page-being-left rule, from `beforeunload` until `pageshow`
+(no `navigate` handler: a page whose entry has not run has no link to follow). `shell.e2e.ts`
+misses the entry once (the page reloads and renders), on every load (it reloads once and stays
+blank), and after a page chunk spent the reload (it stays). Dispatch sends no
+Content-Security-Policy; one would have to allow that script by its hash. The server makes the
+browser revalidate every page and keep every hashed asset (`packages/envoy/cmd/dispatch/AGENTS.md`,
+"Routes"), so no cached page from an older build asks for assets that are gone.
 On focus no more than once a minute, the SPA checks the server health and fresh `index.html`; a
 new entry chunk offers a dismissible **Reload** notice.
 

@@ -13,6 +13,49 @@
     <meta name="theme-color" content="#0f172a" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>Dispatch</title>
+    <!--
+      A build script that fails to download (the entry chunk, or one it imports) reloads the page
+      once: a rolling deploy can serve this page from one server and its assets from another that
+      never built them, and no app code runs to recover. The rules are the lazy-chunk recovery's in
+      src/features/shell/DeploymentResilience.tsx, sharing its once-per-session sessionStorage key.
+      Dispatch sends no Content-Security-Policy; one would have to allow this script by its hash.
+    -->
+    <script>
+      (function () {
+        var leaving = false;
+        window.addEventListener("beforeunload", function () {
+          leaving = true;
+        });
+        window.addEventListener("pageshow", function () {
+          leaving = false;
+        });
+        window.addEventListener(
+          "error",
+          function (event) {
+            var script = event.target;
+            if (!(script instanceof HTMLScriptElement) || !script.src) {
+              return;
+            }
+            if (new URL(script.src).pathname.indexOf("/assets/") !== 0) {
+              return;
+            }
+            if (leaving || !navigator.onLine) {
+              return;
+            }
+            try {
+              if (window.sessionStorage.getItem("dispatch.reloaded-for-chunk") === "true") {
+                return;
+              }
+              window.sessionStorage.setItem("dispatch.reloaded-for-chunk", "true");
+            } catch (unavailable) {
+              return;
+            }
+            window.location.reload();
+          },
+          true
+        );
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
