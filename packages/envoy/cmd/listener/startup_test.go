@@ -173,11 +173,13 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	postListener(t, replacement.port, "/v1/interests/subscribe", `{"session_id":"`+holderID+`","topics":[],"self_subscribed":true}`)
 	postListener(t, replacement.port, "/v1/roles/set", `{"session_id":"`+holderID+`","role":"`+role+`"}`)
 	frames := receiveAsSession(t, client, holderID)
-	// The old task learns the claim from the role and session buckets its caches follow.
-	waitFor(t, 30*time.Second, "the old task to see "+holderID+" hold "+role, func() bool {
-		status, _ := callListener(t, old.port, http.MethodGet, "/v1/roles/"+role, "")
-		return status == http.StatusOK
-	})
+	// The old task reads the claim from the role bucket and the holder from its session cache, which
+	// can trail the bucket and not yet hold the session the replacement just registered; it then reads
+	// the holder from the session bucket itself (roleHolderSession), so its first lookup answers the
+	// claim rather than releasing it as lapsed.
+	if status, answer := callListener(t, old.port, http.MethodGet, "/v1/roles/"+role, ""); status != http.StatusOK {
+		t.Fatalf("the old task's lookup of %s right after the replacement accepted %s's claim: status %d %s, want 200", role, holderID, status, answer)
+	}
 
 	publish := func(body string) contracts.Envelope {
 		t.Helper()

@@ -89,25 +89,47 @@ type commentThreadTarget struct {
 	ReplyRoot   *model.Comment
 	AskQuestion string
 	AskState    string
+	// AskMoved says the ask is an approval request a version moved past the one its agent last
+	// handed to the human (approvalMoved): it waits on its agent whatever a reply's turn says.
+	AskMoved bool
+}
+
+// openAsk says the thread hangs under an open ask, the only kind with a turn.
+func (t commentThreadTarget) openAsk() bool {
+	return t.AskID != nil && t.AskState == "open"
 }
 
 // replyTurn is who holds the turn once a reply into this thread is posted. Only an open ask
 // has a turn to hold: a reply under an answered or resolved ask records none, so the column
 // always means "who the ask waits on after this".
 func (t commentThreadTarget) replyTurn(actor model.Actor, requested *string) *string {
-	if t.AskID == nil || t.AskState != "open" {
+	if !t.openAsk() {
 		return nil
 	}
 	return new(askReplyTurn(actor, requested))
 }
 
-// eventThread is what a comment event says about the thread the comment joined, given the
-// turn replyTurn settled on.
-func (t commentThreadTarget) eventThread(turn *string) commentEventThread {
-	thread := commentEventThread{AskQuestion: t.AskQuestion, AskState: t.AskState}
-	if turn != nil {
-		thread.AskWaitingOn = *turn
+// waitingOnAfter is whom the thread's open ask waits on once a reply recording turn (replyTurn's)
+// is its newest comment; "" when the thread is not an open ask's. It is waitingOnExpression for that
+// row. The comment write holds the owner row that every version write, hand-back and comment insert
+// takes first, so the ask describeAsk read is the one the reply commits beside, and the reply is the
+// thread's newest (migration 0065): a moved approval request waits on its agent, and otherwise the
+// reply's own turn decides, since a hand-back can only have recorded an older reply.
+func (t commentThreadTarget) waitingOnAfter(turn *string) string {
+	switch {
+	case !t.openAsk():
+		return ""
+	case t.AskMoved:
+		return "agent"
+	default:
+		return *turn
 	}
+}
+
+// eventThread is what a comment event says about the thread the comment joined, given the
+// derived ask turn after this comment is its newest reply.
+func (t commentThreadTarget) eventThread(waitingOn string) commentEventThread {
+	thread := commentEventThread{AskQuestion: t.AskQuestion, AskState: t.AskState, AskWaitingOn: waitingOn}
 	if t.ReplyTo != nil {
 		thread.ThreadRootID = *t.ReplyTo
 	}
@@ -155,11 +177,7 @@ func (s *server) normalizeCommentThreadTarget(
 	if _, err := uuid.Parse(*input.AskID); err != nil {
 		return commentThreadTarget{}, s.askIDInputForOwner(ctx, tx, owner)
 	}
-	question, state, err := s.describeAsk(ctx, tx, owner, *input.AskID)
-	if err != nil {
-		return commentThreadTarget{}, err
-	}
-	return commentThreadTarget{AskID: input.AskID, AskQuestion: question, AskState: state}, nil
+	return s.describeAsk(ctx, tx, owner, input.AskID)
 }
 
 // threadHeadOf climbs reply_to from an already-locked comment to the head of its thread: the
@@ -173,11 +191,7 @@ func (s *server) threadHeadOf(
 	root := from
 	for depth := 1; ; depth++ {
 		if root.AskID != nil {
-			question, state, err := s.describeAsk(ctx, tx, owner, *root.AskID)
-			if err != nil {
-				return commentThreadTarget{}, err
-			}
-			return commentThreadTarget{AskID: root.AskID, AskQuestion: question, AskState: state}, nil
+			return s.describeAsk(ctx, tx, owner, root.AskID)
 		}
 		if root.ReplyTo == nil {
 			return commentThreadTarget{ReplyTo: &root.ID, ReplyRoot: &root}, nil
@@ -193,22 +207,23 @@ func (s *server) threadHeadOf(
 	}
 }
 
-// describeAsk is the question and state of an ask on this owner, refusing one that belongs
-// to another.
+// describeAsk reads the ask on this owner that a reply joins, as the thread it heads, refusing one
+// that belongs to another.
 func (s *server) describeAsk(
-	ctx context.Context, tx pgx.Tx, owner owner, askID string,
-) (string, string, error) {
-	var question, state string
+	ctx context.Context, tx pgx.Tx, owner owner, askID *string,
+) (commentThreadTarget, error) {
+	target := commentThreadTarget{AskID: askID}
 	err := tx.QueryRow(ctx, `
-		select question, state from asks
-		where id = $1
-		  and issue_key is not distinct from $2
-		  and artifact_id is not distinct from $3
-	`, askID, owner.IssueKey, owner.ArtifactID).Scan(&question, &state)
+		select a.question, a.state, `+approvalMoved+`
+		from asks a
+		where a.id = $1
+		  and a.issue_key is not distinct from $2
+		  and a.artifact_id is not distinct from $3
+	`, *askID, owner.IssueKey, owner.ArtifactID).Scan(&target.AskQuestion, &target.AskState, &target.AskMoved)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", errorf(http.StatusBadRequest, "INVALID_COMMENT", "ask_id must identify an ask on this owner")
+		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "ask_id must identify an ask on this owner")
 	}
-	return question, state, err
+	return target, err
 }
 
 // commentRoute is the owner's delivery route as the Envoy listener resolved it before the
@@ -472,6 +487,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, err)
 		return
 	}
+	waitingOn := threadTarget.waitingOnAfter(turn)
 	if input.AskID != nil {
 		if err := asks.FollowAuthor(r.Context(), tx, *input.AskID, actor); err != nil {
 			s.writeHandlerError(w, err)
@@ -563,16 +579,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	events := []model.Event{}
 	if snapshot != nil {
-		snapshotEvent, err := s.appendEvent(r.Context(), tx, owner.event(
-			"artifact.version",
-			actor,
-			docs.ArtifactVersionEventPayload(anchor.ArtifactID, artifactName, snapshot.Version, nil, snapshot.Changes),
-		))
+		snapshotEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
 		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if err := refs.Stamp(r.Context(), tx, "artifact", anchor.ArtifactID, snapshotEvent.ID); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -596,7 +604,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		events = append(events, event)
 	}
 	payload, err := s.commentEventPayload(
-		r.Context(), tx, comment, artifactName, threadTarget.eventThread(turn), referenceChanges,
+		r.Context(), tx, comment, artifactName, threadTarget.eventThread(waitingOn), referenceChanges,
 	)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -639,5 +647,5 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		}
 		comment.Deliveries = append(comment.Deliveries, attempt)
 	}
-	WriteJSON(w, http.StatusCreated, withAdvice(comment, advice))
+	WriteJSON(w, http.StatusCreated, withAdvice(commentWriteResponse{Comment: comment, AskWaitingOn: waitingOn}, advice))
 }

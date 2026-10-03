@@ -85,9 +85,10 @@ handoffs; do not narrate them into the spec or a `dispatch_message`. A blocker o
 clear is a `dispatch_ask`.
 
 The issue's primary document **is** the root specification. Extend it in place: a new version
-that keeps the human's own text and grows the design (the adoption or decomposition and its
-waves, how each outcome is proven, and the integration test), each open question a
-[decision block](../dispatch/SKILL.md#decision-blocks). Never post a second "spec" artifact beside
+that adds only the evidence each decision needs and what the human decides, each as a
+[decision block](../dispatch/SKILL.md#decision-blocks). The decomposition and its waves, how each
+outcome is proven, and the integration test are your own calls: they go in the child issues and
+the planner's `.legion/plan.json`, not the root spec. Never post a second "spec" artifact beside
 it (`dispatch_artifact` with the primary document's name replaces the human's document; do not do
 that).
 The design gate runs only when the "Design gate policy" line at the end of your system prompt
@@ -102,7 +103,7 @@ dispatch_doc_edit({ issue: "<root issue>", ... })   // extend the primary docume
 // then settle its decision blocks (below)
 result = dispatch_request_approval({
   issue: "<root issue>",                             // the primary document by default
-  summary: "<what the tree will do that the human hasn't already agreed to>",
+  summary: "<what the human is approving>",
 })
 legion({
   op: "register_gate",
@@ -115,8 +116,10 @@ legion({
 The decision blocks come first: settle every one as
 [Approval of a spec](../dispatch/SKILL.md#approval-of-a-spec) says before you request approval;
 `dispatch_request_approval` refuses while one is open. Each answer reaches you, since you follow
-every ask you open. `summary` says in one to three sentences what the tree will do that the human
-hasn't already agreed to.
+every ask you open. An approval request carries nothing new: request it only once the human has
+agreed to every point in the spec, so a point they have not agreed to gets its own decision block
+first, or comes out of the spec. `summary` says in one to three sentences what the human is
+approving and nothing else: no commentary and no open question.
 
 `dispatch_request_approval` opens a system question on the document with the fixed options
 `Approve` and `Request changes`; a human answers it from the Inbox or approves from the
@@ -127,45 +130,45 @@ spec.md (document id <UUID>) at version <N> (ask <id>)", followed by the questio
 Inbox shows, and its `details.artifact` / `details.version` carry the same two values. The
 document id is never the slug or file name you passed in (`spec`, `spec.md`): the daemon
 recognizes the document's approval events by that id, and both the `legion` tool and the daemon
-refuse a value that is not a UUID. Calling `dispatch_request_approval` again at the version an
-open request names returns that request unchanged, so it is safe to repeat; once the document has
-a newer version, that request is retracted (its `ask.resolved` reaches you) and the call opens a
-new one at the latest version. If its text instead reads "spec.md (document id <UUID>) is already
-approved at version <N>" — a human approved from the document header before you asked — still
-call `register_gate` with that id and version: the daemon reads the approval from Dispatch as it
-registers, opens the gate, and delivers `design-approved` at once. The same read covers a human
-who answers the question between your `dispatch_request_approval` and `register_gate` calls, so
-an approval is never lost to timing; you never approve anything yourself.
+refuse a value that is not a UUID. Calling `dispatch_request_approval` again while that request
+waits on the human, with the same `summary`, changes nothing and returns it (its text says
+it "already waits on the human"), so it is safe to repeat; a different `summary` is refused then.
+A newer version of the spec moves the open request to that version and leaves it waiting on you,
+with no wake when the edit was yours: once the human has agreed to every point in it, call again
+to hand the same request back at the latest version. If its text instead reads "spec.md (document
+id <UUID>) is already approved at version <N>" — a human approved from the document header before
+you asked — still call `register_gate` with that id and version: the daemon reads the approval
+from Dispatch as it registers, opens the gate, and delivers `design-approved` at once. The same
+read covers a human who answers the question between your `dispatch_request_approval` and
+`register_gate` calls, so an approval is never lost to timing; you never approve anything
+yourself.
 
 Then park. Do not release a wave or spawn a Legion role until a later delivered wake shows
 `design-approved` on the root. On `design-changes-requested`, revise the spec (a new version of
-the primary document) as the human's reason asks, call `dispatch_request_approval` again with a
-`summary` that leads with what the revision changes — it opens the request at the new version —
-and stay parked.
+the primary document) as the human's reason asks, request approval again as above (the answer
+closed the last request, so this opens a new one), and stay parked.
 
 **After approval, the root spec changes only when what the tree delivers, or a decision a human
 settled, changes.** Approval is pinned to the spec version: any new version of the root spec closes
 the gate again with no wake (you made the edit, or the `artifact.version` event on your issue tells
-you). So edit an approved root spec only when its Summary, its Acceptance, the tree's scope, the
-approved decomposition, or a decision a human settled in one of its decision blocks changes. Then
-edit it, call `dispatch_request_approval` again with a `summary` that leads with what changed
-against the approved Summary, Acceptance and settled decisions, and release no new wave and spawn
-no new role until the next `design-approved` arrives — work already in flight continues. A settled
-decision is the human's. A plan that would overturn one goes back to the planner with the decision
-kept, which asks the human nothing, unless the planner brings evidence the human did not weigh that
-would change the decision, such as a measurement showing the settled choice cannot meet the
-Acceptance; then edit the spec and re-request, with a `summary` that names the decision and that
+you). So edit an approved root spec only when its Summary, its Acceptance, the tree's scope, or a
+decision a human settled in one of its decision blocks changes. Such a change is a point the human
+has not agreed to: put the problem behind it to them as its own decision block, with its evidence,
+at the end of the section it changes, and request approval again as above once they have answered
+it. Release no new wave and spawn no new role until the next `design-approved` arrives — work
+already in flight continues. A settled decision is the human's. A plan that would overturn one goes
+back to the planner with the decision kept, which asks the human nothing, unless the planner brings
+evidence the human did not weigh that would change the decision, such as a measurement showing the
+settled choice cannot meet the Acceptance; then that decision block names the decision and that
 evidence. A plan never overturns a settled decision on its own. A design change that leaves all
-five intact, such as a planner's measurement that finds a better way to build the same outcome,
-goes in the plan (the issue's
-`plan.md` document and `.legion/plan.json`), never into the approved spec, even where the spec's
-own design section now describes the older design; the reviewer reads the plan beside the spec.
-When a planner's completion names a departure from the spec's design, check it against the
+four intact, such as a planner's measurement that finds a better way to build the same outcome,
+goes in the plan (the issue's `plan.md` document and `.legion/plan.json`), never into the approved
+spec, even where the spec's text describes the older design; the reviewer reads the plan beside the
+spec. When a planner's completion names a departure from the spec's design, check it against the
 approved Summary, Acceptance and settled decisions: when all of them still hold, edit nothing,
-request nothing, and carry on with the tree. Later waves of the approved decomposition,
-re-scoping open children toward the same Acceptance, and integration-failure children need no spec
-edit and no new approval, and a child issue's spec is never gated: the root approval covers the
-tree.
+request nothing, and carry on with the tree. Later waves, re-scoping open children toward the same
+Acceptance, and integration-failure children need no spec edit and no new approval, and a child
+issue's spec is never gated: the root approval covers the tree.
 
 ## 2. Children in flight
 
@@ -281,8 +284,9 @@ Preserve this order exactly:
    task. It drives the changed path in production through the user's own access path and records
    what it saw on the pull request and on this issue. Close only after the implementer's production
    report exists. A defect it finds is a corrective child issue of this tree, not a note on a
-   closed one; a deploy the implementer cannot perform is its `dispatch_ask` naming that deploy,
-   with options for its outcomes, and the issue waits for it.
+   closed one; if the implementer cannot perform the deploy, it opens a `dispatch_ask` that starts
+   with the production gap and why it matters, then names the required step, its risk, and
+   outcome-named options. The issue waits for that answer.
 
 What returns the tree to review: a changed diff — a commit above the approved head that
 touches anything outside `docs/solutions/`, or a conflict-resolution merge whose fingerprint
@@ -338,7 +342,7 @@ active phase worker.
 | `children-complete` | Execute steps 3–4: parent integration verification; failures become a new child wave, success advances to review and retro. |
 | `child-reopened` | Treat the completion edge as reset. Reassess the reopened child and return the tree to children-in-flight; do not continue an already-started end-game. |
 | `design-approved` | Payload `{type:"design-approved"}`. A human approved the root spec document at its current version; the gate is open. Proceed to section 2. |
-| `design-changes-requested` | Payload `{type:"design-changes-requested", version, reason, author?}`. A human asked for changes to the root spec at `version`, for `reason`. Revise the spec as the reason asks, call `dispatch_request_approval` again with a `summary` that leads with what the revision changes, and stay parked; the gate is closed. |
+| `design-changes-requested` | Payload `{type:"design-changes-requested", version, reason, author?}`. A human asked for changes to the root spec at `version`, for `reason`. Revise the spec as the reason asks and request approval again as section 1 says; stay parked; the gate is closed. |
 | `phase-complete` | Payload `{type:"phase-complete", issue, role, summary}`. May arrive live or via `catchup-overseer`'s `phaseCompletions`. Read the committed handoff for that phase, then spawn the next phase's owner, or `spawn_worker` on the same role again to resume it with corrections if the handoff shows unresolved gaps. A `planner` completion that departs from the spec's design changes the approved root spec only as section 1 says: when the approved Summary, Acceptance and settled decisions still hold, the plan is the record and the next phase starts. A `reviewer` completion whose GitHub review is `CHANGES_REQUESTED` (the daemon returns the issue's Dispatch status to `in_progress` for this, on the reviewer's completion and again when you spawn the corrective implementer unless the daemon already knows the issue is `in_progress`) means `spawn_worker` the **implementer** again with the review findings — thread URLs and blocking items — as its task, then route back through tester and reviewer in order; never `spawn_worker` the reviewer directly off this wake and never proceed to retro on this verdict. A reviewer completion with an `APPROVED` review proceeds to retro (step 5). A `reviewer` completion after a conflict-forced rebase whose review body names an unchanged fingerprint is a confirmation, not a round: if retro already completed, `spawn_worker` the merger; otherwise resume the step you were on. An `implementer` completion that follows the merge is its production report: read the record on the pull request and the issue, then run step 7 — the issue is already at `retro`, the daemon writes no status for this completion, and you set `done` yourself. A `tester` completion whose handoff carries `implementerProof.verdict: "rejected"`, or a failure naming the production-like proof, goes back to the **implementer** with that finding — never forward to the reviewer, and never by supplying the proof from another role. A worker that reports no surface reaches the changed path gets a child issue in this tree (infrastructure, tooling, or a skill) and a resume once it lands; that report is never a reason to advance the phase. |
 | `worker-queued` | Payload `{type:"worker-queued", issue, role}`. This role's task is queued for promotion — either the deployment's worker cap is full, or the live worker acknowledged the task without starting a turn and the daemon is retrying it (counted; the worker is replaced after three such failures, still with the same task). Do not respawn or retry — wait for `worker-started`. `legion state` shows the queue (`workerAdmission.queue`: role token, issue, role, kind, and the time the task was first queued — never the task text); read it before re-sending. A `spawn_worker` identical to the queued task changes nothing and is not announced again. Different text replaces the queued task silently in the same FIFO slot and retains its original queue time. A `spawn_worker` that fails with "got no response in 3 attempts" was already retried by the plugin under one request id and may still have reached the daemon: read the queue and the role's claim in `legion state` before sending it again. |
 | `worker-started` | Payload `{type:"worker-started", issue, role}`. A previously queued role has been promoted and is now running. Treat it exactly as a normal spawn: resume tracking that role's live session. |
@@ -348,7 +352,7 @@ active phase worker.
 | `pr-blocked` | Payload `{type:"pr-blocked", pr, attempts}`. `attempts` counts heads pushed onto a red verdict that changed something outside `.legion/` — handoff-only pushes (`.legion/` paths only) never count, a push by the review App (a planner's, tester's, reviewer's or architect's) never counts, and the head after a red the tester's red tests earned (a review-App push that changed a path outside `.legion/`, however many handoff-only pushes follow it) does not count either — so after the tester's handoff-only push onto the implementer's red, the implementer's next push does count; a push the daemon cannot classify (a listener without `changed_paths`, a list the listener stopped at 100 paths or 32,768 runes of text, a push listing no commits) does. Published once per exhausted count, not on every later red verdict for that count. Read the failed CI evidence and recovery attempts. Assign a focused implementer or corrective child, then return it through testing and review; do not treat the blocked PR as final. |
 | `pr-merged` | Payload `{type:"pr-merged", pr, mergeCommitSha}`. The PR merged because a human merged it under the repository's rules. `spawn_worker` the **implementer** with the production-check task naming that merge commit (it resumes the same agent; a retired role has no live holder, so never `envoy_publish` for this). Its `phase-complete` is what brings you to step 7: verify the record on the pull request and this issue first, then sign off naming it and set the issue `done`. A merge is not the close. |
 | `pr-closed-unmerged` | Decide from current scope whether to reopen the work, send a fresh implementer, or cancel it with a reason. Delegate the repository action to the responsible phase worker and keep ownership. |
-| `issue-comment` | Interpret the comment in the issue's design context. Answer it, adjust the plan, or relay it via `envoy_publish` to the responsible worker's role token; scope and product decisions remain with you. |
+| `issue-comment` | Interpret the comment in the issue's design context. Reply in its thread (`dispatch_comment` with `reply_to`; under an open ask whose next move is yours, such as the approval request you must revise or hand back, `reply_to_ask` with `turn: "agent"`, since a default-turn reply hands that request back to the human and a corrected `summary` is then refused), then adjust the plan or relay it via `envoy_publish` to the responsible worker's role token; scope and product decisions remain with you. |
 | `catchup-overseer` | Verify its child counts and PR verdicts against current artifacts, then resume the applicable lifecycle step. This is a current-state snapshot, not a raw-event replay. A root architect uses `gates[LEGION_TREE].open`: `true` means the root spec is approved and section 2 may continue; `false`, or no `open` key, means section 1 still applies. A resumed sub-architect receives `overseerCatchup(state, LEGION_ISSUE)` for its own subtree: its `gates` intentionally omits the root gate because a child spec is never gated. Do not request or register a gate; resume at section 2. Handle each `phaseCompletions` entry exactly as a `phase-complete` wake, then compare `childCounts[LEGION_ISSUE].open` with `legion state` and Dispatch before deciding the next action. |
 | `worker-died` | Payload `{type:"worker-died", issue, role}`. Two causes, one verdict: the daemon retried this role's boot through `MAX_LAUNCH_FAILURES` attempts and could not confirm it, or the worker booted and acknowledged every prompt without ever starting a turn through `MAX_PROMPT_RETIRES` retire-and-relaunch cycles (LEGION-93) — never a raw-event replay or a silent revive. Your next `spawn_worker` for the role is the retry (one cold launch, three prompts, and `worker-died` again if the agent is still broken). Reassess the work and `spawn_worker` again for the role (it resumes the same agent via `--resume` if a session file survived) or reassign it if the failure looks environmental, not agent-specific. |
 | `reopened` | Reopen the root lifecycle: inspect the reason and current artifacts, reassess scope and children, and resume at the first applicable numbered step. |

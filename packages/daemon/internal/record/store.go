@@ -1,0 +1,702 @@
+package record
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
+)
+
+const maxInt64 = uint64(^uint64(0) >> 1)
+
+// Postgres implements Store exclusively through caller-owned pgx transactions. It has no pool:
+// opening, committing, and retrying a transaction belong to the layer that owns its boundary.
+type Postgres struct{}
+
+var _ Store = (*Postgres)(nil)
+
+// NewStore returns the stateless Postgres record implementation.
+func NewStore() *Postgres { return &Postgres{} }
+
+func (s *Postgres) MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) (bool, error) {
+	tag, err := tx.Exec(ctx, `insert into processed_events (source, event_id) values ($1, $2)
+		on conflict (source, event_id) do nothing`, source, eventID)
+	if err != nil {
+		return false, fmt.Errorf("mark %s event %s processed: %w", source, eventID, err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status`
+
+func (s *Postgres) Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error) {
+	issue, err := scanIssue(tx.QueryRow(ctx, "select "+issueColumns+" from issues where key = $1", key))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read issue %s: %w", key, err)
+	}
+	return issue, nil
+}
+
+func (s *Postgres) Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error) {
+	rows, err := tx.Query(ctx, "select "+issueColumns+" from issues order by key")
+	if err != nil {
+		return nil, fmt.Errorf("list issues: %w", err)
+	}
+	defer rows.Close()
+	issues := []Issue{}
+	for rows.Next() {
+		issue, err := scanIssue(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list issues: %w", err)
+		}
+		issues = append(issues, *issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list issues: %w", err)
+	}
+	return issues, nil
+}
+
+func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
+	if issue.Generation > maxInt64 {
+		return fmt.Errorf("put issue %s: generation %d does not fit a bigint", issue.Key, issue.Generation)
+	}
+	var heldFrom any
+	var holdReason HoldReason
+	if issue.Hold != nil {
+		heldFrom, holdReason = string(issue.Hold.From), issue.Hold.Reason
+	}
+	_, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, hold_reason, dispatch_status)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, nullif($15::text, ''), $16)
+		on conflict (key) do update set tree = excluded.tree, project = excluded.project, title = excluded.title,
+		parent = excluded.parent, phase = excluded.phase, generation = excluded.generation,
+		status = excluded.status, rank = excluded.rank, handed_over = excluded.handed_over, linger_until = excluded.linger_until,
+		held_from = excluded.held_from, last_dispatch_seq = excluded.last_dispatch_seq,
+		ready_pending_version = excluded.ready_pending_version, hold_reason = excluded.hold_reason, dispatch_status = excluded.dispatch_status`,
+		issue.Key, issue.Tree, issue.Project, issue.Title, issue.Parent, string(issue.Phase), int64(issue.Generation), issue.Status,
+		issue.Rank, issue.HandedOver, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, issue.ReadyPendingVersion, string(holdReason), issue.DispatchStatus,
+	)
+	if err != nil {
+		return fmt.Errorf("put issue %s: %w", issue.Key, err)
+	}
+	return nil
+}
+
+func scanIssue(row scanner) (*Issue, error) {
+	var issue Issue
+	var phaseValue string
+	var generation int64
+	var heldFrom *string
+	var holdReason string
+	if err := row.Scan(&issue.Key, &issue.Tree, &issue.Project, &issue.Title, &issue.Parent, &phaseValue, &generation, &issue.Status,
+		&issue.Rank, &issue.HandedOver, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &issue.ReadyPendingVersion, &holdReason, &issue.DispatchStatus); err != nil {
+		return nil, err
+	}
+	if generation < 0 {
+		return nil, fmt.Errorf("issue %s has negative generation %d", issue.Key, generation)
+	}
+	issue.Phase = phase.Phase(phaseValue)
+	if heldFrom != nil {
+		issue.Hold = &Hold{From: phase.Phase(*heldFrom), Reason: HoldReason(holdReason)}
+	}
+	issue.Generation = uint64(generation)
+	return &issue, nil
+}
+
+func (s *Postgres) Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error) {
+	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, summary, last_handoff, decision, completed_at from phases
+		where issue = $1 order by role`, issue)
+	if err != nil {
+		return nil, fmt.Errorf("list phases for %s: %w", issue, err)
+	}
+	defer rows.Close()
+	phases := []PhaseRow{}
+	for rows.Next() {
+		phase, err := scanPhase(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list phases for %s: %w", issue, err)
+		}
+		phases = append(phases, phase)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list phases for %s: %w", issue, err)
+	}
+	return phases, nil
+}
+
+func (s *Postgres) PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) error {
+	var decision []byte
+	if phase.Decision != nil {
+		var err error
+		if decision, err = json.Marshal(phase.Decision); err != nil {
+			return fmt.Errorf("put %s phase on %s: encode the review decision: %w", phase.Role, phase.Issue, err)
+		}
+	}
+	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, summary, last_handoff,
+		decision, completed_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		on conflict (issue, role) do update set claim = excluded.claim,
+		handoff_commit = excluded.handoff_commit, rounds = excluded.rounds, verdict = excluded.verdict,
+		summary = excluded.summary, last_handoff = excluded.last_handoff, decision = excluded.decision,
+		completed_at = excluded.completed_at`,
+		phase.Issue, string(phase.Role), string(phase.Claim), phase.HandoffCommit, phase.Rounds, phase.Verdict, phase.Summary, phase.LastHandoff,
+		decision, phase.CompletedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("put %s phase on %s: %w", phase.Role, phase.Issue, err)
+	}
+	return nil
+}
+
+func scanPhase(row scanner) (PhaseRow, error) {
+	var phase PhaseRow
+	var role, token string
+	var decision []byte
+	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Rounds, &phase.Verdict, &phase.Summary, &phase.LastHandoff,
+		&decision, &phase.CompletedAt); err != nil {
+		return PhaseRow{}, err
+	}
+	phase.CompletedAt = phase.CompletedAt.UTC()
+	if decision != nil {
+		phase.Decision = &ReviewDecision{}
+		if err := json.Unmarshal(decision, phase.Decision); err != nil {
+			return PhaseRow{}, fmt.Errorf("decode the review decision: %w", err)
+		}
+	}
+	phase.Role, phase.Claim = claim.Role(role), claim.Token(token)
+	return phase, nil
+}
+
+const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at,
+	verdict, failing, fix_attempts, blocked_attempts, check_runs,
+	generation, snapshot, pushes, head_counted, planned_red, review_seen, review_seen_at, state,
+	checked_head`
+
+func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
+	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where issue = $1", issue))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read pull request for %s: %w", issue, err)
+	}
+	return pr, nil
+}
+
+func (s *Postgres) PullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*PullRequest, error) {
+	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where repo = $1 and branch = $2", repo, branch))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read pull request for %s %s: %w", repo, branch, err)
+	}
+	return pr, nil
+}
+
+// PullRequestByNumber reads the pull request a GitHub event names. The engine reached it by
+// listing every issue and reading each one's pull request — a read per issue for every check,
+// review and push event — and the row is one query away.
+func (s *Postgres) PullRequestByNumber(ctx context.Context, tx pgx.Tx, repo string, number int) (*PullRequest, error) {
+	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where repo = $1 and number = $2", repo, number))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read pull request %s#%d: %w", repo, number, err)
+	}
+	return pr, nil
+}
+
+func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest) error {
+	failing, err := json.Marshal(pr.Failing)
+	if err != nil {
+		return fmt.Errorf("put pull request for %s: encode failing checks: %w", pr.Issue, err)
+	}
+	checkRuns, err := json.Marshal(pr.CheckRuns)
+	if err != nil {
+		return fmt.Errorf("put pull request for %s: encode check runs: %w", pr.Issue, err)
+	}
+	pushes, err := json.Marshal(append([]ClassifiedPush{}, pr.Pushes...))
+	if err != nil {
+		return fmt.Errorf("put pull request for %s: encode pushes: %w", pr.Issue, err)
+	}
+	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
+		verdict, failing, fix_attempts, blocked_attempts, check_runs, generation, snapshot, pushes,
+		head_counted, planned_red, review_seen, review_seen_at, state, checked_head)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
+		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
+		verdict = excluded.verdict, failing = excluded.failing, fix_attempts = excluded.fix_attempts,
+		blocked_attempts = excluded.blocked_attempts, check_runs = excluded.check_runs,
+		generation = excluded.generation, snapshot = excluded.snapshot,
+		pushes = excluded.pushes, head_counted = excluded.head_counted,
+		planned_red = excluded.planned_red, review_seen = excluded.review_seen,
+		review_seen_at = excluded.review_seen_at, state = excluded.state, checked_head = excluded.checked_head`,
+		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt,
+		pr.Verdict, failing, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
+		pr.Generation, pr.Snapshot, pushes, pr.HeadCounted, pr.PlannedRed,
+		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead,
+	)
+	if err != nil {
+		return fmt.Errorf("put pull request for %s: %w", pr.Issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error) {
+	var claims bool
+	if err := tx.QueryRow(ctx, "select exists (select 1 from claims where tree = $1 and session = $2 and session <> '')", tree, session).Scan(&claims); err != nil {
+		return false, fmt.Errorf("read the claims of session %s in %s: %w", session, tree, err)
+	}
+	return claims, nil
+}
+
+// ClearGeneration empties one issue's generation-scoped facts: a merged or closed pull request,
+// the counters of one still open, its design gate, its recorded handoffs and a READY the gate
+// refused.
+func (s *Postgres) ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error {
+	return clearGeneration(ctx, tx, "issue = $1", "key = $1", issue, fmt.Sprintf("clear the generation of %s", issue))
+}
+
+// ClearTreeGeneration empties them for every issue of the tree. A root set back to todo starts a
+// new generation of the whole tree, and its children carried the old one's pull request, gate and
+// handoffs into it — a child re-entered at the new generation read a handoff of the last — and a
+// child's READY the old gate refused would wait on a packet cleared with those handoffs.
+func (s *Postgres) ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error {
+	return clearGeneration(ctx, tx, "issue in (select key from issues where tree = $1)", "tree = $1", tree,
+		fmt.Sprintf("clear the generation of tree %s", tree))
+}
+
+// clearGeneration runs each statement with key as $1: where selects the cleared issues' rows by
+// their issue column, and issues selects the same issues in the issues table.
+func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describe string) error {
+	for _, statement := range []string{
+		"delete from pull_requests where " + where + " and state <> 'open'",
+		// An open pull request is kept across a new generation, but the last one's reading of it is
+		// not: its counters and its checks verdict are of a head nobody has judged since, and the
+		// review round's decision goes with the phases below. Its pushes stay, each a fact about two
+		// commits, and so does its newest review, which orders every review it will have.
+		"update pull_requests set fix_attempts = 0, blocked_attempts = 0, head_counted = '', " +
+			"planned_red = false, checked_head = '', verdict = '', failing = '[]'::jsonb, " +
+			"check_runs = '[]'::jsonb where " + where,
+		"delete from design_gates where " + where,
+		"update phases set handoff_commit = '', rounds = 0, verdict = '', summary = '', decision = null where " + where,
+		// A READY the gate refused waits on the merger's packet, which the statement above clears.
+		"update issues set ready_pending_version = null where " + issues,
+	} {
+		if _, err := tx.Exec(ctx, statement, key); err != nil {
+			return fmt.Errorf("%s: %w", describe, err)
+		}
+	}
+	return nil
+}
+
+func scanPullRequest(row scanner) (*PullRequest, error) {
+	var pr PullRequest
+	var failing, checkRuns, pushes []byte
+	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
+		&pr.Verdict, &failing, &pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot,
+		&pushes, &pr.HeadCounted, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
+		&pr.CheckedHead); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(failing, &pr.Failing); err != nil {
+		return nil, fmt.Errorf("decode failing checks: %w", err)
+	}
+	if err := json.Unmarshal(checkRuns, &pr.CheckRuns); err != nil {
+		return nil, fmt.Errorf("decode check runs: %w", err)
+	}
+	if err := json.Unmarshal(pushes, &pr.Pushes); err != nil {
+		return nil, fmt.Errorf("decode pushes: %w", err)
+	}
+	return &pr, nil
+}
+
+func (s *Postgres) Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error) {
+	var gate DesignGate
+	err := tx.QueryRow(ctx, `select issue, artifact_id, latest_version, approved_version from design_gates where issue = $1`, issue).
+		Scan(&gate.Issue, &gate.ArtifactID, &gate.LatestVersion, &gate.ApprovedVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read design gate for %s: %w", issue, err)
+	}
+	return &gate, nil
+}
+
+func (s *Postgres) PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error {
+	_, err := tx.Exec(ctx, `insert into design_gates (issue, artifact_id, latest_version, approved_version)
+		values ($1, $2, $3, $4)
+		on conflict (issue) do update set artifact_id = excluded.artifact_id,
+		latest_version = excluded.latest_version, approved_version = excluded.approved_version`,
+		gate.Issue, gate.ArtifactID, gate.LatestVersion, gate.ApprovedVersion)
+	if err != nil {
+		return fmt.Errorf("put design gate for %s: %w", gate.Issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error) {
+	rows, err := tx.Query(ctx, "select issue, index, admitted_at from slots order by index, issue")
+	if err != nil {
+		return nil, fmt.Errorf("list slots: %w", err)
+	}
+	defer rows.Close()
+	slots := []Slot{}
+	for rows.Next() {
+		var slot Slot
+		if err := rows.Scan(&slot.Issue, &slot.Index, &slot.AdmittedAt); err != nil {
+			return nil, fmt.Errorf("list slots: %w", err)
+		}
+		slots = append(slots, slot)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list slots: %w", err)
+	}
+	return slots, nil
+}
+
+func (s *Postgres) PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error {
+	_, err := tx.Exec(ctx, `insert into slots (issue, index, admitted_at) values ($1, $2, $3)
+		on conflict (issue) do update set index = excluded.index, admitted_at = excluded.admitted_at`,
+		slot.Issue, slot.Index, slot.AdmittedAt)
+	if err != nil {
+		return fmt.Errorf("put slot for %s: %w", slot.Issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error {
+	if _, err := tx.Exec(ctx, "delete from slots where issue = $1", issue); err != nil {
+		return fmt.Errorf("release slot for %s: %w", issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) ControllerRegistered(ctx context.Context, tx pgx.Tx, project string) (bool, error) {
+	// The controllers row is keyed by the project token `legion controller start` mints under
+	// (api/controller.go), and registered is controller.Record.Registered's rule: a session holds
+	// the current capability.
+	token, err := claim.ProjectToken(project)
+	if err != nil {
+		return false, err
+	}
+	var registered bool
+	if err := tx.QueryRow(ctx, "select exists (select 1 from controllers where project = $1 and session <> '')", token).Scan(&registered); err != nil {
+		return false, fmt.Errorf("read whether %s has a registered controller: %w", project, err)
+	}
+	return registered, nil
+}
+
+func (s *Postgres) ControllerNoticePending(ctx context.Context, tx pgx.Tx, project string, kind NoticeKind) (bool, error) {
+	var pending bool
+	if err := tx.QueryRow(ctx, `select exists (select 1 from outbox
+		where kind = $1 and split_part(issue, '-', 1) = $2 and payload->>'kind' = $3)`,
+		string(OutboxKindControllerNotice), project, string(kind)).Scan(&pending); err != nil {
+		return false, fmt.Errorf("read whether %s has a %s controller notice pending: %w", project, kind, err)
+	}
+	return pending, nil
+}
+
+const outboxColumns = `id, kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until`
+
+func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error {
+	if !json.Valid(row.Payload) {
+		return fmt.Errorf("enqueue %s for %s: payload is not JSON", row.Kind, row.Issue)
+	}
+	var err error
+	if row.CreatedAt.IsZero() {
+		_, err = tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
+			values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.LeaseToken, row.LeaseUntil)
+	} else {
+		_, err = tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until)
+			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.CreatedAt, row.LeaseToken, row.LeaseUntil)
+	}
+	if err != nil {
+		return fmt.Errorf("enqueue %s for %s: %w", row.Kind, row.Issue, err)
+	}
+	return nil
+}
+
+// ClaimDue leases project's due rows, oldest first. The database is shared by the daemons of
+// several projects, and a row belongs to its issue's project: an issue key is `<project>-<n>`, and
+// a project key has no hyphen (the configuration's projects keys, claim.IsIssueKey). The scope is in
+// the select, not a filter of what it returns, because the lease is what would take another
+// project's row from its own daemon. An issue's Dispatch status writes run one at a time in the
+// order they were made: a status row waits while an older one for the same issue is unfinished,
+// because each carries the status its predecessor leaves, and a newer write run first would find the
+// board short of it and finish unwritten as though a human had moved it. Supervise rows need no
+// such rule: a stop names the run it ends through the claim's own record of the newest start run
+// against it (claims.last_start_row), so ordering them here would buy nothing that survives a
+// retry the runtime delayed.
+func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error) {
+	if limit <= 0 {
+		return []OutboxRow{}, nil
+	}
+	if leaseFor <= 0 {
+		return nil, fmt.Errorf("claim due outbox rows: lease duration must be positive")
+	}
+	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
+		where split_part(issue, '-', 1) = $4 and next_at <= $1 and (lease_until is null or lease_until <= $1)
+		and not (kind = $3 and exists (select 1 from outbox older
+			where older.kind = $3 and older.issue = outbox.issue and older.id < outbox.id))
+		order by next_at, id limit $2 for update skip locked`,
+		now, limit, string(OutboxKindDispatchStatus), project)
+	if err != nil {
+		return nil, fmt.Errorf("claim due outbox rows: %w", err)
+	}
+	defer rows.Close()
+	claimed := []OutboxRow{}
+	for rows.Next() {
+		row, err := scanOutbox(rows)
+		if err != nil {
+			return nil, fmt.Errorf("claim due outbox rows: %w", err)
+		}
+		claimed = append(claimed, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("claim due outbox rows: %w", err)
+	}
+	for i := range claimed {
+		token, err := leaseToken()
+		if err != nil {
+			return nil, err
+		}
+		until := now.Add(leaseFor)
+		if _, err := tx.Exec(ctx, "update outbox set lease_token = $2, lease_until = $3 where id = $1", claimed[i].ID, token, until); err != nil {
+			return nil, fmt.Errorf("claim outbox row %d: %w", claimed[i].ID, err)
+		}
+		claimed[i].LeaseToken, claimed[i].LeaseUntil = token, &until
+	}
+	return claimed, nil
+}
+
+func (s *Postgres) WaitingNotices(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]OutboxRow, error) {
+	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
+		where kind = $1 and next_at > $2 and split_part(issue, '-', 1) = $3 order by id`, string(OutboxKindNotice), now, project)
+	if err != nil {
+		return nil, fmt.Errorf("list waiting notices: %w", err)
+	}
+	defer rows.Close()
+	waiting := []OutboxRow{}
+	for rows.Next() {
+		row, err := scanOutbox(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list waiting notices: %w", err)
+		}
+		waiting = append(waiting, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list waiting notices: %w", err)
+	}
+	return waiting, nil
+}
+
+func (s *Postgres) DropStatusWrites(ctx context.Context, tx pgx.Tx, issue string) error {
+	if _, err := tx.Exec(ctx, "delete from outbox where kind = $1 and issue = $2", string(OutboxKindDispatchStatus), issue); err != nil {
+		return fmt.Errorf("drop the queued status writes of %s: %w", issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) error {
+	if _, err := tx.Exec(ctx, "delete from outbox where kind = $1 and issue = $2 and payload->>'kind' = 'catch-up'", string(OutboxKindNotice), issue); err != nil {
+		return fmt.Errorf("drop the queued catch-ups of %s: %w", issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) OutboxLeased(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) (bool, error) {
+	var leased bool
+	if err := tx.QueryRow(ctx, "select exists(select 1 from outbox where id = $1 and lease_token = $2)", id, leaseToken).Scan(&leased); err != nil {
+		return false, fmt.Errorf("read the lease of outbox row %d: %w", id, err)
+	}
+	return leased, nil
+}
+
+func (s *Postgres) ExpediteOutbox(ctx context.Context, tx pgx.Tx, id int64, now time.Time) error {
+	if _, err := tx.Exec(ctx, "update outbox set next_at = $2 where id = $1 and next_at > $2", id, now); err != nil {
+		return fmt.Errorf("expedite outbox row %d: %w", id, err)
+	}
+	return nil
+}
+
+func (s *Postgres) TreeIssues(ctx context.Context, tx pgx.Tx, tree string) ([]Issue, error) {
+	rows, err := tx.Query(ctx, "select "+issueColumns+" from issues where tree = $1 order by key", tree)
+	if err != nil {
+		return nil, fmt.Errorf("list the issues of %s: %w", tree, err)
+	}
+	defer rows.Close()
+	issues := []Issue{}
+	for rows.Next() {
+		issue, err := scanIssue(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list the issues of %s: %w", tree, err)
+		}
+		issues = append(issues, *issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the issues of %s: %w", tree, err)
+	}
+	return issues, nil
+}
+
+func (s *Postgres) EarlierNotices(ctx context.Context, tx pgx.Tx, tree string, id int64) ([]OutboxRow, error) {
+	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
+		where kind = $1 and id < $2 and issue in (select key from issues where tree = $3)
+		order by id`, string(OutboxKindNotice), id, tree)
+	if err != nil {
+		return nil, fmt.Errorf("read the notices of %s before row %d: %w", tree, id, err)
+	}
+	defer rows.Close()
+	earlier := []OutboxRow{}
+	for rows.Next() {
+		row, err := scanOutbox(rows)
+		if err != nil {
+			return nil, fmt.Errorf("read the notices of %s before row %d: %w", tree, id, err)
+		}
+		earlier = append(earlier, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the notices of %s before row %d: %w", tree, id, err)
+	}
+	return earlier, nil
+}
+
+func (s *Postgres) FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
+	if _, err := tx.Exec(ctx, "delete from outbox where id = $1 and lease_token = $2", id, leaseToken); err != nil {
+		return fmt.Errorf("finish outbox row %d: %w", id, err)
+	}
+	return nil
+}
+
+func (s *Postgres) RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error {
+	if _, err := tx.Exec(ctx, `update outbox set attempts = attempts + 1, next_at = $3, last_error = $4,
+		lease_token = '', lease_until = null where id = $1 and lease_token = $2`, id, leaseToken, nextAt, lastErr); err != nil {
+		return fmt.Errorf("retry outbox row %d: %w", id, err)
+	}
+	return nil
+}
+
+// RoleRun reads one role's run of an issue generation as the store holds it: the role's supervise
+// rows for the generation still queued, oldest first, and the claim with token (this daemon's own
+// claim on the role), with the task it holds. It decides nothing:
+// workflow.StartFor reads it.
+func (s *Postgres) RoleRun(ctx context.Context, tx pgx.Tx, token claim.Token, issue string, role claim.Role, generation uint64) (RoleRun, error) {
+	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
+		where issue = $1 and kind = $2 and payload->>'role' = $3 and payload->>'generation' = $4 order by id`,
+		issue, string(OutboxKindSupervise), string(role), strconv.FormatUint(generation, 10))
+	if err != nil {
+		return RoleRun{}, fmt.Errorf("read the queued %s rows of %s: %w", role, issue, err)
+	}
+	defer rows.Close()
+	var run RoleRun
+	for rows.Next() {
+		row, err := scanOutbox(rows)
+		if err != nil {
+			return RoleRun{}, fmt.Errorf("read the queued %s rows of %s: %w", role, issue, err)
+		}
+		payload, err := DecodeOutboxPayload(row)
+		if err != nil {
+			return RoleRun{}, err
+		}
+		request, ok := payload.(SuperviseRequest)
+		if !ok {
+			return RoleRun{}, fmt.Errorf("outbox row %d of kind %s decodes to %T", row.ID, row.Kind, payload)
+		}
+		run.Queued = append(run.Queued, QueuedSupervise{ID: row.ID, Request: request})
+	}
+	if err := rows.Err(); err != nil {
+		return RoleRun{}, fmt.Errorf("read the queued %s rows of %s: %w", role, issue, err)
+	}
+	var held RoleClaim
+	var pending bool
+	var task supervise.Delivery
+	var confirmed *time.Time
+	err = tx.QueryRow(ctx, `select c.state, c.last_start_row, d.claim_token is not null, coalesce(d.generation, 0), coalesce(d.phase, ''), d.confirmed_at
+		from claims c left join pending_task_deliveries d on d.claim_token = c.token where c.token = $1`, string(token)).
+		Scan(&held.State, &held.LastStartRow, &pending, &task.Generation, &task.Phase, &confirmed)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+	case err != nil:
+		return RoleRun{}, fmt.Errorf("read claim %s: %w", token, err)
+	default:
+		if pending {
+			if confirmed != nil {
+				task.ConfirmedAt = *confirmed
+			}
+			held.Pending = &task
+		}
+		run.Claim = &held
+	}
+	return run, nil
+}
+
+// PendingStatusWrites lists every Dispatch status write of project's issues the outbox has not
+// finished: due now, in flight, backing off after a failed attempt, or waiting behind an older
+// write for the same issue. Finishing deletes the row, so each one left is a write the outbox has
+// not finished; a write that reached Dispatch whose finish failed stays listed until its lease
+// expires and the rerun finishes it. Oldest first: the order ClaimDue writes one issue's statuses
+// in.
+func (s *Postgres) PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error) {
+	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
+		where kind = $1 and split_part(issue, '-', 1) = $2 order by id`, string(OutboxKindDispatchStatus), project)
+	if err != nil {
+		return nil, fmt.Errorf("list pending Dispatch status writes: %w", err)
+	}
+	defer rows.Close()
+	pending := []OutboxRow{}
+	for rows.Next() {
+		row, err := scanOutbox(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list pending Dispatch status writes: %w", err)
+		}
+		pending = append(pending, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list pending Dispatch status writes: %w", err)
+	}
+	return pending, nil
+}
+
+func scanOutbox(row scanner) (OutboxRow, error) {
+	var out OutboxRow
+	var kind string
+	var payload []byte
+	if err := row.Scan(&out.ID, &kind, &out.Issue, &payload, &out.Attempts, &out.NextAt, &out.LastError,
+		&out.CreatedAt, &out.LeaseToken, &out.LeaseUntil); err != nil {
+		return OutboxRow{}, err
+	}
+	out.Kind = OutboxKind(kind)
+	out.Payload = append(json.RawMessage(nil), payload...)
+	return out, nil
+}
+
+func leaseToken() (string, error) {
+	var raw [24]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("mint outbox lease token: %w", err)
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+type scanner interface {
+	Scan(dest ...any) error
+}

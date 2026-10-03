@@ -48,9 +48,11 @@ type AppContext struct {
 	AllowedLogins  map[string]struct{}
 	Store          *store.Store
 	AgentToken     string
-	RepoProjects   string
 	DefaultProject string
 	ServerURL      string
+	// InsecureCookie drops the Secure attribute from every cookie the router sets, for browsers
+	// reaching Dispatch over plain http (cmd/dispatch: DISPATCH_INSECURE_COOKIE).
+	InsecureCookie bool
 	HTTPClient     auth.HTTPClient
 	apiDeps        api.Deps
 	app            *auth.AppConfig // nil ⇒ not configured
@@ -73,17 +75,20 @@ type AppContextOptions struct {
 	AllowedLogins  map[string]struct{}
 	Store          *store.Store
 	AgentToken     string
-	RepoProjects   string
 	DefaultProject string
 	ServerURL      string
+	InsecureCookie bool
 	EnvoyURL       string
-	Docs           docs.API
-	Events         *events.Broker
-	App            *auth.AppConfig
-	GitHubAPIBase  string
-	OIDC           *oidc.Verifier
-	AgentStream    agentstream.Source
-	Lifetime       context.Context
+	// EnvoyToken is the bearer every Envoy listener call sends (cmd/dispatch: ENVOY_TOKEN); empty
+	// sends none.
+	EnvoyToken    string
+	Docs          docs.API
+	Events        *events.Broker
+	App           *auth.AppConfig
+	GitHubAPIBase string
+	OIDC          *oidc.Verifier
+	AgentStream   agentstream.Source
+	Lifetime      context.Context
 	// AgentSecretsURL/AgentSecretsToken configure the credential-request UI's secrets broker
 	// client; empty URL means the feature is off. See api.DepsInput.
 	AgentSecretsURL   string
@@ -123,10 +128,10 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		Identity:          opts.Identity,
 		AllowedLogins:     opts.AllowedLogins,
 		AgentToken:        opts.AgentToken,
-		RepoProjectsRaw:   opts.RepoProjects,
 		DefaultProject:    opts.DefaultProject,
 		ServerURL:         opts.ServerURL,
 		EnvoyURL:          opts.EnvoyURL,
+		EnvoyToken:        opts.EnvoyToken,
 		Docs:              opts.Docs,
 		Events:            opts.Events,
 		App:               opts.App,
@@ -150,9 +155,9 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		AllowedLogins:  opts.AllowedLogins,
 		Store:          opts.Store,
 		AgentToken:     opts.AgentToken,
-		RepoProjects:   opts.RepoProjects,
 		DefaultProject: opts.DefaultProject,
 		ServerURL:      strings.TrimSuffix(opts.ServerURL, "/"),
+		InsecureCookie: opts.InsecureCookie,
 		devSignInHost:  devSignInHost,
 		apiDeps:        apiDeps,
 		app:            opts.App,
@@ -235,7 +240,7 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "too many pending sign-in attempts")
 		return
 	}
-	http.SetCookie(w, oauthStateCookieFor(nonce, oauthStateMaxAge))
+	http.SetCookie(w, oauthStateCookieFor(nonce, oauthStateMaxAge, !r.ctx.InsecureCookie))
 	redirectURI := callbackURL(r.ctx.ServerURL, req)
 	target := auth.BuildAuthorizeURL(app.ClientID, redirectURI, state)
 	http.Redirect(w, req, target, http.StatusFound)
@@ -252,7 +257,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	http.SetCookie(w, oauthStateCookieFor("", -1))
+	http.SetCookie(w, oauthStateCookieFor("", -1, !r.ctx.InsecureCookie))
 	pending, ok := r.takePendingState(state)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
@@ -300,7 +305,7 @@ func (r *router) issueSession(w http.ResponseWriter, req *http.Request, login st
 			return false
 		}
 	}
-	w.Header().Add("Set-Cookie", auth.IssueSessionCookie(login, generation, r.ctx.SigningKey))
+	w.Header().Add("Set-Cookie", auth.IssueSessionCookie(login, generation, r.ctx.SigningKey, !r.ctx.InsecureCookie))
 	return true
 }
 
@@ -319,7 +324,7 @@ func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
 	if err := r.ctx.Users.Remove(req.Context(), login); err != nil {
 		slog.Warn("dispatch: remove user failed", "login", login, "error", err)
 	}
-	w.Header().Set("Set-Cookie", auth.ClearSessionCookie())
+	w.Header().Set("Set-Cookie", auth.ClearSessionCookie(!r.ctx.InsecureCookie))
 	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -418,6 +423,7 @@ var serverRoots = []string{"/api", "/v1", "/auth", "/ws", "/healthz"}
 
 func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	requestedPath := req.URL.Path
+	// A rooted clean holds no `..`, so every path joined under the dist directory below stays in it.
 	normalized := filepath.Clean("/" + requestedPath)
 	if isReservedPath(normalized, serverRoots) {
 		api.WriteJSON(w, http.StatusNotFound, map[string]string{
@@ -444,10 +450,6 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	candidate := filepath.Join(r.ctx.WebDistDir, normalized)
-	if !strings.HasPrefix(candidate, r.ctx.WebDistDir) {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
 	info, err := os.Stat(candidate)
 	if err == nil && !info.IsDir() {
 		serveFile(w, req, candidate)
@@ -613,13 +615,13 @@ func (r *router) takePendingState(token string) (pendingState, bool) {
 	return pending, pending.expiresAt.After(time.Now())
 }
 
-func oauthStateCookieFor(value string, maxAge int) *http.Cookie {
+func oauthStateCookieFor(value string, maxAge int, secure bool) *http.Cookie {
 	return &http.Cookie{
 		Name:     oauthStateCookie,
 		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   os.Getenv("DISPATCH_INSECURE_COOKIE") == "",
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   maxAge,
 	}

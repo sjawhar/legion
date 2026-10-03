@@ -58,6 +58,9 @@ type testServerOptions struct {
 	// envoyTimeout shortens that client's window, so a test can exercise a receipt timeout
 	// without holding a stand-in listener for the production five seconds.
 	envoyTimeout time.Duration
+	// persistence is an optional document-store seam for API handlers that need the document
+	// service to observe a persistence boundary condition.
+	persistence func(*store.Store) docs.VersionedStore
 	// agentStream is the live agent conversation relay; nil is the deployment with no NATS,
 	// where the viewer route answers 503.
 	agentStream agentstream.Source
@@ -99,7 +102,11 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 	}
 	database := storetest.Open(t)
 	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: settle})
+	var documentPersistence docs.VersionedStore
+	if options.persistence != nil {
+		documentPersistence = options.persistence(database)
+	}
+	documentService := docs.New(docs.Deps{Store: database, Persistence: documentPersistence, Events: broker, ServerURL: "https://dispatch.example", Settle: settle})
 	t.Cleanup(func() {
 		if err := documentService.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)
@@ -111,7 +118,6 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		Identity:         identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
 		AllowedLogins:    allowed,
 		AgentToken:       "agent-token",
-		RepoProjectsRaw:  "owner/repo=TEST",
 		DefaultProject:   options.defaultProject,
 		ServerURL:        "https://dispatch.example",
 		Docs:             documentService,
@@ -1716,7 +1722,7 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: cookieIdentity, AllowedLogins: allowed, AgentToken: "agent-token",
-		RepoProjectsRaw: "owner/repo=TEST", Docs: documentService, Events: broker,
+		Docs: documentService, Events: broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -1727,7 +1733,7 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("establish alice's session: %v", err)
 	}
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", generation, "signing-key"))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", generation, "signing-key", true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}
@@ -1992,14 +1998,13 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 	})
 	allowed := map[string]struct{}{"alice": {}, "bob": {}}
 	deps, err := NewDeps(DepsInput{
-		Store:           database,
-		Identity:        identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins:   allowed,
-		AgentToken:      "agent-token",
-		RepoProjectsRaw: "owner/repo=TEST",
-		ServerURL:       "https://dispatch.example",
-		Docs:            documentService,
-		Events:          broker,
+		Store:         database,
+		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
+		AllowedLogins: allowed,
+		AgentToken:    "agent-token",
+		ServerURL:     "https://dispatch.example",
+		Docs:          documentService,
+		Events:        broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

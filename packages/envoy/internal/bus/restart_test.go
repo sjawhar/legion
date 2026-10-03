@@ -3,7 +3,9 @@ package bus_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -203,16 +205,43 @@ func (l *busLogs) errorLine() string {
 	return l.lineAt("ERROR", "")
 }
 
+// lines returns the records logged so far, one per line.
+func (l *busLogs) lines() []string {
+	return strings.Split(l.String(), "\n")
+}
+
 // lineAt returns the first record at level whose text holds fragment, or "".
 func (l *busLogs) lineAt(level, fragment string) string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for _, line := range strings.Split(l.buffer.String(), "\n") {
+	for _, line := range l.lines() {
 		if strings.Contains(line, `"level":"`+level+`"`) && strings.Contains(line, fragment) {
 			return line
 		}
 	}
 	return ""
+}
+
+// attempts decodes, in the order they were logged, the attempt numbers of the records at level
+// with message msg, so a test reads the number from the record rather than from where slog writes
+// it.
+func (l *busLogs) attempts(level, msg string) []int {
+	var found []int
+	for _, line := range l.lines() {
+		if line == "" {
+			continue
+		}
+		var record struct {
+			Level   string
+			Msg     string
+			Attempt int
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			panic(fmt.Sprintf("decode the bus log record %q: %v", line, err))
+		}
+		if record.Level == level && record.Msg == msg && record.Attempt > 0 {
+			found = append(found, record.Attempt)
+		}
+	}
+	return found
 }
 
 func captureBusLogs(t *testing.T) *busLogs {

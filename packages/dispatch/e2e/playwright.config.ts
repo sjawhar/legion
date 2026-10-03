@@ -1,25 +1,46 @@
 import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
-import { dispatchPort, fakeEnvoyPort, fakeGithubPort, harnessPorts } from "./harness-ports";
-import { plainHttpHost } from "./plain-http-origin";
+import { baseUrl } from "./api";
+import { usesFakeBroker } from "./harness-broker";
+import { harnessPorts } from "./harness-ports";
+import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 
-const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${dispatchPort}`;
-// The plain-HTTP project's origin: the harness `baseURL` names, by a host name Chromium maps back
-// to that harness's host, so the page is a non-loopback plain-HTTP origin while every request still
-// reaches the same listener. `plainHttpSpec` is the one file that project runs; `chromium` and
-// `iphone` ignore it, since its first assertion (no secure context) fails on loopback by design.
-const harness = new URL(baseURL);
-const plainHttpOrigin = new URL(baseURL);
-plainHttpOrigin.hostname = plainHttpHost;
-const plainHttpSpec = /plain-http-origin\.e2e\.ts/;
+// The plain-HTTP project's origin is a proxy on PLAIN_HTTP_PORT, reached by a host name Chromium
+// maps to loopback. The page is a non-loopback plain-HTTP origin, while the proxy forwards to the
+// dev sign-in server under its own loopback origin. `plainHttpSpecs` are the files that project
+// runs, the origin's own rows and the proxy's; `chromium` and `iphone` ignore them, since they
+// open the plain-HTTP name, which only that project maps, and the origin rows' first assertion
+// fails on loopback by design.
+const plainHttpSpecs = /plain-http-(origin|proxy)\.e2e\.ts/;
 const startsOwnServers = !process.env.PLAYWRIGHT_BASE_URL;
+const fakeBroker = fileURLToPath(new URL("./fake-broker.ts", import.meta.url));
 const fakeEnvoy = fileURLToPath(new URL("./fake-envoy.ts", import.meta.url));
 const fakeGithub = fileURLToPath(new URL("./fake-github.ts", import.meta.url));
+const plainHttpProxy = fileURLToPath(new URL("./plain-http-proxy.ts", import.meta.url));
 const runServer = fileURLToPath(new URL("./run-server.sh", import.meta.url));
 
+// Every listener this config can start, with its port beside that port's variable, both from
+// e2e/harness-ports.ts. A deployed run (PLAYWRIGHT_BASE_URL) starts only those marked `deployed`:
+// its Dispatch server is already up, and the fake GitHub serves only a server this run starts. The
+// fake broker is started exactly when the harness switch points this run's server at it
+// (e2e/harness-broker.ts), never for a deployed run. The port probe and `webServer` both read
+// `startedListeners`, so a listener is probed exactly when it is started.
+const listeners = [
+  { ...harnessPorts.fakeEnvoy, command: `bun ${fakeEnvoy}`, deployed: true },
+  { ...harnessPorts.plainHttp, command: `bun ${plainHttpProxy}`, deployed: true },
+  { ...harnessPorts.fakeGithub, command: `bun ${fakeGithub}`, deployed: false },
+  ...(usesFakeBroker
+    ? [{ ...harnessPorts.fakeBroker, command: `bun ${fakeBroker}`, deployed: false }]
+    : []),
+  { ...harnessPorts.dispatch, command: `bash ${runServer}`, deployed: false },
+];
+const startedListeners = startsOwnServers
+  ? listeners
+  : listeners.filter((listener) => listener.deployed);
+
 // `DISPATCH_E2E_REUSE_SERVERS=1` runs the suite against a harness the caller started and left
-// listening on the three harness ports. Unset or empty starts this run's own servers and refuses a
+// listening on the five harness ports. Unset or empty starts this run's own servers and refuses a
 // port already taken, because reusing a server this run did not start points `e2e/seed.ts`'s
 // truncation at whatever database that server holds — another lane's. Any other value is refused
 // rather than quietly read as "no".
@@ -40,7 +61,7 @@ const reuseServers = resolveReuseServers();
 // as used when either `127.0.0.1` or `::1` accepts a connection. A probe that dialled only
 // `127.0.0.1` would miss a listener bound on `::1` alone — what a docker-published port binds —
 // and leave that case to Playwright's backstop, which names no variable.
-function isPortUsed(port: number): Promise<boolean> {
+async function isPortUsed(port: number): Promise<boolean> {
   const dial = (host: string) => {
     const { promise, resolve } = Promise.withResolvers<boolean>();
     const connection = connect(port, host)
@@ -51,15 +72,7 @@ function isPortUsed(port: number): Promise<boolean> {
       });
     return promise;
   };
-  const { promise, resolve } = Promise.withResolvers<boolean>();
-  let pending = 2;
-  const onResult = (used: boolean) => {
-    if (used) resolve(true);
-    else if (--pending === 0) resolve(false);
-  };
-  void dial("127.0.0.1").then(onResult);
-  void dial("::1").then(onResult);
-  return promise;
+  return (await Promise.all([dial("127.0.0.1"), dial("::1")])).includes(true);
 }
 
 // A listing run starts no web server: `listMode` builds only a load task and a report-begin task
@@ -94,21 +107,20 @@ function isListMode(argv: readonly string[]): boolean {
 // `child_process.fork` whose stdio carries an `"ipc"` channel (`lib/runner/index.js:1915-1929`),
 // so `process.send` is a function there and undefined in the CLI that starts the servers;
 // `TEST_WORKER_INDEX` cannot discriminate them, because the loader never sets it.
-if (
-  startsOwnServers &&
-  !reuseServers &&
-  typeof process.send !== "function" &&
-  !isListMode(process.argv)
-) {
-  const used = await Promise.all(harnessPorts.map((entry) => isPortUsed(entry.port)));
-  const taken = harnessPorts.filter((_, index) => used[index]);
+if (!reuseServers && typeof process.send !== "function" && !isListMode(process.argv)) {
+  const used = await Promise.all(startedListeners.map((listener) => isPortUsed(listener.port)));
+  const taken = startedListeners.filter((_, index) => used[index]);
   if (taken.length > 0) {
-    const ports = taken.map((entry) => `${entry.port} (${entry.variable})`).join(", ");
+    const ports = taken.map((listener) => `${listener.port} (${listener.variable})`).join(", ");
+    const variables = startedListeners.map((listener) => listener.variable).join("/");
+    const remedy = startsOwnServers
+      ? `move this run to free ports with ${variables} and to its own DATABASE_URL, since the ` +
+        "server already listening holds the database you named"
+      : `move this run to free ports with ${variables}, and start the deployed server with the ` +
+        "same FAKE_ENVOY_PORT, since its ENVOY_URL derives from it";
     throw new Error(
       `The Dispatch e2e harness cannot start: ${ports} already in use. Stop whatever listens ` +
-        "there, or move this run to free ports with DISPATCH_E2E_PORT/FAKE_ENVOY_PORT/" +
-        "FAKE_GITHUB_PORT and to its own DATABASE_URL, since the server already listening still " +
-        "holds the database you named. To run against a harness you started yourself, set " +
+        `there, or ${remedy}. To run against a harness you started yourself, set ` +
         "DISPATCH_E2E_REUSE_SERVERS=1."
     );
   }
@@ -128,44 +140,32 @@ export default defineConfig({
   expect: { timeout: expectTimeout },
   use: {
     ...devices["Desktop Chrome"],
-    baseURL,
+    baseURL: baseUrl,
     headless: true,
     trace: "retain-on-failure",
   },
-  ...(startsOwnServers
-    ? {
-        webServer: [
-          {
-            command: `bun ${fakeEnvoy}`,
-            port: fakeEnvoyPort,
-            reuseExistingServer: reuseServers,
-          },
-          {
-            command: `bun ${fakeGithub}`,
-            port: fakeGithubPort,
-            reuseExistingServer: reuseServers,
-          },
-          {
-            command: `bash ${runServer}`,
-            port: dispatchPort,
-            reuseExistingServer: reuseServers,
-          },
-        ],
-      }
-    : {}),
+  // Runs once the web servers are up and before any row: it refuses a target that does not read
+  // this run's fake Envoy (e2e/preflight.ts).
+  globalSetup: fileURLToPath(new URL("./preflight.ts", import.meta.url)),
+  webServer: startedListeners.map(({ command, port }) => ({
+    command,
+    port,
+    reuseExistingServer: reuseServers,
+  })),
   projects: [
-    { name: "chromium", testIgnore: plainHttpSpec, use: { ...devices["Desktop Chrome"] } },
+    { name: "chromium", testIgnore: plainHttpSpecs, use: { ...devices["Desktop Chrome"] } },
     {
       name: "iphone",
-      testIgnore: plainHttpSpec,
+      testIgnore: plainHttpSpecs,
       use: { ...devices["iPhone 13"], browserName: "chromium" },
     },
-    // A caret beside a collaborator's cursor behaves per engine, and the issue picker's
-    // keyboard-step rule rests on each engine dispatching a closed select's `change` in the key's
-    // own task, so those two specs also run in WebKit.
+    // A caret beside a collaborator's cursor behaves per engine, the issue picker's keyboard-step
+    // rule rests on each engine dispatching a closed select's `change` in the key's own task, and
+    // deep links meet each engine's chunk cancellation and the margin hold's frame and scroll order.
+    // So those three specs also run in WebKit.
     {
       name: "webkit",
-      testMatch: /(collab-cursor|keyboard-agents-picker)\.e2e\.ts/,
+      testMatch: /(collab-cursor|deep-links|keyboard-agents-picker)\.e2e\.ts/,
       use: { ...devices["Desktop Safari"] },
     },
     // The live view's phone layout (its keyboard cap, gutter and scroll locks) also runs in WebKit,
@@ -178,19 +178,19 @@ export default defineConfig({
     },
     // Firefox's native editing mishandles text typed over what follows a block's last line break,
     // and the issue picker's keyboard-step rule rests on the engine's select dispatch, so those two
-    // specs also run in Firefox.
+    // specs also run in Firefox, and the whole deep-links spec for the reason given above.
     {
       name: "firefox",
-      testMatch: /(code-line-replace|keyboard-agents-picker)\.e2e\.ts/,
+      testMatch: /(code-line-replace|deep-links|keyboard-agents-picker)\.e2e\.ts/,
       use: { ...devices["Desktop Firefox"] },
     },
     {
       name: "chromium-plain-http",
-      testMatch: plainHttpSpec,
+      testMatch: plainHttpSpecs,
       use: {
         ...devices["Desktop Chrome"],
-        baseURL: plainHttpOrigin.origin,
-        launchOptions: { args: [`--host-resolver-rules=MAP ${plainHttpHost} ${harness.hostname}`] },
+        baseURL: plainHttpOrigin,
+        launchOptions: { args: [`--host-resolver-rules=MAP ${plainHttpHost} 127.0.0.1`] },
       },
     },
   ],

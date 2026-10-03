@@ -120,7 +120,7 @@ return undefined;                                 // neither `command` nor `env`
   imitates" from "the plugin's tool dropped the field". Two permanent debug lines make this measurable forever: an
   instance id on `extension instance loaded`, and one `legion tool_call hook` line per invocation (one small
   secret-free line per tool call).
-- **Run against the production plugin tree.** Sami's ruling after 1.17.1 (2026-09-13, AGENTC-79): pre-merge proof runs
+- **Run against the production plugin tree.** Sami's ruling after 1.17.1 (2026-09-13): pre-merge proof runs
   on a rig that loads the real `legion` profile's plugins, `secretsd` included (`RIG_PLUGINS=production` in the
   grant rig), never the extension alone. That is how #974 shipped broken.
 - **Run both legs.** A headless `omp --mode rpc` worker and an interactive `omp` under a private tmux server. The

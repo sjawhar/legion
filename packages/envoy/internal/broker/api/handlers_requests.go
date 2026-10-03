@@ -17,7 +17,11 @@ import (
 // unsigned session_id (wake-only). The v8 "secrets"/"reason"/"issue" top-level fields are gone —
 // they now live inside the signed request object itself.
 type createRequestBody struct {
-	Request   string  `json:"request"`
+	// The session's signed request: a compact ES256 JWS, signed with the session's key and
+	// addressed to the broker's public URL, naming the secrets (authorization_details) and the
+	// reason.
+	Request string `json:"request"`
+	// Optional: the Envoy session the broker notifies if this request expires undecided.
 	SessionID *string `json:"session_id"`
 }
 
@@ -27,12 +31,18 @@ type createRequestBody struct {
 // below builds this dedicated response rather than marshaling the Request it gets back from
 // Machine.Create directly.
 type createRequestResponse struct {
-	RequestID string                    `json:"request_id"`
-	State     string                    `json:"state"`
-	Secrets   []requests.SecretDecision `json:"secrets"`
-	GrantID   *string                   `json:"grant_id"`
-	RecordID  *string                   `json:"record_id"`
-	Coalesced bool                      `json:"coalesced,omitempty"`
+	// The request's id, which GET /v1/requests/{id} and its cancel route take.
+	RequestID string `json:"request_id"`
+	// "granted", "pending" (a person must decide it) or "denied".
+	State string `json:"state"`
+	// How the rules decided each name asked for.
+	Secrets []requests.SecretDecision `json:"secrets"`
+	// Once granted, the grant to read the values from; null otherwise.
+	GrantID *string `json:"grant_id"`
+	// The credential-request record the approver decides; null when nobody needs to.
+	RecordID *string `json:"record_id"`
+	// True when the request joined an identical one this session already had pending.
+	Coalesced bool `json:"coalesced,omitempty"`
 }
 
 // createRequest requests secrets for the proof-verified caller, never for an enrollment named in
@@ -56,8 +66,8 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 		return
 	case errors.Is(err, pgx.ErrNoRows):
 		// The proof was verified moments ago against a live enrollment, but it was revoked (or
-		// its lease lapsed) before this Create's own read of it — the same race enroll.Renew
-		// guards against. The caller's proof is no longer good for anything.
+		// its lease lapsed) before Create read it or locked it to write — the same race
+		// enroll.Renew guards against. The caller's proof is no longer good for anything.
 		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "enrollment is not live")
 		return
 	case err != nil:
@@ -77,16 +87,37 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 // requestDecision is GET /v1/requests/{id}'s nested "decision" object: who decided the request
 // and when.
 type requestDecision struct {
-	By string    `json:"by"`
+	// Who decided it: the approver's login, "session:<enrollment id>" (the session cancelled it),
+	// "launcher:<credential id>" (its launcher ended the session) or "broker" (the session's lease
+	// lapsed).
+	By string `json:"by"`
+	// When it was decided.
 	At time.Time `json:"at"`
 }
 
+// requestStatusResponse is GET /v1/requests/{id}'s answer.
 type requestStatusResponse struct {
-	State     string           `json:"state"`
-	GrantID   *string          `json:"grant_id"`
-	RecordID  *string          `json:"record_id"`
-	DecidedAt *time.Time       `json:"decided_at"`
-	Decision  *requestDecision `json:"decision"`
+	// "pending", "granted", "denied", "expired" or "cancelled".
+	State string `json:"state"`
+	// Once granted, the grant to read the values from; null otherwise.
+	GrantID *string `json:"grant_id"`
+	// The credential-request record the approver decides; null when nobody needs to.
+	RecordID *string `json:"record_id"`
+	// When it left "pending"; null while pending.
+	DecidedAt *time.Time `json:"decided_at"`
+	// Who decided it and when; null while pending, when the rules decided it at once, and when it
+	// expired.
+	Decision *requestDecision `json:"decision"`
+}
+
+// grantValuesResponse is POST /v1/grants/{id}/values's answer.
+type grantValuesResponse struct {
+	// When the grant expires; the session can read the values again until then.
+	ExpiresAt time.Time `json:"expires_at"`
+	// The granted names the broker releases no value for (delivery: proxy).
+	ProxyOnly []string `json:"proxy_only"`
+	// Each granted name's value, read fresh from the secret store.
+	Values map[string]string `json:"values"`
 }
 
 func (s *server) readRequest(w http.ResponseWriter, r *http.Request, enrollmentID string) {
@@ -141,7 +172,7 @@ func (s *server) cancelRequest(w http.ResponseWriter, r *http.Request, enrollmen
 		writeInternal(w, "cancel request", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"state": "cancelled"})
+	writeJSON(w, http.StatusOK, stateResponse{State: "cancelled"})
 }
 
 func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentID string) {
@@ -173,11 +204,7 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 	if proxyOnly == nil {
 		proxyOnly = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"values":     values,
-		"expires_at": expires,
-		"proxy_only": proxyOnly,
-	})
+	writeJSON(w, http.StatusOK, grantValuesResponse{ExpiresAt: expires, ProxyOnly: proxyOnly, Values: values})
 }
 
 // revokeGrant ends a grant for the session that holds it — session proof only, per the shared
@@ -200,5 +227,5 @@ func (s *server) revokeGrant(w http.ResponseWriter, r *http.Request, enrollmentI
 		writeInternal(w, "revoke grant", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"state": "revoked"})
+	writeJSON(w, http.StatusOK, stateResponse{State: "revoked"})
 }

@@ -7,6 +7,7 @@ import {
   deleteEditorText,
   documentEditor,
   expectMark,
+  markTexts,
   placeCaret,
   selectEditorText,
 } from "./editor";
@@ -184,8 +185,8 @@ test("refining the selection under an open composer leaves nothing of the first 
   browser,
 }) => {
   await withReaders(browser, "Refined selection", async ({ alicePage, bobPage }) => {
-    // The second bar Comment cuts into the first composer's mark, and the margin removes the rest
-    // of it.
+    // The second bar Comment sits inside the first composer's mark, and the margin removes the
+    // first mark.
     await selectEditorText(alicePage, "quick brown");
     await barAction(alicePage, "Comment");
     await expect(composer(alicePage)).toContainText("quick brown");
@@ -261,15 +262,15 @@ test("Suggest on a mid-word selection is refused, and the comment stays", async 
   });
 });
 
-test("Comment over text another reader's comment covers is refused, and that comment stays whole", async ({
+test("Comment over text another reader's comment covers goes through, and that comment stays whole", async ({
   browser,
 }) => {
   await withReaders(
     browser,
     "Overlapping comment",
     async ({ alicePage, bobPage, issueKey, artifactId }) => {
-      // Bob's recorded comment covers "quick brown"; a comment of Alice's over "brown" would cut
-      // "brown" out of it.
+      // Bob's recorded comment covers "quick brown"; Alice's comment over "brown" sits inside it
+      // rather than cutting "brown" out of it (LEGION-458).
       const bobsComment = await createComment(
         issueKey,
         { anchor: { artifact: "spec", quote: "quick brown" }, body: "whole phrase" },
@@ -278,23 +279,60 @@ test("Comment over text another reader's comment covers is refused, and that com
       if (bobsComment.anchor === null) {
         throw new Error("Bob's comment has no anchor.");
       }
-      await expectMark(alicePage, bobsComment.anchor.mark_id, "quick brown");
+      const bobMark = bobsComment.anchor.mark_id;
+      await expectMark(alicePage, bobMark, "quick brown");
       await selectEditorText(alicePage, "brown");
       await barAction(alicePage, "Ask");
       await expect(composer(alicePage)).toContainText("brown");
       await kindButton(alicePage, "Comment").click();
-      await expect(composer(alicePage).getByRole("status")).toHaveText(
-        "Someone else's comment already covers part of this text. Close this composer and select text outside it."
-      );
-      await expect(kindButton(alicePage, "Ask")).toHaveAttribute("aria-pressed", "true");
-      await expectMark(alicePage, bobsComment.anchor.mark_id, "quick brown");
-      await expectMark(bobPage, bobsComment.anchor.mark_id, "quick brown");
-      await alicePage.keyboard.press("Escape");
+      await expect(kindButton(alicePage, "Comment")).toHaveAttribute("aria-pressed", "true");
+      await expect(composer(alicePage).getByRole("status")).toHaveCount(0);
       await expect(askMarks(alicePage)).toHaveCount(0);
-      await expectMark(alicePage, bobsComment.anchor.mark_id, "quick brown");
+      let aliceCommentTexts: Record<string, string> = {};
       await expect
-        .poll(() => listComments(issueKey, artifactId).then((items) => items[0]?.anchor?.quote))
-        .toBe("quick brown");
+        .poll(async () => {
+          aliceCommentTexts = await markTexts(commentMarks(alicePage));
+          return Object.keys(aliceCommentTexts).length;
+        })
+        .toBe(2);
+      const aliceMark = Object.keys(aliceCommentTexts).find((id) => id !== bobMark);
+      if (aliceMark === undefined) {
+        throw new Error("Alice's comment mark is not in her editor.");
+      }
+      await Promise.all(
+        [alicePage, bobPage].map((page) =>
+          expect
+            .poll(() => markTexts(commentMarks(page)))
+            .toEqual({ [bobMark]: "quick brown", [aliceMark]: "brown" })
+        )
+      );
+
+      // Sent, the server verifies Alice's comment on "brown" and still reads Bob's "quick brown".
+      await composer(alicePage).getByLabel("Comment").fill("just brown");
+      await composer(alicePage).getByRole("button", { exact: true, name: "Send" }).click();
+      await expect
+        .poll(() =>
+          listComments(issueKey, artifactId).then((items) =>
+            items
+              .map((item) => ({
+                body: item.body,
+                mark: item.anchor?.mark_id,
+                quote: item.anchor?.quote,
+              }))
+              .sort((a, b) => a.body.localeCompare(b.body))
+          )
+        )
+        .toEqual([
+          { body: "just brown", mark: aliceMark, quote: "brown" },
+          { body: "whole phrase", mark: bobMark, quote: "quick brown" },
+        ]);
+      await Promise.all(
+        [alicePage, bobPage].map((page) =>
+          expect
+            .poll(() => markTexts(commentMarks(page)))
+            .toEqual({ [bobMark]: "quick brown", [aliceMark]: "brown" })
+        )
+      );
     }
   );
 });

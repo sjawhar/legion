@@ -22,6 +22,16 @@ type ConnectOption func(*connectOpts)
 type connectOpts struct {
 	replicas                    int
 	publishAcknowledgementClock AcknowledgementClock
+	environment                 func(string) (string, bool)
+}
+
+// parseConnectOptions applies options over the defaults every connect starts from.
+func parseConnectOptions(options []ConnectOption) connectOpts {
+	opts := connectOpts{replicas: 1, publishAcknowledgementClock: wallClock{}, environment: os.LookupEnv}
+	for _, o := range options {
+		o(&opts)
+	}
+	return opts
 }
 
 // AcknowledgementClock supplies deadline contexts for JetStream publish acknowledgements.
@@ -43,6 +53,14 @@ func WithPublishAcknowledgementClock(clock AcknowledgementClock) ConnectOption {
 // WithReplicas overrides the replica count of the stream ConnectOwningStream ensures (default 1).
 func WithReplicas(n int) ConnectOption {
 	return func(o *connectOpts) { o.replicas = n }
+}
+
+// WithEnvironment names where a connect reads ENVOY_ALLOW_REMOTE_NATS (AllowRemoteEnvVar),
+// NATS_NKEY_SEED_FILE and NATS_NKEY_SEED, in place of the process environment (os.LookupEnv):
+// envoy-dispatch hands it the lookup over its settings table, which lists all three. Dial takes
+// the same lookup as its environment parameter.
+func WithEnvironment(lookup func(string) (string, bool)) ConnectOption {
+	return func(o *connectOpts) { o.environment = lookup }
 }
 
 type subscriptionTransport uint8
@@ -250,19 +268,20 @@ func connectWithContext(ctx context.Context, name string, urls []string, credent
 }
 
 // Dial opens a tuned core NATS connection using envoy's standard options (5s connect timeout,
-// infinite reconnect every second, retry-loop for the initial 10 attempts), as the NATS user the
+// infinite reconnect every second, retry-loop for the initial 10 attempts), as the NATS user
 // environment names (nkeyCredential). A caller that needs core pub/sub on a connection of its own
 // uses it: nats.go re-subscribes core subscriptions on reconnect by itself, so it needs none of
 // Client's recovery, and it touches no stream. It refuses a NATS server that is not this machine's
-// on the same terms as Connect.
+// on the same terms as Connect, reading ENVOY_ALLOW_REMOTE_NATS from environment too, which
+// answers as os.LookupEnv does (WithEnvironment).
 //
 // For JetStream-backed publishing or a durable consumer, use Connect; to reconcile the stream
 // this codebase owns, ConnectOwningStream.
-func Dial(name string, urls []string) (*nats.Conn, error) {
-	if err := refuseRemoteNATS(urls); err != nil {
+func Dial(name string, urls []string, environment func(string) (string, bool)) (*nats.Conn, error) {
+	if err := refuseRemoteNATS(urls, environment); err != nil {
 		return nil, err
 	}
-	credential, err := nkeyCredential(os.LookupEnv)
+	credential, err := nkeyCredential(environment)
 	if err != nil {
 		return nil, err
 	}
@@ -281,10 +300,7 @@ func Dial(name string, urls []string) (*nats.Conn, error) {
 //
 // For the JetStream stream this codebase owns, use ConnectOwningStream.
 func Connect(urls []string, options ...ConnectOption) (*Client, error) {
-	if err := refuseRemoteNATS(urls); err != nil {
-		return nil, err
-	}
-	return newClient(urls, false, options)
+	return newClient(urls, false, parseConnectOptions(options))
 }
 
 // ConnectOwningStream opens a client that also reconciles ENVOY_NOTIFICATIONS against this
@@ -292,18 +308,14 @@ func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 // when the server has none. Only the deployed services call it: envoy-listener and
 // envoy-dispatch's server.
 func ConnectOwningStream(urls []string, options ...ConnectOption) (*Client, error) {
-	if err := refuseRemoteNATS(urls); err != nil {
-		return nil, err
-	}
-	return newClient(urls, true, options)
+	return newClient(urls, true, parseConnectOptions(options))
 }
 
-func newClient(urls []string, ownsStream bool, options []ConnectOption) (*Client, error) {
-	opts := connectOpts{replicas: 1, publishAcknowledgementClock: wallClock{}}
-	for _, o := range options {
-		o(&opts)
+func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error) {
+	if err := refuseRemoteNATS(urls, opts.environment); err != nil {
+		return nil, err
 	}
-	credential, err := nkeyCredential(os.LookupEnv)
+	credential, err := nkeyCredential(opts.environment)
 	if err != nil {
 		return nil, err
 	}
@@ -648,8 +660,8 @@ func usesCoreTransport(topic string) bool {
 }
 
 // ErrRefused is returned for an envelope that is refused the same way however often it is
-// published, so a caller answers it as a refusal rather than a failure to retry. It is ErrTooLarge
-// or ErrInvalidSubject.
+// published, or a KV key refused however often a call names it, so a caller answers it as a
+// refusal rather than a failure to retry. It is ErrTooLarge, ErrInvalidSubject or ErrInvalidKey.
 var ErrRefused = errors.New("refused")
 
 // refusal is a kind of ErrRefused. Its text names only the kind, since every line and answer that
@@ -672,6 +684,12 @@ var ErrTooLarge error = refusal("too large to publish whole")
 // answer that never comes and a core publish is dropped. Its error names the subject, or the KV key
 // that would have made it.
 var ErrInvalidSubject error = refusal("not a subject NATS accepts")
+
+// ErrInvalidKey is the ErrRefused of a KV key outside nats.go's key alphabet (`ses:bad`), which
+// nats.go refuses on every read, write, delete and watch before sending anything, wherever the key
+// came from: no build writes one, but a direct bucket write can store one, and a stored claim can
+// name one as its holder. Its error names the key, and still matches nats.ErrInvalidKey.
+var ErrInvalidKey error = refusal("not a key nats.go accepts")
 
 // maxSubjectBytes bounds a subject the bus publishes on, or a KV call builds from a key. The server
 // closes a connection whose protocol line runs past its max control line (4 KiB by default) and

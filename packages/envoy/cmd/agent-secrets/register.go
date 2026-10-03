@@ -9,7 +9,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -26,8 +25,7 @@ import (
 const helperConnectPatience = 10 * time.Second
 
 func cmdRegister(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("agent-secrets register", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newFlagSet("register", stderr)
 	wait := flags.Int("wait", 0, "wait up to this many seconds for the helper to enroll the session (0 returns at once, as does a helper holding no launcher credential)")
 	doExec := flags.Bool("exec", false, "after registering, exec the command that follows as this same process")
 	if err := flags.Parse(args); err != nil {
@@ -43,9 +41,12 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 
-	sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK")
-	if sock == "" {
-		fmt.Fprintln(stderr, "agent-secrets register: AGENT_SECRETS_HELPER_SOCK is unset (host sessions only; an agent box has a key dir instead)")
+	// The helper's socket as every other helper-mode form finds it (identity.go): the variable when
+	// set, else the default socket when it is there. An agent box has neither: its key dir sits
+	// where the default socket's directory would be, and no helper listens in it.
+	sock, named := helperSocket()
+	if !named && !exists(sock) {
+		fmt.Fprintf(stderr, "agent-secrets register: AGENT_SECRETS_HELPER_SOCK is unset and no helper socket is at %s (host sessions only; an agent box has a key dir instead)\n", sock)
 		return exitUsageError
 	}
 
@@ -65,24 +66,24 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	// --exec never blocks a launch on the broker, but never launches silently either: the agent
 	// starts with no secrets access (helper unreachable), with broker calls that fail NOT_ENROLLED
 	// until the helper's enroll loop succeeds, or, while the helper holds no launcher credential,
-	// with no broker identity at all: its agent-secrets calls fail NO_CREDENTIAL and secret-run
-	// (dotfiles), which asks identity, uses secretsd until the machine is logged in.
+	// with no broker identity at all: its agent-secrets calls fail NO_CREDENTIAL, and identity
+	// exits 1, until the machine is logged in.
 	switch {
 	case err != nil:
 		fmt.Fprintf(stderr, "agent-secrets: helper at %s unreachable (%v); this session has no secrets access until it is relaunched with the helper running\n", sock, err)
 	case *wait > 0 && resp.State != "enrolled" && resp.Code == helper.CodeNoCredential:
-		fmt.Fprintln(stderr, "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets launcher login) this session's agent-secrets calls fail and secret-run uses secretsd")
+		fmt.Fprintln(stderr, "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets launcher login) this session's agent-secrets calls fail")
 	case *wait > 0 && resp.State != "enrolled":
 		fmt.Fprintf(stderr, "agent-secrets register: not enrolled yet (%s); launching anyway, and this session's secrets calls fail until the helper enrolls it\n", resp.Error)
 	}
 	path, err := exec.LookPath(command[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets register: %v\n", err)
-		return 127
+		return exitNotFound
 	}
 	if err := syscall.Exec(path, command, os.Environ()); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets register: exec: %v\n", err)
-		return 126
+		return exitCannotRun
 	}
 	return 0 // unreachable: syscall.Exec replaces this process image on success
 }

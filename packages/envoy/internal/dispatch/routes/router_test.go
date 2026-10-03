@@ -135,18 +135,18 @@ func oauthStart(t *testing.T, handler http.Handler) (string, *http.Cookie) {
 
 func TestOAuthStateCookieMatchesCookieMode(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		env    string
-		secure bool
+		name     string
+		insecure bool
+		secure   bool
 	}{
 		{name: "TLS default", secure: true},
-		{name: "HTTP development mode", env: "1", secure: false},
+		{name: "HTTP development mode", insecure: true, secure: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("DISPATCH_INSECURE_COOKIE", tc.env)
 			users := &memoryUserStore{users: map[string]*auth.User{}}
 			handler, ctx := newTestRouter(t, users, map[string]struct{}{"sjawhar": {}})
 			ctx.HTTPClient = callbackHTTPClient{login: "sjawhar"}
+			ctx.InsecureCookie = tc.insecure
 
 			state, nonce := oauthStart(t, handler)
 			if nonce.Secure != tc.secure {
@@ -159,6 +159,16 @@ func TestOAuthStateCookieMatchesCookieMode(t *testing.T) {
 			handler.ServeHTTP(response, callback)
 			if response.Code != http.StatusFound {
 				t.Fatalf("OAuth callback status = %d body=%s, want %d", response.Code, response.Body.String(), http.StatusFound)
+			}
+			issued := false
+			for _, cookie := range response.Result().Cookies() {
+				issued = issued || cookie.Name == "dsession"
+				if cookie.Secure != tc.secure {
+					t.Errorf("callback cookie %s Secure = %t, want %t", cookie.Name, cookie.Secure, tc.secure)
+				}
+			}
+			if !issued {
+				t.Errorf("callback set no dsession cookie: %v", response.Result().Cookies())
 			}
 		})
 	}
@@ -289,7 +299,7 @@ func TestCookieIdentityRechecksAllowedLogins(t *testing.T) {
 	}
 	handler := New(ctx)
 	request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key"))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key", true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}
@@ -359,18 +369,6 @@ func TestAuthStartEvictsExpiredPendingStates(t *testing.T) {
 	}
 }
 
-func TestBuildAppContextRejectsMalformedRepoProjectMapping(t *testing.T) {
-	_, err := BuildAppContext(AppContextOptions{
-		SigningKey:   "signing-key",
-		Users:        &memoryUserStore{users: map[string]*auth.User{}},
-		Identity:     identity.HeaderIdentity{Header: "X-Dispatch-User"},
-		RepoProjects: "not-a-repo-project-mapping",
-	})
-	if err == nil || !strings.Contains(err.Error(), "DISPATCH_REPO_PROJECTS") {
-		t.Fatalf("error: got %v, want malformed DISPATCH_REPO_PROJECTS rejection", err)
-	}
-}
-
 func TestStaticHandlerServesSpaShellForUnknownRoute(t *testing.T) {
 	webDist := t.TempDir()
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
@@ -409,6 +407,70 @@ func TestStaticHandlerServesIndexAtRoot(t *testing.T) {
 	}
 	if response.Body.String() != "<!doctype html>" {
 		t.Fatalf("root body: got %q, want dashboard shell", response.Body.String())
+	}
+}
+
+func TestStaticHandlerServesDistDirectorySpelledThroughDotDot(t *testing.T) {
+	parent := t.TempDir()
+	webDist := filepath.Join(parent, "web", "dist")
+	for _, dir := range []string{webDist, filepath.Join(parent, "web", "build")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("make %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	// The directory as an operator can spell it from a sibling package, never cleaned:
+	// DISPATCH_WEB_DIST="$PWD/../dispatch/web/dist" run from packages/envoy.
+	sep := string(filepath.Separator)
+	context.WebDistDir = filepath.Join(parent, "web", "build") + sep + ".." + sep + "dist"
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusOK || response.Body.String() != "<!doctype html>" {
+		t.Fatalf("root through %q: got %d %q, want 200 and the dashboard shell", context.WebDistDir, response.Code, response.Body.String())
+	}
+}
+
+// The static handler is called directly, not through the router's mux: the mux redirects a path
+// holding `..` before any handler runs, so only the handler's own rooted clean of the request path
+// is under test here. A request whose `..` would climb out of the dist directory answers exactly as
+// a file missing inside it does, so a file outside it is neither served nor told apart from one
+// that is not there.
+func TestStaticHandlerKeepsRequestsInsideTheDistDirectory(t *testing.T) {
+	parent := t.TempDir()
+	webDist := filepath.Join(parent, "dist")
+	if err := os.MkdirAll(webDist, 0o700); err != nil {
+		t.Fatalf("make %s: %v", webDist, err)
+	}
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "secret.txt"), []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	_, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+	static := &router{ctx: context}
+	serve := func(path string) *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		static.staticHandler(response, httptest.NewRequest(http.MethodGet, path, nil))
+		return response
+	}
+
+	missing := serve("/absent.txt")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("a file missing from the dist directory: got %d %q, want 404", missing.Code, missing.Body.String())
+	}
+	for _, path := range []string{"/../secret.txt", "/%2e%2e/secret.txt", "/../absent.txt"} {
+		t.Run(path, func(t *testing.T) {
+			response := serve(path)
+			if response.Code != missing.Code || response.Body.String() != missing.Body.String() {
+				t.Fatalf("%s: got %d %q, want the dist directory's own missing-file answer %d %q", path, response.Code, response.Body.String(), missing.Code, missing.Body.String())
+			}
+		})
 	}
 }
 
@@ -741,7 +803,7 @@ func TestLogoutRevokesCopiedSessionCookie(t *testing.T) {
 		t.Fatalf("build context: %v", err)
 	}
 	handler := New(ctx)
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key"))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key", true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}
@@ -785,7 +847,7 @@ func TestCookieAuthenticatedUnsafeRequestsRequireSameOrigin(t *testing.T) {
 		if err != nil {
 			t.Fatalf("build context: %v", err)
 		}
-		cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key"))
+		cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("sjawhar", 0, "signing-key", true))
 		if err != nil {
 			t.Fatalf("parse session cookie: %v", err)
 		}

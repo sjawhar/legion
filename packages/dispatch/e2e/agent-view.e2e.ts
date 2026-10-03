@@ -288,7 +288,8 @@ async function lowerKeyboard(page: Page): Promise<void> {
 }
 
 test.beforeEach(async () => {
-  await Promise.all([resetDatabase(), setLiveSessions([planner])]);
+  await resetDatabase();
+  await setLiveSessions([planner]);
 });
 
 test("the conversation view replays what the session held, streams its next turn, and sends as Send, the terminal's Enter, through the existing delivery", async ({

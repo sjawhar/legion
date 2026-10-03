@@ -1,0 +1,1047 @@
+package intake
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	legionstore "github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
+)
+
+type handlerFunc func(context.Context, pgx.Tx, Fact) (Result, error)
+
+func (f handlerFunc) Apply(ctx context.Context, tx pgx.Tx, fact Fact) (Result, error) {
+	return f(ctx, tx, fact)
+}
+
+func TestApplyFactCommitsRefusalAndLaterHandlers(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	ctx := context.Background()
+	refusal := &Refusal{Status: 409, Code: "DESIGN_GATE_CLOSED", Message: "approve version 3"}
+
+	result, err := ApplyFact(ctx, pool, "dispatch", "event-refusal", DispatchIssue{Key: "LEGION-208"},
+		writeHandler("first", refusal),
+		writeHandler("later", nil),
+	)
+	if err != nil {
+		t.Fatalf("ApplyFact: %v", err)
+	}
+	if !reflect.DeepEqual(result.Refusal, refusal) {
+		t.Fatalf("refusal = %#v, want %#v", result.Refusal, refusal)
+	}
+	if got := writeCount(t, pool); got != 2 {
+		t.Fatalf("committed writes = %d, want 2", got)
+	}
+	if got, want := writeHandlers(t, pool), []string{"first", "later"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("handler order = %#v, want %#v", got, want)
+	}
+}
+
+func TestApplyFactDeduplicatesBeforeHandlers(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	ctx := context.Background()
+
+	if _, err := ApplyFact(ctx, pool, "dispatch", "event-duplicate", DispatchIssue{Key: "LEGION-208"}, writeHandler("first", nil)); err != nil {
+		t.Fatalf("first ApplyFact: %v", err)
+	}
+	result, err := ApplyFact(ctx, pool, "dispatch", "event-duplicate", DispatchIssue{Key: "LEGION-208"}, handlerFunc(func(context.Context, pgx.Tx, Fact) (Result, error) {
+		return Result{}, errors.New("duplicate reached a handler")
+	}))
+	if err != nil {
+		t.Fatalf("duplicate ApplyFact: %v", err)
+	}
+	if result.Duplicate != true || result.Refusal != nil {
+		t.Fatalf("duplicate result = %#v, want a duplicate with no refusal", result)
+	}
+	if got := writeCount(t, pool); got != 1 {
+		t.Fatalf("writes after duplicate = %d, want 1", got)
+	}
+}
+
+func TestApplyFactRollsBackHandlerAndDeduplicationOnError(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	ctx := context.Background()
+
+	_, err := ApplyFact(ctx, pool, "dispatch", "event-rollback", DispatchIssue{Key: "LEGION-208"},
+		writeHandler("rolled-back", nil),
+		handlerFunc(func(context.Context, pgx.Tx, Fact) (Result, error) { return Result{}, errors.New("handler failed") }),
+	)
+	if err == nil || !strings.Contains(err.Error(), "handler failed") {
+		t.Fatalf("ApplyFact error = %v, want handler error", err)
+	}
+	if got := writeCount(t, pool); got != 0 {
+		t.Fatalf("writes after rollback = %d, want 0", got)
+	}
+
+	if _, err := ApplyFact(ctx, pool, "dispatch", "event-rollback", DispatchIssue{Key: "LEGION-208"}, writeHandler("retry", nil)); err != nil {
+		t.Fatalf("retry ApplyFact: %v", err)
+	}
+	if got := writeCount(t, pool); got != 1 {
+		t.Fatalf("writes after retry = %d, want 1", got)
+	}
+}
+
+// A handler's OnCommit hook runs once ApplyFact's transaction has committed, in the order handlers
+// registered them, and sees what the fact wrote; a fact whose later handler fails rolls back and
+// runs none. A duplicate runs no handler, so it registers none.
+func TestOnCommitRunsOnlyAfterTheFactCommits(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	ctx := context.Background()
+	var ran []string
+	hooked := func(name string) Handler {
+		return handlerFunc(func(ctx context.Context, tx pgx.Tx, fact Fact) (Result, error) {
+			if _, err := writeHandler(name, nil).Apply(ctx, tx, fact); err != nil {
+				return Result{}, err
+			}
+			OnCommit(ctx, func() { ran = append(ran, fmt.Sprintf("%s saw %d", name, writeCount(t, pool))) })
+			return Result{}, nil
+		})
+	}
+
+	if _, err := ApplyFact(ctx, pool, "dispatch", "event-hooks-rolled-back", DispatchIssue{Key: "LEGION-208"},
+		hooked("first"),
+		handlerFunc(func(context.Context, pgx.Tx, Fact) (Result, error) { return Result{}, errors.New("handler failed") }),
+	); err == nil {
+		t.Fatal("ApplyFact with a failing handler succeeded")
+	}
+	if len(ran) != 0 {
+		t.Fatalf("hooks %v ran for a fact that rolled back", ran)
+	}
+
+	for range 2 {
+		if _, err := ApplyFact(ctx, pool, "dispatch", "event-hooks", DispatchIssue{Key: "LEGION-208"}, hooked("first"), hooked("second")); err != nil {
+			t.Fatalf("ApplyFact: %v", err)
+		}
+	}
+	if fmt.Sprint(ran) != "[first saw 2 second saw 2]" {
+		t.Fatalf("hooks ran %v; want both once, in order, each seeing both committed writes", ran)
+	}
+}
+
+func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
+	updatedAt := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		subject string
+		file    string
+		want    Fact
+	}{
+		{
+			name:    "Dispatch issue created",
+			subject: "notifications.dispatch.issue.CAPTURE-4.issue.created",
+			file:    "dispatch/issue-created.json",
+			want:    DispatchIssue{Key: "CAPTURE-4", Seq: 1, Type: "issue.created", Status: "triage", Title: "Captured approval issue", Rank: "UUUU"},
+		},
+		{
+			name:    "Dispatch issue updated",
+			subject: "notifications.dispatch.issue.CAPTURE-3.issue.updated",
+			file:    "dispatch/issue-updated.json",
+			want:    DispatchIssue{Key: "CAPTURE-3", Seq: 2, Type: "issue.updated", Status: "todo", Title: "Captured workflow issue", Rank: "UUU"},
+		},
+		{
+			name:    "Dispatch issue closed",
+			subject: "notifications.dispatch.issue.CAPTURE-4.issue.closed",
+			file:    "dispatch/issue-closed.json",
+			want:    DispatchIssue{Key: "CAPTURE-4", Seq: 6, Type: "issue.closed", Status: "done", Title: "Captured approval issue", Rank: "UUUU"},
+		},
+		{
+			name:    "Dispatch artifact version",
+			subject: "notifications.dispatch.issue.CAPTURE-4.artifact.version",
+			file:    "dispatch/artifact-version.json",
+			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactVersion, Version: 2},
+		},
+		{
+			name:    "Dispatch artifact approved",
+			subject: "notifications.dispatch.issue.CAPTURE-4.artifact.approved",
+			file:    "dispatch/artifact-approved.json",
+			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactApproved, Version: 2},
+		},
+		{
+			name:    "Dispatch artifact changes requested",
+			subject: "notifications.dispatch.issue.CAPTURE-3.artifact.changes_requested",
+			file:    "dispatch/artifact-changes-requested.json",
+			want:    DispatchArtifact{Key: "CAPTURE-3", ArtifactID: "e7860036-ca1a-4ec6-8bd0-51d5f1b6fbd8", Kind: DispatchArtifactChangesRequested, Version: 2, Reason: "Captured reviewer reason"},
+		},
+		{
+			name:    "pull request opened",
+			subject: "notifications.github.sjawhar.legion.pr.42",
+			file:    "github/pr-opened.json",
+			want:    PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Body: "Dispatch: LEGION-208", URL: "https://github.com/sjawhar/legion/pull/42", UpdatedAt: updatedAt},
+		},
+		{
+			name:    "pull request synchronized",
+			subject: "notifications.github.sjawhar.legion.pr.42",
+			file:    "github/pr-synchronized.json",
+			want:    PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Body: "Dispatch: LEGION-208", UpdatedAt: updatedAt},
+		},
+		{
+			name:    "pull request closed",
+			subject: "notifications.github.sjawhar.legion.pr.42",
+			file:    "github/pr-closed.json",
+			want:    PullRequestClosed{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head-captured", UpdatedAt: updatedAt},
+		},
+		{
+			name:    "pull request merged",
+			subject: "notifications.github.sjawhar.legion.pr.42",
+			file:    "github/pr-merged.json",
+			want:    PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge-captured"},
+		},
+		{
+			name:    "pull request review",
+			subject: "notifications.github.sjawhar.legion.pr.42.review",
+			file:    "github/review.json",
+			want:    PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head-captured", HeadSHA: "head-captured", Author: "reviewer", Body: "Captured review"},
+		},
+		{
+			name:    "checks settlement",
+			subject: "notifications.github.sjawhar.legion.pr.42.checks",
+			file:    "github/checks.json",
+			want:    PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "abcdef1234567890abcdef1234567890abcdef12", CheckRuns: []CheckRun{{Name: "unit", ID: 73}}, Snapshot: "ed3e3bafc46f498bca65fe879fcd1765a90fecbb1fcd62579e46a94707c0bacd", Verdict: "red", Failing: []string{"unit"}},
+		},
+		{
+			name:    "branch push",
+			subject: "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208",
+			file:    "github/push.json",
+			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "before-captured", After: "head-captured", ChangedPaths: new(".legion/plan.json\nsource.go"), Truncated: new("false"), Pusher: "author"},
+		},
+		{
+			name:    "comment",
+			subject: "notifications.github.sjawhar.legion.pr.42.comment",
+			file:    "github/comment.json",
+			want:    nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := os.ReadFile("testdata/" + tc.file)
+			if err != nil {
+				t.Fatalf("read captured envelope: %v", err)
+			}
+			got, err := decodeMessage(tc.subject, "CAPTURE", capturedRepositories, data)
+			if err != nil {
+				t.Fatalf("decode captured envelope: %v", err)
+			}
+			if !reflect.DeepEqual(got.Fact, tc.want) {
+				t.Fatalf("fact = %#v, want %#v", got.Fact, tc.want)
+			}
+		})
+	}
+}
+
+func TestCapturedIssueUpdatedEnvelopeDecodes(t *testing.T) {
+	data := capturedIssueUpdatedEnvelope(t)
+	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, data); err != nil {
+		t.Fatalf("decode captured issue.updated envelope: %v", err)
+	}
+}
+
+// An issue event's labels say whether it is handed to Legion; decodeDispatchFact resolves that
+// once, into HandedOver, matching the label in any case among any others, never carrying the raw
+// list itself.
+func TestADispatchIssueEventResolvesHandedOverFromItsLabels(t *testing.T) {
+	data := strings.Replace(string(capturedIssueUpdatedEnvelope(t)), `\"labels\":[]`, `\"labels\":[\"frontend\",\"Legion\"]`, 1)
+	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(data))
+	if err != nil {
+		t.Fatalf("decode labeled issue.updated envelope: %v", err)
+	}
+	issue, ok := got.Fact.(DispatchIssue)
+	if !ok || !issue.HandedOver {
+		t.Fatalf("fact = %#v, want a Dispatch issue with HandedOver true (labels included Legion)", got.Fact)
+	}
+}
+
+// Envoy's goldens (packages/contracts/fixtures/github-envelopes, which its golden test writes from
+// its webhook fixtures) are the subjects its listener publishes. For each, the consumer configured
+// with the payload's repository filters on a prefix of the golden's topic and decodes the workflow
+// fact the golden carries: the two sides spell a repository's subject segments alike, a dotted name
+// included.
+func TestEnvoyGoldenSubjectsReachTheirRepositorysConsumer(t *testing.T) {
+	goldens, err := filepath.Glob(filepath.Join("..", "..", "..", "contracts", "fixtures", "github-envelopes", "*.json"))
+	if err != nil || len(goldens) == 0 {
+		t.Fatalf("Envoy golden envelopes: %v, %d found", err, len(goldens))
+	}
+	for _, path := range goldens {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var golden struct {
+				Topic          string         `json:"topic"`
+				PayloadSummary string         `json:"payload_summary"`
+				Payload        map[string]any `json:"payload"`
+			}
+			if err := json.Unmarshal(data, &golden); err != nil {
+				t.Fatalf("decode golden: %v", err)
+			}
+			repository := ghrepo.MustParse(golden.Payload["repo"].(string))
+			filter := githubFilters([]ghrepo.Repository{repository})[0]
+			if !strings.HasPrefix(golden.Topic, strings.TrimSuffix(filter, ">")) {
+				t.Fatalf("%s's consumer filters %s, which does not match Envoy's %s", repository, filter, golden.Topic)
+			}
+			payload, err := json.Marshal(golden.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			envelope, err := json.Marshal(map[string]any{
+				"event_id": "golden", "source": "github", "source_event_id": "golden", "topic": golden.Topic,
+				"dedupe_key": "golden", "issued_at": 1, "payload_summary": golden.PayloadSummary,
+				"payload": string(payload), "trace_id": "golden",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := decodeMessage(golden.Topic, "GOLDEN", []ghrepo.Repository{repository}, envelope)
+			if err != nil {
+				t.Fatalf("decode %s: %v", golden.Topic, err)
+			}
+			if kind := golden.Payload["kind"]; (kind == "pr" || kind == "review" || kind == "push") && decoded.Fact == nil {
+				t.Fatalf("%s's %s event decoded no fact", repository, kind)
+			}
+		})
+	}
+}
+
+// A checks settlement names its pull request in its subject, where a dotted repository name is one
+// segment, a dot as `_`: the settlement decodes for the repository its payload names.
+func TestDecodeChecksForADottedRepository(t *testing.T) {
+	data := capturedGitHubEnvelope(t, "checks.json")
+	data = bytes.ReplaceAll(data, []byte("sjawhar/legion"), []byte("sjawhar/legion.x"))
+	data = bytes.ReplaceAll(data, []byte("sjawhar.legion."), []byte("sjawhar.legion_x."))
+	decoded, err := decodeMessage("notifications.github.sjawhar.legion_x.pr.42.checks", "CAPTURE", []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion.x")}, data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if checks, ok := decoded.Fact.(PullRequestChecks); !ok || checks.Repo != "sjawhar/legion.x" || checks.Number != 42 {
+		t.Fatalf("fact = %#v, want sjawhar/legion.x#42's checks", decoded.Fact)
+	}
+}
+
+// The daemon reads nothing from a settlement's settled_at, so a settled_at that is not a millisecond
+// count still decodes the settlement the captured one does, rather than losing its CI verdict.
+func TestDecodeChecksIgnoresAMalformedSettledAt(t *testing.T) {
+	const subject = "notifications.github.sjawhar.legion.pr.42.checks"
+	captured := capturedGitHubEnvelope(t, "checks.json")
+	want, err := decodeMessage(subject, "CAPTURE", capturedRepositories, captured)
+	if err != nil || want.Fact == nil {
+		t.Fatalf("decode the captured settlement: fact %#v, err %v", want.Fact, err)
+	}
+	for _, settledAt := range []string{`\"yesterday\"`, `-5`} {
+		data := bytes.Replace(captured, []byte(`\"settled_at\":1790124840596`), []byte(`\"settled_at\":`+settledAt), 1)
+		if bytes.Equal(data, captured) {
+			t.Fatal("the captured settlement carries no settled_at to replace")
+		}
+		got, err := decodeMessage(subject, "CAPTURE", capturedRepositories, data)
+		if err != nil {
+			t.Fatalf("settled_at %s: decode: %v", settledAt, err)
+		}
+		if !reflect.DeepEqual(got.Fact, want.Fact) {
+			t.Fatalf("settled_at %s: fact = %#v, want %#v", settledAt, got.Fact, want.Fact)
+		}
+	}
+}
+
+func TestConsumeTermsPoisonMessagesOnce(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	logs := &lockedBuffer{}
+	spec := consumerSpec(logs)
+	stop := startConsume(t, js, spec, pool, writeHandler("applied", nil))
+	defer stop()
+
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-208.issue.updated", []byte(`{`))
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-208.issue.updated", envelopeJSON(t, "dispatch-poison", "dispatch", `{"id":1,"issue_key":"CAPTURE-208","seq":1,"notify":true,"type":"issue.updated","payload":{"key":"CAPTURE-999","status":"todo","title":"wrong key"}}`))
+	testwait.Eventually(t, "two poison logs", func() bool { return strings.Count(logs.String(), "poison JetStream message") == 2 })
+	time.Sleep(3 * spec.AckWait)
+	if got := strings.Count(logs.String(), "poison JetStream message"); got != 2 {
+		t.Fatalf("poison logs after ack wait = %d, want 2", got)
+	}
+	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+}
+
+// One NATS stream carries every Dispatch project's issue events. A daemon acts only on its own
+// project's: another project's event is acknowledged and never reaches a handler, as the shipped
+// daemon drops it (events.ts: a subject key outside the configured projects returns).
+func TestConsumeAcknowledgesAnotherProjectsDispatchEventWithoutApplyingIt(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	spec.Project = "LEGION"
+	stop := startConsume(t, js, spec, pool, writeHandler("foreign", nil))
+	defer stop()
+
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
+	testwait.Eventually(t, "the foreign event acknowledged", func() bool {
+		consumer, err := stream.Consumer(context.Background(), dispatchConsumerName(spec.Project))
+		if err != nil {
+			return false
+		}
+		info, err := consumer.Info(context.Background())
+		return err == nil && info.AckFloor.Consumer == 1 && info.NumAckPending == 0
+	})
+	if got := writeCount(t, pool); got != 0 {
+		t.Fatalf("handler writes for another project's event = %d, want 0", got)
+	}
+}
+
+// A subject inside a repository's filter does not prove the event is that repository's: a
+// repository whose name holds a dot (`sjawhar/legion.x`) publishes under more segments than an owner
+// and a name, which `sjawhar/legion`'s filter matches. The payload's repository decides, as the
+// shipped daemon's does (reducers.ts registerPrFenced: a pull request whose repository is not its
+// issue's is not registered), so another repository's pull request on a `legion/<KEY>` branch is
+// acknowledged and never reaches a handler.
+func TestConsumeAcknowledgesAnotherRepositorysGitHubEventWithoutApplyingIt(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	stop := startConsume(t, js, spec, pool, writeHandler("foreign", nil))
+	defer stop()
+
+	foreign := bytes.ReplaceAll(capturedGitHubEnvelope(t, "pr-opened.json"), []byte("sjawhar/legion"), []byte("sjawhar/legion.x"))
+	publish(t, js, "notifications.github.sjawhar.legion.x.pr.42", foreign)
+	testwait.Eventually(t, "the foreign pull request acknowledged", func() bool {
+		consumer, err := stream.Consumer(context.Background(), githubConsumerName(spec.Project))
+		if err != nil {
+			return false
+		}
+		info, err := consumer.Info(context.Background())
+		return err == nil && info.AckFloor.Consumer == 1 && info.NumAckPending == 0
+	})
+	if got := writeCount(t, pool); got != 0 {
+		t.Fatalf("handler writes for another repository's pull request = %d, want 0", got)
+	}
+}
+
+func TestConsumeDeduplicatesOneEventAcrossDeliveries(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	stop := startConsume(t, js, spec, pool, writeHandler("applied", nil))
+	defer stop()
+
+	message := capturedIssueUpdatedEnvelope(t)
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", message)
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", message)
+	testwait.Eventually(t, "one deduplicated write", func() bool { return writeCount(t, pool) == 1 })
+	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+}
+
+func TestConsumeNaksRollbackAndAppliesRedeliveryOnce(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	var calls atomic.Int32
+	handler := handlerFunc(func(ctx context.Context, tx pgx.Tx, fact Fact) (Result, error) {
+		if _, err := tx.Exec(ctx, `insert into intake_test_writes (handler) values ('retry')`); err != nil {
+			return Result{}, err
+		}
+		if calls.Add(1) == 1 {
+			return Result{}, errors.New("transient handler failure")
+		}
+		return Result{}, nil
+	})
+	stop := startConsume(t, js, spec, pool, handler)
+	defer stop()
+
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
+	testwait.Eventually(t, "redelivery committed once", func() bool { return calls.Load() >= 2 && writeCount(t, pool) == 1 })
+	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+}
+
+func TestConsumeRestartResumesAfterAcknowledgedMessage(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, _ := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	stop := startConsume(t, js, spec, pool, writeHandler("restart", nil))
+
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
+	testwait.Eventually(t, "first committed message", func() bool { return writeCount(t, pool) == 1 })
+	stop()
+
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-4.issue.created", capturedIssueCreatedEnvelope(t))
+	stop = startConsume(t, js, spec, pool, writeHandler("restart", nil))
+	defer stop()
+	testwait.Eventually(t, "durable consumer resumes after ack", func() bool { return writeCount(t, pool) == 2 })
+}
+
+// A daemon's first boot on a NATS server already holding history — production's stream keeps
+// 72 hours of ENVOY_NOTIFICATIONS — must not replay it into admission: its consumers, created now,
+// start at the next message. Boot reads its Dispatch listing after creating them, and the listing
+// covers the state before them.
+func TestAFreshConsumerStartsAtTheNextMessage(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
+	publish(t, js, "notifications.github.sjawhar.legion.pr.42", capturedGitHubEnvelope(t, "pr-opened.json"))
+
+	consumers, err := OpenConsumers(context.Background(), js, spec)
+	if err != nil {
+		t.Fatalf("OpenConsumers: %v", err)
+	}
+	for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+		if pending := consumerInfo(t, stream, name).NumPending; pending != 0 {
+			t.Errorf("%s was created with %d messages of history pending, want 0", name, pending)
+		}
+	}
+	stop := runConsumers(t, consumers, pool, writeHandler("fresh", nil))
+	defer stop()
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-4.issue.created", capturedIssueCreatedEnvelope(t))
+	testwait.Eventually(t, "the next message committed", func() bool { return writeCount(t, pool) >= 1 })
+	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+	if got := writeCount(t, pool); got != 1 {
+		t.Errorf("%d facts committed, want only the message published after the consumers were created", got)
+	}
+}
+
+// A consumer that already exists keeps its position, whatever policy created it: an earlier daemon's
+// consumer (created delivering all) still owes its unacknowledged backlog, and a boot that updates
+// it still applies the configuration that may change, the repositories it filters on.
+func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
+	publish(t, js, "notifications.github.sjawhar.legion.pr.42", capturedGitHubEnvelope(t, "pr-opened.json"))
+	for _, config := range []jetstream.ConsumerConfig{
+		{Durable: dispatchConsumerName(spec.Project), FilterSubject: "notifications.dispatch.issue.>", AckPolicy: jetstream.AckExplicitPolicy, AckWait: spec.AckWait},
+		{Durable: githubConsumerName(spec.Project), FilterSubjects: githubFilters(spec.Repositories), AckPolicy: jetstream.AckExplicitPolicy, AckWait: spec.AckWait},
+	} {
+		if _, err := stream.CreateConsumer(context.Background(), config); err != nil {
+			t.Fatalf("create the earlier daemon's consumer %s: %v", config.Durable, err)
+		}
+	}
+
+	spec.Repositories = []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion"), ghrepo.MustParse("acme/widgets")}
+	if _, err := OpenConsumers(context.Background(), js, spec); err != nil {
+		t.Fatalf("OpenConsumers over existing consumers: %v", err)
+	}
+	for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+		if pending := consumerInfo(t, stream, name).NumPending; pending != 1 {
+			t.Errorf("%s has %d messages pending after the boot, want its backlog of 1", name, pending)
+		}
+	}
+	if got, want := consumerInfo(t, stream, githubConsumerName(spec.Project)).Config.FilterSubjects, githubFilters(spec.Repositories); !slices.Equal(got, want) {
+		t.Errorf("GitHub consumer filters = %v, want the boot's %v", got, want)
+	}
+
+	stop := startConsume(t, js, spec, pool, writeHandler("existing", nil))
+	defer stop()
+	testwait.Eventually(t, "both backlogs delivered and acknowledged", func() bool {
+		for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+			if info := consumerInfo(t, stream, name); info.NumPending != 0 || info.NumAckPending != 0 || info.Delivered.Consumer == 0 {
+				return false
+			}
+		}
+		return true
+	})
+	if writeCount(t, pool) == 0 {
+		t.Error("the Dispatch backlog was acknowledged without being applied")
+	}
+}
+
+func consumerInfo(t *testing.T, stream jetstream.Stream, name string) *jetstream.ConsumerInfo {
+	t.Helper()
+	consumer, err := stream.Consumer(context.Background(), name)
+	if err != nil {
+		t.Fatalf("look up consumer %s: %v", name, err)
+	}
+	info, err := consumer.Info(context.Background())
+	if err != nil {
+		t.Fatalf("consumer %s info: %v", name, err)
+	}
+	return info
+}
+
+func capturedGitHubEnvelope(t *testing.T, name string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "github", name))
+	if err != nil {
+		t.Fatalf("read captured GitHub envelope %s: %v", name, err)
+	}
+	return data
+}
+
+func TestConsumeCommitsRefusalAndAcknowledges(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	logs := &lockedBuffer{}
+	spec := consumerSpec(logs)
+	stop := startConsume(t, js, spec, pool, writeHandler("refusal", &Refusal{Status: 409, Code: "DESIGN_GATE_CLOSED", Message: "approve version 3"}))
+	defer stop()
+
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
+	testwait.Eventually(t, "refusal committed", func() bool { return writeCount(t, pool) == 1 && strings.Count(logs.String(), "committed refusal") == 1 })
+	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+}
+
+// Every carrier of a ghrepo.Repository refuses the zero value, and intake is one: a zero
+// repository would subscribe to `notifications.github...>`, a subject no repository publishes on,
+// and intake would wait on it silently. The spec is refused by name before any consumer opens.
+func TestOpenConsumersRefusesAZeroRepository(t *testing.T) {
+	spec := consumerSpec(&lockedBuffer{})
+	spec.Repositories = append(spec.Repositories, ghrepo.Repository{})
+	if _, err := normalizedSpec(spec); err == nil || err.Error() != "intake consumer repository is required" {
+		t.Fatalf("normalizedSpec with a zero repository = %v, want \"intake consumer repository is required\"", err)
+	}
+}
+
+// capturedRepositories is the repository every captured GitHub envelope names.
+var capturedRepositories = []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}
+
+func consumerSpec(logs *lockedBuffer) ConsumerSpec {
+	return ConsumerSpec{
+		Project:      "CAPTURE",
+		Repositories: capturedRepositories,
+		AckWait:      200 * time.Millisecond,
+		NakDelay:     25 * time.Millisecond,
+		Logger:       slog.New(slog.NewTextHandler(logs, nil)),
+	}
+}
+
+func startConsume(t *testing.T, js jetstream.JetStream, spec ConsumerSpec, pool *pgxpool.Pool, handlers ...Handler) func() {
+	t.Helper()
+	consumers, err := OpenConsumers(context.Background(), js, spec)
+	if err != nil {
+		t.Fatalf("OpenConsumers: %v", err)
+	}
+	return runConsumers(t, consumers, pool, handlers...)
+}
+
+func runConsumers(t *testing.T, consumers *Consumers, pool *pgxpool.Pool, handlers ...Handler) func() {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- consumers.Run(ctx, pool, handlers...) }()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cancel()
+			if err := <-done; err != nil {
+				t.Errorf("Run: %v", err)
+			}
+		})
+	}
+}
+
+func testJetStream(t *testing.T) (jetstream.JetStream, jetstream.Stream) {
+	t.Helper()
+	js := testnats.JetStream(t)
+	return js, testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
+}
+
+func publish(t *testing.T, js jetstream.JetStream, subject string, data []byte) {
+	t.Helper()
+	if _, err := js.Publish(context.Background(), subject, data); err != nil {
+		t.Fatalf("publish %s: %v", subject, err)
+	}
+}
+
+func assertNoAckPending(t *testing.T, stream jetstream.Stream, consumer string) {
+	t.Helper()
+	testwait.Eventually(t, consumer+" has no acknowledgement pending", func() bool {
+		item, err := stream.Consumer(context.Background(), consumer)
+		if err != nil {
+			return false
+		}
+		info, err := item.Info(context.Background())
+		return err == nil && info.NumAckPending == 0
+	})
+}
+
+func capturedIssueUpdatedEnvelope(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile("testdata/dispatch/issue-updated.json")
+	if err != nil {
+		t.Fatalf("read captured issue.updated envelope: %v", err)
+	}
+	return data
+}
+
+func capturedIssueCreatedEnvelope(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile("testdata/dispatch/issue-created.json")
+	if err != nil {
+		t.Fatalf("read captured issue.created envelope: %v", err)
+	}
+	return data
+}
+
+func envelopeJSON(t *testing.T, eventID, source, payload string) []byte {
+	t.Helper()
+	out, err := json.Marshal(map[string]any{
+		"event_id":        eventID,
+		"source":          source,
+		"source_event_id": eventID + "-source",
+		"topic":           "test",
+		"dedupe_key":      eventID,
+		"issued_at":       1,
+		"payload_summary": "test event",
+		"payload":         payload,
+		"trace_id":        eventID + "-trace",
+	})
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	return out
+}
+
+func writeHandler(name string, refusal *Refusal) Handler {
+	return handlerFunc(func(ctx context.Context, tx pgx.Tx, _ Fact) (Result, error) {
+		if _, err := tx.Exec(ctx, `insert into intake_test_writes (handler) values ($1)`, name); err != nil {
+			return Result{}, err
+		}
+		return Result{Refusal: refusal}, nil
+	})
+}
+
+func createWrites(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `create table intake_test_writes (id bigserial primary key, handler text not null)`); err != nil {
+		t.Fatalf("create write table: %v", err)
+	}
+}
+
+func writeCount(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var count int
+	if err := pool.QueryRow(context.Background(), `select count(*) from intake_test_writes`).Scan(&count); err != nil {
+		t.Fatalf("count writes: %v", err)
+	}
+	return count
+}
+
+func writeHandlers(t *testing.T, pool *pgxpool.Pool) []string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `select handler from intake_test_writes order by id`)
+	if err != nil {
+		t.Fatalf("list handler writes: %v", err)
+	}
+	defer rows.Close()
+	var handlers []string
+	for rows.Next() {
+		var handler string
+		if err := rows.Scan(&handler); err != nil {
+			t.Fatalf("scan handler write: %v", err)
+		}
+		handlers = append(handlers, handler)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate handler writes: %v", err)
+	}
+	return handlers
+}
+
+func migratedPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	dsn := os.Getenv("LEGION_TEST_PG_DSN")
+	if dsn == "" {
+		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test intake transactions")
+	}
+	base, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse LEGION_TEST_PG_DSN: %v", err)
+	}
+	adminURL := *base
+	adminURL.Path = "/postgres"
+	admin, err := pgxpool.New(context.Background(), adminURL.String())
+	if err != nil {
+		t.Fatalf("connect admin database: %v", err)
+	}
+	t.Cleanup(admin.Close)
+	name := "legion_intake_test_" + randomSuffix(t)
+	if _, err := admin.Exec(context.Background(), "create database "+name); err != nil {
+		t.Fatalf("create %s: %v", name, err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
+			t.Errorf("drop %s: %v", name, err)
+		}
+	})
+
+	testURL := *base
+	testURL.Path = "/" + name
+	st, err := legionstore.Open(context.Background(), testURL.String())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := st.Migrate(context.Background()); err != nil {
+		st.Close()
+		t.Fatalf("migrate store: %v", err)
+	}
+	st.Close()
+	pool, err := pgxpool.New(context.Background(), testURL.String())
+	if err != nil {
+		t.Fatalf("open test pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+func randomSuffix(t *testing.T) string {
+	t.Helper()
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatalf("random suffix: %v", err)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+// Facts apply one at a time: the handlers read and rewrite whole records (an issue, the admission
+// slots that span trees), so a second fact running beside the first would act on what the first is
+// about to change and overwrite it. The second fact waits for the first to commit.
+func TestApplyFactSerializesConcurrentFacts(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `create table intake_test_counter (n integer not null); insert into intake_test_counter values (0)`); err != nil {
+		t.Fatalf("create counter: %v", err)
+	}
+	increment := func(read, release chan struct{}) Handler {
+		return handlerFunc(func(ctx context.Context, tx pgx.Tx, _ Fact) (Result, error) {
+			var n int
+			if err := tx.QueryRow(ctx, `select n from intake_test_counter`).Scan(&n); err != nil {
+				return Result{}, err
+			}
+			if read != nil {
+				close(read)
+				<-release
+			}
+			_, err := tx.Exec(ctx, `update intake_test_counter set n = $1`, n+1)
+			return Result{}, err
+		})
+	}
+	read, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	letFirstFinish := func() { releaseOnce.Do(func() { close(release) }) }
+	// A failing wait must still let the first fact finish, or its open transaction holds the pool.
+	defer letFirstFinish()
+	first := make(chan error, 1)
+	go func() {
+		_, err := ApplyFact(ctx, pool, "test", "first", DispatchIssue{Key: "LEGION-208"}, increment(read, release))
+		first <- err
+	}()
+	<-read
+	second := make(chan error, 1)
+	go func() {
+		_, err := ApplyFact(ctx, pool, "test", "second", DispatchIssue{Key: "LEGION-209"}, increment(nil, nil))
+		second <- err
+	}()
+	testwait.Eventually(t, "the second fact to wait for the first", func() bool {
+		var waiting int
+		if err := pool.QueryRow(ctx, `select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and wait_event = 'advisory'`).Scan(&waiting); err != nil {
+			return false
+		}
+		return waiting == 1
+	})
+	letFirstFinish()
+	if err := <-first; err != nil {
+		t.Fatalf("first ApplyFact: %v", err)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("second ApplyFact: %v", err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `select n from intake_test_counter`).Scan(&n); err != nil {
+		t.Fatalf("read counter: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("counter = %d, want both facts applied in turn", n)
+	}
+}
+
+// A reopened pull request is open again, recorded as when it opened: a closed pull request's record
+// is dropped at the next re-admission, so one reopened in between must not stay closed. The fact
+// says it is a reopen, since GitHub sends opened only once and a second one is a redelivery.
+func TestDecodeReopenedPullRequestAsOpened(t *testing.T) {
+	data, err := os.ReadFile("testdata/github/pr-opened.json")
+	if err != nil {
+		t.Fatalf("read captured opened envelope: %v", err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("decode captured envelope: %v", err)
+	}
+	payload := envelope["payload"].(string)
+	if !strings.Contains(payload, `"action":"opened"`) {
+		t.Fatalf("captured payload %s has no opened action", payload)
+	}
+	envelope["payload"] = strings.Replace(payload, `"action":"opened"`, `"action":"reopened"`, 1)
+	reopened, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", capturedRepositories, reopened)
+	if err != nil {
+		t.Fatalf("decode reopened: %v", err)
+	}
+	if opened, ok := got.Fact.(PullRequestOpened); !ok || opened.Number != 42 || opened.Branch != "legion/LEGION-208" || opened.HeadSHA != "head-captured" || !opened.Reopened {
+		t.Fatalf("reopened fact = %#v, want the pull request opened again", got.Fact)
+	}
+}
+
+// A Dispatch event names who wrote it. A session actor's id is decoded, so the workflow can tell a
+// write by an agent holding a claim, or by an outside session, from a person's move. A user actor
+// decodes none, and neither does the daemon's own session, legion-daemon:<PROJECT>: both are the
+// writes the workflow acts on.
+func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
+	data, err := os.ReadFile("testdata/dispatch/issue-updated.json")
+	if err != nil {
+		t.Fatalf("read captured issue.updated envelope: %v", err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("decode captured envelope: %v", err)
+	}
+	payload := envelope["payload"].(string)
+	if !strings.Contains(payload, `"actor":{"kind":"user","id":"smoke"}`) {
+		t.Fatalf("captured payload %s has no user actor", payload)
+	}
+	envelope["payload"] = strings.Replace(payload, `"actor":{"kind":"user","id":"smoke"}`, `"actor":{"kind":"session","id":"ses-impl"}`, 1)
+	byAgent, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, byAgent)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if issue, ok := got.Fact.(DispatchIssue); !ok || issue.ActorSession != "ses-impl" {
+		t.Fatalf("fact = %#v, want the session actor ses-impl", got.Fact)
+	}
+	human, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, data)
+	if err != nil {
+		t.Fatalf("decode the captured event: %v", err)
+	}
+	if issue, ok := human.Fact.(DispatchIssue); !ok || issue.ActorSession != "" {
+		t.Fatalf("fact = %#v, want no session actor for a user", human.Fact)
+	}
+	envelope["payload"] = strings.Replace(payload, `"actor":{"kind":"user","id":"smoke"}`, `"actor":{"kind":"session","id":"legion-daemon:CAPTURE"}`, 1)
+	byDaemon, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, byDaemon)
+	if err != nil {
+		t.Fatalf("decode the daemon's own write: %v", err)
+	}
+	if issue, ok := daemon.Fact.(DispatchIssue); !ok || issue.ActorSession != "" {
+		t.Fatalf("fact = %#v, want no session actor for the daemon's own write", daemon.Fact)
+	}
+}
+
+// The listener's forced marker, GitHub's review id and the review's submission time reach the
+// facts: the workflow reads a push without the marker as forced and orders reviews by submission
+// time then id, so each must survive decoding exactly. A review id that is not a positive integer
+// is refused rather than read as none. A time that cannot be read is taken as none and reported,
+// since a review without one is still ordered, by its id.
+func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
+	withPayload := func(t *testing.T, name, subject string, set map[string]any) (decodedMessage, error) {
+		t.Helper()
+		var envelope map[string]any
+		if err := json.Unmarshal(capturedGitHubEnvelope(t, name), &envelope); err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		// The envelope carries its payload as JSON text.
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(envelope["payload"].(string)), &payload); err != nil {
+			t.Fatalf("parse %s's payload: %v", name, err)
+		}
+		for key, value := range set {
+			payload[key] = value
+		}
+		text, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("encode %s's payload: %v", name, err)
+		}
+		envelope["payload"] = string(text)
+		data, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatalf("encode %s: %v", name, err)
+		}
+		return decodeMessage(subject, "CAPTURE", capturedRepositories, data)
+	}
+	pushSubject := "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208"
+	reviewSubject := "notifications.github.sjawhar.legion.pr.42.review"
+
+	for _, forced := range []string{"true", "false"} {
+		decoded, err := withPayload(t, "push.json", pushSubject, map[string]any{"forced": forced})
+		if push, ok := decoded.Fact.(Push); err != nil || !ok || push.Forced == nil || *push.Forced != forced {
+			t.Fatalf("push with forced %q = %#v, %v", forced, decoded.Fact, err)
+		}
+	}
+	decoded, err := withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010",
+		"submitted_at": "2026-09-26T12:03:00+02:00"})
+	submitted := time.Date(2026, 9, 26, 10, 3, 0, 0, time.UTC)
+	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 ||
+		!review.SubmittedAt.Equal(submitted) || len(decoded.Unread) != 0 {
+		t.Fatalf("review with an id and a submission time = %#v, unread %q, %v", decoded.Fact, decoded.Unread, err)
+	}
+	if _, err := withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "not-a-number"}); err == nil {
+		t.Fatal("a review id that is not a number decoded")
+	}
+	for _, unreadable := range []any{"yesterday", 1.72735218e+09, true, map[string]any{"t": "2026-09-26T12:03:00Z"}} {
+		decoded, err = withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010", "submitted_at": unreadable})
+		if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 || !review.SubmittedAt.IsZero() ||
+			len(decoded.Unread) != 1 || !strings.Contains(decoded.Unread[0], "submitted_at") {
+			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and the field reported", unreadable, decoded.Fact, decoded.Unread, err)
+		}
+	}
+	for _, absent := range []any{nil, ""} {
+		decoded, err = withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010", "submitted_at": absent})
+		if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || !review.SubmittedAt.IsZero() || len(decoded.Unread) != 0 {
+			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and nothing reported", absent, decoded.Fact, decoded.Unread, err)
+		}
+	}
+}

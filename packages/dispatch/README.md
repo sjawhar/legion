@@ -41,29 +41,47 @@ runs the Vite development server for interface work.
 
 `bun run e2e` builds the SPA and drives Playwright against the real Go Dispatch
 server and Postgres. The harness starts `e2e/run-server.sh` unless
-`PLAYWRIGHT_BASE_URL` selects a deployed server. The script resolves the
-concrete Go binary in the caller's toolchain environment, then starts Dispatch
-with pinned server settings: trusted `X-Dispatch-User` identity for `alice`
-and `bob`, `DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
-key and cookie-signing key, a loopback listen host and the suite's dashboard
-origin. The server process has no caller Home or XDG directory and receives no
-inherited `DISPATCH_*`, `ENVOY_*` or `NATS_*` variable, so neither a shell
-setting nor `~/.config/opencode/envoy.json` /
-`~/.local/share/dispatch` can redirect it.
+`PLAYWRIGHT_BASE_URL` selects a deployed server. The script builds the server
+with the caller's `go` into `packages/envoy/dispatch-e2e` and execs it, so a
+SIGTERM to the pid it hands its caller stops the server. It pins every server
+setting: cookie identity, the production mode, with `alice` and `bob` signed in through the
+server's dev sign-in route (`DISPATCH_DEV_SIGNIN=1`, fenced to a loopback
+origin, listener and database, with a signing key the server generates for its
+process), `DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
+key, a loopback listen host and the suite's dashboard origin. Address the
+harness as `127.0.0.1:<port>`, never `localhost`: under that flag the router
+refuses any other `Host`. The server process has no caller Home or XDG
+directory and receives no inherited `DISPATCH_*`, `ENVOY_*` or `NATS_*`
+variable, so neither a shell setting nor `~/.config/opencode/envoy.json` /
+`~/.local/share/dispatch` can redirect it. The one way in from outside is the
+broker switch below: a URL in `DISPATCH_E2E_AGENT_SECRETS_URL`, with its bearer
+in `DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE`, points the server's credential
+requests at a broker the caller runs, as the secrets broker's docs rig
+(`docs/site/media/broker/rig.sh`) does.
 
-`DATABASE_URL` is required and must name an isolated database: `e2e/seed.ts`
-truncates it before every scenario and never selects a shared default. The
-harness ports `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
-`9021`) and `FAKE_GITHUB_PORT` (default `9022`) are its other inputs, resolved
-for the whole suite by `e2e/harness-ports.ts`. A run starts its own servers on
-those three ports and refuses before any of them starts if one is taken, so it
-never truncates the database behind a server it did not start;
+`DATABASE_URL` is required and must name an isolated loopback database:
+`e2e/seed.ts` truncates it before every scenario and never selects a shared
+default, and the dev sign-in flag refuses a non-loopback host. psql runs without
+`PGHOSTADDR` (`e2e/psql.ts`), which would otherwise send it somewhere the server
+never checked. The harness ports `DISPATCH_E2E_PORT` (default `8777`),
+`FAKE_ENVOY_PORT` (default `9021`), `FAKE_GITHUB_PORT` (default `9022`),
+`PLAIN_HTTP_PORT` (default `9023`) and `FAKE_BROKER_PORT` (default `9024`) are
+its other inputs, resolved for the whole suite by `e2e/harness-ports.ts`. A
+local run starts its own servers on those five ports and refuses before any of
+them starts if one is taken, so it never
+truncates the database behind a server it did not start;
 `DISPATCH_E2E_REUSE_SERVERS=1` is the opt-in for running against a harness you
 started yourself. `AGENTS.md`'s end-to-end section states that rule in full —
 the accepted values, what a bad or duplicated port does, and which invocations
 skip the probe. The harness starts `e2e/fake-envoy.ts` on `FAKE_ENVOY_PORT`
 and that listener is the only Envoy the server ever talks to; tests seed its
-live sessions with `setLiveSessions` from `e2e/agents.ts`.
+live sessions with `setLiveSessions` from `e2e/agents.ts`. It starts
+`e2e/fake-broker.ts` on `FAKE_BROKER_PORT` as the secrets broker, so the
+credential-request feature is on, and tests seed its pending requests with
+`setPendingCredentialRequests` from `e2e/fake-broker-helpers.ts`; an empty
+`DISPATCH_E2E_AGENT_SECRETS_URL` runs the suite with no broker instead, as a
+deployment that configures none (`AGENTS.md` has the switch). It also starts
+`e2e/plain-http-proxy.ts` on `PLAIN_HTTP_PORT` for the plain-HTTP project.
 
 Run the local harness with its isolated database available:
 
@@ -75,37 +93,60 @@ DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslm
 
 ## Acceptance run against the deployed image
 
-The `acceptance` Compose profile runs Playwright against a locally built Dispatch image with its
-own Postgres volume and database. It uses header identity for `alice` and `bob`, an
-acceptance-only agent token, disabled NATS, and port 8767; it starts only the named acceptance
-service and its database dependency.
+The `dispatch.acceptance.compose.yml` Compose file builds a Dispatch image from this tree and runs
+it for Playwright with its own Postgres volume and database. It signs `alice` and `bob` in through
+the dev sign-in route, as the local harness does. It also uses an acceptance-only agent token,
+disabled NATS, and a private loopback fake Envoy with no token. `FAKE_ENVOY_PORT` and
+`ENVOY_IMAGE_TAG` are its only required inputs: the acceptance service derives its `ENVOY_URL`
+from `FAKE_ENVOY_PORT`, and `e2e:deployed` starts the fake listener on it. Before any row runs,
+`e2e:deployed` puts a session in that fake and requires the server's `GET /api/v1/agents` to list
+it, so a server reading another Envoy listener refuses the run instead of answering it from the
+wrong sessions (`e2e/preflight.ts`). `e2e:deployed` also starts the plain-HTTP proxy on
+`PLAIN_HTTP_PORT`. The fake Envoy makes subscriber, Agents-page, and fixture-hook rows exercise
+the deployed server instead of a real session. Fake GitHub rows still skip because the acceptance
+service does not configure that listener.
 
 ```bash
 cd packages/envoy/deploy/compose
-DISPATCH_ACCEPTANCE_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose -f dispatch.compose.yml build dispatch
-DISPATCH_ACCEPTANCE_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose -p dispatch-acceptance -f dispatch.compose.yml --profile acceptance up -d dispatch-acceptance
+acceptance_envoy_port=19061
+acceptance_plain_http_port=19062
+acceptance_dispatch_port=18767
+acceptance_pg_port=55660
+acceptance_image_tag=dispatch-acceptance-local
+acceptance_compose_project=dispatch-acceptance
+compose=(env FAKE_ENVOY_PORT="$acceptance_envoy_port" DISPATCH_ACCEPTANCE_PORT="$acceptance_dispatch_port" DISPATCH_ACCEPTANCE_PG_PORT="$acceptance_pg_port" ENVOY_IMAGE_TAG="$acceptance_image_tag" docker compose -p "$acceptance_compose_project" -f dispatch.acceptance.compose.yml)
+"${compose[@]}" build dispatch-acceptance
+"${compose[@]}" up -d dispatch-acceptance
 cd ../../../dispatch
-PLAYWRIGHT_BASE_URL=http://127.0.0.1:8767 \
-PLAYWRIGHT_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55516/dispatch_acceptance?sslmode=disable' \
+FAKE_ENVOY_PORT="$acceptance_envoy_port" \
+PLAIN_HTTP_PORT="$acceptance_plain_http_port" \
+PLAYWRIGHT_BASE_URL="http://127.0.0.1:${acceptance_dispatch_port}" \
+PLAYWRIGHT_DATABASE_URL="postgres://postgres:dispatch@127.0.0.1:${acceptance_pg_port}/dispatch_acceptance?sslmode=disable" \
 E2E_AGENT_TOKEN=acceptance-token \
 bun run e2e:deployed
 cd ../envoy/deploy/compose
-DISPATCH_ACCEPTANCE_PG_PORT=55516 ENVOY_IMAGE_TAG=pr4-local docker compose -p dispatch-acceptance -f dispatch.compose.yml --profile acceptance down -v
-docker rmi ghcr.io/sjawhar/legion/envoy:pr4-local
+"${compose[@]}" down -v
+docker rmi "ghcr.io/sjawhar/legion/envoy:${acceptance_image_tag}"
 ```
 
 `e2e/seed.ts` truncates its database before each scenario. Always set
 `PLAYWRIGHT_DATABASE_URL` to an isolated test database when using a deployed URL.
-The suite has `chromium` and `iphone` projects; the iPhone project uses Chromium
-with iPhone 13 viewport, touch, and user-agent emulation. A `webkit` project runs
-`e2e/collab-cursor.e2e.ts` alone, since where a caret lands beside a
-collaborator's cursor differs by engine, and a `firefox` project runs
-`e2e/code-line-replace.e2e.ts` alone, since Firefox's own editing mishandles text
-typed over what follows a block's last line break; `bun run e2e:install` installs all three browsers.
-A `chromium-plain-http` project runs `e2e/plain-http-origin.e2e.ts` alone, with the page opened at
-`http://dispatch-e2e.test:<port>` (Chromium maps that name to the harness host), a plain-HTTP origin
-that is not loopback and so not a secure context: it proves a document takes a new paragraph and a
-comment renders formatted there, where `crypto.randomUUID` does not exist.
+The suite has six projects. `chromium` and `iphone` run every spec except the two plain-HTTP specs;
+the iPhone project uses Chromium with iPhone 13 viewport, touch, and user-agent emulation. `webkit`
+runs `e2e/collab-cursor.e2e.ts`, since where a caret lands beside a collaborator's cursor differs by
+engine, and `firefox` runs `e2e/code-line-replace.e2e.ts`, since Firefox's own editing
+mishandles text typed over what follows a block's last line break; both also run
+`e2e/keyboard-agents-picker.e2e.ts`, whose keyboard rule rests on each engine's select dispatch.
+`webkit-iphone` runs the live view's two phone-layout rows of `e2e/agent-view.e2e.ts` in WebKit
+with the iPhone 13 profile, since iOS Safari is the engine its keyboard cap exists for.
+`chromium-plain-http` runs `e2e/plain-http-origin.e2e.ts` and `e2e/plain-http-proxy.e2e.ts`, with
+the page opened at `http://dispatch-e2e.test:<PLAIN_HTTP_PORT>` (Chromium maps that name to the
+local proxy), a plain-HTTP origin that is not loopback and so not a secure context. The proxy
+forwards to the dev sign-in server at its loopback origin. The project proves a document takes a
+new paragraph and a comment renders formatted there, where `crypto.randomUUID` does not exist, and
+that the proxy refuses any other `Host` as the server's own fence does and keeps no request open
+upstream once a page has closed.
+`bun run e2e:install` installs all three browsers.
 
 ## Phone check
 

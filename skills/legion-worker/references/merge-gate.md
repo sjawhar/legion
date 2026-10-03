@@ -73,12 +73,12 @@ completion leaves the issue in reviewing until you finish.
   in READY (an empty output is quoted as `no file changes above the approved head`); then the same
   with `'~docs/solutions'` appended, which must print nothing. *The READY packet*: the merger
   always posts `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
-  (the shape `packages/pi-envoy/roles/merger.md` defines), then the PR body's `Outcome:` line and
-  its `Not proven / risk:` value — every bullet under that label joined with `; ` on the one
-  READY line, or `none` — quoted from the `## For the reviewer` block at that same head (or one
-  line saying the body carries no brief — the packet still publishes), then the `--summary`
-  output and the PR body's gate facts, as a `dispatch_message` on the issue. When the `Legion
-  addressing` line names a merge queue, it also publishes the same packet there with
+  (the shape `packages/daemon/internal/prompts/roles/merger.md` defines), then the PR body's
+  `Outcome:` line and its `Not proven / risk:` value — every bullet under that label joined with
+  `; ` on the one READY line, or `none` — quoted from the `## For the reviewer` block at that same
+  head (or one line saying the body carries no brief — the packet still publishes), then the
+  `--summary` output and the PR body's gate facts, as a `dispatch_message` on the issue. When the
+  `Legion addressing` line names a merge queue, it also publishes the same packet there with
   `envoy_publish`; a 404 means the Dispatch message remains the durable notice and the merger
   stays idle. The READY packet names both the implementer's and tester's `E2E` lines; a missing
   one is reported to the architect instead of published. Legion never merges.
@@ -96,7 +96,8 @@ completion leaves the issue in reviewing until you finish.
   carrying the Legion footer, and a `dispatch_message` on the issue — the reviewer and merger
   read GitHub, the architect reads the issue. When the deploy that carries the merge has not
   happened (a shared profile still holding the previous plugin release, a daemon still running
-  the previous commit, a slot nobody has run), open a `dispatch_ask` naming the exact install or
-  restart step, with options for its outcomes, keep the `Production:` line at `pending <what is
-  missing>`, and complete the check once the human answers that it is done. Never record a
-  staging pass as the production check, and never let the architect sign off on a `pending` line.
+  the previous commit, a slot nobody has run), open a `dispatch_ask` that starts with the
+  production gap and why it matters, then names the required install or restart step, its risk,
+  and outcome-named options. Keep the `Production:` line at `pending <what is missing>`, and
+  complete the check once the human answers. Never record a staging pass as the production check,
+  and never let the architect sign off on a `pending` line.
