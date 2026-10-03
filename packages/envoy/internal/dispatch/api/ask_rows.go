@@ -23,16 +23,10 @@ const askRowFrom = `from asks a
 	left join artifacts ba on ba.id = a.block_artifact_id
 	left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid`
 
-// commentInsertedAt is the created_at both comment inserts write (createCommentFor, replyComment).
-// Each runs after its transaction has taken the owner row, which every comment insert takes, so
-// the clock there orders an owner's comments as they commit; the column default, now(), is the
-// transaction's start, and a reply that began first but waited for the row would sort before one
-// that committed while it waited.
-const commentInsertedAt = `clock_timestamp()`
-
 // newestReply selects the newest comment in the thread of the ask aliased a: the one that
-// committed last (commentInsertedAt). lastReplyJoin reads it for every ask read, and a hand-back
-// records its id, so both agree on which reply is newest.
+// committed last, since a comment's created_at is when its insert ran (migration 0065) and every
+// comment insert first takes the owner row. lastReplyJoin reads it for every ask read, and a
+// hand-back records its id, so both agree on which reply is newest.
 const newestReply = `select c.id, c.author, c.created_at, c.turn from comments c
 			where c.ask_id = a.id
 			order by c.created_at desc, c.id desc
@@ -43,26 +37,32 @@ const newestReply = `select c.id, c.author, c.created_at, c.turn from comments c
 const lastReplyJoin = `
 		left join lateral (` + newestReply + `) lr on true`
 
-// waitingOnExpression is the one turn rule every open-ask read, the Inbox order, a reply's
-// waiting_on and the approval route's hand-back decision share. A moved approval request waits on
-// its agent until that agent hands its current version back. A hand-back records the reply that
-// was newest when it ran (handed_back_reply_id), so the request waits on the human until a newer
-// reply's turn decides it. Every other ask follows its newest reply's turn.
+// approvalMoved says the ask aliased a is an approval request a version moved past the version its
+// agent last handed to the human. waitingOnExpression and describeAsk, which reads it for a reply's
+// waiting_on (commentThreadTarget.waitingOnAfter), share it.
+const approvalMoved = `(a.kind = 'approval'
+		and (a.approval->>'requested_version')::bigint < (a.approval->>'version')::bigint)`
+
+// waitingOnExpression is the one turn rule every open-ask read, the Inbox order, a document's
+// awaiting approval and the approval route's hand-back decision share; a reply's own waiting_on
+// applies it to the reply it just inserted (commentThreadTarget.waitingOnAfter). A moved approval
+// request waits on its agent until that agent hands its current version back. A hand-back records
+// the reply that was newest when it ran (handed_back_reply_id), so the request waits on the human
+// until a newer reply's turn decides it. Every other ask follows its newest reply's turn.
 const waitingOnExpression = `case
-	when a.kind = 'approval'
-		and (a.approval->>'requested_version')::bigint < (a.approval->>'version')::bigint
+	when ` + approvalMoved + `
 	then 'agent'
 	when a.kind = 'approval' and lr.id = a.handed_back_reply_id
 	then 'human'
 	else coalesce(lr.turn, 'human')
 end`
 
+// askWaitingOn reads whom the open ask askID waits on, for the approval route's hand-back decision.
 func askWaitingOn(ctx context.Context, q queryer, askID string) (string, error) {
 	var waitingOn string
-	err := q.QueryRow(ctx, `select `+waitingOnExpression+`
+	if err := q.QueryRow(ctx, `select `+waitingOnExpression+`
 		from asks a`+lastReplyJoin+`
-		where a.id = $1 and a.state = 'open'`, askID).Scan(&waitingOn)
-	if err != nil {
+		where a.id = $1 and a.state = 'open'`, askID).Scan(&waitingOn); err != nil {
 		return "", fmt.Errorf("read ask waiting_on: %w", err)
 	}
 	return waitingOn, nil
@@ -70,9 +70,11 @@ func askWaitingOn(ctx context.Context, q queryer, askID string) (string, error) 
 
 // askReadColumns are askRowColumns plus the newest comment in the ask's thread. WaitingOn derives
 // from that reply with the moved and newly handed-back approval-request overrides in
-// waitingOnExpression; LastReply still names the newest comment. Queries selecting them read from
-// askReadFrom. Event payloads are built from askRowColumns instead: they never carry WaitingOn.
-const askReadColumns = askRowColumns + `, lr.author, lr.created_at, ` + waitingOnExpression
+// waitingOnExpression, aliased waiting_on so a query ordering by it (the Inbox) names the column
+// rather than evaluating the rule a second time; LastReply still names the newest comment. Queries
+// selecting them read from askReadFrom. Event payloads are built from askRowColumns instead: they
+// never carry WaitingOn.
+const askReadColumns = askRowColumns + `, lr.author, lr.created_at, ` + waitingOnExpression + ` as waiting_on`
 
 const askReadFrom = askRowFrom + lastReplyJoin
 

@@ -5,11 +5,25 @@
 #   request     the question of the approval request at $version, or null when none names it
 #   summarized  whether that question carries a summary after "Approve <name> (version N)?"
 #   blocks      how many of the spec's decision blocks a human answered
-#   early       each approval request made too early, as "version N: <block question>"
-#   open_in_version: the version a request named still held one of the spec's blocks open. The
-#   request's `requested_version` is the version the agent handed to the human. An approval ask
-#   follows later versions in place, so the shared event selector records its ask.opened and each
-#   ask.handed_back, never an ask.edited, which only rewords it.
+#   early       each approval hand-back made too early, as "version N: <block question>", by either
+#               rule below. A request follows later versions in place, so the shared event selector
+#               reads its ask.opened and each ask.handed_back as hand-backs, never an ask.edited,
+#               which only rewords it.
+# open_in_version: the version a hand-back named in requested_version, the version the agent handed
+# to the human, still held one of the spec's blocks open. The version records each block's state;
+# the block's ask cannot order that, since Dispatch indexes a block as an ask when it settles the
+# document, after the edit that wrote it. Only a block whose id is one of the spec's block asks
+# counts, so an :::ask quoted in code (a fence, or a list item that opens with one) is never read as
+# a block. It judges every hand-back, answered or not.
+# answered_after: a hand-back no human answered came before a human answered one of the spec's
+# blocks. That covers a request made while the choice was still prose, before its block existed,
+# and one sent in parallel with the edit that wrote the block; an answer's time is written as the
+# human answers. A hand-back a human answered is left to the first rule, so the flow
+# legion-architect prescribes passes: the human asks for changes, the revision raises a block, the
+# human answers it, and the architect requests again, which opens a new request since Request
+# changes answered the old one. The trade-off: a premature request the human answered with Request
+# changes no longer fails the run, because the human caught it and the first rule still judges its
+# version.
 include "design-gate-approval-requests";
 def ts: (capture("^(?<s>[0-9-]+T[0-9:]+)(\\.(?<f>[0-9]+))?Z$") // error("not an RFC3339 UTC time: \(.)")) | ((.s + "Z") | fromdateiso8601) + ((.f // "0") | "0." + . | tonumber);
 .[0] as $asks | .[1] as $events | .[2:] as $versions

@@ -1667,7 +1667,7 @@ drive_gated_spec() {
       fail "$issue: version $version of its spec could not be read"
     requested+=("$evidence/$issue-spec-v$version.json")
   done
-  verdict=$(jq -c -s --arg artifact "$artifact" --argjson version "$approved" -f "$root/scripts/e2e/lib/design-gate-verdict.jq" "$evidence/$issue-asks.json" "$evidence/$issue-events.json" "${requested[@]}")
+  verdict=$(jq -c -s -L "$root/scripts/e2e/lib" --arg artifact "$artifact" --argjson version "$approved" -f "$root/scripts/e2e/lib/design-gate-verdict.jq" "$evidence/$issue-asks.json" "$evidence/$issue-events.json" "${requested[@]}")
   printf '%s\n' "$verdict" >"$evidence/$issue-gate-verdict.json"
   request=$(jq -r '.request // empty' <<<"$verdict")
   [ -n "$request" ] || fail "$issue: no approval request names version $approved of its spec ($evidence/$issue-asks.json)"
@@ -1922,10 +1922,11 @@ pass
 
 begin token-rotation
 # A pod's projected operator token (pod.yml: expiration_seconds 3600) is renewed by the kubelet at
-# 80 % of its life, 2880 s after it was issued, and a model turn after the renewal still runs on the
-# gateway's aliases. The architect's pod is the longest-lived. A token whose issue time (iat) is
-# later than the pod's start is a renewal: the pod's first token was issued as it started. By
-# token-rotation the architect has usually run long enough for one, so the wait is often none.
+# 80 % of its life, 2880 s after it was issued, and a model turn after the renewal still runs on a
+# model the operator fixture's overlay gives a role. The architect's pod is the longest-lived. A
+# token whose issue time (iat) is later than the pod's start is a renewal: the pod's first token was
+# issued as it started. By token-rotation the architect has usually run long enough for one, so the
+# wait is often none.
 pod=$(claim_sandbox "$tree1" architect)
 pod_uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}')
 pod_started=$(date -d "$(op get pod "$pod" -o jsonpath='{.status.startTime}')" +%s) || fail "the architect pod $pod has no start time"
@@ -1964,7 +1965,9 @@ until_true 600 "a completed architect turn after the rotation" turn_after_rotati
 architect_pod_kept "before the turn after the rotation completed"
 after=$(claim_session_text "$tree1" architect | jq -R -s -c --arg at "$rotated" '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant" and .timestamp > $at) | "\(.message.provider)/\(.message.model)"] | unique')
 note "turns after the rotation were answered by $after"
-jq -e 'all(.[]; test("^anthropic/claude-[a-z0-9.-]+-legion$"))' <<<"$after" >/dev/null || fail "a turn after the rotation left the gateway's aliases: $after"
+route_models=$(sed -n '/^modelRoles:/,/^[^ ]/s/^  [a-z]*: \([^:]*\).*/\1/p' "$operator_route/overlay.yml" | jq -R -s -c 'split("\n") | map(select(. != "")) | unique')
+jq -e --argjson route "$route_models" 'all(.[]; . as $m | any($route[]; . == $m))' <<<"$after" >/dev/null ||
+  fail "a turn after the rotation left the operator fixture's role models $route_models: $after"
 pass
 
 begin idle-suspend

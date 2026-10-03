@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 
@@ -191,6 +193,18 @@ func routeIndexEntries(routes []apiRoute) []routeIndexEntry {
 	return entries
 }
 
+// routeIndexBody is the body GET /api/v1 answers.
+func routeIndexBody(entries []routeIndexEntry) map[string]any {
+	return map[string]any{"routes": entries, "docs": routeIndexDocs}
+}
+
 func (s *server) getRouteIndex(w http.ResponseWriter, _ *http.Request) {
-	WriteJSON(w, http.StatusOK, map[string]any{"routes": s.routeIndex, "docs": routeIndexDocs})
+	WriteJSON(w, http.StatusOK, routeIndexBody(s.routeIndex))
+}
+
+// WriteRouteIndex writes the body GET /api/v1 answers on a server without test hooks, read
+// from the table alone: no database, no listener. `envoy-dispatch routes` prints it, and the
+// docs site's API reference is generated from that output.
+func WriteRouteIndex(w io.Writer) error {
+	return json.NewEncoder(w).Encode(routeIndexBody(routeIndexEntries((&server{}).routes())))
 }

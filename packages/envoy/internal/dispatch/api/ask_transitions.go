@@ -29,9 +29,11 @@ type answerRevision struct {
 	EditedAt *string
 }
 
-// answerTransition records a human answer. Approval asks have their review options and are
-// answered only while they name the document's latest settled version; questions accept their
-// configured options.
+// answerTransition records a human answer. Approval asks have their review options and always name
+// the document's latest settled version, since every version write moves the open request to it
+// (docs.MoveApprovalAsk) and stamps edited_at, so revision, which the answer route requires, refuses
+// an answer to a version the human was not shown (ASK_EDITED). Questions accept their configured
+// options.
 func answerTransition(
 	actor model.Actor,
 	selected []string,
@@ -146,7 +148,8 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	// An approval ask's answer is a review of the document it names, pinned to the version its
-	// question named, which the transition has already found to be the latest settled one.
+	// question named: the latest settled one, which every version write moves the request to, and
+	// the one the human reviewed (revision).
 	transition.After = func(ctx context.Context, tx pgx.Tx, ask model.Ask) ([]model.Event, error) {
 		if ask.Kind != "approval" {
 			return nil, nil

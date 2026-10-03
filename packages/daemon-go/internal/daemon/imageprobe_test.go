@@ -236,7 +236,7 @@ func TestTheImageProbesRefusalsNameThePluginRootAPodLoads(t *testing.T) {
 		notWant      string
 	}{
 		{"another contract", contractPrevious, []string{"yes"},
-			[]string{"speaks Go daemon API contract 2; this daemon requires 3", "into the plugin root @ROOT, which a pod loads as its one explicit extension"}, "OMP profile"},
+			[]string{"speaks daemon API contract 2; this daemon requires 3", "into the plugin root @ROOT, which a pod loads as its one explicit extension"}, "OMP profile"},
 		{"not loaded", contractCurrent, []string{"no"},
 			[]string{"pi-legion-envoy 1.57.0 at @ROOT did not load with discovery off and @ROOT as Oh My Pi's one explicit extension, as a pod loads it"}, "omp plugin list"},
 		{"loaded from another copy", contractCurrent, []string{"elsewhere"},
@@ -325,7 +325,7 @@ func TestTheImageProbeHoldsThePluginToTheContractItIsGiven(t *testing.T) {
 	gate, _ = imageGateUnder(t, f, contractPrevious, 0)
 	err := gate.verifyImage(context.Background())
 
-	if err == nil || !strings.Contains(err.Error(), "speaks Go daemon API contract 2; this daemon requires 3") {
+	if err == nil || !strings.Contains(err.Error(), "speaks daemon API contract 2; this daemon requires 3") {
 		t.Fatalf("verifyImage = %v, want the contract refusal naming 2 and 3", err)
 	}
 	if got := strings.Join(f.calls(t), " "); got != "agents" {

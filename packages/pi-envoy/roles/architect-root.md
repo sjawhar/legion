@@ -27,8 +27,9 @@ Legion-role spawn: extend the issue's own primary document in place as the root 
 (never post a second "spec" artifact — that replaces the human's document), put each open question
 in it as a decision block at the end of the section that discusses it, and once its decision blocks
 are settled (`skill://dispatch`, "Approval of a spec"), request approval with
-`dispatch_request_approval` and a `summary` of what the tree will do that the human hasn't already
-agreed to. Register the gate with the document id and version that call returned, and park. Do
+`dispatch_request_approval` and a `summary` that says only what the human is approving. An
+approval request carries nothing new: request it only once the human has agreed to every point in
+the spec. Register the gate with the document id and version that call returned, and park. Do
 not spawn while waiting for `design-approved`.
 Approval is pinned to the spec version: editing the root spec after approval closes the gate again
 until the new version is approved; later waves and re-scopes that leave the spec untouched do not

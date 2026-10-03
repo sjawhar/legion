@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/goroutinetest"
 	"github.com/sjawhar/envoy/internal/testnats"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
@@ -239,8 +241,14 @@ func TestReconnectHooksRunWhileTheDurableCannotBind(t *testing.T) {
 			if client.SubOK() {
 				t.Fatal("SubOK reports the durable bound while another connection holds it")
 			}
-			// Recovery's next attempts come 1 s and 3 s after its first.
-			time.Sleep(2500 * time.Millisecond)
+			// Recovery retries the refused restore 1 s and 3 s after its first attempt, and each
+			// attempt asks rewatch for a run before it logs its failure, so once the third attempt has
+			// logged, both retries have had their chance to run the hook again. The retries after it,
+			// which go on while the durable is held, find what the third found: the reconnect covered
+			// and no connection event since, so rewatch finds the hooks not due and runs nothing.
+			waitFor(t, 30*time.Second, "the recovery's third attempt at the refused restore", func() bool {
+				return slices.Contains(logs.attempts("ERROR", "envoy nats recovery resubscribe failed"), 3)
+			})
 			if runs := len(hooked); runs != 0 {
 				t.Fatalf("the reconnect hook ran %d more time(s) for one reconnect", runs)
 			}
@@ -299,9 +307,16 @@ func TestReconnectHooksRunOneAtATimeOnceForEachEventBetweenRuns(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("the hooks never ran for the in-place reconnect")
 	}
-	// The recovery's attempt that came during the reconnect's run, and its next one 2 s later, have
-	// both been made by now.
-	time.Sleep(hookTakes)
+	// The recovery keeps retrying the refused restore, one attempt at a time, and each attempt asks
+	// rewatch for a run before it logs its failure. An attempt that begins after the reconnect's run
+	// has ended finds what every later attempt finds, both events covered and no event since, and the
+	// attempt that came during the run has logged before it began. So once an attempt begun from here
+	// has logged, every chance to run the hooks again has passed.
+	afterRun := captureBusLogs(t)
+	waitFor(t, 30*time.Second, "a recovery attempt begun after the reconnect's run to log its refused restore", func() bool {
+		begun := afterRun.attempts("INFO", "envoy nats recovery attempt")
+		return len(begun) > 0 && slices.Contains(afterRun.attempts("ERROR", "envoy nats recovery resubscribe failed"), begun[0])
+	})
 	if got, most := runs.Load(), mostAtOnce.Load(); got != 2 || most != 1 {
 		t.Fatalf("the hooks ran %d time(s) for two connection events between runs, at most %d at once; want 2 runs, one at a time", got, most)
 	}
@@ -322,10 +337,14 @@ func TestAFailedRunOfTheReconnectHooksRunsAgainWithoutAnotherConnectionEvent(t *
 		t.Fatalf("connect: %v", err)
 	}
 	defer client.Close()
-	ran := make(chan *natsgo.Conn, 8)
+	type hookRun struct {
+		conn      *natsgo.Conn
+		goroutine uint64
+	}
+	ran := make(chan hookRun, 8)
 	var runs atomic.Int32
 	client.AddReconnectHook(func(conn *natsgo.Conn) error {
-		ran <- conn
+		ran <- hookRun{conn: conn, goroutine: goroutinetest.ID()}
 		if runs.Add(1) == 1 {
 			return errors.New("the first run fails")
 		}
@@ -335,23 +354,30 @@ func TestAFailedRunOfTheReconnectHooksRunsAgainWithoutAnotherConnectionEvent(t *
 	if err := client.Conn.ForceReconnect(); err != nil {
 		t.Fatalf("reconnect in place: %v", err)
 	}
+	var recoveryGoroutine uint64
 	for run := 1; run <= 2; run++ {
 		select {
-		case conn := <-ran:
-			if conn != client.Conn {
+		case got := <-ran:
+			if got.conn != client.Conn {
 				t.Fatalf("run %d of the reconnect hooks was on a connection the client no longer has", run)
+			}
+			if run == 2 {
+				recoveryGoroutine = got.goroutine
 			}
 		case <-time.After(15 * time.Second):
 			t.Fatalf("the reconnect hooks ran %d time(s) after an in-place reconnect whose first run failed; want them run again", run-1)
 		}
 	}
-	// The run that succeeded covers the reconnect, so nothing runs the hooks again.
-	time.Sleep(2500 * time.Millisecond)
-	if extra := len(ran); extra != 0 {
-		t.Fatalf("the reconnect hooks ran %d more time(s) after a run succeeded", extra)
-	}
 	if reconnects := client.Conn.Stats().Reconnects; reconnects != 1 {
 		t.Fatalf("the connection reconnected %d time(s); want the one in-place reconnect, so no other connection event ran the hooks", reconnects)
+	}
+	// The run that succeeded covers the reconnect. It ran on the goroutine of the recovery the failed
+	// run started, the one thing besides a connection event that runs the hooks, and that recovery
+	// looks once more for hooks due after it clears its flag; once its goroutine has returned, every
+	// chance to run them again has passed.
+	waitFor(t, 15*time.Second, "the recovery that ran the hooks again to end", func() bool { return !goroutinetest.Live(recoveryGoroutine) })
+	if extra := len(ran); extra != 0 {
+		t.Fatalf("the reconnect hooks ran %d more time(s) after a run succeeded", extra)
 	}
 }
 
@@ -512,11 +538,20 @@ func waitOutHeldDurable(t *testing.T, client *bus.Client, uri string) {
 	if _, err := holderJS.Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck()); err != nil {
 		t.Fatalf("bind the durable as the other task: %v", err)
 	}
-	if err := holderConn.Flush(); err != nil {
-		t.Fatalf("flush the holder: %v", err)
-	}
-	if _, err := client.Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck()); err == nil {
+	// The holder's bind returns before the server has read its SUB, and a Flush proves only that it
+	// has: nats-server applies the new interest on the consumer's own goroutine afterwards
+	// (updateDeliveryInterest), so until the consumer reports itself push-bound, the consumer info a
+	// second bind reads says it is free, and that bind succeeds.
+	waitFor(t, 10*time.Second, "the durable to be push-bound to the other task", func() bool {
+		info, err := holderJS.ConsumerInfo(bus.Stream, consumer)
+		return err == nil && info.PushBound
+	})
+	_, err = client.Subscribe("", func(msg *natsgo.Msg) { _ = msg.Ack() }, natsgo.Bind(bus.Stream, consumer), natsgo.ManualAck())
+	if err == nil {
 		t.Fatal("bound a durable another connection holds")
+	}
+	if !strings.Contains(err.Error(), "consumer is already bound") {
+		t.Fatalf("the bind of a durable another connection holds failed for another reason: %v", err)
 	}
 }
 

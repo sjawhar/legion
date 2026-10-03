@@ -23,7 +23,10 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-const maxArtifactBlobSize = 25 << 20
+const (
+	maxArtifactBlobSize      = 25 << 20
+	maxDocumentMarkdownBytes = int(maxJSONRequestBytes) // A Markdown document; maxJSONRequestBytes bounds an issue's spec and every edit the same way (LEGION-465).
+)
 
 func (s *server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -115,7 +118,12 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 		writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "invalid artifact content type")
 		return
 	}
-	s.storeArtifact(w, r, input, actor, artifactKind(mediaType), target)
+	kind := artifactKind(mediaType)
+	if kind == "doc" && len(input.content) > maxDocumentMarkdownBytes {
+		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "a markdown document is at most 1 MiB; a larger file is stored as a binary artifact under another content type")
+		return
+	}
+	s.storeArtifact(w, r, input, actor, kind, target)
 }
 
 func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (artifactUploadInput, bool) {
@@ -826,8 +834,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		// Which operations the live document did not hold once this write reached it: a
 		// concurrent change that landed after the version was rendered and before the publish is
 		// past undoing, so the edit reports it rather than refusing (LEGION-269). null means the
-		// check reached no verdict - the publish failed and the room is reloading - which is not
-		// the same statement as the empty list.
+		// check reached no verdict - the publish failed and the room is reloading, or the room
+		// holds a tree too deep to read - which is not the same statement as the empty list.
 		"lost_ops": lostOps(ledger, artifact.ID),
 		"token":    edit.Token,
 	}, advice))

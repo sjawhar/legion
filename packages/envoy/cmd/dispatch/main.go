@@ -277,6 +277,9 @@ func main() {
 			Docs:      documentService,
 		})
 	}
+	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
+	// anyone opening its document.
+	go documentService.RunSettlementResumption(ctx)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -345,9 +348,10 @@ func defaultDataDir() (string, error) {
 // binary. The binary lives at packages/envoy/dispatch (when built locally) or
 // is installed elsewhere; we walk up to find packages/dispatch/web/dist.
 func defaultWebDistDir() (string, error) {
-	// First try $DISPATCH_WEB_DIST.
+	// First try $DISPATCH_WEB_DIST, made absolute and clean like every path below, so a value
+	// spelled through `..` names the same directory the static handler joins requests under.
 	if env := os.Getenv("DISPATCH_WEB_DIST"); env != "" {
-		return env, nil
+		return filepath.Abs(env)
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -780,6 +784,13 @@ var subcommands = []subcommand{
 	}},
 	{"census", func(ctx context.Context, _ []string, getenv func(string) string, stdout, stderr io.Writer) int {
 		return census(ctx, getenv("DATABASE_URL"), stdout, stderr)
+	}},
+	{"routes", func(_ context.Context, _ []string, _ func(string) string, stdout, stderr io.Writer) int {
+		if err := api.WriteRouteIndex(stdout); err != nil {
+			fmt.Fprintf(stderr, "routes: %v\n", err)
+			return 1
+		}
+		return 0
 	}},
 }
 

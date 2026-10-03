@@ -161,7 +161,6 @@ export function reply(seq: number, author: "human" | "agent"): ApprovalHistoryEv
       anchor: null,
       reply_to: null,
       ask_id: ASK,
-      waiting_on: turn,
       turn,
       resolved: false,
       resolved_by: null,

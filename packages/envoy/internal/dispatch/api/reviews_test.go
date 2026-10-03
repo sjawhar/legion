@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,7 @@ type approvalRead struct {
 		Version       *int    `json:"version"`
 		Reason        *string `json:"reason"`
 		AskID         *string `json:"ask_id"`
+		WaitingOn     string  `json:"waiting_on"`
 		By            *struct {
 			ID string `json:"id"`
 		} `json:"by"`
@@ -195,8 +198,10 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 	}
 }
 
-// An approval request's question carries the requester's summary of what the version proposes,
-// within the ask cap. A repeat with a new summary rewords the existing row and never opens another.
+// An approval request's question carries the requester's summary of what the human is approving,
+// within the ask cap at every version the request can reach. While the request waits on the human,
+// a repeat with a different summary is refused and changes nothing, so the card the human is
+// reading keeps its question and revision and an answer started from it is saved.
 func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -242,16 +247,17 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 			t.Fatalf("summary %q: status=%d body=%s", blank, refused.Code, refused.Body.String())
 		}
 	}
-	// "Approve spec.md (version 1)? " leaves 771 of the 800 UTF-16 units for the summary; each
-	// "é" is one unit and two bytes, and the padding around a summary is not part of it.
-	over := strings.Repeat("é", 772)
-	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(refused.Body.String(), "summary is 1 characters over the 771-character limit (772/771)") {
+	// "Approve spec.md (version 9999999999)? ", the prefix at the longest version a request can
+	// reach, leaves 762 of the 800 UTF-16 units for the summary; each "é" is one unit and two bytes,
+	// and the padding around a summary is not part of it.
+	over := strings.Repeat("é", 763)
+	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(refused.Body.String(), "summary is 1 characters over the 762-character limit (763/762)") {
 		t.Fatalf("summary over the cap: status=%d body=%s", refused.Code, refused.Body.String())
 	}
 	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State != "draft" {
 		t.Fatalf("approval after refused requests = %#v, want draft with nothing opened", got.Approval)
 	}
-	atCap := strings.Repeat("é", 771)
+	atCap := strings.Repeat("é", 762)
 	padded := "  " + atCap + "\n"
 	first := request(issue.PrimaryArtifactID, &padded)
 	if first.Code != http.StatusCreated {
@@ -262,31 +268,126 @@ func TestApprovalRequestSummaryAndARepeatWithANewSummary(t *testing.T) {
 		t.Fatalf("summarised approval ask = %#v", opened)
 	}
 
-	// A repeat at the same version rewords the one open request with its new summary.
+	// The request waits on the human, so a different summary would rewrite the card they are
+	// reading: it is refused, and the card keeps its question and its revision.
 	other := "A different summary."
-	repeat := request(issue.PrimaryArtifactID, &other)
-	if repeat.Code != http.StatusCreated {
-		t.Fatalf("repeat at the same version: status=%d body=%s", repeat.Code, repeat.Body.String())
+	reworded := request(issue.PrimaryArtifactID, &other)
+	if reworded.Code != http.StatusConflict || !strings.Contains(reworded.Body.String(), `"code":"APPROVAL_WAITS_ON_HUMAN"`) || !strings.Contains(reworded.Body.String(), "a different summary would rewrite the card they are reading") {
+		t.Fatalf("a different summary while the request waits on the human: status=%d body=%s", reworded.Code, reworded.Body.String())
 	}
-	updated := decodeBody[requestResponse](t, repeat).Ask
-	if updated.ID != opened.ID || updated.Question != "Approve spec.md (version 1)? "+other || updated.Approval.RequestedVersion != 1 {
-		t.Fatalf("repeat at the same version = %#v, want ask %s updated with the new summary", updated, opened.ID)
+	if shown := readAskDetail(t, handler, opened.ID); shown.Question != opened.Question || shown.EditedAt != nil || shown.WaitingOn != "human" {
+		t.Fatalf("ask after a refused rewording = %#v, want %q unedited and waiting on the human", shown, opened.Question)
 	}
+	if counts := askEventCounts(t, handler, issue.Key, opened.ID); counts["ask.opened"] != 1 || counts["ask.edited"] != 0 || counts["ask.handed_back"] != 0 {
+		t.Fatalf("ask events after a refused rewording = %#v, want the opening alone", counts)
+	}
+	// The cap is checked before the turn, as on every request.
 	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) {
 		t.Fatalf("summary over the cap on a repeat at the same version: status=%d body=%s", refused.Code, refused.Body.String())
 	}
 
-	// Once the latest version is approved a request opens nothing, and its summary is still checked.
-	if approved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+updated.ID+"/answer", map[string]any{
-		"selected": []string{"Approve"}, "expected_edited_at": updated.EditedAt,
+	// The human answers from the card as they loaded it before the refused repeat, and it is saved.
+	if approved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+opened.ID+"/answer", map[string]any{
+		"selected": []string{"Approve"}, "expected_edited_at": opened.EditedAt,
 	}, "alice"); approved.Code != http.StatusOK {
-		t.Fatalf("approve version 1: status=%d body=%s", approved.Code, approved.Body.String())
+		t.Fatalf("approve version 1 from the card shown before the repeat: status=%d body=%s", approved.Code, approved.Body.String())
 	}
+
+	// Once the latest version is approved a request opens nothing, and its summary is still checked.
 	if refused := request(issue.PrimaryArtifactID, &over); refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) {
 		t.Fatalf("summary over the cap on an approved document: status=%d body=%s", refused.Code, refused.Body.String())
 	}
 	if satisfied := request(issue.PrimaryArtifactID, &other); satisfied.Code != http.StatusOK || !strings.Contains(satisfied.Body.String(), `"ask":null`) || !strings.Contains(satisfied.Body.String(), `"state":"approved"`) {
 		t.Fatalf("request on an approved document: status=%d body=%s", satisfied.Code, satisfied.Body.String())
+	}
+}
+
+// A version move rebuilds an approval request's question at the document's new version without
+// asking again, so the summary is budgeted against the longest version a request can reach: the
+// longest summary the route accepts keeps the question within the ask cap however many digits the
+// version gains, and that budget is the tightest that does.
+func TestTheLongestAcceptedSummaryFitsTheCapAtEveryVersion(t *testing.T) {
+	for _, name := range []string{"spec.md", "a", strings.Repeat("n", 100)} {
+		for _, requested := range []int{1, 9, 12345} {
+			limit := 0
+			for length := 1; length <= maxAskQuestion16; length++ {
+				if _, err := approvalQuestion(name, requested, strings.Repeat("é", length)); err != nil {
+					break
+				}
+				limit = length
+			}
+			summary := strings.Repeat("é", limit)
+			if _, err := approvalQuestion(name, requested, summary+"é"); err == nil || !strings.Contains(err.Error(), "summary is 1 characters over") {
+				t.Fatalf("%s at version %d: one past the %d-unit limit = %v, want CAP_EXCEEDED", name, requested, limit, err)
+			}
+			// A move to the first version of each digit count, then to the longest of all.
+			for boundary := 9; boundary < maxApprovalVersion; boundary = boundary*10 + 9 {
+				if length := len16(docs.ApprovalQuestion(name, boundary+1, summary)); length > maxAskQuestion16 {
+					t.Fatalf("%s requested at version %d, moved to %d: question is %d units, past the %d cap", name, requested, boundary+1, length, maxAskQuestion16)
+				}
+			}
+			if length := len16(docs.ApprovalQuestion(name, maxApprovalVersion, summary)); length != maxAskQuestion16 {
+				t.Fatalf("%s requested at version %d, moved to the longest version: question is %d units, want exactly the %d cap", name, requested, length, maxAskQuestion16)
+			}
+		}
+	}
+}
+
+// The longest summary the route accepts at version 1 still fits the ask cap once a version move
+// rebuilds the question at version 10, whose number is one character longer.
+func TestAVersionMoveKeepsTheLongestAcceptedSummaryWithinTheAskCap(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Long summary", "A spec")
+	request := func(summary string) *httptest.ResponseRecorder {
+		return sessionRequest(t, handler, http.MethodPost,
+			"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
+			map[string]any{"actor": sessionActor(), "summary": summary})
+	}
+	refused := request(strings.Repeat("é", maxAskQuestion16))
+	match := regexp.MustCompile(`the (\d+)-character limit`).FindStringSubmatch(refused.Body.String())
+	if refused.Code != http.StatusBadRequest || match == nil {
+		t.Fatalf("summary past the cap: status=%d body=%s, want CAP_EXCEEDED naming the limit", refused.Code, refused.Body.String())
+	}
+	limit, err := strconv.Atoi(match[1])
+	if err != nil {
+		t.Fatalf("parse the summary limit %q: %v", match[1], err)
+	}
+	summary := strings.Repeat("é", limit)
+	requested := request(summary)
+	if requested.Code != http.StatusCreated {
+		t.Fatalf("request approval with the longest summary: status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	askID := decodeBody[struct {
+		Ask struct {
+			ID string `json:"id"`
+		} `json:"ask"`
+	}](t, requested).Ask.ID
+	// Versions 2 to 9 are written directly, so the next version a route writes is the first with
+	// two digits.
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into artifact_versions (artifact_id, number, markdown, authors)
+		select v.artifact_id, n, v.markdown, '[]'
+		from artifact_versions v, generate_series(2, 9) n
+		where v.artifact_id = $1 and v.number = 1
+	`, issue.PrimaryArtifactID); err != nil {
+		t.Fatalf("write versions 2 to 9: %v", err)
+	}
+	if named := dispatchRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
+		map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
+		t.Fatalf("name version 10: status=%d body=%s", named.Code, named.Body.String())
+	}
+	moved := readAskDetail(t, handler, askID)
+	if moved.Question != "Approve spec.md (version 10)? "+summary {
+		t.Fatalf("moved question = %q, want version 10 with the summary unchanged", moved.Question)
+	}
+	if length := len16(moved.Question); length > maxAskQuestion16 {
+		t.Fatalf("moved question is %d units, past the %d-unit ask cap", length, maxAskQuestion16)
 	}
 }
 

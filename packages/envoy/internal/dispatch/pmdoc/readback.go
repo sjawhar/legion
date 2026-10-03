@@ -39,7 +39,8 @@ func readBack(doc *Node, spanCells int) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ParseRendering(r.b.String())
+	back, err := ParseRendering(r.b.String())
+	return back, renderedNesting(doc, err)
 }
 
 // NewMisread names how after, which a write made from before, reads back otherwise where before

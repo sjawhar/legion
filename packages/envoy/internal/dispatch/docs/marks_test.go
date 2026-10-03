@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -374,15 +375,26 @@ func TestVersionWriteRefreshesAnchorsByMark(t *testing.T) {
 	}
 }
 
+// An unrecorded comment mark - one no comment, ask or suggestion row records - stays until the
+// first settlement that saw it is UnrecordedMarkTTL old, and the first settlement after that
+// sweeps it; a recorded mark, resolved or not, and a proof-authored mark stay. The sweep ages
+// marks by the service's clock, which the test holds and moves, so a mark's age is what the test
+// sets and never how long a loaded runner took. The sweep re-arms settlement for the mark's
+// remaining TTL in real time; any such settlement reads the held clock and cannot change the
+// result this test asserts.
 func TestSettleSweepsUnrecordedMarksAfterTTL(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "")
+	const ttl = time.Minute
 	service := New(Deps{
 		Store:             database,
 		Events:            events.NewBroker(),
-		Settle:            20 * time.Millisecond,
-		UnrecordedMarkTTL: 200 * time.Millisecond,
+		Settle:            time.Hour,
+		UnrecordedMarkTTL: ttl,
 	})
+	started := time.Now()
+	var aged atomic.Int64
+	service.now = func() time.Time { return started.Add(time.Duration(aged.Load())) }
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	seedServiceText(t, service, artifactID, "The quick brown fox")
 	browserMark(t, service, artifactID, "proofComment", "dangling", "quick")
@@ -391,15 +403,22 @@ func TestSettleSweepsUnrecordedMarksAfterTTL(t *testing.T) {
 	if _, err := database.Pool.Exec(context.Background(), `update comments set resolved = true where id = $1`, resolvedCommentID); err != nil {
 		t.Fatalf("resolve recorded comment: %v", err)
 	}
+	dangling := func() bool {
+		_, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "dangling")
+		return found
+	}
 
-	time.Sleep(100 * time.Millisecond)
-	if _, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "dangling"); !found {
+	settleCurrentGeneration(t, service, artifactID)
+	aged.Store(int64(ttl / 2))
+	settleCurrentGeneration(t, service, artifactID)
+	if !dangling() {
 		t.Fatal("unrecorded mark swept before its TTL")
 	}
-	waitFor(t, time.Second, "unrecorded mark removed", func() bool {
-		_, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "dangling")
-		return !found
-	})
+	aged.Store(int64(ttl))
+	settleCurrentGeneration(t, service, artifactID)
+	if dangling() {
+		t.Fatal("unrecorded mark not swept once its TTL passed")
+	}
 	if _, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofAuthored", "auth"); !found {
 		t.Fatal("proof-authored mark was swept")
 	}

@@ -1,0 +1,6 @@
+# Astro's generated types and build cache.
+.astro/
+# The Go binaries scripts/build-binaries.sh builds for the generators.
+.bin/
+# Generated reference pages: scripts/generate.ts rebuilds them on every build, so they never drift.
+src/content/docs/*/reference/

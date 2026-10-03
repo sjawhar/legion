@@ -15,6 +15,11 @@ const marksMapName = "marks"
 var ErrInvalidMarkdown = errors.New("markdown is not a Proof document")
 var ErrDocSchema = errors.New("document is outside the Proof schema")
 
+// ErrDocumentTooLarge is a document whose tree encodes to more items than one document update can
+// store (ygo's cap of 1,048,576, maxUpdateItems): more formatted spans than any real document
+// has, such as 1 MiB of `)_`, which reads as 524,288 italic spans.
+var ErrDocumentTooLarge = errors.New("document holds more formatted spans than can be stored")
+
 // parseInput parses markdown a caller writes that replaces no live document: a new document's
 // first text, or the empty text a delete splices. Text an insert or an accept writes into a
 // document is parseFragmentInput's.
@@ -76,10 +81,7 @@ func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 	}
 	tree, err := pmdoc.Read(doc.GetXmlFragment(fragmentName))
 	if err != nil {
-		if errors.Is(err, pmdoc.ErrSchema) {
-			return nil, fmt.Errorf("%w: %v", ErrDocSchema, err)
-		}
-		return nil, err
+		return nil, docSchema(err)
 	}
 	return tree, nil
 }
@@ -90,10 +92,7 @@ func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmd
 	}
 	tree, err := pmdoc.ReadInTransaction(txn, fragment)
 	if err != nil {
-		if errors.Is(err, pmdoc.ErrSchema) {
-			return nil, fmt.Errorf("%w: %v", ErrDocSchema, err)
-		}
-		return nil, err
+		return nil, docSchema(err)
 	}
 	return tree, nil
 }
@@ -101,12 +100,21 @@ func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmd
 func renderTree(tree *pmdoc.Node) (string, error) {
 	markdown, err := pmdoc.Render(tree)
 	if err != nil {
-		if errors.Is(err, pmdoc.ErrSchema) {
-			return "", fmt.Errorf("%w: %v", ErrDocSchema, err)
-		}
-		return "", err
+		return "", docSchema(err)
 	}
 	return markdown, nil
+}
+
+// docSchema is err with pmdoc's refusal of what a live document holds (pmdoc.ErrSchema) told as
+// that document outside the schema (ErrDocSchema), which the API serves as DOC_SCHEMA: neither the
+// caller's input nor an internal fault. Every read and walk of a live tree through pmdoc tells its
+// refusal this way, including a walk inside a write's transaction, which a peer can have deepened
+// past the schema's depth bound since the write read the tree.
+func docSchema(err error) error {
+	if errors.Is(err, pmdoc.ErrSchema) {
+		return fmt.Errorf("%w: %v", ErrDocSchema, err)
+	}
+	return err
 }
 
 // renderDocument is what doc renders now, or the error that stopped it being read or rendered.

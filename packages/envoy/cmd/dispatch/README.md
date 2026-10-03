@@ -245,6 +245,39 @@ it was queued behind, and the `pg_stat_activity` query that lists the holders; e
 let it finish and start the server again. A migration that needs another bound sets its own
 `SET LOCAL lock_timeout`.
 
+Migrations `0056`–`0062` make search indexing linear. Each table has its own migration, so its
+transaction holds an `ACCESS EXCLUSIVE` lock only for the `DROP EXPRESSION` and trigger setup;
+`0062` re-indexes only rows holding sixteen or more underscore-joined segments under `ROW EXCLUSIVE`.
+Their censuses answer `0` for 0056–0061, which neither refuse nor rewrite a row, and, for 0062,
+the candidate rows whose stored vector the new expression changes.
+
+Migration `0063_doc_settlements_pending` creates the table in which every durable document update
+records the settlement it owes, which the settlement deletes when it commits. A room's load and the
+server's minute-by-minute resumption arm the settlement a row names, so one a shutdown cuts short
+still runs. It creates a table and touches no row; its census answers `0`.
+
+Migrations `0064`–`0066` let an approval request follow its document's versions. `0064` backfills
+`requested_version` into every approval ask from its `version`, rebuilds `asks_approval_kind_check`
+to require it, and adds the nullable `asks.handed_back_reply_id` and an insert trigger that gives
+an older binary's approval row the same value; it locks `asks` alone. `0065` sets
+`comments.created_at`'s default to `clock_timestamp()`, so a comment is stamped when its insert
+runs, after the owner row every comment insert takes, and an ask's newest reply is the one that
+committed last; it locks `comments` alone. `0066` adds `handed_back_reply_id`'s foreign key to
+`comments`, which takes `SHARE ROW EXCLUSIVE` on both tables, as adding any foreign key does: a
+write waits behind it, a read does not. In one migration, the column's key held `asks`
+`ACCESS EXCLUSIVE` while it waited for `comments`, and a comment write that went on to read `asks`
+deadlocked with it. A comment write that goes on to write `asks` (accepting a suggestion, or an
+edit under a comment's anchor, whose version moves the approval request) can still close a cycle
+with `0066` while it waits for `comments`, and under the five-second bound either side could lose
+it: Postgres checks a waiter once, `deadlock_timeout` (1 s by default) after it starts to wait, so
+a write that closes the cycle within that second fails `0066` and one that closes it later is
+itself the victim, answered `500`. `0066` therefore sets its own `lock_timeout` of 500 ms, shorter
+than `deadlock_timeout`: it gives up first (`55P03`, nothing applied), the write finishes, and the
+next boot applies it; the cost is that a comment write holding `comments` past half a second fails
+that boot too, and so does an autovacuum of either table where `deadlock_timeout` is not shorter,
+which the census refuses (below). Every census answers `0`: 0053's check guarantees every approval
+ask a `version` to backfill from, and the other two change no row.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -318,7 +351,10 @@ census like every later one. It refuses:
   that session has waited `deadlock_timeout`, so an autovacuum passes at any age, with the grant or
   without (to a role without it, autovacuum is the holder that runs as no role), except an
   anti-wraparound vacuum, which Postgres does not cancel, or one on a server whose
-  `deadlock_timeout` is not shorter than the migration's five-second lock timeout. Postgres marks a
+  `deadlock_timeout` is not shorter than a lock timeout the migration waits under: the runner's five
+  seconds, or the one its own `SET LOCAL lock_timeout` sets, which Postgres reads in a savepoint of
+  the census's (a value it refuses there refuses the migration). `0066` sets 500 ms, so an
+  autovacuum on `asks` or `comments` refuses it at the default one second. Postgres marks a
   vacuum anti-wraparound when it launches it, in its activity, which only a role with
   `pg_read_all_stats` can read, and which Postgres records only with `track_activities` on; where
   the census cannot read it, it refuses every vacuum of a table past its freeze age
@@ -411,10 +447,15 @@ value: dashboard-URL mentions are recognised only against it, so an empty URL wo
 
 ## Search
 
-Migration 0010 adds stored generated `search` columns. Postgres computes them on every write, so
-no application code writes or refreshes the search vectors. Search covers issue titles, the latest
-settled document text, comments, asks (questions and free-text answers), and messages. Live
-document text takes up to the 2 s settle delay to appear in search results.
+Migration 0010 added stored generated `search` columns. Migrations `0057`–`0061` made them
+plain columns that a `BEFORE INSERT OR UPDATE` trigger per table fills
+(`issues_search`, `artifact_versions_search`, `comments_search`, `asks_search`,
+`messages_search`), so no application code writes or refreshes a search vector. Every indexed
+text, headline, and duplicate-title comparison first passes through `search_text` (0056), which
+puts a space after every sixteenth underscore-joined segment. A query is not normalised and is
+limited to 1,000 characters. Search covers issue titles, the latest settled document text,
+comments, asks (questions and free-text answers), and messages. Live document text takes up to
+the 2 s settle delay to appear in search results.
 
 Search snippets are escaped text with only server-inserted `<mark>` elements around matches. Native
 issue creation rejects a title that near-duplicates an existing issue in the same project with
@@ -437,7 +478,9 @@ the Postgres `postgres` database for a non-default local port.
 
 `GET /api/v1` (no credential) is the authoritative list: every mounted `/api/v1` route with its
 `method`, `path`, `auth` (`public`, `any`, `human`, or `bearer`), and `description`, sorted by path
-then method. The table below is a summary. An unknown path under `/api`, `/v1`, `/auth`, `/ws`,
+then method. `envoy-dispatch routes` prints the same body from the table alone, with no database
+or listener and never a test hook; the docs site's HTTP API reference is generated from it. The
+table below is a summary. An unknown path under `/api`, `/v1`, `/auth`, `/ws`,
 or `/healthz` is a JSON 404 `{"code":"NOT_FOUND","error":"no route for GET
 /v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell; a missing file
 under `/assets` stays `404 {"error":"not found"}`.
@@ -486,14 +529,14 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/comments/{id}/accept` | POST | cookie or trusted header | Apply and accept an anchored suggestion. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and leaves the suggestion open; one removed after it answers `200` with `lost: true`. |
 | `/api/v1/comments/{id}/reject` | POST | cookie or trusted header | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | cookie, trusted header, or bearer | Post an issue message. |
-| `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |
-| `/api/v1/projects/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |
+| `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose formatting is more items than one document update can store (1,048,576), naming the count. |
+| `/api/v1/projects/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose formatting is more items than one document update can store (1,048,576), naming the count. |
 | `/api/v1/artifacts/{id}` | GET | cookie, trusted header, or bearer | Read an artifact, its versions, and incoming references. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/text` | GET | cookie, trusted header, or bearer | Read a live document's markdown. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | cookie, trusted header, or bearer | Read a document version or download a blob. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions` | POST | cookie, trusted header, or bearer | Create a named live-document version. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/edits` | POST | cookie, trusted header, or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
-| `/api/v1/artifacts/{id}/approval-requests` | POST | cookie, trusted header, or bearer | Ask a human to approve a document's latest settled version. The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`; past the ask cap is `400 CAP_EXCEEDED` naming `summary`). One open approval row follows every document version in place, rewording its question and emitting `ask.edited`; while its `requested_version` is below the new version it waits on the agent. Calling this route again rewords that same row when the supplied summary changes its question (`ask.edited`; an omitted summary keeps its prior one), and, while the row waits on the agent - moved, or a thread reply newer than its last hand-back holds the turn - hands it back to the human: `requested_version` becomes the latest version and `ask.handed_back` is emitted, leaving `edited_at` as it was. It answers `201` when it wrote either, and `200` with no event for a repeat that finds the row waiting on the human with the same question. |
+| `/api/v1/artifacts/{id}/approval-requests` | POST | cookie, trusted header, or bearer | Ask a human to approve a document's latest settled version. The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`; past the ask cap at the longest version a request can reach, ten digits, is `400 CAP_EXCEEDED` naming `summary`). One open approval row follows every document version in place, rewording its question and emitting `ask.edited`; while its `requested_version` is below the new version it waits on the agent. Only the move that takes it from the human notifies; a later move while it already waits on the agent is `quiet: true`, `notify: false`, and reaches no follower. Calling this route again while the row waits on the agent - moved, or a thread reply newer than its last hand-back holds the turn - hands it back to the human: a summary that changes its question rewords it first (`ask.edited`; an omitted summary keeps its prior one), then `requested_version` becomes the latest version and `ask.handed_back` is emitted, leaving `edited_at` as it was. While the row waits on the human, the same summary or none is a repeat that answers `200` with no event, and a different one is `409 APPROVAL_WAITS_ON_HUMAN` and changes nothing, since it would rewrite the card the human is reading. It answers `201` when it wrote anything, with the document's `approval` as the call left it (`waiting_on` while awaiting). |
 | `/api/v1/artifacts/{id}/asks?state=` | GET, POST | cookie, trusted header, or bearer | List or create asks on an unlinked document. |
 | `/api/v1/artifacts/{id}/comments` | GET, POST | cookie, trusted header, or bearer | List or create comments and suggestions on an unlinked document. |
 | `/api/v1/artifacts/{id}/events` | GET | cookie, trusted header, or bearer | Read an unlinked document's events. |
@@ -553,8 +596,8 @@ table's width is rejected as `TABLE_WIDTH`; blank cells there are dropped.
 | `409 ANCHOR_MISSING` | A browser submitted a `mark_id` that the server did not observe in the live tree. |
 | `409 ANCHOR_ORPHANED` | An operation needs a mark whose anchored text has been deleted. |
 | `400 INVALID_ANCHOR` | An anchor must provide exactly one of a nonempty `quote` or nonempty `mark_id`, with its document artifact. |
-| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding text in a cell past its delimiter row's width, which a pipe inside code or a link that is not backslash-escaped makes. Malformed edit replacements report `INVALID_OP`. |
-| `500 DOC_SCHEMA` | The live tree contains a node or mark outside the Proof schema and cannot be rendered safely. |
+| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding text in a cell past its delimiter row's width, which a pipe inside code or a link that is not backslash-escaped makes. A Markdown document nests at most 100 blocks (quotes, lists and their items, typed blocks, and footnote definitions), and one textblock's inline markdown at most 100 marks (emphasis, strong, strikethrough, links, images, and code); deeper content is refused naming the line. An accepted suggestion whose blocks nest within that bound but land deep enough that the document would nest past it is `INVALID_OP` on `replace_with`, naming how many blocks the result nests. Malformed edit replacements report `INVALID_OP`. |
+| `500 DOC_SCHEMA` | The live tree contains a node or mark outside the Proof schema and cannot be rendered safely, such as a node more than 1,000 levels below the document or an attribute value nesting more than 100 arrays and objects. Settlement writes no version of such a tree, and its reads answer this code. The document's room stays live only while a peer holds it: once the last peer leaves, the room is evicted and every later load refuses the tree, so the document websocket's upgrade answers `500`, and edits and uploads to the document answer `DOC_SCHEMA` too. No route repairs such a document (LEGION-469). |
 
 ## Comment errors
 

@@ -4,6 +4,19 @@
 
 ### Changed
 
+- `DispatchClient.requestApproval` returns `recorded`, false when Dispatch answered 200 because the
+  open request already stood as asked, and `dispatch_request_approval` says which it was: "Approval
+  requested" when the call opened the request or handed it back (rewording it first when the
+  summary was new), and "already waits on the human, so this call changed nothing" otherwise,
+  naming what would have left it waiting on the agent (LEGION-470). A different summary while the
+  request waits on the human is Dispatch's `409 APPROVAL_WAITS_ON_HUMAN`, reported as the error it
+  is. `DispatchClient.comment` and `artifactComment` return `CommentWriteResponse`, the comment
+  plus `ask_waiting_on` on a reply to an open ask, which `dispatch_comment` reports as the ask's
+  state after the reply. Delivery accepts the new `ask.handed_back` event, whose payload is the ask.
+  A document's approval line in `dispatch_read` and `dispatch_doc_read` says whom an awaiting
+  request waits on (`Approval: awaiting, waiting on agent (…)`), so an agent whose own revision
+  moved its request, which sends it no event, reads that the request waits on it.
+  `DispatchClient.requestApproval` answers `ApprovalRequestResponse` plus `recorded`.
 - `DispatchClient.requestApproval` takes `{ actor, summary }`, and `dispatch_request_approval`
   sends `summary` and quotes the question the server returned in its result (LEGION-387).
 - `dispatch_request_approval` is refused, with no request sent, while the version it would name
@@ -25,11 +38,12 @@
   open block. An edit with no `delete` or `retype` by block id reads nothing more; one with reads
   `GET /artifacts/{id}/blocks`, and the owner's asks only when it reaches an `ask` block.
 - `dispatch_request_approval`'s result and its open-block refusal describe a request that follows
-  its document (LEGION-470): the result says a revision moves the request and waits on the agent
-  until one more call when the revision is complete, and the refusal says to open the request, or
-  to hand it back when one is already open. The stale line on `dispatch_doc_read` and the
-  already-approved result say a new request is needed when the change proposes something the human
-  has not settled, and after any change to a Legion root spec under an armed design gate.
+  its document and carries nothing new (LEGION-470): the result says a revision moves the request
+  and waits on the agent until one more call, made when the revision is complete and the human has
+  agreed to every point in it; the refusal says to open the request, or to hand it back when one
+  is already open, once the human has agreed to every point in it. The stale line on
+  `dispatch_doc_read` and the already-approved result say the same in place of "request approval
+  again" and "request again only for a new version".
 
 ### Added
 
@@ -78,6 +92,10 @@
 
 ### Fixed
 
+- `dispatch_doc_edit` given `lost_ops: null` says the live document is being reloaded or holds a
+  tree too deep to read, where it said only that it was being reloaded: a document past the
+  schema's depth bound reaches no verdict either, and a re-read answers it `DOC_SCHEMA`
+  (LEGION-465).
 - A non-2xx answer whose body is not Dispatch's `{code, error}` JSON — a gateway's or proxy's HTML
   page, an empty body, JSON of another shape — reached every `dispatch_*` tool as its raw body
   (LEGION-457). `DispatchClient` now throws it as a `DispatchGatewayError` (a

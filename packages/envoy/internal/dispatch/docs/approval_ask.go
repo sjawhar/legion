@@ -14,9 +14,9 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-// ApprovalAskAt returns the open approval ask on artifactID, or nil. The caller holds the document
-// owner's row, so it observes the same version the review and approval routes use.
-func ApprovalAskAt(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
+// OpenApprovalAsk returns the open approval ask on artifactID, locked, or nil. The caller holds the
+// document owner's row, so it observes the same version the review and approval routes use.
+func OpenApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.Ask, error) {
 	row := tx.QueryRow(ctx, `
 		select `+AskColumns+`
 		from asks a
@@ -37,9 +37,10 @@ func ApprovalAskAt(ctx context.Context, tx pgx.Tx, artifactID string) (*model.As
 
 // MoveApprovalAsk advances the document's one open approval ask to a new settled version. The
 // row and its thread stay open; requested_version records that the agent must hand it back before
-// a human sees it in Waiting on you again.
+// a human sees it in Waiting on you again. Only the move that takes the request from the human
+// wakes anyone; a later one, while it already waits on its agent, is quiet (RewriteApprovalAsk).
 func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, serverURL string) ([]model.Event, error) {
-	ask, err := ApprovalAskAt(ctx, tx, artifactID)
+	ask, err := OpenApprovalAsk(ctx, tx, artifactID)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +65,9 @@ func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 // RewriteApprovalAsk rewords one open approval row to name version with summary, indexes its new
 // question, stamps edited_at, and records its ask.edited event. A document version move and a
 // request with a new summary both reword; neither hands the request back, so requested_version
-// stays as it was.
+// stays as it was. A move of a request that already waits on its agent, requested_version below the
+// version it named, is recorded quiet (model.AskEditEventPayload.Quiet): it changes only that
+// version, so like a human's unnamed version it wakes nobody.
 func RewriteApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -80,11 +83,12 @@ func RewriteApprovalAsk(
 		Multiple: ask.Multiple,
 		Urgency:  ask.Urgency,
 	}
+	quiet := version != ask.Approval.Version && ask.Approval.RequestedVersion < ask.Approval.Version
 	ask.Question = ApprovalQuestion(ask.Approval.Name, version, summary)
 	ask.Approval.Version = version
-	approval, err := json.Marshal(ask.Approval)
+	approval, err := EncodeApproval(ask.Approval)
 	if err != nil {
-		return model.Event{}, fmt.Errorf("encode approval ask: %w", err)
+		return model.Event{}, err
 	}
 	var editedAt time.Time
 	if err := tx.QueryRow(ctx, `
@@ -100,10 +104,11 @@ func RewriteApprovalAsk(
 	if err != nil {
 		return model.Event{}, fmt.Errorf("index approval ask: %w", err)
 	}
+	payload := model.NewAskEditEventPayload(*ask, previous, actor, changes)
+	payload.Quiet = quiet
 	event, err := broker.Append(ctx, tx, model.Event{
 		IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
-		Type: "ask.edited", Actor: actor,
-		Payload: model.NewAskEditEventPayload(*ask, previous, actor, changes),
+		Type: "ask.edited", Actor: actor, Payload: payload,
 	})
 	if err != nil {
 		return model.Event{}, fmt.Errorf("append approval ask edit: %w", err)
@@ -112,6 +117,15 @@ func RewriteApprovalAsk(
 		return model.Event{}, fmt.Errorf("stamp approval ask references: %w", err)
 	}
 	return event, nil
+}
+
+// EncodeApproval is an approval ask's approval as asks.approval stores it.
+func EncodeApproval(approval *model.AskApproval) ([]byte, error) {
+	encoded, err := json.Marshal(approval)
+	if err != nil {
+		return nil, fmt.Errorf("encode approval ask: %w", err)
+	}
+	return encoded, nil
 }
 
 // ApprovalQuestion renders the server-owned question prefix with its optional summary.

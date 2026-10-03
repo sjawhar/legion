@@ -103,7 +103,7 @@ dispatch_doc_edit({ issue: "<root issue>", ... })   // extend the primary docume
 // then settle its decision blocks (below)
 result = dispatch_request_approval({
   issue: "<root issue>",                             // the primary document by default
-  summary: "<what the tree will do that the human hasn't already agreed to>",
+  summary: "<what the human is approving>",
 })
 legion({
   op: "register_gate",
@@ -116,8 +116,10 @@ legion({
 The decision blocks come first: settle every one as
 [Approval of a spec](../dispatch/SKILL.md#approval-of-a-spec) says before you request approval;
 `dispatch_request_approval` refuses while one is open. Each answer reaches you, since you follow
-every ask you open. `summary` says in one to three sentences what the tree will do that the human
-hasn't already agreed to.
+every ask you open. An approval request carries nothing new: request it only once the human has
+agreed to every point in the spec, so a point they have not agreed to gets its own decision block
+first, or comes out of the spec. `summary` says in one to three sentences what the human is
+approving and nothing else: no commentary and no open question.
 
 `dispatch_request_approval` opens a system question on the document with the fixed options
 `Approve` and `Request changes`; a human answers it from the Inbox or approves from the
@@ -131,32 +133,35 @@ nothing, followed by the question the human's Inbox shows, and its `details.arti
 name you passed in (`spec`, `spec.md`): the daemon recognizes the document's approval events by
 that id, and both the `legion` tool and the daemon refuse a value that is not a UUID. A further
 call hands the request back to the human's Inbox only while it waits on you (a new version moved
-it, or the human replied in its thread); while it already waits on the human, the call rewords it
-or changes nothing. So call it once per revision, when the revision is complete;
+it, or the human replied in its thread); while it already waits on the human, the same `summary`
+changes nothing and a different one is refused. So call it once per revision, when the revision
+is complete and the human has agreed to every point in it;
 [Approval requests](../dispatch/references/documents.md#approval-requests) says how the request
-follows the document. If its text instead reads "spec.md (document id <UUID>) is already
-approved at version <N>" — a human approved from the document header before you asked — still call
-`register_gate` with that id and version: the daemon reads the approval from Dispatch as it
-registers, opens the gate, and delivers `design-approved` at once. The same read covers a human
-who answers the question between your `dispatch_request_approval` and `register_gate` calls, so
-an approval is never lost to timing; you never approve anything yourself.
+follows the document and whom it waits on. If its text instead reads "spec.md (document id
+<UUID>) is already approved at version <N>" — a human approved from the document header before
+you asked — still call `register_gate` with that id and version: the daemon reads the approval
+from Dispatch as it registers, opens the gate, and delivers `design-approved` at once. The same
+read covers a human who answers the question between your `dispatch_request_approval` and
+`register_gate` calls, so an approval is never lost to timing; you never approve anything
+yourself.
 
 Then park. Do not release a wave or spawn a Legion role until a later delivered wake shows
 `design-approved` on the root. On `design-changes-requested`, reply in the request's thread,
-revise the spec, put any decision the human must make in a decision block, and request approval
-again once with a `summary` of what the revision proposes: the answer closed the last request, so
-this call opens a new one. Approval is pinned to the spec version: editing the root spec after
-approval closes the gate again with no wake (you made the edit, or the `artifact.version` event on
-your issue tells you), and under the Go daemon every merger's `READY` in the tree is refused until a
-human approves the latest version. A decision block is such an edit. Write one into an approved
-root spec only for a decision the human must make, whether you found it or a worker escalated it,
-knowing it closes the gate; once its answer is folded into the text, request approval again with a
-`summary`, since the approval answered the last request and no request is open to follow the edit.
-Release no new wave and spawn no new role until the next `design-approved` arrives — work already
-in flight continues. Later waves, re-scopes, and integration-failure children that leave the root
-spec untouched need no new approval, and a child issue's spec is never gated: the root approval
-covers the tree. A sub-architect writes a decision about its own child into that child's spec and
-sends one about the root design to the architect above it with `envoy_publish`.
+revise the spec, put any decision the human must make in a decision block, and once the human has
+agreed to every point in the revision, request approval again once: the answer closed the last
+request, so this call opens a new one. Approval is pinned to the spec version: editing the root
+spec after approval closes the gate again with no wake (you made the edit, or the
+`artifact.version` event on your issue tells you), and under the Go daemon every merger's `READY`
+in the tree is refused until a human approves the latest version. A decision block is such an
+edit. Write one into an approved root spec only for a decision the human must make, whether you
+found it or a worker escalated it, knowing it closes the gate; once its answer is folded into the
+text, request approval again, since the approval answered the last request and no request is open
+to follow the edit. Release no new wave and spawn no new role until the next `design-approved`
+arrives — work already in flight continues. Later waves, re-scopes, and integration-failure
+children that leave the root spec untouched need no new approval, and a child issue's spec is
+never gated: the root approval covers the tree. A sub-architect writes a decision about its own
+child into that child's spec and sends one about the root design to the architect above it with
+`envoy_publish`.
 
 ## 2. Children in flight
 
@@ -272,8 +277,9 @@ Preserve this order exactly:
    task. It drives the changed path in production through the user's own access path and records
    what it saw on the pull request and on this issue. Close only after the implementer's production
    report exists. A defect it finds is a corrective child issue of this tree, not a note on a
-   closed one; a deploy the implementer cannot perform is its `dispatch_ask` naming that deploy,
-   with options for its outcomes, and the issue waits for it.
+   closed one; if the implementer cannot perform the deploy, it opens a `dispatch_ask` that starts
+   with the production gap and why it matters, then names the required step, its risk, and
+   outcome-named options. The issue waits for that answer.
 
 What returns the tree to review: a changed diff — a commit above the approved head that
 touches anything outside `docs/solutions/`, or a conflict-resolution merge whose fingerprint
@@ -329,7 +335,7 @@ active phase worker.
 | `children-complete` | Execute steps 3–4: parent integration verification; failures become a new child wave, success advances to review and retro. |
 | `child-reopened` | Treat the completion edge as reset. Reassess the reopened child and return the tree to children-in-flight; do not continue an already-started end-game. |
 | `design-approved` | Payload `{type:"design-approved"}`. A human approved the root spec document at its current version; the gate is open. Proceed to section 2. |
-| `design-changes-requested` | Payload `{type:"design-changes-requested", version, reason, author?}`. A human asked for changes to the root spec at `version`, for `reason`. Reply in the request's thread, revise the spec, put any decision the human must make in a decision block, and request approval again once with a `summary` of what the revision proposes (the answer closed the last request, so this opens a new one); the gate is closed. |
+| `design-changes-requested` | Payload `{type:"design-changes-requested", version, reason, author?}`. A human asked for changes to the root spec at `version`, for `reason`. Reply in the request's thread, revise the spec, put any decision the human must make in a decision block, and once the human has agreed to every point in the revision, request approval again once (the answer closed the last request, so this opens a new one); the gate is closed. |
 | `phase-complete` | Payload `{type:"phase-complete", issue, role, summary}`. May arrive live or via `catchup-overseer`'s `phaseCompletions`. Read the committed handoff for that phase, then spawn the next phase's owner, or `spawn_worker` on the same role again to resume it with corrections if the handoff shows unresolved gaps. A `reviewer` completion whose GitHub review is `CHANGES_REQUESTED` (the daemon returns the issue's Dispatch status to `in_progress` for this, on the reviewer's completion and again when you spawn the corrective implementer unless the daemon already knows the issue is `in_progress`) means `spawn_worker` the **implementer** again with the review findings — thread URLs and blocking items — as its task, then route back through tester and reviewer in order; never `spawn_worker` the reviewer directly off this wake and never proceed to retro on this verdict. A reviewer completion with an `APPROVED` review proceeds to retro (step 5). A `reviewer` completion after a conflict-forced rebase whose review body names an unchanged fingerprint is a confirmation, not a round: if retro already completed, `spawn_worker` the merger; otherwise resume the step you were on. An `implementer` completion that follows the merge is its production report: read the record on the pull request and the issue, then run step 7 — the issue is already at `retro`, the daemon writes no status for this completion, and you set `done` yourself. A `tester` completion whose handoff carries `implementerProof.verdict: "rejected"`, or a failure naming the production-like proof, goes back to the **implementer** with that finding — never forward to the reviewer, and never by supplying the proof from another role. A worker that reports no surface reaches the changed path gets a child issue in this tree (infrastructure, tooling, or a skill) and a resume once it lands; that report is never a reason to advance the phase. |
 | `worker-queued` | Payload `{type:"worker-queued", issue, role}`. This role's task is queued for promotion — either the deployment's worker cap is full, or the live worker acknowledged the task without starting a turn and the daemon is retrying it (counted; the worker is replaced after three such failures, still with the same task). Do not respawn or retry — wait for `worker-started`. `legion state` shows the queue (`workerAdmission.queue`: role token, issue, role, kind, and the time the task was first queued — never the task text); read it before re-sending. A `spawn_worker` identical to the queued task changes nothing and is not announced again. Different text replaces the queued task silently in the same FIFO slot and retains its original queue time. A `spawn_worker` that fails with "got no response in 3 attempts" was already retried by the plugin under one request id and may still have reached the daemon: read the queue and the role's claim in `legion state` before sending it again. |
 | `worker-started` | Payload `{type:"worker-started", issue, role}`. A previously queued role has been promoted and is now running. Treat it exactly as a normal spawn: resume tracking that role's live session. |

@@ -187,7 +187,11 @@ func holdsAContainerTheBrowserDrops(doc *Node) bool {
 // kept two ways: as the browser editor's parser compares labels (footnoteLabelKey), since it
 // matches a reference to its definition whatever the case, and lowercased, as this renderer
 // compared them before it did, since text escaped then must be escaped still.
-type footnoteLabelSet struct{ keys, lowered map[string]bool }
+type footnoteLabelSet struct {
+	keys, lowered    map[string]bool
+	longestRuneCount int
+	hasBracket       bool
+}
 
 // refersTo reports whether text shaped like a reference with label is escaped: it would read as a
 // reference to a defined label, or this renderer escaped it when it lowercased labels. An escape
@@ -204,6 +208,12 @@ func definedFootnoteLabels(doc *Node) footnoteLabelSet {
 			if label, ok := node.Attrs["label"].(string); ok {
 				labels.keys[footnoteLabelKey(label)] = true
 				labels.lowered[strings.ToLower(label)] = true
+				runeCount := 0
+				for range label {
+					runeCount++
+				}
+				labels.longestRuneCount = max(labels.longestRuneCount, runeCount)
+				labels.hasBracket = labels.hasBracket || strings.Contains(label, "[")
 			}
 		}
 		for _, child := range node.Children {
@@ -860,21 +870,35 @@ func writtenLineBreaks(nodes []*Node) []*Node {
 		}
 		out = append(out, &Node{Type: "text", Text: text, Marks: marks})
 	}
+	onlyWhitespaceAfter := make([]bool, len(nodes))
+	whitespace := true
+	for index := len(nodes) - 1; index >= 0; index-- {
+		onlyWhitespaceAfter[index] = whitespace
+		node := nodes[index]
+		whitespace = whitespace && node.Type == "text" && strings.TrimSpace(node.Text) == ""
+	}
 	for index, node := range nodes {
 		switch {
 		case node.Type == "hardbreak" && node.Attrs["isInline"] == true:
 			appendText(" ", nil)
 		case node.Type == "text" && !nodeHasMark(node, "inlineCode") && strings.Contains(node.Text, "\n"):
-			lines := strings.Split(node.Text, "\n")
-			for line, text := range lines {
-				if line > 0 {
-					if onlyWhitespaceFollows(strings.Join(lines[line:], "\n"), nodes[index+1:]) {
-						appendText("\n", node.Marks)
-					} else {
-						out = append(out, &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}})
-					}
+			value := node.Text
+			lastNonWhitespace := len(strings.TrimRightFunc(value, unicode.IsSpace))
+			lineStart := 0
+			for {
+				lineEnd := strings.IndexByte(value[lineStart:], '\n')
+				if lineEnd < 0 {
+					appendText(value[lineStart:], node.Marks)
+					break
 				}
-				appendText(text, node.Marks)
+				lineEnd += lineStart
+				appendText(value[lineStart:lineEnd], node.Marks)
+				if lastNonWhitespace <= lineEnd+1 && onlyWhitespaceAfter[index] {
+					appendText("\n", node.Marks)
+				} else {
+					out = append(out, &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}})
+				}
+				lineStart = lineEnd + 1
 			}
 		case node.Type == "text":
 			appendText(node.Text, node.Marks)
@@ -883,20 +907,6 @@ func writtenLineBreaks(nodes []*Node) []*Node {
 		}
 	}
 	return out
-}
-
-// onlyWhitespaceFollows reports whether text, and after it every one of rest, holds nothing but
-// whitespace.
-func onlyWhitespaceFollows(text string, rest []*Node) bool {
-	if strings.TrimSpace(text) != "" {
-		return false
-	}
-	for _, node := range rest {
-		if node.Type != "text" || strings.TrimSpace(node.Text) != "" {
-			return false
-		}
-	}
-	return true
 }
 
 func num(value any, fallback float64) float64 {

@@ -420,7 +420,10 @@ type ArtifactReview struct {
 // ArtifactApproval is a document's approval state as of its latest version:
 // draft (never reviewed or requested), awaiting (an approval ask is open),
 // approved (approved at the latest version), stale (approved at an older
-// version), or changes_requested (the latest review asks for changes).
+// version), or changes_requested (the latest review asks for changes). An
+// awaiting approval carries its request's WaitingOn: agent once a version moved
+// the request past the one its agent handed to the human, or a reply left it with
+// the agent; human otherwise (the ask reads' waiting_on).
 type ArtifactApproval struct {
 	State         string  `json:"state"`
 	LatestVersion int     `json:"latest_version"`
@@ -430,6 +433,7 @@ type ArtifactApproval struct {
 	Reason        *string `json:"reason,omitempty"`
 	AskID         *string `json:"ask_id,omitempty"`
 	RequestedBy   *Actor  `json:"requested_by,omitempty"`
+	WaitingOn     string  `json:"waiting_on,omitempty"`
 }
 
 // ArtifactReviewEventPayload is the payload of artifact.approved and
@@ -676,6 +680,12 @@ type AskEditEventPayload struct {
 	ReferenceChangesPayload
 	Previous AskEditPrevious `json:"previous"`
 	EditedBy Actor           `json:"edited_by"`
+	// Quiet marks a version move of an approval request that already waited on its agent: it
+	// changes only the version the request names, so like a human's unnamed artifact.version it
+	// wakes nobody (events.Broker.Notify) and reaches no follower (the outbox's follower routes),
+	// while the event log and SSE carry it as they carry every event. The move that takes the
+	// request from the human is not quiet.
+	Quiet bool `json:"quiet,omitempty"`
 }
 
 // NewAskEditEventPayload builds the payload of an `ask.edited` event.
@@ -789,11 +799,13 @@ type Comment struct {
 	AnchorPosition
 	ReplyTo *string `json:"reply_to"`
 	AskID   *string `json:"ask_id"`
-	// Turn records the reply's own turn. WaitingOn is the open ask's derived turn once this
-	// comment becomes its newest reply, so a moved approval request remains agent-owned even
-	// when the replying session's default turn would otherwise be human.
+	// Turn is set on a reply to an open ask (AskID non-nil) and names whose turn the reply hands
+	// over: "human" when the human needs to act, "agent" when the comment is a progress note and
+	// the asking agent still owes the next move. A human's reply always hands the turn to the
+	// agent. The ask's WaitingOn follows its newest reply's Turn except where an approval request
+	// overrides it (moved, or handed back after this reply). Nil on replies under a closed ask
+	// (nothing is waiting) and on every other comment.
 	Turn       *string           `json:"turn"`
-	WaitingOn  string            `json:"waiting_on,omitempty"`
 	Resolved   bool              `json:"resolved"`
 	ResolvedBy *Actor            `json:"resolved_by"`
 	ResolvedAt *string           `json:"resolved_at"`

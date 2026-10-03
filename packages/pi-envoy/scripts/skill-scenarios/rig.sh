@@ -646,7 +646,7 @@ cmd_batch() {
       index=$((index + 1))
       printf '%s %s %s %s %s\n' "$batch_scenario" "$label" "$n" "$index" "$start"
     done
-  done | xargs -P "${SKILL_SCENARIOS_PARALLEL:-5}" -L 1 bash "$here/rig.sh" run &
+  done | xargs -r -P "${SKILL_SCENARIOS_PARALLEL:-5}" -L 1 bash "$here/rig.sh" run &
   runs_pid=$!
   wait "$runs_pid"
 }

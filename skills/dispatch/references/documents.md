@@ -156,31 +156,37 @@ is refused, with nothing sent, while that version holds a decision block open, a
 names each block and its ask. An answer or a `dispatch_resolve_ask` closes the ask at once but
 reaches a version only when the document settles, about two seconds later, or with your next
 `dispatch_doc_edit`: fold the answer into the text (or, for a waiver, write the human's decision
-in) and then request. A block written in the last few seconds counts as open before Dispatch has
+in) before you request. A block written in the last few seconds counts as open before Dispatch has
 opened its ask.
 
-One request lasts until a human answers it:
+One request lasts until a human answers it, and at any moment it waits either on the human or on
+you:
 
-- A new version moves an open request to that version, and its `ask.edited` reaches you; the
-  request then waits on you. A human's reply in its thread leaves it waiting on you too; your own
-  reply there returns it to the human, unless you post it as a progress note (`turn: "agent"`) or
-  a new version moved it.
+- A new version moves an open request to that version, and the request then waits on you. Only
+  the move that takes it from the human sends its followers an event (`ask.edited`), never to the
+  session whose own version moved it; a move while it already waits on you sends nothing.
+  `dispatch_read` and `dispatch_doc_read` show whom it waits on:
+  `Approval: awaiting, waiting on agent (requested by …, ask …)`.
+- A human's reply in its thread leaves it waiting on you too; your own reply there returns it to
+  the human, unless you post it as a progress note (`turn: "agent"`) or a new version moved it.
 - While it waits on you, the next `dispatch_request_approval` hands the same row back to the
-  human's Inbox, at the latest version and with the `summary` you pass.
-- While it waits on the human, a different `summary` rewords the question in place and hands
-  nothing back, and the same `summary` writes nothing: the result says the request already waits
-  on the human, so the call changed nothing.
+  human's Inbox at the latest version (`ask.handed_back`). Make that call once the revision is
+  complete and the human has agreed to every point in it: the request carries nothing new.
+- While it waits on the human, a call hands nothing back. The same `summary`, or none, writes
+  nothing, and the result says the request already waits on the human, so the call changed
+  nothing. A different `summary` is refused (`APPROVAL_WAITS_ON_HUMAN`), since it would rewrite
+  the card the human is reading: raise what changed with the human first, in the request's thread
+  or as a decision block.
 - `Approve` and `Request changes` each close the request. The answer reaches you as
   `artifact.approved` or `artifact.changes_requested` with the pinned `version`;
   `changes_requested` carries the reason, which is your next piece of work. After either answer
   there is no request to hand back: the next call opens a new one at the latest version.
 - A call while the latest version is approved opens nothing and says so.
 
-`dispatch_read` and `dispatch_doc_read` show the document's approval state; `stale` means it was
-approved and then edited. A stale approval needs a new request only when the change proposes
-something the human has not settled, except on a Legion root spec under an armed design gate:
-there any later version closes the gate for the whole tree until a human approves it, so the root
-architect requests approval again once the revision is complete (`skill://legion-architect`).
+`stale` on `dispatch_read` and `dispatch_doc_read` means the document was approved and then
+edited: request approval again once that revision is complete and the human has agreed to every
+point in it. On a Legion root spec under an armed design gate, any later version closes the gate
+for the whole tree until a human approves it (`skill://legion-architect`).
 
 ## A document that is reloading
 

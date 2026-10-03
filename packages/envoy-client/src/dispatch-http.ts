@@ -3,9 +3,9 @@ import type {
   Actor,
   Advised,
   Agent,
+  ApprovalRequestResponse,
   ArchitectureSource,
   Artifact,
-  ArtifactApproval,
   ArtifactBlock,
   ArtifactReferences,
   ArtifactText,
@@ -15,6 +15,7 @@ import type {
   AskRead,
   Comment,
   CommentRead,
+  CommentWriteResponse,
   CreateArtifactInput,
   CreateAskInput,
   CreateCommentInput,
@@ -497,19 +498,12 @@ export class DispatchClient {
   async requestApproval(
     artifactID: string,
     input: { actor: Actor; summary: string }
-  ): Promise<{
-    ask: Ask | null;
-    artifact_id: string;
-    version: number;
-    approval: ArtifactApproval;
-    recorded: boolean;
-  }> {
-    const answer = await this.#jsonAnswer<{
-      ask: Ask | null;
-      artifact_id: string;
-      version: number;
-      approval: ArtifactApproval;
-    }>("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
+  ): Promise<ApprovalRequestResponse & { recorded: boolean }> {
+    const answer = await this.#jsonAnswer<ApprovalRequestResponse>(
+      "POST",
+      ["api", "v1", "artifacts", artifactID, "approval-requests"],
+      input
+    );
     return { ...answer.payload, recorded: answer.status === 201 };
   }
 
@@ -517,7 +511,7 @@ export class DispatchClient {
     return this.#json("PATCH", ["api", "v1", "asks", id], input);
   }
 
-  async comment(issue: string, input: CreateCommentInput): Promise<Advised<Comment>> {
+  async comment(issue: string, input: CreateCommentInput): Promise<Advised<CommentWriteResponse>> {
     return this.#json(
       "POST",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"],
@@ -570,7 +564,10 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "artifacts", id, "comments"]);
   }
 
-  async artifactComment(id: string, input: CreateCommentInput): Promise<Advised<Comment>> {
+  async artifactComment(
+    id: string,
+    input: CreateCommentInput
+  ): Promise<Advised<CommentWriteResponse>> {
     return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], input);
   }
 

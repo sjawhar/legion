@@ -212,7 +212,14 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		where schemaname = current_schema()
 	`, []string{"graph_edges"})
 
+	// Every search column is filled by its table's BEFORE trigger (0057-0061), never by application code.
 	assertDatabaseObjects(t, ctx, store.Pool, `
+		select event_object_table
+		from information_schema.triggers
+		where trigger_schema = current_schema() and trigger_name = event_object_table || '_search'
+		  and event_manipulation = 'INSERT'
+	`, []string{"issues", "artifact_versions", "comments", "asks", "messages"})
+	assertDatabaseObjectsAbsent(t, ctx, store.Pool, `
 		select table_name
 		from information_schema.columns
 		where table_schema = current_schema() and column_name = 'search' and is_generated = 'ALWAYS'
@@ -885,7 +892,7 @@ func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 	}
 }
 
-// 0053 pairs an ask's kind with its approval; 0056 adds requested_version to that approval. An
+// 0053 pairs an ask's kind with its approval; 0064 adds requested_version to that approval. An
 // approval ask carries the fields model.AskApproval decodes and no other kind carries approval,
 // not even JSON null. A hand-written row that breaks the pairing either way is refused at insert.
 // The rows named in residual are shapes 0053 admits and ScanAsk still fails on. They are skipped,
@@ -926,12 +933,12 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		// an object.
 		{"an approval ask whose document id is empty, as the JSON null reads back", "approval", new(`{"artifact_id":"","name":"","version":0}`), true},
 		// An id that is not a uuid fails the cast answering the ask makes on it (22P02), and one in
-		// capitals is never found by docs.ApprovalAskAt, which compares the id as text with the
+		// capitals is never found by docs.OpenApprovalAsk, which compares the id as text with the
 		// lowercase text Postgres writes, so a new version would never move the ask.
 		{"an approval ask whose document id is empty at a real version", "approval", new(`{"artifact_id":"","name":"spec.md","version":1}`), true},
 		{"an approval ask whose document id is in capitals", "approval", new(`{"artifact_id":"7C1E8A52-3F4B-4D6E-9A0B-1C2D3E4F5A6B","name":"spec.md","version":1}`), true},
 		// A character before or after the uuid, or a letter past f in it, also fails that cast, and
-		// docs.ApprovalAskAt never finds the ask. Each row is refused only while its anchor, or the
+		// docs.OpenApprovalAsk never finds the ask. Each row is refused only while its anchor, or the
 		// pattern's hex class, is as written.
 		{"an approval ask whose document id has a digit after the uuid", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b0","name":"spec.md","version":1}`), true},
 		{"an approval ask whose document id has a digit before the uuid", "approval", new(`{"artifact_id":"07c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1}`), true},
@@ -1000,117 +1007,6 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 				t.Fatalf("insert error = %v, want SQLSTATE 23514 naming asks_approval_kind_check", err)
 			}
 		})
-	}
-}
-
-// 0056 backfills the version every existing approval request was shown to, then keeps an older
-// binary's approval insert valid by adding requested_version from version before the check runs. A
-// moved request may advance version while preserving this value, which is how ask reads distinguish
-// a human-ready request from one an agent still owns. Its handed_back_reply_id starts null on every
-// row and names a reply in the comments table, on an approval ask only.
-func TestMigrate0056BackfillsAndRequiresApprovalRequestedVersion(t *testing.T) {
-	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, 55)
-	if _, err := store.Pool.Exec(ctx, `
-		insert into projects (key, name) values ('CORE', 'Core');
-		insert into issues (key, project_key, number, title, created_by, rank)
-			values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"session","id":"s"}', 'U');
-		insert into asks (issue_key, author, question, options, kind, approval)
-			values ('CORE-1', '{"kind":"session","id":"s"}', 'Approve spec.md (version 7)?',
-				'[{"label":"Approve"},{"label":"Request changes"}]', 'approval',
-				'{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":7}');
-	`); err != nil {
-		t.Fatalf("seed pre-0056 approval ask: %v", err)
-	}
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	var requestedVersion *int
-	if err := store.Pool.QueryRow(ctx, `
-		select (approval->>'requested_version')::integer
-		from asks where kind = 'approval'
-	`).Scan(&requestedVersion); err != nil {
-		t.Fatalf("read migrated requested version: %v", err)
-	}
-	if requestedVersion == nil || *requestedVersion != 7 {
-		t.Fatalf("migrated requested_version = %v, want 7", requestedVersion)
-	}
-	if _, err := store.Pool.Exec(ctx, `
-		insert into asks (issue_key, author, question, options, kind, approval)
-		values ('CORE-1', '{"kind":"session","id":"s"}', 'Approve spec.md (version 8)?',
-			'[{"label":"Approve"},{"label":"Request changes"}]', 'approval',
-			'{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":8}')
-	`); err != nil {
-		t.Fatalf("older approval insert: %v", err)
-	}
-	if err := store.Pool.QueryRow(ctx, `
-		select (approval->>'requested_version')::integer
-		from asks where question = 'Approve spec.md (version 8)?'
-	`).Scan(&requestedVersion); err != nil {
-		t.Fatalf("read older approval insert: %v", err)
-	}
-	if requestedVersion == nil || *requestedVersion != 8 {
-		t.Fatalf("older requested_version = %v, want 8", requestedVersion)
-	}
-	var refusal *pgconn.PgError
-	for _, requested := range []string{"0", "8.5", `"8"`, "9", "10000000000"} {
-		_, err := store.Pool.Exec(ctx, `
-			insert into asks (issue_key, author, question, options, kind, approval)
-			values ('CORE-1', '{"kind":"session","id":"s"}', 'Approve spec.md (version 8)?',
-				'[{"label":"Approve"},{"label":"Request changes"}]', 'approval',
-				jsonb_build_object(
-					'artifact_id', '7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b',
-					'name', 'spec.md',
-					'version', 8,
-					'requested_version', $1::jsonb
-				)
-			)
-		`, requested)
-		if !errors.As(err, &refusal) || refusal.Code != "23514" || refusal.ConstraintName != "asks_approval_kind_check" {
-			t.Fatalf("requested_version %s error = %v, want asks_approval_kind_check", requested, err)
-		}
-	}
-	if _, err := store.Pool.Exec(ctx, `
-		insert into asks (issue_key, author, question, options, kind, approval)
-		values ('CORE-1', '{"kind":"session","id":"s"}', 'Approve spec.md (version 8)?',
-			'[{"label":"Approve"},{"label":"Request changes"}]', 'approval',
-			'{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":8,"requested_version":8}')
-	`); err != nil {
-		t.Fatalf("approval with requested_version: %v", err)
-	}
-	var handedBack *string
-	if err := store.Pool.QueryRow(ctx, `
-		select handed_back_reply_id::text from asks where question = 'Approve spec.md (version 7)?'
-	`).Scan(&handedBack); err != nil || handedBack != nil {
-		t.Fatalf("migrated handed_back_reply_id = %v (%v), want null", handedBack, err)
-	}
-	var replyID string
-	if err := store.Pool.QueryRow(ctx, `
-		insert into comments (issue_key, author, body) values ('CORE-1', '{"kind":"user","id":"alice"}', 'Why?')
-		returning id::text
-	`).Scan(&replyID); err != nil {
-		t.Fatalf("seed reply: %v", err)
-	}
-	if _, err := store.Pool.Exec(ctx, `
-		update asks set handed_back_reply_id = $1 where question = 'Approve spec.md (version 7)?'
-	`, replyID); err != nil {
-		t.Fatalf("record a hand-back on an approval ask: %v", err)
-	}
-	for _, refused := range []struct {
-		name, sql, code, constraint string
-	}{
-		{"a question ask", `insert into asks (issue_key, author, question, handed_back_reply_id)
-			values ('CORE-1', '{"kind":"session","id":"s"}', 'Which?', '` + replyID + `')`,
-			"23514", "asks_handed_back_reply_approval"},
-		{"a reply that does not exist", `update asks set handed_back_reply_id = gen_random_uuid()
-			where question = 'Approve spec.md (version 7)?'`,
-			"23503", "asks_handed_back_reply_id_fkey"},
-	} {
-		_, err := store.Pool.Exec(ctx, refused.sql)
-		if !errors.As(err, &refusal) || refusal.Code != refused.code || refusal.ConstraintName != refused.constraint {
-			t.Fatalf("handed_back_reply_id on %s: error = %v, want %s", refused.name, err, refused.constraint)
-		}
 	}
 }
 

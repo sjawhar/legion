@@ -11,6 +11,18 @@
   to the human, at the version `approval.requested_version` names. `ask.edited` stays a rewording:
   a hand-back that changes no wording records only `ask.handed_back` and leaves `edited_at` as it
   was, and one with a new summary records `ask.edited` and then `ask.handed_back` (LEGION-470).
+- Added `AskEditEventPayload.quiet`: `true` on a version move of an approval request that already
+  waits on its agent, which carries `notify: false` and reaches no follower, as a human's unnamed
+  `artifact.version` does; only the move that takes the request from the human wakes anyone
+  (LEGION-470).
+- Added `ArtifactApproval.waiting_on`, whose move an `awaiting` approval's request waits on, and
+  `ApprovalRequestResponse`, the answer of `POST /api/v1/artifacts/{id}/approval-requests`
+  (LEGION-470).
+- `dispatch_request_approval`'s description and `summary` say an approval request carries nothing
+  new: the summary says only what the human is approving, a later version leaves the request
+  waiting on the agent until it hands the request back once the human has agreed to every point,
+  and a call while the request already waits on the human hands nothing back, refusing a different
+  summary (LEGION-470).
 - `dispatch_request_approval` requires `summary`, the proposals in the document's latest version
   the human hasn't already agreed to (LEGION-387). `SPEC_SECTIONS` is removed: `dispatch_issue`'s
   `spec` and `dispatch_doc_edit` point at the dispatch skill's "Writing a spec" instead of listing
@@ -19,9 +31,17 @@
   open decision block, even when a human asked for approval (LEGION-387); its `summary`
   description no longer repeats that rule. `dispatch_doc_edit`'s description says a `delete` or
   `retype` that would take an ask block out of the document while its ask is open is refused.
+- `itemFromSearch` answers `null` for an item id that decodes to a control character, as the
+  Dispatch server's reference reader names nothing for one (LEGION-463). No item has such an id,
+  and a NUL in one failed the write that cited it.
 
 ### Added
 
+- `DISPATCH_TEXT_REFERENCES`: markdown bodies with the `dispatch://` references each one cites,
+  read against `https://dispatch.test` or the row's `origin`. The dashboard's
+  `composerReferences` and the Go reader `text.Extract`, through its JSON copy, are both tested
+  against it, so neither where a reference ends nor what it names changes on one side only
+  (LEGION-463).
 - `BlockPath`, `BlockPathEntry` and `TablePosition`, the shape of
   `GET /api/v1/artifacts/{id}/blocks/{block_id}`: a block's path from the top-level block down
   and, in a table, the row and column indexes `delete_row` and `delete_column` take, the text of

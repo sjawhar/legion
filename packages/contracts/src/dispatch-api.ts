@@ -443,6 +443,20 @@ export interface ArtifactApproval {
   readonly reason?: string | null;
   readonly ask_id?: string | null;
   readonly requested_by?: Actor;
+  /** Whose move the open request waits on (`Ask.waiting_on`), on `awaiting` alone: `agent` once a
+   *  version moved it past the one its agent last handed to the human, or a reply left it with the
+   *  agent; `human` otherwise. */
+  readonly waiting_on?: AskTurn;
+}
+
+/** What `POST /api/v1/artifacts/{id}/approval-requests` answers: the document's open request (null
+ *  when its latest version is already approved), the version it names, and the document's approval
+ *  as the call left it. */
+export interface ApprovalRequestResponse {
+  readonly ask: Ask | null;
+  readonly artifact_id: string;
+  readonly version: number;
+  readonly approval: ArtifactApproval;
 }
 
 export interface ArtifactBlock {
@@ -731,6 +745,11 @@ export type AskEventPayload = Ask & ReferenceChangesPayload;
 export type AskEditEventPayload = AskEventPayload & {
   readonly previous: AskEditPrevious;
   readonly edited_by: Actor;
+  /** A version move of an approval request that already waits on its agent: it changes only the
+   *  version the request names, so its event, like a human's unnamed `artifact.version`, carries
+   *  `notify: false` and reaches no follower. Absent on every other edit, the move that takes the
+   *  request from the human included. */
+  readonly quiet?: true;
 };
 
 /** One recorded rewording of an ask: what the question was before this edit, who edited, when. */
@@ -796,9 +815,6 @@ export interface Comment extends AnchorPosition {
   readonly anchor: Anchor | null;
   readonly reply_to: string | null;
   readonly ask_id: string | null;
-  /** The open ask's derived turn once this comment is its newest reply. It may differ from
-   *  `turn`: an agent reply on a moved approval request leaves that request waiting on the agent. */
-  readonly waiting_on?: AskTurn;
   /** On a reply to an open ask, who holds the turn after it; null under a closed ask (nothing is
    *  waiting) and on every other comment. A human's reply is always `agent`; a session's is
    *  `human` unless posted as a progress note. */
@@ -811,6 +827,17 @@ export interface Comment extends AnchorPosition {
   readonly created_at: string;
   readonly mentions: CommentMention[];
   readonly deliveries: CommentDelivery[];
+}
+
+/** What a route that writes a comment answers (`POST /api/v1/issues/{key}/comments`,
+ *  `POST /api/v1/artifacts/{id}/comments`, and the delivery callback
+ *  `POST /api/v1/comments/{id}/reply`): the comment row and, on a reply to an open ask, whom that
+ *  ask waits on now that the reply is its newest. It is the value the comment's event carries
+ *  under the same name, and may differ from `turn`: an agent's reply on a moved approval request
+ *  leaves that request waiting on the agent. A replayed delivery callback, which writes nothing,
+ *  answers the stored reply without it. */
+export interface CommentWriteResponse extends Comment {
+  readonly ask_waiting_on?: AskTurn;
 }
 
 export interface Suggestion {

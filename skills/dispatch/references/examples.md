@@ -8,14 +8,13 @@ message that should not be sent, and a draft placed where the human reads it.
 Before — a wall of text hides the decision and the human never receives it:
 
 ```text
-We need to settle the release gate because the deploy branch has the migration and the
-dashboard changes, I checked the staging result and it is fine except the release notes are
-not reviewed, so should we ship today, wait for docs, or cut the dashboard from this release?
-I think waiting is safest but the customer demo is tomorrow and the list above is probably stale.
+The deploy branch has the migration and dashboard changes. Staging is fine, but release notes are
+not reviewed before tomorrow's customer demo. Review the notes, ship without them, or cut the
+dashboard from the release. Waiting is safest, but the list above may be stale.
 ```
 
-After — write the design decision into the document section it concerns, so the options are
-clickable and the answer stays with the release design:
+After — write the decision into the document section it concerns: state the problem, and make each
+genuinely different option a button, so the answer stays with the release design:
 
 ```ts
 dispatch_doc_edit({
@@ -25,10 +24,10 @@ dispatch_doc_edit({
     op: "insert",
     after: "Release requires reviewed operator instructions before deployment.",
     markdown: `:::ask{#release-gate urgency="high"}
-Choose the release gate. Recommendation: ship after release-note review, since the tested deployment is otherwise ready.
+Release notes are unreviewed, and tomorrow's customer demo means the release cannot wait for a later review. How should we proceed? Recommendation: review the notes, then ship, to keep the release complete and reviewed.
 
-- Review notes, then ship: Keeps the release intact and reviewed.
-- Ship now: Meets the demo deadline; release notes follow later.
+- Review notes, then ship: Delays release for review but keeps the release complete and reviewed.
+- Ship now: Meets the demo deadline but leaves the release notes unreviewed.
 :::`,
   }],
 })
@@ -58,11 +57,20 @@ dispatch_artifact({ issue: "OPS-52", name: "cu-update-2026-09-15.md", content: "
 dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
   { op: "insert", after: "## Context", markdown: "## Draft (artifact cu-update-2026-09-15.md)" },
 ]})
-dispatch_ask({ issue: "OPS-52", question: "Send the customer update as drafted?", options: [...] })
+dispatch_ask({
+  issue: "OPS-52",
+  question:
+    "Customers need an update today, but the draft is only in a separate file, so the reader cannot review it in context. How should we proceed? Recommendation: put the draft in the spec before sending it.",
+  options: [
+    { label: "Put the draft in the spec", description: "Adds a spec edit before sending but lets the reader review it in context." },
+    { label: "Keep the separate file", description: "Saves the spec edit but leaves the reader to find the draft." },
+  ],
+})
 ```
 
-After — the draft is a section of the spec. Sending it is a to-do only a human can complete, so it
-stays a standalone ask:
+After — the draft is a section of the spec, and the ask anchors there. Sending it is a to-do only a
+human can complete, so it stays a standalone ask. If it really must be a file, the spec and the ask
+both link the slug from the upload result:
 
 ```ts
 dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
@@ -70,14 +78,26 @@ dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
 ]})
 dispatch_ask({
   issue: "OPS-52",
-  question: "Send the customer update as drafted?",
-  options: [...],
+  question:
+    "Customers need an update today, and the reviewed text is ready in the spec. Sending it cannot be recalled. How should we proceed? Recommendation: send the reviewed update.",
+  options: [
+    { label: "Send the reviewed update", description: "Delivers the update today but makes its text external." },
+    { label: "Hold the update", description: "Avoids sending now but leaves customers without the update." },
+  ],
   anchor: { artifact: "spec", quote: "Hi team," },
 })
-// Or, for a real file, link the slug from the upload result in the question:
+// or, for a real file — the spec links it where the reader needs it, and so does the ask:
+dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
+  { op: "insert", after: "## Context", markdown: "## Draft\n\nThe update to send: dispatch://OPS-52/artifact/cu-update-2026-09-15-md" },
+]})
 dispatch_ask({
   issue: "OPS-52",
-  question: "Send this customer update as-is? dispatch://OPS-52/artifact/cu-update-2026-09-15-md",
-  options: [...],
+  question:
+    "Customers need an update today, and its reviewed text is linked from the spec. Sending it cannot be recalled. How should we proceed? Recommendation: send the reviewed update.",
+  options: [
+    { label: "Send the reviewed update", description: "Delivers the linked update today but makes its text external." },
+    { label: "Hold the update", description: "Avoids sending now but leaves customers without the update." },
+  ],
+  ref: "dispatch://OPS-52/artifact/cu-update-2026-09-15-md",
 })
 ```

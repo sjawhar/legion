@@ -25,7 +25,7 @@ import (
 
 // The image probe (the in-cluster boot probe, packages/daemon/src/daemon/worker-image-probe.ts,
 // as a Sandbox): a daemon off the cluster is not the image its workers run, so it proves the image
-// by running the image's own Go `legion probe-image --go-daemon-api-version <N>` in a Sandbox of
+// by running the image's own Go `legion probe-image --daemon-api-version <N>` in a Sandbox of
 // that image, placed as every worker is placed, and reading the OK line back from the pod's log.
 // Only a pod on this cluster proves the cluster can pull the image, schedule it on the Legion pool
 // under gVisor, and run its Oh My Pi and plugin there; only the image's CLI can read the image
@@ -58,8 +58,8 @@ var digestHex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // ImageProbe is how ProbeImage proves the runtime's worker image.
 type ImageProbe struct {
-	// Contract is the Go daemon API contract the image's plugin must declare: the daemon's own
-	// GoDaemonAPIVersion.
+	// Contract is the daemon API contract the image's plugin must declare: the daemon's own
+	// DaemonAPIVersion.
 	Contract int
 	// Budget is how long one attempt waits for the probe pod to finish
 	// (slow_command_timeout_seconds). The Sandbox's shutdownTime is the budget and one API call
@@ -436,7 +436,7 @@ var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 // reasons of its own (kubeletFailure) is transient, whatever of its log could be read, and an
 // unread log is judged by the read's error. A Failed pod past those is one whose probe container
 // exited on its own: the image's refusal. The OK line must confirm this daemon's contract: an
-// image whose CLI predates the Go contract check prints none, having checked no contract, and is
+// image whose CLI predates the contract check prints none, having checked no contract, and is
 // refused, not waved through; one that confirmed another contract is refused naming both. And it
 // must say the prompt-named agents' models resolved: any other mark, or none, does not prove the
 // workers run their agents on their models. When the daemon has a pane NATS nkey seed (Options.NATSUser),
@@ -472,10 +472,10 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 	}
 	confirmed, ok := bootprobe.ConfirmedContract(logTail)
 	if !ok {
-		return imageRefusal(digest, "pod %s Succeeded without confirming Go daemon API contract %d (its legion CLI predates the check) — log tail: %s", name, contract, logTail)
+		return imageRefusal(digest, "pod %s Succeeded without confirming daemon API contract %d (its legion CLI predates the check) — log tail: %s", name, contract, logTail)
 	}
 	if confirmed != contract {
-		return imageRefusal(digest, "pod %s Succeeded but confirmed Go daemon API contract %d, this daemon requires %d — log tail: %s", name, confirmed, contract, logTail)
+		return imageRefusal(digest, "pod %s Succeeded but confirmed daemon API contract %d, this daemon requires %d — log tail: %s", name, confirmed, contract, logTail)
 	}
 	if mark := bootprobe.AgentModels(logTail); mark != bootprobe.AgentModelsResolved {
 		if mark == "" {
@@ -529,7 +529,7 @@ type probeSpec struct {
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
-	command := []string{r.tools.Legion, "probe-image", "--go-daemon-api-version", strconv.Itoa(p.Contract), "--plugin-root", legionPlugin, "--pod-safety"}
+	command := []string{r.tools.Legion, "probe-image", "--daemon-api-version", strconv.Itoa(p.Contract), "--plugin-root", legionPlugin, "--pod-safety"}
 	if len(providersMounts) > 0 {
 		command = append(command, "--provider-env-dir", ProvidersDir)
 	}

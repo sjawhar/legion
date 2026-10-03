@@ -672,6 +672,9 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "REPLY_FORBIDDEN", http.StatusForbidden, "session may reply only to its own delivery")
 		return
 	}
+	// A replay of a callback that already posted its reply writes nothing and answers the stored
+	// reply as it is, with no ask_waiting_on: that names whom the ask waits on once a reply is its
+	// newest, which a replayed reply need no longer be.
 	if attempt.ReplyID != nil {
 		reply, err := s.loadComment(r.Context(), tx, *attempt.ReplyID)
 		if err != nil {
@@ -738,24 +741,20 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 	// with no `turn` does.
 	turn := thread.replyTurn(actor, nil)
 	reply, err := scanComment(tx.QueryRow(r.Context(), `
-		insert into comments (issue_key, artifact_id, author, body, reply_to, ask_id, turn, created_at)
-		values ($1, $2, $3, $4, $5, $6, $7, `+commentInsertedAt+`)
+		insert into comments (issue_key, artifact_id, author, body, reply_to, ask_id, turn)
+		values ($1, $2, $3, $4, $5, $6, $7)
 		returning `+commentColumns+`
 	`, comment.IssueKey, comment.ArtifactID, author, *input.Body, thread.ReplyTo, thread.AskID, turn))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	waitingOn := thread.waitingOnAfter(turn)
 	if thread.AskID != nil {
 		if err := asks.FollowAuthor(r.Context(), tx, *thread.AskID, actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-	}
-	reply.WaitingOn, err = thread.waitingOn(r.Context(), tx)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
 	}
 	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", reply.ID, reply.Body)
 	if err != nil {
@@ -775,7 +774,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload, err := s.commentEventPayload(
-		r.Context(), tx, reply, artifactName, thread.eventThread(reply.WaitingOn), referenceChanges,
+		r.Context(), tx, reply, artifactName, thread.eventThread(waitingOn), referenceChanges,
 	)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -797,5 +796,5 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
-	WriteJSON(w, http.StatusCreated, reply)
+	WriteJSON(w, http.StatusCreated, commentWriteResponse{Comment: reply, AskWaitingOn: waitingOn})
 }
