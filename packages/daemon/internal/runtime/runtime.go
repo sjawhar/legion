@@ -84,6 +84,20 @@ type Runtime interface {
 	ProvisionsWorkspaces() bool
 }
 
+// IssueResourceKey fences a retained-resource close to the workflow run and the outbox row
+// that follows its role stops. A later start supersedes it even within the same generation.
+type IssueResourceKey struct {
+	Issue, Tree                     string
+	IssueGeneration, TreeGeneration uint64
+	StopRow                         int64
+}
+
+// IssueSuspender stops an issue's pod only after its durable close and complete stored role
+// population authorize it. Process-only runtimes have no shared issue resources to suspend.
+type IssueSuspender interface {
+	SuspendIssue(context.Context, IssueResourceKey) error
+}
+
 // TreeLifecycleCleaner is the optional whole-tree capability. Its explicit workflow and operator
 // reservation entry points fence claim persistence before any resource census; per-role Release
 // and Suspend never delete a shared issue pod. A runtime without shared issue resources simply does
