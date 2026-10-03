@@ -28,9 +28,8 @@ import {
 import type { z } from "zod";
 
 /**
- * The plugin's client for the Go daemon (`packages/daemon-go`), the one `extensions/legion.ts`
- * boots through when the pane carries `LEGION_DAEMON_API=go`. `daemon-client.ts` stays the
- * TypeScript daemon's client until Stage 7 deletes it and that daemon together.
+ * The plugin's client for the daemon (`packages/daemon-go`), the one `extensions/legion.ts` boots
+ * every Legion session through.
  *
  * Every response is read through the strict schemas of `@legion/contracts/legion-go-api`, which the
  * Go daemon's golden tests hold to its own types; the requests are the claim wire of
@@ -40,7 +39,7 @@ import type { z } from "zod";
  */
 
 /** `claim.RegisterRequest`: the pane's boot token and the session this agent became.
- * `pluginContract` is this build's `legion.goDaemonApiVersion`. */
+ * `pluginContract` is this build's `legion.daemonApiVersion`. */
 export interface GoRegisterInput {
   readonly bootToken: string;
   readonly sessionId: string;
@@ -132,7 +131,7 @@ export class LegionGoDaemonApiError extends Error {
   }
 }
 
-/** A success the Go daemon API contract does not describe. The body is never quoted: a
+/** A success the daemon API contract does not describe. The body is never quoted: a
  * registration's carries the claim's secret. */
 export class LegionGoDaemonContractError extends Error {
   constructor(
@@ -142,7 +141,7 @@ export class LegionGoDaemonContractError extends Error {
     problem: string
   ) {
     super(
-      `${method} ${path} answered ${status} with a body the Go daemon API contract does not describe: ${problem}`
+      `${method} ${path} answered ${status} with a body the daemon API contract does not describe: ${problem}`
     );
     this.name = "LegionGoDaemonContractError";
   }

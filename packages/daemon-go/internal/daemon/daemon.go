@@ -457,7 +457,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			prefix:         cfg.OmpLaunchPrefix,
 			timeout:        cfg.SlowCommandTimeout,
 			retry:          bootprobe.Daemon,
-			contract:       api.GoDaemonAPIVersion,
+			contract:       api.DaemonAPIVersion,
 			roleReferences: p.roleReferences,
 			log:            log,
 		}.verify

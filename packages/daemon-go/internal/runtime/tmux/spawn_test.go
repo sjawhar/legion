@@ -76,9 +76,8 @@ func testSpec() runtime.SpawnSpec {
 	}
 }
 
-// The pane's -e pairs, in the one order: the pairs every Legion pane carries (the shipped set,
-// ProcessManager.launchWorker's env in processes.ts, less what Stage 3 adds, plus
-// LEGION_DAEMON_API=go), the grant file the pi-envoy extension writes before each command that
+// The pane's -e pairs, in the one order: the pairs every Legion pane carries, the grant file the
+// pi-envoy extension writes before each command that
 // redeems a grant, the XDG base directories under `<state_dir>/home` explicitly, the caller's own
 // variables sorted, then one `<NAME>_FILE` pointer per secret — the boot token's first. PATH is
 // never a pair: tmux would discard it (LEGION-91); the shell command exports it. No secret value is
@@ -96,7 +95,6 @@ func TestPanePairs(t *testing.T) {
 	files := secretFiles("/state", spec)
 	got := panePairs(spec, in, files)
 	want := []string{
-		"-e", "LEGION_DAEMON_API=go",
 		"-e", "LEGION_TREE=LEGION-42",
 		"-e", "LEGION_ISSUE=LEGION-43",
 		"-e", "LEGION_ROLE=tester",

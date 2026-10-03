@@ -80,7 +80,7 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 // req's session as the project's controller when the token is the current controller capability,
 // and answers the one refusal an unknown token gets otherwise. No boot gate checks the operator's
 // Oh My Pi — the daemon gates only the panes it launches — so a controller whose plugin speaks
-// another Go daemon API contract is refused here, naming both, and nothing is recorded. The
+// another daemon API contract is refused here, naming both, and nothing is recorded. The
 // registration is issued a secret of its own, persisted by its hash before this answers, which
 // the session's controller grants authenticate with.
 func (s *server) registerController(w http.ResponseWriter, r *http.Request, req claim.RegisterRequest) {
@@ -97,11 +97,11 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 		writeJSON(w, claim.InvalidBootToken.Status, claim.InvalidBootToken)
 		return
 	}
-	if req.PluginContract != GoDaemonAPIVersion {
-		s.log.Warn("api: refused a controller registration: its plugin speaks another Go daemon API contract",
-			"session", req.SessionID, "pluginContract", req.PluginContract, "goDaemonApiVersion", GoDaemonAPIVersion)
+	if req.PluginContract != DaemonAPIVersion {
+		s.log.Warn("api: refused a controller registration: its plugin speaks another daemon API contract",
+			"session", req.SessionID, "pluginContract", req.PluginContract, "daemonApiVersion", DaemonAPIVersion)
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
-			"pi-legion-envoy speaks Go daemon API contract %d; this daemon requires %d", req.PluginContract, GoDaemonAPIVersion)))
+			"pi-legion-envoy speaks daemon API contract %d; this daemon requires %d", req.PluginContract, DaemonAPIVersion)))
 		return
 	}
 	secret := rand.Text()

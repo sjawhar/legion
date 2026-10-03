@@ -21,7 +21,7 @@
 # image's git with a network-free `jj git clone` of a scratch repository, and executes the three launch
 # probes (the daemon's two plus the session-storage probe) through `legion probe-image`; the second runs
 # every toolchain command; the last runs the Go `legion version` and the Go `legion probe-image`, which
-# runs the same three probes, holds the plugin to the Go daemon API contract, and prints the OK line the
+# runs the same three probes, holds the plugin to the daemon API contract, and prints the OK line the
 # Go daemon's probe Sandbox reads. A broken image never publishes.
 #
 # The `legion` profile carries no model route, and neither does Legion: an operator's pod supplies it
@@ -323,11 +323,11 @@ COPY --from=go /out/agent-secrets /opt/legion/go/bin/agent-secrets
 # as gh's and jj's (/usr/local/bin, copied above) and a pod environment can name all three. Then the Go
 # `legion probe-image` runs the three launch probes through the Go daemon's own code, loading the plugin
 # the way a Sandbox pod does (--plugin-root: the one explicit extension, discovery off), holds the
-# plugin to the Go daemon API contract this binary speaks, and resolves by name every task agent and
+# plugin to the daemon API contract this binary speaks, and resolves by name every task agent and
 # skill Legion's prompts name (shipped in its agents/ and dist/skills directories). It leaves those
 # agents' models unresolved (--skip-agent-models): the build has none of the operator's model
 # configuration, which the pod brings. It prints `probe-image: OK (/opt/omp/bin/omp)
-# session-storage=probed agent-models=skipped go-daemon-api-version=<N>`; the Go daemon's probe
+# session-storage=probed agent-models=skipped daemon-api-version=<N>`; the Go daemon's probe
 # Sandbox runs it again with its own contract, on the pod baseline and under the operator's pod,
 # resolving every agent's model, and refuses a skipped result, before any claim runs on the image
 # (packages/daemon-go/internal/runtime/sandbox/probe.go). It needs the natives step 3 fetched, which

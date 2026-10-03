@@ -445,7 +445,7 @@ func TestAControllerRegistrationIsInTheStateAndSurvivesARestart(t *testing.T) {
 	}
 	status, body = d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: capability.Secret, SessionID: "ses_controller", OmpSessionFile: "/sessions/ses_controller.jsonl",
-		AgentID: "ses_controller", PluginContract: api.GoDaemonAPIVersion,
+		AgentID: "ses_controller", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusOK {
 		t.Fatalf("register the controller = %d; body %s", status, body)

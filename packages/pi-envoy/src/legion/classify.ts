@@ -27,8 +27,7 @@ export function classifySession(env: NodeJS.ProcessEnv): LegionSessionKind {
   const issue = requiredEnvironment(env, "LEGION_ISSUE");
   // The daemon roots an issue tree at itself: the root architect's own issue
   // key equals the tree's. A sub-architect on a child issue is a phase
-  // worker like any other role — bootstrapWorker already special-cases
-  // role === "architect" for tool registration.
+  // worker like any other role.
   if (env.LEGION_ROLE === "architect" && issue === tree) {
     return { kind: "root-architect", tree };
   }
@@ -64,10 +63,4 @@ export function requiredControllerCapability(env: NodeJS.ProcessEnv): string {
     );
   }
   return secret;
-}
-
-export function generation(env: NodeJS.ProcessEnv): number {
-  const value = Number(requiredEnvironment(env, "LEGION_GENERATION"));
-  if (!Number.isSafeInteger(value)) throw new Error("LEGION_GENERATION must be an integer");
-  return value;
 }

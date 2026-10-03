@@ -74,7 +74,7 @@ func runController(ctx context.Context, args []string, stdout, stderr io.Writer)
 // Oh My Pi invocation that does not resolve; then probe that Oh My Pi as the controller will run it
 // — the launch prefix, the invocation, the controller's whole environment, in
 // `<state_dir>/controller`, created for it, at the operator's terminal — and refuse a
-// pi-legion-envoy it does not load, or loads speaking another Go daemon API contract than this
+// pi-legion-envoy it does not load, or loads speaking another daemon API contract than this
 // binary's, which would refuse the controller at session start (daemon.ProbeController). The probe
 // runs `omp models`, which starts no session, so it neither registers, takes the controller role,
 // nor reads a controller secret. Then fetch the controller secret with the operator token as a
@@ -161,7 +161,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 		omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation), controllerDir)
 	secret, designGate, err := probeAndMint(ctx, cfg.DaemonURL, daemon.ControllerProbe{
 		Omp: invocation, Prefix: cfg.OmpLaunchPrefix, Env: env, WorkDir: controllerDir, Stdin: os.Stdin, Stderr: stderr,
-		Contract: api.GoDaemonAPIVersion, Log: slog.New(slog.NewTextHandler(stderr, nil)),
+		Contract: api.DaemonAPIVersion, Log: slog.New(slog.NewTextHandler(stderr, nil)),
 	}, operatorToken)
 	if err != nil {
 		removeDirs(created)
@@ -225,18 +225,16 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 }
 
 // controllerEnvironment is what the controller's Oh My Pi is told on top of the operator's own
-// environment: the shared controller set a tmux controller pane carries
-// (packages/daemon/src/daemon/controller-environment.ts), plus LEGION_DAEMON_API=go, which picks
-// the plugin's Go client, and PI_SHELL_PREFIX, which keeps this state directory's gh shim and
-// legion launcher first in the agent's bash tool as on every Go pane. Secrets travel as
-// `<NAME>_FILE` pointers only. Later pairs replace any inherited value of the same name.
+// environment: the controller marker and role, the daemon, project and state directory, the Envoy,
+// GitHub and Dispatch settings every pane carries, and PI_SHELL_PREFIX, which keeps this state
+// directory's gh shim and legion launcher first in the agent's bash tool as on every pane. Secrets
+// travel as `<NAME>_FILE` pointers only. Later pairs replace any inherited value of the same name.
 func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretFile string) [][2]string {
 	workerBin, bin := workerbin.Dir(stateDir), workerbin.LauncherDir(stateDir)
 	separator := string(filepath.ListSeparator)
 	env := [][2]string{
 		{"LEGION_CONTROLLER", "1"},
 		{"LEGION_ROLE", "controller"},
-		{"LEGION_DAEMON_API", "go"},
 		{"LEGION_DAEMON_URL", cfg.DaemonURL},
 		{"LEGION_PROJECT", cfg.Project},
 		{"LEGION_STATE_DIR", stateDir},

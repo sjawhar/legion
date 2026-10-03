@@ -98,10 +98,10 @@ func TestAControllerSpeakingAnotherContractIsRefusedNamingBoth(t *testing.T) {
 	capability := h.mintedSecret()
 	recorder := h.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: capability, SessionID: "ses_controller", OmpSessionFile: "/sessions/ses_controller.jsonl",
-		AgentID: "agent-ses_controller", PluginContract: GoDaemonAPIVersion + 1,
+		AgentID: "agent-ses_controller", PluginContract: DaemonAPIVersion + 1,
 	}, nil)
 	wantRefusal(t, recorder, http.StatusConflict, fmt.Sprintf(
-		"pi-legion-envoy speaks Go daemon API contract %d; this daemon requires %d", GoDaemonAPIVersion+1, GoDaemonAPIVersion))
+		"pi-legion-envoy speaks daemon API contract %d; this daemon requires %d", DaemonAPIVersion+1, DaemonAPIVersion))
 	record, found, err := h.store.Controller(context.Background(), testProject)
 	if err != nil || !found || record.Registered() {
 		t.Fatalf("controller record = %+v, %v, %v, want the capability minted and no session registered", record, found, err)

@@ -6,20 +6,20 @@ import {
   type LegionRole,
 } from "@legion/contracts";
 import pkg from "../../package.json";
-import { classifySession, requiredEnvironment, requiredSecret } from "./classify";
+import { requiredEnvironment, requiredSecret } from "./classify";
 import type { ControllerDaemon } from "./controller-session";
 import { LegionGoDaemonApiError, type LegionGoDaemonClient } from "./go-daemon-client";
 import { exportJjSessionAttribution } from "./jj-attribution";
 import { claimEnvoyRole, onEnvoyRoleRegained, subscribeLegionNotice } from "./role-claim-bridge";
 import type { CommandContext, SessionContext } from "../pi-types";
 
+/** The claim a session registered: its own id, the daemon's answer for tree, issue and role, and
+ * the secret every credentialed request carries. */
 export interface GoClaimCapability {
-  readonly kind: "phase-worker";
   readonly sessionID: string;
   readonly tree: string;
   readonly issue: string;
   readonly role: LegionRole;
-  readonly roleToken: string;
   readonly secret: string;
 }
 
@@ -36,7 +36,7 @@ export interface GoBootstrapState {
   recordBootstrappedSession(sessionFile: string): void;
 }
 
-// The Go path keeps this policy beside its client until Stage 7 removes the TypeScript daemon path.
+// Bounds retries of the transient `claims/ready` request.
 const READY_RETRY_ATTEMPTS = 3;
 const READY_RETRY_DELAY_MS = 1_000;
 
@@ -147,7 +147,7 @@ export function goControllerDaemon(
           sessionId: sessionID,
           ompSessionFile: sessionFile,
           agentId,
-          pluginContract: pkg.legion.goDaemonApiVersion,
+          pluginContract: pkg.legion.daemonApiVersion,
         })
         .catch((error: unknown) => {
           if (error instanceof LegionGoDaemonApiError) {
@@ -176,15 +176,13 @@ export function goControllerDaemon(
 }
 
 /**
- * Boots a claim the Go daemon launched. The TypeScript daemon's bootstrap remains in legion.ts:
- * its ready route, recovery client and root-only tool path are a distinct API until Stage 7 removes
- * it. This path speaks only `/legion/v1/claims/*` through the Go client.
+ * Boots the claim behind a root architect's or a phase worker's pane through
+ * `/legion/v1/claims/*` (`legion.ts` calls it for every Legion session but the controller).
  */
 export async function bootstrapGoClaim(
   context: SessionContext,
   state: GoBootstrapState
 ): Promise<void> {
-  if (classifySession(process.env).kind === "not-legion") return;
   const sessionID = context.sessionManager.getSessionId();
   const capability = state.capability();
   if (capability !== undefined && capability.sessionID !== sessionID) return;
@@ -203,7 +201,7 @@ export async function bootstrapGoClaim(
         sessionId: sessionID,
         ompSessionFile: sessionFile,
         agentId,
-        pluginContract: pkg.legion.goDaemonApiVersion,
+        pluginContract: pkg.legion.daemonApiVersion,
       })
       .catch((error) => exitOnGoRegistrationRefusal(error, state.exitProcess));
     const ready = {
@@ -217,12 +215,10 @@ export async function bootstrapGoClaim(
       const stateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
       await exportJjSessionAttribution(sessionFile, stateDir);
       state.setCapability({
-        kind: "phase-worker",
         sessionID,
         tree: claim.tree,
         issue: claim.issue,
         role: claim.role,
-        roleToken: claim.claimToken,
         secret: claim.secret,
       });
       // The claim's role topic is where the Go daemon sends every notice for an architect (the
