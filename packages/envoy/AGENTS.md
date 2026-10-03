@@ -285,34 +285,22 @@ lock and none takes a room's state lock. A read that may load its room (a versio
 and holds the room: a room looked up again with `GetDoc` once that Apply returned can have been
 evicted in between.
 
-Every decode of a document's whole state takes a pending queue as long as the most items one
-update can carry (`newDocumentCopy`, `maxUpdateItems`): the copy, a write's fork (`forkLive`), and
-every decode of the stored history - a read with no room resident (`loadDocument`), the history
-check behind a room's load and a rebuild's refusal (`validateUpdate`), and the room's own load
-(`Server.MaxPendingItems`, set in `New`) - and so does the store's check of each update it appends
-(`appendUpdate`, `AppendUpdateTx`), which decodes the update alone. ygo's decoder defers an item
-whose parent it cannot place yet - a container a later client's group holds, one outside the
-update it decodes, or one garbage collection emptied when a peer deleted it - and parks every later
-item of that client behind it as a clock gap, refusing the update once 100,000 are parked, its
-default (LEGION-502). A room whose peer deleted a chain of 200,000 nested blocks, or whose
-lower-numbered client wrote 100,000 items after one such deferral, then failed every copy with
-`crdt: invalid update` while the room itself served it
-(`TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`,
-`TestACopyHoldsEveryItemItsRoomParksForOneClient`). Once that room was evicted or the server
-restarted, the same document read as `409 DOCUMENT_UNLOADABLE`, its room did not open, and the
-rebuild that code offers, whose history check refused it too, replaced its history with its latest
-saved version (`TestAStoredHistoryLoadsWhatItsRoomParksForOneClient`). A browser update of more
-than 100,000 items written against blocks the document already holds, such as 75,000 paragraphs
-with their block ids written ahead of one, failed the store's check, so the room failed and dropped
-the edit (`TestTheStoreTakesOneBrowserUpdateItsRoomTook`). ygo refuses any update that declares
-more than `maxUpdateItems` items, so no decode of one parks past that queue; in a room, which keeps
-what it parks across updates, it is also the most the room's peers can park, about ten times ygo's
-default. One check still decodes one update alone at ygo's default: ygo's, of an update the
-service broadcasts (`Server.BroadcastUpdate`). It refuses an update of more than 100,000 items that
-lean on items outside it, such as a settlement that stamps that many blocks' ids, and the room
-fails.
+Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment
+(`internal/dispatch/docs/persistence.go`) states the rule and its reason: whether the service builds
+the decoder (`newDocumentCopy`: the copy, a write's fork, every decode of the stored history, and
+the store's check of each update it appends) or ygo builds it for the service
+(`Server.MaxPendingItems`, set in `New`: the rooms, and ygo's check of each update the service
+broadcasts). In a room, which keeps what it parks across updates, the queue is also the most the
+room's peers can park, about ten times ygo's default. `TestTheStoreTakesOneBrowserUpdateItsRoomTook`
+and `TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates ygo's default queue refuses,
+which fail the room; `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`,
+`TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and
+`TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer
+deleted a chain of 200,000 nested blocks, or whose lower-numbered client wrote 150,000 items ahead
+of a block the server wrote, is copied, read, opened and kept from a rebuild whole.
 
-A room whose last peer leaves stays resident until it has been idle for a minute
+A room whose last peer leaves, or that only the service's `Server.Apply` touches - an agent's
+edit, a read outside any transaction - stays resident until it has been idle for a minute
 (`roomIdleTimeout`), when ygo's idle sweeper evicts it. ygo's default, eager eviction, evicts a room
 the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (reearth/ygo
 v1.49.5, `provider/websocket/peer.go` checks only the peers): the callback's write then lands on the
@@ -320,11 +308,14 @@ evicted room and reaches the store only through its retiring persistence worker,
 access has already loaded the store without it and serves, and takes, the next write on a document
 missing the first. Two such writes, each a diff of the same document, merge into a document neither
 wrote, and into one holding no block at all once each kept a block the other replaced: the
-healthy-room probe met it as a socket closed with `DOC_SCHEMA`. The idle sweeper evicts only a room
-no Apply holds or has touched since its last peer left (`provider/websocket/idle_sweep.go`), so every
-write a room the sweeper evicts has taken is durable before another instance of it loads, and a peer
-that returns within the minute rejoins the warm room. `TestAHealthyRoomUnderWritesIsNeverRefused`
-checks every load of a room against the writes its earlier instances took. ygo's `CloseRoom` checks
+healthy-room probe met it as a socket closed with `DOC_SCHEMA`. The idle sweeper evicts a room only
+while no Apply holds it, counts its idle minute from its last peer leaving or the last Apply on it
+returning, and flushes it before it evicts it (`provider/websocket/idle_sweep.go`), so every write a
+room the sweeper evicts has taken is durable before another instance of it loads, and a peer that
+returns within the minute rejoins the warm room. `TestAHealthyRoomUnderWritesIsNeverRefused`
+checks every load of a room against the writes its earlier instances took, and
+`TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout` that a room only the API touches is
+evicted and reads back what the API wrote. ygo's `CloseRoom` checks
 only the peers as well, and the service still calls it to close an issue's rooms (`SetIssueClosed`),
 for a room with an editor at `Shutdown`, and to evict one (`evictRoom`): a write that commits on a
 room it has retired reaches the store through ygo's stranded persistence, on the committing goroutine
