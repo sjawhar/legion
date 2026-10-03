@@ -832,6 +832,14 @@ claim's pod and the image probe's.
   example of one, the one the Go live harnesses run on: a `models.yml` and a settings overlay from a
   ConfigMap, and a mounted token its key command reads. Its README lists what an operator supplies
   and how `pod` and `provider_keys` compose.
+- **The Legion machine-user sign-in.** `legion model-token` (in the worker image at
+  `/opt/legion/go/bin/legion`) is a model `apiKey` command: it answers Cognito's custom challenge
+  with the pod's projected service-account token (a `projected` `service_account_token` in `pod`,
+  with the dedicated audience), prints the access token, caches it 0600 on the state volume until
+  five minutes before expiry, and never keeps a refresh token. A refused sign-in exits non-zero
+  with the reason and prints no token. Region, client id, username and both paths are flags in the
+  operator's `models.yml`; the [operator route README](../deploy/kubernetes/operator-route/README.md)
+  shows the line.
 - **Each role's model** is the operator's: the `models.yml` and `overlay.yml` they keep in a
   directory of their own (for example `~/.local/state/legion-model-config`), which
   `deploy/kubernetes/operator-route/apply.sh --context <kube context> <directory>` writes into the

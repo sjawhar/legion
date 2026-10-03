@@ -58,6 +58,30 @@ The ConfigMap carries no `legion.dev/project` label. A live harness run creates 
 run-scoped name and deletes only objects labelled with its own run's project, so it never touches
 this one.
 
+## Signing in as the Legion machine user
+
+A gateway that admits Cognito user tokens takes a token from `legion model-token`, which the worker
+image carries at `/opt/legion/go/bin/legion`. Oh My Pi runs it as the model `apiKey` and runs it
+again after a 401. It signs in with Cognito's custom authentication (`InitiateAuth` with
+`CUSTOM_AUTH`, then `RespondToAuthChallenge`), answering the challenge with the pod's projected
+service-account token. It prints the access token and caches it, owner-only, on the pod's
+memory-backed state volume until five minutes before it expires, then signs in again. It never
+stores or uses the refresh token Cognito also returns. A refused sign-in exits non-zero with the
+reason on stderr and prints no token. A token it cannot cache is still printed, with the cache
+failure on stderr: the image probe's pod has no state volume.
+
+Every value is the operator's, passed as flags in their own `models.yml`:
+
+```yaml
+    apiKey: "!/opt/legion/go/bin/legion model-token --region <pool region> --client-id <app client id> --username <machine user> --service-account-token-file /var/run/operator/token --cache-file /var/run/legion/state/model-token"
+```
+
+The service-account token is the projected token `pod.yml` already mounts at
+`/var/run/operator/token`, with the operator's dedicated sign-in audience in place of
+`${MODEL_TOKEN_AUDIENCE}`; `legion start --check-config` refuses that placeholder unfilled. Set
+`X-Api-Key` to the same command. The examples here keep the gateway's current route and model names
+until the operator switches their own copies.
+
 ## How the pieces compose
 
 `runtime.kubernetes.pod` delivers **files and variables**; `provider_keys` delivers **variables from

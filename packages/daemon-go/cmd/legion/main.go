@@ -51,6 +51,7 @@ var commands = map[string]command{
 	"status":         runStatus,
 	"restart":        runRestart,
 	"worker-shim":    runWorkerShim,
+	"model-token":    runModelToken,
 	"claims":         runClaims,
 	"gh":             runGh,
 	"credential":     runCredential,
