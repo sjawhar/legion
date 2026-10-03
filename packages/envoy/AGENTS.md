@@ -25,7 +25,7 @@ events to the right session.
 | Webhook config         | `internal/webhook/config.go`                     | ENVOY_WEBHOOKS parsing, startup validation         |
 | Listener behavior      | `cmd/listener/main.go`                    | subscribe/match/deliver flow                       |
 | NATS client            | `internal/bus/nats.go`, `internal/bus/recovery.go` | connect, subscribe and publish; reconnect, recovery and the reconnect hooks |
-| NATS credential        | `internal/bus/nkey.go`                    | every bus connection's nkey user: `NATS_NKEY_SEED_FILE` (wins) or `NATS_NKEY_SEED`; unusable refuses, neither set connects without one. A connect reads these and `ENVOY_ALLOW_REMOTE_NATS` from the process environment, or from the lookup `bus.WithEnvironment` hands it (envoy-dispatch's settings table) |
+| NATS credential        | `internal/bus/nkey.go`                    | every bus connection's nkey user: `NATS_NKEY_SEED_FILE` (wins) or `NATS_NKEY_SEED`; unusable refuses, neither set connects without one. `Connect` and `ConnectOwningStream` read these and `ENVOY_ALLOW_REMOTE_NATS` from the process environment, or from the lookup `bus.WithEnvironment` hands them; `Dial` from the lookup its caller passes. envoy-dispatch hands both its settings table |
 | Stream definition      | `internal/bus/stream.go`                  | `ENVOY_NOTIFICATIONS` subjects, retention and duplicate window, and their reconciliation at start |
 | Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
 | Interest storage       | `internal/store/kv.go`                    | JetStream KV subscriptions                         |

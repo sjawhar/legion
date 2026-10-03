@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -79,7 +80,7 @@ func TestDialRefusesANATSServerThatIsNotThisMachines(t *testing.T) {
 	uri := testnats.URL(t)
 	remote := remoteLookingURL(t, uri)
 
-	_, err := bus.Dial("relay", []string{remote})
+	_, err := bus.Dial("relay", []string{remote}, os.LookupEnv)
 	if !errors.Is(err, bus.ErrRemoteNATS) {
 		t.Fatalf("dial %s = %v, want a %v", remote, err, bus.ErrRemoteNATS)
 	}
@@ -87,7 +88,7 @@ func TestDialRefusesANATSServerThatIsNotThisMachines(t *testing.T) {
 		t.Fatalf("refusal %q does not name both the server %s and the override %s", err, remote, bus.AllowRemoteEnvVar)
 	}
 
-	conn, err := bus.Dial("relay", []string{uri})
+	conn, err := bus.Dial("relay", []string{uri}, os.LookupEnv)
 	if err != nil {
 		t.Fatalf("dial this machine's NATS: %v", err)
 	}
@@ -141,30 +142,30 @@ func TestConnectReachesANonLocalNATSWhenTheRunSaysSo(t *testing.T) {
 	}
 }
 
-// A connect handed an environment (WithEnvironment: envoy-dispatch hands its settings table) reads
-// the reach and the credential there and nowhere else, for Connect, ConnectOwningStream and Dial
-// alike. Every case fails before it dials.
+// A connect handed an environment (WithEnvironment, or Dial's environment: envoy-dispatch hands its
+// settings table) reads the reach and the credential there and nowhere else, for Connect,
+// ConnectOwningStream and Dial alike. Every case fails before it dials.
 func TestAHandedEnvironmentReplacesTheProcessEnvironment(t *testing.T) {
 	const remote = "nats://nats.example:4222"
 	t.Setenv(bus.AllowRemoteEnvVar, "1")
 	t.Setenv("NATS_NKEY_SEED_FILE", filepath.Join(t.TempDir(), "the process's seed"))
-	handed := func(values map[string]string) bus.ConnectOption {
-		return bus.WithEnvironment(func(key string) (string, bool) {
+	handed := func(values map[string]string) func(string) (string, bool) {
+		return func(key string) (string, bool) {
 			value, set := values[key]
 			return value, set
-		})
+		}
 	}
-	connects := map[string]func(bus.ConnectOption) error{
-		"Connect": func(option bus.ConnectOption) error {
-			_, err := bus.Connect([]string{remote}, option)
+	connects := map[string]func(func(string) (string, bool)) error{
+		"Connect": func(environment func(string) (string, bool)) error {
+			_, err := bus.Connect([]string{remote}, bus.WithEnvironment(environment))
 			return err
 		},
-		"ConnectOwningStream": func(option bus.ConnectOption) error {
-			_, err := bus.ConnectOwningStream([]string{remote}, option)
+		"ConnectOwningStream": func(environment func(string) (string, bool)) error {
+			_, err := bus.ConnectOwningStream([]string{remote}, bus.WithEnvironment(environment))
 			return err
 		},
-		"Dial": func(option bus.ConnectOption) error {
-			_, err := bus.Dial("handed", []string{remote}, option)
+		"Dial": func(environment func(string) (string, bool)) error {
+			_, err := bus.Dial("handed", []string{remote}, environment)
 			return err
 		},
 	}

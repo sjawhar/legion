@@ -166,7 +166,7 @@ func main() {
 			slog.Info("dispatch: agent conversation relay off: it needs NATS")
 		}
 	} else {
-		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.NatsURLs, bus.WithEnvironment(env.lookup))
+		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.NatsURLs, env.lookup)
 		if err != nil {
 			slog.Error("dispatch: connect the agent conversation relay", "error", err)
 			os.Exit(1)

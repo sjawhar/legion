@@ -57,7 +57,8 @@ func WithReplicas(n int) ConnectOption {
 
 // WithEnvironment names where a connect reads ENVOY_ALLOW_REMOTE_NATS (AllowRemoteEnvVar),
 // NATS_NKEY_SEED_FILE and NATS_NKEY_SEED, in place of the process environment (os.LookupEnv):
-// envoy-dispatch hands it the lookup over its settings table, which lists all three.
+// envoy-dispatch hands it the lookup over its settings table, which lists all three. Dial takes
+// the same lookup as its environment parameter.
 func WithEnvironment(lookup func(string) (string, bool)) ConnectOption {
 	return func(o *connectOpts) { o.environment = lookup }
 }
@@ -267,20 +268,20 @@ func connectWithContext(ctx context.Context, name string, urls []string, credent
 }
 
 // Dial opens a tuned core NATS connection using envoy's standard options (5s connect timeout,
-// infinite reconnect every second, retry-loop for the initial 10 attempts), as the NATS user the
+// infinite reconnect every second, retry-loop for the initial 10 attempts), as the NATS user
 // environment names (nkeyCredential). A caller that needs core pub/sub on a connection of its own
 // uses it: nats.go re-subscribes core subscriptions on reconnect by itself, so it needs none of
 // Client's recovery, and it touches no stream. It refuses a NATS server that is not this machine's
-// on the same terms as Connect. Of the options it reads only WithEnvironment.
+// on the same terms as Connect, reading ENVOY_ALLOW_REMOTE_NATS from environment too, which
+// answers as os.LookupEnv does (WithEnvironment).
 //
 // For JetStream-backed publishing or a durable consumer, use Connect; to reconcile the stream
 // this codebase owns, ConnectOwningStream.
-func Dial(name string, urls []string, options ...ConnectOption) (*nats.Conn, error) {
-	opts := parseConnectOptions(options)
-	if err := refuseRemoteNATS(urls, opts.environment); err != nil {
+func Dial(name string, urls []string, environment func(string) (string, bool)) (*nats.Conn, error) {
+	if err := refuseRemoteNATS(urls, environment); err != nil {
 		return nil, err
 	}
-	credential, err := nkeyCredential(opts.environment)
+	credential, err := nkeyCredential(environment)
 	if err != nil {
 		return nil, err
 	}
