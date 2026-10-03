@@ -323,6 +323,7 @@ var handoffPhases = map[string]rule{
 			field{"remainingIssues", optional(array(object(field{"issue", text}, field{"evidence", text}), 0))},
 			field{"error", optional(text)},
 		))},
+		// Required by specDeparturesWritten after all declared fields have held.
 		field{"specDepartures", optional(boundedArray(specDeparture, 0, maxSpecDepartures))},
 	),
 	"implement": phaseShape(
