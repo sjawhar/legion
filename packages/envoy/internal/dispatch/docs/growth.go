@@ -36,7 +36,9 @@ import (
 // its ask's block, and settlement writes it back into a block that returns to the document. Where
 // the document has no room for it, each records who answered and when and leaves the answer out of
 // the block (SetBlockAttributes, withholdAnswers), and the ask keeps it. Of the other writes that
-// do not run through applyLive, the block-id backfill and the sweep of unrecorded marks add no
+// do not run through applyLive, a rebuild weighs the markdown a caller supplies as SeedText weighs
+// a new document's, and restores a latest version whatever it weighs, since that is the server's
+// own text (RebuildDocument); the block-id backfill and the sweep of unrecorded marks add no
 // caller text. What the bound weighs is the document a write leaves, not the history its store
 // keeps: every update stays stored with the content later writes delete, and a cold load builds
 // all of it, so repeated versions and a comment's margin record, which each reply rewrites whole,
