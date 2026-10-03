@@ -15,10 +15,10 @@
   are made in the plan or the code, not the spec. The `legion-architect` skill, both root architect
   role prompts and `dispatch_request_approval`'s description say the same, and `dispatch-first`
   sends an agent to the `dispatch` skill before its first design question. A root architect's spec
-  keeps the human's text and grows only what the human decides, each as a decision block; the
-  architect's decomposition, its waves, how each outcome is proven and the integration test go in
-  the child issues and the plan, so the design gate asks the human to approve only their own text
-  and their own decisions.
+  adds only the evidence each decision needs and what the human decides, each as a decision block;
+  the architect's decomposition, its waves, how each outcome is proven and the integration test go
+  in the child issues and the planner's `.legion/plan.json`, so the design gate never asks the
+  human to approve the architect's own calls.
 - A spec is the design conversation (LEGION-387). The `dispatch` skill's "Writing a spec" drops
   the eight required headings: a spec starts as the problem and its evidence, puts each open
   question in a decision block at the end of the section that discusses it, records a settled

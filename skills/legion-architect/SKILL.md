@@ -85,11 +85,12 @@ handoffs; do not narrate them into the spec or a `dispatch_message`. A blocker o
 clear is a `dispatch_ask`.
 
 The issue's primary document **is** the root specification. Extend it in place: a new version
-that keeps the human's own text and grows only what the human decides, each as a
+that adds only the evidence each decision needs and what the human decides, each as a
 [decision block](../dispatch/SKILL.md#decision-blocks). The decomposition and its waves, how each
 outcome is proven, and the integration test are your own calls: they go in the child issues and
-the plan, not the root spec. Never post a second "spec" artifact beside it (`dispatch_artifact`
-with the primary document's name replaces the human's document; do not do that).
+the planner's `.legion/plan.json`, not the root spec. Never post a second "spec" artifact beside
+it (`dispatch_artifact` with the primary document's name replaces the human's document; do not do
+that).
 The design gate runs only when the "Design gate policy" line at the end of your system prompt
 says `gates.design: root-issues`. When it says `gates.design: off`, write the spec and continue
 to section 2 with no approval step at all: do not request approval, do not register a gate, and
