@@ -158,7 +158,6 @@ type PullRequestChecks struct {
 	Snapshot   string
 	Verdict    string
 	Failing    []string
-	SettledAt  time.Time
 }
 
 func (PullRequestChecks) isFact() {}

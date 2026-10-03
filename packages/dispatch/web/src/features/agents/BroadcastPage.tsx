@@ -37,6 +37,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 
 import { deliveryAttempts } from "./attempts";
+import { useMarkShownRepliesRead } from "./unread";
 
 /** How long the server leaves a delivery claim before another sender may take it
  *  (`claimLapsed`, one minute). Past it, a pending attempt is nobody's. */
@@ -76,6 +77,9 @@ function BroadcastRecipientRow({
       api.createMessageDelivery(recipient.message.id, mode),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["broadcast"] }),
   });
+  // The row shows the recipient's whole thread, so its replies are read. Only these: the
+  // session's replies anywhere else, older or newer, stay unread until a view shows them.
+  useMarkShownRepliesRead(recipient.session_id, recipient.replies);
   const label = sessionLabel(recipient.session_id, titles.get(recipient.session_id) ?? "");
   const answer = recipient.replies.find((reply) => reply.author.kind === "session");
   const answeredBy = answer === undefined ? undefined : resolveAuthor(answer.author, titles).label;

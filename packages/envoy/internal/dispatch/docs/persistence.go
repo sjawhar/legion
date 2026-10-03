@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -58,6 +59,16 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	return persistence.LoadResult{Update: update, Version: head}, nil
 }
 
+// Head is the version Load folds the room up to now, read through the pool that owns loads, as
+// Load reads it: a room load (servicePersistenceAdapter.LoadDoc) asks it.
+func (p *PgVersioned) Head(ctx context.Context, room string) (persistence.Version, error) {
+	rooms, err := p.store.Pool.Rooms()
+	if err != nil {
+		return 0, err
+	}
+	return p.head(ctx, rooms, room)
+}
+
 // AppendUpdate validates and stores one incremental V1 update as content.
 func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
 	return p.appendUpdate(ctx, room, update, true)
@@ -69,7 +80,7 @@ func (p *PgVersioned) AppendUpdateWithClass(ctx context.Context, room string, up
 }
 
 func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
+	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		return 0, err
 	}
 	var version persistence.Version
@@ -94,7 +105,7 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 // AppendUpdateTx appends an already validated V1 update inside tx, recording whether it changes
 // the document's content: settlement versions a document only past a content update.
 func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
+	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		// ygo refuses an update declaring more than maxUpdateItems items with the same error it
 		// gives a malformed one. The server encoded this update itself, so when its header
 		// declares more than the cap, the cap is the cause and the document is the caller's to
@@ -419,7 +430,8 @@ func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persis
 }
 
 // Compact folds older updates into the oldest retained record without changing
-// the room's materialized state.
+// the room's materialized state. Under a context compactIfIdle marked, it leaves a room whose lock
+// another holder has for a later compaction.
 func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -428,7 +440,8 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		return 0, nil
 	}
 	deleted := 0
-	err := p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
+	_, idleOnly := ctx.Value(compactIfIdleKey{}).(bool)
+	err := p.lockRoom(ctx, room, !idleOnly, func(conn *pgxpool.Conn) error {
 		tx, err := conn.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("begin compact document: %w", err)
@@ -501,7 +514,52 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		}
 		return nil
 	})
+	if errors.Is(err, errRoomLockBusy) {
+		return 0, nil
+	}
 	return deleted, err
+}
+
+// RebuildTx replaces a room's durable history with one fresh update at the next version, inside
+// tx, which holds the room's lock until it ends. Its caller has already proved that ygo cannot load
+// the old merged history; this method never makes that destructive decision itself.
+func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
+	if err := validateUpdate(seed); err != nil {
+		return RebuildReport{}, fmt.Errorf("validate rebuilt document seed: %w", err)
+	}
+	if err := lockDocumentRoom(ctx, tx, room); err != nil {
+		return RebuildReport{}, err
+	}
+	if err := p.recoverPruneTx(ctx, tx, room); err != nil {
+		return RebuildReport{}, err
+	}
+	head, err := p.head(ctx, tx, room)
+	if err != nil {
+		return RebuildReport{}, err
+	}
+	var report RebuildReport
+	for _, deletion := range []struct {
+		query string
+		count *int64
+	}{
+		{`delete from doc_updates where artifact_id = $1`, &report.RemovedUpdates},
+		{`delete from doc_checkpoints where artifact_id = $1`, &report.RemovedCheckpoints},
+		{`delete from doc_snapshots where artifact_id = $1`, &report.RemovedSnapshots},
+	} {
+		result, err := tx.Exec(ctx, deletion.query, room)
+		if err != nil {
+			return RebuildReport{}, fmt.Errorf("delete rebuilt document data: %w", err)
+		}
+		*deletion.count = result.RowsAffected()
+	}
+	report.Head = int64(head) + 1
+	if _, err := tx.Exec(ctx, `
+		insert into doc_updates (artifact_id, version, update, content_changed)
+		values ($1, $2, $3, true)
+	`, room, report.Head, seed); err != nil {
+		return RebuildReport{}, fmt.Errorf("seed rebuilt document: %w", err)
+	}
+	return report, nil
 }
 
 // Delete removes all persisted Yjs data for a document room.
@@ -594,13 +652,41 @@ func (p *PgVersioned) recoverPruneTx(ctx context.Context, tx pgx.Tx, room string
 	return nil
 }
 
+// compactIfIdleKey marks a context whose compaction skips a room whose lock another holder has
+// (compactIfIdle).
+type compactIfIdleKey struct{}
+
+// compactIfIdle marks ctx so Compact leaves a room whose lock another holder has for a later
+// compaction rather than waiting for the lock. The room's persistence worker compacts under it
+// (servicePersistenceAdapter.Compact): the worker compacts as it exits, and a settlement holding
+// the room's lock can be waiting for that exit, since an update the settlement commits into a room
+// whose worker is leaving is stored on the settlement's own goroutine once the worker has gone
+// (ygo's persistStranded). A compaction that waited for the lock would wait for itself. Compaction
+// is housekeeping, and the next one folds what a skipped one would have.
+func compactIfIdle(ctx context.Context) context.Context {
+	return context.WithValue(ctx, compactIfIdleKey{}, true)
+}
+
+// errRoomLockBusy is a room lock another holder has, for work that does not wait for it.
+var errRoomLockBusy = errors.New("document room lock is held")
+
 func (p *PgVersioned) withRoomLock(ctx context.Context, room string, fn func(*pgxpool.Conn) error) error {
+	return p.lockRoom(ctx, room, true, fn)
+}
+
+// lockRoom runs fn holding a pooled connection and the room's advisory lock. When wait is false
+// it takes neither lock another holder has, and returns errRoomLockBusy instead.
+func (p *PgVersioned) lockRoom(ctx context.Context, room string, wait bool, fn func(*pgxpool.Conn) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	value, _ := p.locks.LoadOrStore(room, &sync.Mutex{})
 	lock := value.(*sync.Mutex)
-	lock.Lock()
+	if wait {
+		lock.Lock()
+	} else if !lock.TryLock() {
+		return errRoomLockBusy
+	}
 	defer lock.Unlock()
 
 	conn, err := p.pool().Acquire(ctx)
@@ -612,8 +698,18 @@ func (p *PgVersioned) withRoomLock(ctx context.Context, room string, fn func(*pg
 	// reads through them, never through a second pooled connection.
 	ctx, releaseMark := store.HoldsConnection(ctx)
 	defer releaseMark()
-	if _, err := conn.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, room); err != nil {
-		return fmt.Errorf("lock document room: %w", err)
+	if wait {
+		if _, err := conn.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, room); err != nil {
+			return fmt.Errorf("lock document room: %w", err)
+		}
+	} else {
+		var locked bool
+		if err := conn.QueryRow(ctx, `select pg_try_advisory_lock(hashtext($1))`, room).Scan(&locked); err != nil {
+			return fmt.Errorf("lock document room: %w", err)
+		}
+		if !locked {
+			return errRoomLockBusy
+		}
 	}
 	defer func() { _, _ = conn.Exec(context.Background(), `select pg_advisory_unlock(hashtext($1))`, room) }()
 	return fn(conn)

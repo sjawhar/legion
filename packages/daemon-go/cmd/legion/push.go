@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -117,13 +116,13 @@ naming the line it ends with.
 // from the paths it changes and the handoffs it carries, so no later push is ever missing and no
 // head a human may merge is left without checks.
 func runPush(_ context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlags("push", stderr)
-	flags.Usage = func() { fmt.Fprint(stderr, pushHelp) }
+	flags := newFlags("push", pushHelp, stderr)
 	workspaceFlag := flags.String("workspace", "", "workspace directory (default $LEGION_WORKSPACE, else the current directory)")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		if !errors.Is(err, flag.ErrHelp) {
-			fmt.Fprint(stderr, pushHelp)
-		}
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
+	}
+	if flags.NArg() != 0 {
+		flags.Usage()
 		return 2
 	}
 	if err := push(*workspaceFlag, stdout, stderr); err != nil {

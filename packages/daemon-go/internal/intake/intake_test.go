@@ -146,7 +146,6 @@ func TestOnCommitRunsOnlyAfterTheFactCommits(t *testing.T) {
 
 func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 	updatedAt := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
-	checksSettledAt := time.UnixMilli(1790124840596).UTC()
 	cases := []struct {
 		name    string
 		subject string
@@ -223,7 +222,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "checks settlement",
 			subject: "notifications.github.sjawhar.legion.pr.42.checks",
 			file:    "github/checks.json",
-			want:    PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "abcdef1234567890abcdef1234567890abcdef12", CheckRuns: []CheckRun{{Name: "unit", ID: 73}}, Snapshot: "ed3e3bafc46f498bca65fe879fcd1765a90fecbb1fcd62579e46a94707c0bacd", Verdict: "red", Failing: []string{"unit"}, SettledAt: checksSettledAt},
+			want:    PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "abcdef1234567890abcdef1234567890abcdef12", CheckRuns: []CheckRun{{Name: "unit", ID: 73}}, Snapshot: "ed3e3bafc46f498bca65fe879fcd1765a90fecbb1fcd62579e46a94707c0bacd", Verdict: "red", Failing: []string{"unit"}},
 		},
 		{
 			name:    "branch push",
@@ -341,6 +340,30 @@ func TestDecodeChecksForADottedRepository(t *testing.T) {
 	}
 	if checks, ok := decoded.Fact.(PullRequestChecks); !ok || checks.Repo != "sjawhar/legion.x" || checks.Number != 42 {
 		t.Fatalf("fact = %#v, want sjawhar/legion.x#42's checks", decoded.Fact)
+	}
+}
+
+// The daemon reads nothing from a settlement's settled_at, so a settled_at that is not a millisecond
+// count still decodes the settlement the captured one does, rather than losing its CI verdict.
+func TestDecodeChecksIgnoresAMalformedSettledAt(t *testing.T) {
+	const subject = "notifications.github.sjawhar.legion.pr.42.checks"
+	captured := capturedGitHubEnvelope(t, "checks.json")
+	want, err := decodeMessage(subject, "CAPTURE", capturedRepositories, captured)
+	if err != nil || want.Fact == nil {
+		t.Fatalf("decode the captured settlement: fact %#v, err %v", want.Fact, err)
+	}
+	for _, settledAt := range []string{`\"yesterday\"`, `-5`} {
+		data := bytes.Replace(captured, []byte(`\"settled_at\":1790124840596`), []byte(`\"settled_at\":`+settledAt), 1)
+		if bytes.Equal(data, captured) {
+			t.Fatal("the captured settlement carries no settled_at to replace")
+		}
+		got, err := decodeMessage(subject, "CAPTURE", capturedRepositories, data)
+		if err != nil {
+			t.Fatalf("settled_at %s: decode: %v", settledAt, err)
+		}
+		if !reflect.DeepEqual(got.Fact, want.Fact) {
+			t.Fatalf("settled_at %s: fact = %#v, want %#v", settledAt, got.Fact, want.Fact)
+		}
 	}
 }
 

@@ -61,14 +61,82 @@ import (
 	"github.com/sjawhar/envoy/internal/buildversion"
 )
 
-// Exit codes for the "request" and NAME...-- <command> forms: 75 (EX_TEMPFAIL) and 77
-// (EX_NOPERM) follow BSD sysexits.h, chosen so a caller can tell "still waiting" from "refused"
-// without parsing stderr.
+// Exit codes beyond 0 (done) and 1 (failed): 75 (EX_TEMPFAIL) and 77 (EX_NOPERM) follow BSD
+// sysexits.h, chosen so a caller of the "request" and NAME... -- <command> forms can tell "still
+// waiting" from "refused" without parsing stderr, and 126 and 127 are the shell's own for a command
+// that cannot run or is not there. Each carries a comment, and every exit code is 0, 1 or one of
+// these: the broker's generated error reference (cmd/broker-refgen) prints them and refuses a code
+// without a comment or a function that returns any other.
 const (
-	exitUsageError = 2
-	exitPending    = 75
-	exitDenied     = 77
+	exitUsageError = 2   // a usage error: an unknown flag or argument, or a required one or AGENT_SECRETS_URL missing
+	exitPending    = 75  // the request is still waiting for a person to approve it; nothing was run
+	exitDenied     = 77  // the request was denied; nothing was run
+	exitCannotRun  = 126 // the command `register --exec` was given exists but could not be run
+	exitNotFound   = 127 // the command `register --exec` was given was not found
 )
+
+// command is one form of agent-secrets, as usage lists it and its own -h describes it.
+type command struct {
+	name     string // the words after "agent-secrets"; "" for the NAME... -- <command> form
+	synopsis string
+	summary  string // one or more lines, each under 90 characters
+}
+
+// commands is every form, in the order usage lists them.
+var commands = []command{
+	{"keygen", "agent-secrets keygen --out <dir>",
+		"Write a new signing key to <dir>/key.pem and print its thumbprint. A box's launcher runs it\ninside the box before enrolling it."},
+	{"enroll", "agent-secrets enroll --helper --kind box --runtime-id <id> --thumbprint <tp> [--session-id <id>]",
+		"Enroll a box's key through this machine's agent-secrets-helper, write the enrollment id to\nAGENT_SECRETS_KEY_DIR/enrollment, and print it."},
+	{"unenroll", "agent-secrets unenroll --helper --enrollment <id>",
+		"Revoke a box's enrollment through this machine's agent-secrets-helper."},
+	{"launcher login", "agent-secrets launcher login",
+		"Log this machine in: print the confirmation code its operator types into Dispatch, then wait\nfor the decision (exit 0 once approved, 1 when denied or expired)."},
+	{"launcher login-status", "agent-secrets launcher login-status",
+		"Print \"issued\" and exit 0 while this machine's helper holds a launcher credential; otherwise\nprint the last login's state and exit 1."},
+	{"register", "agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]",
+		"Register this process with agent-secrets-helper as a host session. With --exec, run COMMAND\nas this same process, so it and everything it starts are that session."},
+	{"identity", "agent-secrets identity",
+		"Exit 0 when this process has a broker identity and 1 when it does not, asking the broker\nnothing."},
+	{"--version", "agent-secrets --version",
+		"Print the release this binary was built as."},
+	{"renew", "agent-secrets renew",
+		"Keep an agent box's enrollment lease alive, renewing it until interrupted."},
+	{"request", "agent-secrets request NAME... [--reason TEXT] [--json]",
+		"Request secrets and print the request's id and state; exit 75 while it waits for approval\nand 77 when it is denied."},
+	{"status", "agent-secrets status <request_id> [--json]",
+		"Print a request's state, its grant once granted, and who decided it."},
+	{"cancel", "agent-secrets cancel <request_id>",
+		"Cancel one of this session's pending requests."},
+	{"revoke", "agent-secrets revoke <grant_id>",
+		"End one of this session's grants."},
+	{"self", "agent-secrets self [--json]",
+		"Print this session's enrollment, operator, lease, and live grants."},
+	{"whoami", "agent-secrets whoami [--json]",
+		"Print this session's enrollment as the broker's JSON, as self --json does."},
+	{"sign", "agent-secrets sign --method M --url U [--enrollment E]",
+		"Print the proof this session would sign for one broker call, without making the call."},
+	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]",
+		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted."},
+}
+
+// usageEnvironment closes usage: the variables every form reads, and the exit codes.
+const usageEnvironment = `
+environment:
+  AGENT_SECRETS_URL          the broker's base URL; every form that calls the broker needs it
+  AGENT_SECRETS_KEY_DIR      an agent box's or pod's key.pem and enrollment
+                             (default $XDG_RUNTIME_DIR/agent-secrets, used when key.pem is there)
+  AGENT_SECRETS_HELPER_SOCK  a host session's agent-secrets-helper socket
+                             (default $XDG_RUNTIME_DIR/agent-secrets/helper.sock, used when it is there)
+  AGENT_SECRETS_ENROLL_WAIT  how long a call waits while a box's launcher is still enrolling it
+                             (default 20s)
+  AGENT_SECRETS_APPROVE_URL  Dispatch's address; launcher login names the page under it where the
+                             operator types the code
+  OMP_SESSION_ID             the agent session the broker notifies if a pending request expires
+
+exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 77 denied;
+register --exec exits 127 when COMMAND is not found and 126 when it cannot run
+`
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -107,13 +175,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "revoke":
 		return cmdRevoke(args[1:], stdout, stderr)
 	case "self":
-		return cmdSelf(args[1:], stdout, stderr)
+		return cmdSelf("self", args[1:], stdout, stderr)
 	case "whoami":
 		// whoami is GET /v1/enrollments/self, but must always print the broker's raw JSON body
 		// (scripts/agentbox's box-doctor and host-doctor both pipe bare `agent-secrets whoami`
 		// straight into jq): identical to self --json, so it aliases cmdSelf with --json forced
 		// on rather than duplicating it.
-		return cmdSelf(append([]string{"--json"}, args[1:]...), stdout, stderr)
+		return cmdSelf("whoami", append([]string{"--json"}, args[1:]...), stdout, stderr)
 	case "sign":
 		return cmdSign(args[1:], stdout, stderr)
 	case "identity":
@@ -124,25 +192,50 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func usage() string {
-	return `usage:
-  agent-secrets keygen --out <dir>
-  agent-secrets enroll --helper --kind box --runtime-id <id> --thumbprint <tp> [--session-id <id>]
-  agent-secrets unenroll --helper --enrollment <id>
-  agent-secrets launcher login
-  agent-secrets launcher login-status
-  agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
-  agent-secrets identity
-  agent-secrets --version
-  agent-secrets renew
-  agent-secrets request NAME... [--reason TEXT] [--json]
-  agent-secrets status <request_id> [--json]
-  agent-secrets cancel <request_id>
-  agent-secrets revoke <grant_id>
-  agent-secrets self [--json]
-  agent-secrets whoami [--json]
-  agent-secrets sign --method M --url U [--enrollment E]
-  agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]
-`
+	var b strings.Builder
+	b.WriteString("usage:\n")
+	for _, c := range commands {
+		fmt.Fprintf(&b, "  %s\n", c.synopsis)
+		for line := range strings.SplitSeq(c.summary, "\n") {
+			fmt.Fprintf(&b, "      %s\n", line)
+		}
+	}
+	b.WriteString(usageEnvironment)
+	return b.String()
+}
+
+func lookupCommand(name string) command {
+	for _, c := range commands {
+		if c.name == name {
+			return c
+		}
+	}
+	panic(fmt.Sprintf("agent-secrets: commands has no entry %q", name))
+}
+
+// writeCommandHelp prints one form's synopsis and summary.
+func writeCommandHelp(w io.Writer, c command) {
+	fmt.Fprintf(w, "usage: %s\n\n%s\n", c.synopsis, c.summary)
+}
+
+// newFlagSet is the flag set of the form named name: its errors and its -h go to stderr, and -h
+// prints the form's synopsis and summary, then its flags when it defines any. A form with no
+// flags parses its arguments with it too, so its -h answers as every other form's does and any
+// flag is a usage error.
+func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
+	c := lookupCommand(name)
+	flags := flag.NewFlagSet(strings.TrimSpace("agent-secrets "+name), flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.Usage = func() {
+		writeCommandHelp(flags.Output(), c)
+		hasFlags := false
+		flags.VisitAll(func(*flag.Flag) { hasFlags = true })
+		if hasFlags {
+			fmt.Fprintln(flags.Output(), "\nflags:")
+			flags.PrintDefaults()
+		}
+	}
+	return flags
 }
 
 func exitUsage(err error) int {
@@ -333,8 +426,7 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets keygen: unexpected argument %q\n", positional[0])
 		return exitUsageError
 	}
-	flags := flag.NewFlagSet("agent-secrets keygen", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newFlagSet("keygen", stderr)
 	out := flags.String("out", os.Getenv("AGENT_SECRETS_KEY_DIR"), "directory to write key.pem into")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
@@ -389,13 +481,12 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets enroll: unexpected argument %q\n", positional[0])
 		return exitUsageError
 	}
-	flags := flag.NewFlagSet("agent-secrets enroll", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newFlagSet("enroll", stderr)
 	kind := flags.String("kind", "", `"box" (the only kind --helper supports)`)
 	runtimeID := flags.String("runtime-id", "", "this runtime's stable id")
 	thumbprint := flags.String("thumbprint", "", "the signing key's RFC 7638 thumbprint")
-	sessionID := flags.String("session-id", "", "the Envoy session id to wake on a decision")
-	helperFlag := flags.Bool("helper", false, "enroll through the local agent-secrets-helper socket (kind box only; the only enrollment path this CLI has left, since a launcher credential is a proof-signed key held only in a helper or the Legion daemon, never a bearer token this CLI could read from a file)")
+	sessionID := flags.String("session-id", "", "the agent session the broker notifies if one of this box's pending requests expires")
+	helperFlag := flags.Bool("helper", false, "enroll through this machine's agent-secrets-helper, which holds its launcher credential (required: a launcher credential is a key held only by a helper or a launcher, never a token this CLI could read)")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
@@ -461,8 +552,7 @@ func cmdUnenroll(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets unenroll: unexpected argument %q\n", positional[0])
 		return exitUsageError
 	}
-	flags := flag.NewFlagSet("agent-secrets unenroll", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newFlagSet("unenroll", stderr)
 	enrollmentID := flags.String("enrollment", "", "the enrollment id to revoke")
 	helperFlag := flags.Bool("helper", false, "unenroll through the local agent-secrets-helper socket")
 	if err := flags.Parse(flagArgs); err != nil {
@@ -503,7 +593,10 @@ func cmdUnenrollHelper(enrollmentID string, stderr io.Writer) int {
 
 func cmdRenew(args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, nil)
-	if len(positional) > 0 || len(flagArgs) > 0 {
+	if err := newFlagSet("renew", stderr).Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if len(positional) > 0 {
 		fmt.Fprintln(stderr, "agent-secrets renew: no arguments are accepted")
 		return exitUsageError
 	}
@@ -562,8 +655,7 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 
 func cmdRequest(args []string, stdout, stderr io.Writer) int {
 	flagArgs, names := splitArgs(args, map[string]bool{"reason": true})
-	flags := flag.NewFlagSet("agent-secrets request", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newFlagSet("request", stderr)
 	reason := flags.String("reason", "", "why these secrets are needed")
 	asJSON := flags.Bool("json", false, "print the response body verbatim")
 	if err := flags.Parse(flagArgs); err != nil {
@@ -604,8 +696,7 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 
 func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, nil)
-	flags := flag.NewFlagSet("agent-secrets status", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newFlagSet("status", stderr)
 	asJSON := flags.Bool("json", false, "print the response body verbatim")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
@@ -644,7 +735,10 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 
 func cmdCancel(args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, nil)
-	if len(flagArgs) > 0 || len(positional) != 1 {
+	if err := newFlagSet("cancel", stderr).Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if len(positional) != 1 {
 		fmt.Fprintln(stderr, "agent-secrets cancel: exactly one request_id is required")
 		return exitUsageError
 	}
@@ -667,7 +761,10 @@ func cmdCancel(args []string, stdout, stderr io.Writer) int {
 
 func cmdRevoke(args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, nil)
-	if len(flagArgs) > 0 || len(positional) != 1 {
+	if err := newFlagSet("revoke", stderr).Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if len(positional) != 1 {
 		fmt.Fprintln(stderr, "agent-secrets revoke: exactly one grant_id is required")
 		return exitUsageError
 	}
@@ -688,26 +785,26 @@ func cmdRevoke(args []string, stdout, stderr io.Writer) int {
 // self
 // ---------------------------------------------------------------------------
 
-func cmdSelf(args []string, stdout, stderr io.Writer) int {
+// cmdSelf is self, and whoami as self --json; name is which, for its help and its messages.
+func cmdSelf(name string, args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, nil)
 	if len(positional) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets self: unexpected argument %q\n", positional[0])
+		fmt.Fprintf(stderr, "agent-secrets %s: unexpected argument %q\n", name, positional[0])
 		return exitUsageError
 	}
-	flags := flag.NewFlagSet("agent-secrets self", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newFlagSet(name, stderr)
 	asJSON := flags.Bool("json", false, "print the response body verbatim")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
 	base, _, signer, err := sessionContext()
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets self: %v\n", err)
+		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", name, err)
 		return exitUsageError
 	}
 	result, raw, err := newClient(base).Self(context.Background(), signer)
 	if err != nil {
-		reportError(stderr, "agent-secrets self", err)
+		reportError(stderr, "agent-secrets "+name, err)
 		return 1
 	}
 	if *asJSON {
@@ -755,8 +852,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	}
 
 	flagArgs, names := splitArgs(before, map[string]bool{"reason": true, "wait": true})
-	flags := flag.NewFlagSet("agent-secrets", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newFlagSet("", stderr)
 	reason := flags.String("reason", "", "why these secrets are needed")
 	wait := flags.Duration("wait", 30*time.Minute, "how long to wait for a pending request")
 	if err := flags.Parse(flagArgs); err != nil {

@@ -79,7 +79,7 @@ func TestCookieIdentityReturnsLoginOnlyForAllowedValidCookie(t *testing.T) {
 		t.Errorf("missing cookie error: got %v, want ErrNoIdentity", err)
 	}
 
-	cookie := strings.SplitN(auth.IssueSessionCookie("sjawhar", 0, "signing-key"), ";", 2)[0]
+	cookie := strings.SplitN(auth.IssueSessionCookie("sjawhar", 0, "signing-key", true), ";", 2)[0]
 	name, value, ok := strings.Cut(cookie, "=")
 	if !ok {
 		t.Fatalf("invalid session cookie %q", cookie)
@@ -107,7 +107,7 @@ func TestCookieIdentityReturnsLoginOnlyForAllowedValidCookie(t *testing.T) {
 func TestCookieIdentityReadsGenerationWithoutWriting(t *testing.T) {
 	allowed := map[string]struct{}{"sjawhar": {}}
 	sessions := &testSessionStore{generations: map[string]int64{"sjawhar": 0}}
-	cookie := strings.SplitN(auth.IssueSessionCookie("sjawhar", 0, "signing-key"), ";", 2)[0]
+	cookie := strings.SplitN(auth.IssueSessionCookie("sjawhar", 0, "signing-key", true), ";", 2)[0]
 	name, value, ok := strings.Cut(cookie, "=")
 	if !ok {
 		t.Fatalf("invalid session cookie %q", cookie)
@@ -130,7 +130,7 @@ func TestCookieIdentityReadsGenerationWithoutWriting(t *testing.T) {
 func TestCookieIdentityRejectsCookieWithoutSessionRow(t *testing.T) {
 	allowed := map[string]struct{}{"sjawhar": {}}
 	sessions := &testSessionStore{generations: map[string]int64{}}
-	cookie := strings.SplitN(auth.IssueSessionCookie("sjawhar", 0, "signing-key"), ";", 2)[0]
+	cookie := strings.SplitN(auth.IssueSessionCookie("sjawhar", 0, "signing-key", true), ";", 2)[0]
 	name, value, ok := strings.Cut(cookie, "=")
 	if !ok {
 		t.Fatalf("invalid session cookie %q", cookie)
@@ -177,7 +177,7 @@ func TestAllowedLoginsMatchGitHubCasing(t *testing.T) {
 		t.Errorf("header login: got %q, want the login as presented", login)
 	}
 
-	cookie := strings.SplitN(auth.IssueSessionCookie("Xodarap", 0, "signing-key"), ";", 2)[0]
+	cookie := strings.SplitN(auth.IssueSessionCookie("Xodarap", 0, "signing-key", true), ";", 2)[0]
 	name, value, ok := strings.Cut(cookie, "=")
 	if !ok {
 		t.Fatalf("invalid session cookie %q", cookie)

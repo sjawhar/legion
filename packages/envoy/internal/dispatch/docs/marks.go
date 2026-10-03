@@ -144,30 +144,34 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 		return pmdoc.Range{}, err
 	}
 	if err := pmdoc.MarkRange(txn, fragment, range_, spec.pmMark()); err != nil {
-		return pmdoc.Range{}, docSchema(err)
+		return pmdoc.Range{}, documentSchemaError(err)
 	}
 	return range_, nil
 }
 
 // VerifyMark returns what a browser-written mark anchors to, now or after its next document
-// update.
+// update. It subscribes to the room's updates inside the Apply that loads and holds the room: a
+// room looked up again once that Apply returned can have been evicted in between.
 func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error) {
-	if err := s.srv.Apply(ctx, artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {}); err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+	updates := make(chan struct{}, 1)
+	var unsubscribe func()
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		if s.afterReadWarm != nil {
+			s.afterReadWarm(artifactID)
+		}
+		unsubscribe = doc.OnUpdate(func(_ []byte, _ any) {
+			select {
+			case updates <- struct{}{}:
+			default:
+			}
+		})
+	})
+	if unsubscribe != nil {
+		defer unsubscribe()
+	}
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return Anchored{}, err
 	}
-	doc := s.srv.GetDoc(artifactID)
-	if doc == nil {
-		return Anchored{}, errors.New("warm live document did not retain room")
-	}
-
-	updates := make(chan struct{}, 1)
-	unsubscribe := doc.OnUpdate(func(_ []byte, _ any) {
-		select {
-		case updates <- struct{}{}:
-		default:
-		}
-	})
-	defer unsubscribe()
 
 	timer := time.NewTimer(s.markWait)
 	defer timer.Stop()
@@ -290,7 +294,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if !splice {
 			var unmarkErr error
 			transact(func(txn *crdt.Transaction) {
-				unmarkErr = docSchema(pmdoc.Unmark(txn, fragment, string(MarkSuggestion), id))
+				unmarkErr = documentSchemaError(pmdoc.Unmark(txn, fragment, string(MarkSuggestion), id))
 			})
 			if unmarkErr != nil {
 				return unmarkErr
@@ -884,7 +888,7 @@ func (s *Service) unmarkExpired(room string, expired []pmdoc.MarkRef) error {
 					continue
 				}
 				if err := pmdoc.Unmark(txn, fragment, mark.Type, mark.ID); err != nil {
-					sweepErr = docSchema(err)
+					sweepErr = documentSchemaError(err)
 					return
 				}
 			}

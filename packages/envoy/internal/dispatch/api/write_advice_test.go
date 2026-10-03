@@ -572,14 +572,13 @@ func newFailingAdviceHandler(t *testing.T, query string) (http.Handler, *store.S
 	})
 	allowed := map[string]struct{}{"alice": {}, "bob": {}}
 	deps, err := NewDeps(DepsInput{
-		Store:           database,
-		Identity:        identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins:   allowed,
-		AgentToken:      "agent-token",
-		RepoProjectsRaw: "owner/repo=TEST",
-		ServerURL:       "https://dispatch.example",
-		Docs:            documentService,
-		Events:          broker,
+		Store:         database,
+		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
+		AllowedLogins: allowed,
+		AgentToken:    "agent-token",
+		ServerURL:     "https://dispatch.example",
+		Docs:          documentService,
+		Events:        broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

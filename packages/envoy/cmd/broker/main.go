@@ -1,4 +1,4 @@
-// Command broker is the AGENTC-833 secrets broker: it enrolls agent sessions and pods, decides
+// Command broker is the AGENTC-393 secrets broker: it enrolls agent sessions and pods, decides
 // their secret requests by policy or an approver's Dispatch login over a signed credential-request
 // record, and releases granted values. Per the shared broker contract
 // (dispatch://AGENTC-393/artifact/plan-overview-md), the broker holds no Dispatch credential —
@@ -70,10 +70,13 @@ func main() {
 		fatal(err)
 		loader = rules.S3Loader{Client: s3.NewFromConfig(awsCfg), Bucket: bucket, Key: key}
 	}
+	// BROKER_FAKE_SECRETS_FILE: for local development only, a file of source=value lines the
+	// broker reads secret values from when BROKER_RULES_FILE selects local rules, and then
+	// required.
 	var reader secrets.Reader = secrets.Fake{}
 	if cfg.RulesS3URI != "" {
 		reader = secrets.AWS{Client: secretsmanager.NewFromConfig(awsCfg)}
-	} else if path := os.Getenv("BROKER_FAKE_SECRETS_FILE"); path != "" { // local development only
+	} else if path := os.Getenv("BROKER_FAKE_SECRETS_FILE"); path != "" {
 		reader, err = secrets.FakeFromFile(path)
 		fatal(err)
 	} else {
@@ -147,7 +150,7 @@ func main() {
 		}
 	}
 	sweeper := &requests.Sweeper{
-		Machine: reqMachine, MachineLogins: mach,
+		Enrollments: enr, Machine: reqMachine, MachineLogins: mach,
 		Interval: time.Duration(cfg.SweepSeconds) * time.Second, Wake: waker,
 	}
 	go sweeper.Run(ctx)

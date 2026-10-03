@@ -170,6 +170,13 @@ const SearchQueryHint = "search with a short phrase of a few words, not a passag
 const MaxIssuePageLimit = 250
 const DefaultIssuePageLimit = 50
 
+// DocumentSchemaCloseCode and DocumentSchemaCloseReason close a document websocket whose room is
+// outside the Proof schema, before any sync. Generated from DOCUMENT_SCHEMA_CLOSE_CODE and
+// DOCUMENT_SCHEMA_CLOSE_REASON in packages/contracts so the server's close and the dashboard's
+// reading of it cannot drift apart.
+const DocumentSchemaCloseCode = 4409
+const DocumentSchemaCloseReason = "DOC_SCHEMA"
+
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
 }
