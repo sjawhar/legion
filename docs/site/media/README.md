@@ -1,17 +1,18 @@
 # Docs media
 
 The scripts here make the site's screenshots and narrated videos from code, so each one can be
-taken again when the product changes. Screenshots are not committed: CI takes them before every
-site build. Videos are committed with everything needed to record them again.
+taken again when the product changes. Screenshots are not committed: CI
+(`.github/workflows/docs.yaml`) takes them before every site build. Videos are committed with
+everything needed to record them again.
 
 | File | What it is |
 | --- | --- |
-| `harness.ts` | Boots Dispatch the way its e2e suite does (`packages/dispatch/e2e/run-server.sh` with the fake Envoy and fake GitHub, signed in by the trusted `X-Dispatch-User` header), seeds example data, and checks a page is ready and clean before a capture. |
+| `harness.ts` | Boots Dispatch the way its e2e suite does (`packages/dispatch/e2e/run-server.sh` with the fake Envoy and fake GitHub, each browser signed in at the server's dev sign-in route), seeds example data, and checks a page is ready and clean before a capture. |
 | `shot-runner.ts` | Takes a set of declared screenshots against the harness. |
 | `shots.config.ts` | The Dispatch and Legion sets. |
 | `shots.ts` | Takes every set: `shots.config.ts` and each `<section>/shots.config.ts`. |
 | `narration.ts` | `NARRATION_VOICE`, the one voice every video is narrated in, and the call that speaks a section's text. |
-| `recording.ts` | What a walkthrough file declares, and the pointer helpers its browser sections act with. |
+| `recording.ts` | What a walkthrough file declares, and the helpers its browser sections act with: the drawn pointer, `pointTo`, `scrollBy` and `linger`. |
 | `walkthrough.ts` | Records, cuts, narrates and assembles one walkthrough into a video. |
 | `walkthroughs/` | One file per video, holding each section's actions and narration; casts beside it in `walkthroughs/<name>/`. |
 
@@ -86,9 +87,9 @@ so a weak one is re-recorded without touching the rest. Rebuild a video with:
 DATABASE_URL=<database> ELEVENLABS_API_KEY=<key> bun docs/site/media/walkthrough.ts answer-an-ask
 ```
 
-It writes `docs/site/public/media/videos/<name>.mp4`, captions in `<name>.vtt` from the
-narration, and a poster frame in `<name>.jpg`. Commit all three with the walkthrough file. A page
-embeds them as:
+The walkthroughs so far are `answer-an-ask` and `broadcast-and-replies`. A build writes
+`docs/site/public/media/videos/<name>.mp4`, captions in `<name>.vtt` from the narration, and a
+poster frame in `<name>.jpg`. Commit all three with the walkthrough file. A page embeds them as:
 
 ```html
 <video controls preload="metadata" poster="/legion/media/videos/answer-an-ask.jpg" src="/legion/media/videos/answer-an-ask.mp4">
@@ -101,13 +102,17 @@ embeds them as:
 - A browser section is recorded with Playwright's own video recorder, from the ready page to the
   end of its action, then cut to exactly that action. Recordings are timed by the wall clock, and
   one shorter than its action is refused.
-- Video is never stretched, slowed or frozen to fit narration. Each section's narration is
-  generated after its clip is cut and measured, and the build fails when narration is longer than
+- Video is never stretched, slowed or frozen to fit narration. Each narration line is generated
+  after its clip is cut and measured, with ElevenLabs' leading and trailing silence removed, and
+  placed at the moment it describes. The build fails when a line runs into the next one or past
   its clip: cut words, never footage pace. Audio is padded with silence to the clip's length.
+- The build prints every silence of two seconds or more. Over live action (typing, a page
+  updating) that is fine; over a still picture it is dead air, so shorten the hold.
 - A section whose screen shows an error, at its start or its end, fails the recording: fix the
   cause and record it again.
-- Clips are normalised to one frame size (1024x640, 25 fps) and the narration's loudness to
-  -16 LUFS, then concatenated.
+- Every browser section runs in one 1024x896 frame (tall enough for the Inbox's top bar, heading
+  and one whole ask card), at 25 fps, with the narration's loudness at -16 LUFS; the sections are
+  then concatenated.
 
 ### The narration voice
 
@@ -124,12 +129,15 @@ Add a section to a walkthrough's `sections`:
 - `id`: the section's name.
 - `open(page, seeded)`: loads the page the section starts on and waits until it is ready. It is
   not recorded.
-- `act(page, seeded)`: the recorded action. Move with `pointTo(page, locator)` before each click,
-  so the drawn pointer arrives before the click lands, and use `linger(page, seconds)` where a
-  viewer needs time to read. A linger is real page time; keep it short.
-- `narration`: what the narrator says, written after the clip is cut, to its measured length.
-  It claims only what the screen shows.
-- `at` (optional): where the narration starts in the clip, in seconds; 0.4 when omitted.
+- `act(page, seeded, cue)`: the recorded action. Move with `pointTo(page, locator)` before each
+  click, so the drawn pointer arrives before the click lands. `pointTo` refuses a target off
+  screen: bring it into view with `scrollBy(page, pixels)`, which the viewer sees move, since an
+  instant jump reads as a cut. Use `linger(page, seconds)` where a viewer needs time to read; a
+  linger is real page time, so keep it short. Call `cue(name)` at a moment a narration line
+  describes, once that moment is on screen.
+- `narration`: the lines the narrator says, each `{ at, text }`, where `at` is seconds into the
+  clip or the name of a cue. Write them after the clip is cut, to its measured length; each claims
+  only what the screen shows, and is said after the action it names.
 
 Then iterate on the footage without narrating it, and read the measured clip lengths it prints:
 
@@ -137,18 +145,21 @@ Then iterate on the footage without narrating it, and read the measured clip len
 bun docs/site/media/walkthrough.ts <name> --only <section> --record-only
 ```
 
-`--only` re-records the named sections and reuses the others' last recordings from `.work/`; every
-section's action still runs, in order, so each finds the state the ones before it left. The first
-build of a walkthrough records every section.
+It prints each clip's length, with the action's and the recording's wall-clock seconds, and the
+moment each cue landed. `--only` re-records the named sections and reuses the others' last
+recordings from `.work/`; every section's action still runs, in order, so each finds the state the
+ones before it left. The first build of a walkthrough records every section.
 
-A video opens on its payoff within its first five seconds: show the result, then the recipe.
+A video opens on its payoff within its first five seconds: show the result, then the recipe. Two
+browser sections that meet on the same screen start the second with the pointer where the first
+left it, so the cut changes nothing on screen.
 
 ### Terminal casts
 
 A section can be an [asciinema](https://asciinema.org) recording instead of a browser action:
 
 ```ts
-{ id: "state", cast: "legion-state/state.cast", window: [1.5, 14], narration: "…" }
+{ id: "state", cast: "legion-state/state.cast", window: [1.5, 14], narration: [{ at: 0.4, text: "…" }] }
 ```
 
 Record each section on its own (`asciinema rec --cols 100 --rows 28 <file>.cast`) and commit the
@@ -161,8 +172,9 @@ re-recording, not a trim. A walkthrough made only of casts needs no harness and 
 
 ### Before you commit a video
 
-Watch it, then read it: take a frame every two to three seconds and at every section boundary
-(`ffmpeg -i <video> -vf fps=1/2 frame-%03d.png`), crop small text (sidebar labels, form fields,
-terminal chrome) at native size before reading it, and check three things: no error anywhere on
-screen, no narration line claiming something the screen does not show, and nothing private on
-screen.
+Watch it, then read it. Make a contact sheet, a frame every 2.5 seconds
+(`ffmpeg -i <video> -vf "fps=1/2.5,scale=640:-1,tile=3x5" -frames:v 1 sheet.png`), and again at
+`scale=512:-1` for how it reads at half size; look densely at every section boundary. Crop small
+text (sidebar labels, form fields, terminal chrome) at native size before reading it. Check that
+no error shows anywhere on screen, that every caption line matches the frames it plays over, and
+that nothing private is on screen.

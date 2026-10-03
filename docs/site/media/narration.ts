@@ -18,11 +18,15 @@ export const NARRATION_VOICE = {
   },
 } as const;
 
+/** How much of the neighbouring narration ElevenLabs reads on each side, in characters. */
+export const CONTEXT_CHARS = 200;
+
 /**
  * Speaks `text` in `NARRATION_VOICE` and writes the MP3 to `out`. `previous` and `next` are the
- * neighbouring sections' text, which ElevenLabs reads for continuous intonation across cuts. The
- * key comes from `ELEVENLABS_API_KEY`, trimmed (a stored key has carried a trailing newline, which
- * an HTTP header refuses), and no error this raises carries it.
+ * neighbouring lines' text, of which ElevenLabs reads the nearest `CONTEXT_CHARS` for continuous
+ * intonation across lines and cuts. The key comes from `ELEVENLABS_API_KEY`, trimmed (a stored key
+ * has carried a trailing newline, which an HTTP header refuses), and no error this raises
+ * carries it.
  */
 export async function narrate(
   text: string,
@@ -39,8 +43,8 @@ export async function narrate(
       {
         body: JSON.stringify({
           model_id: voice.model,
-          next_text: context.next.slice(0, 200),
-          previous_text: context.previous.slice(-200),
+          next_text: context.next.slice(0, CONTEXT_CHARS),
+          previous_text: context.previous.slice(-CONTEXT_CHARS),
           text,
           voice_settings: voice.settings,
         }),

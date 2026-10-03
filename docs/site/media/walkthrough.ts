@@ -1,14 +1,17 @@
 // Builds a narrated walkthrough video from `walkthroughs/<name>.ts`, section by section, to the
 // production standard in README.md: each section is recorded on its own and cut to its real
-// action; the clip is measured; the narration, written to that length, must fit it; audio is
-// padded with silence, never video with frames; the sections are normalised and concatenated.
+// action; the clip is measured; each narration line, written to that length, is placed at the
+// moment it describes and must end before the next line starts; audio is padded with silence,
+// never video with frames; the sections are normalised and concatenated. The build reports every
+// silence of two seconds or more, where the picture has to be moving.
 //
 //   DATABASE_URL=<a database this may truncate> ELEVENLABS_API_KEY=<key> \
 //     bun docs/site/media/walkthrough.ts <name | path/to/walkthrough.ts> [--only a,b] [--record-only]
 //
 // `--only` re-records the named sections and reuses the others' last recordings; every browser
 // section's action still runs, unrecorded, so each finds the state the ones before it left.
-// `--record-only` records and cuts without narrating, to iterate on a section's footage.
+// `--record-only` records and cuts without narrating, to iterate on a section's footage; it prints
+// each clip's length and the moment of each cue its action marked.
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
@@ -26,7 +29,7 @@ import {
   waitForSettled,
   withHarness,
 } from "./harness";
-import { NARRATION_VOICE, narrate } from "./narration";
+import { CONTEXT_CHARS, NARRATION_VOICE, narrate } from "./narration";
 import { type BrowserSection, type CastSection, drawPointer, type Walkthrough } from "./recording";
 
 /** Finished videos with their captions and posters; committed, served at `/legion/media/videos/`. */
@@ -34,8 +37,10 @@ export const VIDEOS = join(REPO, "docs/site/public/media/videos");
 const WALKTHROUGHS = join(import.meta.dir, "walkthroughs");
 
 /** Every video's frame, which is a browser section's viewport: Playwright records the page in CSS
- *  pixels, and at this size Dispatch's text stays legible in a docs page's content column. */
-const FRAME = { width: 1024, height: 640 };
+ *  pixels, and at this width Dispatch's text stays legible in a docs page's content column. The
+ *  height holds the Inbox's top bar, heading and one whole ask card with its Answer button, so
+ *  answering one needs no scroll. */
+const FRAME = { width: 1024, height: 896 };
 const FPS = 25;
 /** Playwright's recorder opens on a blank frame: recording runs this long before the action,
  *  and the clip starts `CUT_IN` seconds in, past the blank frame and into the still, ready page. */
@@ -48,8 +53,8 @@ const CUT_IN = 0.3;
 const CAST_THEME = "asciinema";
 const CAST_BACKGROUND = "0x121314";
 const CAST_FONT_SIZE = 20;
-/** Where a section's narration starts in its clip unless the section says otherwise. */
-const DEFAULT_AT = 0.4;
+/** The shortest silence the build reports, in seconds: over it the picture must be moving. */
+const SILENCE_REPORTED = 2;
 
 function run(command: string, args: readonly string[]): string {
   const result = Bun.spawnSync([command, ...args], { stderr: "pipe", stdout: "pipe" });
@@ -71,6 +76,8 @@ const H264 = ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "y
 interface Recorded {
   /** Wall-clock seconds the action took. */
   readonly action: number;
+  /** Each cue the action marked, in seconds from the action's start. */
+  readonly cues: Readonly<Record<string, number>>;
 }
 
 /** Records one browser section: the ready page, then its action, as one clip. */
@@ -99,11 +106,15 @@ async function recordBrowserSection<Seeded>(
       await page.waitForTimeout(LEAD_MS);
     }
     const started = performance.now();
-    await section.act(page, seeded);
+    const cues: Record<string, number> = {};
+    await section.act(page, seeded, (cue) => {
+      if (cue in cues) throw new Error(`${section.id}: the cue ${cue} is marked twice`);
+      cues[cue] = (performance.now() - started) / 1000;
+    });
     const action = (performance.now() - started) / 1000;
     if (raw !== undefined) await page.screencast.stop();
     await assertScreenClean(page, errors);
-    return { action };
+    return { action, cues };
   } finally {
     await context.close();
   }
@@ -126,14 +137,14 @@ function renderCast(cast: string, gif: string, out: string, window?: readonly [n
   run("ffmpeg", ["-y", "-v", "error", "-i", gif, ...cut, "-vf", fit, ...H264, "-an", out]);
 }
 
-interface Cue {
+interface Caption {
   readonly from: number;
   readonly to: number;
   readonly text: string;
 }
 
-/** Caption cues for one section's narration: a cue per sentence, timed by its share of letters. */
-function cues(text: string, start: number, length: number): Cue[] {
+/** Captions for one narration line: one per sentence, timed by its share of the letters. */
+function captionsFor(text: string, start: number, length: number): Caption[] {
   const sentences = text.match(/[^.!?]+[.!?]*(\s+|$)/g)?.map((part) => part.trim()) ?? [text];
   const letters = sentences.reduce((sum, sentence) => sum + sentence.length, 0);
   let at = start;
@@ -211,20 +222,26 @@ if (browserSections.length > 0) {
 //    clock, sends a frame only when the page changes, and holds its last frame to the moment it
 //    stopped, so the recording runs as long as the wall clock did, less the moment its first frame
 //    took. The clip ends where the action did. A recording more than that moment short of the
-//    wall clock lost time, and is refused.
+//    wall clock lost time, and is refused. A cue's moment in the clip is its moment in the action
+//    plus the lead-in, less the cut-in.
 interface Clip {
   readonly seconds: number;
   readonly note: string;
+  readonly cues: Readonly<Record<string, number>>;
 }
 const clips: Clip[] = [];
 for (const section of sections) {
   if (isCast(section)) {
     const cast = resolve(dirname(file), section.cast);
     renderCast(cast, join(work, `${section.id}.gif`), clipPath(section.id), section.window);
-    clips.push({ note: `cast ${relative(REPO, cast)}`, seconds: duration(clipPath(section.id)) });
+    clips.push({
+      cues: {},
+      note: `cast ${relative(REPO, cast)}`,
+      seconds: duration(clipPath(section.id)),
+    });
     continue;
   }
-  const { action } = JSON.parse(readFileSync(metaPath(section.id), "utf8")) as Recorded;
+  const { action, cues } = JSON.parse(readFileSync(metaPath(section.id), "utf8")) as Recorded;
   const raw = duration(rawPath(section.id));
   const wall = LEAD_MS / 1000 + action;
   if (raw < wall - FIRST_FRAME_SLACK) {
@@ -241,75 +258,148 @@ for (const section of sections) {
     "-vf", `fps=${FPS},format=yuv420p`, ...H264, "-an", clipPath(section.id),
   ]);
   clips.push({
+    cues: Object.fromEntries(
+      Object.entries(cues).map(([cue, at]) => [cue, LEAD_MS / 1000 + at - CUT_IN])
+    ),
     note: `action ${action.toFixed(2)} s, recording ${raw.toFixed(2)} s`,
     seconds: duration(clipPath(section.id)),
   });
 }
-const report = sections.map(
-  (section, index) =>
-    `${section.id.padEnd(14)} clip ${clips[index].seconds.toFixed(2)} s (${clips[index].note})`
-);
+const report = sections.map((section, index) => {
+  const { cues, note, seconds } = clips[index];
+  const marked = Object.entries(cues).map(([cue, at]) => `${cue} ${at.toFixed(2)} s`);
+  return (
+    `${section.id} clip ${seconds.toFixed(2)} s (${note})` +
+    (marked.length === 0 ? "" : `; cues ${marked.join(", ")}`)
+  );
+});
 if (values["record-only"]) {
   console.log(report.join("\n"));
   process.exit(0);
 }
 
-// 3. Narrate each section and refuse narration longer than its clip. A narration is cached under
-//    everything that shapes it, so a rebuild asks ElevenLabs only for words that changed.
-const spoken = sections.map((section) =>
-  Object.entries(walkthrough.pronounce ?? {}).reduce(
-    (text, [written, said]) => text.replaceAll(written, said),
-    section.narration
-  )
-);
-const narrations: { readonly file: string; readonly seconds: number }[] = [];
-const overruns: string[] = [];
-for (const [index, section] of sections.entries()) {
+// 3. Narrate each line, place it at its moment, and refuse a line that runs into the next one or
+//    past its clip. A line is cached under everything that shapes it, so a rebuild asks
+//    ElevenLabs only for lines whose words or neighbours changed. ElevenLabs pads its speech with
+//    silence, so each line is placed and measured with its leading and trailing silence removed.
+interface Line {
+  readonly section: number;
+  readonly text: string;
+  readonly spoken: string;
+  readonly at: number;
+}
+const lines: Line[] = sections.flatMap((section, index) => {
+  if (section.narration.length === 0) throw new Error(`${name}/${section.id} has no narration.`);
+  return section.narration.map((line) => {
+    const at = typeof line.at === "number" ? line.at : clips[index].cues[line.at];
+    if (at === undefined) {
+      throw new Error(`${name}/${section.id}: no cue ${line.at} was marked for "${line.text}".`);
+    }
+    const spoken = Object.entries(walkthrough.pronounce ?? {}).reduce(
+      (text, [written, said]) => text.replaceAll(written, said),
+      line.text
+    );
+    return { at, section: index, spoken, text: line.text };
+  });
+});
+const voiced: { readonly file: string; readonly seconds: number }[] = [];
+for (const [index, line] of lines.entries()) {
+  const neighbours = (from: number, to?: number) =>
+    lines
+      .slice(from, to)
+      .map((other) => other.spoken)
+      .join(" ");
   const context = {
-    next: spoken.slice(index + 1).join(" "),
-    previous: spoken.slice(0, index).join(" "),
+    next: neighbours(index + 1).slice(0, CONTEXT_CHARS),
+    previous: neighbours(0, index).slice(-CONTEXT_CHARS),
   };
   const key = createHash("sha256")
-    .update(JSON.stringify([NARRATION_VOICE, spoken[index], context]))
+    .update(JSON.stringify([NARRATION_VOICE, line.spoken, context]))
     .digest("hex")
     .slice(0, 16);
-  const mp3 = join(work, "narration", `${section.id}-${key}.mp3`);
-  if (!existsSync(mp3)) await narrate(spoken[index], mp3, context);
-  const seconds = duration(mp3);
-  narrations.push({ file: mp3, seconds });
-  const at = section.at ?? DEFAULT_AT;
-  const spare = clips[index].seconds - at - seconds;
-  report[index] += `, narration ${seconds.toFixed(2)} s from ${at} s, ${spare.toFixed(2)} s spare`;
-  if (spare < 0) overruns.push(`${section.id} by ${(-spare).toFixed(2)} s`);
+  const mp3 = join(work, "narration", `${sections[line.section].id}-${key}.mp3`);
+  if (!existsSync(mp3)) await narrate(line.spoken, mp3, context);
+  const speech = mp3.replace(/\.mp3$/, ".speech.wav");
+  if (!existsSync(speech)) {
+    const trim = "silenceremove=start_periods=1:start_threshold=-50dB";
+    // biome-ignore format: a command's flags read as flag-value pairs
+    run("ffmpeg", [
+      "-y", "-v", "error", "-i", mp3, "-af", `${trim},areverse,${trim},areverse`, speech,
+    ]);
+  }
+  voiced.push({ file: speech, seconds: duration(speech) });
+}
+/** The indexes in `lines` of one section's lines, in the order the walkthrough lists them. */
+const linesOf = (section: number) =>
+  lines.flatMap((line, index) => (line.section === section ? [index] : []));
+const refusals: string[] = [];
+for (const [index, section] of sections.entries()) {
+  const own = linesOf(index);
+  for (const [position, lineIndex] of own.entries()) {
+    const line = lines[lineIndex];
+    const next = own[position + 1];
+    const until = next === undefined ? clips[index].seconds : lines[next].at;
+    const spare = until - line.at - voiced[lineIndex].seconds;
+    report.push(
+      `  ${section.id} at ${line.at.toFixed(2)} s, ${voiced[lineIndex].seconds.toFixed(2)} s, ` +
+        `${spare.toFixed(2)} s spare: ${line.text}`
+    );
+    if (line.at < 0) refusals.push(`${section.id}: "${line.text}" starts before its clip`);
+    if (spare < 0) {
+      refusals.push(
+        `${section.id}: "${line.text}" overruns ${next === undefined ? "its clip" : "the next line"} ` +
+          `by ${(-spare).toFixed(2)} s`
+      );
+    }
+  }
+  // Silence over live action is fine; over a still picture it is dead air. The build names every
+  // long silence for the author to check against the footage.
+  let quietFrom = 0;
+  for (const lineIndex of [...own, undefined]) {
+    const until = lineIndex === undefined ? clips[index].seconds : lines[lineIndex].at;
+    if (until - quietFrom >= SILENCE_REPORTED) {
+      report.push(`  ${section.id} silent ${quietFrom.toFixed(2)}-${until.toFixed(2)} s`);
+    }
+    if (lineIndex !== undefined) quietFrom = lines[lineIndex].at + voiced[lineIndex].seconds;
+  }
 }
 console.log(report.join("\n"));
-if (overruns.length > 0) {
+if (refusals.length > 0) {
   throw new Error(
-    `Narration overruns its clip (${overruns.join(", ")}): cut words, never slow or stretch the video.`
+    `${refusals.join("\n")}\nCut words; never slow, stretch or freeze the video to fit them.`
   );
 }
 
-// 4. Lay each narration on its clip from its start offset, padded with silence to the clip's
-//    length and loudness-normalised; then concatenate the sections and write the captions.
+// 4. Lay each section's lines on its clip at their moments, loudness-normalised and padded with
+//    silence to the clip's length; then concatenate the sections and write the captions.
 const sectionFiles: string[] = [];
 const captions = ["WEBVTT", ""];
 let offset = 0;
 for (const [index, section] of sections.entries()) {
-  const at = section.at ?? DEFAULT_AT;
+  const own = linesOf(index);
   const seconds = clips[index].seconds.toFixed(3);
+  const voices = own.map(
+    (lineIndex, input) =>
+      `[${input + 1}:a]aformat=channel_layouts=stereo,loudnorm=I=-16:TP=-1.5:LRA=11,` +
+      `aresample=44100,adelay=${Math.round(lines[lineIndex].at * 1000)}:all=1[v${input}]`
+  );
+  // The lines never overlap, so summing them unscaled leaves each at its own loudness.
+  const mixed = `${own.map((_, input) => `[v${input}]`).join("")}amix=inputs=${own.length}:normalize=0`;
   const out = join(work, `${section.id}.section.mp4`);
   // biome-ignore format: a command's flags read as flag-value pairs
   run("ffmpeg", [
-    "-y", "-v", "error", "-i", clipPath(section.id), "-i", narrations[index].file,
-    "-filter_complex",
-    "[1:a]aformat=channel_layouts=stereo,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100," +
-      `adelay=${Math.round(at * 1000)}:all=1,apad,atrim=0:${seconds}[a]`,
+    "-y", "-v", "error", "-i", clipPath(section.id),
+    ...own.flatMap((lineIndex) => ["-i", voiced[lineIndex].file]),
+    "-filter_complex", `${voices.join(";")};${mixed},apad,atrim=0:${seconds}[a]`,
     "-map", "0:v", "-map", "[a]", "-c:v", "copy",
     "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-t", seconds, out,
   ]);
   sectionFiles.push(out);
-  for (const cue of cues(section.narration, offset + at, narrations[index].seconds)) {
-    captions.push(`${vttTime(cue.from)} --> ${vttTime(cue.to)}`, cue.text, "");
+  for (const lineIndex of own) {
+    const line = lines[lineIndex];
+    for (const caption of captionsFor(line.text, offset + line.at, voiced[lineIndex].seconds)) {
+      captions.push(`${vttTime(caption.from)} --> ${vttTime(caption.to)}`, caption.text, "");
+    }
   }
   offset += duration(out);
 }

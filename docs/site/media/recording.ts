@@ -2,20 +2,30 @@
 // sections act with. `walkthrough.ts` turns one into a narrated video.
 import type { BrowserContext, Locator, Page } from "@playwright/test";
 
+/** One line of narration and where it starts in its section's clip: seconds into the clip, or
+ *  the name of a cue the section's action marked, so the line is spoken once its moment has
+ *  happened on screen. */
+export interface NarrationLine {
+  readonly at: number | string;
+  readonly text: string;
+}
+
 interface SectionBase {
   readonly id: string;
-  /** What the narrator says over this section, written after the clip was cut, to its length. */
-  readonly narration: string;
-  /** Seconds into the clip the narration starts; 0.4 when omitted. */
-  readonly at?: number;
+  /** What the narrator says over this section, written after the clip was cut, to its length.
+   *  Each line must end before the next one starts, and the last before the clip ends. */
+  readonly narration: readonly NarrationLine[];
 }
+
+/** Marks the moment of the action a narration line names as its `at`. */
+export type Cue = (name: string) => void;
 
 /** A section recorded in the browser against the seeded harness. */
 export interface BrowserSection<Seeded> extends SectionBase {
   /** Unrecorded: loads the page this section starts on and waits until it is ready. */
   readonly open: (page: Page, seeded: Seeded) => Promise<void>;
   /** Recorded: the section's action, from the ready page to the state it ends on. */
-  readonly act: (page: Page, seeded: Seeded) => Promise<void>;
+  readonly act: (page: Page, seeded: Seeded, cue: Cue) => Promise<void>;
 }
 
 /** A section rendered from an asciinema recording. */
@@ -79,13 +89,33 @@ export async function drawPointer(context: BrowserContext): Promise<void> {
 }
 
 /** Glides the drawn pointer to the middle of `target` and waits for it to arrive, so a click or
- *  a hover the caller makes next lands where the viewer is already looking. */
+ *  a hover the caller makes next lands where the viewer is already looking. The target must
+ *  already be on screen: scroll to it with `scrollBy`, where the viewer sees the page move, since
+ *  an instant jump reads as a cut. */
 export async function pointTo(page: Page, target: Locator): Promise<void> {
-  await target.scrollIntoViewIfNeeded();
   const box = await target.boundingBox();
   if (box === null) throw new Error("pointTo: the target is not rendered");
+  const viewport = page.viewportSize();
+  if (viewport === null) throw new Error("pointTo: the page has no viewport");
+  if (box.y < 0 || box.x < 0 || box.y + box.height > viewport.height) {
+    throw new Error(
+      `pointTo: the target is off screen (top ${Math.round(box.y)} px, height ` +
+        `${Math.round(box.height)} px, viewport ${viewport.height} px); scrollBy to it first.`
+    );
+  }
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 8 });
   await page.waitForTimeout(GLIDE_MS + 50);
+}
+
+/** Scrolls the page under the pointer by `pixels` (down when positive) as one steady, visible
+ *  movement: a wheel turn every frame, about 0.6 s for a screen's height. */
+export async function scrollBy(page: Page, pixels: number): Promise<void> {
+  const steps = Math.max(1, Math.round(Math.abs(pixels) / 24));
+  for (let step = 0; step < steps; step++) {
+    await page.mouse.wheel(0, pixels / steps);
+    await page.waitForTimeout(16);
+  }
+  await page.waitForTimeout(150);
 }
 
 /** A pause for the viewer to read what is on screen: real page time, never a held frame. */
