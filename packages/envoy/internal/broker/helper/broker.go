@@ -320,11 +320,14 @@ func (b *Broker) pollLogin(key *ecdsa.PrivateKey, pendingID, code, operator stri
 					cred.expiresAt = out.ExpiresAt.UTC()
 				}
 				b.installCredential(cred, &loginState{Code: code, PendingID: pendingID, State: "issued"})
+				attrs := []any{"credential_id", cred.id, "operator", operator}
+				if !cred.expiresAt.IsZero() {
+					attrs = append(attrs, "expires_at", cred.expiresAt.Format(time.RFC3339))
+				}
+				b.logger().Info("machine login issued; the helper holds a launcher credential", attrs...)
 				if cred.expiresAt.IsZero() {
-					b.logger().Info("machine login issued; the helper holds a launcher credential", "credential_id", cred.id, "operator", operator)
 					b.logger().Warn("the broker did not say when the launcher credential expires, so the helper cannot warn before it does", "credential_id", cred.id)
 				} else {
-					b.logger().Info("machine login issued; the helper holds a launcher credential", "credential_id", cred.id, "operator", operator, "expires_at", cred.expiresAt.Format(time.RFC3339))
 					go b.watchExpiry(cred)
 				}
 				return
@@ -352,19 +355,15 @@ func (b *Broker) watchExpiry(cred *machineCredential) {
 	if lead == 0 {
 		lead = 24 * time.Hour
 	}
-	warn := time.NewTimer(time.Until(cred.expiresAt.Add(-lead)))
-	defer warn.Stop()
 	select {
-	case <-warn.C:
+	case <-time.After(time.Until(cred.expiresAt.Add(-lead))):
 		b.logger().Warn("the launcher credential expires soon; the broker has no renewal, so before then run: agent-secrets launcher login, and have a human approve it",
 			"credential_id", cred.id, "expires_at", cred.expiresAt.Format(time.RFC3339), "in", time.Until(cred.expiresAt).Round(time.Second))
 	case <-cred.gone:
 		return
 	}
-	expire := time.NewTimer(time.Until(cred.expiresAt))
-	defer expire.Stop()
 	select {
-	case <-expire.C:
+	case <-time.After(time.Until(cred.expiresAt)):
 		if b.drop(cred) {
 			b.logger().Error("launcher credential expired; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)",
 				"credential_id", cred.id, "expires_at", cred.expiresAt.Format(time.RFC3339))

@@ -74,8 +74,7 @@ func (s *server) readMachineLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := machineLoginStateResponse{CredentialID: credentialID, State: state}
 	if state == "issued" {
-		expires := expiresAt.UTC()
-		resp.ExpiresAt = &expires
+		resp.ExpiresAt = new(expiresAt.UTC())
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

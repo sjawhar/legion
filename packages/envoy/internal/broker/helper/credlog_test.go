@@ -9,7 +9,6 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"log/slog"
 	"os"
@@ -67,14 +66,9 @@ func TestTheHelperLogsEveryChangeOfTheLauncherCredential(t *testing.T) {
 		t.Fatal("an enroll the broker refuses 401 LAUNCHER_INVALID must fail")
 	}
 
-	var records []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			t.Fatalf("log line %q: %v", line, err)
-		}
+	records := logRecords(t, &out)
+	for _, rec := range records {
 		delete(rec, "time")
-		records = append(records, rec)
 	}
 	want := []map[string]any{
 		{"level": "INFO", "msg": "machine login issued; the helper holds a launcher credential", "credential_id": credentialID, "operator": "ada@example.com", "expires_at": expiresAt},
