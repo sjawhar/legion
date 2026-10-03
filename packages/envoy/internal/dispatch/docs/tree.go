@@ -126,6 +126,32 @@ func renderDocument(doc *crdt.Doc) (string, error) {
 	return renderTree(tree)
 }
 
+// snapshotDocument copies doc's state as of one moment. Encoding it takes the document's lock, which
+// every peer update and service write holds while it applies, so the copy is never a tree half
+// way through a write - which a direct walk of a resident room's live tree can read, since the
+// walk takes no lock (YXmlFragment.Children, crdt/yxml.go:301 in the pinned ygo fork) - and
+// nothing writes the copy. It opens no transaction on doc: ygo hands the room's persistence an
+// update for every transaction it commits, even one that only reads.
+func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
+	snapshot := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(snapshot, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
+		return nil, fmt.Errorf("copy live document: %w", err)
+	}
+	return snapshot, nil
+}
+
+// newDocumentCopy is an empty document to decode a copy of a room's whole state into. Decoding a
+// whole document parks each item whose parent ygo cannot place yet - one under a collected
+// container, and every later item of its client behind it - until the end of the update, and a
+// deleted chain a peer nested past 100,000 levels parks more than ygo's default pending cap allows
+// (crdt/doc.go:100 in the pinned fork), which refuses the copy of a room the room itself holds
+// without complaint. That cap guards a room against a peer's update; a copy is the room's own
+// state, so it parks up to the most items one update may carry (maxUpdateItems), which the
+// decoder enforces anyway (crdt/update.go:519).
+func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
+	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems))...)
+}
+
 // closureChangedMarkdown reports whether a document closure that produced after changed the
 // canonical markdown a version stores, given what the document rendered before it ran (before,
 // beforeErr). It is the measure `content_changed` records for every other write, applied to
