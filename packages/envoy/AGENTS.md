@@ -251,14 +251,99 @@ error for the read and for `writeHandlerError` alike, and both take its codes in
 cause the error carries: a failed room carries the error another operation failed it with
 (settlement's schema refusal, a settlement that failed three times - its warm-up refused because
 the issue had closed, among others - a writer's failed or cancelled commit, a failed store write
-or load), which says nothing of this request. `DOC_SCHEMA` is a live tree outside the schema,
-taken after the refusals that name the caller's own input or a missing block, so an ask block the
-renderer refused stays `400 INVALID_ASK_BLOCK`. Anything else is `INTERNAL`, as
-`writeHandlerError` answers it. Only a request that has gone away fails, decided by that request's
+or load, a history that did not decode), which says nothing of this request.
+`DOCUMENT_UNLOADABLE` (409) is a stored history this request itself could not decode
+(`docs.ErrDocumentUnloadable`), the one state `POST /api/v1/artifacts/{id}/rebuild` repairs and the
+one code the dashboard offers that rebuild for. `DOC_SCHEMA` is a tree outside the schema: one the
+document holds is a `docs.OutsideSchemaError`, which `treeOf` and `documentMarkdown` classify where
+they read or render a document's tree, so every route that starts from it - `GET /text`,
+`GET /blocks`, `POST /edits`, `POST /versions` - answers 409 with its one message, while a schema
+refusal of a tree a write itself produced is a 500 (`producedSchemaError`). Both are taken after
+the refusals that name the caller's own input or a missing block, so an ask block the renderer
+refused stays `400 INVALID_ASK_BLOCK`. Anything else is `INTERNAL`, as `writeHandlerError` answers
+it. Only a request that has gone away fails, decided by that request's
 own context rather than the error, since a room a writer's cancelled commit failed carries that
 writer's `context.Canceled` in its cause. Nor does that read wait for a failed room's recovery
 (`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`,
 `GET /blocks` and the block route wait.
+
+A read of a resident room reads a copy taken under its document lock (`snapshotDocument`,
+`crdt.EncodeStateAsUpdateV1`), never the live tree: `GET /text` and the document websocket's
+admission check (`loadDocument`), a version's capture (`captureLiveTextAndAuthors`), a read
+outside any transaction (`docView`), and settlement's reads of the room (`settleRoomWithin`'s first
+read and its version's, and the block-id backfill's read, through `lockedTreeOf`), so a torn read is
+never versioned as the document; a repair reads the tree inside the transaction that writes it
+(`rewriteLive`), and the unrecorded-mark sweep (`sweepUnrecordedMarks`) inside the transaction that
+unmarks it. A walk of the live tree takes no lock (reearth/ygo v1.49.5, `crdt/yxml.go`) while every
+peer update and service write holds that lock as it applies, so the walk can read a write halfway
+through as a tree outside the schema and answer a healthy document 409 with the repair. A version's
+capture holds the room's state lock across the copy and the authors it captures, so an author the
+update observer credits is captured only with that update's text; the order - state lock, then
+document lock - is never reversed, since only a Yjs transaction's own function holds a document's
+lock and none takes a room's state lock. A read that may load its room (a version's capture,
+`docView`, `VerifyMark`'s subscription) takes what it reads inside the `Server.Apply` that loads
+and holds the room: a room looked up again with `GetDoc` once that Apply returned can have been
+evicted in between.
+
+Every decode of a document's whole state takes a pending queue as long as the most items one
+update can carry (`newDocumentCopy`, `maxUpdateItems`): the copy, a write's fork (`forkLive`), and
+every decode of the stored history - a read with no room resident (`loadDocument`), the history
+check behind a room's load and a rebuild's refusal (`validateUpdate`), and the room's own load
+(`Server.MaxPendingItems`, set in `New`) - and so does the store's check of each update it appends
+(`appendUpdate`, `AppendUpdateTx`), which decodes the update alone. ygo's decoder defers an item
+whose parent it cannot place yet - a container a later client's group holds, one outside the
+update it decodes, or one garbage collection emptied when a peer deleted it - and parks every later
+item of that client behind it as a clock gap, refusing the update once 100,000 are parked, its
+default (LEGION-502). A room whose peer deleted a chain of 200,000 nested blocks, or whose
+lower-numbered client wrote 100,000 items after one such deferral, then failed every copy with
+`crdt: invalid update` while the room itself served it
+(`TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`,
+`TestACopyHoldsEveryItemItsRoomParksForOneClient`). Once that room was evicted or the server
+restarted, the same document read as `409 DOCUMENT_UNLOADABLE`, its room did not open, and the
+rebuild that code offers, whose history check refused it too, replaced its history with its latest
+saved version (`TestAStoredHistoryLoadsWhatItsRoomParksForOneClient`). A browser update of more
+than 100,000 items written against blocks the document already holds, such as 75,000 paragraphs
+with their block ids written ahead of one, failed the store's check, so the room failed and dropped
+the edit (`TestTheStoreTakesOneBrowserUpdateItsRoomTook`). ygo refuses any update that declares
+more than `maxUpdateItems` items, so no decode of one parks past that queue; in a room, which keeps
+what it parks across updates, it is also the most the room's peers can park, about ten times ygo's
+default. One check still decodes one update alone at ygo's default: ygo's, of an update the
+service broadcasts (`Server.BroadcastUpdate`). It refuses an update of more than 100,000 items that
+lean on items outside it, such as a settlement that stamps that many blocks' ids, and the room
+fails.
+
+A room whose last peer leaves stays resident until it has been idle for a minute
+(`roomIdleTimeout`), when ygo's idle sweeper evicts it. ygo's default, eager eviction, evicts a room
+the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (reearth/ygo
+v1.49.5, `provider/websocket/peer.go` checks only the peers): the callback's write then lands on the
+evicted room and reaches the store only through its retiring persistence worker, while the next
+access has already loaded the store without it and serves, and takes, the next write on a document
+missing the first. Two such writes, each a diff of the same document, merge into a document neither
+wrote, and into one holding no block at all once each kept a block the other replaced: the
+healthy-room probe met it as a socket closed with `DOC_SCHEMA`. The idle sweeper evicts only a room
+no Apply holds or has touched since its last peer left (`provider/websocket/idle_sweep.go`), so every
+write a room the sweeper evicts has taken is durable before another instance of it loads, and a peer
+that returns within the minute rejoins the warm room. `TestAHealthyRoomUnderWritesIsNeverRefused`
+checks every load of a room against the writes its earlier instances took. ygo's `CloseRoom` checks
+only the peers as well, and the service still calls it to close an issue's rooms (`SetIssueClosed`),
+for a room with an editor at `Shutdown`, and to evict one (`evictRoom`): a write that commits on a
+room it has retired reaches the store through ygo's stranded persistence, on the committing goroutine
+(`provider/websocket/persistence.go`). A committed write's publish (`publishLiveUpdate`) is already
+durable and suppresses that append; the room's own update observer finishes its suppression slot
+before ygo's persistence observer runs (`onLoadDocument`), so the stranded append never waits on the
+publish it runs inside, and the publish, its request and the document's writer slot are released
+(`TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt`, `TestAWriteSurvivesItsIssueClosingAsItPublishes`).
+A publish whose room `CloseRoom` removed has no peer left to broadcast to and returns.
+
+The room's update observer (`updateChangesMarkdown`) renders a replica of the room, not the live
+tree, since ygo fires it after the transaction has released the document's lock and another write
+can be integrating meanwhile (`renderedReplica`). The replica is copied from the room on its first
+update and then brought up to date under the room's lock with what the room gained since its state
+vector, as `forkLive` brings a fork up to date. The update the observer is handed cannot stand in:
+two transactions' observers run concurrently in either order, and each update carries the room's
+whole delete set. On a 1 MiB document a catch-up after one typed character took about 8 ms where the
+render took about 160 ms and a whole copy about 420 ms, and the replica holds about 80 MiB of heap
+while its room is resident.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
@@ -429,8 +514,8 @@ write reaches the room, `recordPublishedLoss` reads it again: nothing can be und
 response is `200` with `lost_ops` naming the operations whose text the live document does not
 carry, `[]` when everything survived, and `null` when no verdict was reached: the publish failed
 and the room is reloading, or the room holds a tree past the schema's depth bound, which a re-read
-answers with `500 DOC_SCHEMA`. An operation's text counts as surviving while it is live inside an
-element carrying the block id it was written into - any such element, since a browser move can
+answers with `409 DOC_SCHEMA` and the repair. An operation's text counts as surviving while it is
+live inside an element carrying the block id it was written into - any such element, since a browser move can
 leave an id on two until `EnsureBlockIDs` repairs it - so a concurrent range delete around the
 agent's own insertion, or a keystroke in the same paragraph, is an ordinary success, while a
 deleted paragraph, a deleted ancestor and a browser move that strands the run in another block are
@@ -1173,7 +1258,9 @@ Markdown that becomes a whole document - a spec at issue creation, an uploaded d
 is refused with `400 INVALID_ASK_BLOCK` when an ask's body breaks its content rule,
 `paragraph+ bullet_list?` - one or more paragraphs, then at most one bullet list, last
 (`pmdoc.AskContentError`) - as the browser editor's parser refuses to build such a block. A new
-document is held to it for every ask, a new version only for each ask it writes or changes
+document is held to it for every ask, and so are a version that repairs a stored tree outside the
+schema, which has no readable asks to compare with, and a rebuild from supplied markdown; any other
+new version only for each ask it writes or changes
 (`refuseChangedAsks`), comparing the ask's rendering with the current one (`newAskMarkdown`, the
 asks of one check sharing one budget of span cells, spent in document order as the document's own
 render spent it, so a live ask over a table with colspans or rowspans matches the cells its stored

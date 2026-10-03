@@ -1,4 +1,5 @@
 import type { HocuspocusProvider } from "@hocuspocus/provider";
+import { DOCUMENT_SCHEMA_CLOSE_CODE } from "@legion/contracts";
 import type { Awareness } from "y-protocols/awareness";
 import type { Doc } from "yjs";
 
@@ -28,6 +29,11 @@ export interface DocumentConnection {
 export interface ConnectionCallbacks {
   schemaVersion: number;
   onAdmission(readOnly: boolean): void;
+  /**
+   * Fires when the server refuses the socket because the stored document is outside the Proof
+   * schema. The connection has stopped reconnecting; a fresh read decides what comes next.
+   */
+  onOutsideSchema(): void;
   onStatus(state: ConnectionState): void;
   /** Fires once, when the server's first sync completes after admission. */
   onSynced(): void;
@@ -81,6 +87,15 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         authenticated = true;
         callbacks.onAdmission(isSchemaReadOnly(provider.authorizedScope));
         notifySynced();
+      },
+      onClose: ({ event }) => {
+        // Hocuspocus answers every other close by reconnecting. This one is the server's decision
+        // about the stored document (`DOCUMENT_SCHEMA_CLOSE_CODE`), so the provider stops here and
+        // the host reads it again.
+        if (event.code === DOCUMENT_SCHEMA_CLOSE_CODE) {
+          provider.disconnect();
+          callbacks.onOutsideSchema();
+        }
       },
       onStatus: ({ status }) => callbacks.onStatus(status === "disconnected" ? "offline" : status),
       onSynced: ({ state }) => {

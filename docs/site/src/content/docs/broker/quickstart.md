@@ -41,8 +41,10 @@ $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
 demo-read-token-value
 ```
 
-When they need a person's approval, `agent-secrets` waits (up to 30 minutes; set `--wait` to a
-duration such as `5m` to change that) while the approver decides.
+When they need a person's approval, `agent-secrets` says so, with the request's id and where to
+approve it (the request's Dispatch page when `AGENT_SECRETS_APPROVE_URL` names Dispatch's address,
+otherwise Credential requests in the Dispatch Inbox), and waits (up to 30 minutes; set `--wait` to
+a duration such as `5m` to change that) while the approver decides.
 
 ## 2. The approver decides in Dispatch
 
