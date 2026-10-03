@@ -103,9 +103,9 @@ longer running, the chip says **not running**, and the issue counts as unclaimed
 
 ## Creating an issue
 
-Press `c` anywhere. Pick the project, type a title, and optionally the first line of the spec. If
-the title closely matches an existing issue in the project, Dispatch shows that issue and offers
-**Create anyway**. A new issue opens as soon as it is created.
+Press `c` anywhere. Pick the project, type a title of up to 1,000 characters, and optionally the
+first line of the spec. If the title closely matches an existing issue in the project, Dispatch
+shows that issue and offers **Create anyway**. A new issue opens as soon as it is created.
 
 ## The issue page
 
