@@ -96,7 +96,8 @@ func TestSettlementWhoseRoomWasReplacedLeavesTheDocumentToTheReplacement(t *test
 		if room != artifactID || !replaced.CompareAndSwap(false, true) {
 			return
 		}
-		// ygo closes a room the moment its last browser leaves, on that browser's goroutine.
+		// This raw ygo close stands in for the idle sweep, which can evict the idle room between
+		// settlement's read and repair because no Server.Apply holds it then.
 		go func() { _ = service.srv.Server.CloseRoom(room, true) }()
 		deadline := time.Now().Add(5 * time.Second)
 		for service.srv.GetDoc(room) == held {
@@ -542,6 +543,12 @@ func TestASecondWriterIntoARoomClosingUnderASettlementsRepairReturns(t *testing.
 			}
 
 			settled := settleUnderPause(t, service, pause, artifactID, generation)
+			t.Cleanup(func() {
+				if t.Failed() {
+					service.purgeSuppressedPersistence(artifactID)
+					endRoomLockHolders(t, service)
+				}
+			})
 			var closeErr error
 			closed := make(chan struct{})
 			go func() {

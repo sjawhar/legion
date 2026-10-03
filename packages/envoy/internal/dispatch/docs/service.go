@@ -328,16 +328,14 @@ func (s *Service) applySuppressed(ctx context.Context, room string, want *crdt.D
 		if want != nil && doc != want {
 			return errRoomReplaced
 		}
-		// Held from here, after Server.Apply's injection check, which waits for a failed room's
-		// eviction outside a transaction, and never waited for (roomServer).
-		gate, open := s.srv.holdOpen(room)
+		// Taken after Server.Apply's injection check, which waits for a failed room's eviction
+		// outside a transaction. A repair therefore never holds the gate while waiting for that
+		// eviction, and holdOpen rechecks that this room still holds doc before it does.
+		release, open := s.srv.holdOpen(room, doc)
 		if !open {
 			return errRoomReplaced
 		}
-		defer s.srv.releaseOpen(room, gate)
-		if s.srv.GetDoc(room) != doc {
-			return errRoomReplaced
-		}
+		defer release()
 		var mutateErr error
 		wrote, mutateErr = mutate(doc, origin)
 		return mutateErr
@@ -415,7 +413,7 @@ func (s *Service) consumeSuppressedPersistence(room string, update []byte) bool 
 			// A discarded repair's slot is consumed by that repair's own update alone. ygo runs the
 			// observers of two transactions in either order (renderedReplica), so another writer's
 			// update can reach the worker ahead of the repair's, and it is stored as any other.
-			if slot.committed != nil && !bytes.Equal(slot.committed, update) {
+			if !bytes.Equal(slot.committed, update) {
 				s.suppressMu.Unlock()
 				return false
 			}

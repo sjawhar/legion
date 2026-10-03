@@ -3,6 +3,7 @@ package docs
 import (
 	"sync"
 
+	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/provider/websocket"
 )
 
@@ -53,20 +54,24 @@ func (r *roomServer) CloseRoom(room string, force bool) error {
 	return r.Server.CloseRoom(room, force)
 }
 
-// holdOpen holds off every close of room while a repair commits into it, until releaseOpen. It
-// refuses, holding nothing, while a close is under way or waiting: a repair never waits for one.
-func (r *roomServer) holdOpen(room string) (*closeGate, bool) {
+// holdOpen holds doc's room open while a repair commits into it, until release. It refuses,
+// holding nothing, while a close is under way or waiting, or when room has retired or replaced doc:
+// a repair never waits for a close.
+func (r *roomServer) holdOpen(room string, doc *crdt.Doc) (release func(), open bool) {
 	gate := r.acquireGate(room)
 	if !gate.TryRLock() {
 		r.releaseGate(room, gate)
 		return nil, false
 	}
-	return gate, true
-}
-
-func (r *roomServer) releaseOpen(room string, gate *closeGate) {
-	gate.RUnlock()
-	r.releaseGate(room, gate)
+	release = func() {
+		gate.RUnlock()
+		r.releaseGate(room, gate)
+	}
+	if r.GetDoc(room) != doc {
+		release()
+		return nil, false
+	}
+	return release, true
 }
 
 func (r *roomServer) acquireGate(room string) *closeGate {

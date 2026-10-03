@@ -24,8 +24,10 @@ func TestCloseGatesDoNotOutliveTheirRooms(t *testing.T) {
 	var evicted []string
 	for number := 2; number <= 26; number++ { // rooms the service evicts
 		room := createIssueDocument(t, service.store, number, "before")
-		if _, err := service.Text(ctx, room); err != nil {
-			t.Fatalf("load document %d: %v", number, err)
+		seedServiceText(t, service, room, "before")
+		liveTree(t, service, room)
+		if service.srv.GetDoc(room) == nil {
+			t.Fatalf("document %d is not resident after its live read", number)
 		}
 		if err := service.Evict(ctx, room); err != nil {
 			t.Fatalf("evict document %d: %v", number, err)
@@ -85,6 +87,28 @@ func TestARepairRefusesRatherThanWaitsForACloseUnderWay(t *testing.T) {
 	requireNextSettlementStamps(t, service, artifactID, "before\n\nadded\n")
 	if gates := closeGates(service); gates != 0 {
 		t.Fatalf("%d close gates kept once nothing closes or repairs the room", gates)
+	}
+}
+
+// A repair holds the exact document Server.Apply found. Once its room has retired that document,
+// holdOpen refuses and releases the gate it acquired for the check.
+func TestHoldOpenRefusesRoomThatNoLongerHoldsItsDocument(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	owedStamp(t, service, artifactID)
+	doc := service.srv.GetDoc(artifactID)
+	if doc == nil {
+		t.Fatal("document room is not resident")
+	}
+	if err := service.srv.CloseRoom(artifactID, true); err != nil {
+		t.Fatalf("close document room: %v", err)
+	}
+	if release, open := service.srv.holdOpen(artifactID, doc); open {
+		release()
+		t.Fatal("a repair was held open on a document its room no longer holds")
+	}
+	if gates := closeGates(service); gates != 0 {
+		t.Fatalf("%d close gates kept after the refusal", gates)
 	}
 }
 
