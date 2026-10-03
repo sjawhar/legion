@@ -262,3 +262,62 @@ func TestTheStoreTakesOneBrowserUpdateItsRoomTook(t *testing.T) {
 		}
 	})
 }
+
+// A settlement stamps a block id on every block that lacks one, in one update the room broadcasts
+// to its peers. ygo checks each update the service broadcasts by decoding it alone under the
+// server's pending queue (Server.MaxPendingItems), and the stamp of a block the document already
+// holds leans on that block, so a settlement stamping more blocks than ygo's default queue of
+// 100,000 broadcasts only under the server's maxUpdateItems. Refused, the broadcast fails the room
+// on every reload, and the document is never stamped.
+func TestASettlementStampsMoreBlocksThanYgosDefaultQueue(t *testing.T) {
+	service, artifactID := newTestService(t)
+	// The settlement runs below, once, on the test's own goroutine.
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	ctx := context.Background()
+	const blocks = 150_000
+	if err := service.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		fragment := doc.GetXmlFragment(fragmentName)
+		transact(func(txn *crdt.Transaction) {
+			for range blocks {
+				fragment.InsertElement(txn, 0, crdt.NewYXmlElement("paragraph"))
+			}
+		})
+	}); err != nil {
+		t.Fatalf("write %d paragraphs without block ids: %v", blocks, err)
+	}
+	versions := func() (count int) {
+		t.Helper()
+		if err := service.store.Pool.QueryRow(ctx, `select count(*) from artifact_versions where artifact_id = $1`, artifactID).Scan(&count); err != nil {
+			t.Fatalf("count document versions: %v", err)
+		}
+		return count
+	}
+	before := versions()
+
+	settleCurrentGeneration(t, service, artifactID)
+	if err := service.roomFailure(artifactID); err != nil {
+		t.Fatalf("the settlement failed the room: %v", err)
+	}
+	if after := versions(); after != before+1 {
+		t.Fatalf("the settlement wrote %d versions, want 1", after-before)
+	}
+	if stamped, err := service.Blocks(ctx, artifactID); err != nil || len(stamped) != blocks+1 {
+		t.Fatalf("the settled document has %d blocks with ids (%v), want %d", len(stamped), err, blocks+1)
+	}
+	stored, err := NewPgVersioned(service.store).Load(ctx, artifactID)
+	if err != nil {
+		t.Fatalf("load the stored history: %v", err)
+	}
+	durable := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(durable, stored.Update, nil); err != nil {
+		t.Fatalf("decode the stored history: %v", err)
+	}
+	tree, err := treeOf(durable)
+	if err != nil {
+		t.Fatalf("read the stored document: %v", err)
+	}
+	if repairs := pmdoc.BlockIDRepairCount(tree); repairs != 0 {
+		t.Fatalf("the stored document still needs %d block-id repairs", repairs)
+	}
+}
