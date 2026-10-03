@@ -17,8 +17,9 @@ import {
   markSpan,
   placeCaret,
   selectEditorText,
+  setSheet,
 } from "./editor";
-import { commentWithBody, markText, setSheet } from "./margin-helpers";
+import { commentWithBody, markText } from "./margin-helpers";
 import { resetDatabase } from "./seed";
 import { centerOf, touchHold } from "./touch";
 import { asUser } from "./users";

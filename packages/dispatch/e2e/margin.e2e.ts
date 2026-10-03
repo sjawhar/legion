@@ -25,7 +25,7 @@ import {
   selectEditorText,
   setSheet,
 } from "./editor";
-import { commentWithBody, setSheet } from "./margin-helpers";
+import { commentWithBody } from "./margin-helpers";
 import { resetDatabase, setCommentAuthorService } from "./seed";
 import { asUser } from "./users";
 
