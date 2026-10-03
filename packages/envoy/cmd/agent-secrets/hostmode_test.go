@@ -332,7 +332,7 @@ func TestRegisterRefusesWithNoHelperSocket(t *testing.T) {
 	t.Setenv("AGENT_SECRETS_HELPER_SOCK", "")
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
-	code := cmdRegister([]string{"--exec", "--", "true"}, &stdout, &stderr)
+	code := cmdRegister(nil, &stdout, &stderr)
 	if code != exitUsageError {
 		t.Fatalf("register with no helper socket: exit %d, want %d; stderr %q", code, exitUsageError, stderr.String())
 	}
