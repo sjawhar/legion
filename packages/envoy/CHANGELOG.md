@@ -240,7 +240,7 @@
   piece of inline HTML, a tag or a comment, is an element of its own in the document, carrying the
   HTML and splitting its text: weighed as one, the heaviest document of `<b>a</b>` spans the limit
   admitted held 213 to 257 MiB to store, past the 256 MiB a request may hold. Every markdown file of
-  4 KiB or more among this repository's 617 weighs 1.5 to 379 elements a kibibyte, so prose passes
+  4 KiB or more among this repository's 618 weighs 1.5 to 379 elements a kibibyte, so prose passes
   to the 1 MiB cap and the densest of them, a comparison matrix, to about 173 KiB; smaller files run
   denser, up to 1,296 a kibibyte for a 147-byte test fixture of empty list items. A paragraph of
   link reference definitions, which goldmark took time quadratic in its lines to read (a mebibyte of
