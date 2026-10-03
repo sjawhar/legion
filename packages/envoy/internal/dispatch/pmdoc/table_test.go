@@ -3,6 +3,8 @@ package pmdoc
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/extension"
 	extensionast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/parser"
 	gmtext "github.com/yuin/goldmark/text"
@@ -273,4 +276,101 @@ func TestParseKeepsAnEscapedClosingPipeInTheLastCell(t *testing.T) {
 			t.Errorf("Parse(%q) second cells = %q, want %q", markdown, got, want)
 		}
 	}
+}
+
+// unescapeTablePipes leaves the tree goldmark's table AST transformer, which pmdoc no longer
+// registers, leaves: on every corpus fixture, and on seeded random tables of code spans, escaped
+// and doubly escaped pipes, backslashes and marks, in a quote or a list or not, each followed by a
+// paragraph of the same, the two make the same nodes over the same bytes.
+func TestUnescapeTablePipesLeavesTheTreeGoldmarksTransformerDoes(t *testing.T) {
+	read := func(source []byte) (ast.Node, gmtext.Reader, parser.Context) {
+		reader := gmtext.NewReader(source)
+		pc := parser.NewContext()
+		pc.Set(tablePaddingBudgetKey, NewTablePaddingBudget())
+		return blockReader.md.Parser().Parse(reader, parser.WithContext(pc)), reader, pc
+	}
+	tables, unescaped := 0, 0
+	compare := func(name string, source []byte) {
+		t.Helper()
+		ours, _, _ := read(source)
+		unescapeTablePipes(ours, source)
+		theirs, reader, pc := read(source)
+		extension.NewTableASTTransformer().Transform(theirs.(*ast.Document), reader, pc)
+		got, want := goldmarkTree(ours, source), goldmarkTree(theirs, source)
+		if got != want {
+			t.Errorf("%s, %q:\nunescapeTablePipes left\n%s\ngoldmark's transformer left\n%s", name, source, got, want)
+		}
+		if strings.Contains(want, "TableCell") {
+			tables++
+		}
+		if untouched, _, _ := read(source); want != goldmarkTree(untouched, source) {
+			unescaped++
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join("testdata", "corpus"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		source, err := os.ReadFile(filepath.Join("testdata", "corpus", entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		compare(entry.Name(), source)
+	}
+	tokens := []string{"`", "``", "\\|", "\\\\|", "\\", "a", " ", "*", "**", "_", "~~", "[", "](u)", "<b>", "|", "`a\\|b`", "`\\\\|`", "` \\| `"}
+	random := rand.New(rand.NewPCG(465, 2))
+	cell := func() string {
+		var text strings.Builder
+		for range 1 + random.IntN(8) {
+			text.WriteString(tokens[random.IntN(len(tokens))])
+		}
+		return text.String()
+	}
+	for index := range 5000 {
+		prefix := []string{"", "> ", "- "}[random.IntN(3)]
+		var source strings.Builder
+		source.WriteString(prefix + "| h | h |\n")
+		indent := strings.Repeat(" ", len(prefix))
+		if prefix == "> " {
+			indent = prefix
+		}
+		source.WriteString(indent + "| - | - |\n")
+		for range 1 + random.IntN(4) {
+			source.WriteString(indent + "|")
+			for range 1 + random.IntN(3) {
+				source.WriteString(" " + cell() + " |")
+			}
+			source.WriteString("\n")
+		}
+		// A code span outside any table keeps its backslash.
+		source.WriteString("\n" + cell() + "\n")
+		compare(fmt.Sprintf("random table %d", index), []byte(source.String()))
+	}
+	if tables == 0 || unescaped == 0 {
+		t.Fatalf("%d inputs read a table and %d had a pipe unescaped; want both", tables, unescaped)
+	}
+	t.Logf("%d inputs read a table, %d had a pipe unescaped", tables, unescaped)
+}
+
+// goldmarkTree is root's nodes, one a line, indented by depth: each node's kind, and a text's bytes
+// in source with its segment's bounds.
+func goldmarkTree(root ast.Node, source []byte) string {
+	var tree strings.Builder
+	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		depth := 0
+		for parent := node.Parent(); parent != nil; parent = parent.Parent() {
+			depth++
+		}
+		fmt.Fprintf(&tree, "%s%s", strings.Repeat("  ", depth), node.Kind())
+		if text, ok := node.(*ast.Text); ok {
+			fmt.Fprintf(&tree, " [%d,%d) %q", text.Segment.Start, text.Segment.Stop, text.Segment.Value(source))
+		}
+		tree.WriteByte('\n')
+		return ast.WalkContinue, nil
+	})
+	return tree.String()
 }
