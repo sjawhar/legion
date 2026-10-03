@@ -54,8 +54,11 @@ type liveWrite struct {
 	// transaction's updates applied, brought up to date before each operation (forkLive).
 	clientID crdt.ClientID
 	fork     *crdt.Doc
-	// forkedFrom is the room document fork was last brought up to date from.
+	// forkedFrom is the room document fork was last brought up to date from, and forkSeq the room's
+	// credit sequence just before it was read for that: each author credited by then made a change
+	// the room held, which the fork took in (authors.go).
 	forkedFrom *crdt.Doc
+	forkSeq    uint64
 	updates    [][]byte
 	// tree and markdown are the document as this transaction's latest operation left it,
 	// rendered once by that operation (applyJoined) for the version its transaction may write.
@@ -65,11 +68,12 @@ type liveWrite struct {
 	// anchorsTree is the tree the transaction's anchors were last refreshed against, so the
 	// version write does not refresh the same tree's anchors a second time.
 	anchorsTree *pmdoc.Node
-	// credits are the authors of the transaction's content changes; actor made the latest, and
-	// edits counts them, so a version can say it holds them all (authorCapture).
-	credits map[string]model.Actor
-	actor   *model.Actor
-	edits   int
+	// credits are the authors of the transaction's content changes; actor made the latest.
+	// versioned says a version the transaction wrote holds every one of those changes so far and
+	// credits their authors (Ledger.recordVersion), so its commit does not credit them again.
+	credits   map[string]model.Actor
+	actor     *model.Actor
+	versioned bool
 	// loss records what this write's latest batch of operations inserted, so a merge with the
 	// room's concurrent changes can be told from a clean one (see lossCheck). A later operation
 	// of the same transaction that inserts nothing an operation claims - an accept's margin
@@ -166,6 +170,9 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 // may lack state the kept fork still holds (a browser update whose append failed), so the fork is
 // then rebuilt from the reloaded room and the transaction's writes.
 func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
+	write.state.mu.Lock()
+	seq := write.state.creditSeq
+	write.state.mu.Unlock()
 	var gained []byte
 	var room *crdt.Doc
 	var incremental bool
@@ -189,7 +196,7 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		write.dropRendering()
 		return nil, err
 	}
-	write.fork, write.forkedFrom = fork, room
+	write.fork, write.forkedFrom, write.forkSeq = fork, room, seq
 	return fork, nil
 }
 
@@ -323,14 +330,15 @@ func (s *Service) docView(ctx context.Context, artifactID string, read func(*crd
 
 // creditLiveWrite records whom a joined content change is credited to once its transaction
 // commits: its actor alone, as a service mutation that reaches the room directly is credited
-// (creditContentChange). A browser connected to the room made none of it.
+// (creditContentChange). A browser connected to the room made none of it. No version the
+// transaction wrote before holds this change.
 func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 	if write.credits == nil {
 		write.credits = make(map[string]model.Actor)
 	}
 	write.credits[actorKey(actor)] = actor
 	write.actor = new(actor)
-	write.edits++
+	write.versioned = false
 }
 
 // publishLiveWrite applies write's updates to the room one operation at a time, in the order

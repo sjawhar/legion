@@ -483,6 +483,119 @@ func TestNamedVersionKeepsTheCreditOfAnEditItsAuthorMakesBeforeItCommits(t *test
 	}
 }
 
+// An edit a browser makes after a transaction's named version has brought its fork up to date
+// with the room is not in the version, so the version does not credit its author: the version
+// takes its authors before that read. The version the edit's own settlement writes holds the edit
+// and credits its author alone; the transaction's own write is credited on the named version
+// (LEGION-503).
+func TestNamedVersionCreditsNoAuthorOfAnEditMadeAfterItsForkRead(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin edit transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "replace", Find: "Second.", With: "Second, agent."}}, agent, nil); err != nil {
+		t.Fatalf("apply the agent's edit: %v", err)
+	}
+	edited := false
+	service.afterCaptureFork = func(room string) {
+		if room == artifactID && !edited {
+			edited = true
+			editAsPeer(t, service, artifactID, replaceRun("First.", "First, bob."))
+		}
+	}
+	named, err := service.NamedVersion(joined, artifactID, "checkpoint", agent)
+	if err != nil {
+		t.Fatalf("name the version: %v", err)
+	}
+	if !edited {
+		t.Fatal("the named version never brought its fork up to date")
+	}
+	if !reflect.DeepEqual(named.Version.Authors, []model.Actor{agent}) {
+		t.Fatalf("named version authors = %#v, want the agent alone: bob's edit is not in it", named.Version.Authors)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit edit transaction: %v", err)
+	}
+
+	service.afterCaptureFork = nil
+	settleCurrentGeneration(t, service, artifactID)
+	requireLatestVersionMarkdown(t, service, artifactID, "First, bob.\n\nSecond, agent.\n")
+	latest := latestVersionNumber(t, service, artifactID)
+	if latest != named.Version.Number+1 {
+		t.Fatalf("latest version = %d, want %d, the one holding bob's edit", latest, named.Version.Number+1)
+	}
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{bob}) {
+		t.Fatalf("version %d authors = %#v, want bob, whose edit it holds", latest, authors)
+	}
+}
+
+// An upload's version credits its uploader and releases their pending entries, but only those
+// credited before the upload's write read the room: the version is written over those changes.
+// One the uploader makes in a browser after that read, while the upload's transaction is open,
+// is not in the version, and the next version, which holds it, credits them (LEGION-503).
+func TestAnUploadKeepsTheCreditOfAnEditItsUploaderMakesWhileItWrites(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	service.addConnection(artifactID, 1, alice)
+
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin upload transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	uploaded, err := service.ReplaceText(joined, artifactID, "First.\n\nSecond, uploaded.\n", alice)
+	if err != nil {
+		t.Fatalf("replace the document with the upload: %v", err)
+	}
+	editAsPeer(t, service, artifactID, appendBlocks(t, "Third, alice.\n"))
+	// The upload route writes its version itself, crediting the uploader, and records it.
+	authors, err := json.Marshal([]model.Actor{alice})
+	if err != nil {
+		t.Fatalf("encode upload authors: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors, named, doc_update_version)
+		select $1, coalesce(max(number), 0) + 1, $2, $3, false,
+			coalesce((select max(version) from doc_updates where artifact_id = $1), 0)
+		from artifact_versions where artifact_id = $1
+	`, artifactID, uploaded, authors); err != nil {
+		t.Fatalf("write the upload's version: %v", err)
+	}
+	ledger.WroteVersion(artifactID, []model.Actor{alice})
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit upload transaction: %v", err)
+	}
+	requireLatestVersionMarkdown(t, service, artifactID, uploaded)
+	upload := latestVersionNumber(t, service, artifactID)
+
+	settleCurrentGeneration(t, service, artifactID)
+	requireLatestVersionMarkdown(t, service, artifactID, uploaded+"\nThird, alice.\n")
+	if latest := latestVersionNumber(t, service, artifactID); latest != upload+1 {
+		t.Fatalf("latest version = %d, want %d, the one holding alice's browser edit", latest, upload+1)
+	}
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{alice}) {
+		t.Fatalf("version %d authors = %#v, want alice, whose browser edit it holds", upload+1, authors)
+	}
+}
+
 func TestColdSnapshotCapturesFirstEditAfterWarm(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
