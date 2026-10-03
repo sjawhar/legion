@@ -285,7 +285,9 @@ func TestDocumentSocketRefusesARoomOutsideTheSchema(t *testing.T) {
 	}{
 		{"a resident room the reader refuses", writeSchemaInvalidElement},
 		{"a stored history only the renderer refuses", func(t *testing.T, service *Service, artifactID string) {
-			appendRenderOnlySchemaViolation(t, service.store, artifactID)
+			if err := AppendRenderOnlySchemaViolationForTest(context.Background(), service.store, artifactID); err != nil {
+				t.Fatal(err)
+			}
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

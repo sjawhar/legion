@@ -404,16 +404,8 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			s.writeHandlerError(w, err)
 			return
 		}
-		versionEvent, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
-			"artifact.version",
-			actor,
-			docs.ArtifactVersionEventPayload(comment.Anchor.ArtifactID, artifactName, named.Version, diff, named.Changes),
-		))
+		versionEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID), actor, comment.Anchor.ArtifactID, artifactName, named, diff)
 		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if err := refs.Stamp(r.Context(), tx, "artifact", comment.Anchor.ArtifactID, versionEvent.ID); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

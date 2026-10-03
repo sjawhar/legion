@@ -6,7 +6,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 // rebuildArtifact discards only a history ygo cannot load and replaces it with one seed update
@@ -59,16 +58,8 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	var published []model.Event
 	if written.Wrote {
-		event, err := s.appendEvent(r.Context(), tx, ownerForArtifact(artifact).event(
-			"artifact.version",
-			actor,
-			docs.ArtifactVersionEventPayload(artifact.ID, artifact.Name, written.Version, nil, written.Changes),
-		))
+		event, err := s.commitArtifactVersionEvent(r.Context(), tx, ownerForArtifact(artifact), actor, artifact.ID, artifact.Name, written, nil)
 		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if err := refs.Stamp(r.Context(), tx, "artifact", artifact.ID, event.ID); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

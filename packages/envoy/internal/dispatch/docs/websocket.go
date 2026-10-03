@@ -495,7 +495,7 @@ func (r *renderedReplica) catchUp(room string, live *crdt.Doc) {
 }
 
 // updateChangesMarkdown reports whether the room's latest update changed its rendered markdown,
-// the only document content a version stores, rendering replica, the room's document as of that
+// the only document content a version stores. It renders replica, the room's document as of that
 // update (renderedReplica). An update that changes only what no rendering carries - an anchor
 // mark, or a heading id or list item label the browser editor derives - is no content change.
 func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {

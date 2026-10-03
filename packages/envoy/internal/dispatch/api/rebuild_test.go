@@ -85,19 +85,27 @@ func (s *invalidLoadOnceStore) Load(ctx context.Context, room string) (persisten
 	return s.VersionedStore.Load(ctx, room)
 }
 
-// A stored history that does not decode is the one state a rebuild repairs, so a read of it says
-// so with a code of its own, DOCUMENT_UNLOADABLE, rather than the 503 any failed room or store
-// answers; the dashboard offers its rebuild on that code alone. The room it failed recovers, and
-// once the history loads the same read answers the document.
-func TestAHistoryThatCannotLoadReadsAsDocumentUnloadable(t *testing.T) {
+// newBrokenTestServer is a test server whose document store hands a load the failNextLoad names a
+// history that does not decode.
+func newBrokenTestServer(t *testing.T) (http.Handler, *store.Store, *invalidLoadOnceStore) {
+	t.Helper()
 	var broken *invalidLoadOnceStore
-	handler, _, _ := newTestServer(t, testServerOptions{
+	handler, database, _ := newTestServer(t, testServerOptions{
 		settle: time.Hour,
 		persistence: func(database *store.Store) docs.VersionedStore {
 			broken = &invalidLoadOnceStore{VersionedStore: docs.NewPgVersioned(database), invalid: make(map[string]bool)}
 			return broken
 		},
 	})
+	return handler, database, broken
+}
+
+// A stored history that does not decode is the one state a rebuild repairs, so a read of it says
+// so with a code of its own, DOCUMENT_UNLOADABLE, rather than the 503 any failed room or store
+// answers; the dashboard offers its rebuild on that code alone. The room it failed recovers, and
+// once the history loads the same read answers the document.
+func TestAHistoryThatCannotLoadReadsAsDocumentUnloadable(t *testing.T) {
+	handler, _, broken := newBrokenTestServer(t)
 	issue := createArtifactIssue(t, handler)
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
 		"name": "unloadable.md", "content": "before\n",
@@ -125,17 +133,7 @@ func TestAHistoryThatCannotLoadReadsAsDocumentUnloadable(t *testing.T) {
 // Omitting markdown intentionally keeps the latest-version rebuild behavior, including its
 // existing version and approval state.
 func TestRebuildArtifactVersionsSuppliedMarkdownButNotTheLatestVersionSource(t *testing.T) {
-	var broken *invalidLoadOnceStore
-	handler, database, _ := newTestServer(t, testServerOptions{
-		settle: time.Hour,
-		persistence: func(database *store.Store) docs.VersionedStore {
-			broken = &invalidLoadOnceStore{
-				VersionedStore: docs.NewPgVersioned(database),
-				invalid:        make(map[string]bool),
-			}
-			return broken
-		},
-	})
+	handler, database, broken := newBrokenTestServer(t)
 	issue := createArtifactIssue(t, handler)
 	createBrokenDocument := func(t *testing.T, name, markdown string) model.Artifact {
 		t.Helper()
@@ -209,14 +207,7 @@ func TestRebuildArtifactVersionsSuppliedMarkdownButNotTheLatestVersionSource(t *
 }
 
 func TestClosedIssueRebuildRefusesBeforeChangingTheDocument(t *testing.T) {
-	var broken *invalidLoadOnceStore
-	handler, _, _ := newTestServer(t, testServerOptions{
-		settle: time.Hour,
-		persistence: func(database *store.Store) docs.VersionedStore {
-			broken = &invalidLoadOnceStore{VersionedStore: docs.NewPgVersioned(database), invalid: make(map[string]bool)}
-			return broken
-		},
-	})
+	handler, _, broken := newBrokenTestServer(t)
 	issue := createArtifactIssue(t, handler)
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
 		"name": "closed.md", "content": "before\n",
@@ -242,14 +233,7 @@ func TestClosedIssueRebuildRefusesBeforeChangingTheDocument(t *testing.T) {
 // and before the version is written leaves the document's history, versions and events as they
 // were.
 func TestSuppliedRebuildThatFailsBeforeItsVersionLeavesTheDocument(t *testing.T) {
-	var broken *invalidLoadOnceStore
-	handler, database, _ := newTestServer(t, testServerOptions{
-		settle: time.Hour,
-		persistence: func(database *store.Store) docs.VersionedStore {
-			broken = &invalidLoadOnceStore{VersionedStore: docs.NewPgVersioned(database), invalid: make(map[string]bool)}
-			return broken
-		},
-	})
+	handler, database, broken := newBrokenTestServer(t)
 	issue := createArtifactIssue(t, handler)
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
 		"name": "failing.md", "content": "before\n",

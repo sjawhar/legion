@@ -621,6 +621,32 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(content)
 }
 
+// commitArtifactVersionEvent appends the artifact.version event of a version the transaction wrote
+// and stamps the document's new mention edges with it (refs.Stamp), after the append so stamping
+// never touches sequence allocation.
+func (s *server) commitArtifactVersionEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	eventOwner owner,
+	actor model.Actor,
+	artifactID, name string,
+	written docs.VersionResult,
+	diff *string,
+) (model.Event, error) {
+	event, err := s.appendEvent(ctx, tx, eventOwner.event(
+		"artifact.version",
+		actor,
+		docs.ArtifactVersionEventPayload(artifactID, name, written.Version, diff, written.Changes),
+	))
+	if err != nil {
+		return model.Event{}, err
+	}
+	if err := refs.Stamp(ctx, tx, "artifact", artifactID, event.ID); err != nil {
+		return model.Event{}, err
+	}
+	return event, nil
+}
+
 func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -679,16 +705,8 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, eventOwner.event(
-		"artifact.version",
-		actor,
-		docs.ArtifactVersionEventPayload(artifact.ID, artifact.Name, version, diff, named.Changes),
-	))
+	event, err := s.commitArtifactVersionEvent(r.Context(), tx, eventOwner, actor, artifact.ID, artifact.Name, named, diff)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := refs.Stamp(r.Context(), tx, "artifact", artifact.ID, event.ID); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -786,16 +804,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			event, err := s.appendEvent(r.Context(), tx, eventOwner.event(
-				"artifact.version",
-				actor,
-				docs.ArtifactVersionEventPayload(artifact.ID, artifact.Name, written.Version, diff, written.Changes),
-			))
+			event, err := s.commitArtifactVersionEvent(r.Context(), tx, eventOwner, actor, artifact.ID, artifact.Name, *written, diff)
 			if err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-			if err := refs.Stamp(r.Context(), tx, "artifact", artifact.ID, event.ID); err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}

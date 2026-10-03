@@ -7,11 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/reearth/ygo/crdt"
-
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -126,7 +123,9 @@ func TestSchemaRepairKeepsOpenAskBlocks(t *testing.T) {
 func TestStoredRenderOnlySchemaViolationLoadsForRepair(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "")
-	appendRenderOnlySchemaViolation(t, database, artifactID)
+	if err := AppendRenderOnlySchemaViolationForTest(context.Background(), database, artifactID); err != nil {
+		t.Fatal(err)
+	}
 	service := newSchemaRepairService(database)
 	t.Cleanup(func() {
 		if err := service.Shutdown(context.Background()); err != nil {
@@ -138,33 +137,5 @@ func TestStoredRenderOnlySchemaViolationLoadsForRepair(t *testing.T) {
 	}
 	if _, _, err := service.TextWithBlocks(context.Background(), artifactID); !errors.Is(err, ErrDocOutsideSchema) {
 		t.Fatalf("read render-only violation: %v, want ErrDocOutsideSchema", err)
-	}
-}
-
-// appendRenderOnlySchemaViolation persists the stored task item
-// TestStoredRenderOnlySchemaViolationLoadsForRepair describes, which the tree validator reads and
-// the renderer refuses.
-func appendRenderOnlySchemaViolation(t *testing.T, database *store.Store, artifactID string) {
-	t.Helper()
-	doc := crdt.New()
-	fragment := doc.GetXmlFragment(fragmentName)
-	tree := &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{{
-		Type: "bullet_list",
-		Children: []*pmdoc.Node{{
-			Type:  "list_item",
-			Attrs: pmdoc.Attrs{"checked": true},
-			Children: []*pmdoc.Node{
-				{Type: "paragraph"},
-				{Type: "heading", Attrs: pmdoc.Attrs{"level": float64(2)}, Children: []*pmdoc.Node{{Type: "text", Text: "Unreadable task"}}},
-			},
-		}},
-	}}}
-	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
-		return pmdoc.Update(transaction, fragment, tree)
-	}); err != nil {
-		t.Fatalf("write render-only violation: %v", err)
-	}
-	if _, err := NewPgVersioned(database).AppendUpdate(context.Background(), artifactID, crdt.EncodeStateAsUpdateV1(doc, nil)); err != nil {
-		t.Fatalf("persist render-only violation: %v", err)
 	}
 }

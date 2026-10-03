@@ -10,7 +10,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -23,34 +22,6 @@ func appendSchemaInvalidUpdate(t *testing.T, database *store.Store, artifactID s
 	})
 	if _, err := docs.NewPgVersioned(database).AppendUpdate(context.Background(), artifactID, crdt.EncodeStateAsUpdateV1(doc, nil)); err != nil {
 		t.Fatalf("append crafted document update: %v", err)
-	}
-}
-
-// appendRenderOnlySchemaViolation persists a tree the validator reads but the renderer refuses: a
-// checked task whose empty first paragraph precedes a heading has no markdown the browser reads
-// back as a task.
-func appendRenderOnlySchemaViolation(t *testing.T, database *store.Store, artifactID string) {
-	t.Helper()
-	doc := crdt.New()
-	fragment := doc.GetXmlFragment("prosemirror")
-	tree := &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{{
-		Type: "bullet_list",
-		Children: []*pmdoc.Node{{
-			Type:  "list_item",
-			Attrs: pmdoc.Attrs{"checked": true},
-			Children: []*pmdoc.Node{
-				{Type: "paragraph"},
-				{Type: "heading", Attrs: pmdoc.Attrs{"level": float64(2)}, Children: []*pmdoc.Node{{Type: "text", Text: "Unreadable task"}}},
-			},
-		}},
-	}}}
-	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
-		return pmdoc.Update(transaction, fragment, tree)
-	}); err != nil {
-		t.Fatalf("write render-only violation: %v", err)
-	}
-	if _, err := docs.NewPgVersioned(database).AppendUpdate(context.Background(), artifactID, crdt.EncodeStateAsUpdateV1(doc, nil)); err != nil {
-		t.Fatalf("append render-only violation: %v", err)
 	}
 }
 
@@ -98,7 +69,11 @@ var outsideSchemaCorruptions = []struct {
 	corrupt func(*testing.T, *store.Store, string)
 }{
 	{"a tree the reader refuses", appendSchemaInvalidUpdate},
-	{"a tree only the renderer refuses", appendRenderOnlySchemaViolation},
+	{"a tree only the renderer refuses", func(t *testing.T, database *store.Store, artifactID string) {
+		if err := docs.AppendRenderOnlySchemaViolationForTest(context.Background(), database, artifactID); err != nil {
+			t.Fatal(err)
+		}
+	}},
 	{"a paragraph whose text holds an embed", appendTextEmbed},
 }
 
