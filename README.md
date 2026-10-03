@@ -147,3 +147,20 @@ site's [contributing page](https://sjawhar.github.io/legion/contributing/) cover
 
 Apache License 2.0; see [LICENSE](LICENSE). Code copied from other projects keeps its own license in
 a `LICENSE` file beside it.
+
+Every artifact a release ships carries the licenses of the third-party code in it, written at build
+time from what the build included, and the build fails when a dependency's license cannot be
+determined:
+
+| Artifact | Notices |
+| --- | --- |
+| `@sjawhar/pi-legion-envoy`, `@sjawhar/opencode-legion-envoy` (npm) | `dist/THIRD_PARTY_NOTICES` in the package |
+| `packages/claude-envoy` (committed bundle) | `packages/claude-envoy/dist/THIRD_PARTY_NOTICES` |
+| Dispatch web app | `THIRD_PARTY_NOTICES.txt` beside the bundle, served at `/THIRD_PARTY_NOTICES.txt` |
+| `ghcr.io/sjawhar/legion/envoy`, `ghcr.io/sjawhar/legion-worker` images | `/usr/share/doc/legion/THIRD_PARTY_NOTICES` |
+| `legion-<os>-<arch>.tar.gz` (`legion-v*` releases) | `legion-<os>-<arch>/THIRD_PARTY_NOTICES` |
+| `legion-envoy-<arch>.tar.gz`, `agent-secrets-<arch>.tar.gz` (`legion-envoy-v*` releases) | `THIRD_PARTY_NOTICES`, `agent-secrets/THIRD_PARTY_NOTICES` |
+
+`scripts/third-party-notices.ts` writes the JavaScript bundles' notices from the bundler's module
+list, `scripts/go-third-party-notices.sh` the Go programs' with go-licenses, and each image assembles
+its file with `scripts/assemble-third-party-notices.sh`.
