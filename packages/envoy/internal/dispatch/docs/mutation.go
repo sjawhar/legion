@@ -119,16 +119,7 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 	if err != nil {
 		return err
 	}
-	if isGrowthBound(ctx) {
-		if err := refuseUnloadable(fork, before, tree); err != nil {
-			return err
-		}
-	}
 	markdown, err := renderTree(tree)
-	if err != nil {
-		return err
-	}
-	update, err := mergeUpdates(updates)
 	if err != nil {
 		return err
 	}
@@ -136,6 +127,15 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 	// a write that leaves the rendered markdown alone - an anchor mark, a mark record's projection,
 	// an attribute no rendering carries - changes nothing a version stores.
 	beforeMarkdown, err := renderTree(before)
+	if err != nil {
+		return err
+	}
+	if isGrowthBound(ctx) {
+		if err := refuseGrowth(fork, beforeMarkdown, markdown); err != nil {
+			return err
+		}
+	}
+	update, err := mergeUpdates(updates)
 	if err != nil {
 		return err
 	}
@@ -197,14 +197,14 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if err != nil {
 		return "", err
 	}
-	if err := refuseGrowth(nil, tree); err != nil {
-		return "", err
-	}
 	if err := pmdoc.AskContentError(tree); err != nil {
 		return "", &ErrInvalidAskBlock{Reason: err}
 	}
 	canonical, err := renderTree(tree)
 	if err != nil {
+		return "", err
+	}
+	if err := refuseGrowth(nil, "", canonical); err != nil {
 		return "", err
 	}
 	doc := crdt.New()
@@ -245,11 +245,6 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		}
 		target, err := parseReplacing(current, markdown)
 		if err != nil {
-			return err
-		}
-		// The upload is weighed as it writes; the anchor marks the document carries onto it below
-		// are the document's own, already in current's weight.
-		if err := refuseGrowth(current, target); err != nil {
 			return err
 		}
 		if err := refuseChangedAsks(current, target, pmdoc.AskContentError, newAskMarkdown()); err != nil {

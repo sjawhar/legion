@@ -113,3 +113,95 @@ func TestAReadBackCountsNoElements(t *testing.T) {
 		t.Fatalf("read back a mebibyte of a_: %v", err)
 	}
 }
+
+// MeasureDocument counts a document as an upload's parse does: for each shape, the most units an
+// upload takes measure within the element limit, and one unit more measures past it. Front matter
+// is counted by neither, so it and 16,384 headings fit, as the headings alone do.
+func TestMeasureDocumentCountsWhatAnUploadCounts(t *testing.T) {
+	repeated := func(unit string) func(int) string {
+		return func(units int) string { return strings.Repeat(unit, units) }
+	}
+	for _, shape := range []struct {
+		name  string
+		build func(int) string
+	}{
+		{"headings", repeated("# a\n")},
+		{"front matter and headings", func(units int) string { return "---\ntitle: x\n---\n\n" + strings.Repeat("# a\n", units) }},
+		{")_", repeated(")_")},
+		{"list items", repeated("- a\n")},
+		{"hard breaks", repeated("a  \n")},
+		{"table rows", func(units int) string { return "| a | b |\n| - | - |\n" + strings.Repeat("| x | y |\n", units) }},
+		{"links", repeated("[a](b) ")},
+		{"autolinks", repeated("<https://a.example> ")},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			uploads := func(units int) bool {
+				_, err := ParseForWrite(shape.build(units), nil)
+				return !errors.Is(err, ErrTooManyElements)
+			}
+			low, high := 1, 1
+			for uploads(high) {
+				low, high = high, high*2
+			}
+			for high-low > 1 {
+				if middle := (low + high) / 2; uploads(middle) {
+					low = middle
+				} else {
+					high = middle
+				}
+			}
+			if size := MeasureDocument(shape.build(low)); size.TooHeavy() {
+				t.Errorf("%d units, which an upload takes, measure %+v, past the limit", low, size)
+			}
+			if size := MeasureDocument(shape.build(high)); !size.TooHeavy() {
+				t.Errorf("%d units, which an upload refuses, measure %+v, within the limit", high, size)
+			}
+		})
+	}
+	if size := MeasureDocument("---\ntitle: x\n---\n\n" + strings.Repeat("# a\n", maxWriteElements/4)); !size.Counted || size.Elements != maxWriteElements {
+		t.Fatalf("front matter and %d headings measure %+v, want the %d elements of the headings alone", maxWriteElements/4, size, maxWriteElements)
+	}
+}
+
+// A refusal at the guard names the line goldmark stopped reading at as that, never as where the
+// weight passed the limit, which a tree the guard left unbuilt cannot tell. A mebibyte of lines of
+// one character each passes the limit on its 65,534th line, a paragraph weighing three and each line
+// one, and the guard stops reading its blocks on line 131,073; 70,000 such lines it stops reading in
+// their inline syntax, on line 61,074, ahead of the 65,534th, where their weight passes the limit.
+func TestARefusalAtTheGuardSaysWhereReadingStopped(t *testing.T) {
+	for lines, stopped := range map[int]int{1 << 19: 131_073, 70_000: 61_074} {
+		_, err := ParseForWrite(strings.Repeat("a\n", lines), nil)
+		if want := fmt.Sprintf("more than 65536 elements, too many to read past line %d;", stopped); !errors.Is(err, ErrTooManyElements) || !strings.Contains(err.Error(), want) {
+			t.Errorf("%d one-character lines: %v, want a refusal saying %q", lines, err, want)
+		}
+	}
+}
+
+// A bare-row insert is parsed under a header the server writes at the table's width, which is not
+// the caller's markdown: it charges the write nothing, so a row costs its own weight - the row, its
+// cells and their text - and a refusal names a line of the caller's markdown, never the header's.
+func TestATableRowInsertIsChargedItsRowsAlone(t *testing.T) {
+	width := 100
+	table := strings.Repeat("| h ", width) + "|\n" + strings.Repeat("| - ", width) + "|\n| A10 " + strings.Repeat("| x ", width-1) + "|\n"
+	doc, err := Parse(table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor, err := FindQuote(doc, "A10", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := NewTablePaddingBudget()
+	if _, inserted, err := InsertTableRows(doc, anchor, "| y |\n", true, budget); err != nil || !inserted {
+		t.Fatalf("insert one row: inserted=%v, %v", inserted, err)
+	}
+	if want := 3 + width*4 + 1; budget.elements.made != want {
+		t.Fatalf("one row of %d cells charged %d elements, want %d: the row, its cells and its one text", width, budget.elements.made, want)
+	}
+	budget = NewTablePaddingBudget()
+	budget.elements.made = maxWriteElements - 10
+	_, _, err = InsertTableRows(doc, anchor, "\n| y |\n", true, budget)
+	if !errors.Is(err, ErrTooManyElements) || !strings.Contains(err.Error(), "passing that at line 2;") {
+		t.Fatalf("a row past what the batch has left: %v, want a refusal at line 2, the row's", err)
+	}
+}

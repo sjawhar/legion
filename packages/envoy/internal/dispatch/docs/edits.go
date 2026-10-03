@@ -450,12 +450,10 @@ func applyOperations(tree *pmdoc.Node, ops []model.EditOp) (editBatch, error) {
 // applyOperationsWithValidation applies ops as applyOperations does, running validate before each.
 // The batch is one caller write, so its operations' markdown and table rows spend one table-padding
 // budget; each run of a batch - a conditional one runs to check its anchors and preconditions as
-// well as to apply - takes its own, so no run charges the batch's padding twice. A batch that leaves
-// the document heavier than one document may hold, and heavier than it was, is refused
-// (refuseGrowth).
+// well as to apply - takes its own, so no run charges the batch's padding twice. What the batch
+// leaves is weighed against what one upload may hold where it is written (refuseGrowth).
 func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validate operationValidator) (editBatch, error) {
 	budget := pmdoc.NewTablePaddingBudget()
-	start := tree
 	before, err := nodeToken(tree)
 	if err != nil {
 		return editBatch{}, err
@@ -510,9 +508,6 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 			}
 		}
 		tree = next
-	}
-	if err := refuseGrowth(start, tree); err != nil {
-		return editBatch{}, err
 	}
 	return editBatch{
 		tree:       tree,

@@ -477,9 +477,11 @@ func parseTableRows(markdown string, width int, budget *TablePaddingBudget) ([]*
 
 	// The parse reads the caller's rows under two header lines the caller never wrote, after the
 	// blank lines skipped above, so it numbers its lines from the caller's: a refusal names the line
-	// in the insert's own markdown.
+	// in the insert's own markdown. Those two lines are the server's, so they charge the write's
+	// element budget nothing (elementCount.free), and no refusal of its elements names one.
 	header := syntheticTableHeader(width)
 	firstLine := 1 + strings.Count(markdown[:start], "\n") - strings.Count(header, "\n")
+	budget.elements.free = len(header)
 	parsed, err := parseStampedAt(header+markdown[start:end]+"\n", firstLine, budget)
 	// The parse opens with the header written above, so the table under it is the one document-level
 	// table with nothing before it; any other is the fragment's own and keeps its own refusal.

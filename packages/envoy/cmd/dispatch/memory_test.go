@@ -257,6 +257,157 @@ func TestEveryQuoteAtTheCapStaysWithinTheMemoryBound(t *testing.T) {
 	}
 }
 
+// A run of writes, each within what one upload may hold, cannot grow a document past it on a real
+// Dispatch process. For each way a document grows - prose and a code block's text by their bytes,
+// `)_`, headings, hard breaks, list items and table rows by their elements - inserts are taken until
+// one would leave the document's markdown past an upload's limits, which is refused with 413
+// CAP_EXCEEDED, and so is every insert after it. The document still reads and its own text uploads
+// back whole. At the bound - prose filling a document grown by bytes to the 1 MiB cap - a refused
+// insert, its rendering, measure and trial load included, and a one-word edit each hold at most the
+// bound above the idle memory of a server that has not loaded the document; the inserts before
+// them, on one server, are logged with what earlier ones left resident. Prose and code make the
+// thirty-two 900 KB inserts LEGION-481's review grew one document to 29.5 MB with, after which a
+// one-word edit held about a gigabyte.
+func TestAWriteCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
+	memory := newMemoryHarness(t)
+	const spec = "Before sentinel.\n"
+	prose := func(bytes int) string { return strings.Repeat("word ", bytes/5) }
+	for _, shape := range []struct {
+		name, spec, after, chunk string
+		inserts                  int
+		byBytes                  bool
+	}{
+		{"900 KB of prose", spec, "end", prose(900_000), 32, true},
+		{"900 KB of a code block's text", spec, "end", "```\n" + strings.Repeat("a line of code, forty bytes long; more\n", 22_500) + "```\n", 32, true},
+		{"42 KB of )_", spec, "end", strings.Repeat(")_", 21_000), 8, false},
+		{"a thousand headings", spec, "end", strings.Repeat("# a\n", 1_000), 24, false},
+		{"two thousand hard breaks", spec, "end", strings.Repeat("a  \n", 2_000) + "a\n", 16, false},
+		{"three thousand list items", spec, "end", strings.Repeat("- a\n", 3_000), 10, false},
+		{"a thousand table rows", spec + "\n| a | b |\n| - | - |\n| A10 | b |\n", "A10", strings.Repeat("| x | y |\n", 1_000), 12, false},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			insert := map[string]any{"op": "insert", "after": shape.after, "markdown": shape.chunk}
+			refusedWithAdvice := func(answer response) bool {
+				return answer.status == http.StatusRequestEntityTooLarge && strings.Contains(string(answer.body), `"code":"CAP_EXCEEDED"`) &&
+					strings.Contains(string(answer.body), "shorten the change, or split the document")
+			}
+			server := memory.start(t)
+			issue := server.createIssue(t, "Growth by "+shape.name, shape.spec)
+			refused := false
+			for index := range shape.inserts {
+				var answer response
+				peak := server.peakAboveIdle(t, func() { answer = server.edit(t, issue.PrimaryArtifactID, insert) })
+				t.Logf("insert %d: %d, %d MiB above idle with what earlier inserts left: %.200s", index+1, answer.status, peak>>20, answer.body)
+				switch {
+				case answer.status == http.StatusOK && !refused:
+				case refusedWithAdvice(answer):
+					refused = true
+				default:
+					t.Errorf("insert %d answered %d %.300s, want 200 until one is refused with 413 CAP_EXCEEDED saying to shorten the change, and 413 after it", index+1, answer.status, answer.body)
+				}
+			}
+			if !refused {
+				t.Errorf("all %d inserts were taken, want the document's growth refused", shape.inserts)
+			}
+			server.get(t, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks")
+			text := server.text(t, issue.PrimaryArtifactID)
+			if shape.byBytes {
+				if fill := documentCap - len(text) - 64; fill > 0 {
+					if answer := server.edit(t, issue.PrimaryArtifactID, map[string]any{"op": "insert", "after": "end", "markdown": prose(fill)}); answer.status != http.StatusOK {
+						t.Errorf("fill the document to the cap: %d %.300s, want 200", answer.status, answer.body)
+					}
+				}
+				text = server.text(t, issue.PrimaryArtifactID)
+			}
+			server.stop(t)
+			for _, write := range []struct {
+				name string
+				op   map[string]any
+				want func(response) bool
+			}{
+				{"a refused insert", insert, refusedWithAdvice},
+				{"a one-word edit", map[string]any{"op": "replace", "find": "sentinel", "with": "marker"}, func(answer response) bool { return answer.status == http.StatusOK }},
+			} {
+				cold := memory.start(t)
+				var answer response
+				peak := cold.peakAboveIdle(t, func() { answer = cold.edit(t, issue.PrimaryArtifactID, write.op) })
+				cold.stop(t)
+				t.Logf("%s: %s of the %d-byte document answered %d, %d MiB above idle: %.200s", shape.name, write.name, len(text), answer.status, peak>>20, answer.body)
+				if !write.want(answer) {
+					t.Errorf("%s answered %d %.300s", write.name, answer.status, answer.body)
+				}
+				if peak > requestMemoryBound {
+					t.Errorf("%s of the %d-byte document held %d MiB above idle, want at most %d MiB", write.name, len(text), peak>>20, requestMemoryBound>>20)
+				}
+			}
+			reader := memory.start(t)
+			text = reader.text(t, issue.PrimaryArtifactID)
+			upload, err := reader.tryUploadNamed("multipart", issue.Key, "spec.md", text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("%s: an upload of its own %d-byte text answered %d %.200s", shape.name, len(text), upload.status, upload.body)
+			if upload.status != http.StatusCreated {
+				t.Errorf("an upload of the document's own %d-byte text answered %d %.300s, want 201", len(text), upload.status, upload.body)
+			}
+		})
+	}
+}
+
+// An upload's parse does not count front matter, so a new spec of front matter and the 16,384
+// headings one document may hold is stored, as the headings alone are.
+func TestASpecOfFrontMatterAndTheMostHeadingsIsStored(t *testing.T) {
+	memory := newMemoryHarness(t)
+	server := memory.start(t)
+	issue := server.createIssue(t, "Front matter", "---\ntitle: a spec\n---\n\n"+strings.Repeat("# a\n", 16_384))
+	if text := server.text(t, issue.PrimaryArtifactID); !strings.HasPrefix(text, "---\ntitle: a spec\n---\n") || strings.Count(text, "# a\n") != 16_384 {
+		t.Fatalf("the spec reads back %d bytes opening %q, want its front matter and 16,384 headings", len(text), text[:min(len(text), 40)])
+	}
+}
+
+// createdIssue is an issue a memory test created, and its primary document.
+type createdIssue struct {
+	Key               string `json:"key"`
+	PrimaryArtifactID string `json:"primary_artifact_id"`
+}
+
+// createIssue creates an issue of the memory harness's project whose spec is spec, past the
+// near-duplicate check its title would meet beside the others a test creates.
+func (p *dispatchProcess) createIssue(t *testing.T, title, spec string) createdIssue {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"project": "MEM", "title": title, "spec": spec, "force": true})
+	if err != nil {
+		t.Fatalf("encode the issue: %v", err)
+	}
+	created := p.send(t, http.MethodPost, "/api/v1/issues", "application/json", bytes.NewReader(body), http.Header{"X-Dispatch-User": {"alice"}})
+	var issue createdIssue
+	if created.status != http.StatusCreated || json.Unmarshal(created.body, &issue) != nil || issue.PrimaryArtifactID == "" {
+		t.Fatalf("create the issue %q: status %d body %.300s", title, created.status, created.body)
+	}
+	return issue
+}
+
+// edit sends one edit operation to a document as a person does.
+func (p *dispatchProcess) edit(t *testing.T, artifactID string, op map[string]any) response {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"ops": []map[string]any{op}})
+	if err != nil {
+		t.Fatalf("encode the edit: %v", err)
+	}
+	return p.send(t, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits", "application/json", bytes.NewReader(body), http.Header{"X-Dispatch-User": {"alice"}})
+}
+
+// text is a document's markdown, as GET .../text answers it.
+func (p *dispatchProcess) text(t *testing.T, artifactID string) string {
+	t.Helper()
+	answer := p.send(t, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", "", nil, http.Header{"X-Dispatch-User": {"alice"}})
+	var text struct{ Markdown string }
+	if answer.status != http.StatusOK || json.Unmarshal(answer.body, &text) != nil {
+		t.Fatalf("read the document's text: status %d body %.300s", answer.status, answer.body)
+	}
+	return text.Markdown
+}
+
 // bodyAtTheCap is the JSON request body that build makes of the longest quote of unit repeated that
 // fits the 1 MiB request cap.
 func bodyAtTheCap(t *testing.T, unit string, build func(quote string) map[string]any) []byte {
@@ -643,7 +794,12 @@ func (p *dispatchProcess) upload(t *testing.T, mode, issue, markdown string) upl
 
 // tryUpload is upload for a goroutine other than the test's.
 func (p *dispatchProcess) tryUpload(mode, issue, markdown string) (uploadResult, error) {
-	name := fmt.Sprintf("memory-%d.md", time.Now().UnixNano())
+	return p.tryUploadNamed(mode, issue, fmt.Sprintf("memory-%d.md", time.Now().UnixNano()), markdown)
+}
+
+// tryUploadNamed is tryUpload of a document named name: a new version of the issue's document of
+// that name where it has one.
+func (p *dispatchProcess) tryUploadNamed(mode, issue, name, markdown string) (uploadResult, error) {
 	actor := map[string]string{"kind": "session", "id": "memory-test"}
 	var body bytes.Buffer
 	var contentType string

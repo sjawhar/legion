@@ -31,8 +31,10 @@ const maxWriteElements = 65_536
 // count two and weigh four), where reading a mebibyte of `)_` whole allocated 2.6 GB.
 const nodeGuard = 2
 
-// ErrTooManyElements is the refusal of markdown that makes more elements than one write may
-// (maxWriteElements). It is not ErrSchema: the markdown is well formed, and too large to store.
+// ErrTooManyElements is the refusal of markdown too large to store: markdown that makes more elements
+// than one write may (maxWriteElements), and, wrapped by the docs layer, a write that would leave a
+// document larger than one upload may hold (MeasureDocument) or than the server can load again. It
+// is not ErrSchema: the markdown is well formed, and too large to store.
 var ErrTooManyElements = errors.New("document too large to store")
 
 // elementCount is what the markdown one caller write sends makes, across every parse of it. A
@@ -49,6 +51,9 @@ type elementCount struct {
 	// (emphasisDelimiters.OnMatch), and every table cell (lazyTableRows). Past nodeGuard*limit the
 	// parse stops making them.
 	nodes int
+	// free is how many bytes the next parse's source opens with that the server wrote itself
+	// ahead of the caller's markdown - parseTableRows's header - which charge nothing.
+	free int
 }
 
 func newElementCount(limit int) elementCount {
@@ -62,8 +67,8 @@ type parseCount struct {
 	write *elementCount
 	// at is where in the parsed source the count passed its limit, and -1 while it has not; last
 	// is where the latest inline node was counted, which a mark made while a textblock's
-	// delimiters pair is charged at.
-	at, last int
+	// delimiters pair is charged at. free is the elementCount's free, taken for this parse.
+	at, last, free int
 	// parent and children are the textblock the inline count last read and its child count then.
 	parent   ast.Node
 	children int
@@ -75,19 +80,21 @@ var elementCountKey = parser.NewContextKey()
 // countParse starts the count of one parse of the write's markdown in pc, or returns nil for a
 // budget that counts no elements.
 func (c *elementCount) countParse(pc parser.Context) *parseCount {
+	free := c.free
+	c.free = 0
 	if c.limit == 0 {
 		return nil
 	}
-	count := &parseCount{write: c, at: -1}
+	count := &parseCount{write: c, at: -1, free: free}
 	pc.Set(elementCountKey, count)
 	return count
 }
 
 // charge counts n nodes goldmark made at offset in the parsed source and reports whether the
-// count has passed the guard.
+// count has passed the guard. Nodes in the server's own prefix (free) charge nothing.
 func (p *parseCount) charge(n, offset int) bool {
-	if p.passed() {
-		return true
+	if p.passed() || offset < p.free {
+		return p.passed()
 	}
 	p.write.nodes += n
 	if p.write.nodes > nodeGuard*p.write.limit {
@@ -137,80 +144,84 @@ func elementWeight(node ast.Node) int {
 // limit admitted held 350 MiB stored, and four cold reads of it at once 1,190 MiB.
 const hardbreakWeight = 3
 
-// MaxDocumentElements is the most a document may weigh (Weight) after a write that makes it
-// heavier: what one write's markdown may make, so no run of writes, each within the limit, grows a
-// document past what one upload of it may hold. A write that leaves a document as heavy as it was,
-// or lighter, is never refused by it, so a document already past it can still be trimmed or split.
+// MaxDocumentBytes is the most bytes of markdown one document may hold: what one upload of a
+// markdown document may send, and what a write may grow a stored document's rendering to.
+const MaxDocumentBytes = 1 << 20
+
+// MaxDocumentElements is the most elements one document's markdown may make, as an upload's parse
+// counts them: what one write's markdown may make.
 const MaxDocumentElements = maxWriteElements
 
-// Weight is what doc weighs in the elements markdown writing it would make, each node weighed as
-// elementWeight weighs goldmark's: a table cell four, with the paragraph and the text it holds; any
-// other block three; a hard break three; a text one, or none in a code block, whose text goldmark
-// keeps as lines; any other inline node one; and each mark one where its run begins, as the inline
-// syntax that opens it. Anchor marks count as any mark does. A text's line breaks are not counted,
-// and goldmark's text is a line each, so a document weighs at most what its markdown makes.
-func Weight(doc *Node) int {
-	return proofWeight(doc, "")
+// DocumentSize is what markdown measures as an upload of it is measured (ParseForWrite): its bytes,
+// against MaxDocumentBytes, and the elements the upload's parse makes of it - elementWeight over the
+// tree goldmark builds, front matter apart - against MaxDocumentElements.
+type DocumentSize struct {
+	Bytes int
+	// Elements is the markdown's weight when Counted. Goldmark stops building the tree once it has
+	// made nodeGuard times the limit, and then the markdown is not Counted: it makes more elements
+	// than the limit, by how many is unknown, and Elements is zero.
+	Elements int
+	Counted  bool
 }
 
-func proofWeight(node *Node, parent string) int {
-	weight := 0
-	switch {
-	case node.Type == "doc":
-	case node.Type == "table_cell" || node.Type == "table_header":
-		weight = 4
-	case node.Type == "paragraph" && (parent == "table_cell" || parent == "table_header"):
-	case node.Type == "hardbreak":
-		weight = hardbreakWeight
-	case node.Type == "text":
-		if parent != "code_block" {
-			weight = 1
-		}
-	case isInlineNodeType(node.Type):
-		weight = 1
-	default:
-		weight = 3
+// TooLong reports whether the markdown is past MaxDocumentBytes.
+func (s DocumentSize) TooLong() bool { return s.Bytes > MaxDocumentBytes }
+
+// TooHeavy reports whether the markdown makes more than MaxDocumentElements.
+func (s DocumentSize) TooHeavy() bool { return !s.Counted || s.Elements > MaxDocumentElements }
+
+// MeasureDocument is the DocumentSize of markdown, a whole document. Its elements are counted
+// exactly as an upload's parse counts them, its guard included, so markdown MeasureDocument finds
+// within both limits is what one upload may send, as far as its size goes.
+func MeasureDocument(markdown string) DocumentSize {
+	size := DocumentSize{Bytes: len(markdown)}
+	source := []byte(markdown)
+	_, rest, unclosedFrontmatter := parseFrontmatterBlock(source)
+	root, count, _ := blockReader.read(source[rest:], unclosedFrontmatter, NewTablePaddingBudget())
+	if count.passed() {
+		return size
 	}
-	// A mark run continues across the inline nodes between two texts, which carry none.
-	var running []Mark
-	for _, child := range node.Children {
-		weight += proofWeight(child, node.Type)
-		if child.Type != "text" {
-			continue
-		}
-		for _, mark := range child.Marks {
-			if !containsSameMark(running, mark) {
-				weight++
-			}
-		}
-		running = child.Marks
+	for node := root; node != nil; node = nextInTree(root, node) {
+		size.Elements += elementWeight(node)
 	}
-	return weight
+	size.Counted = true
+	return size
 }
 
 // refusal is the refusal of the parse p counts, which made root from source whose first line is
 // firstLine of what the caller wrote, or nil: goldmark passed the guard, or root's elements take the
 // write past its limit. root is weighed without recursion, so a tree nested as deep as the guard
 // allows costs no stack. A parse that counts nothing (a nil p) is never refused.
+//
+// A refusal of root's weight names the line where it passed the limit. One of the guard names the
+// line goldmark stopped reading at, and says only that: the guard counts nodes rather than weight,
+// in both of goldmark's phases - every line's blocks first, then each textblock's inline syntax - so
+// where it stops can lie well before or well after where the markdown's weight passed the limit,
+// and the tree it leaves unbuilt cannot say where that was.
 func (p *parseCount) refusal(root ast.Node, source []byte, firstLine int) error {
 	if p == nil {
 		return nil
 	}
-	if !p.passed() && root != nil {
+	passing := "too many to read past line"
+	if !p.passed() {
 		for node := root; node != nil; node = nextInTree(root, node) {
+			if p.free > 0 && nodeOffset(node) < p.free {
+				continue
+			}
 			p.write.made += elementWeight(node)
 			if p.write.made > p.write.limit {
 				p.at = nodeOffset(node)
 				break
 			}
 		}
-	}
-	if !p.passed() {
-		return nil
+		if !p.passed() {
+			return nil
+		}
+		passing = "passing that at line"
 	}
 	line := firstLine + bytes.Count(source[:min(p.at, len(source))], []byte("\n"))
-	return fmt.Errorf("%w: this write's markdown makes more than %d elements, passing that at line %d; a block weighs 3 elements, a table cell 4, a hard line break 3, an autolink 2, and each piece of inline syntax, mark and line of text 1. Shorten the change, or split the document; an upload of data rather than prose can go up as a file of another content type",
-		ErrTooManyElements, p.write.limit, line)
+	return fmt.Errorf("%w: this write's markdown makes more than %d elements, %s %d; a block weighs 3 elements, a table cell 4, a hard line break 3, an autolink 2, and each piece of inline syntax, mark and line of text 1. Shorten the change, or split the document; an upload of data rather than prose can go up as a file of another content type",
+		ErrTooManyElements, p.write.limit, passing, line)
 }
 
 // nextInTree is the node after node in a walk of root's tree in document order.

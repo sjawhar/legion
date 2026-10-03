@@ -389,9 +389,6 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if err := refuseMisreadAccept(tree, next, with); err != nil {
 			return err
 		}
-		if err := refuseGrowth(tree, next); err != nil {
-			return err
-		}
 		return write(next)
 	})
 }

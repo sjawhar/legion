@@ -559,34 +559,6 @@ func TestApplyOperationsChargesEveryTableRowInsertToTheBatch(t *testing.T) {
 	}
 }
 
-// A batch may not leave a document heavier than one document may hold and heavier than it was: a
-// paragraph inserted into 16,384 headings, which weigh the 65,536 a document may hold, is refused,
-// naming the weight it would leave. A document already past the bound - as a browser can leave one
-// - can still be trimmed: deleting a heading, or replacing one's text with text as heavy, is taken.
-func TestAnEditMayNotGrowADocumentPastWhatOneDocumentMayHold(t *testing.T) {
-	atBound, err := parseInput(strings.Repeat("# a\n", 16_384))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = applyOperations(atBound, []model.EditOp{{Op: "insert", After: "end", Markdown: "More."}})
-	if !errors.Is(err, pmdoc.ErrTooManyElements) || !strings.Contains(err.Error(), "weigh 65540 elements, past the 65536 one document may hold (it weighed 65536)") {
-		t.Fatalf("an insert into a document at the bound: %v, want ErrTooManyElements naming its weight", err)
-	}
-	past, err := pmdoc.ParseRendering(strings.Repeat("# a\n", 17_000) + "# last\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, _ := past.Children[0].Attrs[pmdoc.BlockIDAttr].(string)
-	for name, op := range map[string]model.EditOp{
-		"a delete":           {Op: "delete", Block: first},
-		"a replace as heavy": {Op: "replace", Find: "last", With: "next"},
-	} {
-		if _, err := applyOperations(past, []model.EditOp{op}); err != nil {
-			t.Errorf("%s in a document past the bound: %v, want it taken", name, err)
-		}
-	}
-}
-
 func TestApplyOperationInsertsParagraphAfterParagraphContainingAnchor(t *testing.T) {
 	tree, err := parseInput("Before anchor after.\n\nNext.\n")
 	if err != nil {

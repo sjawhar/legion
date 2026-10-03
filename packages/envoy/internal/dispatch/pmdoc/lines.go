@@ -35,13 +35,7 @@ func segmentsText(segments *gmtext.Segments, source []byte) string {
 // firstLine is the number source's first line has in what the caller wrote, which a refusal of
 // those elements names its line from.
 func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budget *TablePaddingBudget, firstLine int) (ast.Node, error) {
-	pc := parser.NewContext()
-	if unclosedFrontmatter {
-		pc.Set(unclosedFrontmatterKey, true)
-	}
-	pc.Set(tablePaddingBudgetKey, budget)
-	count := budget.elements.countParse(pc)
-	root := withLineStarts(reader.md.Parser(), source, pc)
+	root, count, pc := reader.read(source, unclosedFrontmatter, budget)
 	if refusal := count.refusal(root, source, firstLine); refusal != nil {
 		return nil, refusal
 	}
@@ -49,6 +43,18 @@ func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budg
 		return nil, err
 	}
 	return root, nil
+}
+
+// read is goldmark's tree of source, its tables padded and its elements counted on budget, with the
+// count and the parser context it kept, before anything refuses it.
+func (reader markdownReader) read(source []byte, unclosedFrontmatter bool, budget *TablePaddingBudget) (ast.Node, *parseCount, parser.Context) {
+	pc := parser.NewContext()
+	if unclosedFrontmatter {
+		pc.Set(unclosedFrontmatterKey, true)
+	}
+	pc.Set(tablePaddingBudgetKey, budget)
+	count := budget.elements.countParse(pc)
+	return withLineStarts(reader.md.Parser(), source, pc), count, pc
 }
 
 // unclosedFrontmatterKey marks the parse of a document that opens with a front-matter opener no

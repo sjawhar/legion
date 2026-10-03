@@ -8,27 +8,36 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// Writes add up, so a write may not leave a document heavier than one document may hold and
-// heavier than it was. Inserts each well within one write's element limit are refused with 413
-// CAP_EXCEEDED, saying what to do, once the document would pass it - 42 KB of `)_` at a time, and a
-// thousand headings at a time - and the document still reads, its text and its blocks. Without the
-// bound, four to six `)_` inserts or eighteen of headings left a document the server could no
-// longer load: the next insert answered 500, and its reads 503.
-func TestRepeatedInsertsCannotGrowADocumentPastWhatItCanStoreAndRead(t *testing.T) {
+// Writes add up, so a write may not leave a document's markdown past what one upload may hold, by
+// an upload's own measures - 1 MiB, and 65,536 elements as an upload's parse counts them - and
+// bigger than it was. Inserts each well within both are refused with 413 CAP_EXCEEDED, saying what
+// to do, once the document would pass either, whatever makes it grow: prose and a code block's text
+// by their bytes, `)_`, headings, hard breaks, list items and table rows by their elements. The
+// document still reads, its text and its blocks, and whatever the inserts left uploads back from its
+// own text. Without the bound, thirty-two 900 KB inserts of prose grew one document to 29.5 MB, and
+// four to six `)_` inserts or eighteen of headings left one the server could no longer load: the
+// next insert answered 500, and its reads 503.
+func TestRepeatedInsertsCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
+	tableSpec := "| a | b |\n| - | - |\n| A10 | b |\n"
 	for _, test := range []struct {
-		name, chunk string
-		inserts     int
+		name, spec, after, chunk string
+		inserts                  int
 	}{
-		{"42 KB of )_", strings.Repeat(")_", 21_000), 6},
-		{"a thousand headings", strings.Repeat("# a\n", 1_000), 20},
+		{"900 KB of prose", "Before.\n", "end", strings.Repeat("word ", 180_000), 3},
+		{"900 KB of a code block's text", "Before.\n", "end", "```\n" + strings.Repeat("a line of code, forty bytes long; more\n", 22_500) + "```\n", 3},
+		{"42 KB of )_", "Before.\n", "end", strings.Repeat(")_", 21_000), 6},
+		{"a thousand headings", "Before.\n", "end", strings.Repeat("# a\n", 1_000), 20},
+		{"two thousand hard breaks", "Before.\n", "end", strings.Repeat("a  \n", 2_000) + "a\n", 12},
+		{"three thousand list items", "Before.\n", "end", strings.Repeat("- a\n", 3_000), 8},
+		{"a thousand table rows", tableSpec, "A10", strings.Repeat("| x | y |\n", 1_000), 10},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			handler := newTestHandler(t)
-			issue := createInteractionIssue(t, handler, "TEST", "Repeated growth", "Before.\n")
+			issue := createInteractionIssue(t, handler, "TEST", "Repeated growth", test.spec)
 			refused := 0
 			for index := range test.inserts {
 				response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-					"ops": []map[string]string{{"op": "insert", "after": "end", "markdown": test.chunk}},
+					"ops": []map[string]string{{"op": "insert", "after": test.after, "markdown": test.chunk}},
 				}, "alice")
 				if response.Code == http.StatusOK {
 					continue
@@ -49,7 +58,23 @@ func TestRepeatedInsertsCannotGrowADocumentPastWhatItCanStoreAndRead(t *testing.
 					t.Fatalf("%s after insert %d was refused: status=%d body=%.300s, want 200", read, refused, response.Code, response.Body.String())
 				}
 			}
+			text := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+			uploaded := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "spec.md"}, "spec.md", "text/markdown", []byte(text), "alice")
+			if uploaded.Code != http.StatusCreated {
+				t.Fatalf("upload of the document's own %d-byte text: status=%d body=%.500s, want 201", len(text), uploaded.Code, uploaded.Body.String())
+			}
 		})
+	}
+}
+
+// A new document is measured as an upload is: front matter, which an upload's parse does not
+// count, beside 16,384 headings, which weigh the 65,536 elements one document may hold, is a spec
+// the server takes.
+func TestASpecOfFrontMatterAndTheMostHeadingsIsTaken(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Front matter", "---\ntitle: a spec\n---\n\n"+strings.Repeat("# a\n", 16_384))
+	if text := documentMarkdown(t, handler, issue.PrimaryArtifactID); !strings.HasPrefix(text, "---\ntitle: a spec\n---\n") || strings.Count(text, "# a\n") != 16_384 {
+		t.Fatalf("the spec reads back %d bytes opening %q, want its front matter and 16,384 headings", len(text), text[:min(len(text), 40)])
 	}
 }
 

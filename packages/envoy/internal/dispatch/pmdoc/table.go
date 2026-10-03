@@ -137,7 +137,7 @@ func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 	if recordTablePadding(pc, padding) {
 		return
 	}
-	if count := countedElements(pc); count != nil && count.charge(padding.implied, header.Start) {
+	if count := countedElements(pc); count != nil && rows.charge(count, node.Lines()) {
 		return
 	}
 	t.transform(node, reader, pc)
@@ -178,6 +178,18 @@ func (r tableRows) padding(lines *gmtext.Segments, source []byte) tablePadding {
 		padding.implied += r.width
 	}
 	return padding
+}
+
+// charge charges count the cells goldmark's transformer makes of the table in lines once padded,
+// each row's at the line it is written on, so a row the server wrote ahead of the caller's
+// markdown is charged nothing (parseCount.free). It reports whether the count passed the guard.
+func (r tableRows) charge(count *parseCount, lines *gmtext.Segments) bool {
+	for row := r.header; row < lines.Len(); row++ {
+		if row != r.header+1 && count.charge(r.width, lines.At(row).Start) {
+			return true
+		}
+	}
+	return false
 }
 
 // tableDelimiterCell is a delimiter row's cell as goldmark's transformer reads one: hyphens, a
