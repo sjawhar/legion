@@ -7,10 +7,10 @@ import {
   deleteEditorText,
   documentEditor,
   expectMark,
+  markTexts,
   placeCaret,
   selectEditorText,
 } from "./editor";
-import { markTexts } from "./margin-helpers";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 

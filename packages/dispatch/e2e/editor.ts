@@ -54,11 +54,26 @@ export function markSpan(page: Page, markId: string): Locator {
   return documentEditor(page).locator(`[data-id="${markId}"]`);
 }
 
-/** Waits until `page`'s editor shows the mark `markId` over exactly `quote`. */
+/** The text of each mark among `spans`, keyed by mark id: a mark another mark nests inside renders
+ *  as more than one span, and an outer span's text includes the spans inside it, so a mark's text
+ *  is its own spans' text joined in document order. */
+export function markTexts(spans: Locator): Promise<Record<string, string>> {
+  return spans.evaluateAll((elements) => {
+    const texts: Record<string, string> = {};
+    for (const element of elements) {
+      const id = element.getAttribute("data-id") ?? "";
+      texts[id] = (texts[id] ?? "") + (element.textContent ?? "");
+    }
+    return texts;
+  });
+}
+
+/** Waits until `page`'s editor shows the mark `markId` over exactly `quote`, whether it renders as
+ *  one span or, with another mark nested inside it, as several. */
 export async function expectMark(page: Page, markId: string, quote: string): Promise<void> {
-  const mark = markSpan(page, markId);
-  await expect(mark).toBeVisible();
-  await expect(mark).toHaveText(quote);
+  const spans = markSpan(page, markId);
+  await expect(spans.first()).toBeVisible();
+  await expect.poll(async () => (await markTexts(spans))[markId] ?? "").toBe(quote);
 }
 
 export function cursorLabel(page: Page, name: string): Locator {

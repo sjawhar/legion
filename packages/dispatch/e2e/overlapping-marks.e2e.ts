@@ -13,13 +13,14 @@ import {
   barAction,
   connectedDot,
   documentEditor,
+  expectMark,
   marginCard,
   markSpan,
   placeCaret,
   selectEditorText,
   setSheet,
 } from "./editor";
-import { commentWithBody, markText } from "./margin-helpers";
+import { commentWithBody } from "./margin-helpers";
 import { resetDatabase } from "./seed";
 import { centerOf, touchHold } from "./touch";
 import { asUser } from "./users";
@@ -67,7 +68,7 @@ test("two readers' comments can cover the same text, and neither cuts the other'
     if (bobComment.anchor === null) throw new Error("Bob's comment has no anchor.");
     expect(bobComment.anchor.quote).toBe("quick brown");
     const bobMark = bobComment.anchor.mark_id;
-    await expect.poll(() => markText(alicePage, bobMark)).toBe("quick brown");
+    await expectMark(alicePage, bobMark, "quick brown");
 
     // A comment Alice starts on "brown" and cancels takes its provisional mark away, and only it.
     await setSheet(alicePage, testInfo.project.name, false);
@@ -86,7 +87,7 @@ test("two readers' comments can cover the same text, and neither cuts the other'
               ])
           )
           .toEqual([bobMark]),
-        expect.poll(() => markText(page, bobMark)).toBe("quick brown"),
+        expectMark(page, bobMark, "quick brown"),
       ])
     );
 
@@ -136,8 +137,8 @@ test("two readers' comments can cover the same text, and neither cuts the other'
 
     await Promise.all(
       readers.flatMap((page) => [
-        expect.poll(() => markText(page, bobMark)).toBe("quick brown"),
-        expect.poll(() => markText(page, aliceMark)).toBe("brown"),
+        expectMark(page, bobMark, "quick brown"),
+        expectMark(page, aliceMark, "brown"),
         expect(markSpan(page, bobMark).locator(`[data-id="${aliceMark}"]`)).toHaveCount(1),
         expect(marginCard(page, bobComment.id)).toBeAttached(),
         expect(marginCard(page, aliceComment.id)).toBeAttached(),
@@ -147,8 +148,8 @@ test("two readers' comments can cover the same text, and neither cuts the other'
     await bobPage.reload();
     await expect(connectedDot(bobPage)).toHaveText("connected");
     await Promise.all([
-      expect.poll(() => markText(bobPage, bobMark)).toBe("quick brown"),
-      expect.poll(() => markText(bobPage, aliceMark)).toBe("brown"),
+      expectMark(bobPage, bobMark, "quick brown"),
+      expectMark(bobPage, aliceMark, "brown"),
       expect(marginCard(bobPage, bobComment.id)).toBeAttached(),
       expect(marginCard(bobPage, aliceComment.id)).toBeAttached(),
     ]);
@@ -200,9 +201,7 @@ test("two readers' suggestions keep both action-bar anchors", async ({ browser }
     if (bobSuggestion.anchor === null) throw new Error("Bob's suggestion has no anchor.");
     expect(bobSuggestion.anchor.quote).toBe("quick brown");
     const bobMark = bobSuggestion.anchor.mark_id;
-    await Promise.all(
-      readers.map((page) => expect.poll(() => markText(page, bobMark)).toBe("quick brown"))
-    );
+    await Promise.all(readers.map((page) => expectMark(page, bobMark, "quick brown")));
 
     await setSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "brown");
@@ -232,8 +231,8 @@ test("two readers' suggestions keep both action-bar anchors", async ({ browser }
       throw new Error("Alice's action-bar suggestion mark was not created.");
     await Promise.all(
       readers.flatMap((page) => [
-        expect.poll(() => markText(page, bobMark)).toBe("quick brown"),
-        expect.poll(() => markText(page, aliceMark)).toBe("brown"),
+        expectMark(page, bobMark, "quick brown"),
+        expectMark(page, aliceMark, "brown"),
       ])
     );
 
@@ -273,8 +272,8 @@ test("two readers' suggestions keep both action-bar anchors", async ({ browser }
     await bobPage.reload();
     await expect(connectedDot(bobPage)).toHaveText("connected");
     await Promise.all([
-      expect.poll(() => markText(bobPage, bobMark)).toBe("quick brown"),
-      expect.poll(() => markText(bobPage, aliceMark)).toBe("brown"),
+      expectMark(bobPage, bobMark, "quick brown"),
+      expectMark(bobPage, aliceMark, "brown"),
     ]);
   } finally {
     await bob.close();
