@@ -153,6 +153,65 @@ func TestAnOwnersApprovalSurvivesLooseningToShared(t *testing.T) {
 	}
 }
 
+// TestAnApprovalGivenWhileItsSecretWasRefusedReleasesNothing pins that the time the broker refuses
+// a secret (here an owner tag it reads as malformed) launders no approval. The current tags name no
+// approver for a secret they leave out, so mallory may decide her own request waiting on anyone
+// then; but the grant releases nothing while the secret is refused, nothing once the tag is
+// corrected to alice, who never approved it, and reuse does not hand it back.
+func TestAnApprovalGivenWhileItsSecretWasRefusedReleasesNothing(t *testing.T) {
+	m, _, _, _ := newFixture(t)
+	ctx := context.Background()
+	enr, key := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
+	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need the shared one", "SHARED_KEY"), "")
+	if err != nil || req.RecordID == nil {
+		t.Fatalf("Create = %+v, %v, want pending", req, err)
+	}
+
+	retag(t, m, policytest.Secret("SHARED_KEY", "Alice@Example.com", policy.TierHuman, "alice-v2"))
+	if _, err := m.Policy.Get().Evaluate("SHARED_KEY", policy.Requester{Operator: mallory}); !errors.Is(err, policy.ErrUnknownSecret) {
+		t.Fatalf("Evaluate(SHARED_KEY) with a cased owner tag = %v; want policy.ErrUnknownSecret", err)
+	}
+	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, mallory)
+	if err != nil || dec.GrantID == "" {
+		t.Fatalf("ApplyDecision(mallory) while SHARED_KEY is refused = %+v, %v; want granted", dec, err)
+	}
+	if values, _, err := m.Values(ctx, dec.GrantID, enr); !errors.Is(err, ErrGrantNotLive) {
+		t.Fatalf("Values while SHARED_KEY is refused = %v, %v; want ErrGrantNotLive", values, err)
+	}
+
+	retag(t, m, policytest.Secret("SHARED_KEY", otherPerson, policy.TierHuman, "alice-v3"))
+	if values, _, err := m.Values(ctx, dec.GrantID, enr); !errors.Is(err, ErrGrantNotLive) {
+		t.Fatalf("Values once SHARED_KEY is alice's = %v, %v; want ErrGrantNotLive", values, err)
+	}
+	again, err := m.Create(ctx, enr, signRequest(t, m, key, "need it again", "SHARED_KEY"), "")
+	if err != nil || again.State != "pending" || again.GrantID != nil {
+		t.Fatalf("Create(again) once SHARED_KEY is alice's = %+v, %v; want a new pending request, not the grant handed back", again, err)
+	}
+}
+
+// TestAnOwnersApprovalSurvivesHerRaisingTheTier pins that a decision records the login later
+// checks compare: alice approves bob's session for her agent-tier ALICE_KEY with her login cased
+// and padded, then raises the secret to human tier. She is still its approver, so the grant keeps
+// releasing, its new value included.
+func TestAnOwnersApprovalSurvivesHerRaisingTheTier(t *testing.T) {
+	m, _, _, _ := newFixture(t)
+	ctx := context.Background()
+	enr, key := newEnrollment(t, m.Store, "box", "box-bob-"+t.Name(), new(bob), nil)
+	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need alice's", "ALICE_KEY"), "")
+	if err != nil || req.RecordID == nil {
+		t.Fatalf("Create = %+v, %v, want pending", req, err)
+	}
+	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, " Alice@Example.com ")
+	if err != nil || dec.GrantID == "" {
+		t.Fatalf("ApplyDecision(alice, cased and padded) = %+v, %v, want granted", dec, err)
+	}
+
+	retag(t, m, policytest.Secret("ALICE_KEY", otherPerson, policy.TierHuman, "alice-v2"))
+	if values, _, err := m.Values(ctx, dec.GrantID, enr); err != nil || values["ALICE_KEY"] != "alice-v2" {
+		t.Fatalf("Values after alice raised the tier = %v, %v; want ALICE_KEY=alice-v2", values, err)
+	}
+}
+
 // TestRequestsNeedingTwoApproversAreRefused pins that one request never bundles secrets two
 // approvers decide: a shared human-tier secret's approver is anyone, so a bundle decided as one
 // record would let anyone release the other secret. The owner's human-tier secret beside a shared

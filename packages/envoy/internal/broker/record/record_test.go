@@ -305,8 +305,9 @@ func TestChainVerifierHoldsASlotlessAndASlottedRecordToTheirOwnBytes(t *testing.
 // TestAnyoneApproverAdmitsEveryLoginButItself pins the approver AnyoneApprover against a person's:
 // an agent_secret record naming anyone is decided by any login, never by the sentinel itself or an
 // empty login, and its chain verifies over whichever login approved it; a record naming a person
-// is decided by that person alone, the sentinel included; and a machine login naming anyone, which
-// an older binary could open, is decided by no login and its chain verifies over none.
+// is decided by that person alone, the sentinel included; and a record of any other kind naming
+// anyone (a machine login, which an older binary could open, or a kind not spelled exactly
+// agent_secret) is decided by no login, and a machine login's chain verifies over none.
 func TestAnyoneApproverAdmitsEveryLoginButItself(t *testing.T) {
 	key, _ := proof.NewKey()
 	now := time.Now()
@@ -334,6 +335,8 @@ func TestAnyoneApproverAdmitsEveryLoginButItself(t *testing.T) {
 		{KindAgentSecret, owned, AnyoneApprover, ""},
 		{KindLauncherCredential, shared, "bob@example.com", ""},
 		{KindLauncherCredential, shared, AnyoneApprover, ""},
+		{"", shared, "bob@example.com", ""},
+		{"Agent_Secret", shared, "bob@example.com", ""},
 		{KindLauncherCredential, owned, "Sami@Example.com", "sami@example.com"},
 	} {
 		got, err := c.body.ApproverLogin(c.kind, c.login)

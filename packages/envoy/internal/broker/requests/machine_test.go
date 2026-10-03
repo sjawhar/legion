@@ -942,8 +942,8 @@ func TestEveryRequesterIsDecidedByOwnerAndTier(t *testing.T) {
 
 // TestAnyoneDecidesASharedHumanTierRequest pins the approver record.AnyoneApprover: a request for a
 // shared human-tier secret reaches every person's pending list, any person's login decides it and
-// is recorded as the decider, the sentinel itself decides nothing, and the grant releases its
-// value because its chain verifies under that approver.
+// is recorded as the decider, the sentinel itself, in any casing, and a blank login decide nothing,
+// approve or deny, and the grant releases its value because its chain verifies under that approver.
 func TestAnyoneDecidesASharedHumanTierRequest(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
@@ -957,9 +957,11 @@ func TestAnyoneDecidesASharedHumanTierRequest(t *testing.T) {
 			t.Fatalf("PendingForApprover(%s) = %+v, %v, want the shared record", person, pending, err)
 		}
 	}
-	for _, login := range []string{record.AnyoneApprover, "", "  "} {
-		if _, err := m.ApplyDecision(ctx, *req.RecordID, true, login); !errors.Is(err, record.ErrNotApprover) {
-			t.Fatalf("ApplyDecision(%q) = %v, want record.ErrNotApprover", login, err)
+	for _, approve := range []bool{true, false} {
+		for _, login := range []string{record.AnyoneApprover, " ANYONE ", "", "  ", "\t"} {
+			if _, err := m.ApplyDecision(ctx, *req.RecordID, approve, login); !errors.Is(err, record.ErrNotApprover) {
+				t.Fatalf("ApplyDecision(approve=%v, %q) = %v, want record.ErrNotApprover", approve, login, err)
+			}
 		}
 	}
 	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, "Bob@Example.com")
