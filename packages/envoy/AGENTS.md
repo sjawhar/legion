@@ -1667,10 +1667,13 @@ local-dev-only path. The broker takes no flags, and refuses any flag it is given
 The docs site's broker reference pages are generated at site build from this source by
 `scripts/docs/broker/refgen` (through `docs/site/generators/broker-*.sh`), which fails the build on
 an undocumented item: every `routes()` row needs a comment above it saying what the route does,
-every `Config` field a doc comment opening with the `BROKER_*` variables it reads and a colon
-(`BROKER_FAKE_SECRETS_FILE`'s is in `cmd/broker/main.go`), and every helper refusal code and
-`agent-secrets` exit code a comment. The CLI reference is the built binaries' own `--help`, so every
-form must answer `-h` with exit 0.
+every adapter a reader label in refgen's `credentialLabels`, every handler's success answer a named
+response struct of `internal/broker/api` (never a map literal), every JSON field of a request or
+response body (and of an object it holds) a doc comment saying what it is, a response type that is
+one of several answers of a route a doc comment saying when, every `Config` field a doc comment
+opening with the `BROKER_*` variables it reads and a colon (`BROKER_FAKE_SECRETS_FILE`'s is in
+`cmd/broker/main.go`), and every helper refusal code and `agent-secrets` exit code a comment. The
+CLI reference is the built binaries' own `--help`, so every form must answer `-h` with exit 0.
 
 `internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
@@ -1829,11 +1832,14 @@ for Dispatch's relay: it sends the broker's UI routes the UI bearer and a login,
 when a signed-in human clicks Approve) run a whole local broker stack by hand for manual smoke
 testing; neither ships in `docker/Dockerfile`, which builds exactly `envoy-listener`,
 `envoy-dispatch`, `envoy-broker`, and `agent-secrets`. `dev-broker.sh` prints the exports a second
-shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_UI_TOKEN`, `AGENT_SECRETS_APPROVER`). Each
-`dev-broker.sh` run creates and drops its own isolated database on the shared `dispatch-pg`
-container, so concurrent instances never see each other's enrollments, requests or grants, and
-listens on the port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`;
-AGENTC-833), so concurrent instances can never collide on a shared port either.
+shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_UI_TOKEN`, `AGENT_SECRETS_APPROVER`, the helper's
+`AGENT_SECRETS_HELPER_SOCK` and `AGENT_SECRETS_OPERATOR_FILE`, both in its workdir, where it writes
+the operator file, and `DEV_BROKER_DIR`, the workdir itself). Each `dev-broker.sh` run creates
+and drops its own isolated database, on the shared `dispatch-pg` container or, with
+`DEV_BROKER_POSTGRES_URL` set, through `psql` on the server that URL names (no Docker), so
+concurrent instances never see each other's enrollments, requests or grants, and listens on the
+port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`; AGENTC-833), so
+concurrent instances can never collide on a shared port either.
 `dev-broker.test.sh` proves both kinds of isolation with fakes (no real Postgres or network) and
 runs in CI's `envoy-go` job.
 
