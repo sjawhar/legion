@@ -1,0 +1,31 @@
+---
+title: Walkthrough
+description: An agent asks the secrets broker for an API key, a person approves it in Dispatch, and the agent's command runs with it.
+---
+
+export const media = `${import.meta.env.BASE_URL.replace(/\/?$/, "/")}media/`;
+
+<video controls preload="metadata" playsinline style="width: 100%" src={`${media}broker-walkthrough.mp4`}>
+  Your browser cannot play this video. <a href={`${media}broker-walkthrough.mp4`}>Download it</a>.
+</video>
+
+A four-minute tour of one secret request from start to finish, recorded on example data: the
+Dispatch workspace's person is `alice`, the agent's machine is `example-host-build`, and the
+secret, `DEMO_API_KEY`, holds a made-up value.
+
+1. **Log the machine in, once.** On the agent's machine, `agent-secrets launcher login` prints a
+   code. Alice types it on Dispatch's machine login page, checks the host it names, and approves.
+2. **Start a session.** `agent-secrets register --exec -- bash` registers a session with the
+   machine's helper, as an agent's session is registered when it starts. `agent-secrets self`
+   shows its enrollment and its operator, alice.
+3. **Ask for the secret.** `agent-secrets DEMO_API_KEY --reason "…" -- ./check-demo-key.sh`
+   waits, and prints the Dispatch page where the request is decided.
+4. **Approve it.** The request is in alice's Inbox under Credential requests. Its page shows what
+   was asked for, by which session, for how long, and the agent's stated reason. She approves it.
+5. **The command runs.** The waiting command receives the key in its environment and runs.
+   `agent-secrets status` names who decided the request.
+6. **The record.** The request's page now shows it approved, and Settings lists the live grant
+   with its approver, where it can be revoked.
+
+The rig that recorded it, and the scripts that rerecord it, are in
+[`docs/site/media/broker/`](https://github.com/sjawhar/legion/tree/main/docs/site/media/broker).
