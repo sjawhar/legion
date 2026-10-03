@@ -309,17 +309,25 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 }
 
 // Read answers a machine's own poll: the record's current state and, once issued, its minted
-// credential's id — never a token.
-func (s *Service) Read(ctx context.Context, pendingID string) (state, credentialID string, err error) {
+// credential's id and the moment that credential expires (CredentialLifetime from the approval),
+// so the machine can say ahead of time that it needs a new login — never a token.
+func (s *Service) Read(ctx context.Context, pendingID string) (state, credentialID string, expiresAt time.Time, err error) {
 	var recordID string
 	err = s.Store.Pool.QueryRow(ctx, `select record_id from machine_login_polls where pending_id_hash=$1`, hashPendingID(pendingID)).Scan(&recordID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", ErrNotFound
+		return "", "", time.Time{}, ErrNotFound
 	}
 	if err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
-	return s.recordState(ctx, recordID)
+	state, credentialID, err = s.recordState(ctx, recordID)
+	if err != nil || state != "issued" {
+		return state, credentialID, time.Time{}, err
+	}
+	if err := s.Store.Pool.QueryRow(ctx, `select expires_at from launcher_credentials where id=$1`, credentialID).Scan(&expiresAt); err != nil {
+		return "", "", time.Time{}, err
+	}
+	return state, credentialID, expiresAt, nil
 }
 
 // recordState answers a record's current state ("pending" absent any terminal event, else the
