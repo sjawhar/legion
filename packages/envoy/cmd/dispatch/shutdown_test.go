@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -153,6 +156,139 @@ func TestSIGTERMWithAnEditorConnectedSettlesItsDocumentBeforeExit(t *testing.T) 
 			t.Logf("Dispatch logged: %s", line)
 		}
 	}
+}
+
+// A database that stops answering - a failover, a partition - holds every connection waiting on it,
+// and closing the pool waits for every connection in use. Dispatch gives up on them once its
+// shutdown budget is spent, so it exits inside a runtime's grace period (30 s in the compose file)
+// instead of when the runtime kills it.
+func TestSIGTERMWithTheDatabaseUnansweringExitsWithinTheShutdownBudget(t *testing.T) {
+	database := storetest.Open(t)
+	relay := startDatabaseRelay(t, database.Pool.Config().ConnString())
+	process := startDispatchProcess(t, relay.url)
+	process.waitHealthy(t)
+	_, artifactID := process.createIssue(t)
+	editor := process.openEditor(t, artifactID, "before\n")
+	replaceText(t, editor, "before", "after")
+	waitForRoom(t, editor)
+
+	relay.freeze()
+	signalled := process.Terminate(t)
+	process.WaitExit(t, "SIGTERM with the database unanswering")
+	exited := time.Since(signalled)
+	t.Logf("exited %v after SIGTERM", exited)
+	if budget := httpShutdownTimeout + documentShutdownTimeout; exited > budget+2*time.Second {
+		t.Errorf("Dispatch exited %v after SIGTERM with the database unanswering, want within its %v shutdown budget", exited, budget)
+	}
+	for _, line := range strings.Split(process.Output.String(), "\n") {
+		if strings.Contains(line, "level=WARN") {
+			t.Logf("Dispatch logged: %s", line)
+		}
+	}
+}
+
+// waitForRoom returns once the room has answered a request the editor sent after its edit: the
+// room handles one connection's messages in order, so it has applied the edit by then.
+func waitForRoom(t *testing.T, editor *docstest.Peer) {
+	t.Helper()
+	for len(editor.Answers) > 0 {
+		<-editor.Answers
+	}
+	if err := editor.AskForDocument(); err != nil {
+		t.Fatalf("ask the room for the document: %v", err)
+	}
+	select {
+	case <-editor.Answers:
+	case <-editor.Ended:
+		t.Fatal("the editor's connection closed before the room answered")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the room never answered the editor")
+	}
+}
+
+// databaseRelay forwards Dispatch's database connections to the test's Postgres until frozen, and
+// then forwards nothing more in either direction while holding every connection open, as a
+// database that has stopped answering does.
+type databaseRelay struct {
+	url    string
+	frozen chan struct{}
+	once   sync.Once
+}
+
+func (r *databaseRelay) freeze() { r.once.Do(func() { close(r.frozen) }) }
+
+// startDatabaseRelay starts a relay to the database databaseURL names and returns it with url, the
+// same URL through the relay.
+func startDatabaseRelay(t *testing.T, databaseURL string) *databaseRelay {
+	t.Helper()
+	target, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatalf("parse the database URL: %v", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for the database relay: %v", err)
+	}
+	relay := &databaseRelay{frozen: make(chan struct{})}
+	done := make(chan struct{})
+	var conns sync.WaitGroup
+	t.Cleanup(func() {
+		close(done)
+		_ = listener.Close()
+		conns.Wait()
+	})
+	upstream := target.Host
+	through := *target
+	through.Host = listener.Addr().String()
+	relay.url = through.String()
+	forward := func(to, from net.Conn) {
+		buffer := make([]byte, 32<<10)
+		for {
+			n, err := from.Read(buffer)
+			select {
+			case <-relay.frozen:
+				<-done
+				return
+			default:
+			}
+			if n > 0 {
+				if _, writeErr := to.Write(buffer[:n]); writeErr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
+	go func() {
+		for {
+			client, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			server, err := net.Dial("tcp", upstream)
+			if err != nil {
+				_ = client.Close()
+				continue
+			}
+			conns.Add(2)
+			go func() {
+				defer conns.Done()
+				forward(server, client)
+			}()
+			go func() {
+				defer conns.Done()
+				forward(client, server)
+			}()
+			go func() {
+				<-done
+				_ = client.Close()
+				_ = server.Close()
+			}()
+		}
+	}()
+	return relay
 }
 
 // checkSettledAtShutdown requires the exited process to have stopped in order with the document's

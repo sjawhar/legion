@@ -86,10 +86,12 @@ that row, and no other, inside its 5 s drain budget (`docs.ShutdownDrainBudget`,
 caller's deadline: `cmd/dispatch/shutdown.go` gives document shutdown twice that budget,
 `documentShutdownTimeout`, started once HTTP shutdown has returned within its 5 s,
 `httpShutdownTimeout`; every open event stream ends at the signal through `api.Deps.Lifetime`, so
-HTTP shutdown waits only for the requests in flight); a settled document's repeat would spend the
-budget for nothing. Before it reads which documents owe a settlement, it waits for the durable
-appends each room had queued when it began, and not for later ones, so an editor that keeps sending
-updates leaves only its own room to resume. A room with an editor connected (a spec tab holds the
+HTTP shutdown waits only for the requests in flight; the database pool's close gets what is left of
+the document budget, and past it Dispatch exits with any connection still waiting on a database
+that has stopped answering); a settled document's repeat would spend the budget for nothing. Before
+it reads which documents owe a settlement, it waits for the durable appends each room had queued
+when it began, and not for later ones, so an editor that keeps sending updates leaves only its own
+room to resume. A room with an editor connected (a spec tab holds the
 document's websocket) is settled while it is still loaded, and its editors are closed only once that
 settlement has returned: ygo's `CloseRoom` evicts the room as it closes them, and a settlement does
 not load a room during shutdown, so closing the room first would leave its settlement to the next
