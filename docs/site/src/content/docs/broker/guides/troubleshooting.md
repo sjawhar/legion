@@ -34,7 +34,7 @@ generated from the code, lists every code.
 | `no rule names this secret (UNKNOWN_SECRET)` | The name is not in the broker's rules. | Check the spelling, or ask the rules' owner to add it. |
 | `the requested secrets need different approvers; request them separately (MIXED_APPROVERS)` | One command asked for secrets that different people approve. | Request them in separate commands. |
 | `… not released (proxy-delivery or otherwise unavailable)` | The grant came back without one of the names' values: a `delivery: proxy` secret, which the broker never releases. | Use an `inject` secret. |
-| `grant is expired, revoked, or its session ended (GRANT_NOT_LIVE)` | The grant ended between the decision and the read. | Run the command again to ask anew. |
+| `grant is expired, revoked, or its session ended (GRANT_NOT_LIVE)` | The grant ended between the decision and the read, or the rules changed since it was granted: the secret is now denied or gone from the rules, or one granted automatically now needs approval. | Run the command again to ask anew. |
 | `secret is not in the secrets store (SECRET_NOT_IN_STORE)` | The rules name a `source` the secret store does not hold. | Tell whoever runs the broker; the rules or the store is wrong. |
 | `request object invalid (REQUEST_INVALID)` | The broker could not verify the signed request: usually a clock far off, or an `AGENT_SECRETS_URL` that is not the broker's public URL. | Check the clock and the URL. |
 

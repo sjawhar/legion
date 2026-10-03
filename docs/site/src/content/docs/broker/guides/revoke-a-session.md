@@ -10,6 +10,11 @@ that holds it: ending a session revokes every grant it held and cancels every re
 pending. Ending a grant stops the session reading its values again; a command already running with
 a value keeps it.
 
+Revoking a grant ends a session's access only to a secret someone must approve: the session's next
+request for it waits for that approval again. A grant the rules gave automatically comes straight
+back: the same session's next request for that secret is granted at once, under a new grant. To end
+access to an automatic secret, [change its rule](#end-access-to-an-automatic-secret).
+
 ## Revoke a grant in Dispatch
 
 Dispatch's **Settings** page lists your **Live grants**: the live grants you approved, and those on
@@ -17,8 +22,9 @@ sessions you operate, each with its enrollment, names, approver, and when it was
 expires. Click **Revoke** to end one at once; the session's next read of it is refused
 `GRANT_NOT_LIVE`. The broker allows it when you are the grant's approver or its session's operator,
 and refuses anyone else `NOT_APPROVER`. A grant the rules gave automatically has no approver and is
-not in that list; its operator can still revoke it through the same broker route, with the grant id
-the session's `agent-secrets self` prints:
+not in that list. Its operator can revoke it through the same broker route, with the grant id the
+session's `agent-secrets self` prints, but that does not end access: the session's next request for
+the secret is granted again at once.
 
 ```console
 $ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/grants/<grant id>/revoke-by-approver"
@@ -42,6 +48,15 @@ kind: host
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
 ```
+
+## End access to an automatic secret
+
+Change the secret's requester entry in the rules from `decision: automatic` to `decision: approval`
+or `decision: deny`. Once the broker rereads its rules, every `BROKER_RULES_RELOAD_SECONDS` (see the
+[configuration reference](/legion/broker/reference/config/)), it refuses each read of a grant the
+old rule gave automatically with `GRANT_NOT_LIVE`, and the session's next request for the secret
+waits for a person's approval or is denied. The change applies to every session that entry
+matches, not to one session.
 
 ## Cancel a pending request
 
@@ -78,3 +93,10 @@ A machine's credential lives only in its helper's memory: stopping the helper st
 from enrolling new sessions until someone logs it in again, and the credential expires on its own
 after `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. The broker has no route that revokes a launcher
 credential before then.
+
+Neither ends a session already enrolled: a session renews its lease with its own key, never with
+the machine's credential. A host session lapses within `BROKER_LEASE_SECONDS` once the helper
+stops, since the helper is what renews it. A box renews itself (`agent-secrets renew`), so it keeps
+working after the helper stops and after the machine's credential expires: end each box with
+`agent-secrets unenroll --helper --enrollment <id>`, run against a helper logged in as the box's
+operator, or stop its `agent-secrets renew`, after which it lapses within `BROKER_LEASE_SECONDS`.

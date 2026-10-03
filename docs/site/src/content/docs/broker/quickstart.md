@@ -20,8 +20,10 @@ below is real, captured from that stack, whose rules grant `DEMO_READ_TOKEN` aut
 
 ## 1. The agent asks
 
-An agent never handles a secret's value: it names the secrets a command needs and lets
-`agent-secrets` run the command with them.
+An agent names the secrets a command needs and lets `agent-secrets` run the command with them in
+its environment. `agent-secrets` itself never prints a value, but the command is the agent's choice
+and can (the `printenv` below does), so a session holding a grant can read the value: approve a
+secret only for a session you would trust with the value itself.
 
 ```sh
 agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
@@ -67,7 +69,7 @@ covers the page in full.
 ## 3. The command runs
 
 Once approved, the waiting `agent-secrets` collects the grant and replaces itself with the command,
-`DEMO_API_KEY` set in its environment. Nothing prints the value:
+`DEMO_API_KEY` set in its environment. This command prints only the value's length:
 
 ```console
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- sh -c 'echo "deploying with a ${#DEMO_API_KEY}-character key"'

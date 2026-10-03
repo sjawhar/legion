@@ -9,10 +9,12 @@ sidebar:
 The Secrets Broker hands agent sessions the secret values they need, one request at a time, so an
 agent never holds a long-lived API key. An agent asks for a secret by name; the broker decides from
 its rules whether to grant it at once, refuse it, or ask a person; and the person approves or denies
-it in Dispatch. A granted value reaches only the command that asked for it, and every request,
-decision and use is recorded. The command keeps the value in its environment for as long as it
-runs; the grant's expiry or revocation stops the session from reading the value again, not a
-command that already has it.
+it in Dispatch. A granted value reaches only the session that asked, in the environment of the
+command it runs, and every request, decision and use is recorded. That command is the agent's
+choice and can read the value, so approve a secret only for a session you would trust with the value
+itself. The command keeps the value in its environment for as long as it runs; the grant's expiry or
+revocation stops the session from reading the value again, not a command that already has it, and a
+secret the rules grant automatically is granted again at the session's next request.
 
 ```sh
 agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh

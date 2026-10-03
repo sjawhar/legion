@@ -147,11 +147,17 @@ The broker never stores a value. Each time a session reads a grant, the broker c
 session is still enrolled, the grant is live, its approval still verifies, and the current rules
 still allow every name; then it reads the value from the secret store (AWS Secrets Manager in
 production) and returns it to that session alone. `agent-secrets NAME -- command` puts each value
-in the command's environment under its name and replaces itself with the command, so the value is
-never printed.
+in the command's environment under its name and replaces itself with the command. `agent-secrets`
+itself never prints a value, but the command is the agent's choice, and a command can print or send
+what its environment holds (`printenv NAME` prints it). A session holding a grant can therefore read
+the value: approve a secret only for a session you would trust with the value itself.
 
 A grant ends when it expires, when its session revokes it (`agent-secrets revoke`), when its
-approver or its enrollment's operator revokes it in Dispatch, or when its enrollment ends.
+approver or its enrollment's operator revokes it in Dispatch (an approved grant) or through the
+broker's revoke route, or when its enrollment ends. Ending a grant ends access only to a secret
+someone must approve: a secret the rules grant automatically is granted again at the session's next
+request. To end access to one, change its rule
+([revoke a session or a grant](/legion/broker/guides/revoke-a-session/#end-access-to-an-automatic-secret)).
 
 ## Approvals
 
