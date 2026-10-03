@@ -1650,9 +1650,15 @@ export function ConversationTab({
           </button>
         </div>
       ) : null}
-      {visible && !follow.atTop && shown.length > 0 ? (
+      {/* The pill takes the edge the docked composer leaves free, so it never covers the
+          composer's controls: below `sm` the composer sits at the foot of the screen and grows
+          upward (a refusal's Retry or Discard draft with it), so the pill floats at the top, where
+          the latest turn is; from `sm` the composer sticks to the top and the pill sits at the
+          foot. A thread opened full-screen covers the Conversation the pill acts on, and its own
+          composer sits at the foot, so the pill waits for Back. */}
+      {visible && phoneThread === undefined && !follow.atTop && shown.length > 0 ? (
         <button
-          className={`fixed right-6 bottom-36 z-20 min-h-11 rounded-full px-4 text-sm font-semibold shadow-lg xl:bottom-24 ${primaryButtonBg} ${primaryButtonHoverBg}`}
+          className={`fixed top-4 left-1/2 z-20 min-h-11 -translate-x-1/2 rounded-full px-4 text-sm font-semibold whitespace-nowrap shadow-lg sm:top-auto sm:right-6 sm:bottom-36 sm:left-auto sm:translate-x-0 xl:bottom-24 ${primaryButtonBg} ${primaryButtonHoverBg}`}
           data-testid="jump-to-latest"
           onClick={follow.jumpToLatest}
           type="button"
