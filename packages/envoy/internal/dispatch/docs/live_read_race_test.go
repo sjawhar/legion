@@ -178,8 +178,9 @@ func firstBlockID(t *testing.T, service *Service, artifactID string) string {
 // typeIntoDocument connects a peer that writes the document as a browser's keystrokes do - a
 // paragraph inserted at the start, a word typed into it, the paragraph deleted, each its own
 // update - round after round until the test ends, waiting a random time up to gap between
-// updates so a read's start does not fall into step with them. It returns once the peer has sent
-// its first update and the room is resident.
+// updates so a read's start does not fall into step with them, and never running further ahead of
+// the room than keepUp allows. It returns once the peer has sent its first update and the room is
+// resident.
 func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID string, gap time.Duration) {
 	t.Helper()
 	peer := newDeepPeer(t, serverURL, artifactID)
@@ -225,6 +226,7 @@ func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID stri
 					return
 				}
 				wrote.Do(func() { close(first) })
+				keepUp(service, artifactID, peer.doc, stopped)
 				time.Sleep(rand.N(gap))
 			}
 		}
@@ -259,6 +261,41 @@ func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID stri
 	waitFor(t, 10*time.Second, "the room to load", func() bool {
 		return service.srv.GetDoc(artifactID) != nil
 	})
+}
+
+// A typing peer runs at most typingLead clocks of its own ahead of what the room has applied, and
+// leaves the room at most typingBacklog updates it has not stored (keepUp).
+const (
+	typingLead    = 16
+	typingBacklog = 16
+)
+
+// keepUp waits while the peer runs further ahead of the room than typingLead and typingBacklog
+// allow, or until it stops typing. A peer that sent as fast as it could outran the room on a
+// loaded machine, under -race or not, and the test's end then waited past its deadline for the
+// backlog it had queued; one bounded this loosely still keeps the room busy with its updates.
+func keepUp(service *Service, artifactID string, peer *crdt.Doc, stopped <-chan struct{}) {
+	client := peer.ClientID()
+	sent := peer.StateVector().Clock(client)
+	state := service.room(artifactID)
+	for {
+		room := service.srv.GetDoc(artifactID)
+		if room == nil {
+			return
+		}
+		state.mu.Lock()
+		unstored := int64(state.pendingUpdates)
+		state.mu.Unlock()
+		unstored += state.durableAppends.Load()
+		if sent <= room.StateVector().Clock(client)+typingLead && unstored <= typingBacklog {
+			return
+		}
+		select {
+		case <-stopped:
+			return
+		case <-time.After(100 * time.Microsecond):
+		}
+	}
 }
 
 // allowing is err unless it is want, which the read is expected to meet.
