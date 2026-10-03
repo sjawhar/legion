@@ -772,10 +772,9 @@ func TestCreateRequestWithProofTypJWSIs400(t *testing.T) {
 	}
 }
 
-// TestCreateRequestWithUnknownSecretNameIs400UnknownSecret pins the shared broker contract's
-// "identifier must name a rule's secret (else 400 UNKNOWN_SECRET at record time)"
-// (dispatch://AGENTC-393/artifact/plan-overview-md) over real HTTP: a request naming
-// a secret no rule mentions is refused, not folded into an ordinary deny decision.
+// TestCreateRequestWithUnknownSecretNameIs400UnknownSecret pins, over real HTTP, that a request
+// naming a secret the policy does not serve is 400 UNKNOWN_SECRET at record time, not folded into
+// an ordinary deny decision.
 func TestCreateRequestWithUnknownSecretNameIs400UnknownSecret(t *testing.T) {
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")

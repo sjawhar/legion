@@ -480,21 +480,20 @@ with the providers Secret mounted, as a deployment with `provider_keys` does.
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
 | `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker the run enrolls pods with — the **production** broker (Plan D, the broker design's AWS deployment plan), never a development slot (below) |
 | `LEGION_E2E_AGENT_SECRETS_OPERATOR` | unset | the email of the person this run's machine login is approved by — the harness starts a `legion-daemon` machine login and prints `STAGE4A: approve machine login code XXXX-XXXX on the Dispatch credential page as <operator>`, the stage is devbox-attended so the operator enters the code and clicks Approve, signed in to Dispatch as that person, during the run (polled up to 10 minutes; a timeout, denial, or expiry blocks the `secrets-*` checks with that reason, never fails the stage); distinct from the daemon's own production credential |
-| `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256` | unset | the `sha256sum` of the dummy value Sami seeded into the production broker's secret store for rule `LEGION_E2E_AUTO` (pod, automatic, inject) — the harness never sees the value itself, only its hash |
+| `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256` | unset | the `sha256sum` of the dummy value Sami seeded into the production broker's secret store for `LEGION_E2E_AUTO` (`owner=shared`, `tier=agent`: every session and pod gets it automatically) — the harness never sees the value itself, only its hash |
 | `LEGION_E2E_AGENT_SECRETS_BIN` | `$work/agent-secrets` (built by the script; not read from the environment) | the checkout's `agent-secrets` CLI (`packages/envoy/cmd/agent-secrets`), run directly from the devbox for the `secrets-old-uid-and-revocation` check's before/after-revocation reads |
 
-**Why the production broker, with dummy rules, and not a development slot.** A dispatch-project
+**Why the production broker, with dummy secrets, and not a development slot.** A dispatch-project
 development slot cannot host this proof, for three reasons Plan D established: its broker verifies
 tokens of the *staging* cluster's issuer, and the pods this harness launches carry the production
 cluster's; it lives in the staging VPC and cannot reach production Dispatch; and it may not run a
 Dispatch of its own (the GitHub App's credentials cannot cross accounts), so it can issue no
 launcher credential — nothing, the daemon included, can enroll against it. Instead the proof runs
-against the **production broker** with a rules file carrying only two throwaway secrets
-(`LEGION_E2E_AUTO`: pod, automatic, inject; `LEGION_E2E_APPROVAL`: pod, approval by
-`login:<name>` naming the same login as `LEGION_E2E_AGENT_SECRETS_OPERATOR`, inject — the shared
-broker contract (the broker's design overview) permits only `operator` or
-`login:<name>` approvers, never `issue_assignee`; both 3600 s, Sami's
-values seeded after Plan D's apply) —
+against the **production broker** with two throwaway secrets in its namespace, tagged
+(`LEGION_E2E_AUTO`: `owner=shared`, `tier=agent`, granted automatically to every pod;
+`LEGION_E2E_APPROVAL`: `owner=shared`, `tier=human`, so a request for it is decided by anyone
+signed in to Dispatch, the operator included — a pod has no operator, and the broker's policy
+names no issue assignee; Sami's values seeded after Plan D's apply) —
 "before any real secret moves" is exactly this state, and it is what spec Acceptance 2's "a live
 worker pod on a development slot" means here.
 
@@ -534,11 +533,11 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `adopt-working-copy` | `AdoptWorkingCopy` with the implement App's bot identity; `jj log -r @ -T author` in `$LEGION_WORKSPACE` shows it |
 | `worker-colocated` | a worker spawned while the root runs requires the tree's node (podAffinity on `legion.dev/tree`, topology `kubernetes.io/hostname`) and runs there |
 | `secrets-two-pods-enrolled` | the root and the colocated worker — two pods on the operator's one ServiceAccount — are each enrolled with the broker on their hello, with the pod uid the runtime recorded; each carries exactly one projected token for audience `agent-secrets` (alone in its volume, the middleman token untouched beside it) and a 0600 `key.pem` and enrollment id owned by `legion`; `agent-secrets self --json` answers each with its own enrollment id and kind `pod`; the two ids differ |
-| `secrets-automatic-grant` | the root's `agent-secrets LEGION_E2E_AUTO -- …` runs with the automatic rule's value (proven by its sha256 against the operator's `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256`, never the value itself); the root's and the worker's separate `request`s each grant, with two distinct grant ids |
+| `secrets-automatic-grant` | the root's `agent-secrets LEGION_E2E_AUTO -- …` runs with the automatic secret's value (proven by its sha256 against the operator's `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256`, never the value itself); the root's and the worker's separate `request`s each grant, with two distinct grant ids |
 | `secrets-cross-pod-negative` | the worker's `agent-secrets status`/`revoke` naming the root's request or grant id is 403 `NOT_YOURS`, and the root's grant still works after the attempt; the worker's own key beside a copy of the root's enrollment id is 401 `PROOF_INVALID` (the proof's thumbprint is not the enrollment's) |
 | `secrets-copied-token-negative` | an enrollment naming the worker's pod uid and thumbprint but the root's projected token is refused 403 `POD_IDENTITY_MISMATCH` — a copied token alone binds nothing |
 | `secrets-self-enroll-negative` | from inside the root's pod, an enroll attempt bearing the pod's own boot token as if it were a launcher credential is refused 401, and the pod's enrollment (`agent-secrets self`) is unchanged after |
-| `secrets-approval-ask` | a request for the approval-gated secret comes back pending with a credential-request record id (ruling 16: the broker's rules pick the approver at request time, naming no issue); the harness prints `STAGE4A: approve credential request <record id> for LEGION_E2E_APPROVAL on the Dispatch credential page as <operator>` and polls, exactly as the machine login does, for up to 10 minutes until the operator's real approval settles it granted (success), denied, or expired (both failures) — always attended, with no cancel-and-cleanup path |
+| `secrets-approval-ask` | a request for the approval-gated secret comes back pending with a credential-request record id (ruling 16: the secret's owner and tier pick the approver at request time, naming no issue); the harness prints `STAGE4A: approve credential request <record id> for LEGION_E2E_APPROVAL on the Dispatch credential page as <operator>` and polls, exactly as the machine login does, for up to 10 minutes until the operator's real approval settles it granted (success), denied, or expired (both failures) — always attended, with no cancel-and-cleanup path |
 | `suspend` | Suspend of the worker: when it returns the runtime's watch no longer holds the claim; Sandbox `Suspended`, pod gone, tree PVC `Bound`, `Probe(recorded)` gone; over the settle window Observe delivers no observation of the worker evaluated after Suspend returned (an observation's `At` is stamped as its evaluation ends, and Observe re-reads the recorded incarnation before it sends) |
 | `no-affinity` | with the root suspended and no tree pod scheduled, a second worker carries no affinity, runs, and mounts the tree PVC; suspended, the resumed root carries none either |
 | `resume` | Resume of the first worker: the affinity is back, a new incarnation, a hello at the next generation with its token, and the marker holds exactly the old and new pod uids |

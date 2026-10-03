@@ -1661,16 +1661,64 @@ authenticates the enrollment chooses the slot; a session's proof cannot enroll a
 while a pod's `runtime_id` stays the pod UID its token proves. Omitted or `""` is the runtime's
 one enrollment, every box's and host's. The same key
 in the same slot gets its live enrollment back (200), a different key in a live slot is `409
-ALREADY_ENROLLED`, and the rules never see the slot: every slot of a pod matches on its verified
-service account alone. Migration 0007 is forward-only: an older broker binary's conflict lookup
+ALREADY_ENROLLED`, and the policy never sees the slot or the service account: a pod is a requester
+with no operator. Migration 0007 is forward-only: an older broker binary's conflict lookup
 reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled
-back past it once a slotted enrollment exists. `internal/broker/rules` evaluates
-`agent-secret-rules.yaml` policy per request (the broker's design overview is its contract; a
-file that still has an `approvers:` section is refused, naming the removal); `internal/broker/proof`
+back past it once a slotted enrollment exists. `internal/broker/policy` decides who may have which
+secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
 credential; `internal/broker/machine` decides typed-code machine logins and mints the launcher
 credentials they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets
-Manager, or a fake local file for development.
+Manager, or, for local development, from `secrets.Local`, an in-memory stand-in for the AWS calls.
+
+`internal/broker/policy` reads the policy from Secrets Manager itself (`policy.Loader`): every
+secret whose name starts with `BROKER_SECRETS_PREFIX` (such as `production/agent-secrets/`), listed
+with `ListSecrets` filtered to that prefix. The filter matches case-insensitively, so each name is
+re-checked against the prefix as written, and a name that only matched in another case is skipped
+without a log line. A secret's name under the prefix is the lowercase, hyphenated form of the name a
+session asks for: `<prefix>deel-api-key` is `DEEL_API_KEY`. Its `owner` tag is `shared`, a person's
+lowercase email (as their sign-in names them; a cased email is refused, so IAM's case-sensitive tag
+conditions and the broker agree on who owns it), or a registered service's name; its `tier` tag is
+`agent` or `human`; and its `KmsKeyId` must name `BROKER_SECRETS_KMS_KEY_ARN`'s key, by its ARN, its
+key id, or an alias, by name or ARN, that points at it now. Secrets Manager reports the key in
+whatever form the secret was created with, so an alias is resolved through `kms:ListAliases`, which
+a load calls only when it meets one. No service is registered yet (`Loader.Services` is empty, and
+nothing sets `Requester.Service`), so an owner tag naming a service is refused as malformed, for
+everyone, until service owners land. `Set.Evaluate` decides from owner and tier alone:
+
+| The secret | Its owner's own session | Another person's session, a pod, any service |
+| --- | --- | --- |
+| A person's, agent tier | granted at once | an approval request to the owner |
+| A person's, human tier | an approval request to the owner | an approval request to the owner |
+| Shared, agent tier | granted at once | granted at once |
+| Shared, human tier | approval by `anyone` | approval by `anyone` |
+| A service's, agent tier | (no person owns it) | granted at once to that service's own sessions; denied to everyone else |
+| A service's, human tier | refused at load (`service-owner-human-tier`) | refused at load |
+
+"Its owner's own session" is a session enrolled under a machine login its owner approved
+(`Requester.Operator`, compared lowercased). A request whose approver is `anyone`
+(`record.AnyoneApprover`) is in every person's `GET /v1/pending` and any signed-in person may decide
+it, never under the login `anyone` itself. A secret the loader refuses - a missing or malformed
+tag, a name that maps to no request name, or a key other than the agent-secrets key, the
+AWS-managed one included - is left out of the policy: a request naming it is `400 UNKNOWN_SECRET`,
+and a live grant of it stops at its next read (`GRANT_NOT_LIVE`). Every load logs one line for each
+such secret through Go's default slog handler at ERROR, `agent secret policy refused name=<its full
+Secrets Manager name> reason=<reason>`, the reason one of `name-malformed`, `owner-tag-missing`,
+`owner-tag-malformed`, `tier-tag-missing`, `tier-tag-malformed`, `service-owner-human-tier` and
+`not-on-agent-secrets-key`. `policy.Current` loads the policy at boot, and a boot whose load fails
+exits; it reloads every five minutes (`policyRefresh`, `cmd/broker/main.go`; no setting), and a
+reload that fails logs `agent secret policy load failed; previous policy kept error="<cause>"` at
+ERROR and keeps the policy it had. The deployment's alarms filter on both lines
+(`policy.RefusedMessage`, `policy.LoadFailedMessage`), so neither changes without the alarm.
+`Set.Version` is the SHA-256 of every served secret's name, owner, tier and ARN, in name order: a
+request records it, and a live grant is re-checked against the policy only once it has moved
+(`stillAllowed`). The record line, the column and the API field that carry it are still named
+`rules_version`, since records are content-addressed and stored bodies must still parse. The
+broker's AWS identity needs `secretsmanager:ListSecrets` (on `*`, which takes no resource),
+`secretsmanager:GetSecretValue` on the namespace with `kms:Decrypt` on the agent-secrets key, and
+`kms:ListAliases` (on `*`); it calls `DescribeSecret` nowhere. `BROKER_FAKE_SECRETS_FILE` stands
+`secrets.Local` in for all three, read from a JSON file of the same facts,
+`{"secrets": [{"name", "kms_key_id", "tags", "value"}]}`.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
@@ -1764,13 +1812,14 @@ the placeholder, is refused naming both), `BROKER_PUBLIC_URL` (required; absolut
 the broker's own address, the request object's `aud` and the launcher proof's `htu`),
 `BROKER_UI_TOKEN[_FILE]` (required — the 32-byte bearer shared with exactly Dispatch's server; it
 proves the caller is Dispatch, and Dispatch vouches for the approving login each decision names),
-`BROKER_RULES_FILE` / `BROKER_RULES_S3_URI` (exactly one; the latter `s3://<bucket>/<key>`),
+`BROKER_SECRETS_PREFIX` (required; the namespace, a Secrets Manager name prefix ending in `/`),
+`BROKER_SECRETS_KMS_KEY_ARN` (required; the agent-secrets key's ARN, `arn:aws:kms:…:key/<id>`),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
 set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, max 3600),
 `BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_MAX_GRANT_SECONDS` (default 43200, max
-43200), `BROKER_RULES_RELOAD_SECONDS` (default 300, max 3600), `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
+43200 — how long every grant lives, unless its session ends first), `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
 (default 604800, max 2592000 — a minted launcher credential's own lifetime; past it the holder
 re-runs login, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60 —
 `requests.Sweeper`'s tick interval, the poller's replacement), and `BROKER_TRUSTED_PROXY_HEADER`
@@ -1787,18 +1836,19 @@ a named-but-unreadable or empty file is a startup error naming the file, never a
 an unset value. `config.Load` refuses to start naming a stale removal still set in the
 environment — the removed `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
 `BROKER_DISPATCH_PROJECT` and `BROKER_ASK_POLL_SECONDS` (the broker holds no Dispatch credential
-and asks/issues nothing), and `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker
-checks no WebAuthn origin) — so a stale deployment fails loudly rather than silently running on
-configuration that means nothing any more. It also refuses: a missing required variable; a
-`BROKER_PUBLIC_URL` that isn't an absolute URL with no path; both or neither of
-`BROKER_RULES_FILE`/`BROKER_RULES_S3_URI` set; a `BROKER_RULES_S3_URI` without an `s3://` prefix;
-exactly one of `BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a `_SECONDS` variable
-that isn't a whole number between the min and max its row of Load's `ints` table gives
-(non-numeric fails the same check as out of range). `cmd/broker/main.go` reads one thing
-`config.Load` does not: when `BROKER_RULES_FILE`
-selects local rules (rather than `BROKER_RULES_S3_URI`, which pairs with AWS Secrets Manager for
-secret values), it requires `BROKER_FAKE_SECRETS_FILE` and refuses to start without it — a
-local-dev-only path. The broker takes no flags, and refuses any flag it is given.
+and asks/issues nothing), `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker
+checks no WebAuthn origin), and `BROKER_RULES_FILE`, `BROKER_RULES_S3_URI` and
+`BROKER_RULES_RELOAD_SECONDS` (each secret's own tags are the policy, so there is no rules file) —
+so a stale deployment fails loudly rather than silently running on configuration that means
+nothing any more. It also refuses: a missing required variable; a `BROKER_PUBLIC_URL` that isn't an
+absolute URL with no path; a `BROKER_SECRETS_PREFIX` that does not end in `/`, starts with one or
+holds white space; a `BROKER_SECRETS_KMS_KEY_ARN` that is not a key ARN (an alias can be pointed
+elsewhere, and a bare key id names no account); exactly one of
+`BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a `_SECONDS` variable that isn't a
+whole number between the min and max its row of Load's `ints` table gives (non-numeric fails the
+same check as out of range). `cmd/broker/main.go` reads one thing `config.Load` does not:
+`BROKER_FAKE_SECRETS_FILE`, which makes the run a local one (above), the only kind that may set a
+`BROKER_PUBLIC_URL` on port 0. The broker takes no flags, and refuses any flag it is given.
 
 The docs site's broker reference pages are generated at site build from this source by
 `cmd/broker-refgen` (through `docs/site/generators/broker-reference.sh`), which fails the build on
@@ -1845,7 +1895,8 @@ for the current, authoritative route list.
 `internal/broker/record` implements the credential-request record every human decision turns
 on: `Body.Canonical()` renders the contract's fixed `\n`-terminated line format (the request
 object verbatim, the approver, the enrollment's tab-separated kind, runtime id and operator, plus
-a pod's slot as a fourth field only when it has one, lifetime, rules version, expiry, and the
+a pod's slot as a fourth field only when it has one, lifetime, policy version (the `rules_version`
+line), expiry, and the
 machine-login code or `-`), `Body.ID()` is the lowercase-hex SHA-256 of that canonical form — the
 record's own content-addressed id, which a slotless record keeps byte for byte — and `ParseBody`
 is `Canonical`'s exact inverse, refusing any stored body that would not reproduce itself
@@ -1858,9 +1909,10 @@ equal to `BROKER_PUBLIC_URL`, `iat`/`exp` within skew and a 600-second cap, a `r
 `agent_secret` or exactly one `launcher_credential` entry naming a valid hostname and an optional
 `[a-z0-9-]{1,64}` service).
 `Body.ApproverLogin(login)` is the one approver comparison: a record's approver is resolved when
-the record is created (an approval rule's `login:<name>`, the requesting enrollment's operator for
-`approver: operator`, or a machine login's `login_hint`), and every decision and every chain
-re-check compares the canonical lowercase login against it, a decision recording the canonical
+the record is created (a secret's owner, `anyone` for a shared human-tier secret, or a machine
+login's `login_hint`, which is never `anyone`), and every decision and every chain re-check
+compares the canonical lowercase login against it, any login but `anyone` itself deciding an
+`anyone` record, a decision recording the canonical
 login it returns. `record.ChainVerifier` (`chain.go`, built per record kind by
 `store.Store.ChainVerifier`, so a record of one kind never backs the other's credential) is
 what "every release re-verifies the whole chain" means in code: given a record id it re-fetches
@@ -1879,15 +1931,16 @@ control, as it already was for grant rows.
 
 `internal/broker/requests.Machine` is the `agent_secret` request state machine. `Create` verifies
 the caller's signed request object (`iss` must be the requesting enrollment's own key, no
-`login_hint` — a session never names its own approver, only the rules do), first checks for a
+`login_hint` — a session never names its own approver, only the policy does), first checks for a
 still-live grant covering the exact same name set (`reuseLiveGrant`: no new request, no new record,
-as long as the current rules still allow it and the grant's whole chain still verifies), then
-evaluates the rules per name: any `deny` denies the whole request with no record written at all; a
-name no rule mentions at all aborts the whole call with `rules.ErrUnknownSecret` (`400
+as long as the current policy still allows it and the grant's whole chain still verifies), then
+evaluates the policy per name: any `deny` denies the whole request with no record written at all; a
+name the policy does not serve aborts the whole call with `policy.ErrUnknownSecret` (`400
 UNKNOWN_SECRET`, per the broker's design overview) instead of being folded into an ordinary
 `deny` decision — no request row is written either, matching the "at record time" wording; a name
 needing approval that names a *different* approver than an already-approval-needing name in the
-same request is refused `400 MIXED_APPROVERS`; when every name is decided (`granted`/`denied`) with
+same request is refused `400 MIXED_APPROVERS`; every grant lives `BROKER_MAX_GRANT_SECONDS`; when
+every name is decided (`granted`/`denied`) with
 nothing pending, the request and, if granted, its grant are written with no record; a request
 needing approval writes the request row and a `credential_requests` record together, in one
 transaction serialized by an advisory lock keyed on the enrollment and the sorted name set, so an
@@ -1908,17 +1961,19 @@ not yet expired, is `409 RECORD_TERMINAL` for its approver (a duplicate or late 
 nothing) — but a record past its expiry, whether the sweeper has recorded it expired or not,
 answers with a message saying it expired before its approver acted (`requests.ErrExpired`), never
 that it was decided. An `agent_secret` record is pending while its request is: `GET /v1/pending`
-(`PendingForApprover`) lists it only then, and `GET /v1/credential-requests/{id}` (`ReadRecord`)
+(`PendingForApprover`, which lists `anyone` records for every approver) lists it only then, and
+`GET /v1/credential-requests/{id}` (`ReadRecord`)
 reads it as pending only then; a decided record's terminal event names the decision, and a request
 cancelled with no cancelled event on its record, the shape an ended enrollment's requests had
 before `endEnrollment` wrote one, reads as `cancelled` from its request row. A machine login is
 pending while it carries no terminal event. `Values` releases a
-live grant's inject-delivery values, re-checking the enrollment, the
-grant, its whole approval chain (`VerifyChain`), and — when the rules changed since the grant was
-decided — that the current rules still allow every granted name (`stillAllowed`: a name the rules no
-longer carry, deny, or now want approved that was granted automatically, all refuse); a name is
-released only when both its delivery frozen at grant time and its current delivery are `inject`,
-else withheld in `proxy_only`; a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
+live grant's values, each read from the secret its request froze (the ARN), re-checking the
+enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the policy version moved
+since the grant was decided — that the current policy still allows every granted name
+(`stillAllowed`: a name the policy no longer serves, denies, or now wants approved that was granted
+automatically, all refuse); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
+Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
+reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant
 on a human's Dispatch login, allowed only when that login is the grant's approver or its
 enrollment's operator (`mayRevoke`, else `403 NOT_APPROVER`); revoking an already-revoked grant is
