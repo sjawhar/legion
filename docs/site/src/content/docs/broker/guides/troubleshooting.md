@@ -30,7 +30,7 @@ generated from the code, lists every code.
 | `request … was denied` (exit 77) | The approver denied it, or the rules deny one of the names for this session. Nothing ran. | Ask the approver, or the rules' owner, why. |
 | `request … is still waiting for approval; nothing was run. Check it with: agent-secrets status …` (exit 75) | Nobody decided within `--wait` (30 minutes by default). | Ask the approver; check with `agent-secrets status`; rerun the command once it is granted, or with a longer `--wait`, a duration such as `1h`. |
 | `invalid value "…" for flag -wait: parse error` (exit 2) | `--wait` takes a duration with its unit (`90s`, `5m`, `1h`), not a bare number. `register --wait` is the exception: it takes whole seconds. | Add the unit. |
-| `request … was expired` or `request … was cancelled` | Nobody decided it within 12 hours, or the session cancelled it (`agent-secrets cancel`). A session that ended reads none of its requests: its calls are refused `PROOF_INVALID`. | Ask again. |
+| `request … was expired` or `request … was cancelled` | Nobody decided it before it [expired](/legion/broker/concepts/#approvals), or the session cancelled it (`agent-secrets cancel`). A session that ended reads none of its requests: its calls are refused `PROOF_INVALID`. | Ask again. |
 | `no rule names this secret (UNKNOWN_SECRET)` | The name is not in the broker's rules. | Check the spelling, or ask the rules' owner to add it. |
 | `the requested secrets need different approvers; request them separately (MIXED_APPROVERS)` | One command asked for secrets that different people approve. | Request them in separate commands. |
 | `… not released (proxy-delivery or otherwise unavailable)` | The grant came back without one of the names' values: a `delivery: proxy` secret, which the broker never releases. | Use an `inject` secret. |
@@ -44,7 +44,7 @@ generated from the code, lists every code.
 | --- | --- | --- |
 | `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver the request names. | The named approver decides it. |
 | `request is already decided` or `this machine login has already been decided` (`RECORD_TERMINAL`) | It was decided already, or the session that asked has ended. | Nothing to do. |
-| `… expired before its approver acted on it` (`RECORD_TERMINAL`) | A request waits 12 hours, a machine login 15 minutes. | The agent or the machine asks again. |
+| `… expired before its approver acted on it` (`RECORD_TERMINAL`) | It waited past its expiry: [a request's](/legion/broker/concepts/#approvals) or [a machine login's](/legion/broker/concepts/#machine-login). | The agent or the machine asks again. |
 | `no pending machine login has this code` (`NO_SUCH_CODE`) | The code is mistyped, already decided, or expired. | Check the code on the machine's terminal; start a new login if it expired. |
 | `confirmation code does not match` (`CODE_MISMATCH`) | The decision carried a different code from the login it names. | Look the code up again and decide from that page. |
 | `this machine login's key already holds a live launcher credential` (`KEY_HOLDS_LIVE_CREDENTIAL`) | The machine signed two logins with one key, and one is already approved. | Deny this one; the machine is already logged in. |

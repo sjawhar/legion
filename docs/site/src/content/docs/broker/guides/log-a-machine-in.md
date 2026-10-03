@@ -89,7 +89,8 @@ container](/legion/broker/guides/run-an-agent-in-a-container/) shows how the hel
 
 ## When to log in again
 
-The credential lasts 7 days by default (`BROKER_LAUNCHER_CREDENTIAL_SECONDS`), and the helper keeps
+The credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (the
+[configuration reference](/legion/broker/reference/config/) gives its default), and the helper keeps
 it only in memory, so log in again after it expires or after the helper restarts.
 `agent-secrets launcher login-status` exits 1 and says why when the machine needs it:
 
@@ -99,4 +100,4 @@ none
 agent-secrets launcher login-status: no machine login has run on this helper; run: agent-secrets launcher login
 ```
 
-A login nobody approves expires after 15 minutes; start a new one.
+A login nobody approves [expires](/legion/broker/concepts/#machine-login); start a new one.

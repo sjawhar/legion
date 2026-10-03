@@ -26,7 +26,8 @@ Opening a **Secret request** shows the broker's record of it:
 - **Enrollment**: the session asking, as kind, runtime id and operator. A `host` runtime id starts
   with the machine's host name; a `pod` enrollment also shows its **Worker slot**.
 - **Lifetime**: how long the grant would last from the moment you approve.
-- **Requested** and **Expires**: a request nobody decides expires 12 hours after it was made.
+- **Requested** and **Expires**: when it was made, and when it
+  [expires](/legion/broker/concepts/#approvals) if nobody decides it.
 - **Rules version**: the rules that sent it to you.
 - **Approver**: who may decide it.
 - **The agent's stated reason**: the `--reason` the agent gave, shown as plain text.
@@ -46,7 +47,7 @@ The broker refuses a decision that cannot stand, and Dispatch shows its message 
 | --- | --- |
 | `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver this request names. |
 | `request is already decided` (`RECORD_TERMINAL`) | Someone, or another tab, decided it first, or the agent's session ended and withdrew it. |
-| `request expired before its approver acted on it` (`RECORD_TERMINAL`) | It waited past its 12 hours. The agent asks again if it still needs the secret. |
+| `request expired before its approver acted on it` (`RECORD_TERMINAL`) | It waited past its expiry. The agent asks again if it still needs the secret. |
 | `this grant's approval chain no longer verifies` (`GRANT_CHAIN_INVALID`) | The stored request no longer matches its own signature; nothing was granted. Tell whoever runs the broker. |
 
 ## Without Dispatch

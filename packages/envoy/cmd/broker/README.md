@@ -17,18 +17,10 @@ The Envoy image (`packages/envoy/docker/Dockerfile`) ships it as `envoy-broker`.
 ## Run
 
 The broker takes no flags and reads its configuration from `BROKER_*` environment variables
-(`internal/broker/config/config.go`; the docs site's configuration reference lists every one). It
-needs Postgres, a rules file and a secret store, and the AWS SDK needs a region to reach the last
-two:
-
-```sh
-BROKER_DATABASE_URL=postgres://... \
-BROKER_PUBLIC_URL=https://secrets.internal.example \
-BROKER_UI_TOKEN_FILE=/run/secrets/broker-ui-token \
-BROKER_RULES_S3_URI=s3://<bucket>/agent-secret-rules.yaml \
-AWS_REGION=<region> \
-envoy-broker
-```
+(`internal/broker/config/config.go`). It needs Postgres, a rules file and a secret store. The docs
+site's "Operating the broker" page (`docs/site/src/content/docs/broker/operate.md`) gives a minimal
+production configuration and everything the broker depends on, and its generated configuration
+reference lists every variable with its default.
 
 For a local stack (Postgres in Docker, or one you run named by `DEV_BROKER_POSTGRES_URL`, example
 rules, fake secret values, and the clients), run `packages/envoy/scripts/dev-broker.sh`.

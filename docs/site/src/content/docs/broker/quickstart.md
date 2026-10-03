@@ -57,7 +57,7 @@ page:
 | Identifiers | The secrets asked for: `DEMO_API_KEY` |
 | Enrollment | The session's kind, runtime and operator: `host · example-host-build:2150654:335907311 · ada@example.com` |
 | Lifetime | How long a grant would last: 1 hour |
-| Requested, Expires | When it was asked, and when it expires undecided (12 hours later) |
+| Requested, Expires | When it was asked, and when it [expires](/legion/broker/concepts/#approvals) undecided |
 | Rules version | The SHA-256 of the rules that decided it needs approval |
 | Approver | `ada@example.com` |
 | The agent's stated reason | Deploy the example service |

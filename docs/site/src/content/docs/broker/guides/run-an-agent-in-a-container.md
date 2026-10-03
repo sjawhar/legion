@@ -45,7 +45,8 @@ before enrollment fails at once.
 
 ## 3. Keep its lease alive, inside the box
 
-An enrollment is leased for `BROKER_LEASE_SECONDS` (15 minutes by default). Run
+An enrollment is leased for `BROKER_LEASE_SECONDS` (the
+[configuration reference](/legion/broker/reference/config/) gives its default). Run
 `agent-secrets renew` in the box for its whole life; it renews the lease until it is stopped:
 
 ```sh
@@ -81,7 +82,7 @@ $ agent-secrets self
 agent-secrets self: proof invalid: not live (PROOF_INVALID)
 ```
 
-On its next run, within `BROKER_SWEEP_SECONDS` (5 seconds by default), the broker's sweep ends the
+On its next run, within `BROKER_SWEEP_SECONDS`, the broker's sweep ends the
 enrollment: its grants are revoked, its pending requests are cancelled and leave the approver's
 Inbox (approving one now answers `request is already decided`), and the broker logs:
 

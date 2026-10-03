@@ -83,9 +83,10 @@ in one step, and the approver's Inbox drops them. A session ends in one of two w
   A box's launcher revokes it with `agent-secrets unenroll --helper --enrollment <id>`.
 - **Its lease lapses.** A session that stops renewing (a pod that is gone, a box whose
   `agent-secrets renew` stopped, or a machine that went away) is refused `PROOF_INVALID` from the
-  moment its lease lapses, `BROKER_LEASE_SECONDS` (15 minutes by default) after its last renewal.
-  The broker's sweep ends it on its next run, within `BROKER_SWEEP_SECONDS` (5 seconds by
-  default), and logs `broker sweeper: ended an enrollment whose lease lapsed`.
+  moment its lease lapses, `BROKER_LEASE_SECONDS` after its last renewal. The broker's sweep ends it
+  on its next run, within `BROKER_SWEEP_SECONDS`, and logs
+  `broker sweeper: ended an enrollment whose lease lapsed`. The
+  [configuration reference](/legion/broker/reference/config/) gives both settings' defaults.
 
 ## Stop a machine from enrolling sessions
 

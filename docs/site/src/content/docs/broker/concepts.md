@@ -6,7 +6,9 @@ sidebar:
 ---
 
 This page explains the ideas the rest of the broker's documentation leans on. Each section names
-the code that implements it, so you can check the page against the source.
+the code that implements it, so you can check the page against the source. A `BROKER_*` name is one
+of the broker's settings; the [configuration reference](/legion/broker/reference/config/), generated
+from the loader, gives each one's default and accepted values.
 
 ## Sessions and enrollment
 
@@ -31,15 +33,15 @@ has one of three kinds:
 | `box` | An agent session running in a container on a machine, called a **box**. | The container, in `key.pem` under `AGENT_SECRETS_KEY_DIR`. | The machine's helper, when whoever starts the container runs `agent-secrets enroll --helper` ([run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/)). |
 | `pod` | A Legion worker pod in Kubernetes. | The pod, in its key directory. | The Legion daemon, which proves the pod with a projected service-account token the broker verifies against `BROKER_K8S_OIDC_ISSUER`. |
 
-An enrollment is leased for `BROKER_LEASE_SECONDS` (15 minutes by default) and renewed while its
-session runs: the helper renews host sessions, `agent-secrets renew` renews a box, and Legion's pod
-shim renews a pod. An enrollment has **ended** once its launcher revokes it (the helper does as
-soon as a host session's process exits) or its lease lapses. From the moment the lease lapses, the
-session's calls are refused `PROOF_INVALID`; the broker's sweep, which runs every
-`BROKER_SWEEP_SECONDS` (5 seconds by default), then ends the enrollment on its first run after the
-lapse. Ending an enrollment either way revokes every grant it held and cancels every request it
-still had pending, so those leave the approver's Inbox and an approval can never land on a session
-that is gone (`packages/envoy/internal/broker/enroll/enroll.go`, `endEnrollment`).
+An enrollment is leased for `BROKER_LEASE_SECONDS` and renewed while its session runs: the helper
+renews host sessions, `agent-secrets renew` renews a box, and Legion's pod shim renews a pod. An
+enrollment has **ended** once its launcher revokes it (the helper does as soon as a host session's
+process exits) or its lease lapses. From the moment the lease lapses, the session's calls are
+refused `PROOF_INVALID`; the broker's sweep, which runs every `BROKER_SWEEP_SECONDS`, then ends the
+enrollment on its first run after the lapse. Ending an enrollment either way revokes every grant it
+held and cancels every request it still had pending, so those leave the approver's Inbox and an
+approval can never land on a session that is gone
+(`packages/envoy/internal/broker/enroll/enroll.go`, `endEnrollment`).
 
 Every `host` and `box` enrollment records an **operator**: the person whose machine it runs on. The
 operator is the person who approved the machine login that enrolled it, never a value the launcher
@@ -60,9 +62,10 @@ approved a **machine login** for it. The login works like a device code:
 4. On approval the broker mints a **launcher credential** bound to the machine's key. It is never a
    token: the machine uses it by signing with that key.
 
-A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (7 days by default). The helper
-keeps its key in memory only, so a helper restart, like an expired credential, means logging the
-machine in again. A machine login nobody decides expires after 15 minutes.
+A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. The helper keeps its key in memory
+only, so a helper restart, like an expired credential, means logging the machine in again. A
+machine login nobody decides expires after 15 minutes, a fixed time rather than a setting
+(`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`).
 
 A credential enrolls sessions only for its own operator: an enrollment naming anyone else is refused
 `OPERATOR_MISMATCH`. The broker's rate limiter caps how often anyone can start a machine login, per
@@ -138,10 +141,10 @@ reason of at most 400 characters. The broker evaluates every name
   asking twice.
 
 A granted request yields a **grant**: the session's right to read those values until the grant
-expires. A grant lives the shortest of `BROKER_MAX_GRANT_SECONDS` (12 hours by default) and each of
-its secrets' `max_lifetime_seconds`, counted from the moment it is granted. While it lives, a new
-request from the same session for exactly the same names gets the same grant back, without asking
-anyone again, as long as the current rules still allow it.
+expires. A grant lives the shortest of `BROKER_MAX_GRANT_SECONDS` and each of its secrets'
+`max_lifetime_seconds`, counted from the moment it is granted. While it lives, a new request from
+the same session for exactly the same names gets the same grant back, without asking anyone again,
+as long as the current rules still allow it.
 
 The broker never stores a value. Each time a session reads a grant, the broker checks that the
 session is still enrolled, the grant is live, its approval still verifies, and the current rules
@@ -169,7 +172,8 @@ their Dispatch session. The broker then checks that login against the record's a
 else is refused `NOT_APPROVER`, whatever state the record is in.
 
 A record is decided once. A second click, a concurrent one, or one after the record expired gets
-`RECORD_TERMINAL`; a pending request nobody decides expires after 12 hours. Because the UI token
+`RECORD_TERMINAL`. A pending request nobody decides expires after 12 hours, a fixed time rather than
+a setting (`agentSecretPendingTTL` in `packages/envoy/cmd/broker/main.go`). Because the UI token
 vouches for whoever Dispatch says is approving, it is an approval credential: only Dispatch's
 server may hold it.
 
