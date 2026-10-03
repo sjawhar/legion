@@ -27,6 +27,7 @@ import {
   type MarginTab,
   marginItemId,
   marginItemMarkId,
+  marginItemRecord,
   threadMarkId,
   useMarginItems,
   useMarginOwner,
@@ -402,7 +403,7 @@ export function useMarginSheet(): MarginSheetModel {
       .map((item) => marginItemMarkId(item))
       .filter((markId): markId is string => markId !== undefined);
     const blockIds = selectedItems
-      .map((item) => (item.kind === "ask" ? item.ask.anchor : item.comment.anchor))
+      .map((item) => marginItemRecord(item).anchor)
       .flatMap((anchor) =>
         anchor?.orphaned && typeof anchor.block_id === "string" ? [anchor.block_id] : []
       );
@@ -418,8 +419,7 @@ export function useMarginSheet(): MarginSheetModel {
   );
   useEffect(() => {
     const item = marginItems.find((candidate) => marginItemId(candidate) === selectedItemId);
-    const anchor =
-      item === undefined ? undefined : item.kind === "ask" ? item.ask.anchor : item.comment.anchor;
+    const anchor = item === undefined ? undefined : marginItemRecord(item).anchor;
     if (!anchor?.orphaned || typeof anchor.block_id !== "string") {
       selectedBlockFocus.current = undefined;
       return;

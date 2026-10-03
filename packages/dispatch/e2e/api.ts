@@ -38,6 +38,7 @@ import type {
   UpdateIssueInput,
   UserAgentState,
   UserAgentStateInput,
+  UserAgentStates,
   UserIssueState,
   Version,
 } from "../web/src/api/types";
@@ -182,6 +183,19 @@ export function listAgents(options: ApiOptions = {}): Promise<Agent[]> {
   return request<Agent[]>("/api/v1/agents", "GET", undefined, options);
 }
 
+/** A session's conversation as the Agents page reads it: its exchanges in the server's order. */
+export function listAgentMessages(
+  sessionID: string,
+  options: ApiOptions = {}
+): Promise<MessageRead[]> {
+  return request<MessageRead[]>(
+    `/api/v1/agents/${encodeURIComponent(sessionID)}/messages`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
 export function createIssue(
   input: Partial<Pick<Issue, "project" | "title">> & {
     external?: string;
@@ -273,6 +287,18 @@ export function createArtifactComment(
     `/api/v1/artifacts/${encodeURIComponent(artifactID)}/comments`,
     "POST",
     input,
+    options
+  );
+}
+
+export function listArtifactComments(
+  artifactID: string,
+  options: ApiOptions = {}
+): Promise<Comment[]> {
+  return request<Comment[]>(
+    `/api/v1/artifacts/${encodeURIComponent(artifactID)}/comments`,
+    "GET",
+    undefined,
     options
   );
 }
@@ -567,6 +593,11 @@ export function putAgentState(
     input,
     options
   );
+}
+
+/** The signed-in human's own conversation state with every session, unread counts included. */
+export function getAgentStates(options: ApiOptions = {}): Promise<UserAgentStates> {
+  return request<UserAgentStates>("/api/v1/me/agents/state", "GET", undefined, options);
 }
 
 export function putIssueState(

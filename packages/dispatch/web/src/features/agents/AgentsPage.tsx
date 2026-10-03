@@ -29,6 +29,7 @@ import { PinButton } from "../../components/PinButton";
 import { RefusableButton } from "../../components/RefusableButton";
 import { TruncatedText } from "../../components/TruncatedText";
 import { useSending } from "../../hooks/useSending";
+import { compareTimestamps } from "../../lib/timestamps";
 import {
   borderDefault,
   card,
@@ -140,8 +141,9 @@ export function orderAgents(
     if (left.last_activity === null || right.last_activity === null) {
       if (left.last_activity === null && right.last_activity !== null) return 1;
       if (left.last_activity !== null && right.last_activity === null) return -1;
-    } else if (left.last_activity !== right.last_activity) {
-      return right.last_activity.localeCompare(left.last_activity);
+    } else {
+      const byActivity = compareTimestamps(right.last_activity, left.last_activity);
+      if (byActivity !== 0) return byActivity;
     }
     return left.title.localeCompare(right.title) || left.session_id.localeCompare(right.session_id);
   });
@@ -181,7 +183,7 @@ export function partitionAgents(
 function exchangeDelivery(agent: Agent, read: MessageRead): NonNullable<ReplyTarget["thread"]> {
   let last: MessageDelivery | undefined;
   for (const attempt of [read.message, ...read.replies].flatMap((item) => item.deliveries)) {
-    if (last === undefined || Date.parse(attempt.created_at) >= Date.parse(last.created_at)) {
+    if (last === undefined || compareTimestamps(attempt.created_at, last.created_at) >= 0) {
       last = attempt;
     }
   }
@@ -384,8 +386,7 @@ function exchangesAfter(
   clearedBefore: string | undefined
 ): readonly MessageRead[] {
   if (clearedBefore === undefined) return exchanges;
-  const cutoff = Date.parse(clearedBefore);
-  return exchanges.filter((read) => Date.parse(exchangeActivityAt(read)) > cutoff);
+  return exchanges.filter((read) => compareTimestamps(exchangeActivityAt(read), clearedBefore) > 0);
 }
 
 function AgentMessageList({
@@ -496,7 +497,7 @@ function AgentMessageList({
               clear.mutate(
                 visible
                   .map(exchangeActivityAt)
-                  .reduce((latest, at) => (Date.parse(at) > Date.parse(latest) ? at : latest))
+                  .reduce((latest, at) => (compareTimestamps(at, latest) > 0 ? at : latest))
               )
             }
             type="button"

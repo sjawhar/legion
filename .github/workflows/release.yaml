@@ -246,16 +246,18 @@ jobs:
       - name: Determine next version
         id: version
         run: |
+          # The package's prepack copies skills/ into the tarball (package.json "prepack"), where
+          # OpenCode loads it as the plugin's skills, so a commit there releases whatever its type.
           PREV_TAG=$(git tag -l 'opencode-legion-envoy-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
             # When no release tag exists, seed from the published npm version so
             # an already-published version is never recomputed. Once a release
             # tags successfully, this branch stops running.
             PREV_VERSION=$(npm view @sjawhar/opencode-legion-envoy version 2>/dev/null || echo "0.0.0")
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD -- packages/envoy-plugin/ packages/contracts/ packages/envoy-client/)
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD --patch-path skills/ -- packages/envoy-plugin/ packages/contracts/ packages/envoy-client/ skills/)
           else
             PREV_VERSION="${PREV_TAG#opencode-legion-envoy-v}"
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" -- packages/envoy-plugin/ packages/contracts/ packages/envoy-client/)
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" --patch-path skills/ -- packages/envoy-plugin/ packages/contracts/ packages/envoy-client/ skills/)
           fi
 
           if [ "$VERSION" = "empty" ]; then
@@ -349,16 +351,18 @@ jobs:
       - name: Determine next version
         id: version
         run: |
+          # prepack.sh copies skills/ into dist/skills, which every Oh My Pi session loads as the
+          # plugin's skills, so a commit there releases whatever its type.
           PREV_TAG=$(git tag -l 'pi-legion-envoy-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
             # When no release tag exists, seed from the published npm version so
             # an already-published version is never recomputed. Once a release
             # tags successfully, this branch stops running.
             PREV_VERSION=$(npm view @sjawhar/pi-legion-envoy version 2>/dev/null || echo "0.0.0")
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ packages/workspace/ skills/)
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" HEAD --patch-path skills/ -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ packages/workspace/ skills/)
           else
             PREV_VERSION="${PREV_TAG#pi-legion-envoy-v}"
-            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ packages/workspace/ skills/)
+            VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" --patch-path skills/ -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ packages/workspace/ skills/)
           fi
 
           if [ "$VERSION" = "empty" ]; then

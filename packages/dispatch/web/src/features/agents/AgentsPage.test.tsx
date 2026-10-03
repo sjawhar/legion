@@ -408,6 +408,16 @@ test("orderAgents keeps pinned sessions first in pin order, whoever needs you", 
   ]);
 });
 
+test("orderAgents orders Dispatch activity within one second by time, not by the timestamp strings", () => {
+  // As text `…00.12Z` sorts after `…00.123456Z`, the later time.
+  const earlier = session({ last_activity: "2026-10-02T00:00:00.12Z", session_id: "earlier" });
+  const later = session({ last_activity: "2026-10-02T00:00:00.123456Z", session_id: "later" });
+  expect(orderAgents([earlier, later], [], new Map()).map((agent) => agent.session_id)).toEqual([
+    "later",
+    "earlier",
+  ]);
+});
+
 test("partitionAgents splits live sessions with a Dispatch signal, silent live sessions, and unseen sessions", () => {
   const asked = session({ open_asks: 1, session_id: "asked" });
   const spoke = session({ last_activity: minutesAgo(3), session_id: "spoke" });
@@ -1365,6 +1375,43 @@ test("Agents keeps exchanges with activity after the persisted cutoff and hides 
   }
 });
 
+// The cutoff and the answers carry microseconds: an answer 44 µs after the Clear, in the same
+// millisecond, is news and stays, and the answer at the Clear itself is cleared.
+test("an exchange answered within the Clear's millisecond but after it stays visible", async () => {
+  const page = renderAgents({
+    agentState: {
+      "planner-session": {
+        cleared_before: "2026-09-14T03:00:00.123456Z",
+        read_through: "2026-09-14T03:00:00.1235Z",
+        unread_replies: 0,
+      },
+    },
+    messages: [
+      exchange("m2", "Pending question", "2026-09-14T02:00:00Z", {
+        body: "Answer after the Clear",
+        createdAt: "2026-09-14T03:00:00.1235Z",
+      }),
+      exchange("m1", "Cleared question", "2026-09-14T01:00:00Z", {
+        body: "Answer at the Clear",
+        createdAt: "2026-09-14T03:00:00.123456Z",
+      }),
+    ],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    const conversation = await within(planner).findByRole("list", {
+      name: "Conversation with Planner",
+    });
+    await expect(within(conversation).findByText("Answer after the Clear")).resolves.toBeTruthy();
+    expect(within(planner).queryByText("Cleared question")).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
 test("Agents replies to an issue-less exchange through the agent route, threaded under the answer", async () => {
   const root = message("Can this ship?", {
     deliveries: [
@@ -1427,6 +1474,114 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
       expect(within(planner).queryByText("Replying to Planner — Yes, it can.")).toBeNull()
     );
     expect(within(planner).getByRole("button", { name: "Choose issue" })).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// The server's times carry microseconds, and `Date.parse` keeps milliseconds: it reads
+// `…00.123456Z` and `…00.1235Z` as one time. The read mark and the Clear cutoff still name the
+// newer, or a reply 44 µs after the mark would stay unread and a Clear would stop short of it.
+test("Agents marks read and clears through the newest reply even within one millisecond", async () => {
+  const page = renderAgents({
+    agentState: { "planner-session": { unread_replies: 1 } },
+    messages: [
+      exchange("m2", "Second question", "2026-09-14T02:00:00Z", {
+        body: "Second answer",
+        createdAt: "2026-09-14T03:00:00.123456Z",
+      }),
+      exchange("m1", "First question", "2026-09-14T01:00:00Z", {
+        body: "First answer",
+        createdAt: "2026-09-14T03:00:00.1235Z",
+        unread: true,
+      }),
+    ],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    fireEvent.click(
+      await within(planner).findByRole("button", { name: "Planner replied: 1 unread" })
+    );
+    await expect(within(planner).findByText("First answer")).resolves.toBeTruthy();
+    await waitFor(() =>
+      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
+        read_through: "2026-09-14T03:00:00.1235Z",
+      })
+    );
+
+    fireEvent.click(within(planner).getByRole("button", { name: "Clear conversation" }));
+    await waitFor(() =>
+      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
+        cleared_before: "2026-09-14T03:00:00.1235Z",
+      })
+    );
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("a reply inherits the mode of the exchange's newest attempt even within one millisecond", async () => {
+  const attempt = (
+    delivery: MessageDeliveryMode,
+    createdAt: string,
+    number: number
+  ): MessageDelivery => ({
+    attempt: number,
+    created_at: createdAt,
+    delivery,
+    envelope_id: `envelope-${number}`,
+    error: null,
+    message_id: "message-1",
+    reply_id: "message-2",
+    session_id: "planner-session",
+    state: "sent",
+  });
+  const root = message("Can this ship?", {
+    // The newer attempt is listed first, so an order to the millisecond keeps the older's mode.
+    deliveries: [
+      attempt("btw", "2026-09-14T00:00:01.1235Z", 2),
+      attempt("aside", "2026-09-14T00:00:01.123456Z", 1),
+    ],
+  });
+  const page = renderAgents({
+    messages: [
+      {
+        message: root,
+        replies: [
+          message("Yes, it can.", {
+            author: { id: "planner-session", kind: "session" },
+            id: "message-2",
+            in_reply_to: root.id,
+          }),
+        ],
+      },
+    ],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    const conversation = await within(planner).findByRole("list", {
+      name: "Conversation with Planner",
+    });
+    const replies = await within(conversation).findByRole("list", { name: "Replies" });
+    const answer = within(replies).getByText("Yes, it can.").closest("li");
+    if (answer === null) throw new Error("answer turn missing");
+    fireEvent.click(within(answer).getByRole("button", { name: "Reply" }));
+    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
+      target: { value: "Ship it." },
+    });
+    fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
+    await waitFor(() =>
+      expect(page.createAgentMessage).toHaveBeenCalledWith("planner-session", {
+        body: "Ship it.",
+        delivery: "btw",
+        in_reply_to: "message-2",
+      })
+    );
   } finally {
     page.view.unmount();
     page.restore();

@@ -18,11 +18,13 @@ import {
   createMessage,
   createProject,
   disconnectAllStreams,
+  getAgentStates,
+  listAgentMessages,
   putAgentState,
   replyToMessageDelivery,
 } from "./api";
 import { recordClipboard } from "./clipboard";
-import { resetDatabase } from "./seed";
+import { resetDatabase, setCreatedAt } from "./seed";
 import { asUser } from "./users";
 
 const planner: FakeSession = {
@@ -446,6 +448,90 @@ test("a reconnect picks up a Clear made from another device", async ({ browser }
     await disconnectAllStreams();
     await expect(plannerCard.getByRole("button", { name: "Show anyway" })).toBeVisible();
     await expect(conversation).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The server's times carry microseconds. Opening a row marks read through the newest reply, so of
+// two replies written in one millisecond it names the newer, or that one would stay unread.
+test("opening a row marks read the newer of two replies written in one millisecond", async ({
+  browser,
+}) => {
+  await setLiveSessions([planner]);
+  const plannerActor = { id: planner.session_id, kind: "session" as const };
+  const askA = await createAgentMessage(planner.session_id, {
+    body: "Question A",
+    delivery: "aside",
+  });
+  const answerA = (await replyToMessageDelivery(
+    askA.id,
+    { attempt: 1, body: "Answer A" },
+    plannerActor
+  )) as Message;
+  const askB = await createAgentMessage(planner.session_id, {
+    body: "Question B",
+    delivery: "aside",
+  });
+  const answerB = (await replyToMessageDelivery(
+    askB.id,
+    { attempt: 1, body: "Answer B" },
+    plannerActor
+  )) as Message;
+  // Alice's follow-up moves exchange A above B in the server's order, so the page meets the older
+  // reply first: a comparison to the millisecond would keep it.
+  const followUp = await createAgentMessage(planner.session_id, {
+    body: "Follow-up on A",
+    delivery: "aside",
+    in_reply_to: answerA.id,
+  });
+  const second = Math.floor((Date.now() - 120_000) / 1000) * 1000;
+  const at = (offsetSeconds: number, fraction = "") =>
+    `${new Date(second + offsetSeconds * 1000).toISOString().slice(0, 19)}${fraction}Z`;
+  const replyA = at(0, ".123456");
+  const replyB = at(0, ".1235");
+  await setCreatedAt("messages", askA.id, at(-60));
+  await setCreatedAt("messages", askB.id, at(-30));
+  await setCreatedAt("messages", answerA.id, replyA);
+  await setCreatedAt("messages", answerB.id, replyB);
+  await setCreatedAt("messages", followUp.id, at(30));
+  // The fixture holds only if the server lists A first, with both replies unread.
+  expect(
+    (await listAgentMessages(planner.session_id)).map((read) => [
+      read.message.body,
+      read.replies
+        .filter((reply) => reply.author.id === planner.session_id)
+        .map((reply) => reply.created_at),
+      read.unread,
+    ])
+  ).toEqual([
+    ["Question A", [replyA], true],
+    ["Question B", [replyB], true],
+  ]);
+  expect((await getAgentStates())[planner.session_id]?.unread_replies).toBe(2);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    await expect(page.getByText("New replies 2").first()).toBeVisible();
+    const plannerCard = page
+      .locator("article")
+      .filter({ has: page.getByRole("heading", { level: 2, name: "Planner" }) });
+    const marked = page.waitForRequest(
+      (request) =>
+        request.method() === "PUT" &&
+        request.url().endsWith(`/api/v1/me/agents/${planner.session_id}/state`)
+    );
+    await plannerCard.getByRole("button", { name: "Planner replied: 2 unread" }).click();
+    expect((await marked).postDataJSON()).toEqual({ read_through: replyB });
+    await expect(
+      plannerCard.getByRole("list", { name: "Conversation with Planner" })
+    ).toContainText("Answer B");
+    await expect(page.getByText(/^New repl/)).toHaveCount(0);
+    await expect
+      .poll(async () => (await getAgentStates())[planner.session_id]?.unread_replies)
+      .toBe(0);
   } finally {
     await alice.close();
   }
