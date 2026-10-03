@@ -80,7 +80,7 @@ setup on that machine, and that server needs a database of its own.
 Sign in, then open **Settings**:
 
 - **Projects**: create your first project, with a key such as `CORE` and a name.
-- **Repository mappings**: choose which project issues from each GitHub repository land in.
+- **Repositories → Projects**: choose which project issues from each GitHub repository land in.
   `DISPATCH_DEFAULT_PROJECT` catches repositories with no mapping; that project must already exist.
 - **Architecture sources**: point a project at a repository branch holding its architecture
   model. Saving checks that the GitHub App can read it.
