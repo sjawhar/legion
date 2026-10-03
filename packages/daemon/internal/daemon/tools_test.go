@@ -43,3 +43,26 @@ func TestResolveToolsPrefersTheOverrideAndNamesEveryMissingTool(t *testing.T) {
 		t.Fatalf("resolveTools with a relative override = %v, want it refused", err)
 	}
 }
+
+// A daemon started from inside a Legion pane inherits that pane's worker-bin, whose gh is the shim
+// that runs `legion gh`, first on its PATH. Its panes are told the real gh, never the shim, which
+// their own `legion gh` would run and so reach `legion gh` again.
+func TestResolveToolsSkipsAnInheritedPanesWorkerBin(t *testing.T) {
+	pane, real := t.TempDir(), t.TempDir()
+	workerBin := filepath.Join(pane, "worker-bin")
+	if err := os.Mkdir(workerBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable(t, workerBin, "gh")
+	for _, tool := range []string{"gh", "git", "jj"} {
+		executable(t, real, tool)
+	}
+	env := map[string]string{"PATH": workerBin + string(filepath.ListSeparator) + real}
+	tools, err := resolveTools(func(name string) (string, bool) { v, ok := env[name]; return v, ok })
+	if err != nil {
+		t.Fatalf("resolveTools: %v", err)
+	}
+	if want := filepath.Join(real, "gh"); tools["gh"] != want {
+		t.Fatalf("resolveTools with a pane's worker-bin first on PATH = gh %s, want the real %s", tools["gh"], want)
+	}
+}
