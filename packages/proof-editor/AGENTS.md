@@ -30,7 +30,7 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/lib.css` | The editor stylesheet |
 | `src/tests/*.test.ts` | The suites that came with those files |
 
-Eight files under `src/` are legion's own rather than copies, so the file-by-file audit below does
+Nine files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
 
 | File | What it is |
@@ -42,9 +42,10 @@ not reach them:
 | `src/editor/schema/uuid.ts` | `uuidV4`, the block-id default generator: a v4 UUID from `crypto.getRandomValues`, which every browsing context defines, where `crypto.randomUUID` exists only in a secure context, so a document opened over plain HTTP by a LAN address or a host name minted no id (LEGION-461); it is also biome-checked |
 | `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (it removes no span, as a creation over another record's mark does not since the three declare `excludes: ''`, or puts back what it removes, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; any other removal of a record mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
 | `src/record-mark-retype.ts` | Retyping a provisional record mark for the margin composer's Comment / Suggest / Ask switch, and the precise span-by-span removal behind the handle's `removeMark`, over text and inline atoms such as an image alike (LEGION-363); it is also biome-checked |
+| `src/record-mark-target.ts` | Which mark a click or a hover in the document names: of the mark spans around the target, the record mark whose range is the smallest, the innermost span's among marks the same size, since which of two overlapping record marks nests inside the other follows the order they were made in (LEGION-458); it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Thirteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Fourteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -70,12 +71,14 @@ cursors through `collabCursorPlugin` from `./collab-cursor-plugin` instead of ca
 `./editor-highlights`; `src/dispatch-marks.ts`'s `dispatchAsk` schema declaring `excludes: ''`,
 so two readers' asks may cover the same text, with `removeAskMark` removing that mark's instance
 by id rather than every `dispatchAsk` over its range and the parse runner closing its own span of
-nested asks rather than every open ask (LEGION-458); and annotations, casts and assertions that
-make a file type-check, each of which erases before runtime (below).
+nested asks rather than every open ask (LEGION-458); `src/dispatch-mark-events.ts` reading the mark
+a click or a hover names from `./record-mark-target` rather than taking the innermost mark span,
+so a click on text two record marks cover opens the narrower one (LEGION-458); and annotations,
+casts and assertions that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
-only lines that differ should be the thirteen kinds.
+only lines that differ should be the fourteen kinds.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the
@@ -161,5 +164,6 @@ against the pinned commit stays readable. `assist` matters as much as the other 
 would reorder the copy's imports. `upstream/` is excluded the same way, for the same reason:
 it is tsc's output, not source. Anything legion writes here — `scripts/`, `tests/`,
 `src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
-`src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/tests/harness.ts` — follow the
+`src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/record-mark-target.ts`,
+`src/tests/harness.ts` — follow the
 repo's conventions and are checked.

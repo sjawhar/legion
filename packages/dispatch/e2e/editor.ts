@@ -81,7 +81,8 @@ export function cursorLabel(page: Page, name: string): Locator {
 }
 
 /** Selects the first occurrence of `quote` inside the focused ProseMirror node the way a drag
- * does: a DOM Range plus the selectionchange ProseMirror's DOMObserver listens to. */
+ * does: a DOM Range plus the selectionchange ProseMirror's DOMObserver listens to. A quote no one
+ * text node holds - text another mark's span splits - is found across the text nodes in order. */
 export async function selectEditorText(page: Page, quote: string): Promise<void> {
   await setEditorRange(page, { extent: "whole", quote });
   await actionBar(page).waitFor({ state: "visible" });
@@ -126,7 +127,31 @@ async function setEditorRange(page: Page, target: EditorRange): Promise<void> {
         found = true;
         break;
       }
-      if (!found) throw new Error(`quote is not in the editor: ${quote}`);
+      if (!found) {
+        // The quote runs across text nodes: read them as one text and map its two ends back.
+        const runs: { node: Node; start: number; end: number }[] = [];
+        let text = "";
+        const across = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        for (let node = across.nextNode(); node !== null; node = across.nextNode()) {
+          const start = text.length;
+          text += node.textContent ?? "";
+          runs.push({ end: text.length, node, start });
+        }
+        const index = text.indexOf(quote);
+        const first = runs.find((run) => run.start <= index && index < run.end);
+        const last = runs.find(
+          (run) => run.start < index + quote.length && index + quote.length <= run.end
+        );
+        if (index < 0 || first === undefined || last === undefined) {
+          throw new Error(`quote is not in the editor: ${quote}`);
+        }
+        const startAt = { node: first.node, offset: index - first.start };
+        const endAt = { node: last.node, offset: index + quote.length - last.start };
+        const from = extent === "after" ? endAt : startAt;
+        const to = extent === "before" ? startAt : endAt;
+        range.setStart(from.node, from.offset);
+        range.setEnd(to.node, to.offset);
+      }
     }
     const selection = window.getSelection();
     selection?.removeAllRanges();

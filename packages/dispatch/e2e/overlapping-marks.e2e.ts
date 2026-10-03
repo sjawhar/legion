@@ -7,6 +7,7 @@ import {
   getArtifactText,
   getComment,
   listComments,
+  listIssueAsks,
 } from "./api";
 import {
   actionBar,
@@ -280,3 +281,106 @@ test("two readers' suggestions keep both action-bar anchors", async ({ browser }
     await alice.close();
   }
 });
+
+type RecordKind = "Comment" | "Suggest" | "Ask";
+
+/** The composer field each kind's record is written in. */
+const recordField: Record<RecordKind, string> = {
+  Ask: "Question",
+  Comment: "Comment",
+  Suggest: "Replacement",
+};
+
+const overlapKinds: { kind: RecordKind; noun: string }[] = [
+  { kind: "Comment", noun: "comment" },
+  { kind: "Suggest", noun: "suggestion" },
+  { kind: "Ask", noun: "ask" },
+];
+
+// The marks are made in both orders because the order decides which span nests inside the other,
+// and the narrower mark has to open from its text either way.
+const overlapOrders: { name: string; quotes: [string, string] }[] = [
+  { name: "the wider made first", quotes: ["quick brown", "brown"] },
+  { name: "the narrower made first", quotes: ["brown", "quick brown"] },
+];
+
+for (const { kind, noun } of overlapKinds) {
+  for (const order of overlapOrders) {
+    test(`a click on text a wider and a narrower ${noun} both cover opens the narrower one, ${order.name}`, async ({
+      browser,
+    }, testInfo) => {
+      await createProject({ key: "CORE", name: "Core" });
+      const issue = await createIssue({
+        project: "CORE",
+        spec: initialMarkdown,
+        title: "Overlap click",
+      });
+      const artifactId = issue.primary_artifact_id;
+      const project = testInfo.project.name;
+      // Every record of this kind with an anchor, as the server holds it.
+      const anchored = async () => {
+        const records =
+          kind === "Ask"
+            ? await listIssueAsks(issue.key)
+            : await listComments(issue.key, artifactId);
+        return records.flatMap((record) =>
+          record.anchor === null
+            ? []
+            : [{ id: record.id, markId: record.anchor.mark_id, quote: record.anchor.quote }]
+        );
+      };
+      const context = await asUser(browser, "alice");
+
+      try {
+        const page = await context.newPage();
+        await page.goto(`/issues/${issue.key}/spec`);
+        await expect(connectedDot(page)).toHaveText("connected");
+
+        for (const [index, quote] of order.quotes.entries()) {
+          await setSheet(page, project, false);
+          await selectEditorText(page, quote);
+          const button = actionBar(page).getByRole("button", { exact: true, name: kind });
+          if (kind === "Suggest" && project === "iphone") {
+            await touchHold(page, await centerOf(button), 0);
+          } else {
+            await button.click();
+          }
+          const composer = page.getByRole("form", { name: "Comment composer" });
+          await composer.getByLabel(recordField[kind]).fill(`On ${quote}`);
+          await composer.locator('button[type="submit"]').click();
+          await expect.poll(async () => (await anchored()).length).toBe(index + 1);
+        }
+        const records = await anchored();
+        const wide = records.find((record) => record.quote === "quick brown");
+        const narrow = records.find((record) => record.quote === "brown");
+        if (wide === undefined || narrow === undefined) {
+          throw new Error(`Expected one ${noun} on each quote, got ${JSON.stringify(records)}.`);
+        }
+
+        // A fresh reader of the document presses the text both marks cover: a click on the
+        // desktop, and a tap on the phone, where the review sheet then opens under the finger.
+        await page.reload();
+        await expect(connectedDot(page)).toHaveText("connected");
+        await Promise.all([
+          expectMark(page, wide.markId, "quick brown"),
+          expectMark(page, narrow.markId, "brown"),
+        ]);
+        await setSheet(page, project, false);
+        const covered = markSpan(page, narrow.markId);
+        if (project === "iphone") {
+          await touchHold(page, await centerOf(covered), 0);
+        } else {
+          await covered.click();
+        }
+        // An ask's card is current while it is selected or hovered, and the desktop pointer stays
+        // on the text, so there one current card also says the hover names the narrower mark.
+        await expect(page.locator('[data-margin-item][aria-current="true"]')).toHaveAttribute(
+          "data-margin-item",
+          narrow.id
+        );
+      } finally {
+        await context.close();
+      }
+    });
+  }
+}

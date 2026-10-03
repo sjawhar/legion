@@ -123,8 +123,12 @@ suggestions, replies, resolved-thread disclosure, and the phone thread dialog. C
 highlighted mark opens its thread in the margin (the compact sheet on small viewports) and never
 navigates away from the document. Two readers' comments, suggestions or asks may cover the same
 text: the record marks declare `excludes: ''` (the pinned fork's schema for comments and
-suggestions, `packages/proof-editor/src/dispatch-marks.ts` for asks), so their spans nest and a
-click opens the innermost mark's thread, and removing a mark removes that mark's instance, never
+suggestions, `packages/proof-editor/src/dispatch-marks.ts` for asks), so their spans nest. Which
+span nests inside the other follows the order the marks were made in, so a click on text two marks
+cover opens the narrowest mark's thread - the mark whose range is the smallest, and of two the same
+size the innermost span's (`packages/proof-editor/src/record-mark-target.ts`) - and hovering there
+marks that same thread; a narrower comment inside a wider one is always reachable from its text.
+Removing a mark removes that mark's instance, never
 the type over its range. A selected margin item, its orphaned block, and the brief focus pulse are
 editor decorations (`ProofEditorHandle.setActiveMarks`, `setActiveBlocks`, `focusMark` and
 `focusBlock`), never classes Dispatch writes into editor DOM: ProseMirror reads such a write back
