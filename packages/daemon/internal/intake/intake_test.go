@@ -661,13 +661,8 @@ func runConsumers(t *testing.T, consumers *Consumers, pool *pgxpool.Pool, handle
 
 func testJetStream(t *testing.T) (jetstream.JetStream, jetstream.Stream) {
 	t.Helper()
-	ctx := context.Background()
 	js := testnats.JetStream(t)
-	stream, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
-	if err != nil {
-		t.Fatalf("create notification stream: %v", err)
-	}
-	return js, stream
+	return js, testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
 }
 
 func publish(t *testing.T, js jetstream.JetStream, subject string, data []byte) {

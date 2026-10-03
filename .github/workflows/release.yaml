@@ -42,27 +42,78 @@ concurrency:
 jobs:
   changes:
     runs-on: ubuntu-24.04
+    # Job-level permissions replace the workflow's: the checkout, and the run list the base step
+    # reads.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       legion: ${{ steps.filter.outputs.legion }}
       envoy_plugin: ${{ steps.filter.outputs.envoy_plugin }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
       worker_image: ${{ steps.filter.outputs.worker_image }}
     steps:
+      # Full history, for the base step's ancestry check.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # The filters compare against the commit the last successful run of this workflow on main
+      # checked out, not against the push's own before-sha. GitHub keeps one pending run per
+      # concurrency group and cancels it when a newer push queues behind it, and a run can fail
+      # after releasing some packages and before others; comparing against the push alone would
+      # leave those commits to no run. Every job versions from its package's last tag, so a commit
+      # two ranges hold releases once. The range also holds the version-bump commits
+      # (`[skip ci]`) that run pushed after its checkout: after each npm release, the next run
+      # starts that package's job, which finds nothing since its tag and skips, and builds a
+      # sha- worker image.
+      #
+      # Only push and workflow_dispatch runs count: only the repository's writers create those,
+      # and a fork's pull request run can carry a branch named main and a commit of the fork's
+      # choosing. The base must also be in this commit's history. The lookup reads this run's own
+      # workflow, so a renamed file reads its own runs, and a workflow_dispatch skips it and the
+      # filters, since every job runs on a dispatch; a dispatch on main is how a renamed workflow
+      # gets its first base.
+      - name: Find the commit the last successful run checked out
+        id: base
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          workflow=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id)
+          newest() {
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=$1&status=success&per_page=1" \
+              --jq '.workflow_runs[] | "\(.created_at) \(.head_sha)"'
+          }
+          # Each query is its own assignment, so the step's `set -e` stops on gh's own error rather
+          # than awk reading an error body as a commit.
+          push=$(newest push)
+          dispatch=$(newest workflow_dispatch)
+          sha=$(printf '%s\n' "$push" "$dispatch" | sort -r | awk 'NR == 1 { print $2 }')
+          if [ -z "$sha" ]; then
+            echo "::error::No successful push or workflow_dispatch run of this workflow on main to compare against; run it once with workflow_dispatch on main"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$sha" HEAD; then
+            echo "::error::$sha, the commit the last successful run checked out, is not in the history of $GITHUB_SHA; run it once with workflow_dispatch on main"
+            exit 1
+          fi
+          echo "Changes since $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@v3
         id: filter
+        if: github.event_name != 'workflow_dispatch'
         with:
+          base: ${{ steps.base.outputs.sha }}
           filters: |
             # The Go `legion` the legion job releases and worker.Dockerfile's go stage compiles: its
-            # module, the modules go.work binds it to (packages/envoy is also copied whole into the
-            # image for the agent-secrets binary it builds, AGENTC-393), and the role prompts every
-            # release archive carries beside the binary.
+            # module, which embeds the role prompts, and the modules go.work binds it to
+            # (packages/envoy is also copied whole into the image for the agent-secrets binary it
+            # builds, AGENTC-393).
             legion:
               - 'packages/daemon/**'
               - 'go.work'
               - 'go.work.sum'
               - 'packages/envoy/**'
-              - 'packages/pi-envoy/roles/**'
             envoy_plugin:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'
@@ -97,12 +148,11 @@ jobs:
               - '.dockerignore'
               - '.github/workflows/worker-image.yaml'
 
-  # The Go `legion`: linux and darwin archives of the binary with the role prompts it reads beside
-  # itself (role-prompts/, which a standalone `legion` needs unless LEGION_ROLE_PROMPTS_DIR names
-  # another bundle), on a legion-v* tag of the commit the run checked out. Nothing is committed: a
-  # Go module carries no version file, so the tag alone records the version, and `legion version`
-  # names it. Only main releases one: a workflow_dispatch from another branch skips this job, and the
-  # worker image job below then publishes that commit's sha- tag alone, as it does for any branch.
+  # The Go `legion`: linux and darwin archives of the binary, which embeds its role prompts, on a
+  # legion-v* tag of the commit the run checked out. Nothing is committed: a Go module carries no
+  # version file, so the tag alone records the version, and `legion version` names it. Only main
+  # releases one: a workflow_dispatch from another branch skips this job, and the worker image job
+  # below then publishes that commit's sha- tag alone, as it does for any branch.
   legion:
     needs: changes
     if: >-
@@ -136,16 +186,16 @@ jobs:
           else
             PREV_VERSION="${PREV_TAG#legion-v}"
           fi
-          # The role prompts ship as runtime: packages/pi-envoy/roles is each archive's role-prompts/,
-          # and the binary embeds internal/prompts/go, so a docs: commit to either still releases.
-          # release-bump.sh reads a --patch-path only when it is also one of the paths after --.
+          # The binary embeds its prompts (internal/prompts/roles and go), so a docs: commit there
+          # still releases. release-bump.sh reads a --patch-path only when it is also one of the
+          # paths after --.
           VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" \
-            --patch-path packages/pi-envoy/roles/ --patch-path packages/daemon/internal/prompts/go/ \
-            -- packages/daemon/ packages/pi-envoy/roles/ packages/daemon/internal/prompts/go/)
+            --patch-path packages/daemon/internal/prompts/roles/ --patch-path packages/daemon/internal/prompts/go/ \
+            -- packages/daemon/ packages/daemon/internal/prompts/roles/ packages/daemon/internal/prompts/go/)
 
           if [ "$VERSION" = "empty" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "No commits in packages/daemon/ or packages/pi-envoy/roles/ since $PREV_TAG"
+            echo "No commits in packages/daemon/ since $PREV_TAG"
             exit 0
           fi
           if [ "$VERSION" = "none" ]; then
@@ -170,8 +220,7 @@ jobs:
             packages/envoy/go.sum
       # CGO_ENABLED=0: a static binary, as the worker image builds it, so a linux archive runs on any
       # distribution. Each archive holds one top-level directory, legion-<os>-<arch>, with `legion`
-      # and `role-prompts/` in it: mise's github backend strips that one directory, leaving the
-      # binary beside its prompts.
+      # in it: mise's github backend strips that one directory, leaving the binary.
       - name: Build legion
         if: steps.version.outputs.skip != 'true'
         env:
@@ -186,7 +235,6 @@ jobs:
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C packages/daemon build -buildvcs=false \
               -ldflags "-X main.revision=$GITHUB_SHA -X main.release=v$VERSION" \
               -o "$GITHUB_WORKSPACE/out/$dir/legion" ./cmd/legion
-            cp -R packages/pi-envoy/roles "out/$dir/role-prompts"
             tar czf "assets/$dir.tar.gz" -C out "$dir"
           done
           (cd assets && sha256sum -- * > SHA256SUMS)

@@ -27,7 +27,8 @@ On the agent's machine, `agent-secrets launcher login` prints a code and the add
 machine-login page, `/credentials/machine`. Alice opens that page, types the code, and checks the
 record it finds: a machine login for `example-host-build`, with her as its approver. She approves
 it, and the login on the machine returns. `agent-secrets launcher login-status` checks the machine
-login at any time: it prints `issued` while the machine holds one.
+login at any time: it prints `issued` while the machine holds one, and says when that login
+expires. The broker does not renew it, so before then a person must approve a new machine login.
 
 ![The machine login page with a code looked up: a machine login for example-host-build, approver alice, with Approve and Deny buttons](/legion/media/broker/machine-login.png)
 
@@ -50,9 +51,10 @@ command waits, and prints the Dispatch page where the request is decided.
 
 ## 4. Approve it
 
-The request is at the top of alice's Inbox, under **Credential requests**.
+The request is at the top of alice's Inbox, under **Credential requests**, and counts toward
+**Needs you** beside the sidebar's Inbox.
 
-![The Inbox, with a secret request for DEMO_API_KEY under Credential requests](/legion/media/broker/inbox-credential-request.png)
+![The Inbox, with a secret request for DEMO_API_KEY under Credential requests, Needs you 1 beside Inbox in the sidebar, and Blocked on you: 1 item](/legion/media/broker/inbox-credential-request.png)
 
 Its page shows what was asked for, by which session, for how long, who may approve it, and the
 agent's stated reason.
