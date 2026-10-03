@@ -1968,9 +1968,10 @@ is denied), and `reuseLiveGrant` never hands back a live grant holding a withhel
 automatically, so the session asks before it gets the name again while every other session is
 unaffected; a session revoking its own grant withholds nothing. `RevokeByApprover` locks the
 session's row `for no key update` before the grant's, and `createDecided` reads the withheld names
-after taking that row `for share`, retrying `Create`'s decision when a withholding landed
-meanwhile (`errWithheldMeanwhile`), so no automatic grant is written after the revoke that
-withheld it. `GrantsForApprover` (`GET /v1/grants?approver=`) lists every live grant of the
+after taking that row `for share`, deciding once more when a withholding landed meanwhile
+(`errWithheldMeanwhile`; that pass reads the name as withheld, and a second refusal is returned as
+an error rather than retried), so no automatic grant is written after the revoke that withheld it.
+`GrantsForApprover` (`GET /v1/grants?approver=`) lists every live grant of the
 person's sessions, automatic ones included, and every grant the person approved, each answering
 `granted` (`automatic` or `approval`) with a null `approver` and `record_id` for an automatic
 one. Audit rows never carry secret values: `audit()` takes only

@@ -158,7 +158,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 
 	set := m.Policy.Get()
 	requester := enr.requester()
-	for {
+	for pass := 1; ; pass++ {
 		if existing, ok, err := m.reuseLiveGrant(ctx, enrollmentID, names, set, requester); err != nil {
 			return Request{}, err
 		} else if ok {
@@ -181,7 +181,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 			return m.createPending(ctx, enr, r, obj)
 		}
 		req, err := m.createDecided(ctx, r)
-		if errors.Is(err, errWithheldMeanwhile) {
+		if errors.Is(err, errWithheldMeanwhile) && pass == 1 {
 			continue
 		}
 		return req, err
@@ -189,7 +189,9 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 }
 
 // errWithheldMeanwhile is createDecided's refusal to grant a name a person withheld from the
-// session after Create read what was withheld; Create decides again.
+// session after Create read what was withheld. Create decides once more, and that pass reads the
+// name as withheld and asks for it, since nothing removes a withheld name; a second refusal could
+// come only from a policy that grants a withheld name at once, so Create returns it as an error.
 var errWithheldMeanwhile = errors.New("a requested secret was withheld from this session while the request was decided")
 
 // createDecided writes a request the policy decided at once, granted or denied, and a granted one's
