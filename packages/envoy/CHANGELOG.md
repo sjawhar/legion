@@ -62,6 +62,16 @@
   `INTERNAL`, the codes the API answers those errors with elsewhere), logged at WARN, and they do
   not wait for a failed document room's recovery; only a request that has itself gone away fails
   them (LEGION-460).
+- `PUT /api/v1/me/agents/{session_id}/state` accepts `read_replies`, the ids of messages that
+  session wrote, and marks those replies read and no other (`user_agent_reply_read`, migration
+  `0067`); `unread_replies` and the conversation window's unread flag leave them out. Opening a
+  broadcast page now clears the answers it shows from the New replies badge and each agent's row,
+  on every tab, while the session's older reply to another message, or one newer than the page
+  shows, still counts. An id may take any form `uuid.Parse` reads; one it cannot read, or one that
+  is not a message that session wrote, is `400 INVALID_STATE`. A request naming only replies
+  already read, or replies the session's read mark has passed, changes nothing and appends no
+  `user_agent_state.updated` event, and a `read_through` deletes the viewer's rows for that
+  session whose replies it reaches (LEGION-485).
 
 ### Changed
 

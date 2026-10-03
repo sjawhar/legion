@@ -53,6 +53,8 @@
   `gen:go` generates them into Go as `contracts.DocumentSchemaCloseCode` and
   `contracts.DocumentSchemaCloseReason`, so the server's close and the dashboard's reading of it
   cannot drift apart (LEGION-469).
+- `UserAgentStateInput.read_replies`: the ids of a session's own replies to mark read, those
+  alone, for a view that shows only some of a session's replies (LEGION-485).
 - `DISPATCH_TEXT_REFERENCES`: markdown bodies with the `dispatch://` references each one cites,
   read against `https://dispatch.test` or the row's `origin`. The dashboard's
   `composerReferences` and the Go reader `text.Extract`, through its JSON copy, are both tested
