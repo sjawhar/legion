@@ -5,52 +5,37 @@ sidebar:
   order: 6
 ---
 
-This page follows one issue through Legion, step by step. Each step names what you see; the
-screenshots, the two terminal recordings and the narrated video are recorded by the site's media
-scripts, which replace each `TODO(media)` marker below.
+This page follows one issue through Legion, step by step, and each step names what you see. The
+screenshots, the narrated video and the two terminal recordings show example data: a Storefront
+project in Dispatch and a Legion daemon running on one machine.
 
-<!-- TODO(media) video legion-issue-journey
-Narrated walkthrough, about three minutes, recorded against the disposable Dispatch project and
-smoke repository, example data only: an issue labelled `legion` and set to `todo`; admission and the
-architect's claim; the architect's decision block and the spec approval in the Inbox; the status
-moving through in_progress, testing, needs_review and retro; the pull request and its body on
-GitHub; the READY message; the merge; the production check and the architect's sign-off; done.
-Narration follows the steps on this page. No browser chrome or address bar in frame. -->
-
-:::note[Video to come]
-A narrated video of the whole journey replaces this note.
-:::
+<video controls preload="metadata" poster="/legion/media/videos/legion-issue-journey.jpg" style="width: 100%" aria-label="Walkthrough: handing an issue to Legion and getting it back ready to merge">
+  <source src="/legion/media/videos/legion-issue-journey.mp4" type="video/mp4">
+  <track kind="captions" src="/legion/media/videos/legion-issue-journey.vtt" srclang="en" label="English" default>
+</video>
 
 ## 1. Hand the issue over
 
 The issue has a title that states the outcome and a spec with acceptance criteria. You add the
 `legion` label from the issue header and set the status to `todo`.
 
-<!-- TODO(media) screenshot legion-handover
-Dispatch issue page, example project: the issue header with the label picker open and `legion`
-selected, status `todo`. -->
+![An issue handed to Legion: the label picker open on its header with legion selected, and the status Todo.](/legion/media/legion/handover.png)
 
 ## 2. Admission and the architect's claim
 
 With a slot free, the daemon admits the issue: the status becomes `in_progress`, and moments later
 the architect claims it, so the issue shows it as claimed by Legion's session.
 
-<!-- TODO(media) screenshot legion-admitted
-The same issue after admission: status `in_progress`, the claim line naming the architect's
-session, and the status change in the issue's events. -->
+![The issue after admission: status In progress, claimed by the issue's architect, with the claim in its Conversation.](/legion/media/legion/admitted.png)
 
 ## 3. Decisions and the spec approval
 
 The architect grows the spec into a design and writes each open question as a decision block, which
 reaches the assignee's Inbox. Once every block is answered, it asks for approval with a summary.
 
-<!-- TODO(media) screenshot legion-decision-block
-The spec document with one decision block: its question, options and the architect's
-recommendation. -->
+![The spec's design with an open decision block: the architect's question, its recommendation, and two options to answer.](/legion/media/legion/decision-block.png)
 
-<!-- TODO(media) screenshot legion-spec-approval
-The Inbox's approval question for the spec, with Approve and Request changes, and the architect's
-summary. -->
+![The architect's request to approve the spec in the Inbox, with its summary and the Approve and Request changes options.](/legion/media/legion/spec-approval.png)
 
 ## 4. The phases run
 
@@ -58,28 +43,22 @@ After approval the daemon starts the planner, then the implementer, which opens 
 then the tester and the reviewer. The issue's status follows: `in_progress`, `testing`,
 `needs_review`, then `retro` once the reviewer approves.
 
-<!-- TODO(media) screenshot legion-status-events
-The issue's events showing the daemon's status changes from `in_progress` to `testing`,
-`needs_review` and `retro`, and the pull request under the issue's external links. -->
+![The issue's Conversation as the phases run: the daemon's status changes, newest first, with the issue now in Retro and its pull request linked.](/legion/media/legion/status-events.png)
 
 ## 5. The pull request
 
 The pull request's body follows Legion's template: the outcome, why, the change, how it was
 proven, what is not proven, and later the production check. Legion's reviewer approves it as the
-review App.
+review App. In Dispatch, the issue's header links the pull request.
 
-<!-- TODO(media) screenshot legion-pull-request
-The smoke repository's pull request: the body's Outcome, Proven by and E2E lines, and the review
-App's approval of the head. -->
+![The issue header with the pull request Legion opened, linked as #42.](/legion/media/legion/pull-request.png)
 
 ## 6. READY, and your merge
 
 The merger checks the approved head and the required checks, and the daemon posts `READY` on the
 Dispatch issue. You merge the pull request on GitHub.
 
-<!-- TODO(media) screenshot legion-ready
-The READY message on the Dispatch issue: the first line with the pull request, head and approved
-commits, then the outcome and risks. -->
+![The READY message on the issue: the pull request, its head and the approved commit, then the outcome and the risk.](/legion/media/legion/ready.png)
 
 ## 7. The production check and sign-off
 
@@ -87,27 +66,21 @@ After the merge the implementer checks the change in production and records it o
 and the issue. The architect signs off with a comment summarizing the evidence, and the issue moves
 to `done`.
 
-<!-- TODO(media) screenshot legion-signed-off
-The issue in `done`, with the implementer's production record and the architect's sign-off
-comment. -->
+![The issue closed as Done, with the implementer's production record and the architect's sign-off.](/legion/media/legion/signed-off.png)
 
 ## The operator's view
 
-The same journey from the operator's terminal: the daemon's state while the tree runs, and the
-controller's first turn.
+The same journey from the operator's terminal: the daemon's state and the agents it runs, the
+controller starting, and the controller's daily report.
 
-<!-- TODO(media) cast legion-state
-Terminal recording, narrated: `legion status <PROJECT>`, `legion state --config legion.yaml`, and
-`legion state --config legion.yaml --json | jq '.admission, .issues["<KEY>"].phase'` while a tree
-runs. Example project and placeholder hosts only. -->
+<video controls preload="metadata" poster="/legion/media/videos/legion-state.jpg" style="width: 100%" aria-label="Terminal recording: legion status, legion state and legion claims list on a running daemon">
+  <source src="/legion/media/videos/legion-state.mp4" type="video/mp4">
+  <track kind="captions" src="/legion/media/videos/legion-state.vtt" srclang="en" label="English" default>
+</video>
 
-<!-- TODO(media) cast legion-controller
-Terminal recording, narrated: `legion controller start --config controller.yaml`, the controller's
-first turn (its start procedure, filling a free slot), and a message typed to it. -->
+<video controls preload="metadata" poster="/legion/media/videos/legion-controller.jpg" style="width: 100%" aria-label="Terminal recording: legion controller start, and the controller registered with the daemon">
+  <source src="/legion/media/videos/legion-controller.mp4" type="video/mp4">
+  <track kind="captions" src="/legion/media/videos/legion-controller.vtt" srclang="en" label="English" default>
+</video>
 
-<!-- TODO(media) screenshot legion-daily-report
-The project's `Legion daily report` issue, in icebox, with one day's report message. -->
-
-:::note[Recordings to come]
-Two terminal recordings, of `legion state` and of the controller starting, replace this note.
-:::
+![The project's Legion daily report issue, parked in Icebox, with the controller's report for the day: the issue Legion finished and its pull request, nothing running, and the free slots.](/legion/media/legion/daily-report.png)

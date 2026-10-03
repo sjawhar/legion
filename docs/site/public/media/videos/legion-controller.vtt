@@ -1,0 +1,13 @@
+WEBVTT
+
+00:00:03.200 --> 00:00:05.668
+It checks the controller's Oh My Pi,
+
+00:00:05.750 --> 00:00:07.516
+then starts it against the daemon.
+
+00:00:07.600 --> 00:00:10.223
+The controller opens on its start procedure,
+
+00:00:12.700 --> 00:00:15.885
+and the daemon records it as the project's controller.

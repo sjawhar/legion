@@ -145,7 +145,7 @@ async function recordBrowserSection<Seeded>(
   try {
     await section.open(page, seeded);
     await waitForSettled(page);
-    await assertScreenClean(page, errors);
+    await assertScreenClean(page, errors, section.allowEmpty);
     const frames: ScreencastFrame[] = [];
     if (raw !== undefined) {
       const first = Promise.withResolvers<void>();
@@ -174,7 +174,7 @@ async function recordBrowserSection<Seeded>(
       await page.screencast.stop();
       writeRecording(frames, startedAt - LEAD_MS, stoppedAt, raw);
     }
-    await assertScreenClean(page, errors);
+    await assertScreenClean(page, errors, section.allowEmpty);
     await section.finish?.(page, seeded);
     return { action, cues, frames: frames.length };
   } finally {

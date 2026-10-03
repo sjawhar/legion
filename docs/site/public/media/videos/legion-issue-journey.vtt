@@ -1,0 +1,73 @@
+WEBVTT
+
+00:00:00.300 --> 00:00:02.083
+Legion took this issue to done:
+
+00:00:03.428 --> 00:00:04.669
+checked in production,
+
+00:00:05.341 --> 00:00:06.327
+and signed off.
+
+00:00:07.540 --> 00:00:09.057
+To hand Legion an issue,
+
+00:00:09.753 --> 00:00:10.897
+add the legion label
+
+00:00:12.039 --> 00:00:13.832
+and set it to Todo.
+
+00:00:14.008 --> 00:00:16.313
+Legion admits it and claims it.
+
+00:00:17.060 --> 00:00:19.886
+The architect's questions come to your Inbox.
+
+00:00:21.229 --> 00:00:21.993
+Pick an answer,
+
+00:00:23.182 --> 00:00:24.843
+and once every one is answered,
+
+00:00:25.437 --> 00:00:28.023
+it asks you to approve the spec.
+
+00:00:29.657 --> 00:00:30.233
+Approve it,
+
+00:00:30.790 --> 00:00:31.489
+and it's clear.
+
+00:00:34.120 --> 00:00:37.071
+The status follows each phase.
+
+00:00:39.801 --> 00:00:41.576
+READY names the pull request,
+
+00:00:41.898 --> 00:00:44.222
+and what it changes, for your merge.
+
+00:00:46.700 --> 00:00:50.764
+From the terminal, legion state reads the daemon;
+
+00:00:52.700 --> 00:00:55.681
+its JSON shows the architect, ready;
+
+00:00:56.300 --> 00:00:59.291
+legion claims list shows each claim.
+
+00:01:00.480 --> 00:01:01.920
+Then start the controller.
+
+00:01:03.280 --> 00:01:05.505
+It checks the controller's Oh My Pi,
+
+00:01:05.830 --> 00:01:06.720
+then starts it.
+
+00:01:07.680 --> 00:01:10.291
+The controller opens on its start procedure,
+
+00:01:12.680 --> 00:01:14.220
+and registers with the daemon.

@@ -1,0 +1,13 @@
+WEBVTT
+
+00:00:01.600 --> 00:00:04.969
+legion status says the daemon is running.
+
+00:00:05.200 --> 00:00:09.896
+legion state prints its admission slots and the issues it records.
+
+00:00:11.200 --> 00:00:15.048
+Its JSON shows this issue's architect, ready.
+
+00:00:16.900 --> 00:00:19.951
+legion claims list shows each claim.

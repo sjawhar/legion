@@ -30,6 +30,8 @@ export interface BrowserSection<Seeded> extends SectionBase {
    *  write a click starts, before the page closes. A section that ends on a click ends its clip
    *  there, and the next section opens on the page the click loaded. */
   readonly finish?: (page: Page, seeded: Seeded) => Promise<void>;
+  /** Empty states, by `aria-label`, this section may start or end on; any other one fails it. */
+  readonly allowEmpty?: readonly string[];
 }
 
 /** A section rendered from an asciinema recording. */
