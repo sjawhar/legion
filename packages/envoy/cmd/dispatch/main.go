@@ -348,9 +348,10 @@ func defaultDataDir() (string, error) {
 // binary. The binary lives at packages/envoy/dispatch (when built locally) or
 // is installed elsewhere; we walk up to find packages/dispatch/web/dist.
 func defaultWebDistDir() (string, error) {
-	// First try $DISPATCH_WEB_DIST.
+	// First try $DISPATCH_WEB_DIST, made absolute and clean like every path below, so a value
+	// spelled through `..` names the same directory the static handler joins requests under.
 	if env := os.Getenv("DISPATCH_WEB_DIST"); env != "" {
-		return env, nil
+		return filepath.Abs(env)
 	}
 	exe, err := os.Executable()
 	if err != nil {

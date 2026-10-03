@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import type { InboxRow } from "../../api/types";
+import { compareTimestamps } from "../../lib/timestamps";
 import {
   borderDefault,
   surfaceMutedBg,
@@ -48,14 +49,9 @@ export function BlockedOnYou({
     );
   }
 
-  const oldest = waiting.reduce((earlier, ask) => {
-    const earlierAt = Date.parse(earlier.created_at);
-    const askAt = Date.parse(ask.created_at);
-    return (Number.isNaN(askAt) ? Number.POSITIVE_INFINITY : askAt) <
-      (Number.isNaN(earlierAt) ? Number.POSITIVE_INFINITY : earlierAt)
-      ? ask
-      : earlier;
-  });
+  const oldest = waiting.reduce((earlier, ask) =>
+    compareTimestamps(ask.created_at, earlier.created_at) < 0 ? ask : earlier
+  );
 
   const count = waiting.length;
   // A count of every waiting ask, not one urgency, so the strip stays structural: the spec
