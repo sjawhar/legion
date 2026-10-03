@@ -71,6 +71,49 @@ func TestSettlementStampVersionKeepsAnEditMadeAfterItsRead(t *testing.T) {
 	requireLatestVersionMarkdown(t, service, artifactID, want)
 }
 
+// A settlement whose room is replaced while it does its database work - the room's last browser
+// left, and its repair's write loaded the room again from the store - writes nothing into the
+// replacement: its version is read from the document it held, which would never get the repair.
+// The settlement the replacement's load arms versions the document with the repair (LEGION-479).
+func TestSettlementWhoseRoomWasReplacedLeavesTheDocumentToTheReplacement(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
+	service.settleRoom(artifactID, 0)
+	answer := answerBlockAsk(t, service, artifactID)
+	editAsPeer(t, service, artifactID, replaceRun("Context before.", "Context after."))
+
+	held := service.srv.GetDoc(artifactID)
+	var replaced atomic.Bool
+	service.afterSettleReconcile = func(room string) {
+		if room != artifactID || !replaced.CompareAndSwap(false, true) {
+			return
+		}
+		// ygo closes a room the moment its last browser leaves, on that browser's goroutine.
+		go func() { _ = service.srv.CloseRoom(room, true) }()
+		deadline := time.Now().Add(5 * time.Second)
+		for service.srv.GetDoc(room) == held {
+			if time.Now().After(deadline) {
+				t.Error("the room was never closed")
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if !replaced.Load() {
+		t.Fatal("settlement never reached the window between its read and its repair")
+	}
+	service.afterSettleReconcile = nil
+	settleCurrentGeneration(t, service, artifactID)
+
+	want := ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"" +
+		answer.At.Format(time.RFC3339Nano) + "\" selected=\"[]\"}\nShip it?\n:::\n\nContext after.\n"
+	waitForDocumentText(t, service, artifactID, want)
+	waitForPersistedProofText(t, service.store, artifactID, want)
+	requireLatestVersionMarkdown(t, service, artifactID, want)
+}
+
 // requireLatestVersionMarkdown requires the document's latest version to hold want.
 func requireLatestVersionMarkdown(t *testing.T, service *Service, artifactID, want string) {
 	t.Helper()
