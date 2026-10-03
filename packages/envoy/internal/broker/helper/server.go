@@ -337,6 +337,10 @@ func (s *Server) loginStatus() Response {
 	return resp
 }
 
+// cannotEnrollMsg is the ERROR an enrollment (a host session's or a box's) logs while the helper
+// holds no launcher credential to attempt it with, beside why (noCredentialReason).
+const cannotEnrollMsg = "session cannot enroll: the helper holds no launcher credential; run: agent-secrets launcher login, and have a human approve it"
+
 // lacksCredential reports whether err failed for want of a launcher credential the helper still
 // lacks: errNoCredential, unless a login has installed one since the attempt failed. That login
 // woke the retry, which uses the new credential at once, so the failure is an ordinary retry
@@ -347,13 +351,17 @@ func (s *Server) lacksCredential(err error) bool {
 
 // enrollBox registers a box's key as kind box — a pass-through broker call requiring no
 // registered session (a box enrollment is not a registry session; see Broker.EnrollBox's doc
-// comment), so unlike sign it does not check descendancy at all.
+// comment), so unlike sign it does not check descendancy at all. An enrollment the helper cannot
+// attempt for want of a launcher credential logs cannotEnrollMsg, as a host session's does.
 func (s *Server) enrollBox(ctx context.Context, runtimeID, thumbprint string, sessionID *string) Response {
 	if runtimeID == "" || thumbprint == "" {
 		return Response{Code: CodeBadRequest, Error: "enroll-box needs runtime_id and thumbprint"}
 	}
 	id, lease, err := s.Broker.EnrollBox(ctx, runtimeID, thumbprint, sessionID)
 	if err != nil {
+		if s.lacksCredential(err) {
+			s.Log.Error(cannotEnrollMsg, "runtime_id", runtimeID, "why", s.Broker.noCredentialReason())
+		}
 		return Response{Code: CodeEnrollFailed, Error: err.Error()}
 	}
 	return Response{OK: true, EnrollmentID: id, LeaseExpires: lease.UTC().Format(time.RFC3339Nano)}
@@ -450,8 +458,7 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		enrolled := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 			sess.setError(err.Error())
 			if s.lacksCredential(err) {
-				s.Log.Error("session cannot enroll: the helper holds no launcher credential; run: agent-secrets launcher login, and have a human approve it",
-					"runtime_id", sess.RuntimeID, "why", s.Broker.noCredentialReason(), "in", delay)
+				s.Log.Error(cannotEnrollMsg, "runtime_id", sess.RuntimeID, "why", s.Broker.noCredentialReason(), "in", delay)
 				return
 			}
 			s.Log.Warn("enroll failed; retrying", "runtime_id", sess.RuntimeID, "error", err, "in", delay)

@@ -61,6 +61,26 @@ func waitForRecord(t *testing.T, out *syncBuffer, msg string) map[string]any {
 	}
 }
 
+// TestABoxTheHelperCannotEnrollIsAnError: an enroll-box the helper cannot attempt for want of a
+// launcher credential fails, as before, and logs the same ERROR and reason as a host session's
+// enrollment does.
+func TestABoxTheHelperCannotEnrollIsAnError(t *testing.T) {
+	var out syncBuffer
+	r := newLoggedRig(t, "", slog.New(slog.NewJSONHandler(&out, nil)))
+	if box := r.call(t, Request{Op: "enroll-box", RuntimeID: "box-1", Thumbprint: "tp-1"}); box.OK || box.Code != CodeEnrollFailed || box.Error != noCredentialMsg {
+		t.Fatalf("enroll-box with no credential: %+v; want %s naming %q", box, CodeEnrollFailed, noCredentialMsg)
+	}
+	line := waitForRecord(t, &out, "session cannot enroll: the helper holds no launcher credential; run: agent-secrets launcher login, and have a human approve it")
+	for k, v := range map[string]any{
+		"level": "ERROR", "runtime_id": "box-1",
+		"why": "no machine login since the helper started; a restart discards the launcher credential",
+	} {
+		if line[k] != v {
+			t.Fatalf("the line for the box: %s = %v; want %v (line %v)", k, line[k], v, line)
+		}
+	}
+}
+
 // noErrors fails t if out holds a record at ERROR other than the drop line itself.
 func noErrors(t *testing.T, out *syncBuffer, dropMsg string) {
 	t.Helper()
