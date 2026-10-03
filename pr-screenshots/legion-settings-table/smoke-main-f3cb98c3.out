@@ -1,0 +1,60 @@
+== boot refusals
+[boot no-env] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DATABASE_URL required"
+[boot no-token] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_AGENT_TOKEN required"
+[boot no-logins] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_ALLOWED_LOGINS required in cookie identity mode"
+[boot header-untrusted] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_IDENTITY_HEADER_TRUSTED=1 required with OAuth and header identity"
+[boot bad-port] exit=1 level=ERROR msg="dispatch: resolve boot config" error="invalid DISPATCH_PORT: \"70000\""
+[boot bad-identity] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_IDENTITY=\"basic\" (expected cookie or header:<Header-Name>)"
+[boot empty-server-url] exit=1 level=ERROR msg="dispatch: load envoy config" error="DISPATCH_SERVER_URL=\"\" (expected an absolute http(s) URL without a path)"
+[boot empty-nats-urls] exit=1 level=ERROR msg="dispatch: load envoy config" error="NATS_URLS=\"\" (expected a comma-separated list of NATS URLs)"
+[boot remote-nats] exit=1 level=ERROR msg="dispatch: connect NATS" error="bus: refusing a NATS server that is not this machine's: nats://nats.example:4222 (set ENVOY_ALLOW_REMOTE_NATS=1 to reach it)"
+[boot remote-nats-from-envoy-json] exit=1 level=ERROR msg="dispatch: connect NATS" error="bus: refusing a NATS server that is not this machine's: nats://nats.example:4222 (set ENVOY_ALLOW_REMOTE_NATS=1 to reach it)"
+[boot bad-seed] exit=1 level=ERROR msg="dispatch: connect NATS" error="NATS_NKEY_SEED does not hold a valid nkey seed: illegal base32 data at input byte 0"
+[boot seed-file-wins] exit=1 level=ERROR msg="dispatch: connect NATS" error="NATS_NKEY_SEED_FILE names /nonexistent/seed, which could not be read: open /nonexistent/seed: no such file or directory"
+[boot empty-seed-file] exit=1 level=ERROR msg="dispatch: connect NATS" error="NATS_NKEY_SEED_FILE is set but empty"
+[boot remote-allowed] exit=1 level=ERROR msg="dispatch: connect NATS" error="NATS_NKEY_SEED does not hold a valid nkey seed: illegal base32 data at input byte 0"
+[boot app-without-secret] exit=1 level=ERROR msg="dispatch: load app credentials" error="load app from env: DISPATCH_APP_CLIENT_ID set but DISPATCH_APP_CLIENT_SECRET missing"
+[boot app-bad-pem] exit=1 level=ERROR msg="dispatch: load app credentials" error="load app from env: DISPATCH_APP_PEM_B64: illegal base64 data at input byte 0"
+[boot app-bad-id] exit=1 level=ERROR msg="dispatch: load app credentials" error="load app from env: DISPATCH_APP_ID: strconv.ParseInt: parsing \"abc\": invalid syntax"
+[boot broker-without-token] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_AGENT_SECRETS_TOKEN_FILE or DISPATCH_AGENT_SECRETS_TOKEN is required when DISPATCH_AGENT_SECRETS_URL is set"
+[boot broker-token-file-missing] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_AGENT_SECRETS_TOKEN_FILE names /nonexistent/token, which could not be read: open /nonexistent/token: no such file or directory"
+[boot oidc-half] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_OIDC_AUDIENCE is required when DISPATCH_OIDC_ISSUER is set"
+[boot dev-signin-with-key] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process; unset DISPATCH_SIGNING_KEY"
+[boot dev-signin-remote-allowed] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_DEV_SIGNIN=1 publishes to this machine's NATS only: unset ENVOY_ALLOW_REMOTE_NATS, or set DISPATCH_NATS_DISABLED=1"
+[boot dev-signin-origin-from-envoy-json] exit=1 level=ERROR msg="dispatch: dev sign-in" error="DISPATCH_DEV_SIGNIN=1 is for a loopback origin only: the dashboard origin \"https://from-envoy-json.example\" (DISPATCH_SERVER_URL, or dispatch.serverUrl in envoy.json) must name 127.0.0.1, [::1] or localhost"
+== subcommands
+[sub settings] exit=2
+    envoy-dispatch: unknown subcommand "settings"; the subcommands are backfill-block-ids, backfill-anchor-blocks, rebuild-refs, redeliver-webhooks, census, and envoy-dispatch with no argument serves
+[sub census] exit=0
+    census: fresh database, nothing to check
+    census: ok
+[sub census-no-url] exit=2
+    census: DATABASE_URL is required
+[sub rebuild-refs-origin-from-env] exit=0
+    rebuild-refs: documents=0 asks=0 comments=0 messages=0 orphans=0 edges=0
+[sub rebuild-refs-no-origin] exit=1
+    rebuild-refs: dispatch.server_url is required to recognise dashboard URLs; refusing to drop URL-form mentions
+[sub redeliver-remote] exit=1
+    redeliver-webhooks: connect NATS: bus: refusing a NATS server that is not this machine's: nats://nats.example:4222 (set ENVOY_ALLOW_REMOTE_NATS=1 to reach it)
+[sub redeliver-no-key] exit=1
+    redeliver-webhooks: no GitHub App private key (DISPATCH_APP_PEM_B64) to sign with
+== dev sign-in server, NATS off
+[serve dev-signin] healthz {"ok":true,"db":true,"nats":null,"commit":<c>,"schema_version":63}
+    GET /: SMOKE-DIST index
+    sign-in cookies: dsession=<v>; HttpOnly; Path=/; SameSite=Strict; Max-Age=2592000; Secure|
+    GET /api/v1/agents: 200
+    listener saw: GET /v1/sessions authorization=Bearer listener-token|
+    boot log: level=INFO msg="dispatch: no app credentials yet — dashboard will respond 503 until configured"|level=WARN msg="dispatch: dev sign-in mounted: any allowlisted login signs in at /auth/_dev/signin without GitHub; cookies are valid on this process only" origin=http://127.0.0.1:47361|level=INFO msg="dispatch: NATS publisher disabled"|level=INFO msg="dispatch: webhook redelivery off: it needs NATS and the GitHub App private key"|level=INFO msg="dispatch: listening" addr=127.0.0.1:47361|
+[serve dev-signin-insecure] healthz {"ok":true,"db":true,"nats":null,"commit":<c>,"schema_version":63}
+    sign-in cookies: dsession=<v>; HttpOnly; Path=/; SameSite=Strict; Max-Age=2592000|
+    boot log: level=INFO msg="dispatch: no app credentials yet — dashboard will respond 503 until configured"|level=WARN msg="dispatch: dev sign-in mounted: any allowlisted login signs in at /auth/_dev/signin without GitHub; cookies are valid on this process only" origin=http://127.0.0.1:47361|level=INFO msg="dispatch: NATS publisher disabled"|level=INFO msg="dispatch: webhook redelivery off: it needs NATS and the GitHub App private key"|level=INFO msg="dispatch: listening" addr=127.0.0.1:47361|
+== server on NATS with an App from the environment
+[serve nats-app] healthz {"ok":true,"db":true,"nats":true,"commit":<c>,"schema_version":63}
+    /auth/start redirect_uri: redirect_uri=http%3A%2F%2F127.0.0.1%3A47361%2Fauth%2Fcallback
+    /auth/start cookies: dispatch_oauth_state=<v>; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax|
+    signing-key file: ls: cannot access '<scratch>/home-nats-app/.local/share/dispatch/signing-key': No such file or directory
+    boot log: level=INFO msg="dispatch: loaded github app" slug=smoke-app client_id=Iv1.smoke source=env|level=INFO msg="dispatch: webhook redelivery off: it needs NATS and the GitHub App private key"|level=INFO msg="dispatch: listening" addr=127.0.0.1:47361|
+[serve nats-app-insecure] healthz {"ok":true,"db":true,"nats":true,"commit":<c>,"schema_version":63}
+    /auth/start cookies: dispatch_oauth_state=<v>; Path=/; Max-Age=600; HttpOnly; SameSite=Lax|
+    signing-key file: <scratch>/home-nats-app-insecure/.local/share/dispatch/signing-key
+    boot log: level=INFO msg="dispatch: loaded github app" slug="" client_id=Iv1.smoke source=env|level=INFO msg="dispatch: webhook redelivery off: it needs NATS and the GitHub App private key"|level=INFO msg="dispatch: listening" addr=127.0.0.1:47361|

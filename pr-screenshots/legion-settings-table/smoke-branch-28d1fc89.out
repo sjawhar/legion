@@ -1,0 +1,287 @@
+== boot refusals
+[boot no-env] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DATABASE_URL required"
+[boot no-token] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_AGENT_TOKEN required"
+[boot no-logins] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_ALLOWED_LOGINS required in cookie identity mode"
+[boot header-untrusted] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_IDENTITY_HEADER_TRUSTED=1 required with OAuth and header identity"
+[boot bad-port] exit=1 level=ERROR msg="dispatch: resolve boot config" error="invalid DISPATCH_PORT: \"70000\""
+[boot bad-identity] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_IDENTITY=\"basic\" (expected cookie or header:<Header-Name>)"
+[boot empty-server-url] exit=1 level=ERROR msg="dispatch: load envoy config" error="DISPATCH_SERVER_URL=\"\" (expected an absolute http(s) URL without a path)"
+[boot empty-nats-urls] exit=1 level=ERROR msg="dispatch: load envoy config" error="NATS_URLS=\"\" (expected a comma-separated list of NATS URLs)"
+[boot remote-nats] exit=1 level=ERROR msg="dispatch: connect NATS" error="bus: refusing a NATS server that is not this machine's: nats://nats.example:4222 (set ENVOY_ALLOW_REMOTE_NATS=1 to reach it)"
+[boot remote-nats-from-envoy-json] exit=1 level=ERROR msg="dispatch: connect NATS" error="bus: refusing a NATS server that is not this machine's: nats://nats.example:4222 (set ENVOY_ALLOW_REMOTE_NATS=1 to reach it)"
+[boot bad-seed] exit=1 level=ERROR msg="dispatch: connect NATS" error="NATS_NKEY_SEED does not hold a valid nkey seed: illegal base32 data at input byte 0"
+[boot seed-file-wins] exit=1 level=ERROR msg="dispatch: connect NATS" error="NATS_NKEY_SEED_FILE names /nonexistent/seed, which could not be read: open /nonexistent/seed: no such file or directory"
+[boot empty-seed-file] exit=1 level=ERROR msg="dispatch: connect NATS" error="NATS_NKEY_SEED_FILE is set but empty"
+[boot remote-allowed] exit=1 level=ERROR msg="dispatch: connect NATS" error="NATS_NKEY_SEED does not hold a valid nkey seed: illegal base32 data at input byte 0"
+[boot app-without-secret] exit=1 level=ERROR msg="dispatch: load app credentials" error="load app from env: DISPATCH_APP_CLIENT_ID set but DISPATCH_APP_CLIENT_SECRET missing"
+[boot app-bad-pem] exit=1 level=ERROR msg="dispatch: load app credentials" error="load app from env: DISPATCH_APP_PEM_B64: illegal base64 data at input byte 0"
+[boot app-bad-id] exit=1 level=ERROR msg="dispatch: load app credentials" error="load app from env: DISPATCH_APP_ID: strconv.ParseInt: parsing \"abc\": invalid syntax"
+[boot broker-without-token] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_AGENT_SECRETS_TOKEN_FILE or DISPATCH_AGENT_SECRETS_TOKEN is required when DISPATCH_AGENT_SECRETS_URL is set"
+[boot broker-token-file-missing] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_AGENT_SECRETS_TOKEN_FILE names /nonexistent/token, which could not be read: open /nonexistent/token: no such file or directory"
+[boot oidc-half] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_OIDC_AUDIENCE is required when DISPATCH_OIDC_ISSUER is set"
+[boot dev-signin-with-key] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process; unset DISPATCH_SIGNING_KEY"
+[boot dev-signin-remote-allowed] exit=1 level=ERROR msg="dispatch: resolve boot config" error="DISPATCH_DEV_SIGNIN=1 publishes to this machine's NATS only: unset ENVOY_ALLOW_REMOTE_NATS, or set DISPATCH_NATS_DISABLED=1"
+[boot dev-signin-origin-from-envoy-json] exit=1 level=ERROR msg="dispatch: dev sign-in" error="DISPATCH_DEV_SIGNIN=1 is for a loopback origin only: the dashboard origin \"https://from-envoy-json.example\" (DISPATCH_SERVER_URL, or dispatch.serverUrl in envoy.json) must name 127.0.0.1, [::1] or localhost"
+== subcommands
+[sub settings] exit=0
+    {
+      "settings": [
+        {
+          "name": "DATABASE_URL",
+          "file": null,
+          "default": null,
+          "required": "yes",
+          "description": "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks` and `rebuild-refs` read it too. A `pool_max_conns` parameter is refused."
+        },
+        {
+          "name": "DISPATCH_AGENT_TOKEN",
+          "file": null,
+          "default": null,
+          "required": "yes",
+          "description": "Shared bearer token an agent may authenticate with; personal tokens minted in Settings are the usual agent credential."
+        },
+        {
+          "name": "DISPATCH_IDENTITY",
+          "file": null,
+          "default": "`cookie`",
+          "required": "no",
+          "description": "How a browser request names its human: `cookie` (GitHub sign-in and a signed session cookie) or `header:<Header-Name>` (a trusted proxy's header)."
+        },
+        {
+          "name": "DISPATCH_ALLOWED_LOGINS",
+          "file": null,
+          "default": null,
+          "required": "when `DISPATCH_IDENTITY` is `cookie`",
+          "description": "Comma-separated GitHub logins Dispatch lets in, compared case-insensitively; both identity modes refuse any other login."
+        },
+        {
+          "name": "DISPATCH_IDENTITY_HEADER_TRUSTED",
+          "file": null,
+          "default": null,
+          "required": "when `DISPATCH_IDENTITY` is a header and `DISPATCH_APP_CLIENT_ID` is set",
+          "description": "Set to `1` to confirm the identity header comes from a trusted proxy while GitHub sign-in is configured too."
+        },
+        {
+          "name": "DISPATCH_LISTEN_HOST",
+          "file": null,
+          "default": "every interface",
+          "required": "no",
+          "description": "Host the server binds; an IPv6 host may be written with or without brackets."
+        },
+        {
+          "name": "DISPATCH_PORT",
+          "file": null,
+          "default": "`8766`",
+          "required": "no",
+          "description": "Port the server binds."
+        },
+        {
+          "name": "DISPATCH_SERVER_URL",
+          "file": null,
+          "default": "`dispatch.serverUrl` from `envoy.json`",
+          "required": "no",
+          "description": "The origin people open in a browser and the GitHub OAuth callback origin: an absolute http(s) URL with no path. Set, even empty, it overrides `envoy.json`."
+        },
+        {
+          "name": "NATS_URLS",
+          "file": null,
+          "default": "`natsUrls` from `envoy.json`",
+          "required": "no",
+          "description": "Comma-separated NATS server URLs. Set, even empty, it overrides `envoy.json`."
+        },
+        {
+          "name": "ENVOY_ALLOW_REMOTE_NATS",
+          "file": null,
+          "default": null,
+          "required": "no",
+          "description": "Set to `1` to let Dispatch reach a NATS server that is not on this machine; without it Dispatch refuses one, and every deployment sets it."
+        },
+        {
+          "name": "NATS_NKEY_SEED",
+          "file": "NATS_NKEY_SEED_FILE",
+          "default": null,
+          "required": "no",
+          "description": "Nkey seed of the NATS user Dispatch connects as; unset, it connects with no credential. A set but unusable seed refuses startup."
+        },
+        {
+          "name": "DISPATCH_NATS_DISABLED",
+          "file": null,
+          "default": null,
+          "required": "no",
+          "description": "Set to `1` to run without NATS: no event is published, and the agent conversation relay and webhook redelivery are off."
+        },
+        {
+          "name": "ENVOY_URL",
+          "file": null,
+          "default": "`http://127.0.0.1:9020`",
+          "required": "no",
+          "description": "Base URL of the Envoy listener Dispatch delivers mentions and messages through and reads live sessions from."
+        },
+        {
+          "name": "ENVOY_TOKEN",
+          "file": null,
+          "default": null,
+          "required": "no",
+          "description": "Bearer token Dispatch sends on every Envoy listener call; unset, it sends none."
+        },
+        {
+          "name": "DISPATCH_REPO_PROJECTS",
+          "file": null,
+          "default": null,
+          "required": "no",
+          "description": "Comma-separated `owner/repo=KEY` mappings seeded at startup; a mapping saved in the dashboard wins."
+        },
+        {
+          "name": "DISPATCH_DEFAULT_PROJECT",
+          "file": null,
+          "default": null,
+          "required": "no",
+          "description": "Project an external issue from an unmapped repository is created in; it must already exist."
+        },
+        {
+          "name": "DISPATCH_APP_CLIENT_ID",
+          "file": null,
+          "default": null,
+          "required": "no",
+          "description": "GitHub App OAuth client ID. Set, the App comes from the `DISPATCH_APP_*` variables instead of `~/.local/share/dispatch/app.json`."
+        },
+        {
+          "name": "DISPATCH_APP_CLIENT_SECRET",
+          "file": null,
+          "default": null,
+          "required": "when `DISPATCH_APP_CLIENT_ID` is set",
+          "description": "GitHub App OAuth client secret."
+        },
+        {
+          "name": "DISPATCH_APP_PEM_B64",
+          "file": null,
+          "default": null,
+          "required": "no",
+          "description": "Base64-encoded GitHub App private key, which signs every App call: the architecture import and webhook redelivery are off without one."
+        },
+        {
+          "name": "DISPATCH_APP_ID",
+          "file": null,
+          "default": null,
+          "required": "no",
+          "description": "The GitHub App's numeric ID."
+        },
+        {
+          "name": "DISPATCH_APP_SLUG",
+          "file": null,
+          "default": null,
+          "required": "no",
+          "description": "The GitHub App's slug."
+        },
+        {
+          "name": "DISPATCH_APP_NAME",
+          "file": null,
+          "default": null,
+          "required": "no",
+          "description": "The GitHub App's display name."
+        },
+        {
+          "name": "DISPATCH_GITHUB_API_BASE",
+          "file": null,
+          "default": "`https://api.github.com`",
+          "required": "no",
+          "description": "GitHub API origin the App calls; tests point it at a fake. `redeliver-webhooks` reads it too."
+        },
+        {
+          "name": "DISPATCH_SIGNING_KEY",
+          "file": null,
+          "default": "a key kept in `~/.local/share/dispatch/signing-key`, created on first start",
+          "required": "no",
+          "description": "HMAC key that signs session cookies; changing it signs everyone out."
+        },
+        {
+          "name": "DISPATCH_INSECURE_COOKIE",
+          "file": null,
+          "default": null,
+          "required": "no",
+          "description": "Any value drops the `Secure` attribute from Dispatch's cookies, for browsers that reach it over plain http."
+        },
+        {
+          "name": "DISPATCH_OIDC_ISSUER",
+          "file": null,
+          "default": null,
+          "required": "when `DISPATCH_OIDC_AUDIENCE` is set",
+          "description": "OIDC issuer whose projected service-account tokens authenticate as agents."
+        },
+        {
+          "name": "DISPATCH_OIDC_AUDIENCE",
+          "file": null,
+          "default": null,
+          "required": "when `DISPATCH_OIDC_ISSUER` is set",
+          "description": "Audience those service-account tokens must carry."
+        },
+        {
+          "name": "DISPATCH_AGENT_SECRETS_URL",
+          "file": null,
+          "default": null,
+          "required": "no",
+          "description": "Base URL of the secrets broker's API, an absolute http(s) URL with no path; set, the credential-request pages are on."
+        },
+        {
+          "name": "DISPATCH_AGENT_SECRETS_TOKEN",
+          "file": "DISPATCH_AGENT_SECRETS_TOKEN_FILE",
+          "default": null,
+          "required": "when `DISPATCH_AGENT_SECRETS_URL` is set",
+          "description": "Bearer token Dispatch sends the secrets broker."
+        },
+        {
+          "name": "DISPATCH_WEB_DIST",
+          "file": null,
+          "default": "the `packages/dispatch/web/dist` directory found from the binary's location",
+          "required": "no",
+          "description": "Directory of the built dashboard the server serves."
+        },
+        {
+          "name": "DISPATCH_DEV_SIGNIN",
+          "file": null,
+          "default": null,
+          "required": "no",
+          "description": "Set to `1` on a loopback-only local server to sign any allowed login in at `/auth/_dev/signin` without GitHub."
+        },
+        {
+          "name": "DISPATCH_TEST_HOOKS",
+          "file": null,
+          "default": null,
+          "required": "no",
+          "description": "Set to `1` to mount the end-to-end tests' hook routes; never in a real deployment."
+        }
+      ]
+    }
+[sub census] exit=0
+    census: fresh database, nothing to check
+    census: ok
+[sub census-no-url] exit=2
+    census: DATABASE_URL is required
+[sub rebuild-refs-origin-from-env] exit=0
+    rebuild-refs: documents=0 asks=0 comments=0 messages=0 orphans=0 edges=0
+[sub rebuild-refs-no-origin] exit=1
+    rebuild-refs: dispatch.server_url is required to recognise dashboard URLs; refusing to drop URL-form mentions
+[sub redeliver-remote] exit=1
+    redeliver-webhooks: connect NATS: bus: refusing a NATS server that is not this machine's: nats://nats.example:4222 (set ENVOY_ALLOW_REMOTE_NATS=1 to reach it)
+[sub redeliver-no-key] exit=1
+    redeliver-webhooks: no GitHub App private key (DISPATCH_APP_PEM_B64) to sign with
+== dev sign-in server, NATS off
+[serve dev-signin] healthz {"ok":true,"db":true,"nats":null,"commit":<c>,"schema_version":63}
+    GET /: SMOKE-DIST index
+    sign-in cookies: dsession=<v>; HttpOnly; Path=/; SameSite=Strict; Max-Age=2592000; Secure|
+    GET /api/v1/agents: 200
+    listener saw: GET /v1/sessions authorization=Bearer listener-token|
+    boot log: level=INFO msg="dispatch: no app credentials yet — dashboard will respond 503 until configured"|level=WARN msg="dispatch: dev sign-in mounted: any allowlisted login signs in at /auth/_dev/signin without GitHub; cookies are valid on this process only" origin=http://127.0.0.1:47361|level=INFO msg="dispatch: NATS publisher disabled"|level=INFO msg="dispatch: webhook redelivery off: it needs NATS and the GitHub App private key"|level=INFO msg="dispatch: listening" addr=127.0.0.1:47361|
+[serve dev-signin-insecure] healthz {"ok":true,"db":true,"nats":null,"commit":<c>,"schema_version":63}
+    sign-in cookies: dsession=<v>; HttpOnly; Path=/; SameSite=Strict; Max-Age=2592000|
+    boot log: level=INFO msg="dispatch: no app credentials yet — dashboard will respond 503 until configured"|level=WARN msg="dispatch: dev sign-in mounted: any allowlisted login signs in at /auth/_dev/signin without GitHub; cookies are valid on this process only" origin=http://127.0.0.1:47361|level=INFO msg="dispatch: NATS publisher disabled"|level=INFO msg="dispatch: webhook redelivery off: it needs NATS and the GitHub App private key"|level=INFO msg="dispatch: listening" addr=127.0.0.1:47361|
+== server on NATS with an App from the environment
+[serve nats-app] healthz {"ok":true,"db":true,"nats":true,"commit":<c>,"schema_version":63}
+    /auth/start redirect_uri: redirect_uri=http%3A%2F%2F127.0.0.1%3A47361%2Fauth%2Fcallback
+    /auth/start cookies: dispatch_oauth_state=<v>; Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax|
+    signing-key file: ls: cannot access '<scratch>/home-nats-app/.local/share/dispatch/signing-key': No such file or directory
+    boot log: level=INFO msg="dispatch: loaded github app" slug=smoke-app client_id=Iv1.smoke source=env|level=INFO msg="dispatch: webhook redelivery off: it needs NATS and the GitHub App private key"|level=INFO msg="dispatch: listening" addr=127.0.0.1:47361|
+[serve nats-app-insecure] healthz {"ok":true,"db":true,"nats":true,"commit":<c>,"schema_version":63}
+    /auth/start cookies: dispatch_oauth_state=<v>; Path=/; Max-Age=600; HttpOnly; SameSite=Lax|
+    signing-key file: <scratch>/home-nats-app-insecure/.local/share/dispatch/signing-key
+    boot log: level=INFO msg="dispatch: loaded github app" slug="" client_id=Iv1.smoke source=env|level=INFO msg="dispatch: webhook redelivery off: it needs NATS and the GitHub App private key"|level=INFO msg="dispatch: listening" addr=127.0.0.1:47361|
