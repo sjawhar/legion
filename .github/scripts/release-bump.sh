@@ -31,7 +31,14 @@ shift 2
 patch_paths=()
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do
   case $1 in
-    --patch-path) patch_paths+=("${2:?--patch-path needs a path}"); shift 2 ;;
+    --patch-path)
+      if [ $# -lt 2 ] || [ -z "$2" ] || [ "$2" = "--" ]; then
+        echo "release-bump.sh: --patch-path needs a path; $usage" >&2
+        exit 2
+      fi
+      patch_paths+=("$2")
+      shift 2
+      ;;
     *) echo "release-bump.sh: unknown argument '$1'; $usage" >&2; exit 2 ;;
   esac
 done
