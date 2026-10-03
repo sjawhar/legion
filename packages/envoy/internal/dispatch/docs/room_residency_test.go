@@ -29,11 +29,11 @@ import (
 // versions and peers come and go around it.
 //
 // Reads: the socket's admission check, `/text`, a version's capture (`POST /versions`) and a read
-// outside any transaction (docView) read a copy of the resident room taken under its lock
-// (snapshotDocument), never its live tree halfway through a write, which they would read as a tree
-// outside the schema - the socket closed with documentSchemaCloseCode, the read or the version
-// answered 409 with the repair. Under -race the direct walk of the live tree is also a data race
-// with the writer.
+// outside any transaction (docTree) read the resident room as of one moment under its lock - its
+// replica brought up to date (readLive) or a copy (snapshotDocument) - never its live tree halfway
+// through a write, which they would read as a tree outside the schema - the socket closed with
+// documentSchemaCloseCode, the read or the version answered 409 with the repair. Under -race the
+// direct walk of the live tree is also a data race with the writer.
 //
 // Writes: a peer joins and leaves over and over, so the room's last peer leaves while the writer
 // is inside its Server.Apply. The room must not be evicted under that write (roomIdleTimeout):
@@ -462,6 +462,42 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 		t.Errorf("the observer's last rendering = %q, want the room's %q", *content, want)
 	}
 	t.Logf("%d peer writes and %d projections", writes.Load(), projections.Load())
+}
+
+// A room's reads walk the replica its update observer keeps (readLive), and the replica goes with
+// the room: it holds a whole copy of the room's document, so a listing that outlived the room would
+// keep that copy for every room the server has ever evicted.
+func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	ctx := context.Background()
+	// A write the room's update observer sees, which makes its replica.
+	if err := service.ProjectMark(ctx, artifactID, "projection", MarkRecord{
+		Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
+	}, model.Actor{Kind: "user", ID: "bob"}); err != nil {
+		t.Fatal(err)
+	}
+	listed, ok := service.replicas.Load(artifactID)
+	if !ok {
+		t.Fatal("the written room lists no replica")
+	}
+	replica := listed.(*renderedReplica)
+	replica.mu.Lock()
+	held := replica.doc != nil
+	replica.mu.Unlock()
+	if !held {
+		t.Fatal("the written room's replica holds no copy")
+	}
+
+	if err := service.Evict(ctx, artifactID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 30*time.Second, "the evicted room's replica to go", func() bool {
+		runtime.GC()
+		_, listed := service.replicas.Load(artifactID)
+		return !listed
+	})
 }
 
 // lockedLog collects what every goroutine logs.
