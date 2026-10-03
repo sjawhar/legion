@@ -1,13 +1,13 @@
 import { expect, test } from "@playwright/test";
 
-import { setLiveSessions, shownAgentRows } from "./agents";
+import { shownAgentRows } from "./agents";
 import { getInbox } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 import { seedWorkspace } from "./workspace";
 
 test.beforeEach(async () => {
-  await Promise.all([resetDatabase(), setLiveSessions([])]);
+  await resetDatabase();
 });
 
 // Every surface a human alone acts on has to come up non-empty from this one seed: an empty

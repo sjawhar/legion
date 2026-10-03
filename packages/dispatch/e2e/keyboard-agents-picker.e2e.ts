@@ -7,7 +7,6 @@ import {
   plannerSession,
   refusePosts,
   seedAgents,
-  setLiveSessions,
   shownAgentRows,
 } from "./agents";
 import { createAgentMessage, createMessage, patchIssue } from "./api";
@@ -26,9 +25,6 @@ import { asUser } from "./users";
 
 test.beforeEach(async () => {
   await resetDatabase();
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([]);
-  }
 });
 
 /** The send the rows below make, and the path of the one `POST` it produces. A comment and a

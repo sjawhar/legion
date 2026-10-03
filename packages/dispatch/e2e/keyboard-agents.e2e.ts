@@ -8,7 +8,6 @@ import {
   plannerSession,
   refusePosts,
   seedAgents,
-  setLiveSessions,
   shownAgentRows,
 } from "./agents";
 import { createMessage } from "./api";
@@ -28,9 +27,6 @@ async function nextTask(page: Page): Promise<void> {
 
 test.beforeEach(async () => {
   await resetDatabase();
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([]);
-  }
 });
 test.describe("agents page", () => {
   test("j/k rove the agent rows, Enter opens the composer, i the issue picker, x selects and Shift+P pins", async ({

@@ -42,9 +42,11 @@ import type {
   UserIssueState,
   Version,
 } from "../web/src/api/types";
-import { dispatchPort } from "./harness-ports";
+import { harnessPorts } from "./harness-ports";
 
-const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${dispatchPort}`;
+export const baseUrl =
+  process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${harnessPorts.dispatch.port}`;
+const dashboardOrigin = new URL(baseUrl).origin;
 // A deployed server has its own agent token; the local harness pins `e2e-token` in
 // e2e/run-server.sh, so an E2E_AGENT_TOKEN left in the shell from a deployed run would only
 // make every bearer-seeded call 401 against it.
@@ -59,6 +61,64 @@ interface ApiOptions {
   login?: string;
   /** The bearer an `as: "agent"` call sends; the shared `e2eAgentToken` when absent. */
   token?: string;
+}
+
+/** The name of the session cookie the server issues at sign-in, dev or GitHub. */
+export const sessionCookieName = "dsession";
+
+/** The server's dev sign-in route for `login`, relative to the dashboard origin; it answers a
+ *  sign-in with a 302 that sets the session cookie. */
+export function devSignInPath(login: string): string {
+  return `/auth/_dev/signin?login=${encodeURIComponent(login)}`;
+}
+
+export function devSignInError(login: string, status: number, responseText: string): Error {
+  return new Error(`dev sign-in as ${login} failed: ${status} ${responseText}`);
+}
+
+const sessionCookies = new Map<string, Promise<string>>();
+
+/** The session cookie the server issues `login` at its dev sign-in route, minted once per
+ *  spelling of a login and kept until something revokes it: the generation the cookie names lives
+ *  in `user_sessions`, which `resetDatabase` truncates (it calls `forgetSessions`), and a browser
+ *  context's Sign out as the same login advances it. A sign-in that fails, by its answer or by
+ *  the request itself, is not kept, so the next call asks again. */
+function sessionCookie(login: string): Promise<string> {
+  const cached = sessionCookies.get(login);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const cookie = fetch(new URL(devSignInPath(login), baseUrl), { redirect: "manual" }).then(
+    async (response) => {
+      const value = response.headers
+        .getSetCookie()
+        .find((header) => header.startsWith(`${sessionCookieName}=`))
+        ?.split(";")[0];
+      if (response.status !== 302 || value === undefined) {
+        throw devSignInError(login, response.status, await response.text());
+      }
+      return value;
+    }
+  );
+  sessionCookies.set(login, cookie);
+  cookie.catch(() => {
+    if (sessionCookies.get(login) === cookie) {
+      sessionCookies.delete(login);
+    }
+  });
+  return cookie;
+}
+
+/** Forgets every cached session cookie; `resetDatabase` calls it after truncating `user_sessions`. */
+export function forgetSessions(): void {
+  sessionCookies.clear();
+}
+
+/** Headers that make a plain fetch act as `login`: the session cookie, and the dashboard origin
+ *  the server requires on every cookie-authenticated write (enforceCookieOrigin admits a write
+ *  whose `Origin` is the dashboard's). */
+export async function userHeaders(login = "alice"): Promise<Record<string, string>> {
+  return { Cookie: await sessionCookie(login), Origin: dashboardOrigin };
 }
 
 async function request<T>(
@@ -79,7 +139,7 @@ async function request<T>(
   if (as === "agent") {
     headers.Authorization = `Bearer ${options.token ?? e2eAgentToken}`;
   } else {
-    headers["X-Dispatch-User"] = options.login ?? "alice";
+    Object.assign(headers, await userHeaders(options.login));
   }
 
   const response = await fetch(new URL(path, baseUrl), {

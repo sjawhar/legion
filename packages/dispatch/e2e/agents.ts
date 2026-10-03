@@ -2,7 +2,7 @@ import { expect, type Locator, type Page } from "@playwright/test";
 
 import type { CreateBroadcastInput } from "../web/src/api/types";
 import { createAsk, createComment, createIssue, createProject } from "./api";
-import { fakeEnvoyPort } from "./harness-ports";
+import { harnessPorts } from "./harness-ports";
 
 export interface FakeSession {
   session_id: string;
@@ -16,15 +16,14 @@ export interface FakeSession {
   topics?: string[];
 }
 
+/** A request to the harness's fake Envoy. Playwright starts this listener for local and deployed
+ *  runs, so fixture state reaches whichever Dispatch server the suite targets. */
 async function fixtureRequest(
   path: string,
   method: "GET" | "PATCH" | "PUT",
   body?: object
 ): Promise<Response> {
-  if (process.env.PLAYWRIGHT_BASE_URL) {
-    throw new Error("live Envoy fixtures are unavailable with PLAYWRIGHT_BASE_URL");
-  }
-  const response = await fetch(`http://127.0.0.1:${fakeEnvoyPort}${path}`, {
+  const response = await fetch(`http://127.0.0.1:${harnessPorts.fakeEnvoy.port}${path}`, {
     body: body === undefined ? undefined : JSON.stringify(body),
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     method,
@@ -33,6 +32,11 @@ async function fixtureRequest(
     throw new Error(`${method} ${path} failed: ${response.status} ${await response.text()}`);
   }
   return response;
+}
+
+/** Clears all mutable fake Envoy state between e2e rows. */
+export async function resetFakeEnvoy(): Promise<void> {
+  await fixtureRequest("/__fixture/reset", "PUT");
 }
 
 export async function setLiveSessions(rows: FakeSession[]): Promise<void> {
@@ -96,32 +100,13 @@ export interface FakeInterest {
 }
 
 export async function setInterests(rows: FakeInterest[]): Promise<void> {
-  if (process.env.PLAYWRIGHT_BASE_URL) {
-    throw new Error("live Envoy fixtures are unavailable with PLAYWRIGHT_BASE_URL");
-  }
-
-  const response = await fetch(`http://127.0.0.1:${fakeEnvoyPort}/__fixture/interests`, {
-    body: JSON.stringify(rows),
-    headers: { "Content-Type": "application/json" },
-    method: "PUT",
-  });
-  if (!response.ok) {
-    throw new Error(`setting interests failed: ${response.status} ${await response.text()}`);
-  }
+  await fixtureRequest("/__fixture/interests", "PUT", rows);
 }
 
 export async function getUnsubscribeCalls(): Promise<{ session_id: string; topics: string[] }[]> {
-  if (process.env.PLAYWRIGHT_BASE_URL) {
-    throw new Error("live Envoy fixtures are unavailable with PLAYWRIGHT_BASE_URL");
-  }
-
-  const response = await fetch(`http://127.0.0.1:${fakeEnvoyPort}/__fixture/unsubscribe-calls`);
-  if (!response.ok) {
-    throw new Error(
-      `reading unsubscribe calls failed: ${response.status} ${await response.text()}`
-    );
-  }
-  return (await response.json()) as { session_id: string; topics: string[] }[];
+  return (await fixtureRequest("/__fixture/unsubscribe-calls", "GET")).json() as Promise<
+    { session_id: string; topics: string[] }[]
+  >;
 }
 
 // The Agents page's keyboard rows, in `keyboard-agents.e2e.ts`, `keyboard-palette.e2e.ts` and the

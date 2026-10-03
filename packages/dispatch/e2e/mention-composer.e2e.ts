@@ -96,7 +96,7 @@ async function sendBesideReply(page: Page, issueKey: string, parent: string): Pr
 }
 
 test.beforeEach(async () => {
-  await Promise.all([resetDatabase(), setLiveSessions([])]);
+  await resetDatabase();
 });
 
 test("E1 and E2: explicit role mentions deliver once while /btw without a mention stays a plain comment", async ({
