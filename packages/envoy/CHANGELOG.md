@@ -64,6 +64,11 @@
 
 ### Changed
 
+- A blank approval-request `summary` is refused (`400 SUMMARY_INPUT`) with text that asks for what
+  the human is approving, rather than for what the version proposes that the human has not agreed
+  to, and the advice in `409 APPROVAL_WAITS_ON_HUMAN` and in an approval ask's `409 ASK_KIND_FIXED`
+  says to hand the request back only once the human has agreed to every point in the document
+  (LEGION-475).
 - A Dispatch approval request follows its document's versions instead of being retracted and
   reopened on every edit (LEGION-470). A version write moves the open request to the new version
   (`ask.edited`), keeping its thread and summary, and leaves it Waiting on agents until its agent
