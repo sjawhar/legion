@@ -7,8 +7,9 @@
 -- grants only, the rows that update reads.
 --
 -- requests_record: a credential-request record finds its request by record_id, when an approver
--- decides it (requests.Machine.ApplyDecision's `for update`) and when it is read with no terminal
--- event (requests.Machine.ReadRecord), so each of those scanned all of requests.
+-- decides it (requests.Machine.ApplyDecision's `for update`) and whenever an agent_secret record
+-- is read (requests.Machine.ReadRecord, which takes its state from its request), so each of those
+-- scanned all of requests.
 --
 -- Plain create index, which holds off writes to each table while it builds: the runner applies
 -- every migration in one transaction, where CONCURRENTLY is refused, and both tables are small

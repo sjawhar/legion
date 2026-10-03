@@ -53,7 +53,11 @@ harness as `127.0.0.1:<port>`, never `localhost`: under that flag the router
 refuses any other `Host`. The server process has no caller Home or XDG
 directory and receives no inherited `DISPATCH_*`, `ENVOY_*` or `NATS_*`
 variable, so neither a shell setting nor `~/.config/opencode/envoy.json` /
-`~/.local/share/dispatch` can redirect it.
+`~/.local/share/dispatch` can redirect it. The one way in from outside is the
+broker switch below: a URL in `DISPATCH_E2E_AGENT_SECRETS_URL`, with its bearer
+in `DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE`, points the server's credential
+requests at a broker the caller runs, as the secrets broker's docs rig
+(`docs/site/media/broker/rig.sh`) does.
 
 `DATABASE_URL` is required and must name an isolated loopback database:
 `e2e/seed.ts` truncates it before every scenario and never selects a shared

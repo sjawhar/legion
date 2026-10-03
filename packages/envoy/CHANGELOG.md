@@ -69,9 +69,11 @@
   on every tab, while the session's older reply to another message, or one newer than the page
   shows, still counts. An id may take any form `uuid.Parse` reads; one it cannot read, or one that
   is not a message that session wrote, is `400 INVALID_STATE`. A request naming only replies
-  already read, or replies the session's read mark has passed, changes nothing and appends no
-  `user_agent_state.updated` event, and a `read_through` deletes the viewer's rows for that
-  session whose replies it reaches (LEGION-485).
+  already read by id, or replies the session's read mark has passed, changes nothing and appends
+  no `user_agent_state.updated` event. A reply the viewer's Clear hides but the read mark has not
+  passed is neither, though the count leaves it out: a Clear can move back, so the first request
+  naming that reply writes its row and appends the event. A `read_through` deletes the viewer's
+  rows for that session whose replies it reaches (LEGION-485).
 
 ### Changed
 
@@ -192,15 +194,34 @@
   or Claude Code plugin built from the same executor) keeps that URL from being sent at all,
   because its `dispatch_search` refuses the same rules before any request.
 
-- A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version and its reads answer `500 DOC_SCHEMA`, and once its room's last peer leaves, every later load of the room refuses it, so the document websocket, edits and uploads refuse the document until it is repaired (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
+- A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A listener whose session cache had not yet seen a role holder another listener registered a moment ago released the holder's fresh claim as lapsed: a lookup (`GET /v1/roles/<role>`, a role publish) or a role delivery read the claim from the role bucket and the holder from a cache that trails the session bucket, so during a rolling deploy the old task could delete the claim the replacement had just accepted, and the role reached nobody until its holder claimed it again. A soft claim could take such a holder's role, and the role reaper end its claim, the same way. Each now reads the holder from the session bucket itself before it takes anything from it (LEGION-456).
 - One MiB of `>` formed 1,048,576 nested quotes inside the document cap and eventually ended the process in a stack overflow while its tree was validated. Dispatch now refuses the document before building that tree (LEGION-465).
 - Reading a textblock's inline markdown took one stack frame per nested mark, so the stack and memory it needed grew with the nesting the caller wrote: one 1 MiB upload of 262,140 nested strong marks read with no error but peaked at about 0.9 GB of memory. The inline bound above is checked before any walk of those marks that recurses, and goldmark's own walk through a link's label, which enters every image the label holds, meets each image held to the bound as it is made (LEGION-465).
 - A table whose rows hold an escaped pipe in a code span parsed in time quadratic in its size: goldmark's table transformer checked every code span's text against every escaped pipe in the document, and 1 MiB of such rows took over two minutes. Dispatch takes the backslash out of those pipes itself, in one pass, and 1 MiB parses in about two seconds (LEGION-465).
 - Marking or unmarking a document's text, and checking whether a concurrent change removed the text a write inserted, walked the live tree one stack frame per level with no bound, where an authenticated peer can grow the tree through any number of small websocket updates. Each now refuses a node more than 1,000 levels deep, text included, as the document's reads do, and a peer's update that deepens the tree between a write's read and its transaction is answered `500 DOC_SCHEMA` rather than `500 INTERNAL` (LEGION-465).
 - Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.49.6-sami.3` (commit `7cf8e9ff`), which walks the deleted children iteratively and carries the transactional GC fix; the change is open upstream (LEGION-465).
 
+- A document write whose issue closed, or whose server shut down with an editor connected, while
+  the committed write was being applied to its room no longer hangs. Closing the room retired its
+  persistence worker under the write, and ygo's fallback append, run on the write's own goroutine,
+  waited for the write to finish first: the request that made it got no answer, every later write
+  to the document waited on its writer slot, and the document's later rooms stopped persisting.
+  The room's own update observer now releases the write before that append runs (LEGION-469).
+- A write to a document in which a peer had deleted a chain of 200,000 nested blocks, or one whose
+  lower-numbered client had written 100,000 items after one ygo could not yet place, failed
+  with `fork live document: crdt: invalid update`, and so did every read of such a resident room
+  once reads went through a copy. Once its room was evicted or the server restarted, the
+  lower-numbered client's document could not be read or opened at all. Every decode of a
+  document's state, each copy of its room and its stored history alike, used ygo's default queue
+  of 100,000 items parked behind one whose parent it cannot place yet, which such a state
+  overruns; each, and the room's own load, now decodes with a queue as long as one update can
+  carry. The store's check of each update it appends decoded the update alone at the same
+  default, so a browser update of more than 100,000 items written against blocks the document
+  already held failed the room and lost the edit; that check now takes the same queue
+  (LEGION-469).
 - Document settlement no longer undoes an edit a browser or an agent makes while it settles
   (LEGION-479). Settlement wrote its repairs (the block ids it stamps, an ask block's server-owned
   attributes it restores) as the tree it had read before its database work, so an edit made in

@@ -1737,8 +1737,8 @@ func TestGithubPayloadFields(t *testing.T) {
 	longBodyWithFooter := strings.Repeat("a", 3000) + `<!-- legion:{"session":"worker-1"} -->`
 	// A real subject line from this repository, well past the 70-rune push summary, which
 	// head_subject must carry whole.
-	realLongSubject := "fix(daemon-go, envoy, contracts): a dotted repository name is one subject segment" +
-		" and one key segment, and intake applies only its configured repositories (LEGION-208 4b) (#1421)"
+	realLongSubject := "fix(agent-secrets): keep the session identity in the exec child, wait for enrollment," +
+		" and stop login-status reporting a refused credential (AGENTC-393) (#1589)"
 	tests := []struct {
 		name        string
 		event       string

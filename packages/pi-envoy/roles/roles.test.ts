@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { describePhaseHandoffWriteProblems, PLAN_REVIEW_MAX_ROUNDS } from "@legion/contracts";
 
 const rolesDir = import.meta.dir;
 const phaseRoles = ["planner", "implementer", "tester", "reviewer", "merger"] as const;
@@ -24,7 +23,7 @@ const headlessOnly = [
   "spawn_worker",
   "legion-worker",
   // A task subagent the interactive fragment starts dispatches none of its own. The needle is the
-  // boot gate's own form (packages/daemon-go/internal/promptrefs/promptrefs.go), so a dispatch that
+  // boot gate's own form (packages/daemon/internal/promptrefs/promptrefs.go), so a dispatch that
   // carries other arguments is caught too.
   'agent="',
 ];
@@ -154,10 +153,11 @@ const rolePromptFiles = readdirSync(rolesDir, { recursive: true, encoding: "utf8
 );
 
 describe("the planner's plan checks", () => {
-  // The form the boot gate resolves (packages/daemon-go/internal/promptrefs: `agent="<name>"`),
+  // The form the boot gate resolves (packages/daemon/internal/promptrefs: `agent="<name>"`),
   // whatever else a dispatch's parentheses carry. What each shipped agent declares is
   // shipped-agents.test.ts's; the composed planner's dispatch order is
-  // packages/daemon-go/internal/prompts/prompts_test.go's.
+  // packages/daemon/internal/prompts/prompts_test.go's; that `legion handoff write` accepts every
+  // check shape planner.md shows is packages/daemon/cmd/legion/handoff_test.go's.
   test("every task agent a role prompt dispatches is shipped in agents/", () => {
     const dispatchers = new Map<string, string[]>();
     for (const file of rolePromptFiles)
@@ -171,39 +171,5 @@ describe("the planner's plan checks", () => {
         existsSync(path.join(agentsDir, `${agent}.md`)),
         `${agent}, dispatched by ${files}`
       ).toBe(true);
-  });
-
-  // A planner that records the checks as its handoff instructions show them is not refused.
-  test("every plan-check shape the handoff instructions show is one the plan write accepts", () => {
-    const residue = read("planner.md");
-    const shapes = (field: string) => {
-      const line = residue.split("\n").find((text) => text.startsWith(`- \`${field}\`:`));
-      if (!line) throw new Error(`planner.md shows no ${field}`);
-      return [...line.matchAll(/`(\{.*?\})`(?=[ ,;.]|$)/g)].map(
-        (match) =>
-          JSON.parse(match[1].replaceAll("…", "x").replaceAll(": N", ": 1")) as Record<
-            string,
-            unknown
-          >
-      );
-    };
-    const gapAnalyses = shapes("gapAnalysis");
-    const planReviews = shapes("planReview");
-    expect(gapAnalyses).toHaveLength(2);
-    expect(planReviews.map((review) => review.verdict)).toEqual(["approved", "rejected", "failed"]);
-    expect(planReviews[1]).toMatchObject({ rounds: PLAN_REVIEW_MAX_ROUNDS });
-    const requiredSkills = { implement: ["none: x"], test: ["none: x"], review: ["none: x"] };
-    for (const gapAnalysis of gapAnalyses)
-      for (const planReview of planReviews) {
-        const handoff = {
-          schemaVersion: 1,
-          phase: "plan",
-          completed: "2026-09-30T00:00:00.000Z",
-          requiredSkills,
-          gapAnalysis,
-          planReview,
-        };
-        expect(describePhaseHandoffWriteProblems(handoff), JSON.stringify(handoff)).toEqual([]);
-      }
   });
 });

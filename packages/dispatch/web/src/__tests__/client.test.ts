@@ -309,8 +309,8 @@ test("isUnauthorized distinguishes a 401 from a transient 5xx failure", async ()
 });
 
 test(
-  "isRetryableQueryError exempts auth outcomes (401, 403) and a credential-feature-off 404, " +
-    "but retries a transient 5xx",
+  "isRetryableQueryError exempts auth outcomes (401, 403), a credential-feature-off 404 and a " +
+    "document outside the schema, but retries a transient 5xx",
   async () => {
     const unauthorized = createApiClient(
       stubFetch(() => new Response(null, { status: 401 })).fetch
@@ -325,20 +325,39 @@ test(
         Response.json({ error: "not configured", code: "FEATURE_OFF" }, { status: 404 })
       ).fetch
     );
+    const documentSchema = createApiClient(
+      stubFetch(() =>
+        Response.json(
+          {
+            error:
+              "document is outside the Proof schema; replace the document from markdown to repair it",
+            code: "DOC_SCHEMA",
+          },
+          { status: 409 }
+        )
+      ).fetch
+    );
     const serverError = createApiClient(stubFetch(() => new Response(null, { status: 503 })).fetch);
 
-    const [unauthorizedError, forbiddenError, featureOffError, serverErrorResult] =
-      await Promise.all([
-        unauthorized.whoAmI().catch((error: unknown) => error),
-        forbidden.whoAmI().catch((error: unknown) => error),
-        featureOff.getCredentialRecord("record-1").catch((error: unknown) => error),
-        serverError.whoAmI().catch((error: unknown) => error),
-      ]);
+    const [
+      unauthorizedError,
+      forbiddenError,
+      featureOffError,
+      documentSchemaError,
+      serverErrorResult,
+    ] = await Promise.all([
+      unauthorized.whoAmI().catch((error: unknown) => error),
+      forbidden.whoAmI().catch((error: unknown) => error),
+      featureOff.getCredentialRecord("record-1").catch((error: unknown) => error),
+      documentSchema.getArtifactText("artifact-1").catch((error: unknown) => error),
+      serverError.whoAmI().catch((error: unknown) => error),
+    ]);
 
     expect(isRetryableQueryError(unauthorizedError)).toBe(false);
     expect(isRetryableQueryError(forbiddenError)).toBe(false);
     expect(isCredentialFeatureOff(featureOffError)).toBe(true);
     expect(isRetryableQueryError(featureOffError)).toBe(false);
+    expect(isRetryableQueryError(documentSchemaError)).toBe(false);
     expect(isRetryableQueryError(serverErrorResult)).toBe(true);
   }
 );
