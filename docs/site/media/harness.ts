@@ -227,14 +227,21 @@ export interface ViewerOptions {
 
 const DESKTOP = { width: 1440, height: 900 };
 
-/** A browser context signed in as `VIEWER` at the harness server's dev sign-in route. The cookie
- *  names a session the next `reset()` revokes, so open a context after the reset. */
+/** A browser context signed in as `VIEWER` with the session cookie the server's dev sign-in route
+ *  mints, the one the e2e API client (`userHeaders`) signs in with. Playwright's own request client
+ *  (`e2e/users.ts`'s `signIn`) is not used: under Bun 1.3 its Set-Cookie parser is handed the
+ *  route's path as the response URL, throws, and the sign-in never settles. The cookie names a
+ *  session the next `reset()` revokes, so open a context after the reset. */
 export async function newViewerContext(
   browser: Browser,
   baseURL: string,
   options: ViewerOptions
 ): Promise<BrowserContext> {
-  const { signIn } = await import("../../../packages/dispatch/e2e/users");
+  const { sessionCookieName, userHeaders } = await dispatchApi();
+  const cookie = (await userHeaders(VIEWER)).Cookie;
+  if (!cookie.startsWith(`${sessionCookieName}=`)) {
+    throw new Error(`the dev sign-in answered an unexpected cookie: ${cookie.split("=")[0]}`);
+  }
   const { defaultBrowserType: _engine, ...iphone } = devices["iPhone 13"];
   const device =
     options.viewport === "phone"
@@ -250,7 +257,9 @@ export async function newViewerContext(
     reducedMotion: "reduce",
     ...(options.recordVideo === undefined ? {} : { recordVideo: options.recordVideo }),
   });
-  await signIn(context, VIEWER);
+  await context.addCookies([
+    { name: sessionCookieName, url: baseURL, value: cookie.slice(sessionCookieName.length + 1) },
+  ]);
   return context;
 }
 
