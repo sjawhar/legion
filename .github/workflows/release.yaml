@@ -84,13 +84,17 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=$1&status=success&per_page=1" \
               --jq '.workflow_runs[] | "\(.created_at) \(.head_sha)"'
           }
-          sha=$({ newest push; newest workflow_dispatch; } | sort -r | awk 'NR == 1 { print $2 }')
+          # Each query is its own assignment, so the step's `set -e` stops on gh's own error rather
+          # than awk reading an error body as a commit.
+          push=$(newest push)
+          dispatch=$(newest workflow_dispatch)
+          sha=$(printf '%s\n' "$push" "$dispatch" | sort -r | awk 'NR == 1 { print $2 }')
           if [ -z "$sha" ]; then
             echo "::error::No successful push or workflow_dispatch run of this workflow on main to compare against; run it once with workflow_dispatch on main"
             exit 1
           fi
           if ! git merge-base --is-ancestor "$sha" HEAD; then
-            echo "::error::$sha, the commit the last successful run checked out, is not in the history of $GITHUB_SHA"
+            echo "::error::$sha, the commit the last successful run checked out, is not in the history of $GITHUB_SHA; run it once with workflow_dispatch on main"
             exit 1
           fi
           echo "Changes since $sha"
