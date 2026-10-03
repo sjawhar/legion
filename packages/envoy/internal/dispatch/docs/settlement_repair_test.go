@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/reearth/ygo/crdt"
+	ygws "github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -168,6 +170,75 @@ func latestVersionAuthors(t *testing.T, service *Service, artifactID string) []m
 		t.Fatalf("decode the latest document version's authors: %v", err)
 	}
 	return authors
+}
+
+// A repairing settlement's version can hold a browser's edit whose own update the room stores
+// only after the settlement commits, since the settlement holds the document's lock until then.
+// When that append fails, the room fails and reloads from the store without the edit's text, which
+// the version already holds; the settlement's own stored update carries the document's delete set,
+// the edit's deletions included. The browser resends what the room lacks when it reconnects, and
+// the document's next settlement finds the document matching that version and writes no other
+// (LEGION-479).
+func TestSettlementVersionAheadOfAFailedAppendIsMetByTheBrowsersResend(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	store := &failingBrowserAppendStore{
+		VersionedStore: NewPgVersioned(database),
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	service := New(Deps{Store: database, Persistence: store, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
+	service.settleRoom(artifactID, 0)
+	answer := answerBlockAsk(t, service, artifactID)
+
+	var browser *crdt.Doc
+	service.afterSettleReconcile = func(room string) {
+		if room == artifactID && browser == nil {
+			store.failing.Store(true)
+			browser = editAsPeer(t, service, artifactID, replaceRun("Context before.", "Context after."))
+		}
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if browser == nil {
+		t.Fatal("settlement never reached the window between its read and its repair")
+	}
+	want := ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"" +
+		answer.At.Format(time.RFC3339Nano) + "\" selected=\"[]\"}\nShip it?\n:::\n\nContext after.\n"
+	requireLatestVersionMarkdown(t, service, artifactID, want)
+	versioned := latestVersionNumber(t, service, artifactID)
+
+	// The edit's append fails, which fails the room; it reloads without the edit's text.
+	<-store.entered
+	close(store.release)
+	waitForRoomFailure(t, service, artifactID)
+	ctx := context.Background()
+	if err := service.awaitRoomRecovery(ctx, artifactID); err != nil {
+		t.Fatalf("wait for the room to recover: %v", err)
+	}
+	store.failing.Store(false)
+	service.afterSettleReconcile = nil
+	if reloaded, err := service.Text(ctx, artifactID); err != nil || strings.Contains(reloaded, "Context after.") {
+		t.Fatalf("reloaded document = %q (%v), want it without the edit whose append failed", reloaded, err)
+	}
+
+	// The browser reconnects and sends what the room lacks, as its sync does.
+	var resendErr error
+	if err := service.srv.Apply(ctx, artifactID, func(room *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		resendErr = crdt.ApplyUpdateV1(room, crdt.EncodeStateAsUpdateV1(browser, room.StateVector()), "peer")
+	}); err != nil && !errors.Is(err, ygws.ErrNoChanges) {
+		t.Fatalf("load the room for the browser's resend: %v", err)
+	}
+	if resendErr != nil {
+		t.Fatalf("resend the browser's edit: %v", resendErr)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	waitForDocumentText(t, service, artifactID, want)
+	waitForPersistedProofText(t, service.store, artifactID, want)
+	if latest := latestVersionNumber(t, service, artifactID); latest != versioned {
+		t.Fatalf("latest version = %d, want %d, which already held the resent edit", latest, versioned)
+	}
 }
 
 // requireLatestVersionMarkdown requires the document's latest version to hold want.
@@ -575,8 +646,9 @@ func requireNoSuppressedSlots(t *testing.T, service *Service, room, when string)
 }
 
 // editAsPeer writes a tree change as a browser's edit reaches the room: made in a document of its
-// own, with a client id of its own, synced from the room and applied to it as a peer's update.
-func editAsPeer(t *testing.T, service *Service, artifactID string, edit func(*pmdoc.Node) *pmdoc.Node) {
+// own, with a client id of its own, synced from the room and applied to it as a peer's update. It
+// returns that browser's document.
+func editAsPeer(t *testing.T, service *Service, artifactID string, edit func(*pmdoc.Node) *pmdoc.Node) *crdt.Doc {
 	t.Helper()
 	room := service.srv.GetDoc(artifactID)
 	if room == nil {
@@ -600,4 +672,5 @@ func editAsPeer(t *testing.T, service *Service, artifactID string, edit func(*pm
 	if err := crdt.ApplyUpdateV1(room, crdt.EncodeStateAsUpdateV1(peer, synced), "peer"); err != nil {
 		t.Fatalf("apply the peer's edit to the room: %v", err)
 	}
+	return peer
 }

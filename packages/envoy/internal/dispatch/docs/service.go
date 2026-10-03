@@ -1072,7 +1072,12 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		retry(err)
 		return
 	}
-	tree, err := treeOf(doc)
+	// The settlement reads the document three times, and each read has its own name: read is this
+	// one, before the database work; reconciled is the tree the ask blocks are reconciled on, the
+	// stamp's when it stamped ids; versioned is the one the version is rendered from, read again
+	// after the repairs when the settlement wrote any. A browser's edit made in between is in a
+	// later one and not an earlier one.
+	read, err := treeOf(doc)
 	if err != nil {
 		if errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
@@ -1089,7 +1094,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// otherwise would sit past every later version's cursor, since no version follows it to move
 	// the cursor, and the first settlement after a renderer change would version a document
 	// nobody had touched.
-	beforeMarkdown, beforeRenderErr := renderTree(tree)
+	beforeMarkdown, beforeRenderErr := renderTree(read)
 	if s.afterSettleRead != nil {
 		s.afterSettleRead(room)
 	}
@@ -1121,11 +1126,12 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		}
 		retry(err)
 	}
-	if pmdoc.BlockIDRepairCount(tree) > 0 {
+	reconciled := read
+	if pmdoc.BlockIDRepairCount(read) > 0 {
 		slot, update, err := s.applySuppressed(ctx, room, doc, func(doc *crdt.Doc, origin any) (bool, error) {
 			var minted int
 			var stampErr error
-			tree, minted, stampErr = stampBlockIDs(doc, origin)
+			reconciled, minted, stampErr = stampBlockIDs(doc, origin)
 			return minted > 0, stampErr
 		})
 		keep(slot, update)
@@ -1167,7 +1173,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			abandon(fmt.Errorf("broadcast superseded document identity update: %w", err))
 			return
 		}
-		identityChanged := closureChangedMarkdown(beforeMarkdown, beforeRenderErr, tree)
+		identityChanged := closureChangedMarkdown(beforeMarkdown, beforeRenderErr, reconciled)
 		if _, err := s.persistence.AppendUpdateTx(ctx, tx, room, identityUpdate, identityChanged); err != nil {
 			abandon(err)
 			return
@@ -1181,7 +1187,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 	pending, authors, eventActor := settlementAuthors(state)
 	state.mu.Unlock()
-	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, tree, eventActor)
+	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, reconciled, eventActor)
 	if err != nil {
 		abandon(err)
 		return
@@ -1200,9 +1206,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		}
 	}
 
-	var update []byte
+	versioned := reconciled
 	if len(slots) > 0 {
-		update, err = mergeUpdates(updates)
+		update, err := mergeUpdates(updates)
 		if err != nil {
 			abandon(err)
 			return
@@ -1211,13 +1217,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			abandon(fmt.Errorf("broadcast document closure update: %w", err))
 			return
 		}
-		closureChanged := closureChangedMarkdown(beforeMarkdown, beforeRenderErr, tree)
+		closureChanged := closureChangedMarkdown(beforeMarkdown, beforeRenderErr, reconciled)
 		if _, err := s.persistence.AppendUpdateTx(ctx, tx, room, update, closureChanged); err != nil {
 			abandon(err)
 			return
 		}
-	}
-	if len(slots) > 0 {
 		snapshotCursor, err = currentUpdateCursor(ctx, tx, room)
 		if err != nil {
 			abandon(err)
@@ -1227,13 +1231,13 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		// tree settlement reconciled before them: a peer's edit made since is in the room, its
 		// browsers and its stored updates, and a version rendered from the earlier tree would leave
 		// it out (LEGION-479).
-		tree, err = lockedTreeOf(doc)
+		versioned, err = lockedTreeOf(doc)
 		if err != nil {
 			abandon(err)
 			return
 		}
 	}
-	markdown, err := renderTree(tree)
+	markdown, err := renderTree(versioned)
 	if err != nil {
 		if len(slots) == 0 && errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
@@ -1248,6 +1252,8 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// since its read: the room and its peers hold those updates, and dropped here they would never
 	// reach the store. Its version is the document as it stood after the repairs, the move
 	// included; the move's own update is appended once this transaction releases the room lock.
+	// Should that append fail, the room fails and reloads without the move's text, which the
+	// version holds, until the browser that made it resends it on reconnecting.
 	if s.stopping.Load() || state.closed || state.failed != nil || (state.gen != generation && len(slots) == 0) {
 		state.mu.Unlock()
 		s.discardSuppressedPersistence(room, slots...)
@@ -1306,7 +1312,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		return
 	}
 	if versioning {
-		result, writeErr := s.writeVersionTx(ctx, tx, room, markdown, tree, eventActor, &versionWrite{
+		result, writeErr := s.writeVersionTx(ctx, tx, room, markdown, versioned, eventActor, &versionWrite{
 			authors:          authors,
 			docUpdateVersion: &snapshotCursor,
 		})
@@ -1360,7 +1366,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	for _, event := range published {
 		s.events.Publish(event)
 	}
-	s.sweepUnrecordedMarks(room, tree)
+	s.sweepUnrecordedMarks(room, versioned)
 }
 
 func currentUpdateCursor(ctx context.Context, tx pgx.Tx, artifactID string) (int64, error) {

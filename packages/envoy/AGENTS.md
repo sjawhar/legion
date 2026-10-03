@@ -53,11 +53,17 @@ update. A repair reports whether its transaction wrote anything; one that wrote 
 committed that transaction, and ygo hands the worker an update for it too (the document's delete
 set), so its slot is finished with that update and the worker takes it rather than storing it. A
 settlement that wrote into the room renders its version from the document as it stands after the
-repairs (`lockedTreeOf`), so a peer's edit made since its read is in that version too. A
-settlement that wrote
-into the room commits what it wrote even when the document moved after its read, since the room and
-its browsers hold it; one that wrote nothing leaves a moved document to the settlement the move
-scheduled. `envoy-dispatch backfill-block-ids` runs that closure across every
+repairs (`lockedTreeOf`), so a peer's edit made since its read is in that version too, and credits
+that edit's author, whose own settlement then writes no version. A settlement that wrote into the
+room commits what it wrote even when the document moved after its read, since the room and its
+browsers hold it; one that wrote nothing leaves a moved document to the settlement the move
+scheduled. A repair is written only into the document the settlement read (`applySuppressed`):
+one whose room was evicted and reloaded since is refused and retried, and one whose room left the
+server while its transaction committed is given up and fails the room, its update discarded
+without waiting for its slot, since ygo then stores it on the committing goroutine itself
+(`persistStranded`). The room worker's compaction skips a room whose lock another holder has
+(`compactIfIdle`), so a settlement holding the lock never waits for that worker's exit.
+`envoy-dispatch backfill-block-ids` runs the same stamp through `applySuppressed` across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
 The closer's timer lives in memory, so the database says which documents still owe it: every
