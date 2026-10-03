@@ -8,10 +8,7 @@
 # edits together, and `bun install` rewrites the lockfile from them.
 #
 # The set is every manifest that declares zod — the root `package.json` and each workspace it
-# lists — in any dependency section, so a new workspace joins it by declaring zod. One is left
-# out by name: `packages/daemon`, the TypeScript daemon, which stays on zod 3 until Stage 7 of
-# LEGION-208 deletes it. The exclusion asserts that reason: once that manifest names a zod that
-# is not 3.x, this check fails and asks for the exclusion to go.
+# lists — in any dependency section, so a new workspace joins it by declaring zod.
 #
 # It checks manifests, not `bun.lock`: an exact pin in every manifest leaves the lockfile nothing
 # to nest, and a failure here names the manifest that drifted. Packages outside the workspace set
@@ -39,8 +36,6 @@ SECTIONS = (
     "resolutions",
 )
 EXACT = re.compile(r"\d+\.\d+\.\d+")
-# The manifest left out of the set, and the major version that justifies leaving it out.
-EXCLUDED = {"packages/daemon/package.json": "3"}
 
 
 def one_line(value: object) -> str:
@@ -97,15 +92,6 @@ for manifest in manifests:
             continue
         value = entries["zod"]
         site = f"{manifest}:{line_of(text, str(value))}"
-        if manifest in EXCLUDED:
-            major = EXCLUDED[manifest]
-            if not re.fullmatch(rf"[\^~]?{major}(\.\d+){{0,2}}", str(value)):
-                problems.append(
-                    f"{site}: {manifest} is left out of this check because it is on zod {major}, "
-                    f"but its {section} name zod {one_line(value)} — remove it from EXCLUDED in "
-                    f".github/scripts/check-zod-version.sh"
-                )
-            continue
         if not isinstance(value, str) or not EXACT.fullmatch(value):
             problems.append(
                 f"{site}: {section} name zod {one_line(value)}, which is a range, not a release: "
@@ -118,8 +104,8 @@ for manifest in manifests:
 if not declared and not problems:
     fatal(
         "package.json",
-        f"no manifest outside {', '.join(EXCLUDED)} declares zod: this check covered 0 of "
-        f"{len(manifests)} manifests, so it proves nothing",
+        f"no manifest declares zod: this check covered 0 of {len(manifests)} manifests, so it "
+        f"proves nothing",
     )
 if len(declared) > 1:
     most = max(len(sites) for sites in declared.values())
@@ -143,8 +129,5 @@ if problems:
     print(f"::error::{len(problems)} zod declaration(s) do not name the one exact zod", file=sys.stderr)
     raise SystemExit(1)
 (version, sites), = declared.items()
-print(
-    f"every zod declaration names {version} ({len(sites)} across {len(manifests)} manifests; "
-    f"{', '.join(EXCLUDED)} excluded, on zod {', '.join(EXCLUDED.values())})"
-)
+print(f"every zod declaration names {version} ({len(sites)} across {len(manifests)} manifests)")
 PY

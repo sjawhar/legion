@@ -59,12 +59,18 @@ function dispatchEvent(type: string, payload: object, eventActor = actor, notify
 }
 
 const issue = { title: "Native Dispatch", status: "in_progress", route: "role:legion-controller" };
+const apiQuestion = "The service needs a public API. Which approach should we use?";
+const transportQuestion = "The service needs one transport. Which approach should we use?";
+const publishQuestion = "The document is ready for readers. How should we publish it?";
+const draftQuestion = "The document needs a publication decision. How should we proceed?";
+const releaseQuestion = "The release is ready. How should we proceed?";
+
 const openAsk = {
   id: "ask-1",
   issue_key: "DSP-1",
   author: actor,
-  question: "Which API?",
-  options: [{ label: "JSON" }, { label: "MCP" }],
+  question: apiQuestion,
+  options: [{ label: "JSON API" }, { label: "MCP API" }],
   multiple: false,
   urgency: "med",
   opened_event_id: 7,
@@ -72,7 +78,7 @@ const openAsk = {
     artifact_id: "artifact-1",
     block_id: "block-1",
     mark_id: "mark-1",
-    quote: "Which API?",
+    quote: apiQuestion,
     orphaned: false,
   },
   state: "open",
@@ -192,7 +198,7 @@ describe("renderInbound dispatch events", () => {
         type: "ask.answered",
         actor: { kind: "session", id: "session-1" },
         ask: "dispatch://DSP-1/ask/ask-1",
-        question: "Which API?",
+        question: apiQuestion,
         answer: "JSON - Use JSON HTTP.",
       },
     });
@@ -214,9 +220,9 @@ describe("renderInbound dispatch events", () => {
       type: "ask.opened",
       actor: { kind: "session", id: "session-1" },
       ask: "dispatch://DSP-1/ask/ask-1",
-      question: "Which API?",
-      options: ["JSON", "MCP"],
-      quote: "Which API?",
+      question: apiQuestion,
+      options: ["JSON API", "MCP API"],
+      quote: apiQuestion,
       document: "DSP/spec",
     });
   });
@@ -235,7 +241,7 @@ describe("renderInbound dispatch events", () => {
 
     expect(decoded.envoy.dispatch).toMatchObject({
       type: "ask.answered",
-      question: "Which API?",
+      question: apiQuestion,
       answer: "Can't - No access.",
     });
   });
@@ -248,7 +254,7 @@ describe("renderInbound dispatch events", () => {
     const rendered = renderInbound(JSON.stringify({ ...correlated, in_reply_to: "ask-1" }), reader);
     const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
     expect(decoded.envoy.re).toBe("dispatch://DSP-1/ask/ask-1");
-    expect(rendered.content).not.toContain("re: Which API?");
+    expect(rendered.content).not.toContain(`re: ${apiQuestion}`);
     // Correlated: the ask is named once, by `re:`, never again inside the record.
     expect(decoded.envoy.dispatch).not.toHaveProperty("ask");
   });
@@ -594,7 +600,7 @@ describe("renderInbound dispatch events", () => {
         type: "ask.answered",
         actor: { kind: "session", id: "session-1" },
         ask: "dispatch://DSP-1/ask/ask-1",
-        question: "Which API?",
+        question: apiQuestion,
         answer: "Neither; let's do a third thing.",
       },
     });
@@ -638,7 +644,7 @@ describe("renderInbound dispatch events", () => {
       type: "ask.resolved",
       actor: { kind: "session", id: "session-1" },
       ask: "dispatch://DSP-1/ask/ask-1",
-      question: "Which API?",
+      question: apiQuestion,
       resolved: "retracted: A newer question supersedes this one.",
     });
   });
@@ -648,14 +654,14 @@ describe("renderInbound dispatch events", () => {
       renderInbound(
         dispatchEvent("ask.edited", {
           ...openAsk,
-          question: "Which transport should we implement?",
-          options: [{ label: "REST" }, { label: "gRPC" }],
+          question: transportQuestion,
+          options: [{ label: "REST transport" }, { label: "gRPC transport" }],
           multiple: true,
           urgency: "high",
           edited_at: "2026-09-11T03:26:00Z",
           previous: {
-            question: "Which API?",
-            options: [{ label: "JSON" }, { label: "MCP" }],
+            question: apiQuestion,
+            options: [{ label: "JSON API" }, { label: "MCP API" }],
             multiple: false,
             urgency: "med",
           },
@@ -670,10 +676,10 @@ describe("renderInbound dispatch events", () => {
       type: "ask.edited",
       actor: { kind: "session", id: "session-1" },
       ask: "dispatch://DSP-1/ask/ask-1",
-      question: "Which transport should we implement?",
-      options: ["REST", "gRPC"],
-      quote: "Which API?",
-      previous: "Which API?",
+      question: transportQuestion,
+      options: ["REST transport", "gRPC transport"],
+      quote: apiQuestion,
+      previous: apiQuestion,
     });
   });
   test("renders an artifact-owned ask edit by project document", () => {
@@ -698,11 +704,11 @@ describe("renderInbound dispatch events", () => {
             ...openAsk,
             issue_key: null,
             artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
-            question: "Publish?",
+            question: publishQuestion,
             edited_at: "2026-09-11T04:05:29Z",
             previous: {
-              question: "Draft?",
-              options: [{ label: "Yes" }],
+              question: draftQuestion,
+              options: [{ label: "Publish for readers" }],
               multiple: false,
               urgency: "med",
             },
@@ -720,8 +726,8 @@ describe("renderInbound dispatch events", () => {
       owner: "CORE / design-notes",
       type: "ask.edited",
       ask: "dispatch://CORE/artifact/design-notes/ask/ask-1",
-      question: "Publish?",
-      previous: "Draft?",
+      question: publishQuestion,
+      previous: draftQuestion,
     });
   });
 
@@ -842,7 +848,7 @@ describe("renderInbound dispatch events", () => {
           actor: { kind: "user", id: "alice" },
           notify: true,
           created_at: "2026-09-09T00:00:00Z",
-          payload: { ...comment, ask_id: askID, ask_question: "Which API should we ship?" },
+          payload: { ...comment, ask_id: askID, ask_question: apiQuestion },
         }),
       })
     );
@@ -852,7 +858,7 @@ describe("renderInbound dispatch events", () => {
     };
 
     expect(decoded.envoy.re).toBe("dispatch://DSP-1/ask/ask-1");
-    expect(decoded.envoy.dispatch.question).toBe("Which API should we ship?");
+    expect(decoded.envoy.dispatch.question).toBe(apiQuestion);
     expect(decoded.envoy.reply_with).toEqual({
       tool: "dispatch_comment",
       args: { issue: "DSP-1", reply_to_ask: "ask-1", body: "..." },
@@ -931,7 +937,7 @@ describe("renderInbound dispatch events", () => {
           payload: {
             ...comment,
             ask_id: askID,
-            ask_question: "Which API should we ship?",
+            ask_question: apiQuestion,
             ask_state: "open",
           },
         }),
@@ -946,7 +952,7 @@ describe("renderInbound dispatch events", () => {
       owner: "DSP-1",
       type: "comment.created",
       actor: { kind: "user", id: "alice" },
-      question: "Which API should we ship?",
+      question: apiQuestion,
       reply: "Please update this.",
       state: "open",
     });
@@ -958,7 +964,7 @@ describe("renderInbound dispatch events", () => {
         dispatchEvent("comment.created", {
           ...comment,
           ask_id: "ask-1",
-          ask_question: "Ship it?",
+          ask_question: releaseQuestion,
           ask_state: "open",
           ask_waiting_on: "agent",
           turn: "agent",
@@ -972,7 +978,7 @@ describe("renderInbound dispatch events", () => {
       type: "comment.created",
       actor: { kind: "session", id: "session-1" },
       ask: "dispatch://DSP-1/ask/ask-1",
-      question: "Ship it?",
+      question: releaseQuestion,
       reply: "Please update this.",
       state: "open",
       waiting_on: "agent",

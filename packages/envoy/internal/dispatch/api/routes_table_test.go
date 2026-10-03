@@ -58,10 +58,54 @@ func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
 	}
 }
 
+// WriteRouteIndex is what `envoy-dispatch routes` prints and the docs site's API reference is
+// generated from: every row of the table, as GET /api/v1 serves it, and no test hook.
+func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
+	var output bytes.Buffer
+	if err := WriteRouteIndex(&output); err != nil {
+		t.Fatal(err)
+	}
+	var printed routeIndex
+	if err := json.Unmarshal(output.Bytes(), &printed); err != nil {
+		t.Fatalf("decode %q: %v", output.String(), err)
+	}
+	table := (&server{}).routes()
+	if len(printed.Routes) != len(table) {
+		t.Fatalf("printed %d routes, table has %d", len(printed.Routes), len(table))
+	}
+	byKey := make(map[string]routeIndexEntry, len(printed.Routes))
+	for _, entry := range printed.Routes {
+		byKey[entry.Method+" "+entry.Path] = entry
+	}
+	for _, route := range table {
+		entry, ok := byKey[route.Method+" "+route.Pattern]
+		if !ok {
+			t.Errorf("%s %s missing from the printed index", route.Method, route.Pattern)
+			continue
+		}
+		if entry.Auth != route.Auth || entry.Description != route.Description {
+			t.Errorf("%s %s printed as auth %q, description %q; the table says %q, %q", route.Method, route.Pattern, entry.Auth, entry.Description, route.Auth, route.Description)
+		}
+	}
+	for _, entry := range printed.Routes {
+		if strings.Contains(entry.Path, "/_test/") {
+			t.Errorf("printed index carries test hook %s %s", entry.Method, entry.Path)
+		}
+	}
+
+	mux := http.NewServeMux()
+	Register(mux, Deps{AgentToken: "agent-token"})
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1", nil))
+	if served := response.Body.String(); served != output.String() {
+		t.Fatalf("printed index differs from GET /api/v1:\nprinted %s\nserved  %s", output.String(), served)
+	}
+}
+
 // The table is the registration: every row is mounted, every row is described, and the
 // count only moves when a route is deliberately added or removed.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 113
+	const registeredRoutes = 114
 	routes := (&server{}).routes()
 	if len(routes) != registeredRoutes {
 		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)
@@ -85,8 +129,8 @@ func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
 			t.Fatalf("route %q has auth %q", key, route.Auth)
 		}
 	}
-	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != registeredRoutes+3 {
-		t.Fatalf("test hooks add three routes: got %d, want %d", got, registeredRoutes+3)
+	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != registeredRoutes+4 {
+		t.Fatalf("test hooks add four routes: got %d, want %d", got, registeredRoutes+4)
 	}
 }
 

@@ -13,7 +13,8 @@ reviewer on every re-review, the merger before READY. Every path it cites is in 
   `Accepted:` — the opener's own follow-up included — leaves the thread open, because resolution
   considers only the newest comment). The review App can reply on a thread but cannot resolve it:
   GitHub grants resolving a review thread to the pull request's author, and the implementer opens
-  every Legion pull request (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps).
+  every Legion pull request (`docs/site/src/content/docs/legion/running-legion.md`, "The two
+  GitHub Apps").
   When `LEGION_GRANT_FILE` or `LEGION_GRANT` is set, use `legion threads resolve --pr <number> --repo <owner>/<repo>`.
   When neither is set, add `--gh` to that command, which applies the fallback's rule below through
   your own `gh`; where no `legion` command is installed, use `gh api graphql` with the session's

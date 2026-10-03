@@ -1,7 +1,10 @@
+import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
-import type { InboxRow } from "../../api/types";
+import { inboxQuery } from "../../api/queries";
+import type { CredentialPendingRow, InboxRow } from "../../api/types";
+import { compareTimestamps, isTimestamp } from "../../lib/timestamps";
 import {
   borderDefault,
   surfaceMutedBg,
@@ -10,6 +13,7 @@ import {
   textSecondaryOnSurface,
   textSecondaryOnSurfaceMuted,
 } from "../../theme/classes";
+import { useCredentialRequests } from "../credentials/pending";
 import { formatAskAge } from "./ask-age";
 import { isSnoozed } from "./snooze";
 
@@ -25,17 +29,52 @@ export function waitingOnYou<
   return asks.filter((ask) => ask.waiting_on === "human" && !isSnoozed(ask));
 }
 
+/** Everything the Inbox lists that waits for the viewer - its asks whose turn is theirs, and every
+ *  pending credential request, each of which names the viewer as its approver - counted, with when
+ *  the oldest of them began waiting (undefined when nothing does). The badges and the banner read
+ *  this one rule, so another kind of waiting item is added here once. A time `compareTimestamps`
+ *  refuses still counts but is never the oldest: the broker's `requested_at` reaches here
+ *  verbatim, and the badges render in the app shell, outside every page's error boundary, so a
+ *  throw here would take down every page. */
+function needsYou(
+  asks: readonly InboxRow[],
+  credentialRequests: readonly CredentialPendingRow[]
+): { count: number; oldest: string | undefined } {
+  const since = [
+    ...waitingOnYou(asks).map((ask) => ask.created_at),
+    ...credentialRequests.map((request) => request.requested_at),
+  ];
+  const oldest = since
+    .filter(isTimestamp)
+    .reduce<string | undefined>(
+      (earlier, at) => (earlier === undefined || compareTimestamps(at, earlier) < 0 ? at : earlier),
+      undefined
+    );
+  return { count: since.length, oldest };
+}
+
+/** The rail's and the compact top bar's `Needs you N`, over the whole inbox; the banner counts
+ *  the view. */
+export function useNeedsYouCount(): number {
+  const inbox = useQuery(inboxQuery());
+  const { requests } = useCredentialRequests();
+  return needsYou(inbox.data ?? [], requests).count;
+}
+
 export function BlockedOnYou({
   asks,
   className,
+  credentialRequests = [],
   variant = "banner",
 }: {
   asks: readonly InboxRow[];
   className?: string;
+  /** The credential requests the Inbox lists above its asks; the project pill has none. */
+  credentialRequests?: readonly CredentialPendingRow[];
   variant?: "banner" | "pill";
 }): ReactNode {
-  const waiting = waitingOnYou(asks);
-  if (waiting.length === 0) return null;
+  const { count, oldest } = needsYou(asks, credentialRequests);
+  if (count === 0) return null;
 
   if (variant === "pill") {
     return (
@@ -43,21 +82,11 @@ export function BlockedOnYou({
         className={`${className ?? ""} inline-flex min-h-11 items-center rounded-full px-3 text-xs font-medium md:min-h-9 md:px-2 ${surfaceMutedStrongBg} ${textSecondaryOnSurface} ${textSecondaryHoverToPrimary}`}
         to="/"
       >
-        Blocked on you · {waiting.length}
+        Blocked on you · {count}
       </Link>
     );
   }
 
-  const oldest = waiting.reduce((earlier, ask) => {
-    const earlierAt = Date.parse(earlier.created_at);
-    const askAt = Date.parse(ask.created_at);
-    return (Number.isNaN(askAt) ? Number.POSITIVE_INFINITY : askAt) <
-      (Number.isNaN(earlierAt) ? Number.POSITIVE_INFINITY : earlierAt)
-      ? ask
-      : earlier;
-  });
-
-  const count = waiting.length;
   // A count of every waiting ask, not one urgency, so the strip stays structural: the spec
   // reserves the urgency hues for urgency and priority. `w-full` is load-bearing - below
   // 1280 px an unlayered `a:not(.prose a) { display: inline-flex }` in styles.css beats
@@ -67,8 +96,8 @@ export function BlockedOnYou({
       className={`block w-full rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${surfaceMutedBg} ${textSecondaryOnSurfaceMuted}`}
       to="/"
     >
-      Blocked on you: {count} {count === 1 ? "item" : "items"}, oldest{" "}
-      {formatAskAge(oldest.created_at)}
+      Blocked on you: {count} {count === 1 ? "item" : "items"}
+      {oldest === undefined ? null : `, oldest ${formatAskAge(oldest)}`}
     </Link>
   );
 }

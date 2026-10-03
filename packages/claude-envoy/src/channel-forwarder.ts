@@ -65,10 +65,15 @@ interface Following {
   readonly done: Promise<void>
 }
 
-// The identity `createDeliveryDedupe` recognises a repeat by (its own schema, so no field the rule
-// reads can go missing here), and the topic the envelope names.
+// A delivery's identity fields parse independently: a field the shared rule refuses identifies
+// nothing, and its valid sibling can still recognise a repeat. `topic` follows the same rule
+// before it is exposed as the envelope topic.
 const DeliveryIdentity = DedupeIdentitySchema.extend({
-  topic: z.string().min(1).optional(),
+  event_id: DedupeIdentitySchema.shape.event_id.catch(undefined),
+  dedupe_key: DedupeIdentitySchema.shape.dedupe_key.catch(undefined),
+  source: DedupeIdentitySchema.shape.source.catch(undefined),
+  source_event_id: DedupeIdentitySchema.shape.source_event_id.catch(undefined),
+  topic: z.string().min(1).optional().catch(undefined),
 })
 
 const decoder = new TextDecoder()

@@ -12,6 +12,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -27,13 +28,15 @@ import (
 // TestLoginStatusFollowsTheCredentialTheHelperHolds: an approved machine login, then a re-login
 // the operator denies. The denied `launcher login` exits 1 naming the denial, while login-status
 // reads issued and exits 0, since the helper still holds the first login's credential, and says on
-// stderr that the most recent login was denied. Once the broker refuses that credential,
-// login-status exits 1 saying so, and a re-login denied while the helper holds no credential
-// reads denied and exits 1.
+// stderr that the most recent login was denied. While the credential is held, login-status ends
+// with the expiry the broker minted it with, a week out, and a box the helper enrolls with it
+// reads its grants through `agent-secrets self` and a proxy-delivery name through the client's
+// grant values. Once the broker refuses that credential, login-status exits 1 saying so, and a
+// re-login denied while the helper holds no credential reads denied and exits 1.
 func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 	rig := brokertest.NewRig(t)
 	binary := buildAgentSecrets(t)
-	srv, sock := serveRealHelper(t, rig.URL)
+	srv, sock := serveRealHelper(t, rig.URL, rig.Operator)
 	loginStatus := func() (string, string, int) {
 		t.Helper()
 		return runAgentSecrets(t, binary, rig.URL, t.TempDir(), []string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login-status")
@@ -47,8 +50,43 @@ func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 	if !srv.Broker.HasCredential() {
 		t.Fatal("the approved login installed no launcher credential")
 	}
-	if stdout, stderr, exit := loginStatus(); exit != 0 || stdout != "issued\n" || stderr != "" {
-		t.Fatalf("login-status after the approved login: exit %d, stdout %q, stderr %q; want 0, %q, nothing", exit, stdout, stderr, "issued\n")
+	var minted time.Time
+	if err := rig.Store.Pool.QueryRow(context.Background(), `select expires_at from launcher_credentials where expires_at > now()`).Scan(&minted); err != nil {
+		t.Fatalf("read the minted credential's expiry: %v", err)
+	}
+	// A week less the seconds the test has run so far.
+	expiry := prefix + "the launcher credential expires at " + minted.UTC().Format(time.RFC3339) + " (in 6d23h"
+	const expiryEnd = "m); the broker has no renewal, so a new machine login a human approves must replace it before then\n"
+	if stdout, stderr, exit := loginStatus(); exit != 0 || stdout != "issued\n" || !strings.HasPrefix(stderr, expiry) || !strings.HasSuffix(stderr, expiryEnd) || strings.Count(stderr, "\n") != 1 {
+		t.Fatalf("login-status after the approved login: exit %d, stdout %q, stderr %q; want 0, %q, %q…%q", exit, stdout, stderr, "issued\n", expiry, expiryEnd)
+	}
+
+	// --- a box the helper enrolls: self lists its grant, and a proxy secret comes back unreleased ---
+	boxKey, err := proof.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	thumbprint, err := proof.Thumbprint(&boxKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrolled, err := helper.Call(sock, helper.Request{Op: "enroll-box", RuntimeID: "self-box-" + t.Name(), Thumbprint: thumbprint}, 10*time.Second)
+	if err != nil || !enrolled.OK {
+		t.Fatalf("enroll-box with the approved login's credential: %+v %v", enrolled, err)
+	}
+	keyDir := writeKeyDir(t, boxKey, enrolled.EnrollmentID)
+	stdout, stderr, exit := runAgentSecrets(t, binary, rig.URL, keyDir, nil, "request", "TEST_PROXY_SECRET", "--json")
+	var granted RequestResult
+	if err := json.Unmarshal([]byte(stdout), &granted); exit != 0 || err != nil || granted.State != "granted" || granted.GrantID == nil {
+		t.Fatalf("request TEST_PROXY_SECRET from the box: exit %d, stdout %q, stderr %q; want it granted at once", exit, stdout, stderr)
+	}
+	wantGrant := "grant: " + *granted.GrantID + " (request " + granted.RequestID + ", expires "
+	if stdout, stderr, exit := runAgentSecrets(t, binary, rig.URL, keyDir, nil, "self"); exit != 0 || !strings.Contains(stdout, wantGrant) {
+		t.Fatalf("self after the grant: exit %d, stdout %q, stderr %q; want a line starting %q", exit, stdout, stderr, wantGrant)
+	}
+	values, err := newClient(rig.URL).GrantValues(context.Background(), &fileSigner{key: boxKey, enrollmentID: enrolled.EnrollmentID}, *granted.GrantID)
+	if err != nil || len(values.Values) != 0 || len(values.ProxyOnly) != 1 || values.ProxyOnly[0] != "TEST_PROXY_SECRET" {
+		t.Fatalf("grant values of the proxy secret: %+v %v; want no value and proxy_only [TEST_PROXY_SECRET]", values, err)
 	}
 
 	// --- a re-login the operator denies: the first credential is still held ---
@@ -59,14 +97,14 @@ func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 	if !srv.Broker.HasCredential() {
 		t.Fatal("a denied re-login must leave the earlier login's credential in place")
 	}
-	want := prefix + "the most recent machine login (code " + denied + ") was denied; the helper still holds the launcher credential an earlier login issued\n"
-	if stdout, stderr, exit := loginStatus(); exit != 0 || stdout != "issued\n" || stderr != want {
-		t.Fatalf("login-status after a denied re-login: exit %d, stdout %q, stderr %q; want 0, %q, %q", exit, stdout, stderr, "issued\n", want)
+	want := prefix + "the most recent machine login (code " + denied + ") was denied; the helper still holds the launcher credential an earlier login issued\n" + expiry
+	if stdout, stderr, exit := loginStatus(); exit != 0 || stdout != "issued\n" || !strings.HasPrefix(stderr, want) || !strings.HasSuffix(stderr, expiryEnd) || strings.Count(stderr, "\n") != 2 {
+		t.Fatalf("login-status after a denied re-login: exit %d, stdout %q, stderr %q; want 0, %q, %q…%q", exit, stdout, stderr, "issued\n", want, expiryEnd)
 	}
 
 	// --- the broker refuses the held credential ---
 	refuseTheHeldCredential(t, rig, srv, sock)
-	want = prefix + "the broker refused this machine's launcher credential (expired, revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login\n"
+	want = prefix + "the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login\n"
 	if stdout, stderr, exit := loginStatus(); exit != 1 || stdout != "expired\n" || stderr != want {
 		t.Fatalf("login-status after the broker refused the credential: exit %d, stdout %q, stderr %q; want 1, %q, %q", exit, stdout, stderr, "expired\n", want)
 	}
@@ -75,7 +113,7 @@ func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 	if code, exit, stderr := launcherLoginThen(t, rig, binary, sock, "deny", nil); exit != 1 {
 		t.Fatalf("denied launcher login (code %s): exit %d, stderr %q; want 1", code, exit, stderr)
 	}
-	want = prefix + "the last machine login is denied; run: agent-secrets launcher login\n"
+	want = prefix + "the most recent machine login was denied; run: agent-secrets launcher login\n"
 	if stdout, stderr, exit := loginStatus(); exit != 1 || stdout != "denied\n" || stderr != want {
 		t.Fatalf("login-status after a denied login with no credential held: exit %d, stdout %q, stderr %q; want 1, %q, %q", exit, stdout, stderr, "denied\n", want)
 	}

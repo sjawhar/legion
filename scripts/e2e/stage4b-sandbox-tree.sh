@@ -221,8 +221,6 @@ blocked() {
 . "$root/scripts/e2e/lib/namespace-rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 
 rk() { timeout --foreground 300 kubectl --kubeconfig "$runtime_kubeconfig" --context "$runtime_context" "$@"; }
@@ -1639,7 +1637,7 @@ pass
 
 begin preflight
 # The runtime identity is the restricted role, and nothing more: the assumed-role pattern Stage 4a's
-# identity check uses (packages/daemon-go/internal/runtime/sandbox/live_install_test.go:52).
+# identity check uses (packages/daemon/internal/runtime/sandbox/live_install_test.go:52).
 who=$(rk auth whoami -o json) || blocked "kubectl auth whoami under $runtime_context failed"
 jq -e '.status.userInfo.username | test(":assumed-role/[A-Za-z0-9+=,.@_-]*legion-daemon/")' <<<"$who" >/dev/null ||
   fail "the runtime identity $(jq -r .status.userInfo.username <<<"$who") is not the assumed Legion daemon role"
@@ -1753,14 +1751,12 @@ note "streaming the run's pods, the nodes' events, and node memory into $evidenc
 pass
 
 begin boot
-(cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
-stage_role_prompts "$root" "$work"
+(cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion") || fail "lib/built-from.sh could not say what the run built"
 while IFS= read -r line; do note "$line"; done <<<"$built"
 # The build's source is the run's recorded source, or the tree changed between the two.
 [ "$(sed -n 's/^source: //p' <<<"$built")" = "$(jq -r .revision "$evidence/run.json")" ] ||
   fail "the tree changed between prerequisites ($(jq -r .revision "$evidence/run.json")) and the build ($(sed -n 's/^source: //p' <<<"$built"))"
-# The prompt bundle is deployed beside this binary, not read from the checkout it was built in.
 docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=legion \
   -p "127.0.0.1::5432" postgres:16 >/dev/null
@@ -1863,10 +1859,10 @@ gate_open() {
 # approve the version the architect asked about, then checks what the architect did
 # (lib/design-gate-verdict.jq): its approval request at the approved version carries a summary after
 # "Approve <name> (version N)?", a human answered at least one of the spec's decision blocks, and no
-# approval request it made on the spec, retracted ones included, named a version holding one open or
-# came before a human answered one.
+# approval request it made on the spec named a version holding one open or came before a human
+# answered one.
 drive_gated_spec() {
-  local issue=$1 artifact approved asks version verdict request early blocks
+  local issue=$1 artifact approved asks events version verdict request early blocks requested_versions
   local -a requested=()
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   wait_for_worker "$issue" architect
@@ -1874,14 +1870,21 @@ drive_gated_spec() {
   until_true 43200 "a human to approve the $issue spec in Dispatch, opening its design gate" gate_open "$issue" "$artifact"
   approved=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.approvedVersion')
   asks=$(dispatch_get "issues/$issue/asks")
+  events=$(dispatch_events "$issue")
   jq . <<<"$asks" >"$evidence/$issue-asks.json"
-  # Each version of the spec an approval request named, as the human was asked to approve it.
-  for version in $(jq -r --arg artifact "$artifact" '[.[] | select(.kind == "approval" and .approval.artifact_id == $artifact) | .approval.version] | unique | .[]' <<<"$asks"); do
+  jq . <<<"$events" >"$evidence/$issue-events.json"
+  # An approval row follows versions. The shared selector reads the full event history: ask.opened
+  # records its first hand-back and each ask.handed_back a later one.
+  requested_versions=$(jq -r -L "$root/scripts/e2e/lib" --arg artifact "$artifact" '
+    include "design-gate-approval-requests";
+    approval_requested_versions($artifact)
+  ' <<<"$events")
+  for version in $requested_versions; do
     dispatch_get "artifacts/$artifact/versions/$version" >"$evidence/$issue-spec-v$version.json" ||
       fail "$issue: version $version of its spec could not be read"
     requested+=("$evidence/$issue-spec-v$version.json")
   done
-  verdict=$(jq -c -s --arg artifact "$artifact" --argjson version "$approved" -f "$root/scripts/e2e/lib/design-gate-verdict.jq" "$evidence/$issue-asks.json" "${requested[@]}")
+  verdict=$(jq -c -s -L "$root/scripts/e2e/lib" --arg artifact "$artifact" --argjson version "$approved" -f "$root/scripts/e2e/lib/design-gate-verdict.jq" "$evidence/$issue-asks.json" "$evidence/$issue-events.json" "${requested[@]}")
   printf '%s\n' "$verdict" >"$evidence/$issue-gate-verdict.json"
   request=$(jq -r '.request // empty' <<<"$verdict")
   [ -n "$request" ] || fail "$issue: no approval request names version $approved of its spec ($evidence/$issue-asks.json)"
@@ -1890,7 +1893,7 @@ drive_gated_spec() {
   [ "$early" = "[]" ] || fail "$issue: approval was requested before the spec's decision blocks were settled: $early"
   blocks=$(jq .blocks <<<"$verdict")
   [ "$blocks" -gt 0 ] || fail "$issue: a human answered none of the spec's decision blocks, so its open choice was never settled as one ($evidence/$issue-asks.json)"
-  note "$issue: a human answered $blocks of the spec's decision blocks, and every approval request came after those answers on a version with none open"
+  note "$issue: a human answered $blocks of the spec's decision blocks, and every approval hand-back came after those answers on a version with none open"
   note "$issue: the approval request at version $approved asked: $request"
   wait_for_phase "$issue" planning
 }
@@ -1962,9 +1965,9 @@ begin finished-idle-planner-death
 # process generation. The relaunch registers and is ready or idle with no task handed it, while
 # tree 2 stays in implementing, unheld, with its implementer live. A relaunch registers and reaches
 # Ready in seconds, before any end the driver could aim at it, and Ready resets launch failures
-# (packages/daemon-go/internal/supervise/table.go), so the driver cannot spend that budget. The
+# (packages/daemon/internal/supervise/table.go), so the driver cannot spend that budget. The
 # exhausted budget's failure, its single worker-died notice and the unheld phase are proved by
-# packages/daemon-go/internal/daemon/outbox_lifecycle_test.go:592-633 (LEGION-462 plan version 10).
+# packages/daemon/internal/daemon/outbox_lifecycle_test.go:592-633 (LEGION-462 plan version 10).
 planner2=$(claim_token "$tree2" planner)
 planner2_claim() { claims_cli list --json | jq -ce --arg t "$planner2" '.claims[] | select(.token == $t)'; }
 planner2_idle_without_task() { planner2_claim | jq -e '.state == "idle" and .pending == null'; }
@@ -2257,10 +2260,11 @@ pass
 
 begin token-rotation
 # A pod's projected operator token (pod.yml: expiration_seconds 3600) is renewed by the kubelet at
-# 80 % of its life, 2880 s after it was issued, and a model turn after the renewal still runs on the
-# gateway's aliases. The architect's pod is the longest-lived. A token whose issue time (iat) is
-# later than the pod's start is a renewal: the pod's first token was issued as it started. By
-# token-rotation the architect has usually run long enough for one, so the wait is often none.
+# 80 % of its life, 2880 s after it was issued, and a model turn after the renewal still runs on a
+# model the operator fixture's overlay gives a role. The architect's pod is the longest-lived. A
+# token whose issue time (iat) is later than the pod's start is a renewal: the pod's first token was
+# issued as it started. By token-rotation the architect has usually run long enough for one, so the
+# wait is often none.
 pod=$(claim_sandbox "$tree1" architect)
 pod_uid=$(op get pod "$pod" -o jsonpath='{.metadata.uid}')
 pod_started=$(date -d "$(op get pod "$pod" -o jsonpath='{.status.startTime}')" +%s) || fail "the architect pod $pod has no start time"
@@ -2299,7 +2303,9 @@ on_tree "$tree1" until_true 600 "a completed architect turn after the rotation" 
 architect_pod_kept "before the turn after the rotation completed"
 after=$(claim_session_text "$tree1" architect | jq -R -s -c --arg at "$rotated" '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "assistant" and .timestamp > $at) | "\(.message.provider)/\(.message.model)"] | unique')
 note "turns after the rotation were answered by $after"
-jq -e 'all(.[]; test("^anthropic/claude-[a-z0-9.-]+-legion$"))' <<<"$after" >/dev/null || fail "a turn after the rotation left the gateway's aliases: $after"
+route_models=$(sed -n '/^modelRoles:/,/^[^ ]/s/^  [a-z]*: \([^:]*\).*/\1/p' "$operator_route/overlay.yml" | jq -R -s -c 'split("\n") | map(select(. != "")) | unique')
+jq -e --argjson route "$route_models" 'all(.[]; . as $m | any($route[]; . == $m))' <<<"$after" >/dev/null ||
+  fail "a turn after the rotation left the operator fixture's role models $route_models: $after"
 pass
 
 begin idle-resident
@@ -2412,7 +2418,7 @@ make_omp_home "$omp_home"
 bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin" >/dev/null
 bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
   blocked "the controller's model route could not be installed (lib/install-model-gateway.sh)"
-pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
+pin=$(<"$root/.omp-pin")
 cat >"$work/controller.yaml" <<EOF
 project: $project
 daemon_url: http://$host:$port_daemon

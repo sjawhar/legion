@@ -11,7 +11,9 @@
  * Neither the new mark nor the removal is an undo step: ./record-mark-history.ts keeps the
  * composer's own record-mark writes out of undo history, so Ctrl/Cmd+Z after a switch never puts
  * the old mark back and redo never writes it again. The creation takes nothing from another
- * record because a retype over text another record already marks with the new kind is refused.
+ * record: the three record marks declare `excludes: ''`, so a mark of the new kind over text that
+ * another record's mark of that kind covers sits beside that mark rather than cutting it
+ * (LEGION-458).
  *
  * `removeRecordMark` is the precise removal both this module and the handle's `removeMark` use:
  * span by span, by id, whatever the mark's type. Upstream's `deleteMark` is not it - it cannot
@@ -42,12 +44,10 @@ export interface RetypedMark {
   readonly quote: string;
 }
 
-/** Why a retype changed nothing: the document no longer holds the mark on any text; the new kind
- *  cannot be written over its text (a suggestion across table cells); or part of that text already
- *  carries another record's mark of the new kind, which writing over it would cut out of that
- *  record (LEGION-458). */
+/** Why a retype changed nothing: the document no longer holds the mark on any text, or the new
+ *  kind cannot be written over its text (a suggestion across table cells). */
 export interface RetypeRefusal {
-  readonly refused: "missing" | "unmarkable" | "overlaps";
+  readonly refused: "missing" | "unmarkable";
 }
 
 export type RetypeOutcome = RetypedMark | RetypeRefusal;
@@ -64,7 +64,7 @@ export function findRecordMark(
   let from = -1;
   let to = -1;
   let type = "";
-  let text = false;
+  let sawText = false;
   doc.descendants((node, pos) => {
     if (!node.isInline) return true;
     const held = node.marks.find(
@@ -76,10 +76,10 @@ export function findRecordMark(
       type = held.type.name;
     }
     to = pos + node.nodeSize;
-    if (node.isText) text = true;
+    if (node.isText) sawText = true;
     return true;
   });
-  return from === -1 || !text ? null : { range: { from, to }, type };
+  return from === -1 || !sawText ? null : { range: { from, to }, type };
 }
 
 /** The meta key `removeRecordMark` sets on its transaction, and the value it sets there. Both are
@@ -95,23 +95,6 @@ const composerRemoval = Symbol("composer's own record-mark removal");
  *  owns, which ./record-mark-history.ts keeps out of undo history. */
 export function isRecordMarkRemoval(transaction: Transaction): boolean {
   return transaction.getMeta(recordMarkRemoval) === composerRemoval;
-}
-
-/** Whether any inline node in `range` - text or an atom such as an image - carries a mark of
- *  `type` under an id other than `markId`. */
-function rangeHoldsAnother(
-  doc: ProseMirrorNode,
-  range: MarkRange,
-  type: string,
-  markId: string
-): boolean {
-  let held = false;
-  doc.nodesBetween(range.from, range.to, (node) => {
-    if (held || !node.isInline) return !held;
-    held = node.marks.some((mark) => mark.type.name === type && mark.attrs.id !== markId);
-    return !held;
-  });
-  return held;
 }
 
 /** Removes every span of the record mark `markId`, whatever its type, from text and from inline
@@ -135,9 +118,8 @@ export function removeRecordMark(view: EditorView, markId: string): boolean {
 
 /** Replaces the record mark `markId` with a fresh mark of `kind` over the same text, written by
  *  `by`, and answers the new mark - or the mark as it is, when it already has that kind. Refused,
- *  with nothing changed, when the document does not hold `markId`, when `kind` cannot be marked
- *  over its text, or when part of that text already carries another record's mark of `kind`: a
- *  mark type excludes itself, so `addMark` would cut that record's anchor there (LEGION-458). */
+ *  with nothing changed, when the document does not hold `markId` or when `kind` cannot be marked
+ *  over its text. */
 export function retypeMark(
   view: EditorView,
   markId: string,
@@ -149,7 +131,6 @@ export function retypeMark(
   const quote = view.state.doc.textBetween(held.range.from, held.range.to, "\n", "\n");
   const type = MARK_TYPE_FOR_KIND[kind];
   if (held.type === type) return { markId, quote };
-  if (rangeHoldsAnother(view.state.doc, held.range, type, markId)) return { refused: "overlaps" };
   // The same creators, with the same arguments, as the selection bar's `runAction`.
   let created: string;
   if (kind === "comment") {

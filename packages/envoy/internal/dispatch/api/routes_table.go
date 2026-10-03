@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 
@@ -125,9 +127,10 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/artifacts/{id}/subscribers", authHuman, "Sessions subscribed to a document's topics.", s.listArtifactSubscribers},
 		{http.MethodDelete, "/api/v1/artifacts/{id}/subscribers/{session_id}", authHuman, "Unsubscribe a session from a document.", s.unsubscribeArtifactSession},
 		{http.MethodGet, "/api/v1/artifacts/{id}", authAny, "Read a document's metadata and current version.", s.getArtifact},
+		{http.MethodPost, "/api/v1/artifacts/{id}/rebuild", authHuman, "Rebuild a document history ygo cannot load from its latest saved markdown; a live document is 409 DOCUMENT_LIVE and one that loads is 409 DOCUMENT_LOADS.", s.rebuildArtifact},
 		{http.MethodGet, "/api/v1/artifacts/{id}/reviews", authAny, "List a document's approval reviews.", s.listArtifactReviews},
-		{http.MethodPost, "/api/v1/artifacts/{id}/reviews", authHuman, "Approve or request changes on a document's latest settled version; answers the approval ask open at that version, and retracts one naming an older version.", s.createArtifactReview},
-		{http.MethodPost, "/api/v1/artifacts/{id}/approval-requests", authAny, "Open the approval ask for a document's latest version, with an optional summary; a repeated request returns the ask open at that version and replaces a stale one, which names an older version.", s.requestArtifactApproval},
+		{http.MethodPost, "/api/v1/artifacts/{id}/reviews", authHuman, "Approve or request changes on a document's latest settled version; answers the open approval ask when present, preserving its thread.", s.createArtifactReview},
+		{http.MethodPost, "/api/v1/artifacts/{id}/approval-requests", authAny, "Open an approval ask for a document's latest version, with an optional summary. An open ask follows later versions and waits on its agent until this route hands the same row back to a human.", s.requestArtifactApproval},
 		{http.MethodGet, "/api/v1/artifacts/{id}/blocks", authAny, "A document's blocks with markdown ranges, tokens, and reference counts.", s.getArtifactBlocks},
 		{http.MethodGet, "/api/v1/artifacts/{id}/blocks/{block_id}", authAny, "Where one block stands in a document: its path from the top-level block down (type, id, child index), and for a table block, row or cell the table's id, the row index (0 is the header), the cell's column index, the text of the header cell drawn above it and the row's cells; 404 TARGET_NOT_FOUND for an id the live document does not hold.", s.getArtifactBlockPath},
 		{http.MethodGet, "/api/v1/artifacts/{id}/text", authAny, "A document's canonical markdown and whole-document token.", s.getArtifactText},
@@ -148,12 +151,12 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/projects/{key}/artifacts/{slug}/edits", authAny, "Apply edit ops with an optional optimistic-concurrency precondition to a project document, by slug or unambiguous filename.", s.editArtifact},
 		{http.MethodGet, "/api/v1/me/state", authHuman, "The caller's per-issue read state.", s.getUserState},
 		{http.MethodPut, "/api/v1/me/issues/{key}/state", authHuman, "Update the caller's read state for an issue.", s.putUserState},
-		{http.MethodGet, "/api/v1/me/agents/state", authHuman, "The caller's per-agent conversation state: cleared_before, read_through, and unread_replies (the session's replies to the caller's direct messages newer than both).", s.getUserAgentState},
-		{http.MethodPut, "/api/v1/me/agents/{session_id}/state", authHuman, "Clear an agent's conversation for the caller (cleared_before hides exchanges at or before it) and/or mark it read (read_through only moves forward); answers the session's state.", s.putUserAgentState},
+		{http.MethodGet, "/api/v1/me/agents/state", authHuman, "The caller's per-agent conversation state: cleared_before, read_through, and unread_replies (the session's replies to the caller's direct messages newer than both and not read by id).", s.getUserAgentState},
+		{http.MethodPut, "/api/v1/me/agents/{session_id}/state", authHuman, "Clear an agent's conversation for the caller (cleared_before hides exchanges at or before it), mark it read (read_through only moves forward), and/or mark some of its replies read by id (read_replies, the session's own messages); answers the session's state.", s.putUserAgentState},
 		{http.MethodPut, "/api/v1/me/asks/{id}/snooze", authHuman, "Snooze an inbox row for the caller until snoozed_until.", s.putAskSnooze},
 		{http.MethodDelete, "/api/v1/me/asks/{id}/snooze", authHuman, "Un-snooze an inbox row for the caller.", s.deleteAskSnooze},
 		{http.MethodGet, "/api/v1/events", authAny, "Server-sent event stream; Last-Event-ID or ?since= resumes.", s.streamEvents},
-		{http.MethodGet, "/api/v1/credential-requests", authHuman, "List credential requests pending the caller's own decision (?approver=me only); 404 FEATURE_OFF without a configured secrets broker.", s.listCredentialPending},
+		{http.MethodGet, "/api/v1/credential-requests", authHuman, "List credential requests pending the caller's own decision (?approver=me only); null without a configured secrets broker.", s.listCredentialPending},
 		{http.MethodGet, "/api/v1/credential-requests/{id}", authHuman, "Read one credential request's facts; the broker is authoritative.", s.getCredentialRecord},
 		{http.MethodPost, "/api/v1/credential-requests/{id}/approve", authHuman, "Approve a credential request as the caller (a machine login also takes its typed code); the broker decides whether the caller is its approver.", s.approveCredentialRecord},
 		{http.MethodPost, "/api/v1/credential-requests/{id}/deny", authHuman, "Deny a credential request as the caller (a machine login also takes its typed code); the broker decides whether the caller is its approver.", s.denyCredentialRecord},
@@ -165,6 +168,7 @@ func (s *server) routes() []apiRoute {
 		routes = append(routes,
 			apiRoute{http.MethodPost, "/api/v1/events/_test/disconnect", authAny, "Test hook: drop every open event stream.", s.disconnectAllStreams},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},
+			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
 			apiRoute{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
 		)
 	}
@@ -191,6 +195,18 @@ func routeIndexEntries(routes []apiRoute) []routeIndexEntry {
 	return entries
 }
 
+// routeIndexBody is the body GET /api/v1 answers.
+func routeIndexBody(entries []routeIndexEntry) map[string]any {
+	return map[string]any{"routes": entries, "docs": routeIndexDocs}
+}
+
 func (s *server) getRouteIndex(w http.ResponseWriter, _ *http.Request) {
-	WriteJSON(w, http.StatusOK, map[string]any{"routes": s.routeIndex, "docs": routeIndexDocs})
+	WriteJSON(w, http.StatusOK, routeIndexBody(s.routeIndex))
+}
+
+// WriteRouteIndex writes the body GET /api/v1 answers on a server without test hooks, read
+// from the table alone: no database, no listener. `envoy-dispatch routes` prints it, and the
+// docs site's API reference is generated from that output.
+func WriteRouteIndex(w io.Writer) error {
+	return json.NewEncoder(w).Encode(routeIndexBody(routeIndexEntries((&server{}).routes())))
 }

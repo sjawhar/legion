@@ -242,16 +242,8 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	}
 	events := []model.Event{}
 	if snapshot != nil {
-		snapshotEvent, err := s.appendEvent(r.Context(), tx, owner.event(
-			"artifact.version",
-			actor,
-			docs.ArtifactVersionEventPayload(anchor.ArtifactID, artifactName, snapshot.Version, nil, snapshot.Changes),
-		))
+		snapshotEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
 		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if err := refs.Stamp(r.Context(), tx, "artifact", anchor.ArtifactID, snapshotEvent.ID); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -382,7 +374,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ask.Kind == "approval" {
-		writeError(w, "ASK_KIND_FIXED", http.StatusConflict, "an approval ask's question and options are fixed; retract it and request approval again")
+		writeError(w, "ASK_KIND_FIXED", http.StatusConflict, "an approval ask's question and options are fixed; revise its document, then, once the human has agreed to every point in it, hand the request back through dispatch_request_approval")
 		return
 	}
 	if actor.Kind == "session" && !ask.Author.SameAs(actor) {
@@ -596,7 +588,7 @@ func (s *server) listOpenAsks(w http.ResponseWriter, r *http.Request) {
 					'author', lr.author,
 					'created_at', lr.created_at
 				) end as last_reply,
-				coalesce(lr.turn, 'human') as waiting_on
+				`+waitingOnExpression+` as waiting_on
 			from mine a
 			left join issues i on i.key = a.issue_key
 			left join artifacts ar on ar.id = a.artifact_id`+lastReplyJoin+`
