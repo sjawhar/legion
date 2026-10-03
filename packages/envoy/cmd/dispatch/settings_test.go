@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -354,15 +355,15 @@ func signInPool(t *testing.T, clientID, clientSecret string) *oidctest.Issuer {
 	return pool
 }
 
-// signInRouter is the router main serves for boot, with the sign-in pool's code flow main
-// discovers from boot's DISPATCH_SIGNIN_* settings (discoverSignIn).
-func signInRouter(t *testing.T, boot bootConfig) http.Handler {
+// signInRouter is the router main serves for boot over people, with the sign-in pool's code flow
+// main discovers from boot's DISPATCH_SIGNIN_* settings (discoverSignIn).
+func signInRouter(t *testing.T, boot bootConfig, people auth.PeopleStore) http.Handler {
 	t.Helper()
 	flow, err := discoverSignIn(context.Background(), boot)
 	if err != nil || flow == nil {
 		t.Fatalf("discover the sign-in pool %s: %v, %v", boot.SignInIssuer, flow, err)
 	}
-	return routerFor(t, boot, routes.AppContextOptions{SignIn: flow, People: peopleStore(t)})
+	return routerFor(t, boot, routes.AppContextOptions{SignIn: flow, People: people})
 }
 
 // startSignIn answers GET /auth/start from handler: the redirect to the pool's authorization
@@ -377,12 +378,11 @@ func startSignIn(t *testing.T, handler http.Handler) *httptest.ResponseRecorder 
 	return response
 }
 
-// poolSignIn runs a whole sign-in through the router main serves for boot against pool: start, the
-// pool's sign-in as a person the federated provider names alice@example.com in groups, and the
+// poolSignIn runs a whole sign-in through handler, a router signInRouter built, against pool: start,
+// the pool's sign-in as a person the federated provider names alice@example.com in groups, and the
 // callback, whose answer it returns.
-func poolSignIn(t *testing.T, boot bootConfig, pool *oidctest.Issuer, groups ...string) *httptest.ResponseRecorder {
+func poolSignIn(t *testing.T, handler http.Handler, pool *oidctest.Issuer, groups ...string) *httptest.ResponseRecorder {
 	t.Helper()
-	handler := signInRouter(t, boot)
 	pool.SignInAs(map[string]any{
 		"sub":              "person-subject",
 		"cognito:username": "ExampleIdP_alice@example.com",
@@ -535,7 +535,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": "", "DISPATCH_SIGNIN_CLIENT_ID": "", "DISPATCH_SIGNIN_CLIENT_SECRET": "", "DISPATCH_SIGNIN_GROUP": ""}, "DISPATCH_SIGNIN_ISSUER")
 			// The pool main discovers: /auth/start sends the browser to its authorization endpoint.
 			t.Run("router", func(t *testing.T) {
-				if location := startSignIn(t, signInRouter(t, boot)).Header().Get("Location"); !strings.HasPrefix(location, pool.URL()+"/") {
+				if location := startSignIn(t, signInRouter(t, boot, peopleStore(t))).Header().Get("Location"); !strings.HasPrefix(location, pool.URL()+"/") {
 					t.Errorf("DISPATCH_SIGNIN_ISSUER=%s: GET /auth/start redirected to %q, want the pool's authorization endpoint", pool.URL(), location)
 				}
 				pool.FailDiscovery(http.StatusServiceUnavailable)
@@ -553,7 +553,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_CLIENT_ID": ""}, "DISPATCH_SIGNIN_CLIENT_ID missing")
 			// The client the router's sign-in names to the pool.
 			t.Run("router", func(t *testing.T) {
-				location, err := url.Parse(startSignIn(t, signInRouter(t, boot)).Header().Get("Location"))
+				location, err := url.Parse(startSignIn(t, signInRouter(t, boot, peopleStore(t))).Header().Get("Location"))
 				if err != nil || location.Query().Get("client_id") != "table-client" {
 					t.Errorf("DISPATCH_SIGNIN_CLIENT_ID=table-client: GET /auth/start redirected to %v (%v), want client_id table-client", location, err)
 				}
@@ -568,11 +568,11 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_CLIENT_SECRET": ""}, "DISPATCH_SIGNIN_CLIENT_SECRET missing")
 			// The secret the router's code exchange authenticates with: the pool refuses any other.
 			t.Run("router", func(t *testing.T) {
-				if response := poolSignIn(t, boot, pool, "dispatch-members"); response.Code != http.StatusFound || !sessionCookieSet(response) {
+				if response := poolSignIn(t, signInRouter(t, boot, peopleStore(t)), pool, "dispatch-members"); response.Code != http.StatusFound || !sessionCookieSet(response) {
 					t.Errorf("DISPATCH_SIGNIN_CLIENT_SECRET=table-secret: the callback answered %d %s, want a signed-in redirect", response.Code, response.Body.String())
 				}
 				wrong := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL(), "DISPATCH_SIGNIN_CLIENT_SECRET": "another-secret"})
-				if response := poolSignIn(t, wrong, pool, "dispatch-members"); response.Code != http.StatusBadGateway || sessionCookieSet(response) {
+				if response := poolSignIn(t, signInRouter(t, wrong, peopleStore(t)), pool, "dispatch-members"); response.Code != http.StatusBadGateway || sessionCookieSet(response) {
 					t.Errorf("a secret the pool does not hold: the callback answered %d %s, want 502 and no session", response.Code, response.Body.String())
 				}
 			})
@@ -584,13 +584,51 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("SignInGroup = %q", boot.SignInGroup)
 			}
 			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_GROUP": ""}, "DISPATCH_SIGNIN_GROUP missing")
-			// The group the router's sign-in admits: a member signs in, anyone else is refused.
+			// The group the router's sign-in admits: a member signs in, anyone else is refused. Past
+			// the hour, the membership check main attaches to cookie identity renews the member's
+			// sign-in with the pool against the same group, and signs out a person the pool no
+			// longer puts in it.
 			t.Run("router", func(t *testing.T) {
-				if response := poolSignIn(t, boot, pool, "other-group", "table-group"); response.Code != http.StatusFound || !sessionCookieSet(response) {
-					t.Errorf("a member of table-group: the callback answered %d %s, want a signed-in redirect", response.Code, response.Body.String())
+				people := peopleStore(t)
+				handler := signInRouter(t, boot, people)
+				member := poolSignIn(t, handler, pool, "other-group", "table-group")
+				if member.Code != http.StatusFound || !sessionCookieSet(member) {
+					t.Fatalf("a member of table-group: the callback answered %d %s, want a signed-in redirect", member.Code, member.Body.String())
 				}
-				if response := poolSignIn(t, boot, pool, "dispatch-members"); response.Code != http.StatusForbidden || sessionCookieSet(response) {
+				if response := poolSignIn(t, handler, pool, "dispatch-members"); response.Code != http.StatusForbidden || sessionCookieSet(response) {
 					t.Errorf("a person outside table-group: the callback answered %d %s, want 403 and no session", response.Code, response.Body.String())
+				}
+				whoami := func() *httptest.ResponseRecorder {
+					request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
+					for _, cookie := range member.Result().Cookies() {
+						if cookie.Name == "dsession" {
+							request.AddCookie(cookie)
+						}
+					}
+					response := httptest.NewRecorder()
+					handler.ServeHTTP(response, request)
+					return response
+				}
+				// ageConfirmation dates the member's last confirmation two hours back, so their next
+				// request finds it older than the hour.
+				ageConfirmation := func() {
+					t.Helper()
+					membership, found, err := people.Membership(context.Background(), "alice@example.com")
+					if err != nil || !found || membership.RefreshToken == "" {
+						t.Fatalf("the member's membership: %+v, found %t, %v; want a refresh token", membership, found, err)
+					}
+					if err := people.Confirm(context.Background(), "alice@example.com", membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				ageConfirmation()
+				if response := whoami(); response.Code != http.StatusOK || pool.Refreshes() != 1 {
+					t.Errorf("a member of table-group past the hour: whoami answered %d %s after %d refreshes, want 200 after one refresh", response.Code, response.Body.String(), pool.Refreshes())
+				}
+				ageConfirmation()
+				pool.UpdateGrants(func(claims map[string]any) { claims["cognito:groups"] = []string{"other-group"} })
+				if response := whoami(); response.Code != http.StatusUnauthorized {
+					t.Errorf("a member the pool dropped from table-group, past the hour: whoami answered %d %s, want 401", response.Code, response.Body.String())
 				}
 			})
 		},
@@ -855,7 +893,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// The flag as the router's cookies carry it: the state cookie GET /auth/start sets.
 			pool := signInPool(t, "dispatch-client", "client-secret")
 			for value, insecure := range map[string]bool{"": false, "1": true, "false": true} {
-				response := startSignIn(t, signInRouter(t, resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL(), "DISPATCH_INSECURE_COOKIE": value})))
+				response := startSignIn(t, signInRouter(t, resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": pool.URL(), "DISPATCH_INSECURE_COOKIE": value}), peopleStore(t)))
 				cookies := response.Result().Cookies()
 				if len(cookies) != 1 || cookies[0].Secure == insecure {
 					t.Errorf("DISPATCH_INSECURE_COOKIE=%q: /auth/start set %v, want one state cookie with Secure %t", value, cookies, !insecure)
