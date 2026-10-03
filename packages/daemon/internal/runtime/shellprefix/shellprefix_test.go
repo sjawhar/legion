@@ -8,15 +8,15 @@ import (
 	"testing"
 )
 
-// The exact bytes: Oh My Pi runs the prefix verbatim before every command, so a change in quoting
-// or in the trailing `&&` is a change in what every agent's shell does.
+// The exact bytes: Oh My Pi runs the prefix verbatim before every command, so a change in quoting,
+// in the closing `hash -r` or in the trailing `&&` is a change in what every agent's shell does.
 func TestForIsTheAssignmentThatPutsTheDirectoriesFirst(t *testing.T) {
 	got := For("/legion/worker-bin", "/opt/legion/bin")
 	want := `__legion_path=:${PATH//:/::}: && ` +
 		`__legion_path=${__legion_path//:'/legion/worker-bin':/} && ` +
 		`__legion_path=${__legion_path//:'/opt/legion/bin':/} && ` +
 		`__legion_path=${__legion_path//::/:} && __legion_path=${__legion_path#:} && ` +
-		`PATH='/legion/worker-bin:/opt/legion/bin'${__legion_path:+:${__legion_path%:}} && unset __legion_path &&`
+		`PATH='/legion/worker-bin:/opt/legion/bin'${__legion_path:+:${__legion_path%:}} && unset __legion_path && hash -r &&`
 	if got != want {
 		t.Fatalf("For = %q\nwant  %q", got, want)
 	}
@@ -29,7 +29,7 @@ func TestForQuotesADirectoryWithAQuoteInIt(t *testing.T) {
 		`__legion_path=${__legion_path//:'/state/it'\''s':/} && ` +
 		`__legion_path=${__legion_path//:'/bin dir':/} && ` +
 		`__legion_path=${__legion_path//::/:} && __legion_path=${__legion_path#:} && ` +
-		`PATH='/state/it'\''s:/bin dir'${__legion_path:+:${__legion_path%:}} && unset __legion_path &&`
+		`PATH='/state/it'\''s:/bin dir'${__legion_path:+:${__legion_path%:}} && unset __legion_path && hash -r &&`
 	if got != want {
 		t.Fatalf("For = %q\nwant  %q", got, want)
 	}
