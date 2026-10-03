@@ -1,6 +1,8 @@
 ---
 title: Concepts
 description: Sessions and enrollment, machine logins, rules and approvers, grants and their lifetime, approvals, and the audit record.
+sidebar:
+  order: 2
 ---
 
 This page explains the ideas the rest of the broker's documentation leans on. Each section names
@@ -8,7 +10,9 @@ the code that implements it, so you can check the page against the source.
 
 ## Sessions and enrollment
 
-An **agent session** is one running agent: an Oh My Pi process and everything it starts. The
+An **agent session** is one running agent and everything it starts. On a machine, it is the
+process `agent-secrets register --exec` starts (a coding agent, or a shell) and every process below
+it; in a container or a Kubernetes pod, it is whatever holds the session's key directory. The
 broker never deals with a person's or a machine's long-lived key on the agent's behalf. Instead,
 every session has a P-256 signing key of its own that lives only as long as the session does, and
 an **enrollment** that binds that key to the broker.
@@ -17,29 +21,33 @@ Every call a session makes carries a `Proof` header: a JSON Web Signature over t
 and URL, signed with the session's key, used once, and valid only within
 `BROKER_PROOF_SKEW_SECONDS` of the broker's clock. There is no bearer token for a session to leak.
 
-An enrollment has one of three kinds:
+A **launcher** is the program that enrolls sessions: `agent-secrets-helper`, a per-user daemon on
+a machine, for that machine's sessions, or the Legion daemon for the pods it runs. An enrollment
+has one of three kinds:
 
 | Kind | What it is | Who holds its key | Who enrolls it |
 | --- | --- | --- | --- |
-| `host` | An agent session running directly on a machine. | `agent-secrets-helper`, the per-user daemon on that machine, in memory. | The helper, when the session registers with `agent-secrets register`. |
-| `box` | An agent running in a container on a machine. | The container, in `key.pem` under `AGENT_SECRETS_KEY_DIR`. | The container's launcher, through the machine's helper (`agent-secrets enroll --helper`). |
+| `host` | An agent session running directly on a machine. | The machine's helper, in memory. | The helper, when the session registers with `agent-secrets register`. |
+| `box` | An agent session running in a container on a machine, called a **box**. | The container, in `key.pem` under `AGENT_SECRETS_KEY_DIR`. | The machine's helper, when whoever starts the container runs `agent-secrets enroll --helper` ([run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/)). |
 | `pod` | A Legion worker pod in Kubernetes. | The pod, in its key directory. | The Legion daemon, which proves the pod with a projected service-account token the broker verifies against `BROKER_K8S_OIDC_ISSUER`. |
 
 An enrollment is leased for `BROKER_LEASE_SECONDS` (15 minutes by default) and renewed while its
 session runs: the helper renews host sessions, `agent-secrets renew` renews a box, and Legion's pod
-shim renews a pod. An enrollment whose lease lapses, or that its launcher revokes, has **ended**:
-its calls are refused, every grant it held is revoked, and every request it still had pending is
-cancelled, so an approval can never land on a session that is gone
-(`packages/envoy/internal/broker/enroll/enroll.go`, `endEnrollment`). A host session's enrollment
-ends when the session's process exits.
+shim renews a pod. An enrollment has **ended** once its launcher revokes it (the helper does as
+soon as a host session's process exits) or its lease lapses. From the moment the lease lapses, the
+session's calls are refused `PROOF_INVALID`; the broker's sweep, which runs every
+`BROKER_SWEEP_SECONDS` (5 seconds by default), then ends the enrollment on its first run after the
+lapse. Ending an enrollment either way revokes every grant it held and cancels every request it
+still had pending, so those leave the approver's Inbox and an approval can never land on a session
+that is gone (`packages/envoy/internal/broker/enroll/enroll.go`, `endEnrollment`).
 
 Every enrollment records an **operator**: the person whose machine it runs on. The operator is the
 person who approved the machine login that enrolled it, never a value the launcher chooses.
 
 ## Machine login
 
-A launcher (the helper, a container launcher using it, or the Legion daemon) cannot enroll anything
-until a person has approved a **machine login** for it. The login works like a device code:
+A launcher (a machine's helper, or the Legion daemon) cannot enroll anything until a person has
+approved a **machine login** for it. The login works like a device code:
 
 1. The machine generates a fresh key and asks the broker to log in, naming the person who should
    approve it (the helper reads that person's Dispatch login from `AGENT_SECRETS_OPERATOR_FILE`).

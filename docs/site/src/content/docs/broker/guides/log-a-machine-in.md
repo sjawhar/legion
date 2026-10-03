@@ -1,30 +1,40 @@
 ---
 title: Log a machine in
 description: Install the helper on a machine that runs agents, log it in to the broker with a confirmation code, and approve the login in Dispatch.
+sidebar:
+  order: 11
 ---
 
 A machine that runs agent sessions directly needs `agent-secrets-helper`, a per-user daemon that
 holds each session's key, and a **machine login**: a credential, approved by the machine's
-operator, that lets the helper enroll that operator's sessions. Legion's daemon logs itself in the
-same way when it enrolls Kubernetes pods; it prints its code in its log, and you approve it as
-below.
+operator (the person whose agents it runs), that lets the helper enroll that operator's sessions.
+Legion's daemon logs itself in the same way when it enrolls Kubernetes pods; it prints its code in
+its log, and you approve it as below.
 
 ## 1. Install and start the helper
 
 Each `legion-envoy-v*` GitHub release ships `agent-secrets-amd64.tar.gz` and
 `agent-secrets-arm64.tar.gz`, each holding `agent-secrets/bin/agent-secrets` and
 `agent-secrets/bin/agent-secrets-helper`. Put both on your `PATH`, write your Dispatch login to
-the operator file, and run the helper as yourself (a user service manager such as `systemd --user`
-keeps it running):
+the operator file, give the broker's address to the helper and to every agent you will start, and
+run the helper as yourself:
 
 ```sh
 mkdir -p ~/.config/agent-secrets
 echo ada@example.com > ~/.config/agent-secrets/operator
-AGENT_SECRETS_URL=https://secrets.internal.example agent-secrets-helper serve
+export AGENT_SECRETS_URL=https://secrets.internal.example
+agent-secrets-helper serve
 ```
 
-The helper listens on `$XDG_RUNTIME_DIR/agent-secrets/helper.sock` and logs
-`agent-secrets-helper listening`. `agent-secrets-helper --help` lists its settings.
+Put the `export AGENT_SECRETS_URL=…` line in the profile your shells and agents start from, so the
+helper and every agent session get it: every `agent-secrets` form that calls the broker needs it.
+When a user service manager keeps the helper running (`systemd --user`), set it in the helper's
+unit too (`Environment=AGENT_SECRETS_URL=https://secrets.internal.example`).
+
+The helper listens on `$XDG_RUNTIME_DIR/agent-secrets/helper.sock`, where `agent-secrets` finds it
+without being told, and logs `agent-secrets-helper listening`. Set `AGENT_SECRETS_HELPER_SOCK` only
+to use another socket, and then in the helper's environment and every agent's alike.
+`agent-secrets-helper --help` lists its settings.
 
 ## 2. Start the login on the machine
 
@@ -36,6 +46,8 @@ enter it at https://dispatch.example.com/credentials/machine — approve only if
 
 The command waits for the decision. Set `AGENT_SECRETS_APPROVE_URL` to your Dispatch address to get
 the full link; without it, the second line says to enter the code on the Dispatch credential page.
+Interrupting it (Ctrl-C) leaves the login pending: run it again and it shows the same code, until
+someone approves the login or it expires.
 
 ## 3. Approve it in Dispatch
 
@@ -46,7 +58,8 @@ As the operator the login names, open Dispatch's **Enter machine login code** pa
 terminal shows. A machine login can only be selected by its code: no link approves one.
 
 Back on the machine, `agent-secrets launcher login` exits 0 and the helper logs
-`machine login issued; the helper holds a launcher credential`. Check it at any time:
+`machine login issued; the helper holds a launcher credential`: the machine credential the approval
+minted, which the helper now enrolls sessions with. Check it at any time:
 
 ```console
 $ agent-secrets launcher login-status
@@ -59,12 +72,20 @@ Start each agent through `agent-secrets register`, which makes the agent's proce
 it starts, one session the helper enrolls with the broker:
 
 ```sh
-agent-secrets register --wait 10 --exec -- omp
+agent-secrets register --wait 10 --exec -- <agent>
 ```
+
+`<agent>` is the command that starts your agent (`bash` works for trying it out). `register`
+replaces itself with that command and passes its own environment on unchanged, so the agent's
+environment needs `AGENT_SECRETS_URL` (step 1's profile line gives it), and
+`AGENT_SECRETS_HELPER_SOCK` when the helper uses a socket other than the default.
 
 `--wait 10` gives the helper up to 10 seconds to enroll the session before the agent starts. Without
 a machine login it starts the agent anyway, with a warning that the session's `agent-secrets` calls
 fail until the machine is logged in.
+
+An agent in a container instead holds its own key: [run an agent in a
+container](/legion/broker/guides/run-an-agent-in-a-container/) shows how the helper enrolls it.
 
 ## When to log in again
 

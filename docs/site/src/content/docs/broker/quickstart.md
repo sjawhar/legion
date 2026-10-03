@@ -1,15 +1,22 @@
 ---
 title: Quickstart
 description: An agent session uses a secret with one command; the approver sees the request in Dispatch; the command runs with the value in its environment.
+sidebar:
+  order: 1
 ---
 
 This page follows one secret from the agent that asks for it, through the person who approves it,
 back to the command that uses it. It assumes the machine is already logged in to the broker and the
 agent session is registered; on a machine you set up yourself, [log the machine
 in](/legion/broker/guides/log-a-machine-in/) first and start each agent with
-`agent-secrets register --wait 10 --exec -- <agent>`. Every output below is real, captured from
-the [local stack](/legion/broker/guides/run-locally/), whose rules grant `DEMO_READ_TOKEN`
-automatically and need `ada@example.com` to approve `DEMO_API_KEY`.
+`agent-secrets register --wait 10 --exec -- <agent>`.
+
+No broker yet? [Run the local stack](/legion/broker/guides/run-locally/) and log its helper in, as
+that page shows. It has no Dispatch: where step 2 says Dispatch, approve with
+`agent-secrets-devrelay`, as [approving without
+Dispatch](/legion/broker/guides/approve-a-request/#without-dispatch) shows. Every terminal output
+below is real, captured from that stack, whose rules grant `DEMO_READ_TOKEN` automatically and need
+`ada@example.com` to approve `DEMO_API_KEY`.
 
 ## 1. The agent asks
 
@@ -32,8 +39,8 @@ $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
 demo-read-token-value
 ```
 
-When they need a person's approval, `agent-secrets` waits (up to 30 minutes; set `--wait` to change
-that) while the approver decides.
+When they need a person's approval, `agent-secrets` waits (up to 30 minutes; set `--wait` to a
+duration such as `5m` to change that) while the approver decides.
 
 ## 2. The approver decides in Dispatch
 
@@ -72,21 +79,24 @@ secrets gets it again without asking anyone; `agent-secrets self` lists the sess
 
 ```console
 $ agent-secrets self
-enrollment_id: 5a60201a-2c18-488e-9e67-10b3e41390e3
+enrollment_id: 2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 kind: host
 operator: ada@example.com
-lease_expires_at: 2026-10-03T02:21:40Z
-grant: 95c3597a-c6d9-42a5-818b-f8fea438f502 (request fb85d9d7-8dfb-4571-8bfe-0674a7f093c0, expires 2026-10-03T03:06:41Z)
-grant: e2123cec-576a-4dbe-aba5-f17b8cb57701 (request d92c775b-b69b-4775-a7e6-4fce079e3b0c, expires 2026-10-03T03:06:41Z)
+lease_expires_at: 2026-10-03T03:36:40Z
+grant: f5167d29-1789-4719-8e8c-9aec6f1229e7 (request ce11549a-ab03-4a13-95cf-896961c36fc0, expires 2026-10-03T04:21:47Z)
+grant: be34ed2a-78e2-4457-9a75-71283a87c16b (request 7db349e6-ad3c-4f40-86d7-c6a38e899306, expires 2026-10-03T04:22:04Z)
 ```
 
 ## When the answer is no
 
-A denied request runs nothing, and `agent-secrets` exits 77:
+From a session with no live grant of `DEMO_API_KEY` (a new session, or one that ran
+`agent-secrets revoke <grant id>`), the same command asks again. When the approver clicks **Deny**
+(on the local stack, `agent-secrets-devrelay deny --record <record id>`), nothing runs and
+`agent-secrets` exits 77:
 
 ```console
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
-agent-secrets: request 15c26ea4-d896-4bcf-8092-ad253194185c was denied
+agent-secrets: request 2375f92d-bab0-4123-a0cb-d139c98de73c was denied
 ```
 
 A request still undecided when `--wait` runs out exits 75 and runs nothing; a name the rules do not

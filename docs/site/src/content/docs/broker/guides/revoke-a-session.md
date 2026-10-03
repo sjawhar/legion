@@ -1,11 +1,14 @@
 ---
 title: Revoke a session or a grant
 description: End a grant from Dispatch or from the session holding it, cancel a pending request, and end a session so nothing it held still works.
+sidebar:
+  order: 12
 ---
 
 A grant ends on its own when it expires. To end access sooner, revoke the grant, or end the session
 that holds it: ending a session revokes every grant it held and cancels every request it still had
-pending.
+pending. Ending a grant stops the session reading its values again; a command already running with
+a value keeps it.
 
 ## Revoke a grant in Dispatch
 
@@ -14,54 +17,60 @@ sessions you operate, each with its enrollment, names, approver, and when it was
 expires. Click **Revoke** to end one at once; the session's next read of it is refused
 `GRANT_NOT_LIVE`. The broker allows it when you are the grant's approver or its session's operator,
 and refuses anyone else `NOT_APPROVER`. A grant the rules gave automatically has no approver and is
-not in that list; its operator can still revoke it through the same broker route:
+not in that list; its operator can still revoke it through the same broker route, with the grant id
+the session's `agent-secrets self` prints:
 
 ```console
-$ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/grants/6e38a949-636f-44b4-8f7b-24baf9efa744/revoke-by-approver"
+$ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/grants/<grant id>/revoke-by-approver"
 {"state":"revoked"}
 ```
 
-(That is the call Dispatch's server makes; on the [local stack](/legion/broker/guides/run-locally/)
-you can make it yourself.)
+(That is the call Dispatch's server makes with the broker's UI token, the credential only
+Dispatch's server holds; on the [local stack](/legion/broker/guides/run-locally/) you can make it
+yourself.)
 
 ## Revoke a grant from its session
 
-A session can end any of its own grants. `agent-secrets self` lists them:
+A session can end any of its own grants, by the grant id `agent-secrets self` lists:
 
 ```console
-$ agent-secrets revoke c6c1f92f-7ff2-4818-86a0-860494e7ddd7
+$ agent-secrets revoke b51e58bc-3b7b-4144-a2ed-5821f232d612
 revoked
 $ agent-secrets self
-enrollment_id: ddc91237-0835-4ac3-8dc8-936446809913
+enrollment_id: 2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 kind: host
 operator: ada@example.com
-lease_expires_at: 2026-10-03T02:21:47Z
+lease_expires_at: 2026-10-03T03:36:40Z
 ```
 
 ## Cancel a pending request
 
 A session that no longer needs what it asked for withdraws the request, which takes it off the
-approver's list:
+approver's list. It names the request by the request id `agent-secrets` printed when it asked
+(`agent-secrets request` prints it, and so does a command whose `--wait` ran out):
 
 ```console
-$ agent-secrets cancel e8a655b5-905d-4681-b9d9-5e3baa990b34
+$ agent-secrets cancel 715ea84a-6f5c-4230-83c9-1cf258acd88b
 cancelled
-$ agent-secrets status e8a655b5-905d-4681-b9d9-5e3baa990b34
+$ agent-secrets status 715ea84a-6f5c-4230-83c9-1cf258acd88b
 state: cancelled
-decided_by: session:f1fb7fd9-db9f-4a8b-9b58-a567833bdab3
+decided_by: session:2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 ```
 
 ## End a session
 
 Ending a session's enrollment revokes all of its grants and cancels all of its pending requests
-in one step, and the approver's Inbox drops them.
+in one step, and the approver's Inbox drops them. A session ends in one of two ways:
 
-- **A host session** ends when its process exits: the helper sees the registered process go and
-  revokes its enrollment (it logs `session retired … why="process exited"`).
-  `agent-secrets-helper sessions` lists the live ones.
-- **A pod's** enrollment ends when its lease runs out once the pod stops renewing it, as does
-  **any session's** that stops renewing (for instance because its machine went away): the broker
-  ends it after `BROKER_LEASE_SECONDS`.
+- **Its launcher revokes it.** A host session's ends when its process exits: the helper sees the
+  registered process go and revokes its enrollment (it logs
+  `session retired … why="process exited"`). `agent-secrets-helper sessions` lists the live ones.
+  A box's launcher revokes it with `agent-secrets unenroll --helper --enrollment <id>`.
+- **Its lease lapses.** A session that stops renewing (a pod that is gone, a box whose
+  `agent-secrets renew` stopped, or a machine that went away) is refused `PROOF_INVALID` from the
+  moment its lease lapses, `BROKER_LEASE_SECONDS` (15 minutes by default) after its last renewal.
+  The broker's sweep ends it on its next run, within `BROKER_SWEEP_SECONDS` (5 seconds by
+  default), and logs `broker sweeper: ended an enrollment whose lease lapsed`.
 
 ## Stop a machine from enrolling sessions
 

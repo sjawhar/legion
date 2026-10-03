@@ -1,13 +1,18 @@
 ---
 title: Secrets broker
 description: How agents get the secrets they need without holding long-lived keys, with a person approving what needs approval and every grant recorded.
+sidebar:
+  label: Introduction
+  order: 0
 ---
 
 The secrets broker hands agent sessions the secret values they need, one request at a time, so an
 agent never holds a long-lived API key. An agent asks for a secret by name; the broker decides from
 its rules whether to grant it at once, refuse it, or ask a person; and the person approves or denies
-it in Dispatch. A granted value reaches only the command that asked for it, lives only as long as
-its grant, and every request, decision and use is recorded.
+it in Dispatch. A granted value reaches only the command that asked for it, and every request,
+decision and use is recorded. The command keeps the value in its environment for as long as it
+runs; the grant's expiry or revocation stops the session from reading the value again, not a
+command that already has it.
 
 ```sh
 agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
@@ -58,8 +63,9 @@ sequenceDiagram
 ```
 
 On a machine, `agent-secrets-helper` holds each agent session's key and signs for it. In a
-container the container holds its own key, and in Kubernetes each Legion worker pod does; the
-request flow is the same.
+container (a **box**) the container holds its own key, and in Kubernetes each Legion worker pod
+does; the request flow is the same. [Run an agent in a
+container](/legion/broker/guides/run-an-agent-in-a-container/) shows a box's setup.
 
 ## The pieces
 
@@ -91,6 +97,7 @@ every worker pod it starts, so each pod's agent gets only the grants of that pod
   audit record.
 - Guides: [approve a request](/legion/broker/guides/approve-a-request/),
   [log a machine in](/legion/broker/guides/log-a-machine-in/),
+  [run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/),
   [revoke a session or a grant](/legion/broker/guides/revoke-a-session/),
   [run the broker locally](/legion/broker/guides/run-locally/), and
   [troubleshooting](/legion/broker/guides/troubleshooting/).

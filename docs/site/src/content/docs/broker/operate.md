@@ -1,6 +1,8 @@
 ---
 title: Operating the broker
 description: Running the secrets broker - its configuration, its Postgres and secret-store dependencies, Dispatch's connection to it, health, logs and the audit record.
+sidebar:
+  order: 3
 ---
 
 The broker is one stateless HTTP process. Everything it knows lives in Postgres; it reads its rules
@@ -29,7 +31,14 @@ BROKER_DATABASE_URL='postgres://broker:${BROKER_DATABASE_PASSWORD}@db.internal.e
 BROKER_DATABASE_PASSWORD=<placeholder>
 BROKER_UI_TOKEN_FILE=/run/secrets/broker-ui-token
 BROKER_RULES_S3_URI=s3://<bucket>/agent-secret-rules.yaml
+AWS_REGION=<region>
 ```
+
+`AWS_REGION` is the AWS SDK's own setting, not the broker's: the SDK takes the region of the rules
+bucket and the secret store only from `AWS_REGION`, `AWS_DEFAULT_REGION` or the shared AWS config
+file, never from the instance it runs on. Without one, the broker's first rules load fails and it
+exits at startup with `broker: fatal error="rules object s3://…: … Invalid region: region was not a
+valid DNS name."`.
 
 The broker refuses to start, naming the variable, when one is missing, malformed or out of range,
 and also while a variable it no longer reads is still set.
@@ -41,7 +50,7 @@ and also while a variable it no longer reads is still set.
 | Postgres | A database the broker owns (`BROKER_DATABASE_URL`). The broker applies its own migrations at startup; they only move forward, so never run an older broker against a database a newer one has migrated. |
 | The rules file | Read at startup and every `BROKER_RULES_RELOAD_SECONDS`: from S3 in production (`BROKER_RULES_S3_URI`), from a local file in development (`BROKER_RULES_FILE`). [Concepts](/legion/broker/concepts/#rules-who-may-have-which-secret) describes the format. |
 | The secret store | With `BROKER_RULES_S3_URI`, AWS Secrets Manager: each secret's `source` in the rules is a Secrets Manager secret id whose value is a non-empty string. With `BROKER_RULES_FILE`, a local file of `source=value` lines named by `BROKER_FAKE_SECRETS_FILE`, for development only. |
-| AWS credentials | In production the broker reads S3 and Secrets Manager with the AWS SDK's default credential chain (environment, shared config, or the workload's role). It needs to read the rules object and `GetSecretValue` on every rule's `source`, and nothing else. |
+| AWS credentials | In production the broker reads S3 and Secrets Manager with the AWS SDK's default credential chain (environment, shared config, or the workload's role), and a region (`AWS_REGION`, `AWS_DEFAULT_REGION` or the shared config). It needs to read the rules object and `GetSecretValue` on every rule's `source`, and nothing else. |
 | Dispatch | Dispatch's server calls the broker's approval routes. Set Dispatch's `DISPATCH_AGENT_SECRETS_URL` to the broker's URL and `DISPATCH_AGENT_SECRETS_TOKEN` (or `DISPATCH_AGENT_SECRETS_TOKEN_FILE`) to the same value as the broker's `BROKER_UI_TOKEN`. Without them, Dispatch hides its credential pages. |
 | Kubernetes (optional) | To enroll pods, `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` name the cluster's service-account token issuer and the audience the pods' projected tokens carry. The broker fetches the issuer's discovery document at startup and refuses to start if it cannot. |
 | Envoy (optional) | With `BROKER_ENVOY_URL`, the broker tells a waiting agent session, best effort, when its pending request expires. |
@@ -71,6 +80,7 @@ The broker logs text lines to stderr. The ones worth alerting or searching on:
 | `broker: fatal error=…` | Startup refused; the error names the variable or dependency. The process exits 1. |
 | `rules reload refused; previous rules kept error=…` | A reload of the rules did not parse. The broker keeps serving the previous rules. |
 | `broker: <operation> failed error=…` | A request failed with a 500 or 503; the line carries the cause the response does not. |
+| `broker sweeper: ended an enrollment whose lease lapsed enrollment_id=… kind=… runtime_id=… slot=… lease_expired_at=… grants_revoked=… requests_cancelled=…` | A session stopped renewing (a pod that is gone, a box whose `agent-secrets renew` stopped); the sweep ended it, revoking its grants and cancelling its pending requests. |
 | `broker shutting down` | SIGTERM or SIGINT: in-flight requests get 10 seconds to finish. |
 
 Each request is bounded to 45 seconds. Request bodies are JSON of at most 1 MiB.

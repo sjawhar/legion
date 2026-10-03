@@ -1,11 +1,14 @@
 ---
 title: Approve a request
 description: Find a pending secret request in Dispatch, check what it asks for, and approve or deny it.
+sidebar:
+  order: 10
 ---
 
 When an agent asks for a secret the rules say a person must approve, that person decides it in
 Dispatch. Only the approver the request names can decide it: the operator of the machine the agent
-runs on (rules with `approver: operator`), or the login the rules name (`approver: login:<name>`).
+runs on (rules with `approver: operator`), or the login the rules name (`approver: login:<name>`);
+[Concepts](/legion/broker/concepts/#rules-who-may-have-which-secret) explains the rules.
 
 ## Find it
 
@@ -56,18 +59,22 @@ $ curl -s -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" "$AGENT_SECRETS_URL
 {
   "pending": [
     {
-      "record_id": "eb2795ecb7f1865b08106c5975ed15c000b9fb6be61101a58a02dbe23c147846",
+      "record_id": "7b1a96bcccee227f5774b29f4f9d947d4ee32a3284ae8030f2ada3aa8954961b",
       "kind": "agent_secret",
       "identifiers": [
         "DEMO_API_KEY"
       ],
-      "requested_at": "2026-10-03T02:06:41.146245Z"
+      "requested_at": "2026-10-03T03:21:49.962111Z"
     }
   ]
 }
-$ agent-secrets-devrelay approve --record eb2795ecb7f1865b08106c5975ed15c000b9fb6be61101a58a02dbe23c147846
-{"credential_id":null,"grant_id":"e2123cec-576a-4dbe-aba5-f17b8cb57701","state":"approved"}
+$ agent-secrets-devrelay approve --record 7b1a96bcccee227f5774b29f4f9d947d4ee32a3284ae8030f2ada3aa8954961b
+{"credential_id":null,"grant_id":"be34ed2a-78e2-4457-9a75-71283a87c16b","state":"approved"}
 ```
 
 `agent-secrets-devrelay deny --record <id>` denies one. The [HTTP API
 reference](/legion/broker/reference/api/) documents these routes.
+
+A request has two ids. The request id is the one `agent-secrets` prints and takes (`self`,
+`status`, `cancel`, and the exit-75 message); the record id is the one the approver's list shows
+and `agent-secrets-devrelay` takes. `agent-secrets request NAME --json` prints both.

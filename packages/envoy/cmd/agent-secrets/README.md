@@ -23,7 +23,7 @@ quickstart, the guides and the generated CLI reference.
 
 ```sh
 cd packages/envoy
-go build ./cmd/agent-secrets ./cmd/agent-secrets-helper
+go build -o bin/ ./cmd/agent-secrets ./cmd/agent-secrets-helper
 ```
 
 Each `legion-envoy-v*` GitHub release ships both binaries for Linux as

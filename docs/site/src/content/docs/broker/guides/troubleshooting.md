@@ -1,6 +1,8 @@
 ---
 title: Troubleshooting
 description: Every message agent-secrets and Dispatch show when the broker refuses something, what causes it, and how to fix it.
+sidebar:
+  order: 14
 ---
 
 Find the message you see. `agent-secrets` prints a broker refusal as `<message> (<CODE>)` and a
@@ -17,15 +19,17 @@ generated from the code, lists every code.
 | `NOT_ENROLLED: this session is not enrolled with the broker yet` | The session registered, but the helper has not enrolled it yet: it was started without `--wait`, or the broker was unreachable. | Start sessions with `--wait 10`. If it persists, check the helper's log and that `AGENT_SECRETS_URL` reaches the broker. |
 | `this machine is not logged in to the secrets broker; not an agent session (run: agent-secrets launcher login)` | The helper holds no machine credential: it restarted, or the credential expired. | [Log the machine in](/legion/broker/guides/log-a-machine-in/). |
 | `agent-secrets: helper unreachable at …` | The helper is not running, or the socket path is wrong. | Start `agent-secrets-helper`, or point `AGENT_SECRETS_HELPER_SOCK` at its socket. |
+| `agent-secrets register: AGENT_SECRETS_HELPER_SOCK is unset and no helper socket is at … (host sessions only; an agent box has a key dir instead)` (exit 2) | No helper listens on the default socket, `$XDG_RUNTIME_DIR/agent-secrets/helper.sock`, and `AGENT_SECRETS_HELPER_SOCK` names none. | Start `agent-secrets-helper`, or set `AGENT_SECRETS_HELPER_SOCK` to the socket it listens on. |
 | `the last machine login is expired; run: agent-secrets launcher login`, or `the broker refused this machine's launcher credential …` (from `launcher login-status`) | The credential expired or was refused: past its lifetime, a clock far off the broker's, or an `AGENT_SECRETS_URL` that is not exactly the broker's public URL. | Fix the clock or the URL if either is wrong, then log in again. |
-| `PROOF_INVALID` | The broker refused the session's signature: the session ended (its lease ran out, or its process exited), the clock is off by more than `BROKER_PROOF_SKEW_SECONDS`, or `AGENT_SECRETS_URL` differs from the broker's public URL. | Start a new session; check the clock and the URL. |
+| `PROOF_INVALID` | The broker refused the session's signature: the session ended (its lease lapsed, its process exited, or its launcher unenrolled it), the clock is off by more than `BROKER_PROOF_SKEW_SECONDS`, or `AGENT_SECRETS_URL` differs from the broker's public URL. | Start a new session (a box: a new key and enrollment, [run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/)); check the clock and the URL. |
 
 ## The request was refused
 
 | Message | Cause | Fix |
 | --- | --- | --- |
 | `request … was denied` (exit 77) | The approver denied it, or the rules deny one of the names for this session. Nothing ran. | Ask the approver, or the rules' owner, why. |
-| `request … is still waiting for approval; nothing was run. Check it with: agent-secrets status …` (exit 75) | Nobody decided within `--wait` (30 minutes by default). | Ask the approver; check with `agent-secrets status`; rerun the command once it is granted. |
+| `request … is still waiting for approval; nothing was run. Check it with: agent-secrets status …` (exit 75) | Nobody decided within `--wait` (30 minutes by default). | Ask the approver; check with `agent-secrets status`; rerun the command once it is granted, or with a longer `--wait`, a duration such as `1h`. |
+| `invalid value "…" for flag -wait: parse error` (exit 2) | `--wait` takes a duration with its unit (`90s`, `5m`, `1h`), not a bare number. `register --wait` is the exception: it takes whole seconds. | Add the unit. |
 | `request … was expired` or `request … was cancelled` | Nobody decided it within 12 hours, or the session cancelled it (or ended). | Ask again. |
 | `no rule names this secret (UNKNOWN_SECRET)` | The name is not in the broker's rules. | Check the spelling, or ask the rules' owner to add it. |
 | `the requested secrets need different approvers; request them separately (MIXED_APPROVERS)` | One command asked for secrets that different people approve. | Request them in separate commands. |
