@@ -13,9 +13,10 @@ updates:
       - "/.github/actions/*"
     schedule:
       interval: "weekly"
-    # A compromised upstream release sits for 7 days before Dependabot opens a pull request for
-    # it, so the pull request that runs it with worker-image.yaml's packages: write (the
-    # pull_request trigger covers this file) is never the first run of a brand-new tag.
+    # A compromised upstream release sits for 7 days before Dependabot opens a version-update pull
+    # request for it, so the pull request that runs it with worker-image.yaml's packages: write
+    # (the pull_request trigger covers this file) is never the first run of a brand-new tag.
+    # GitHub does not apply cooldown to security-update pull requests.
     cooldown:
       default-days: 7
     commit-message:

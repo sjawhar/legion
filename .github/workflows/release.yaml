@@ -31,9 +31,10 @@ on:
       - ".github/workflows/worker-image.yaml"
   workflow_dispatch:
 
-permissions:
-  contents: write
-  id-token: write
+# Every job declares its own permissions (changes, legion, worker_image, worker_image_release_note,
+# envoy_plugin, pi_envoy below); nothing runs under this workflow-level default, so it stays empty
+# rather than becoming an unreviewed grant to a job added later with no block of its own.
+permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
@@ -328,6 +329,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_plugin == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
+    # npm's provenance OIDC token (`npm publish --provenance`). The tag push and version-bump
+    # commit use the deploy key, not either scope.
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -433,6 +440,12 @@ jobs:
       always() && (needs.envoy_plugin.result == 'success' || needs.envoy_plugin.result == 'skipped') &&
       (needs.changes.outputs.pi_envoy == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
+    # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
+    # npm's provenance OIDC token (`npm publish --provenance`). The tag push and version-bump
+    # commit use the deploy key, not either scope.
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:

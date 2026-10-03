@@ -151,9 +151,10 @@ jobs:
       group: release-envoy-listener
       cancel-in-progress: false
     runs-on: ubuntu-24.04
-    # contents: write and packages: write publish the tag and release; attestations: write and
-    # id-token: write are for the agent-secrets provenance below (id-token is the Sigstore signing
-    # certificate's OIDC token).
+    # packages: write moves the `latest` tag to the newest already-published image (`docker
+    # buildx imagetools create`, below); contents: write creates and uploads the GitHub release
+    # (`gh release create`/`upload`); id-token and attestations: write are for the agent-secrets
+    # provenance attestation. The git tag push uses the deploy key, not any of these scopes.
     permissions:
       contents: write
       packages: write
