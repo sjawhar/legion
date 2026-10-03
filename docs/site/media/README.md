@@ -107,7 +107,9 @@ poster frame in `<name>.jpg`. Commit all three with the walkthrough file. A page
 - Video is never stretched, slowed or frozen to fit narration. Each narration line is generated
   after its clip is cut and measured, with ElevenLabs' leading and trailing silence removed, and
   placed at the moment it describes. The build fails when a line runs into the next one or past
-  its clip: cut words, never footage pace. Audio is padded with silence to the clip's length.
+  its clip: cut words, never footage pace. The lines are mixed onto silence the clip's length, so
+  the audio runs unbroken from the clip's first frame: a gap in the audio's timestamps is one a
+  browser plays straight through, and every later line would sound early.
 - The build prints every silence of two seconds or more. Over live action (typing, a page
   updating) that is fine; over a still picture it is dead air, so shorten the hold.
 - A section whose screen shows an error, at its start or its end, fails the recording: fix the

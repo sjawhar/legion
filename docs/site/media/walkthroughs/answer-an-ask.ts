@@ -7,6 +7,8 @@ import { type DispatchWorkspace, dispatchApi, expect, seedDispatchWorkspace } fr
 import { highlight, linger, pointTo, ring, scrollBy, type Walkthrough } from "../recording";
 
 const ISSUE_TITLE = "Retry failed webhook deliveries";
+/** The key the seed's issue gets, which the narration names as the Inbox shows it. */
+const ISSUE_KEY = "CORE-8";
 const SPEC =
   `# ${ISSUE_TITLE}\n\n` +
   "When a customer's endpoint answers with an error, the delivery is dropped. Retry it with " +
@@ -40,6 +42,9 @@ async function seed(): Promise<Seeded> {
     as: "agent",
   } as const;
   const issue = await api.createIssue({ project: "CORE", spec: SPEC, title: ISSUE_TITLE });
+  if (issue.key !== ISSUE_KEY) {
+    throw new Error(`answer-an-ask: the narration names ${ISSUE_KEY}, the seed made ${issue.key}`);
+  }
   await api.patchIssue(issue.key, { priority: 1, status: "in_progress" });
   for (const [count, block] of [ALERT_CHANNEL, RETRY_LIMIT].entries()) {
     await api.editArtifact(
@@ -76,8 +81,12 @@ async function needsYouCount(page: Page): Promise<number> {
 }
 
 /** Where the pointer moves once the answer is sent: off the row, which the Inbox holds while the
- *  pointer rests on it. */
+ *  pointer rests on it. The mouse jumps to each resting spot, so it hovers nothing on the way;
+ *  the drawn pointer still glides there. */
 const RESTING = { x: 900, y: 360 } as const;
+/** The spec page's left margin, level with where the Inbox's click left the pointer: nothing
+ *  there takes a hover as the page scrolls under it. */
+const MARGIN = { x: 6, y: 380 } as const;
 
 const answerAnAsk: Walkthrough<Seeded> = {
   title: "Answer an ask",
@@ -90,9 +99,9 @@ const answerAnAsk: Walkthrough<Seeded> = {
         { at: "asker", text: "This one is the Planner's." },
         { at: "pick", text: "Pick an option, and give your reason in a note." },
         { at: "ask-back", text: "Unclear? Ask back." },
-        { at: "gone", text: "Answered, it leaves your Inbox." },
-        { at: "open", text: "Open in document shows where your answer landed." },
-        { at: "click", text: "Open it there." },
+        { at: "answer", text: "Answer, and it leaves your Inbox." },
+        { at: "open", text: `${ISSUE_KEY}'s spec keeps your answer.` },
+        { at: "click", text: "Open it from here." },
       ],
       open: async (page) => {
         await page.goto("/");
@@ -110,10 +119,10 @@ const answerAnAsk: Walkthrough<Seeded> = {
         // The pointer moves to the question as the first line names it, and to its asker as the
         // second does.
         await pointTo(page, card.getByText("How many times should a failed delivery be retried?"));
-        await linger(page, 1.65);
+        await linger(page, 1.7);
         await pointTo(page, card.getByText("Planner", { exact: true }));
         cue("asker");
-        await linger(page, 1.25);
+        await linger(page, 1.45);
         const three = card.getByRole("radio", { name: /^Three times/ });
         await pointTo(page, three);
         cue("pick");
@@ -123,32 +132,32 @@ const answerAnAsk: Walkthrough<Seeded> = {
         await note.click();
         await note.pressSequentially(NOTE, { delay: 40 });
         // The line starts as the typing ends; the pointer reaches Ask back as it is named, and
-        // Answer as the line ends.
+        // Answer as the line ends. The next line names Answer as it is clicked.
         cue("ask-back");
         await pointTo(page, card.getByRole("button", { exact: true, name: "Ask back" }));
-        await linger(page, 1);
+        await linger(page, 1.25);
         const answer = card.getByRole("button", { exact: true, name: "Answer" });
         await pointTo(page, answer);
+        cue("answer");
         await answer.click();
-        await page.mouse.move(RESTING.x, RESTING.y, { steps: 8 });
+        await page.mouse.move(RESTING.x, RESTING.y);
         await expect(retryRow(page)).toHaveCount(0);
         await expect(needsYou(page)).toHaveText(`Needs you ${countBefore - 1}`);
-        cue("gone");
         // The Inbox's own count, one lower, is ringed as the line says the ask left.
         await linger(page, 0.9);
         await ring(page, page.getByText(`Blocked on you: ${countBefore - 1} items`));
-        await linger(page, 1.4);
-        // The ring moves to the next question's link as its line names it, and the pointer
-        // follows; the click lands on the next line and ends the clip there, so the next section
-        // opens on the loaded spec rather than on its loading skeleton.
+        await linger(page, 1.2);
+        // The ring moves to the next question's link, which opens the same spec, as its line
+        // names the spec; the pointer goes to the link as the next line says to open it, and the
+        // click ends the clip, so the next section opens on the loaded spec rather than on its
+        // loading skeleton.
         cue("open");
         const open = openInDocument(page);
         await ring(page, open);
-        await linger(page, 0.85);
-        await pointTo(page, open);
-        await linger(page, 0.86);
+        await linger(page, 2.5);
         cue("click");
-        await linger(page, 0.9);
+        await pointTo(page, open);
+        await linger(page, 0.6);
         await open.click();
       },
     },
@@ -169,7 +178,10 @@ const answerAnAsk: Walkthrough<Seeded> = {
       },
       act: async (page, _seeded, cue) => {
         const block = answeredBlock(page);
-        await linger(page, 0.2);
+        // The pointer leaves the content for the margin before the page scrolls under it, so
+        // nothing hovers.
+        await page.mouse.move(MARGIN.x, MARGIN.y);
+        await linger(page, 0.5);
         // One visible scroll brings the whole answered block above the review sheet's handle.
         const box = await block.boundingBox();
         const viewport = page.viewportSize();
@@ -182,14 +194,14 @@ const answerAnAsk: Walkthrough<Seeded> = {
         cue("block");
         await linger(page, 0.8);
         await highlight(page, block.locator('ul[aria-label="Options"] li[data-selected="true"]'));
-        await linger(page, 1.3);
+        await linger(page, 1.25);
         await highlight(page, block.getByText(NOTE, { exact: true }));
         cue("note");
-        await linger(page, 0.35);
+        await linger(page, 0.4);
         await highlight(page, block.getByText(/Answered by alice/));
         cue("who");
         // The clip ends just after the line.
-        await linger(page, 1.1);
+        await linger(page, 1);
       },
     },
   ],

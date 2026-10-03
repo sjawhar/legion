@@ -422,8 +422,8 @@ if (refusals.length > 0) {
   );
 }
 
-// 4. Lay each section's lines on its clip at their moments, loudness-normalised and padded with
-//    silence to the clip's length; then concatenate the sections and write the captions.
+// 4. Lay each section's lines on a silent track the clip's length, at their moments and
+//    loudness-normalised; then concatenate the sections and write the captions.
 const sectionFiles: string[] = [];
 const captions = ["WEBVTT", ""];
 let offset = 0;
@@ -435,14 +435,20 @@ for (const [index, section] of sections.entries()) {
       `[${input + 1}:a]aformat=channel_layouts=stereo,loudnorm=I=-16:TP=-1.5:LRA=11,` +
       `aresample=44100,adelay=${Math.round(lines[lineIndex].at * 1000)}:all=1[v${input}]`
   );
-  // The lines never overlap, so summing them unscaled leaves each at its own loudness.
-  const mixed = `${own.map((_, input) => `[v${input}]`).join("")}amix=inputs=${own.length}:normalize=0`;
+  // The silent bed keeps the audio unbroken from the clip's first frame to its last. `adelay`
+  // starts a line by moving its timestamps, so the lines alone would leave the section's audio
+  // starting at its first line: a gap Chrome plays straight through, putting every later line
+  // early. The lines never overlap, so summing them unscaled leaves each at its own loudness.
+  const mixed =
+    `anullsrc=r=44100:cl=stereo:d=${seconds}[bed];` +
+    `[bed]${own.map((_, input) => `[v${input}]`).join("")}` +
+    `amix=inputs=${own.length + 1}:duration=first:normalize=0[a]`;
   const out = join(work, `${section.id}.section.mp4`);
   // biome-ignore format: a command's flags read as flag-value pairs
   run("ffmpeg", [
     "-y", "-v", "error", "-i", clipPath(section.id),
     ...own.flatMap((lineIndex) => ["-i", voiced[lineIndex].file]),
-    "-filter_complex", `${voices.join(";")};${mixed},apad,atrim=0:${seconds}[a]`,
+    "-filter_complex", `${voices.join(";")};${mixed}`,
     "-map", "0:v", "-map", "[a]", "-c:v", "copy",
     "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-t", seconds, out,
   ]);

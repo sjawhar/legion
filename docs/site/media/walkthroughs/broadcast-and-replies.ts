@@ -82,7 +82,7 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
     {
       id: "send",
       narration: [
-        { at: "filter", text: "Filter to the agents you mean," },
+        { at: 0.2, text: "On Agents, filter to the ones you mean," },
         { at: "select", text: "select all three," },
         { at: "mode", text: "set the mode to Send," },
         { at: "write", text: "write the message once," },
@@ -98,11 +98,11 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
         }
       },
       act: async (page, _seeded, cue) => {
+        // The line names the page as it opens, and the filter as the pointer sets it.
         await linger(page, 0.3);
         const machine = page.getByRole("combobox", { name: "Machine" });
         await pointTo(page, machine);
         await machine.selectOption("build-host");
-        cue("filter");
         const matching = page.getByText("3 matching", { exact: true });
         await expect(matching).toBeVisible();
         // The pointer goes to the filter's count of agents, then to the select-all box as the
@@ -117,11 +117,11 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
         await expect(page.getByText("3 of 3 matching selected", { exact: true })).toBeVisible();
         const composer = page.getByRole("region", { name: "Broadcast" });
         const mode = composer.getByRole("combobox", { name: "Delivery mode" });
-        await linger(page, 1.45);
+        await linger(page, 1.65);
         await pointTo(page, mode);
         await mode.selectOption("steer");
         cue("mode");
-        await linger(page, 1.4);
+        await linger(page, 1.6);
         const message = composer.getByRole("textbox", { name: "Broadcast message" });
         await pointTo(page, message);
         await message.click();
@@ -144,7 +144,7 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
     {
       id: "replies",
       narration: [
-        { at: 0.2, text: "Each card shows that its message was sent." },
+        { at: 0.1, text: "Each card shows it was sent," },
         { at: "first", text: "As each agent answers, its reply appears," },
         { at: "all", text: "until all three are in." },
       ],
@@ -161,11 +161,13 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
         const api = await dispatchApi();
         const { recipients } = await api.getBroadcast(seeded.sent);
         await pointTo(page, card(page, "Tester").getByText("Sent to Tester (Send)"));
-        // The first reply lands as the line ends.
+        // The first reply is sent as the line ends.
         await linger(page, 1.35);
         for (const [index, { reply, title }] of RECIPIENTS.entries()) {
           const recipient = recipients.find((one) => one.session_id === sessionOf(title).id);
           if (recipient === undefined) throw new Error(`${title} received no copy`);
+          // The line saying the replies appear starts as the first one is sent.
+          if (index === 0) cue("first");
           await api.replyToMessageDelivery(
             recipient.message.id,
             { attempt: 1, body: reply },
@@ -177,7 +179,6 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
           // The pointer follows each reply but the last, which lands as the line ends.
           if (index < RECIPIENTS.length - 1) {
             await pointTo(page, card(page, title).getByText(reply));
-            if (index === 0) cue("first");
             await linger(page, 0.8);
           }
         }
