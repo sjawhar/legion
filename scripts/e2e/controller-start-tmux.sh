@@ -288,7 +288,7 @@ for pair in LEGION_CONTROLLER=1 LEGION_ROLE=controller "LEGION_PROJECT=$ptoken" 
   "ENVOY_TOKEN_FILE=$work/envoy-token" "ENVOY_NATS_URL=$nats_url" "HOME=$omp_home" "OMP_PROFILE=$profile"; do
   [ "$(env_of "$omp1" "${pair%%=*}")" = "${pair#*=}" ] || fail "omp $omp1 has ${pair%%=*}=$(env_of "$omp1" "${pair%%=*}"), want ${pair#*=}"
 done
-env_of "$omp1" PI_SHELL_PREFIX | grep -qF "'$ctl_state/worker-bin:$ctl_state/bin:'" || fail "PI_SHELL_PREFIX = $(env_of "$omp1" PI_SHELL_PREFIX)"
+env_of "$omp1" PI_SHELL_PREFIX | grep -qF "PATH='$ctl_state/worker-bin:$ctl_state/bin'\${__legion_path" || fail "PI_SHELL_PREFIX = $(env_of "$omp1" PI_SHELL_PREFIX)"
 [ -z "$(env_of "$omp1" LEGION_CONTROLLER_SECRET)" ] || fail "the controller secret's value is in omp's environment"
 tr '\0' '\n' <"/proc/$omp1/cmdline" | grep -qxF -- "--append-system-prompt" || fail "omp has no --append-system-prompt"
 ! tr '\0' '\n' <"/proc/$omp1/cmdline" | grep -qx -- "--mode\|rpc\|--resume.*" || fail "omp runs --mode rpc or --resume"
