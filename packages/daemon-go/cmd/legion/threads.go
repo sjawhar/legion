@@ -28,15 +28,26 @@ const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!
 
 const resolveReviewThreadMutation = `mutation($threadId: ID!) { resolveReviewThread(input: { threadId: $threadId }) { thread { id isResolved } } }`
 
+// threadsUsage is `legion threads`'s usage, its one subcommand's.
+const threadsUsage = "usage: legion threads resolve --pr <number> --repo <owner>/<repo>"
+
 func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && helpRequested(args[0]) {
+		fmt.Fprintln(stderr, threadsUsage)
+		return 0
+	}
 	if len(args) == 0 || args[0] != "resolve" {
-		fmt.Fprintln(stderr, "usage: legion threads resolve --pr <number> --repo <owner>/<repo>")
+		fmt.Fprintln(stderr, threadsUsage)
 		return 2
 	}
-	flags := newFlags("threads resolve", stderr)
+	flags := newFlags("threads resolve", threadsUsage, stderr)
 	pr := flags.String("pr", "", "pull request number (required)")
 	repo := flags.String("repo", "", "repository owner/name (required)")
-	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+	if code, ok := parseFlags(flags, args[1:]); !ok {
+		return code
+	}
+	if flags.NArg() != 0 {
+		flags.Usage()
 		return 2
 	}
 	repository, err := ghrepo.Parse("--repo", *repo)

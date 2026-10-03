@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -292,24 +294,59 @@ func TestHelpListsEveryCommand(t *testing.T) {
 	}
 }
 
-// A command with subcommands answers --help with the usage that names them, and does nothing else:
-// the docs site's CLI generator reads each subcommand from that line.
+// Every command answers -h, -help and --help with its usage, `usage: legion <command>…`, and exit
+// 0: the docs site's CLI generator fails the build on any other answer.
+func TestEveryCommandAnswersHelp(t *testing.T) {
+	for name := range commands {
+		for _, help := range []string{"-h", "-help", "--help"} {
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", name, help}, &out, &errb)
+			if code != 0 || !usageOf(errb.String(), name) {
+				t.Errorf("legion %s %s = %d, stderr %q; want exit 0 and its usage", name, help, code, errb.String())
+			}
+		}
+	}
+}
+
+// usageOf says whether help begins with the usage line of `legion <words…>`.
+func usageOf(help string, words ...string) bool {
+	line, _, _ := strings.Cut(help, "\n")
+	fields := strings.Fields(line)
+	return len(fields) >= 2+len(words) && slices.Equal(fields[:2+len(words)], append([]string{"usage:", "legion"}, words...))
+}
+
+// A command with subcommands answers --help, exit 0, with a usage line naming every one of them —
+// every key of its table — as `legion <command> a|b|…`, the line the docs site's CLI generator
+// reads each subcommand from; and each subcommand answers --help with its own usage.
 func TestDispatchersAnswerHelpWithTheirSubcommands(t *testing.T) {
 	for _, tc := range []struct {
-		command string
-		usage   string
+		command     string
+		subcommands []string
 	}{
-		{"claims", "usage: legion claims spawn|deliver|suspend|resume|stop|close|list [flags]"},
-		{"handoff", "usage: legion handoff write|read|complete [flags]"},
-		{"workspace-init", "usage: legion workspace-init fetch --repo"},
-		{"controller", "usage: legion controller start --config"},
-		{"threads", "usage: legion threads resolve --pr"},
-		{"gh", "usage: legion gh -- <gh arguments>"},
+		{"claims", slices.Collect(maps.Keys(claimsCommands))},
+		{"handoff", slices.Collect(maps.Keys(handoffCommands))},
+		{"workspace-init", slices.Collect(maps.Keys(workspaceInitCommands))},
+		{"controller", []string{"start"}},
+		{"threads", []string{"resolve"}},
 	} {
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", tc.command, "--help"}, &out, &errb)
-		if code != 2 || !strings.HasPrefix(errb.String(), tc.usage) || strings.Contains(errb.String(), "unknown subcommand") {
-			t.Errorf("legion %s --help = %d, stderr %q; want exit 2 and stderr starting %q", tc.command, code, errb.String(), tc.usage)
+		prefix := "usage: legion " + tc.command + " "
+		line, _, _ := strings.Cut(errb.String(), "\n")
+		if code != 0 || !strings.HasPrefix(line, prefix) {
+			t.Errorf("legion %s --help = %d, stderr %q; want exit 0 and stderr starting %q", tc.command, code, errb.String(), prefix)
+			continue
+		}
+		named := strings.Split(strings.Fields(strings.TrimPrefix(line, prefix))[0], "|")
+		for _, sub := range tc.subcommands {
+			if !slices.Contains(named, sub) {
+				t.Errorf("legion %s --help names %v, not %s: %q", tc.command, named, sub, line)
+			}
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", tc.command, sub, "--help"}, &out, &errb)
+			if code != 0 || !usageOf(errb.String(), tc.command, sub) {
+				t.Errorf("legion %s %s --help = %d, stderr %q; want exit 0 and its usage", tc.command, sub, code, errb.String())
+			}
 		}
 	}
 }

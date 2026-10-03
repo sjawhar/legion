@@ -42,18 +42,22 @@ const controllerSecretVariable = "LEGION_CONTROLLER_SECRET"
 const controllerStartMessage = "Legion controller start: follow skill://legion-controller's start procedure now (\"What happened before you started\"), then end the turn."
 
 func runController(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && helpRequested(args[0]) {
+		fmt.Fprintln(stderr, controllerUsage)
+		return 0
+	}
 	if len(args) == 0 || args[0] != "start" {
 		fmt.Fprintln(stderr, controllerUsage)
 		return 2
 	}
-	flags := newFlags("controller start", stderr)
+	flags := newFlags("controller start", controllerUsage, stderr)
 	configPath := flags.String("config", "", "path to the operator-side controller.yaml (required)")
 	daemonURL := flags.String("daemon-url", "", "the daemon's API address, overriding the file's daemon_url")
-	if err := flags.Parse(args[1:]); err != nil {
-		return 2
+	if code, ok := parseFlags(flags, args[1:]); !ok {
+		return code
 	}
 	if *configPath == "" || flags.NArg() > 0 {
-		fmt.Fprintln(stderr, controllerUsage)
+		flags.Usage()
 		return 2
 	}
 	code, err := controllerStart(ctx, *configPath, *daemonURL, stderr)

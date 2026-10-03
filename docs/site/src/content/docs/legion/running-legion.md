@@ -88,63 +88,11 @@ image's digest.
 ## legion.yaml
 
 The daemon reads one file, `legion.yaml`. Relative paths in it resolve against the file's own
-directory. This is a complete file for a Kubernetes deployment; every value in angle brackets is
-yours:
-
-```yaml
-project: WIDGETS                       # the Dispatch project key this daemon runs
-state_dir: ./state                     # the daemon's local state
-# postgres_dsn: postgres://…           # or LEGION_POSTGRES_DSN in the daemon's environment
-bind: <daemon host address>            # pods dial the worker stream here: never loopback
-daemon_url: http://<daemon host address>:13370
-admission_cap: 4                       # trees running at once
-
-operator_token_file: ./operator-token  # the operator's bearer (below)
-dispatch_url: https://<dispatch host>
-dispatch_token_file: ./dispatch-token
-envoy_url: http://<envoy listener host>:9020
-envoy_token_file: ./envoy-token
-nats_urls: [nats://<nats host>:4222]
-
-projects:
-  WIDGETS: { repo: <owner>/<repository> }
-gates:
-  design: root-issues                  # a person approves each root's spec (the default); or off
-github_apps:
-  implement:
-    app_id: "<implement App id>"
-    private_key_command: <command that prints the App's PEM private key>
-  review:
-    app_id: "<review App id>"
-    private_key_command: <command that prints the App's PEM private key>
-
-runtime:
-  kubernetes:
-    namespace: legion
-    image: ghcr.io/sjawhar/legion-worker@sha256:<digest>
-    storage_class: <storage class>
-    tree_volume: 20Gi
-    kubeconfig: ./kubeconfig           # the daemon's own identity
-    context: <context>
-    pod:                               # the model route: see below
-      env:
-        PI_CONFIG_FILES: /etc/legion-operator/overlay.yml
-        CLAUDE_CODE_USE_FOUNDRY: "0"
-      service_account: legion-worker
-      volumes:
-        - name: operator-route
-          config_map:
-            name: legion-operator-route
-            items: [{key: models.yml, path: models.yml}, {key: overlay.yml, path: overlay.yml}]
-        - name: operator-token
-          projected:
-            sources:
-              - service_account_token: {audience: "<model gateway audience>", expiration_seconds: 3600, path: token}
-      volume_mounts:
-        - {volume: operator-route, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}
-        - {volume: operator-route, mount_path: /etc/legion-operator/overlay.yml, sub_path: overlay.yml}
-        - {volume: operator-token, mount_path: /var/run/operator}
-```
+directory. The repository's `deploy/kubernetes/daemon/legion.yaml.example`, rendered in the
+[configuration reference](/legion/legion/reference/config/), is a complete file for a Kubernetes
+deployment: copy it and replace every value. Each one is a placeholder (documentation addresses,
+made-up App ids, an all-zero image digest) that passes the
+[configuration check](#check-and-start-the-daemon) and reaches nothing.
 
 What each part is for:
 
@@ -173,8 +121,7 @@ What each part is for:
   `launch_failure_limit` (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
 
 The loader refuses any key it does not know, naming it, and refuses `omp_invocation` and
-`omp_launch_prefix` under Kubernetes, since every pod runs the image's Oh My Pi. The
-[configuration reference](/legion/legion/reference/config/) renders the example files the repository ships.
+`omp_launch_prefix` under Kubernetes, since every pod runs the image's Oh My Pi.
 
 ## Secrets and files
 

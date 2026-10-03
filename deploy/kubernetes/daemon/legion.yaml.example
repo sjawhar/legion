@@ -1,0 +1,61 @@
+# legion start --config legion.yaml      (legion start --check-config --config legion.yaml checks it)
+# The Legion daemon's file, complete for a Kubernetes deployment. Relative paths resolve against
+# this file's directory, and the loader refuses any key it does not know, naming it.
+#
+# Every value is a placeholder that passes `legion start --check-config`; replace each with yours.
+# 192.0.2.10 is a documentation address (RFC 5737) and every example.com host a documentation
+# domain (RFC 2606); the App ids are made up; the image digest is all zeros, where yours is the one
+# a Worker Image workflow run or a cli-v<version> release publishes.
+
+project: WIDGETS                       # the Dispatch project key this daemon runs; also a key of projects
+state_dir: ./state                     # the daemon's local state
+# postgres_dsn: postgres://…           # or LEGION_POSTGRES_DSN in the daemon's environment
+bind: 192.0.2.10                       # pods dial the worker stream here: never loopback
+daemon_url: http://192.0.2.10:13370
+admission_cap: 4                       # trees running at once
+
+operator_token_file: ./operator-token  # the operator's bearer, in a file only you can read
+dispatch_url: https://dispatch.example.com
+dispatch_token_file: ./dispatch-token
+envoy_url: http://envoy.example.com:9020
+envoy_token_file: ./envoy-token
+nats_urls: [nats://nats.example.com:4222]
+
+projects:
+  WIDGETS: { repo: acme/widgets }      # each Dispatch project the daemon runs, and its repository
+gates:
+  design: root-issues                  # a person approves each root's spec (the default); or off
+github_apps:
+  implement:
+    app_id: "100001"
+    private_key_command: cat ./implement-app.pem   # prints the App's PEM private key
+  review:
+    app_id: "100002"
+    private_key_command: cat ./review-app.pem
+
+runtime:
+  kubernetes:
+    namespace: legion
+    image: ghcr.io/sjawhar/legion-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    storage_class: standard
+    tree_volume: 20Gi
+    kubeconfig: ./kubeconfig           # the daemon's own identity
+    context: legion-daemon
+    pod:                               # the model route: deploy/kubernetes/operator-route/pod.yml
+      env:
+        PI_CONFIG_FILES: /etc/legion-operator/overlay.yml
+        CLAUDE_CODE_USE_FOUNDRY: "0"
+      service_account: legion-worker
+      volumes:
+        - name: operator-route
+          config_map:
+            name: legion-operator-route
+            items: [{key: models.yml, path: models.yml}, {key: overlay.yml, path: overlay.yml}]
+        - name: operator-token
+          projected:
+            sources:
+              - service_account_token: {audience: "model-gateway.example.com", expiration_seconds: 3600, path: token}
+      volume_mounts:
+        - {volume: operator-route, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}
+        - {volume: operator-route, mount_path: /etc/legion-operator/overlay.yml, sub_path: overlay.yml}
+        - {volume: operator-token, mount_path: /var/run/operator}

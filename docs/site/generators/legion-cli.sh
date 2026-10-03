@@ -2,21 +2,22 @@
 # Writes Legion's CLI reference, <content dir>/legion/reference/cli.md, from the `legion` binary on
 # PATH (docs/site/scripts/build-binaries.sh builds the Legion daemon's Go CLI and puts it there).
 # `legion --help` lists the commands; each command's `--help` is its section, and a command whose
-# usage line names subcommands (`usage: legion claims spawn|deliver|…`) gets one section per
-# subcommand, from that subcommand's own `--help`. Nothing here names a command: a command added
-# to the binary appears in the reference on the next build.
+# usage line names subcommands (`usage: legion claims close|deliver|…`) gets one section per
+# subcommand, from that subcommand's own `--help`, at any depth. Nothing here names a command: a
+# command added to the binary appears in the reference on the next build.
 #
 #   docs/site/generators/legion-cli.sh <content dir>
 #
 # Every help is run with a scrubbed environment (no LEGION_* variable, a scratch HOME, stdin from
 # /dev/null), so no command can find a grant, a daemon or a workspace to act on. A help that exits
-# with anything but 0 or 2 (the Go flag package's usage exit), or a `legion` whose --help lists no
-# commands, fails the build: the reference is never written from a binary it cannot read.
+# with anything but 0 or does not begin with a usage line (`usage: legion …`, or the flag
+# package's `Usage of legion …`), or a `legion` whose --help lists no commands, fails the build:
+# no page is published from a binary it cannot read, and none shows a panic or an error.
 set -euo pipefail
 # bash 5.2 reads `&` in a ${var//pattern/replacement} as the match; escape() needs it literal.
 shopt -u patsub_replacement 2>/dev/null || true
 
-me=legion-cli.sh
+me=${0##*/}
 fail() {
   echo "$me: $*" >&2
   exit 1
@@ -34,13 +35,18 @@ scratch=$(mktemp -d "${TMPDIR:-/tmp}/legion-cli-reference.XXXXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 
 # help runs `legion <args…>` as nothing but a help reader and prints what it wrote, both streams.
+# It must exit 0, and when its last argument is --help, print a usage.
 help() {
   local code=0 output
   output=$(env -i PATH="$PATH" HOME="$scratch" LANG=C.UTF-8 timeout 30 "$legion" "$@" </dev/null 2>&1) || code=$?
-  case $code in
-  0 | 2) printf '%s\n' "$output" ;;
-  *) fail "legion $* exited $code: $output" ;;
-  esac
+  [ "$code" = 0 ] || fail "legion $* exited $code: $output"
+  if [ "${*: -1}" = --help ]; then
+    case $output in
+    "usage: legion "* | "Usage of legion "*) ;;
+    *) fail "legion $* printed no usage: $output" ;;
+    esac
+  fi
+  printf '%s\n' "$output"
 }
 
 # escape makes text safe in a Markdown paragraph or table cell: `<team>` would be read as HTML.
@@ -51,6 +57,15 @@ escape() {
   text=${text//>/&gt;}
   text=${text//|/\\|}
   printf '%s' "$text"
+}
+
+# fence prints the code fence for the text on stdin: one backtick more than its longest run of
+# backticks, and at least three, so no line of the text can close the block early.
+fence() {
+  local longest
+  longest=$(awk '{ while (match($0, /`+/)) { if (RLENGTH > n) n = RLENGTH; $0 = substr($0, RSTART + RLENGTH) } } END { print n + 0 }')
+  [ "$longest" -ge 3 ] || longest=2
+  printf '%*s' $((longest + 1)) '' | tr ' ' '`'
 }
 
 top=$(help --help)
@@ -90,26 +105,27 @@ subcommands() {
         printf '%s\n' "$word"
       done
     fi
-  done <<<"$text" | awk '!seen[$0]++'
+  done <<<"$text"
 }
 
 out=$content/legion/reference
 mkdir -p "$out"
-page=$scratch/cli.md
+page=$out/cli.md
 
 # section writes the section of `legion <path…>` at heading <level>, then its subcommands' one
-# level down.
+# level down. Each level's help must name the longer path for the next, so the recursion ends
+# where the binary's subcommands do.
 section() {
   local level=$1
   shift
-  local path="$*" text sub hashes
+  local path="$*" text sub hashes ticks
   hashes=$(printf '%*s' "$level" '' | tr ' ' '#')
   text=$(help "$@" --help)
+  ticks=$(fence <<<"$text")
   {
     printf '%s legion %s\n\n' "$hashes" "$path"
-    printf '```text\n%s\n```\n\n' "$text"
+    printf '%stext\n%s\n%s\n\n' "$ticks" "$text" "$ticks"
   } >>"$page"
-  [ "$level" -lt 4 ] || return 0
   while IFS= read -r sub; do
     [ -n "$sub" ] || continue
     section $((level + 1)) "$@" "$sub"
@@ -125,9 +141,11 @@ description: Every legion command, subcommand and flag, generated from the binar
 ---
 
 EOF
-  printf 'Generated when the site was built, from `legion --help` and each command'"'"'s `--help` (`%s`). Run `legion <command> --help` for the same text from the binary you have.\n\n' "$(escape "$version")"
+  # shellcheck disable=SC2016 # the backticks are Markdown code spans, not command substitutions
+  printf 'Generated when the site was built, from `legion --help` and each command'"'"'s `--help` (`%s`). Run `legion <command> --help` for the same text from the binary you have.\n\n' "$version"
   printf '| Command | What it does |\n| --- | --- |\n'
   for i in "${!names[@]}"; do
+    # shellcheck disable=SC2016 # the backticks are a Markdown code span, not a command substitution
     printf '| [`legion %s`](#legion-%s) | %s |\n' "${names[$i]}" "${names[$i]}" "$(escape "${summaries[$i]}")"
   done
   printf '\n'
@@ -136,5 +154,4 @@ for name in "${names[@]}"; do
   section 2 "$name"
 done
 
-mv "$page" "$out/cli.md"
-echo "$me: wrote $out/cli.md (${#names[@]} commands, from $legion)"
+echo "$me: wrote $page (${#names[@]} commands, from $legion)"

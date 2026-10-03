@@ -26,9 +26,6 @@ import (
 
 const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> --repo <owner>/<repo> [--root /legion] --credential-helper <git helper> --feed <dir>"
 
-// workspaceInitUsage names both subcommands of `legion workspace-init`.
-const workspaceInitUsage = "usage: " + workspaceFetchUsage + "\n       " + workspaceProvisionUsage
-
 const (
 	// workspaceLostExitCode is the status that tells the runtime the tree volume itself was lost —
 	// neither the shared clone nor the recorded OMP session is on it — rather than that one launch
@@ -53,66 +50,71 @@ type volumeLostError string
 
 func (e volumeLostError) Error() string { return string(e) }
 
-// runWorkspaceInit is `legion workspace-init`, the Kubernetes runtime's two init containers, which
-// prepare an issue's jj workspace on the tree's persistent volume before the main container's
-// worker-shim starts (packages/daemon/src/cli/workspace-init.ts). `fetch` is the first: the one
-// process of the pod that holds the provisioning token, in a container that mounts nothing a tree
-// agent can write. `provision` is the second: all the tree volume's work, in a container the
-// provisioning Secret is not mounted in. Each one's log lines go to stdout and its refusals and
-// failures to stderr — together the init log the runtime quotes — with exit 1, or 3 for a lost
-// volume.
+// workspaceInitCommands is `legion workspace-init`, the Kubernetes runtime's two init containers,
+// which prepare an issue's jj workspace on the tree's persistent volume before the main
+// container's worker-shim starts (packages/daemon/src/cli/workspace-init.ts), and the one list of
+// them `legion workspace-init --help` names. `fetch` is the first: the one process of the pod that
+// holds the provisioning token, in a container that mounts nothing a tree agent can write.
+// `provision` is the second: all the tree volume's work, in a container the provisioning Secret is
+// not mounted in. Each one's log lines go to stdout and its refusals and failures to stderr —
+// together the init log the runtime quotes — with exit 1, or 3 for a lost volume.
+var workspaceInitCommands = map[string]command{
+	"fetch":     runWorkspaceFetch,
+	"provision": runWorkspaceProvision,
+}
+
 func runWorkspaceInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || helpRequested(args[0]) {
-		fmt.Fprintln(stderr, workspaceInitUsage)
-		return 2
+	return runSubcommand(ctx, "workspace-init", workspaceInitCommands, args, stdout, stderr)
+}
+
+func runWorkspaceFetch(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := newFlags("workspace-init fetch", "usage: "+workspaceFetchUsage, stderr)
+	repo := flags.String("repo", "", "repository as <owner>/<name> (required)")
+	feed := flags.String("feed", "", "the pod's feed directory, the container's own (required)")
+	if code, ok := parseWorkspaceInitFlags(flags, args, stderr); !ok {
+		return code
 	}
-	var run func() error
-	switch args[0] {
-	case "fetch":
-		flags := newFlags("workspace-init fetch", stderr)
-		repo := flags.String("repo", "", "repository as <owner>/<name> (required)")
-		feed := flags.String("feed", "", "the pod's feed directory, the container's own (required)")
-		if code, ok := parseWorkspaceInitFlags(flags, args[1:], workspaceFetchUsage, stderr); !ok {
-			return code
-		}
-		run = func() error { return workspaceFetch(ctx, *repo, *feed, stdout) }
-	case "provision":
-		flags := newFlags("workspace-init provision", stderr)
-		issue := flags.String("issue", "", "Dispatch issue key, e.g. LEGION-1 (required)")
-		repo := flags.String("repo", "", "repository as <owner>/<name> (required)")
-		root := flags.String("root", "/legion", "tree volume root directory")
-		credentialHelper := flags.String("credential-helper", "", "git credential helper written into the shared clone's config (required)")
-		feed := flags.String("feed", "", "the pod's feed directory, which workspace-init fetch filled (required)")
-		if code, ok := parseWorkspaceInitFlags(flags, args[1:], workspaceProvisionUsage, stderr); !ok {
-			return code
-		}
-		run = func() error { return workspaceInit(ctx, *issue, *repo, *root, *credentialHelper, *feed, stdout) }
-	default:
-		fmt.Fprintf(stderr, "legion workspace-init: unknown subcommand %q\n%s\n", args[0], workspaceInitUsage)
-		return 2
+	return workspaceInitExit(flags, workspaceFetch(ctx, *repo, *feed, stdout), stderr)
+}
+
+func runWorkspaceProvision(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := newFlags("workspace-init provision", "usage: "+workspaceProvisionUsage, stderr)
+	issue := flags.String("issue", "", "Dispatch issue key, e.g. LEGION-1 (required)")
+	repo := flags.String("repo", "", "repository as <owner>/<name> (required)")
+	root := flags.String("root", "/legion", "tree volume root directory")
+	credentialHelper := flags.String("credential-helper", "", "git credential helper written into the shared clone's config (required)")
+	feed := flags.String("feed", "", "the pod's feed directory, which workspace-init fetch filled (required)")
+	if code, ok := parseWorkspaceInitFlags(flags, args, stderr); !ok {
+		return code
 	}
-	err := run()
-	if err == nil {
-		return 0
-	}
-	fmt.Fprintf(stderr, "legion workspace-init %s: %v\n", args[0], err)
-	if errors.As(err, new(volumeLostError)) {
-		return workspaceLostExitCode
-	}
-	return 1
+	return workspaceInitExit(flags, workspaceInit(ctx, *issue, *repo, *root, *credentialHelper, *feed, stdout), stderr)
 }
 
 // parseWorkspaceInitFlags parses one subcommand's flags, refusing a positional argument; a false
 // ok carries the exit code.
-func parseWorkspaceInitFlags(flags *flag.FlagSet, args []string, usage string, stderr io.Writer) (code int, ok bool) {
-	if err := flags.Parse(args); err != nil {
-		return 2, false
+func parseWorkspaceInitFlags(flags *flag.FlagSet, args []string, stderr io.Writer) (code int, ok bool) {
+	if code, ok := parseFlags(flags, args); !ok {
+		return code, false
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintf(stderr, "legion %s: unexpected argument %q: %s\n", flags.Name(), flags.Arg(0), usage)
+		fmt.Fprintf(stderr, "%s: unexpected argument %q\n", flags.Name(), flags.Arg(0))
+		flags.Usage()
 		return 2, false
 	}
 	return 0, true
+}
+
+// workspaceInitExit is a subcommand's exit status once it has run: 0, or its failure on stderr
+// with 1, or workspaceLostExitCode for a lost volume.
+func workspaceInitExit(flags *flag.FlagSet, err error, stderr io.Writer) int {
+	if err == nil {
+		return 0
+	}
+	fmt.Fprintf(stderr, "%s: %v\n", flags.Name(), err)
+	if errors.As(err, new(volumeLostError)) {
+		return workspaceLostExitCode
+	}
+	return 1
 }
 
 // workspaceInit validates everything before it touches the volume, --repo first, and refuses to

@@ -24,29 +24,20 @@ import (
 // HANDOFF_PHASES). A pane's role is its claim role, LEGION_ROLE, never one of these.
 var handoffPhases = map[string]bool{"architect": true, "plan": true, "implement": true, "test": true, "review": true}
 
-// handoffUsage names every subcommand of `legion handoff`.
-const handoffUsage = "usage: legion handoff write|read|complete [flags]"
-
-func runHandoff(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || helpRequested(args[0]) {
-		fmt.Fprintln(stderr, handoffUsage)
-		return 2
-	}
-	switch args[0] {
-	case "write":
-		return runHandoffWrite(args[1:], stdout, stderr)
-	case "read":
-		return runHandoffRead(args[1:], stdout, stderr)
-	case "complete":
-		return runHandoffComplete(ctx, args[1:], stdout, stderr)
-	default:
-		fmt.Fprintf(stderr, "legion handoff: unknown subcommand %q\n%s\n", args[0], handoffUsage)
-		return 2
-	}
+// handoffCommands is `legion handoff`'s subcommands, the one list of them `legion handoff --help`
+// names.
+var handoffCommands = map[string]command{
+	"write":    runHandoffWrite,
+	"read":     runHandoffRead,
+	"complete": runHandoffComplete,
 }
 
-func handoffFlags(name string, stderr io.Writer) (*flag.FlagSet, *string) {
-	flags := newFlags("handoff "+name, stderr)
+func runHandoff(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return runSubcommand(ctx, "handoff", handoffCommands, args, stdout, stderr)
+}
+
+func handoffFlags(name, usage string, stderr io.Writer) (*flag.FlagSet, *string) {
+	flags := newFlags("handoff "+name, usage, stderr)
 	workspace := flags.String("workspace", "", "workspace directory (default current directory)")
 	return flags, workspace
 }
@@ -63,12 +54,15 @@ func validHandoffPhase(value string) bool { return handoffPhases[value] }
 // runHandoffWrite writes one phase's handoff. The JSON object comes from --data or, when --data is
 // omitted, from stdin, as the TypeScript CLI takes it: one argv string is capped at 128 KiB
 // (Linux's MAX_ARG_STRLEN), and a handoff that accumulates review rounds outgrows it.
-func runHandoffWrite(args []string, stdout, stderr io.Writer) int {
-	flags, workspaceFlag := handoffFlags("write", stderr)
+func runHandoffWrite(_ context.Context, args []string, stdout, stderr io.Writer) int {
+	flags, workspaceFlag := handoffFlags("write", "usage: legion handoff write --phase <phase> [--data <json-object>] [--workspace <dir>]", stderr)
 	phase := flags.String("phase", "", "handoff phase (required)")
 	data := flags.String("data", "", "handoff JSON object (read from stdin when omitted)")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *phase == "" || !validHandoffPhase(*phase) {
-		fmt.Fprintln(stderr, "usage: legion handoff write --phase <phase> [--data <json-object>] [--workspace <dir>]")
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
+	}
+	if flags.NArg() != 0 || *phase == "" || !validHandoffPhase(*phase) {
+		flags.Usage()
 		return 2
 	}
 	raw := []byte(*data)
@@ -109,11 +103,14 @@ func runHandoffWrite(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runHandoffRead(args []string, stdout, stderr io.Writer) int {
-	flags, workspaceFlag := handoffFlags("read", stderr)
+func runHandoffRead(_ context.Context, args []string, stdout, stderr io.Writer) int {
+	flags, workspaceFlag := handoffFlags("read", "usage: legion handoff read [--phase <phase>] [--workspace <dir>]", stderr)
 	phase := flags.String("phase", "", "optional handoff phase")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || (*phase != "" && !validHandoffPhase(*phase)) {
-		fmt.Fprintln(stderr, "usage: legion handoff read [--phase <phase>] [--workspace <dir>]")
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
+	}
+	if flags.NArg() != 0 || (*phase != "" && !validHandoffPhase(*phase)) {
+		flags.Usage()
 		return 2
 	}
 	workspace, err := resolveWorkspace(*workspaceFlag)
@@ -142,12 +139,15 @@ func runHandoffRead(args []string, stdout, stderr io.Writer) int {
 }
 
 func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags, workspaceFlag := handoffFlags("complete", stderr)
+	flags, workspaceFlag := handoffFlags("complete", "usage: legion handoff complete --summary <text> [--verdict pass|fail] [--ready] [--workspace <dir>]", stderr)
 	summary := flags.String("summary", "", "phase summary (required)")
 	verdict := flags.String("verdict", "", "tester verdict: pass or fail")
 	ready := flags.Bool("ready", false, "merger has published READY")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || strings.TrimSpace(*summary) == "" {
-		fmt.Fprintln(stderr, "usage: legion handoff complete --summary <text> [--verdict pass|fail] [--ready] [--workspace <dir>]")
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*summary) == "" {
+		flags.Usage()
 		return 2
 	}
 	role := legionclaim.Role(os.Getenv("LEGION_ROLE"))
