@@ -483,7 +483,10 @@ or listener and never a test hook; the docs site's HTTP API reference is generat
 table below is a summary. An unknown path under `/api`, `/v1`, `/auth`, `/ws`,
 or `/healthz` is a JSON 404 `{"code":"NOT_FOUND","error":"no route for GET
 /v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell; a missing file
-under `/assets` stays `404 {"error":"not found"}`.
+under `/assets` stays `404 {"error":"not found"}`. The dashboard's pages (`index.html` and the
+shell served for a browser route) carry `Cache-Control: no-cache` and an `ETag` of their bytes, no
+`Last-Modified`, and its hashed `/assets` files `public, max-age=31536000, immutable`, so a
+browser keeps no page from another build.
 
 | Path | Method | Identity | Purpose |
 | --- | --- | --- | --- |
@@ -586,6 +589,14 @@ Table-row fragments contain body rows only: omit the table header and delimiter 
 padded to the table width while all operations in the edit request add at most 10,000 cells; a
 larger request is rejected as `INVALID_OP` on `markdown`. A row holding text in a cell past the
 table's width is rejected as `TABLE_WIDTH`; blank cells there are dropped.
+
+## Input errors
+
+| Status / code | Meaning |
+| --- | --- |
+| `400 NUL_CHARACTER` | Caller text holds a NUL character (U+0000), which PostgreSQL's text and jsonb cannot store: any string in a JSON body a route decodes, member names included, a multipart upload's field or markdown file, any route's path or query parameter, or the actor a document websocket's bearer names in `X-Dispatch-Actor` (refused before the upgrade). It covers every parameter, field and member a request carries, including ones the route does not read. The message names where it stands (`title`, `options[1].label`, `file`, `path parameter session_id`, `query parameter label`, `X-Dispatch-Actor.id`), with a NUL in a name the caller wrote shown as `\u0000`, and the character's position, counted from 1 in UTF-16 units; nothing is written. A NUL a browser edit puts in a live document is written as U+FFFD, which is what CommonMark reads one as, in the document's version and every read, a block's id included, an anchor's quote and an ask block's question and options, and a quote, a `# Title` quote and a `heading:` anchor are matched against that text. |
+| `400 INVALID_UTF8` | Caller text holds a byte that is not UTF-8, which PostgreSQL's text cannot store: a multipart upload's field, its markdown file or a binary file part's `Content-Type` (`file Content-Type`), or any route's path or query parameter (`%FF`). JSON cannot carry one, since decoding writes it as U+FFFD. The message names the field, the byte and its position, as `NUL_CHARACTER` does; nothing is written. |
+| `400 ARTIFACT_INPUT` | An artifact upload's multipart body the parser cannot read, such as a part header holding a control character, named with the parser's reason. A body past the upload's size limit stays `413 CAP_EXCEEDED`, and a file part the server cannot spool to its temporary directory is `500 INTERNAL`, logged. |
 
 ## Document errors
 
