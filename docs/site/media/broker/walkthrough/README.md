@@ -69,12 +69,24 @@ no mark names gets a new `mark(...)` in the recorder and a new take.
 
 ## Review
 
-This take was recorded on 2026-10-03 and has not been reviewed yet: the two independent video
-reviewers, a strategic pass and a frame-reading pass, re-check it next, and their findings go here.
-The take before it passed both after one cut, where the jump over the status command's request id
-began mid-word (`agent-secrets s`, then the whole command). This take's recorder marks
-`status-word` between typing `agent-secrets status ` and typing the id, and `ran-status` ends at
-that mark.
+This take was recorded on 2026-10-03, and both independent video reviews passed it the same day,
+on the shipped file (79.36 s, sha256 `d380e0b466f2692c4f13f684be7124b97440af5ab5a861efaa4bf4aeda8be04d`):
+
+- **Strategic review: PASS** (2026-10-03). Nothing to cut, and nothing narrated that is not on
+  screen. `approve` opening on its `inbox` mark shows the loaded Inbox, with the request in it, from
+  its first frame, and the jump at the status command's request id reads as typing.
+- **Frame-reading review: PASS** (2026-10-03). Every cut is clean, and the status join falls at the
+  word boundary, at frames 1944-1947 as the author's frame-by-frame read below gives them. Its sweep
+  transcribed 41 frames (every 2 s from 0.5 s, and 79.3 s) and four around each cut, and found no
+  error text, no host but `example-host-build` and `127.0.0.1:28570`, no person but `alice`, and
+  never the secret's value (only its length and last four characters). It found no silence of 2 s
+  or more over a frozen frame: the longest silent still is about 1.4 s (58.15-59.57 s, across the
+  `approve` to `ran` cut). The audio peaks at -2.06 dBFS, at -18.3 LUFS integrated.
+
+The take before this one passed both reviews but for one cut, where the jump over the status
+command's request id began mid-word (`agent-secrets s`, then the whole command). This take's
+recorder marks `status-word` between typing `agent-secrets status ` and typing the id, and
+`ran-status` ends at that mark.
 
 The shipped `walkthrough.mp4` is 79.36 s (4,236,697 bytes), 1280x720 at 30 fps, with AAC stereo.
 The cut as `build.py` resolves it reads `10 clips, 79.2s, all narration inside its clip`, and
@@ -148,7 +160,7 @@ frames):
 | 70.9 s | Settings lists the live grant, with alice as its approver. | Settings clicked at 69.8 s, scrolled to Live grants by 71.2 s: the example-host-build enrollment, DEMO_API_KEY, Approver alice. |
 | 76.1 s | Each live grant has a Revoke button. | The pointer on Revoke from 74.9 s to 77.9 s. |
 
-Outside the video, as for the last take: the Inbox shows "Nothing needs you" directly under the
-pending credential request, since that line speaks for asks and the Inbox renders credential
-requests in a section of their own above it; and the cut shows about 2.8 s from the click to the
-key, where the agent's poll took 8.1 s (the cast's `approve` and `key` marks).
+Outside the video: the Inbox shows "Nothing needs you" directly under the pending credential
+request, since that line speaks for asks and the Inbox renders credential requests in a section of
+their own above it; and the cut shows about 2.8 s from the click to the key, where the agent's poll
+took 8.1 s (the cast's `approve` and `key` marks), which the walkthrough page says.
