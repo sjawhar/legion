@@ -244,6 +244,55 @@ func TestSettlementCreditsNoAuthorOfAnEditMadeAfterItsRead(t *testing.T) {
 	}
 }
 
+// An edit made after settlement takes its authors and before it copies the tree is in the version
+// it copies but is credited after that take, so the version does not credit its author. The edit's
+// own settlement sees that version and writes none, leaving the author pending for the next version
+// that holds the edit (LEGION-503).
+func TestSettlementCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := service.ReplaceText(context.Background(), artifactID, "First, alice.\n\nSecond.\n", alice); err != nil {
+		t.Fatalf("alice's edit: %v", err)
+	}
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+
+	var release func()
+	service.afterSettleAuthorsTake = func(room string) {
+		if room == artifactID && release == nil {
+			release = holdPeerEdit(t, service, artifactID, &service.afterCreditUpdate, replaceRun("Second.", "Second, bob."))
+		}
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if release == nil {
+		t.Fatal("settlement never reached the window between its authors and its copy")
+	}
+	const both = "First, alice.\n\nSecond, bob.\n"
+	requireLatestVersionMarkdown(t, service, artifactID, both)
+	versioned := latestVersionNumber(t, service, artifactID)
+	if authors := latestVersionAuthors(t, service, artifactID); !slices.Equal(authors, []model.Actor{alice}) {
+		t.Fatalf("version %d authors = %#v, want alice alone: bob was credited after the take", versioned, authors)
+	}
+
+	service.afterSettleAuthorsTake = nil
+	release()
+	settleCurrentGeneration(t, service, artifactID)
+	if latest := latestVersionNumber(t, service, artifactID); latest != versioned {
+		t.Fatalf("latest version = %d, want %d, which already holds bob's edit", latest, versioned)
+	}
+	carol := model.Actor{Kind: "user", ID: "carol"}
+	if _, err := service.ReplaceText(context.Background(), artifactID, both+"\nThird, carol.\n", carol); err != nil {
+		t.Fatalf("carol's edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if authors := latestVersionAuthors(t, service, artifactID); !slices.Contains(authors, bob) {
+		t.Fatalf("version %d authors = %#v, want bob, whose edit it holds", latestVersionNumber(t, service, artifactID), authors)
+	}
+}
+
 // An author already pending when a settlement takes its authors who edits again before it commits
 // is credited on both versions: the settlement's, which holds the first edit, and the one the
 // second edit's own settlement writes. The second edit's update observer credits the author under

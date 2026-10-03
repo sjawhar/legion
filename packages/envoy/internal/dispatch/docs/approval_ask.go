@@ -35,11 +35,13 @@ func OpenApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.
 	return nil, fmt.Errorf("read open approval ask: %w", err)
 }
 
-// MoveApprovalAsk advances the document's one open approval ask to a new settled version. The
-// row and its thread stay open; requested_version records that the agent must hand it back before
-// a human sees it in Waiting on you again. Only the move that takes the request from the human
-// wakes anyone; a later one, while it already waits on its agent, is quiet (RewriteApprovalAsk).
-func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, serverURL string) ([]model.Event, error) {
+// MoveApprovalAsk advances the document's one open approval ask to a new settled version. mover is
+// the actor whose edit moved the request: the caller knows it even when the version credits more
+// than one author. A zero mover is SettlementActor. The row and its thread stay open;
+// requested_version records that the agent must hand it back before a human sees it in Waiting on
+// you again. Only the move that takes the request from the human wakes anyone; a later one, while
+// it already waits on its agent, is quiet (RewriteApprovalAsk).
+func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string) ([]model.Event, error) {
 	ask, err := OpenApprovalAsk(ctx, tx, artifactID)
 	if err != nil {
 		return nil, err
@@ -47,15 +49,14 @@ func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 	if ask == nil || ask.Approval.Version == version.Number {
 		return nil, nil
 	}
-	actor := SettlementActor
-	if len(version.Authors) == 1 {
-		actor = version.Authors[0]
+	if mover == (model.Actor{}) {
+		mover = SettlementActor
 	}
 	summary, err := ApprovalAskSummary(*ask)
 	if err != nil {
 		return nil, err
 	}
-	event, err := RewriteApprovalAsk(ctx, tx, broker, ask, actor, version.Number, summary, serverURL)
+	event, err := RewriteApprovalAsk(ctx, tx, broker, ask, mover, version.Number, summary, serverURL)
 	if err != nil {
 		return nil, err
 	}

@@ -275,10 +275,12 @@
   nothing, typed and undone before a settlement, and one whose text an upload replaced, since the
   upload's version credits its uploader alone. An upload's version records that it credits its
   uploader, who is not credited again on the next version for the upload or for browser edits the
-  upload was written over. A settlement's events, and the asks it indexes, now name the room's
-  latest editor whenever its version credits them, rather than whichever of its authors sorts
-  first, so an author still pending from an earlier change is not named as the writer of the
-  latest editor's ask.
+  upload was written over. A service edit or upload now records the actor that introduced each new
+  ask block until settlement indexes it, so a browser edit elsewhere cannot make that browser the
+  ask's author; a browser-created ask uses the latest known browser editor, and an ambiguous browser
+  edit uses the document-settlement actor. Approval moves likewise name the actor whose edit moved
+  the version, even when it credits several authors, so a stale pending author does not make a
+  human's move appear as the document settlement or suppress its notification.
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds

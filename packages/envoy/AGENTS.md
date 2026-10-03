@@ -54,18 +54,17 @@ update. A repair reports whether its transaction wrote anything; one that wrote 
 committed that transaction, and ygo hands the worker an update for it too (the document's delete
 set), so its slot is finished with that update and the worker takes it rather than storing it. A
 settlement that wrote into the room renders its version from the document as it stands after the
-repairs (`readSettlementTree`), so a peer's edit made since its read is in that version too, and
-credits that edit's author, whose own settlement then writes no version. It takes the authors under
-the room's state lock while it copies that tree, so an edit made while the version renders is
-credited on the version its own settlement writes, not on this one. Every version takes its authors
-no later than it reads the tree it records - a settlement, and a version read straight from the
-room, with the copy; a transaction's version before its fork reads the room; an upload as of its
-write's last read of the room (`liveWrite.forkSeq`) - and its commit releases only the pending
-authors' entries it took (`docs/authors.go`): each entry carries the content change it credits, so
-an author who edits again after a version took its authors stays pending for the second edit, and
-so does one whose edit the version's tree holds while its update observer, which ygo runs only once
-the edit's transaction has released the document, had not yet credited it. That edit's own
-settlement writes no version and releases nothing, and the next version credits them (LEGION-503).
+repairs (`readSettlementTree`), so a peer's edit made since its read is in that version too. The
+settlement takes its authors under the room's state lock before it copies that tree, so an edit
+credited after the take stays pending for the next version that holds it. Every version takes its
+authors no later than it reads the tree it records - a settlement before its copy; a version read
+straight from the room with the copy; a transaction's version before its fork reads the room; an
+upload as of its write's last read of the room (`liveWrite.forkSeq`) - and its commit releases only
+the pending authors' entries it took (`docs/authors.go`). An author who edits again after a version
+took its authors stays pending for the second edit, as does one whose edit the version's tree holds
+while its update observer, which ygo runs only once the edit's transaction has released the
+document, had not yet credited it. That edit's own settlement writes no version and releases
+nothing, and the next version credits them (LEGION-503).
 An upload, whose route writes its version itself, records what that version credits
 (`Ledger.WroteVersion`), so its uploader is not credited again on the next version. A settlement
 that wrote into the room commits what it wrote even when the document moved after its read, since
@@ -80,7 +79,15 @@ wait for that worker's exit. Two cases still hang until the server restarts (LEG
 that fails while a settlement commits into it, and a second writer committing into a room while it
 retires under a repair's commit.
 `envoy-dispatch backfill-block-ids` runs the same stamp through `applySuppressed` across every
-document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when its version credits that actor or no pending author remains - an edit's own version write has already released the authors it credited by the time settlement runs - and otherwise to the first pending author (`settlementAuthors`), so an author left pending from an earlier change is not named for the latest editor's asks. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
+document. Every write path that changes a document queues that closer once its transaction commits:
+a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version
+(`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded
+at issue creation, so ask blocks written by any of them become asks without waiting for a later live
+change. The closer attributes a new ask and its `ask.opened` event to the service write that
+introduced its block (`roomState.authoredAskBlocks`), or to the room's latest known editor for a
+browser-created block. Its other derived events, including an approval request's move, name that
+same latest editor when known; ambiguous browser edits name `SettlementActor`. A free-text ask block
+(no bullet list) carries `options: []` on the wire, never JSON null.
 
 The closer's timer lives in memory, so the database says which documents still owe it: every
 durable document update writes the document's `doc_settlements_pending` row in its own transaction
@@ -289,15 +296,14 @@ the transaction that writes it (`rewriteLive`), and the unrecorded-mark sweep
 (`sweepUnrecordedMarks`) inside the transaction that unmarks it. A walk of the live tree takes no
 lock (reearth/ygo v1.49.5, `crdt/yxml.go`) while every peer update and service write holds that
 lock as it applies, so the walk can read a write halfway through as a tree outside the schema and
-answer a healthy document 409 with the repair. A version's capture read straight from the room and
-each settlement read hold the room's state lock across the copy and the authors they take, so an
-author the update observer credits is taken only with that update's text; the order - state lock,
-then document lock - is never reversed, since only a Yjs transaction's own function holds a
-document's lock and none takes a room's state lock. A transaction's version takes its authors
-before its fork reads the room instead (`docs/authors.go`). A read that may load its room (a
-version's capture, `docView`, `VerifyMark`'s subscription) takes what it reads inside the
-`Server.Apply` that loads and holds the room: a room looked up again with `GetDoc` once that Apply
-returned can have been evicted in between.
+answer a healthy document 409 with the repair. A version's capture read straight from the room
+holds the room's state lock across the copy and authors it takes; a settlement takes its authors
+under that lock and then copies with `lockedTreeOf` after unlocking, so copying or decoding a large
+document does not block the update observer that credits and broadcasts a peer's edit. A transaction
+version takes its authors before its fork reads the room instead (`docs/authors.go`). A read that may
+load its room (a version's capture, `docView`, `VerifyMark`'s subscription) takes what it reads
+inside the `Server.Apply` that loads and holds the room: a room looked up again with `GetDoc` once
+that Apply returned can have been evicted in between.
 
 Every decode of a document's whole state takes a pending queue as long as the most items one
 update can carry (`newDocumentCopy`, `maxUpdateItems`): the copy, a write's fork (`forkLive`), and
@@ -1310,6 +1316,9 @@ canonical markdown.
 - The quote a refresh reads is the first contiguous run of the row's mark (`pmdoc.FindMark`), so text written inside an anchor must carry its mark. A `replace` through the edit route, and the text an accepted suggestion writes inline or into code, takes every comment, suggestion and ask mark that covers all of the text it replaces (`pmdoc.AnchorMarksCovering`, the accepted suggestion's own mark excepted): replacing a word, the first or last word, or the whole quote leaves the anchor over the new text, and the refreshed quote is its whole current extent. A replace that runs past an anchor's edge rewrote text outside it too, so that anchor keeps only the text the replace left alone, and one covering the whole anchor and more orphans it. A block replacement from an accepted suggestion takes no mark, since it can land a code block an ask's mark cannot cover.
 - `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks` create questions: the asker supplies the options and no option label carries a server rule (a human to-do is the to-do phrased as the question, with whatever options fit it). `kind` may be absent or `question`; `kind: "action"` (removed; migration 0035 folded every stored action ask into a question keeping its options and its answer) and `kind: "approval"` (server-created by the document-approval route only) answer `400 ASK_KIND_INPUT`.
 - Document approval is a human review pinned to a version, the way a pull-request review is pinned to a commit. `POST /api/v1/artifacts/{id}/approval-requests` `{summary?}` (any actor) opens an ask of `kind: "approval"` with the fixed options `Approve` / `Request changes`, naming the document and its latest settled version in `ask.approval`; its wording cannot be edited. Its question is `Approve <name> (version <N>)?`, followed by the request's `summary`: what the human is approving and nothing else, since an approval request carries nothing new. A summary is trimmed and must hold text (`400 SUMMARY_INPUT`), and one that would take the question past the ask cap is `400 CAP_EXCEEDED` naming `summary` and the characters left for it, counted against the longest version the request can reach (ten digits, the most `asks_approval_kind_check` admits), so no later version move takes the question past the cap; both are checked on every request, including one that opens nothing, and a request without one gets the bare question. An open approval ask follows every document version in the same transaction, preserving its thread and summary: the move rewords its question to the new version, stamps `edited_at` and appends `ask.edited`, while `requested_version` remains the version the agent last handed to the human, so a moved request is Waiting on agents. Only the move that takes the request from the human wakes anyone: a later move, while `requested_version` is already below the version it named, carries `quiet: true` (`model.AskEditEventPayload.Quiet`), so `events.Broker.Notify` records it with `notify` false and the outbox routes it to no follower, as a human's unnamed `artifact.version` is recorded; the log and SSE still carry it, so a person typing in the document wakes the asker once rather than at every settled version. Calling the request route again reads the open row's `waiting_on` once, before it writes anything (`renewApprovalAsk`, `api/reviews.go`). While it is `agent` - the request moved, or a thread reply newer than its last hand-back holds the turn - the call hands it back to the human: a new summary first rewords it the same way (`edited_at`, `ask.edited`; a request that names none keeps the summary it has), and the hand-back then sets `requested_version` to the current version, records the thread's newest reply as the one it answered (`asks.handed_back_reply_id`, migration 0064, a foreign key to `comments` from 0066) and appends `ask.handed_back`, which leaves `edited_at` and the question as they were, so an answer the human started before it is not refused `ASK_EDITED` and the card's edit history gains nothing. While it is `human` the call hands nothing back: the same summary, or none, writes nothing, and a different one is `409 APPROVAL_WAITS_ON_HUMAN`, naming the question the human is reading, since rewording it would rewrite that card with no turn of theirs and refuse an answer they had started. The route answers 201 when it wrote anything and 200 when it wrote nothing, with the document's `approval` as the call left it. `docs.OpenApprovalAsk` locks that one row, `docs.RewriteApprovalAsk` is the one rewording a version move and a new summary share, and `handBackApprovalAsk` (`api/reviews.go`) the one hand-back. The move is in the version's sole author when one exists and otherwise in settlement's actor, `{kind: "system", id: "document-settlement"}`. What resolving an ask stores is written in one place, `docs.WriteAskResolution`, which settlement's retraction of a removed ask block and the resolve route both call. A request while the latest version is approved returns the approval and opens nothing. Answering an approval ask (humans only; `Request changes` requires text) writes an `artifact_reviews` row pinned to the version it names, which is the latest settled version at answer time, and appends `artifact.approved` or `artifact.changes_requested` (`{artifact_id, name, version, actor, reason, ask_id}`) on the document's owner alongside `ask.answered`. `POST /api/v1/artifacts/{id}/reviews` `{state, reason?}` (humans only) writes the same review from the document header, pinned to the version settled when the request arrives, and answers the open approval ask when present so the review keeps its thread. Every document read carries `approval` (`draft | awaiting | approved | stale | changes_requested`, with `latest_version`, the latest review's `version/by/at/reason/ask_id`, and `requested_by` and `waiting_on` while awaiting, the request's turn by `waitingOnExpression`, so an agent whose own revision moved its request, which sends it no event, reads that the request waits on it); `stale` is derived from versions. Every approval ask names its document and no other ask names one: `asks_approval_kind_check` (migration 0053) refuses a row that pairs `kind` and `approval` otherwise. Legion's design gate consumes the approval events; it is the exception path, not an every-issue step.
+  Every writer passes `MoveApprovalAsk` the actor whose edit moved the request instead: a route
+  passes its own actor, settlement its latest known browser editor, and ambiguous browser content
+  `SettlementActor`; version-author count does not choose the mover.
 - `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept up to 20 labels. Dispatch trims labels, preserves case, removes case-insensitive duplicates, and returns `400 LABELS_INPUT` for blank or over-40-character labels; every label update emits `issue.updated` with its labels. `GET /api/v1/issues?label=<label>` is repeatable, normalizes filter labels identically, and case-insensitively matches every supplied label.
 - A reply to an open ask (`ask_id` set on `POST /api/v1/issues/{key}/comments` or `POST /api/v1/artifacts/{id}/comments`) records `turn` (`comments.turn`, migration 0028): who holds the turn after it. A human author's reply always stores `agent` whatever the request says; a session author's stores `human` unless the request says `turn: "agent"` (a progress note - the agent still owes the next move). A reply under an answered or resolved ask records no turn (nothing is waiting; a requested `turn` is ignored there, as a human's is). `turn` on a comment that is not an ask reply is `400 TURN_REQUIRES_ASK`; any value but `human`/`agent` is `400 INVALID_COMMENT`. Comment objects carry `turn` (null under a closed ask and off ask replies). The column's only constraint is `turn requires ask_id`, so a pre-0028 server still draining during a deploy inserts its ask replies with a null turn; every reader coalesces a null newest-reply turn to `human`.
 - Every ask the API serves is read through one row shape: `docs.AskColumns` + `docs.ScanAsk` decode the ask row (the document settler uses the same pair for indexed blocks and anchor-refresh events), while `api/ask_rows.go` extends it with the block ask's document (`askRowColumns`) and, for reads, the newest comment in its thread (`askReadColumns`, a `lateral ... limit 1` join). `opened_event_id` is attached afterwards by `attachOpenedEventIDs`, one `events` query per read served by the partial index `events_ask_payload_id` (`store/migrations/0030_events_ask_payload_id.up.sql`; its `type in (...)` list mirrors that query and must change with it). `asks.options` is always a JSON array, never null.
