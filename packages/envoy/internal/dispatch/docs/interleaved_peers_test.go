@@ -75,16 +75,7 @@ func TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	latest := func() int {
-		var number int
-		if err := service.store.Pool.QueryRow(ctx, `
-			select coalesce(max(number), 0) from artifact_versions where artifact_id = $1
-		`, artifactID).Scan(&number); err != nil {
-			t.Fatalf("read the latest version: %v", err)
-		}
-		return number
-	}
-	before := latest()
+	before := latestVersionNumber(t, service, artifactID)
 	storedClock := func(client crdt.ClientID) uint64 {
 		stored, err := service.persistence.Load(ctx, artifactID)
 		if err != nil {
@@ -120,7 +111,7 @@ func TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth(t *testing.T) {
 	if attempts.Load() == 0 {
 		t.Fatal("no settlement ran while the first peer's update was held")
 	}
-	if got := latest(); got != before {
+	if got := latestVersionNumber(t, service, artifactID); got != before {
 		t.Fatalf("a settlement wrote version %d while the first peer's update was not stored", got)
 	}
 
