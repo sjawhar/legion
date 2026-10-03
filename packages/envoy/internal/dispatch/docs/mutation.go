@@ -95,10 +95,12 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	unsubscribe := fork.OnUpdate(func(update []byte, _ any) {
 		updates = append(updates, append([]byte(nil), update...))
 	})
+	margin, stopMargin := watchMargin(fork)
 	mutateErr := func() (err error) {
 		defer recoverMutation(artifactID, &err)
 		return mutate(fork, func(inner func(*crdt.Transaction)) { fork.Transact(inner) })
 	}()
+	stopMargin()
 	unsubscribe()
 	if mutateErr != nil {
 		return mutateErr
@@ -121,7 +123,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if err != nil {
 		return err
 	}
-	if err := refuseGrowth(fork, beforeMarkdown, markdown); err != nil {
+	if err := refuseGrowth(growth{fork: fork, before: beforeMarkdown, after: markdown, margin: margin}); err != nil {
 		return err
 	}
 	update, err := mergeUpdates(updates)
@@ -193,7 +195,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if err != nil {
 		return "", err
 	}
-	if err := refuseGrowth(nil, "", canonical); err != nil {
+	if err := refuseGrowth(growth{after: canonical}); err != nil {
 		return "", err
 	}
 	doc := crdt.New()

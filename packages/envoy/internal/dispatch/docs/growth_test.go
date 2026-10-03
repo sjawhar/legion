@@ -57,7 +57,7 @@ func TestAWriteMayNotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 			if want == "" {
 				want = tooLong(test.before, test.after)
 			}
-			err := refuseGrowth(nil, test.before, test.after)
+			err := refuseGrowth(growth{before: test.before, after: test.after})
 			if want == "-" {
 				if err != nil {
 					t.Fatalf("refused: %v, want it taken", err)
@@ -69,6 +69,61 @@ func TestAWriteMayNotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A document's margin - the record of every comment and suggestion it has had, which a browser
+// shows beside the document and every load builds - is weighed with the document. One record may
+// hold 256 KiB of text and the margin 1 MiB; a write that leaves either past its bound and bigger
+// than it was is refused, naming the bound and both sizes. The state the server keeps beside a
+// record's text (a suggestion's status) is not text a caller writes, so an accept rewrites a full
+// margin's record; and a margin already past its bound, as a peer can leave one, can be trimmed but
+// not grown. Without the bound, thirty-two suggestions of 900 KB took one cold websocket load of
+// their document to 296 MiB.
+func TestAMarginMayNotGrowPastWhatADocumentMayHold(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "Text.\n")
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	// A suggestion's record holds its author's reference, "user:alice", and its replacement.
+	suggestion := func(replacement int, replies ...MarkReply) MarkRecord {
+		return MarkRecord{Kind: "replace", By: "user:alice", CreatedAt: "2026-10-03T00:00:00Z", Content: strings.Repeat("a", replacement), Status: "pending", Replies: replies}
+	}
+	refused := func(err error, want string) {
+		t.Helper()
+		if !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("got %v, want ErrDocumentTooLarge saying %q", err, want)
+		}
+	}
+	refused(joinedProjectMark(service, artifactID, "too-big", suggestion(300_000), alice),
+		"holds at most 256 KiB (262144 bytes) of text, and this change would make one hold 300010 bytes (it held 0)")
+	for index := range 4 {
+		if err := joinedProjectMark(service, artifactID, fmt.Sprintf("s%d", index), suggestion(250_000), alice); err != nil {
+			t.Fatalf("suggestion %d of four that fit the margin: %v", index+1, err)
+		}
+	}
+	refused(joinedProjectMark(service, artifactID, "s4", suggestion(250_000), alice),
+		"a document's margin holds at most 1 MiB (1048576 bytes) of comment and suggestion text, and this change would make it hold 1250050 bytes (it held 1000040)")
+	accepted := suggestion(250_000)
+	accepted.Status = "accepted"
+	if err := joinedProjectMark(service, artifactID, "s0", accepted, alice); err != nil {
+		t.Fatalf("accepting a suggestion in a margin that holds 1,000,040 bytes: %v", err)
+	}
+	refused(joinedProjectMark(service, artifactID, "s1", suggestion(250_000, MarkReply{By: "user:alice", Text: strings.Repeat("r", 20_000)}), alice),
+		"holds at most 256 KiB (262144 bytes) of text, and this change would make one hold 270020 bytes (it held 250010)")
+
+	// A peer's record takes the margin past its bound outside any server write.
+	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		marks := doc.GetMap(marksMapName)
+		transact(func(txn *crdt.Transaction) {
+			marks.Set(txn, "peer", map[string]any{"text": strings.Repeat("p", 300_000)})
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := joinedProjectMark(service, artifactID, "s1", suggestion(100), alice); err != nil {
+		t.Fatalf("trimming a suggestion in a margin past its bound: %v", err)
+	}
+	refused(joinedProjectMark(service, artifactID, "s2", suggestion(250_001), alice),
+		"this change would make it hold 1050141 bytes (it held 1050140)")
 }
 
 // The same write to the same document gets the same answer. ygo loads a document's state writer

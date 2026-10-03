@@ -173,3 +173,74 @@ func TestAskEditsAndAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testin
 		})
 	}
 }
+
+// A suggestion's replacement and a comment's text live in the document's margin, which every load
+// of the document builds, so they are weighed as the document is: a comment's record holds at
+// most 256 KiB of text and the margin 1 MiB, and a comment that would pass either is refused with
+// 413 CAP_EXCEEDED naming the limit and both sizes, with the document as it was. Ordinary use -
+// dozens of comments, suggestions and replies of everyday length - is taken whole. Without the
+// bound, thirty-two suggestions of 900 KB were taken and one cold websocket load of their document
+// took 296 MiB.
+func TestSuggestionsCannotGrowADocumentsMarginPastWhatItMayHold(t *testing.T) {
+	handler := newTestHandler(t)
+	var words strings.Builder
+	for index := range 100 {
+		fmt.Fprintf(&words, "q%02dx ", index)
+	}
+	spec := words.String() + "\n"
+	suggest := func(issue string, quote int, replacement string) *httptest.ResponseRecorder {
+		return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue+"/comments", map[string]any{
+			"body":       "a suggestion",
+			"anchor":     map[string]any{"artifact": "spec", "quote": fmt.Sprintf("q%02dx", quote)},
+			"suggestion": map[string]string{"replace_with": replacement},
+		}, "alice")
+	}
+	refused := func(response *httptest.ResponseRecorder, want string) {
+		t.Helper()
+		if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(response.Body.String(), want) {
+			t.Fatalf("status=%d body=%.500s, want 413 CAP_EXCEEDED saying %q", response.Code, response.Body.String(), want)
+		}
+	}
+
+	issue := createInteractionIssue(t, handler, "TEST", "Margin", spec)
+	stored := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	refused(suggest(issue.Key, 0, strings.Repeat("a", 300_000)), "holds at most 256 KiB (262144 bytes) of text")
+	for index := range 4 {
+		if response := suggest(issue.Key, index+1, strings.Repeat("a", 230_000)); response.Code != http.StatusCreated {
+			t.Fatalf("suggestion %d of four that fit the margin: status=%d body=%.300s", index+1, response.Code, response.Body.String())
+		}
+	}
+	refused(suggest(issue.Key, 5, strings.Repeat("a", 230_000)), "a document's margin holds at most 1 MiB (1048576 bytes)")
+	for _, read := range []string{"/text", "/blocks"} {
+		if response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+read, nil, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("%s after the refused suggestion: status=%d body=%.300s", read, response.Code, response.Body.String())
+		}
+	}
+	if text := documentMarkdown(t, handler, issue.PrimaryArtifactID); text != stored {
+		t.Fatalf("the document after the suggestions reads %q, want it as it was, %q", text, stored)
+	}
+
+	ordinary := createInteractionIssue(t, handler, "ORD", "Ordinary margin", spec)
+	sentence := strings.Repeat("A sentence of ordinary length. ", 16)
+	for index := range 60 {
+		var response *httptest.ResponseRecorder
+		if index%3 == 0 {
+			response = suggest(ordinary.Key, index, sentence)
+		} else {
+			response = dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+ordinary.Key+"/comments", map[string]any{
+				"body":   sentence,
+				"anchor": map[string]any{"artifact": "spec", "quote": fmt.Sprintf("q%02dx", index)},
+			}, "alice")
+		}
+		if response.Code != http.StatusCreated {
+			t.Fatalf("ordinary comment %d: status=%d body=%.300s", index+1, response.Code, response.Body.String())
+		}
+		if index%5 == 0 {
+			root := decodeBody[model.Comment](t, response)
+			reply := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+ordinary.Key+"/comments", map[string]any{"body": sentence, "reply_to": root.ID}, "alice")
+			if reply.Code != http.StatusCreated {
+				t.Fatalf("a reply to comment %d: status=%d body=%.300s", index+1, reply.Code, reply.Body.String())
+			}
+		}
+	}
+}

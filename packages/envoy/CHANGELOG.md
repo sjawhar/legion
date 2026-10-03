@@ -221,6 +221,13 @@
   every writer the document holds rather than a random one: the same write to the same document gets
   the same answer, and a new version over a one-line first version, which a random id put ahead of
   that line's writer about half the time (7 of 12 tries of 16,384 headings refused), parks nothing.
+  A document's margin - the record of every comment and suggestion it has had, which every load
+  builds though no rendering carries it - is weighed too: one record (a comment's body and replies,
+  a suggestion's replacement) holds at most 256 KiB of text and the margin 1 MiB, and a comment,
+  suggestion, reply or edit that would leave either past its bound and bigger is `413
+  CAP_EXCEEDED`, naming the bound and both sizes; a status change (accept, reject, resolve) is not
+  text a caller writes and passes. Thirty-two open suggestions of 900 KB took one cold websocket
+  load to 296 MiB, and sixty-four four cold reads at once to 1,223 MiB.
   Browser edits over the websocket are applied before any check and are not bounded by
   this (LEGION-487). Nor is a document's stored history: every update a write appends is kept with
   the content later writes delete, and a cold load builds all of it, so repeated uploads of a
