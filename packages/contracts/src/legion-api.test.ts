@@ -9,6 +9,7 @@ import {
   LegionControllerSecretResponse,
   LegionEmptyResponse,
   LegionErrorResponse,
+  LegionEscalateRequest,
   LegionGateRegisterRequest,
   LegionGitCredentialResponse,
   LegionGitHubTokenResponse,
@@ -79,7 +80,31 @@ test("every Go-written fixture parses through the strict schema", () => {
   }
 });
 
-test("every Stage 3 workflow request has a strict schema", () => {
+test("state accepts optional fields emitted by later workflow slices", () => {
+  const current = fixture("state.json");
+  expect(LegionStateResponse.safeParse(current).success).toBeTrue();
+
+  const later = fixture("state.json") as {
+    admission: Record<string, unknown>;
+    issues: Record<string, { phase: string; slot?: Record<string, unknown> }>;
+  };
+  later.admission.free = 1;
+  later.issues["LEGION-208"]!.phase = "integrating";
+  later.issues["LEGION-208"]!.slot!.lentTo = "LEGION-209";
+
+  expect(LegionStateResponse.safeParse(later).success).toBeTrue();
+});
+
+test("state accepts the existing done phase", () => {
+  const completed = fixture("state.json") as {
+    issues: Record<string, { phase: string }>;
+  };
+  completed.issues["LEGION-208"]!.phase = "done";
+
+  expect(LegionStateResponse.safeParse(completed).success).toBeTrue();
+});
+
+test("every workflow request has a strict schema", () => {
   const requests: ReadonlyArray<readonly [string, z.ZodType, Record<string, unknown>]> = [
     [
       "grant",
@@ -123,6 +148,11 @@ test("every Stage 3 workflow request has a strict schema", () => {
       LegionPhaseRetryRequest,
       { grantId: "grant-208", issue: "LEGION-208", decision: "retry" },
     ],
+    [
+      "escalate",
+      LegionEscalateRequest,
+      { grantId: "grant-208", issue: "LEGION-208", reason: "needs controller triage" },
+    ],
     ["signoff", LegionSignOffRequest, { grantId: "grant-208", issue: "LEGION-208" }],
     [
       "root close",
@@ -146,6 +176,16 @@ test("every Stage 3 workflow request has a strict schema", () => {
       `${name} refuses a missing required field`
     ).toBeFalse();
   }
+});
+
+test("an escalation rejects an empty reason", () => {
+  expect(
+    LegionEscalateRequest.safeParse({
+      grantId: "grant-208",
+      issue: "LEGION-208",
+      reason: "",
+    }).success
+  ).toBeFalse();
 });
 
 test("a workflow refusal preserves its stable code and message", () => {

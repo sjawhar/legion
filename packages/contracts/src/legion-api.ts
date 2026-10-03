@@ -29,6 +29,7 @@ export const LEGION_WORKFLOW_PHASES = [
   "retro",
   "merging",
   "awaiting_merge",
+  "integrating",
   "production_check",
   "done",
   "held",
@@ -121,6 +122,7 @@ const legionGateView = z.strictObject({
 const legionSlotView = z.strictObject({
   index: z.number().int().nonnegative(),
   admittedAt: timestamp,
+  lentTo: z.string().optional(),
 });
 
 /** `api.PendingStatusWrite` — one `dispatch_status` effect the outbox has not finished, due now or
@@ -169,6 +171,7 @@ const legionAdmission = z.strictObject({
   cap: z.number().int().nonnegative(),
   active: z.array(nonEmptyString),
   waiting: z.array(nonEmptyString),
+  free: z.number().int().optional(),
 });
 
 /** `api.ControllerLocator` — the external record of the operator-launched controller: the
@@ -383,6 +386,13 @@ export const LegionPhaseRetryRequest = z.strictObject({
   grantId: nonEmptyString,
   issue: nonEmptyString,
   decision: z.enum(["retry", "escalate"]),
+});
+
+/** `api.EscalateRequest`, the architect's report to the controller. */
+export const LegionEscalateRequest = z.strictObject({
+  grantId: z.string(),
+  issue: z.string(),
+  reason: z.string().min(1),
 });
 
 /** `api.SignOffRequest`, the owning architect's post-production-check sign-off. */
