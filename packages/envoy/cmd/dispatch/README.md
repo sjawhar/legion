@@ -278,7 +278,7 @@ that boot too, and so does an autovacuum of either table where `deadlock_timeout
 which the census refuses (below). Every census answers `0`: 0053's check guarantees every approval
 ask a `version` to backfill from, and the other two change no row.
 
-Migration `0064_user_agent_reply_read` creates the table of replies a human has read by id, which
+Migration `0067_user_agent_reply_read` creates the table of replies a human has read by id, which
 the broadcast page writes for the replies it shows and the unread count leaves out, beside the
 per-session read mark. It creates a table and touches no row; its census answers `0`.
 

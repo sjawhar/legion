@@ -1,4 +1,4 @@
--- 0064_user_agent_reply_read.up.sql
+-- 0067_user_agent_reply_read.up.sql
 -- The replies a human has read one by one, beside the per-session read mark (user_agent_read). A
 -- read mark covers every reply up to a moment, which is right where a whole conversation is on
 -- screen (an Agents row, the live view) and wrong where only some of a session's replies are: a
