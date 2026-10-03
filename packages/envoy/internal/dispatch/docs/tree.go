@@ -251,12 +251,14 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 // the room itself decodes with the same queue (New sets Server.MaxPendingItems), or one update the
 // store appends (appendUpdate, AppendUpdateTx), decoded alone, so that every item of it leaning on
 // one outside it parks. ygo's decoder parks each later item of a client behind one whose parent it
-// cannot place yet - a container in a later client's group, one outside the update it decodes, or
-// one its garbage collection emptied when a peer deleted it - and refuses the whole update once
-// 100,000 are parked, its default (crdt.WithMaxPendingItems; LEGION-502), so a copy, a load or an
-// append of a document whose deleted subtree or one client's writes run past that fails where the
-// room that holds it serves. No update ygo decodes carries more than maxUpdateItems items, so a
-// queue that long holds every item one update can park.
+// cannot place yet and refuses the whole update once 100,000 are parked, its default
+// (crdt.WithMaxPendingItems; LEGION-502). A whole state first resolves the parents it holds itself
+// - a container in a later client's group, one its garbage collection emptied when a peer deleted
+// it - so it parks only what leans on something outside it; an update the store appends parks
+// every item leaning on the document it was written against, so an append that touches more than
+// 100,000 of a document's items fails at ygo's default where the room that holds the document
+// takes it. No update ygo decodes carries more than maxUpdateItems items, so a queue that long
+// holds every item one update can park.
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems))...)
 }

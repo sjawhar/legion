@@ -544,18 +544,18 @@ func New(deps Deps) *Service {
 	srv.PersistCoalesceWindow = -1
 	srv.CompactEvery = 200
 	// A room decodes its stored history into its own document, so it takes the pending queue
-	// every other decode of that history takes (newDocumentCopy). At ygo's default of 100,000 a
-	// room refuses a history the room that wrote it served, once a lower-numbered client wrote
-	// more items than that after one ygo had to defer (LEGION-502), and the document reads as one
-	// whose history cannot load, which offers its rebuild. The queue is maxUpdateItems because ygo
-	// refuses any one update declaring more items than that, so no load of a stored history can
-	// park past it. It is also the most a room's peers can park in it, about ten times ygo's
-	// default; bounding what one peer's update can do to a room is LEGION-487.
+	// every other decode of that history takes (newDocumentCopy), and ygo's check of each update
+	// the service broadcasts (Server.BroadcastUpdate) decodes that update alone under this queue:
+	// at ygo's default of 100,000, a settlement stamping more blocks' ids than that failed the
+	// broadcast, and the room failed on every reload (LEGION-502). The queue is maxUpdateItems
+	// because ygo refuses any one update declaring more items than that, so no decode of one
+	// update can park past it. It is also the most a room's peers can park in it, about ten times
+	// ygo's default; bounding what one peer's update can do to a room is LEGION-487.
 	srv.MaxPendingItems = maxUpdateItems
 	// A room whose last peer leaves, or that only Server.Apply touches, stays resident until it has
-	// been idle for roomIdleTimeout (ygo stamps a room with no peer idle when an Apply returns,
-	// reearth/ygo#269).
-	// Eager eviction, ygo's default, evicts the room the moment its last peer leaves, even while
+	// been idle for roomIdleTimeout: ygo stamps a room idle when its last peer leaves, and when an
+	// Apply on a room no peer is in returns (reearth/ygo#269, in the pinned fork). Eager eviction,
+	// ygo's default, evicts the room the moment its last peer leaves, even while
 	// a Server.Apply is inside its callback on that room (reearth/ygo v1.49.5,
 	// provider/websocket/peer.go:477-504 checks peers alone): the callback's write then lands on
 	// the evicted room and reaches the store only through its retiring persistence worker, while
