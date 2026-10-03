@@ -20,7 +20,7 @@ declare const __DISPATCH_BUILD__: string;
 // The Navigation API, as much of it as this module uses: TypeScript's DOM library does not declare
 // it yet, and a browser without it leaves `window.navigation` undefined.
 interface NavigateEvent extends Event {
-  readonly destination: { readonly sameDocument: boolean };
+  readonly destination: { readonly sameDocument: boolean; readonly url: string };
   readonly downloadRequest: string | null;
 }
 
@@ -97,11 +97,25 @@ function markPageLeaving(): void {
 
 // A route change inside the app is a navigation within this document. A link with `download`
 // (Dispatch's Download version links) fires `navigate` to another document too, with
-// `downloadRequest` set, and then downloads the file and leaves the page where it is. Any other
-// navigation to another document leaves the page. iOS Safari fires `navigate` from 26.2, for a link
-// followed or a form submitted but not for an address the reader types.
+// `downloadRequest` set, and then downloads the file and leaves the page where it is. Firefox
+// (Playwright's build, at least) then fires a second `navigate` for the same click, to the same
+// URL with no `downloadRequest`, so the next navigation to another document after a download is
+// skipped when it goes to the download's URL. Any other navigation to another document leaves the
+// page. iOS Safari fires `navigate` from 26.2, for a link followed or a form submitted but not for
+// an address the reader types.
+let lastDownloadUrl: string | undefined;
+
 function markPageLeavingForAnotherDocument(event: NavigateEvent): void {
-  if (!event.destination.sameDocument && event.downloadRequest === null) {
+  if (event.destination.sameDocument) {
+    return;
+  }
+  const download = lastDownloadUrl;
+  lastDownloadUrl = undefined;
+  if (event.downloadRequest !== null) {
+    lastDownloadUrl = event.destination.url;
+    return;
+  }
+  if (event.destination.url !== download) {
     leavingPage = true;
   }
 }

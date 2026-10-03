@@ -19,11 +19,18 @@ function withOnLine<T>(onLine: boolean, run: () => Promise<T>): Promise<T> {
   });
 }
 
-/** A stand-in for the Navigation API's `navigate` event: whether it stays in this document, and
- *  the file name a link with `download` asks for, empty when the attribute names none (null for
- *  every other navigation). */
-function navigateEvent(sameDocument: boolean, downloadRequest: string | null = null): Event {
-  return Object.assign(new Event("navigate"), { destination: { sameDocument }, downloadRequest });
+/** A stand-in for the Navigation API's `navigate` event: whether it stays in this document, the
+ *  file name a link with `download` asks for, empty when the attribute names none (null for every
+ *  other navigation), and where it goes. */
+function navigateEvent(
+  sameDocument: boolean,
+  downloadRequest: string | null = null,
+  url = "http://localhost/elsewhere"
+): Event {
+  return Object.assign(new Event("navigate"), {
+    destination: { sameDocument, url },
+    downloadRequest,
+  });
 }
 
 test("warms the block schema and headless Markdown renderer once after the first paint", async () => {
@@ -135,6 +142,47 @@ test("a link answered with a download does not mark the page as left", () => {
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
     expect(reload).toHaveBeenCalledTimes(1);
     expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
+  } finally {
+    window.dispatchEvent(new Event("pageshow"));
+    Reflect.deleteProperty(window, "navigation");
+    reload.mockRestore();
+    window.sessionStorage.clear();
+  }
+});
+
+test("the second navigate Firefox fires for one Download click does not mark the page as left", () => {
+  window.sessionStorage.clear();
+  // Firefox follows the download's `navigate` with another for the same click: to the same URL,
+  // with no `downloadRequest`.
+  const navigation = new EventTarget();
+  Object.defineProperty(window, "navigation", { configurable: true, value: navigation });
+  const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
+  const file = "http://localhost/api/v1/artifacts/spec/versions/1";
+  const navigate = (downloadRequest: string | null, url: string) =>
+    navigation.dispatchEvent(navigateEvent(false, downloadRequest, url));
+  const reloadsAfter = (...steps: (() => void)[]) => {
+    window.dispatchEvent(new Event("pageshow"));
+    window.sessionStorage.clear();
+    reload.mockClear();
+    for (const step of steps) step();
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    return reload.mock.calls.length;
+  };
+
+  try {
+    installChunkFailureRecovery();
+    expect({
+      repeated: reloadsAfter(
+        () => navigate("", file),
+        () => navigate(null, file)
+      ),
+      // Only the one navigation after the download is skipped: the next to that URL leaves.
+      thenAgain: reloadsAfter(() => navigate(null, file)),
+      elsewhere: reloadsAfter(
+        () => navigate("", file),
+        () => navigate(null, "http://localhost/elsewhere")
+      ),
+    }).toEqual({ repeated: 1, thenAgain: 0, elsewhere: 0 });
   } finally {
     window.dispatchEvent(new Event("pageshow"));
     Reflect.deleteProperty(window, "navigation");

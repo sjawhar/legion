@@ -308,7 +308,10 @@ Navigation API's `navigate` event to another document marks the page as left ins
 Safari still reloads the page being left. Playwright drives no iOS Safari, so no e2e row covers it.
 A link with `download` (the Download version links) fires that `navigate` to another document too,
 with `downloadRequest` set, and then leaves the reader on the page, so it does not count: in
-Chromium, `shell.e2e.ts` follows one and then fails a chunk, and the page reloads.
+Chromium, `shell.e2e.ts` follows one and then fails a chunk, and the page reloads. Playwright's
+Firefox follows it with a second `navigate` to the same URL and no `downloadRequest`, so the first
+navigation to another document after a download does not count either when it goes to the
+download's URL (`DeploymentResilience.test.tsx` has the sequence; no e2e row runs it in Firefox).
 The page counts as staying again once it is shown (`pageshow`, or the tab turning
 visible) or pressed (a pointer or a key), since a navigation cancelled at a leave prompt, stopped,
 or answered by the server with a download fires no event of its own.
