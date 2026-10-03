@@ -80,7 +80,10 @@ const maxInlineNesting = 100
 // holds with markNesting, which walks without recursing, and parseSource runs it before any walk
 // that recurses through inline nodes - the conversion's parseInlineMarks, footnoteLabels,
 // unescapeTablePipes - so each of those meets at most that many. An image imageNesting measured
-// past the bound, its children dropped, counts at that measure.
+// past the bound, its children dropped, counts at that measure. The walk itself, goldmark's
+// ast.Walk, recurses once per level, but it skips the children of every inline node it enters, so
+// it descends only through blocks, and nestingRefusal runs it only on a tree whose blocks
+// nestingGuard held within maxNesting.
 func inlineNesting(root ast.Node, source []byte, measured map[*ast.Image]int) (refusal nestingError, found bool) {
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering || node.Type() != ast.TypeInline {
