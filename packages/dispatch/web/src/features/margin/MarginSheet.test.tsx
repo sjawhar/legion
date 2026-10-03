@@ -38,7 +38,7 @@ test("an issue margin offers Comments and Pinned, Comments first", () => {
           onToggleThread: () => {},
           onEditingChange: () => {},
         },
-        composer: undefined,
+        composers: [],
         items: {
           actionFailure: undefined,
           answeredAsksPending: false,
@@ -129,7 +129,21 @@ test("a document owner shows the Comments tab and comment composer only", () => 
             onToggleThread: () => {},
             onEditingChange: () => {},
           },
-          composer: { anchor: undefined, kind: "comment", seq: 1, turnedAway: false },
+          composers: [
+            {
+              anchor: { artifact: specArtifact.id, mark_id: "mark-1", quote: "selected" },
+              held: false,
+              kind: "comment",
+              owner: {
+                artifactId: specArtifact.id,
+                kind: "document",
+                project: "CORE",
+                slug: "design-notes",
+              },
+              seq: 1,
+              turnedAway: false,
+            },
+          ],
           items: {
             actionFailure: undefined,
             answeredAsksPending: false,
@@ -256,7 +270,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
               onToggleThread: () => {},
               onEditingChange: () => {},
             },
-            composer: undefined,
+            composers: [],
             items: {
               actionFailure: undefined,
               answeredAsksPending: false,
@@ -404,7 +418,7 @@ test("the standalone document phone sheet shows each suggestion's diff and Accep
               onToggleThread: () => {},
               onEditingChange: () => {},
             },
-            composer: undefined,
+            composers: [],
             items: {
               actionFailure: undefined,
               answeredAsksPending: false,

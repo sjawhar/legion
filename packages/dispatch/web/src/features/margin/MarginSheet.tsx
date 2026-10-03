@@ -48,7 +48,9 @@ export interface MarginSheetModel {
     onEditingChange: (id: string | undefined) => void;
     onToggleResolved: () => void;
   };
-  composer: MarginComposer | undefined;
+  /** Every composer the margin keeps: the open compose's, and each one held for a send that was
+   *  out when the reader left its document. At most one per document, shown on that document. */
+  composers: readonly MarginComposer[];
   items: {
     actionFailure: CommentActionFailure | undefined;
     answeredAsksPending: boolean;
@@ -104,8 +106,8 @@ export interface MarginSheetModel {
 }
 
 interface MarginSheetProps {
-  /** The desktop margin is collapsed to its rail: the sheet stays mounted, hidden, holding only an
-   *  open composer. */
+  /** The desktop margin is collapsed to its rail: the sheet stays mounted, hidden, holding only
+   *  its composers. */
   collapsed?: boolean;
   desktopControl?: ReactNode;
   model: MarginSheetModel;
@@ -118,7 +120,7 @@ export function MarginSheet({
 }: MarginSheetProps): ReactNode {
   const {
     actions,
-    composer,
+    composers,
     items: {
       actionFailure,
       answeredAsksPending,
@@ -237,9 +239,9 @@ export function MarginSheet({
           </>
         ) : null}
         {/* The tabs and what they show. Mounted under a phone margin thread and under the
-            collapsed rail too, holding only the composer then: the composer a selection-bar
-            action opened lives as long as its compose, so its draft, a send it has out and that
-            send's refusal survive whatever the margin shows over it. */}
+            collapsed rail too, holding only the composers then: a composer a selection-bar action
+            opened lives as long as its compose, so its draft, a send it has out and that send's
+            refusal survive whatever the margin shows over it, another document included. */}
         <div
           className={sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}
           hidden={covered}
@@ -309,17 +311,20 @@ export function MarginSheet({
               )}
             </>
           )}
-          {composer === undefined || owner === undefined || visibleArtifact === undefined ? null : (
-            <MarginComposerSlot
-              composer={composer}
-              hidden={tab.value !== "comments"}
-              isClosed={isClosed}
-              onClose={actions.closeComposer}
-              onKindChange={actions.onComposerKindChange}
-              onSent={actions.onComposerSaved}
-              owner={owner}
-            />
-          )}
+          {composers.map((entry) => {
+            const shown = entry.anchor.artifact === visibleArtifact?.id;
+            return (
+              <MarginComposerSlot
+                composer={entry}
+                hidden={!shown || tab.value !== "comments"}
+                isClosed={shown && isClosed}
+                key={entry.anchor.artifact}
+                onClose={actions.closeComposer}
+                onKindChange={actions.onComposerKindChange}
+                onSent={actions.onComposerSaved}
+              />
+            );
+          })}
           {tab.value === "comments" &&
           !covered &&
           owner !== undefined &&

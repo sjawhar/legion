@@ -7,9 +7,9 @@ import { scrollMarginTo, useCardHold } from "./useCardHold";
 import type { MarginTab } from "./useMarginItems";
 
 interface UseMarginListenersOptions {
-  /** The composer the reader opened, if the margin shows one: each one published - a new one, or
-   *  the open one brought back for a selection-bar action that had to wait (`turnedAway`) - is
-   *  shown. */
+  /** The composer on the open document, if the margin shows one: each one published - a new one,
+   *  the open one brought back for a selection-bar action that had to wait (`turnedAway`), or a
+   *  held one the reader came back to - is shown. */
   composer: MarginComposer | undefined;
   focus: { itemId: string; seq: number } | undefined;
   margin: RefObject<HTMLElement | null>;
@@ -93,7 +93,8 @@ export function useMarginListeners({
     if (isCompactViewport && !sheetExpanded) {
       return;
     }
-    const slot = container.querySelector<HTMLElement>("[data-margin-composer]");
+    // The shown one: a composer held for another document's send is in the margin too, hidden.
+    const slot = container.querySelector<HTMLElement>("[data-margin-composer]:not([hidden])");
     if (slot !== null) {
       scrollMarginTo(container, slot.getBoundingClientRect(), container.getBoundingClientRect());
     }

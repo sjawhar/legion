@@ -24,8 +24,7 @@ test.beforeEach(async () => {
 });
 
 /** What the margin's open composer says while a newer selection-bar action waits on its send. */
-const stillSending =
-  "This one is still sending, so the new selection wasn't kept. Select it again once this one is sent.";
+const stillSending = "Still sending this one. Select the text again once it's sent.";
 
 /** In-app navigation, as a link does: a reload would drop a send with the page. */
 async function navigateInApp(page: Page, path: string): Promise<void> {
@@ -101,9 +100,9 @@ test("a newer bar Comment while a margin send is out leaves the composer on the 
   }
 });
 
-// Each compose names its own send: the reader leaving a document with its send out leaves that
-// send behind, and a bar Comment on the next document opens its own composer, which the earlier
-// send's landing neither closes nor settles.
+// Each compose names its own send: the reader leaving a document with its send out takes that
+// compose's composer off screen with them, so a bar Comment on the next document opens a composer
+// of its own, which the earlier send's answer neither closes nor settles.
 test("a bar Comment on another document while a margin send is out opens its own composer", async ({
   browser,
 }) => {
@@ -139,6 +138,54 @@ test("a bar Comment on another document while a margin send is out opens its own
     await expect(form.locator("blockquote")).toHaveText("brown");
     await expect(form.getByLabel("Comment")).toHaveValue("Second draft");
     await expect(form.getByLabel("Comment")).toBeEnabled();
+  } finally {
+    await alice.close();
+  }
+});
+
+// Leaving a document while a margin send is out takes the composer off screen and keeps it, with
+// the send: a refusal while the reader is away hands the draft back there, and coming back to the
+// document finds the draft, the refusal and a Retry that still sends to the send's own mark.
+test("leaving a document while a margin send is out keeps its draft and refusal for the return", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec, title: "Left with a send out" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    const project = test.info().project.name;
+    await openSpec(page, issue.key);
+    const comments = `**/api/v1/issues/${issue.key}/comments`;
+    const refuse = await refusePosts(page, comments);
+    await sendFromBar(page, "quick", "Kept for the return");
+
+    // The Inbox has no margin at all, so nothing of the margin is on screen there.
+    await navigateInApp(page, "/");
+    await expect(page.locator("main").getByRole("heading", { name: "Inbox" })).toBeVisible();
+    await expect(composer(page)).toHaveCount(0);
+    const refused = refusal(page, issue.key, 503);
+    refuse();
+    await refused;
+
+    await navigateInApp(page, `/issues/${issue.key}/spec`);
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Left with a send out" })
+    ).toBeVisible();
+    await expect(connectedDot(page)).toHaveText("connected");
+    await setSheet(page, project, true);
+    const form = composer(page);
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByLabel("Comment")).toHaveValue("Kept for the return");
+    await expect(form.locator("blockquote")).toHaveText("quick");
+
+    await page.unroute(comments);
+    await form.getByRole("button", { name: "Retry" }).click();
+    await expect(composer(page)).toHaveCount(0);
+    await expect(
+      page.getByTestId("margin-sheet").getByText("Kept for the return", { exact: true })
+    ).toBeVisible();
   } finally {
     await alice.close();
   }

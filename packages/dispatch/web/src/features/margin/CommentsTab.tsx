@@ -20,9 +20,13 @@ import type { CommentActionFailure } from "./useCommentActionQueue";
 import type { MarginItemAction, MarginOwner, MarkPlacement, Thread } from "./useMarginItems";
 
 export interface MarginComposer {
-  anchor: ComposerAnchor | undefined;
+  anchor: ComposerAnchor;
+  /** Its send was out when the reader left its document or its issue closed, so it stays until
+   *  that send lands or the reader discards the refusal it hands back. */
+  held: boolean;
   kind: ComposerKind;
-  replyTo?: string;
+  /** Where its sends go: the owner it was opened under, wherever the margin is now. */
+  owner: MarginOwner;
   /** The compose this composer belongs to, which names its send (`marginComposeSendKey`). */
   seq: number;
   /** A newer selection-bar action had to wait for this compose's send. */
@@ -65,11 +69,11 @@ interface CommentsTabProps {
   viewerLogin: string;
 }
 
-/** The composer a selection-bar action (or a margin Reply) opened. `MarginSheet` keeps it mounted
- *  for as long as its compose is open, whatever the margin shows over it - the Pinned tab, a phone
- *  margin thread, the rail the margin collapses to - so its draft, a send it has out and that
- *  send's refusal stay with it; on a closed issue it shows only that send or its refusal. While a
- *  newer selection-bar action waits on its send, it says so. */
+/** The composer a selection-bar action opened. `MarginSheet` keeps it mounted for as long as its
+ *  compose is open, whatever the margin shows over it - the Pinned tab, a phone margin thread, the
+ *  rail the margin collapses to, another document or a page with no margin - so its draft, a send
+ *  it has out and that send's refusal stay with it; on a closed issue it shows only that send or
+ *  its refusal. While a newer selection-bar action waits on its send, it says so. */
 export function MarginComposerSlot({
   composer,
   hidden,
@@ -77,7 +81,6 @@ export function MarginComposerSlot({
   onClose,
   onKindChange,
   onSent,
-  owner,
 }: {
   composer: MarginComposer;
   hidden: boolean;
@@ -85,10 +88,10 @@ export function MarginComposerSlot({
   onClose: (seq: number) => void;
   onKindChange: (kind: ComposerKind) => string | undefined;
   onSent: (seq: number) => void;
-  owner: MarginOwner;
 }): ReactNode {
   const sendKey = useMemo(() => marginComposeSendKey(composer.seq), [composer.seq]);
   const { sending } = useSending(sendKey);
+  const { owner } = composer;
   return (
     // The margin scrolls this into its scrollport when it opens: a composer the reader started
     // from the document renders at the top of the margin's scroll content, which can be thousands
@@ -96,8 +99,7 @@ export function MarginComposerSlot({
     <div data-margin-composer="" hidden={hidden}>
       {composer.turnedAway && sending ? (
         <p className={`pt-3 text-sm ${textMutedOnSurfaceMuted}`} role="status">
-          This one is still sending, so the new selection wasn't kept. Select it again once this one
-          is sent.
+          Still sending this one. Select the text again once it's sent.
         </p>
       ) : null}
       <MentionComposer
@@ -114,12 +116,8 @@ export function MarginComposerSlot({
             ? { issueKey: owner.key, kind: "issue" }
             : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
         }
-        replyTo={
-          composer.replyTo === undefined
-            ? null
-            : { author: "", excerpt: "", id: composer.replyTo, parentKind: "comment" }
-        }
-        onKindChange={composer.anchor === undefined ? undefined : onKindChange}
+        replyTo={null}
+        onKindChange={onKindChange}
       />
     </div>
   );

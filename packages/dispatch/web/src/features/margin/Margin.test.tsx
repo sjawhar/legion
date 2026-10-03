@@ -5,7 +5,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { Ask, Comment, IssueDetails } from "../../api/types";
 import type { RetypeOutcome } from "../doc/editor";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
@@ -956,9 +956,7 @@ test("a newer compose while the open compose's send is out brings that compose b
     expect(within(shown).getByText("selected")).toBeTruthy();
     expect(within(shown).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("why?");
     expect(
-      screen.getByText(
-        "This one is still sending, so the new selection wasn't kept. Select it again once this one is sent."
-      )
+      screen.getByText("Still sending this one. Select the text again once it's sent.")
     ).toBeTruthy();
 
     await act(async () => {
@@ -1000,7 +998,9 @@ function SecondDocumentCompose(): ReactNode {
 }
 
 // Each compose names its own send, so a send the reader left behind with its document holds no
-// compose on the next one, and when it lands it closes and settles nothing there.
+// compose on the next one, and when it lands it closes and settles nothing there. Leaving with the
+// send out hands the mark to the margin, which keeps it for the send: the editor's promise
+// resolves rather than rejecting, which would take the mark back.
 test("a compose after leaving a document mid-send opens, and that send's landing leaves it open", async () => {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
@@ -1038,7 +1038,7 @@ test("a compose after leaving a document mid-send opens, and that send's landing
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: "Open second issue" }));
     await waitFor(() =>
-      expect(screen.getByLabelText("First composer outcome").textContent).toBe("composer closed")
+      expect(screen.getByLabelText("First composer outcome").textContent).toBe("saved")
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Compose on the second document" }));
@@ -1057,6 +1057,90 @@ test("a compose after leaving a document mid-send opens, and that send's landing
     expect(within(still).getByText("elsewhere")).toBeTruthy();
     expect(within(still).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("Second draft");
     expect(screen.getByLabelText("Second document composer outcome").textContent).toBe("idle");
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+    getInbox.mockRestore();
+    listIssueAsks.mockRestore();
+    getMyState.mockRestore();
+    listComments.mockRestore();
+    createComment.mockRestore();
+  }
+});
+
+function NavigateToFirstIssue(): ReactNode {
+  const navigate = useNavigate();
+  return (
+    <button
+      onClick={() => navigate(buildIssuePath({ key: "CORE-1", kind: "issue" }))}
+      type="button"
+    >
+      Back to the first issue
+    </button>
+  );
+}
+
+// A compose whose document the reader leaves while its send is out is held: its composer stays,
+// hidden, and so does the mark the send names. A refusal while the reader is away hands the draft
+// back to it, and coming back finds both, the open compose again.
+test("a compose left mid-send keeps its draft, its refusal and its mark for the reader's return", async () => {
+  const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["issue", secondIssue.key], secondIssue);
+  const getIssue = spyOn(api, "getIssue").mockImplementation(async (key) =>
+    key === "CORE-2" ? secondIssue : issue
+  );
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listComments = spyOn(api, "listComments").mockResolvedValue([]);
+  const sent = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockImplementation(() => sent.promise);
+
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <RegisterBridge bridge={fake.bridge} />
+          <MarkComposerProbe />
+          <NavigateToSecondIssue />
+          <NavigateToFirstIssue />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
+    const first = await screen.findByRole("form", { name: "Comment composer" });
+    fireEvent.change(within(first).getByLabelText("Comment"), { target: { value: "why?" } });
+    fireEvent.click(within(first).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Open second issue" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull()
+    );
+    await act(async () => {
+      sent.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      await sent.promise.catch(() => {});
+    });
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to the first issue" }));
+    const back = await screen.findByRole("form", { name: "Comment composer" });
+    expect(within(back).getByText("selected")).toBeTruthy();
+    expect(within(back).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("why?");
+    expect(within(back).getByText("Couldn't send — the server is down")).toBeTruthy();
+    // The mark stayed for the send, and the document is told the composer holds it again. The
+    // editor's promise resolved when the reader left: a rejection would take the mark back.
+    expect(fake.removed).toEqual([]);
+    expect(fake.held.at(-1)).toBe("m-1");
+    expect(screen.getByLabelText("First composer outcome").textContent).toBe("saved");
   } finally {
     view.unmount();
     getIssue.mockRestore();

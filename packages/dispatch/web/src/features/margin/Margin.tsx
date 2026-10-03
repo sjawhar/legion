@@ -52,12 +52,13 @@ export function Margin({
   const setClampedMarginWidth = (nextWidth: number) => {
     onWidthChange?.(clampMarginWidth(nextWidth));
   };
+  const hasMargin = routeHasMargin(pathname, search);
   // Collapsed to its rail, the margin stays mounted under it, hidden: an open composer - its
   // draft, a send it has out and that send's refusal - is still there when the margin comes back.
-  const railShown = !isCompactViewport && collapsed;
-  // Each compose the margin publishes - a new one, or the open one brought back for a
-  // selection-bar action that had to wait for its send - is the reader's to see, so the rail opens
-  // for it; collapsing the rail with a compose open keeps it collapsed.
+  const railShown = !isCompactViewport && collapsed && hasMargin;
+  // Each compose the margin publishes - a new one, the open one brought back for a selection-bar
+  // action that had to wait for its send, or a held one the reader came back to - is the reader's
+  // to see, so the rail opens for it; collapsing the rail with a compose open keeps it collapsed.
   const { pendingCompose } = useMargin();
   const shownCompose = useRef(pendingCompose);
   useEffect(() => {
@@ -70,8 +71,10 @@ export function Margin({
   // project, Settings, Agents - the desktop column takes no width at all, rather than spending
   // 384 px, a third of a 1280 px viewport, saying so in a sentence. The reader's own collapse
   // preference is untouched, so it returns as they left it on the next issue or document.
-  // `routeHasMargin` is the one answer the shell reserves its gutter from too.
-  if (!isCompactViewport && !routeHasMargin(pathname, search)) {
+  // `routeHasMargin` is the one answer the shell reserves its gutter from too. A composer held for
+  // a send that was out when the reader left its document keeps the margin mounted there, hidden,
+  // so that composer's draft and refusal are there when the reader comes back.
+  if (!isCompactViewport && !hasMargin && model.composers.length === 0) {
     return null;
   }
 
@@ -96,7 +99,7 @@ export function Margin({
       <div
         className={isCompactViewport ? "contents" : "relative order-3 shrink-0"}
         data-testid={isCompactViewport ? undefined : "desktop-margin-shell"}
-        hidden={railShown}
+        hidden={railShown || (!isCompactViewport && !hasMargin)}
         style={isCompactViewport ? undefined : { width: `${marginWidth}px` }}
       >
         <hr

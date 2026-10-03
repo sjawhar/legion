@@ -51,8 +51,9 @@ export const MARGIN_COMPOSER_SEND_KEY: MutationKey = ["margin-composer"];
 
 /** The name of the compose `seq`'s send. While it is out the open compose is that send's: it
  *  neither moves to a newer selection nor ends unsaved, so the send's outcome - its refusal, with
- *  its draft - lands on the composer that sent it. A send of a compose already closed - its
- *  document left behind - holds no newer compose. */
+ *  its draft - lands on the composer that sent it. A compose whose document the reader left with
+ *  its send out stops being the open one, so its send holds no compose on the next document; it is
+ *  the open one again once the reader is back on its own (`resumeCompose`). */
 export function marginComposeSendKey(seq: number): MutationKey {
   return [...MARGIN_COMPOSER_SEND_KEY, seq];
 }
@@ -88,6 +89,10 @@ interface MarginContextValue {
   /** The open mark composer's kind switch: retypes its mark and moves the pending compose to the
    *  new mark, or answers why the switch was refused, for the composer to show. */
   retypeCompose(kind: ComposerKind): string | undefined;
+  /** Makes a compose the reader left with its send out (`settleCompose`'s `left`) the open one
+   *  again, now that they are back on its document - unless a compose is open already. Its
+   *  editor's promise was settled when they left, so nothing settles it now. */
+  resumeCompose(compose: MarkComposeRequest & { seq: number }): void;
   selectItem(id: string): void;
   selectedItemId: string | undefined;
   setBlockPlacements(placements: ReadonlyMap<string, MarkPlacement>): void;
@@ -96,8 +101,10 @@ interface MarginContextValue {
   setMarkPlacements(placements: ReadonlyMap<string, MarkPlacement>): void;
   /** Settles the compose `seq` - the one a composer's own send or close names - if it is still
    *  the open one: a send a compose left behind lands after a newer compose opened, and settles
-   *  nothing. */
-  settleCompose(outcome: "saved" | "cancelled", seq: number): void;
+   *  nothing. `left`: the reader left its document while its send was out. It stops being the
+   *  open compose and its mark stays, since the send names it; the editor that wrote the mark is
+   *  gone with the document, so its promise resolves. */
+  settleCompose(outcome: "saved" | "cancelled" | "left", seq: number): void;
 }
 
 const unavailableMargin = (): never => {
@@ -123,6 +130,7 @@ const MarginContext = createContext<MarginContextValue>({
   placementsReported: false,
   registerDocument: unavailableMargin,
   retypeCompose: unavailableMargin,
+  resumeCompose: unavailableMargin,
   selectItem: unavailableMargin,
   selectedItemId: undefined,
   setBlockPlacements: unavailableMargin,
@@ -201,7 +209,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
     [publishCompose, queryClient]
   );
   const settleCompose = useCallback(
-    (outcome: "saved" | "cancelled", seq: number) => {
+    (outcome: "saved" | "cancelled" | "left", seq: number) => {
       const open = openCompose.current;
       // Nothing to settle once the compose closed - the composer closing after its save - or when
       // a newer compose is the open one.
@@ -212,11 +220,19 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
         bridgeRef.current?.removeMark(open.request.anchor.mark_id);
       }
       publishCompose(undefined);
-      if (outcome === "saved") {
-        open.resolve();
+      if (outcome === "cancelled") {
+        open.reject(new Error("composer closed"));
         return;
       }
-      open.reject(new Error("composer closed"));
+      open.resolve();
+    },
+    [publishCompose]
+  );
+  const resumeCompose = useCallback(
+    ({ anchor, kind, seq }: MarkComposeRequest & { seq: number }) => {
+      if (openCompose.current !== undefined) return;
+      // Its editor's promise was settled when the reader left its document: nothing to settle.
+      publishCompose({ reject: () => {}, request: { anchor, kind, seq }, resolve: () => {} });
     },
     [publishCompose]
   );
@@ -320,6 +336,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       placementsReported,
       registerDocument,
       retypeCompose,
+      resumeCompose,
       selectItem: setSelectedItemId,
       selectedItemId,
       setBlockPlacements: publishBlockPlacements,
@@ -349,6 +366,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       publishMarkPlacements,
       registerDocument,
       retypeCompose,
+      resumeCompose,
       selectHoveredItem,
       selectedItemId,
       setMarkItemIds,

@@ -224,15 +224,21 @@ refused and the editor takes its mark back, so a send's outcome lands on the com
 was sent from; the margin then brings the open composer back on screen - the Comments tab, the
 compact sheet - saying the new selection waits on its send. Every compose the margin publishes,
 this one and a new one alike, opens the desktop margin out of its rail (`Margin.tsx`).
-A send a compose left behind holds nothing: once the reader has left its document, a selection-bar
-action on the next one opens, and that send's landing closes and settles only its own compose
-(`settleCompose` takes the compose's `seq`). That composer lives as long
-as its compose, whatever the margin shows: `MarginSheet` keeps it mounted, hidden, under the
+A compose the reader leaves behind holds no other: once they leave its document, a selection-bar
+action on the next one opens a compose of its own, and the earlier send's answer closes and
+settles only its own compose (`settleCompose` takes the compose's `seq`). A composer lives as
+long as its compose, whatever the margin shows: `MarginSheet` keeps it mounted, hidden, under the
 Pinned tab, under a phone margin thread, and under the rail the desktop margin collapses to
 (`Margin.tsx` keeps the sheet mounted there), so its draft, a send it has out and that send's
-refusal are where the reader left them. The issue closing ends an idle composer, but
-one whose send is out stays, showing that send and then its outcome as a closed issue's composers
-do; leaving the document or the page ends it, and the send still lands. The margin also names
+refusal are where the reader left them. Leaving the document, or the issue closing, ends an idle
+composer. One whose send is out then is held (`held` on `MarginComposer`, at most one composer
+per document): it stays until that send lands or the reader discards its refusal, and so does its
+mark, since the send names it - the margin resolves the editor's promise rather than rejecting it
+(`settleCompose`'s `left`). Off its document it is hidden, in a margin `Margin.tsx` keeps mounted
+even on a route that has none, and it is not the open compose; back on its document it shows
+again and is the open compose again (`resumeCompose`), so a newer selection-bar action there
+waits on its send. On a closed issue it shows only that send and then its outcome, as a closed
+issue's composers do. Leaving the page ends it, and the send still lands. The margin also names
 the mark the open composer holds to the editor
 (`ProofEditorHandle.setComposerMark`). The composer's own mark writes are never undo steps
 (`@legion/proof-editor`'s `recordMarkHistoryPlugin`), in prosemirror-history or y-prosemirror's
