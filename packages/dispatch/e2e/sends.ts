@@ -1,5 +1,23 @@
 import type { Locator, Page } from "@playwright/test";
 
+/** In-app navigation, as a link does: a reload would drop a send with the page. */
+export async function navigateInApp(page: Page, path: string): Promise<void> {
+  await page.evaluate((to) => {
+    window.history.pushState(null, "", to);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, path);
+}
+
+/** The answer `status` to a `POST` to `path` (the end of its URL), once the page has it. */
+export function answeredPost(page: Page, path: string, status: number) {
+  return page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      response.url().endsWith(path) &&
+      response.status() === status
+  );
+}
+
 /** Holds every `POST` to `pattern` until `release`, as a slow server would, and counts them. */
 export async function holdPosts(
   page: Page,

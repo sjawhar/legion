@@ -6,11 +6,12 @@ import {
   composer,
   connectedDot,
   documentEditor,
+  openSpec,
   selectEditorText,
   setSheet,
 } from "./editor";
 import { resetDatabase } from "./seed";
-import { holdPosts, refusePosts } from "./sends";
+import { answeredPost, holdPosts, navigateInApp, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 // The composer a selection-bar action opens holds a send's draft until the server answers, like
@@ -26,20 +27,6 @@ test.beforeEach(async () => {
 /** What the margin's open composer says while a newer selection-bar action waits on its send. */
 const stillSending = "Still sending this one. Select the text again once it's sent.";
 
-/** In-app navigation, as a link does: a reload would drop a send with the page. */
-async function navigateInApp(page: Page, path: string): Promise<void> {
-  await page.evaluate((to) => {
-    window.history.pushState(null, "", to);
-    window.dispatchEvent(new PopStateEvent("popstate"));
-  }, path);
-}
-
-async function openSpec(page: Page, issueKey: string): Promise<void> {
-  await page.goto(`/issues/${issueKey}/spec`);
-  await expect(documentEditor(page)).toContainText(spec);
-  await expect(connectedDot(page)).toHaveText("connected");
-}
-
 /** A bar Comment on `quote`, and `body` sent from the composer it opens. */
 async function sendFromBar(page: Page, quote: string, body: string): Promise<void> {
   await selectEditorText(page, quote);
@@ -52,12 +39,7 @@ async function sendFromBar(page: Page, quote: string, body: string): Promise<voi
 }
 
 function refusal(page: Page, issueKey: string, status: number) {
-  return page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      response.url().endsWith(`/api/v1/issues/${issueKey}/comments`) &&
-      response.status() === status
-  );
+  return answeredPost(page, `/api/v1/issues/${issueKey}/comments`, status);
 }
 
 // A newer selection-bar action while a send is out would move the open composer to the newer mark:
@@ -73,7 +55,7 @@ test("a newer bar Comment while a margin send is out leaves the composer on the 
 
   try {
     const page = await alice.newPage();
-    await openSpec(page, issue.key);
+    await openSpec(page, issue.key, spec);
     const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
     await sendFromBar(page, "quick", "About quick");
 
@@ -113,7 +95,7 @@ test("a bar Comment on another document while a margin send is out opens its own
 
   try {
     const page = await alice.newPage();
-    await openSpec(page, first.key);
+    await openSpec(page, first.key, spec);
     const send = await holdPosts(page, `**/api/v1/issues/${first.key}/comments`);
     await sendFromBar(page, "quick", "Left behind");
 
@@ -156,7 +138,7 @@ test("leaving a document while a margin send is out keeps its draft and refusal 
   try {
     const page = await alice.newPage();
     const project = test.info().project.name;
-    await openSpec(page, issue.key);
+    await openSpec(page, issue.key, spec);
     const comments = `**/api/v1/issues/${issue.key}/comments`;
     const refuse = await refusePosts(page, comments);
     await sendFromBar(page, "quick", "Kept for the return");
@@ -201,7 +183,7 @@ test("the Pinned tab while a margin send is out keeps the composer, its draft an
 
   try {
     const page = await alice.newPage();
-    await openSpec(page, issue.key);
+    await openSpec(page, issue.key, spec);
     const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
     await sendFromBar(page, "brown", "About brown");
 
@@ -234,7 +216,7 @@ test("collapsing the margin while its send is out keeps the composer, its draft 
   try {
     const page = await alice.newPage();
     await page.setViewportSize({ height: 900, width: 1440 });
-    await openSpec(page, issue.key);
+    await openSpec(page, issue.key, spec);
     const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
     await sendFromBar(page, "brown", "Through the rail");
 
@@ -266,7 +248,7 @@ test("a bar Comment while the collapsed margin's send is out shows the margin an
   try {
     const page = await alice.newPage();
     await page.setViewportSize({ height: 900, width: 1440 });
-    await openSpec(page, issue.key);
+    await openSpec(page, issue.key, spec);
     const send = await holdPosts(page, `**/api/v1/issues/${issue.key}/comments`);
     await sendFromBar(page, "brown", "Through the rail");
 
@@ -301,7 +283,7 @@ test("on a phone, a margin thread opened while the margin's send is out keeps th
   try {
     const page = await alice.newPage();
     await page.setViewportSize({ height: 844, width: 390 });
-    await openSpec(page, issue.key);
+    await openSpec(page, issue.key, spec);
     const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
     await sendFromBar(page, "quick", "About quick");
 
@@ -340,7 +322,7 @@ test("a margin send out when its issue closes keeps the draft and shows the refu
 
   try {
     const page = await alice.newPage();
-    await openSpec(page, issue.key);
+    await openSpec(page, issue.key, spec);
     const send = await holdPosts(page, `**/api/v1/issues/${issue.key}/comments`);
     await sendFromBar(page, "brown", "Before the close");
 
