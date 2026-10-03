@@ -292,6 +292,18 @@ the broadcast page writes for the replies it shows and the unread count leaves o
 per-session read mark, and its `(login, session_id)` index, which the read mark's prune of one
 session's rows reads. It creates a table and touches no row; its census answers `0`.
 
+Migration `0068_people` creates `people`, everyone who has signed in, holding the sign-in pool's
+refresh token for a person who signed in through it, and drops `users`, the GitHub OAuth token pair
+of each GitHub login that signed in, which the GitHub proxy acted with before it read GitHub as the
+App. It locks `users` alone, `ACCESS EXCLUSIVE` for the drop; `people` is new. Its census counts the
+`users` rows the drop deletes, so wherever anyone signed in with GitHub it answers non-zero and the
+pre-deploy census of the release that carries it refuses:
+`REFUSED 0068_people.up.sql: its census counts <n> (0068_people.census.sql)`. That refusal is
+expected for this release: no code reads those rows once it ships. The deployer checks that `<n>`
+is `select count(*) from users` and that the report ends `census: REFUSED (1 reason)`, so 0068's
+count is its only refusal, and then rolls the release. Any other reason (a lock holder, a long
+transaction, a table over the limit) still stops the deploy.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
