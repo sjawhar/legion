@@ -1,3 +1,5 @@
+//go:build memory
+
 package main
 
 import (
@@ -30,15 +32,12 @@ import (
 )
 
 // The real-process harness the memory tests (memory_test.go) drive Dispatch through: a test
-// binary that runs main as a Dispatch server on the shared test database, the server's resident
-// memory read from /proc, and requests over HTTP and the document websocket.
+// binary that runs main as a Dispatch server on the shared test database (memoryTestServeEnv), the
+// server's resident memory read from /proc, and requests over HTTP and the document websocket.
+// Both files build only under the `memory` tag, which the dispatch-memory CI job sets: their rows
+// run past go test's default deadline, so the unit run of every Go package leaves them out.
 
-const (
-	// memoryTestServeEnv makes this test binary run main, so the memory tests drive a real Dispatch
-	// process and read its own resident memory.
-	memoryTestServeEnv = "DISPATCH_MEMORY_TEST_SERVE"
-	memoryTestToken    = "memory-test-token"
-)
+const memoryTestToken = "memory-test-token"
 
 // memoryHarness is the database and the issue the memory tests' servers share.
 type memoryHarness struct {

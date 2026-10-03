@@ -326,3 +326,12 @@ env DISPATCH_TEST_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dis
   go test ./internal/dispatch/... ./cmd/dispatch/...
 go vet ./...
 ```
+
+The real-process memory tests (`memory_test.go`, LEGION-481) start a Dispatch server per row and
+read its resident memory from `/proc`, so they build only under the `memory` tag and run in their
+own CI job (`dispatch-memory` in `.github/workflows/envoy-and-contracts.yaml`), past `go test`'s
+default ten-minute deadline:
+
+```sh
+env DISPATCH_TEST_DATABASE_URL=… go test -tags memory -count=1 -timeout 60m ./cmd/dispatch
+```
