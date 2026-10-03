@@ -103,16 +103,14 @@ Two notes on what the script had to learn about its own surface:
 
 ### In CI
 
-The `daemon` job in `.github/workflows/envoy-and-contracts.yaml` runs `go vet -tags e2e ./...` (which also compiles the e2e-tagged Stage 4a harness) in
-`packages/daemon`, installs `tmux` — the tmux runtime's tests drive a real tmux server and skip
-without one, and the daemon refuses to start without it — and the pinned `jj` (through mise, as the
-pi-envoy job does) — the workspace tests drive a real jj, and the daemon resolves jj at boot and
-refuses to start without it — then `go test ./...` against its
+On every pull request, the required `typecheck` job of `.github/workflows/pr-and-main.yaml` runs
+`go vet -tags e2e ./...` (which also compiles the e2e-tagged Stage 4a harness) in
+`packages/daemon`, and its required `test` job installs `tmux` — the tmux runtime's tests drive a
+real tmux server and skip without one, and the daemon refuses to start without it — and the pinned
+`jj` (through mise, as the pi-envoy job does) — the workspace tests drive a real jj, and the daemon
+resolves jj at boot and refuses to start without it — then runs `go test ./...` against its
 `postgres:16` service (`LEGION_TEST_PG_DSN`), then this script with `LEGION_E2E_PG_DSN` pointing at
-the same service, so the script runs no docker of its own there. The job is gated on the
-workflow's `changes` filter (`daemon`: `packages/daemon/**`, `go.work`, `scripts/e2e/**`,
-`packages/pi-envoy/**`, `packages/contracts/fixtures/**`, and the native Dispatch server under
-`packages/envoy/internal/dispatch/**` and `packages/envoy/cmd/dispatch/**`).
+the same service, so the script runs no docker of its own there.
 
 ## stage2-tmux-supervision.sh
 
@@ -441,7 +439,7 @@ LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
 ```
 
 **Devbox only, against the production cluster; CI compiles the harness (`go vet -tags e2e ./...`
-in the `daemon` job) and does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives
+in the Tests workflow's `typecheck` job) and does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives
 Agent Sandbox pods in namespace `legion` from the devbox, the way the 4b daemon will. The script
 needs `go`, `kubectl`, `aws` (the runtime kubeconfig's `aws eks get-token`), `curl`, `ss`,
 `diff`, and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no

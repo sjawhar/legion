@@ -257,12 +257,11 @@ func TestCreateWritesNothingOnAnEnrollmentTheSweepEnded(t *testing.T) {
 	}
 }
 
-// TestCreateWaitsOutTheSweepItRaces is the same race with the two transactions overlapping, the
-// interleaving the review's probe hit: Create's write transaction begins while the lease is still
-// ahead, the lease lapses, the sweep locks the enrollment and is held part-way through ending it,
-// and Create's write reaches the enrollment while the sweep holds it. Create waits for the sweep
-// and, once the sweep commits, refuses as not live rather than committing a pending request on
-// the enrollment the sweep ended.
+// TestCreateWaitsOutTheSweepItRaces is the same race with the two transactions overlapping:
+// Create's write transaction begins while the lease is still ahead, the lease lapses, the sweep
+// locks the enrollment and is held part-way through ending it, and Create's write reaches the
+// enrollment while the sweep holds it. Create waits for the sweep and, once the sweep commits,
+// refuses as not live rather than committing a pending request on the enrollment the sweep ended.
 func TestCreateWaitsOutTheSweepItRaces(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()

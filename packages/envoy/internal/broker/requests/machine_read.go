@@ -186,9 +186,13 @@ func (m *Machine) SessionID(ctx context.Context, id string) (string, error) {
 // Grant is a live grant's public summary, for GET /v1/enrollments/self. It follows the same query
 // pattern as OwnerOf and enrollment above.
 type Grant struct {
-	ID        string    `json:"grant_id"`
-	RequestID string    `json:"request_id"`
-	Approver  *string   `json:"approver"`
+	// The grant's id, which the values and revoke routes take.
+	ID string `json:"grant_id"`
+	// The request it answered.
+	RequestID string `json:"request_id"`
+	// The login that approved it; null for a grant the rules gave automatically.
+	Approver *string `json:"approver"`
+	// When it expires.
 	ExpiresAt time.Time `json:"expires_at"`
 }
 

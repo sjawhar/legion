@@ -20,6 +20,23 @@ database has not applied, read-only, run before the service rolls (README
 "Pre-deploy census"); `runSubcommand` refuses an argument it does not know with
 exit 2 instead of serving, since serving migrates.
 
+Every Dispatch setting `cmd/dispatch` reads is a row of the settings table
+(`cmd/dispatch/settings.go`): `main` reads every row once (`processSettings`),
+`resolveBootConfig` and the subcommands take their values from that read
+(`settingValues`, which panics on a name the table does not list), and each
+reader in `internal/dispatch` is handed its value — a parameter, an option
+(`routes.AppContextOptions.InsecureCookie`/`EnvoyToken`, `envoy.WithToken`),
+or the table's lookup (`config.Load`'s environment, `auth.LoadAppFromEnv`) —
+as are the NATS connects `cmd/dispatch` makes through `internal/bus`
+(`bus.WithEnvironment`, `bus.Dial`'s environment). A new setting is a new row,
+never an `os.Getenv`: `TestNoReaderBypassesTheSettingsTable` fails on any other
+environment read under `cmd/dispatch` or `internal/dispatch`, and on a dot import
+of `os` or `syscall`, whose bare `Getenv` it could not tell from a local
+function; `TestEverySettingReachesItsReader` fails until the row has a case that
+hands it to its reader. `envoy-dispatch settings` prints the table, and the docs
+site's configuration reference (`docs/site/generators/dispatch-config.ts`) is
+generated from it.
+
 `dispatchHandler` mounts the one `GET /healthz` the process serves on its own
 mux, above the dashboard router, and the probe reads the database through
 `store.Pool.Healthy` — a one-connection pool nothing else uses, under
@@ -277,8 +294,8 @@ the table says human only.
 | `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply project-document edit operations. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/api/v1/me/state` | GET | identity | Read the user's issue UI state. |
 | `/api/v1/me/issues/{key}/state` | PUT | identity | Update the user's issue UI state. |
-| `/api/v1/me/agents/state` | GET | identity | Read the user's per-agent conversation state: `{[session_id]: {cleared_before?, read_through?, unread_replies}}`, where `unread_replies` counts the session's replies to the user's direct messages newer than both the Clear and the read mark. |
-| `/api/v1/me/agents/{session_id}/state` | PUT | identity | Clear an agent's conversation (`cleared_before`) and/or mark it read (`read_through`, which only moves forward) for this user: RFC3339, at least one; 400 `INVALID_STATE` when neither is given, one is malformed, or one is more than a minute ahead of the server clock; an accepted value is stored no later than the server's now. Appends `user_agent_state.updated` (`{login, session_id}`) for the viewer's other devices and answers the session's state. |
+| `/api/v1/me/agents/state` | GET | identity | Read the user's per-agent conversation state: `{[session_id]: {cleared_before?, read_through?, unread_replies}}`, where `unread_replies` counts the session's replies to the user's direct messages newer than both the Clear and the read mark and not read by id. |
+| `/api/v1/me/agents/{session_id}/state` | PUT | identity | Clear an agent's conversation (`cleared_before`), mark it read (`read_through`, which only moves forward and covers every reply up to it), and/or mark some of its replies read by id (`read_replies`, messages the path's session wrote, covering those alone, each in any form `uuid.Parse` reads) for this user: at least one; 400 `INVALID_STATE` when none is given, a cutoff is malformed or more than a minute ahead of the server clock, or a `read_replies` id is not a uuid or not a message that session wrote (nothing is written then); an accepted cutoff is stored no later than the server's now. Appends `user_agent_state.updated` (`{login, session_id}`) for the viewer's other devices, except for a request naming only replies already read, which changes nothing, and answers the session's state. |
 | `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
 | `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |

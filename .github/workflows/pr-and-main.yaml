@@ -1,5 +1,7 @@
 name: Tests
 
+# lint, typecheck and test are the checks main's ruleset requires, so they run on every pull request
+# with no path filter, and each covers the shipped daemon (packages/daemon, the Go `legion`).
 on:
   push:
     branches:
@@ -30,15 +32,19 @@ jobs:
       - name: Check image triggers cover every image input
         run: .github/scripts/check-image-trigger-paths.sh
 
-      - name: Setup Bun
-        uses: ./.github/actions/setup-bun
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/daemon/go.mod
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Lint workspace
-        run: bunx biome check --error-on-warnings src/
-        working-directory: packages/workspace
+      - name: Check the Go daemon's formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt -l lists files that are not gofmt-formatted; run gofmt -w on them:"
+            echo "$unformatted"
+            exit 1
+          fi
+        working-directory: packages/daemon
 
 
   typecheck:
@@ -47,37 +53,42 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Setup Bun
-        uses: ./.github/actions/setup-bun
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/daemon/go.mod
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Typecheck workspace
-        run: bunx tsc --noEmit
-        working-directory: packages/workspace
+      # With the e2e tag, vet also compiles the live proofs behind it (the Stage 4a harness,
+      # sandbox/live*_test.go), which run on the devbox against a real cluster.
+      - name: Vet the Go daemon, its e2e-tagged live proofs included
+        run: go vet -tags e2e ./...
+        working-directory: packages/daemon
 
 
   test:
     runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # One service for both: the Go daemon's unit tests' Postgres and the Stage 1 script's.
+      # Setting LEGION_E2E_PG_DSN is what tells the script not to start a container of its own —
+      # that path is the devbox's.
+      LEGION_TEST_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      LEGION_E2E_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
 
     steps:
       - uses: actions/checkout@v5
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
-
-
-
-      - uses: ./.github/actions/install-jj
-
-      # The workspace suite also drives stock jj 0.44 as a second binary (STOCK_JJ in
-      # packages/workspace/src/workspace.test.ts, through `mise x`), installed here beside the
-      # worker image's jj on PATH so no test downloads it.
-      - name: Install the workspace suite's stock jj
-        env:
-          MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: mise install github:jj-vcs/jj@0.44.0
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -100,7 +111,34 @@ jobs:
       - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command, the design-gate verdict)
         run: bun test scripts/e2e/lib
 
-      - name: Test workspace
-        run: bun test
-        working-directory: packages/workspace
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/daemon/go.mod
 
+      # The tmux runtime's tests drive a real tmux server and skip without one, and the daemon
+      # supervises under tmux and refuses to start without it.
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
+
+      # The workspace and boundary tests drive a real jj, the one the worker image ships (its
+      # working-copy filters are among what they plant), and the daemon resolves jj at boot and
+      # refuses to start without it.
+      - uses: ./.github/actions/install-jj
+
+      # internal/podsafety's baseline test and the pod agent's argv test run the Oh My Pi the worker
+      # image ships, and refuse on GitHub Actions without one. The pin is read from
+      # .omp-pin, the repository's one copy of it, installed through the mise above
+      # (.github/actions/install-omp).
+      - uses: ./.github/actions/install-omp
+
+      # internal/runtime/sandbox's uv link-mode test installs a wheel with the uv the worker image
+      # ships (ARG UV_VERSION, checked against ARG UV_SHA256), and refuses on GitHub Actions
+      # without one (.github/actions/install-uv).
+      - uses: ./.github/actions/install-uv
+
+      - name: Test the Go daemon
+        run: go test -count=1 ./...
+        working-directory: packages/daemon
+
+      - name: Stage 1 live proof
+        run: bash scripts/e2e/stage1-skeleton.sh

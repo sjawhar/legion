@@ -34,30 +34,30 @@ type routeHandler struct {
 	serve func(s *server, w http.ResponseWriter, r *http.Request, who caller)
 }
 
-// public is a route anyone may call.
+// public is a route anyone may call, with no credential.
 func public(h func(*server, http.ResponseWriter, *http.Request)) routeHandler {
 	return routeHandler{auth: authNone, serve: func(s *server, w http.ResponseWriter, r *http.Request, _ caller) { h(s, w, r) }}
 }
 
-// launcherAuth is a route for a launcher's proof (payload carries "lid", not "eid").
+// launcherAuth is a route for a machine's launcher (agent-secrets-helper, or the Legion daemon),
+// which signs each call's Proof header with the key its machine login's credential is bound to.
 func launcherAuth(h func(*server, http.ResponseWriter, *http.Request, enroll.Credential)) routeHandler {
 	return routeHandler{auth: authLauncher, serve: func(s *server, w http.ResponseWriter, r *http.Request, who caller) {
 		h(s, w, r, who.launcher)
 	}}
 }
 
-// sessionAuth is a route for an enrolled session's proof; the handler gets its enrollment id.
+// sessionAuth is a route for an enrolled agent session, which signs each call's Proof header with
+// its own key, and which acts only on its own enrollment, requests and grants.
 func sessionAuth(h func(*server, http.ResponseWriter, *http.Request, string)) routeHandler {
 	return routeHandler{auth: authProof, serve: func(s *server, w http.ResponseWriter, r *http.Request, who caller) {
 		h(s, w, r, who.enrollment)
 	}}
 }
 
-// uiAuth is a route for Dispatch's server, authenticated with the shared UI bearer token
-// (constant-time compare against Deps.UIToken). The bearer vouches for the approver login in each
-// decision and revoke body: Dispatch's server sets it from the login its own session resolved,
-// never from anything the browser sent, so the UI token is an approval credential and only
-// Dispatch holds it.
+// uiAuth is a route for Dispatch's server, which sends the broker's UI token as a bearer token and
+// names the person acting (the approver) in the body or query. The broker trusts that name, so the
+// UI token is an approval credential: only Dispatch's server holds it.
 func uiAuth(h func(*server, http.ResponseWriter, *http.Request)) routeHandler {
 	return routeHandler{auth: authUI, serve: func(s *server, w http.ResponseWriter, r *http.Request, _ caller) { h(s, w, r) }}
 }
@@ -71,7 +71,7 @@ type apiRoute struct {
 // routes is the one list of the broker's routes; a new route is a new row here, never a bare
 // mux.HandleFunc. The contract for every row is the shared broker contract
 // (dispatch://AGENTC-393/artifact/plan-overview-md). The comment above each row says what the
-// route does; the broker's generated HTTP reference (scripts/docs/broker/refgen) prints it and
+// route does; the broker's generated HTTP reference (cmd/broker-refgen) prints it and
 // refuses a row without one.
 func routes() []apiRoute {
 	return []apiRoute{
