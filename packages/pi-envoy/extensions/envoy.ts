@@ -95,6 +95,7 @@ import type {
 } from "../src/pi-types";
 import { sideTurn } from "../src/side-turn";
 import { type SessionIdentityContext, subagentSessionCheck } from "../src/subagent-session";
+import { toolDeviceName } from "../src/tool-device";
 import { toolFailure, toolSuccess } from "../src/tool-result";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
@@ -283,6 +284,20 @@ function opensAsk({
       (op === "insert" && markdown !== undefined && ASK_BLOCK_OPENER.test(markdown)) ||
       (op === "retype" && type === "ask")
   );
+}
+
+/** A tool-device `write`'s `content` as the JSON object of arguments it carries, else none. */
+function deviceArguments(content: unknown): Record<string, unknown> {
+  if (typeof content !== "string") return {};
+  try {
+    const parsed: unknown = JSON.parse(content);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Free text, such as a host device's report: no arguments to read.
+  }
+  return {};
 }
 
 /** Name prefix of every native Dispatch tool: talking to the humans, not the work itself. */
@@ -1908,14 +1923,27 @@ export default function envoyExtension(pi: PiApi): void {
       askAwareness.session_id === context.sessionManager.getSessionId() &&
       askAwareness.period > 0
     ) {
-      if (opensAsk(event)) {
+      // A tool device (a `write` to `xd://<tool>`) is reported twice: as its own tool, then as the
+      // `write`. Read as the tool it carries, the second neither counts a Dispatch call as work nor
+      // re-arms the check the first spent. Its `content` is that tool's input, JSON arguments for an
+      // extension tool and free text for some host devices, which carry no ops.
+      const device = toolDeviceName(event);
+      const call =
+        device === undefined
+          ? event
+          : {
+              toolName: device,
+              input: deviceArguments(event.input.content),
+              details: event.details,
+            };
+      if (opensAsk(call)) {
         // The agent asked the humans itself, so this stop has nothing left for the nudge to
         // say: it spends the check the period owed rather than ending the period, and aborts a
         // check in flight before its verdict can be used. Later real work can re-arm a fresh
         // check, whose prompt names the ask.
         askAwareness = { ...askAwareness, check_due: false };
         abortSelfCheck("the agent opened the ask itself");
-      } else if (!event.toolName.startsWith(DISPATCH_TOOL_PREFIX)) {
+      } else if (!call.toolName.startsWith(DISPATCH_TOOL_PREFIX)) {
         // Real work: it owes the period another check, the way finishing a step re-arms the
         // host's todo reminder. A Dispatch write is the agent talking to the humans this nudge
         // is about, not work, so it owes nothing — and a turn that only replies calls no tool

@@ -85,6 +85,10 @@
 
 ### Fixed
 
+- The run-end nudge reads a tool-device call (a `write` to `xd://<tool>`, which Oh My Pi reports
+  after the tool's own result) as the Dispatch call it carries. Before, that `write` counted as
+  work, so a `dispatch_ask` or a decision block made through a device re-armed the check it had
+  just spent, and every Dispatch call made that way owed a new one (LEGION-470).
 - A controller now displays its project token in canonical uppercase
   (`Legion controller · AGENTC`), rather than the lowercase token the Go daemon carries in
   `LEGION_PROJECT` (LEGION-480).

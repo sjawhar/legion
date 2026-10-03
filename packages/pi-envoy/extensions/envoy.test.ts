@@ -2146,6 +2146,43 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
+  test("a tool-device write is read as the Dispatch call it carries, so it re-arms no check", async () => {
+    // Oh My Pi reports a tool-device call (a `write` to `xd://<tool>` carrying the tool's JSON
+    // arguments) twice: as the tool, then as the `write` (measured on 18.4.9).
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-tool-device");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_tool_device", () => ({}));
+    const device = async (tool: string, input: Record<string, unknown>): Promise<void> => {
+      await session.toolResult({
+        toolName: tool,
+        toolCallId: tool,
+        input,
+        details: {},
+        isError: false,
+      });
+      await session.toolResult({
+        toolName: "write",
+        toolCallId: tool,
+        input: { path: `xd://${tool}`, content: JSON.stringify(input) },
+        details: { xdev: { tool, mode: "execute" } },
+        isError: false,
+      });
+    };
+
+    await session.userTurn();
+    await device("dispatch_doc_edit", {
+      issue: "DSP-1",
+      artifact: "spec",
+      ops: [{ op: "insert", markdown: ":::ask{#window}\nWhich deployment window?\n:::" }],
+    });
+    await session.stop();
+    await session.userTurn();
+    await device("dispatch_ask", { issue: "DSP-1", question: "Rotate the token?" });
+    await device("dispatch_comment", { issue: "DSP-1", body: "Asked above." });
+    await session.stop();
+
+    expect(session.asked).toEqual([]);
+  });
+
   test("a retype into an ask block spends the check, unlike a retype into another type", async () => {
     // The query creates a fresh extension module with isolated module-level awareness state.
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-document-retype");
