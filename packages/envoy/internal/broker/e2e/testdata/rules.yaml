@@ -1,5 +1,5 @@
 # rules.yaml is a v9-shaped rules file: `secrets:` policy only, each approval naming its approver
-# as `approver: operator` or `approver: login:<name>` (AGENTC-393). TestRulesTestdataFixturesParse
+# as `approver: operator` or `approver: login:<name>`. TestRulesTestdataFixturesParse
 # (../e2e_test.go) loads this file to prove the shape below parses cleanly, with no
 # `issue_assignee` reference and no `approvers:` section left (both are refused).
 version: 1

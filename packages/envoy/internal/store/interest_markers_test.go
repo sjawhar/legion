@@ -631,7 +631,7 @@ func TestAPassWhoseScanTimedOutPurgesNothingAndLeavesTheRegistryHealthy(t *testi
 // subject shows it is the one the purge needs. The negative control is also the refusal path the
 // deployed listener must survive: a NATS user without the capability leaves every marker where it
 // was, logs one WARN however many passes run, and keeps the cache healthy (LEGION-374); the
-// deployed listeners connect under agent-c's `envoyNatsAuthorization`.
+// deployed listeners connect under the deployment repository's `envoyNatsAuthorization`.
 func TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow(t *testing.T) {
 	// Each subtest starts a server of its own (startGrantedServer), whose grant names the purge
 	// subject of the interest bucket.

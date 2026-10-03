@@ -1,4 +1,4 @@
-// The Stage 4a agent-secrets checks' pure logic (AGENTC-393): whether this run's broker inputs are
+// The Stage 4a agent-secrets checks' pure logic: whether this run's broker inputs are
 // set at all, and the shell-quoting `agent-secrets <args>` runs through kubectl exec with. None of
 // it touches a cluster, so — unlike live_test.go and live_secrets_test.go, both `//go:build e2e` —
 // this file carries no build tag: ordinary `go test ./...` compiles and exercises it directly

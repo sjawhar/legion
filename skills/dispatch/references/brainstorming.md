@@ -43,10 +43,10 @@ do corrections to it. Neither your model nor theirs is the starting truth.
 
 ## A worked example
 
-`dispatch://AGENTC-1563/artifact/spec` is the secrets broker's identity model. Its first version
+One project's spec for its secrets broker's identity model shows the pattern. Its first version
 held the problem, the human's words, what exists today, and the one question that was ready then;
 it also called itself "a conversation", which the human struck as commentary. Each later version
 folds the answers in with the human's words and date and adds the questions they open. Its first
-approval request, on `dispatch://AGENTC-1563/artifact/spec@v35`, named four inferences the human
-had never discussed; the human rejected it, and each of the four was then either put to the human
-as its own decision block or taken out of the spec.
+approval request, at version 35, named four inferences the human had never discussed; the human
+rejected it, and each of the four was then either put to the human as its own decision block or
+taken out of the spec.

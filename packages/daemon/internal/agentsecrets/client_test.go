@@ -16,7 +16,7 @@ import (
 )
 
 // fakeBroker is the launcher-credential and enrollment routes of the shared broker contract
-// (dispatch://AGENTC-393/artifact/plan-overview-md) as a fake: it captures every login request
+// as a fake: it captures every login request
 // object's claims and every enrollment-route request's headers and body, and answers exactly
 // what the test configures. It never honors an Authorization header — the whole point of this
 // task is that one is never sent any more.

@@ -82,8 +82,9 @@ COPY --from=build /out/agent-secrets /usr/local/bin/agent-secrets
 COPY --from=web --chown=envoy:envoy /repo/packages/dispatch/web/dist /srv/dispatch-web
 
 # The same commit envoy-dispatch reports on /healthz, as the image's own label. Its presence is how
-# a deploy check knows the pinned image serves /healthz's commit and schema_version (agent-c's
-# scripts/verify_dispatch_deploy.py). Declared this late so a new commit reuses every layer above.
+# a deploy check knows the pinned image serves /healthz's commit and schema_version (the
+# deployment repository's deploy verification). Declared this late so a new commit reuses every
+# layer above.
 ARG LEGION_COMMIT=
 LABEL org.opencontainers.image.revision=${LEGION_COMMIT}
 

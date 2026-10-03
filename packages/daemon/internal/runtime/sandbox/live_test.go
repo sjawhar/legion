@@ -115,7 +115,7 @@ const (
 // liveTreeVolume is the tree volume's size, the daemon configuration's default. The run sets no
 // scheduling beyond the Legion pool the runtime selects: every pod of a tree requires the node of
 // the tree's first scheduled pod (the tree volume attaches to one node), and the `legion`
-// NodePool's own floor, karpenter.k8s.aws/instance-cpu Gt 3 (agent-c #20006), is what makes that
+// NodePool's own floor, karpenter.k8s.aws/instance-cpu Gt 3 (set in the deployment repository), is what makes that
 // node a 4-vCPU one with room for the tree while no pod requests anything (Stage 4b decision 2).
 var liveTreeVolume = resource.MustParse("20Gi")
 
@@ -147,7 +147,7 @@ type liveEnv struct {
 	// audience filled in, the operator's pod every launch carries; operatorConfigMap is the run's
 	// copy of the ConfigMap it names.
 	operatorPodFile, operatorConfigMap string
-	// The agent-secrets checks' inputs (AGENTC-393): the production broker, the email of the
+	// The agent-secrets checks' inputs: the production broker, the email of the
 	// person this run's machine login is approved by (an attended step: the operator enters the
 	// printed code on the Dispatch credential page and clicks Approve during the run), and the
 	// sha256 of the automatic rule's dummy value, and the checkout's agent-secrets binary. Every
@@ -262,7 +262,7 @@ type minted struct {
 
 // registration is a hello the listener registered: the claim and generation of the Hello event,
 // the hash of the token the resolver accepted for it, and — when the shim's hello carried one —
-// the pod's agent-secrets session identity (AGENTC-393).
+// the pod's agent-secrets session identity.
 type registration struct {
 	claim    claim.Token
 	gen      uint64
@@ -519,7 +519,7 @@ type liveRig struct {
 		gone       observed
 	}
 
-	// secrets is the broker client (AGENTC-393), nil when this run's inputs leave it
+	// secrets is the broker client, nil when this run's inputs leave it
 	// unconfigured or the attended machine login started in newLiveRig never reached "issued"
 	// (secretsBlocked). secretsBlockReason is empty exactly when secrets is set: it holds the
 	// login's outcome — timed out, denied, or expired — for secretsBlocked to report through the

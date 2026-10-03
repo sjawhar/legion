@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # packages/envoy/scripts/dev-broker.sh
 #
-# AGENTC-393 Task 12: the local dev surface a human can drive without AWS or Dispatch. Boots
+# The secrets broker's local dev surface, one a human can drive without AWS or Dispatch. Boots
 # Postgres (dev-postgres.sh, made idempotent here since that script has no guard of its own),
 # builds the broker and its three clients (agent-secrets, agent-secrets-helper and
 # agent-secrets-devrelay), writes a scratch rules file (DEMO_READ_TOKEN, granted automatically, and
@@ -17,7 +17,7 @@
 # requests or grants. The database lives in the shared dispatch-pg container, which this script
 # starts in Docker when it is not running, or, with DEV_BROKER_POSTGRES_URL set
 # (postgres://<user>@<host>:<port>/<database>, a role that may create databases), on that server
-# through psql, with no Docker at all. cmd/broker (AGENTC-833) binds before it reports anything and
+# through psql, with no Docker at all. cmd/broker binds before it reports anything and
 # logs the address it actually bound; this script waits for that line and reads the real port from
 # it, so a curl success can only ever mean this instance's own broker answered.
 #
@@ -197,7 +197,7 @@ die_if_broker_exited() {
   fi
 }
 
-# --- Wait for the broker's own "broker listening" log line (AGENTC-833): only once Listen has
+# --- Wait for the broker's own "broker listening" log line: only once Listen has
 # actually succeeded does the broker report an address, so this can only ever name this
 # instance's own listener, never a different, already-running one. ---
 BOUND_ADDR=""

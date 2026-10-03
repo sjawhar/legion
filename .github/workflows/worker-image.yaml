@@ -35,7 +35,7 @@ on:
   # stage's frozen install); the packages it copies whole — the Dockerfile (packages/daemon), the plugin
   # (packages/pi-envoy, packages/envoy-client, packages/contracts), the skills, the Go module and its
   # build inputs (packages/daemon, go.work, go.work.sum), and packages/envoy (copied whole for its
-  # agent-secrets binary, AGENTC-393); the OMP pin (.omp-pin); the context's .dockerignore; and this
+  # agent-secrets binary); the OMP pin (.omp-pin); the context's .dockerignore; and this
   # workflow. The final `legion probe-image` runs the image's own `legion` and plugin, so a PR that
   # breaks either fails here instead of merging and publishing nothing.
   # .github/scripts/check-image-trigger-paths.sh fails the build when this list misses a file the

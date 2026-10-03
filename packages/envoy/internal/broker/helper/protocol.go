@@ -1,6 +1,6 @@
 // packages/envoy/internal/broker/helper/protocol.go
 
-// Package helper is the host-session side of agent secrets (AGENTC-393): a per-user daemon
+// Package helper is the host-session side of agent secrets: a per-user daemon
 // that pins each registered process by pidfd, holds that session's P-256 key in memory, enrolls
 // it with the secrets broker as kind "host", and signs proofs only for the session's
 // descendants. The wire between the agent-secrets client and the helper is one JSON object per

@@ -14,7 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
-// AgentSecrets is a pod's enrollment with the secrets broker as the shim carries it (AGENTC-393):
+// AgentSecrets is a pod's enrollment with the secrets broker as the shim carries it:
 // the key directory (a memory-backed volume the runtime mounts), the projected token file, and
 // the `agent-secrets` binary. Nil on a tmux pane.
 type AgentSecrets struct {

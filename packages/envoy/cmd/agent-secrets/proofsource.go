@@ -1,8 +1,8 @@
 // packages/envoy/cmd/agent-secrets/proofsource.go
 //
 // Signer produces the compact JWS this process puts in a broker call's Proof header, and the
-// signed credential-request object POST /v1/requests embeds (the shared broker contract,
-// dispatch://AGENTC-393/artifact/plan-overview-md, puts authorization_details and reason inside
+// signed credential-request object POST /v1/requests embeds (the shared broker contract
+// puts authorization_details and reason inside
 // that signed object, not plain top-level fields). An agent box or pod has its own key on tmpfs
 // under AGENT_SECRETS_KEY_DIR and signs both directly for its own enrollment id (fileSigner); a
 // host session has no key of its own and asks

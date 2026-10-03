@@ -36,7 +36,7 @@ type State struct {
 	// capability `legion controller start` fetched.
 	ControllerLocator *ControllerLocator `json:"controllerLocator,omitempty"`
 	// AgentSecretsLogin is the daemon's own agent-secrets machine login
-	// (runtime.kubernetes.agent_secrets, AGENTC-393 Plan C), absent when the deployment configures
+	// (runtime.kubernetes.agent_secrets), absent when the deployment configures
 	// no broker.
 	AgentSecretsLogin *AgentSecretsLoginView `json:"agentSecretsLogin,omitempty"`
 }

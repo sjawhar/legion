@@ -1,7 +1,7 @@
-// Command broker is the AGENTC-393 secrets broker: it enrolls agent sessions and pods, decides
+// Command broker is the secrets broker: it enrolls agent sessions and pods, decides
 // their secret requests by policy or an approver's Dispatch login over a signed credential-request
-// record, and releases granted values. Per the shared broker contract
-// (dispatch://AGENTC-393/artifact/plan-overview-md), the broker holds no Dispatch credential —
+// record, and releases granted values. Per the shared broker contract, the broker holds no
+// Dispatch credential —
 // Dispatch's server calls the broker's UI routes with the deciding human's login, and the broker
 // never opens a Dispatch ask.
 package main
@@ -95,7 +95,7 @@ func main() {
 		func(e error) { slog.Error("rules reload refused; previous rules kept", "error", e) })
 	fatal(err)
 
-	// AGENTC-833: bind now, synchronously, right after every guard that can still refuse to
+	// Bind now, synchronously, right after every guard that can still refuse to
 	// boot has already run (config, the port-0 public-URL guard, migrations, the first rules
 	// load) — the only way any caller, dev-broker.sh included, can learn which process holds an
 	// address is the log line below, printed only once this exact Listen call has already

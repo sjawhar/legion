@@ -2,7 +2,7 @@
 // launcher (an operator's box, a Kubernetes pod, or the host agent-secrets-helper of Plan B)
 // signs its own future requests with the private key whose thumbprint and public JWK a launcher
 // credential is minted against — machine.Service.ApplyDecision mints one once a human approves a
-// typed-code machine login (AGENTC-393 Plan A) — and, for a pod, also proves a projected
+// typed-code machine login — and, for a pod, also proves a projected
 // service-account token bound to that pod, receiving a leased enrollment keyed by its own signing
 // key's thumbprint. proof.Verifier reads enrollments back through Lookup and Replay, and launcher
 // credentials back through AuthenticateLauncher (its LookupLauncher hook), to authenticate later

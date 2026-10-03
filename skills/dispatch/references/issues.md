@@ -9,14 +9,12 @@ project's architecture model, or list or audit a project's backlog.
 When you finish an issue, or are told to work on the next thing, take the top ready issue of the
 whole backlog, across every project: status `todo`, highest priority first, then board rank. There
 are no areas: a standing role, a product owner and a lane each take the top issue like everyone
-else (dispatch://AGENTC-34/ask/01ed2956-73cc-48d2-8ed4-7a86c6d439b1). `todo`
-means ready: specced, unblocked, and waiting on neither a deploy nor a decision. An issue that
-waits on one belongs in `backlog`, with what it waits on said on the issue.
+else. `todo` means ready: specced, unblocked, and waiting on neither a deploy nor a decision. An
+issue that waits on one belongs in `backlog`, with what it waits on said on the issue.
 
 Hold at most three issues in flight (`in_progress`, `testing`, `needs_review` or `retro`), of any
-kind (dispatch://AGENTC-34/ask/1aeb8f2e-0950-4eaa-aaac-24286c9dd3ca). The limit is per agent and
-has nothing to do with the week's priorities (dispatch://AGENTC-393/comment/a7647eb0): the
-priorities decide only what you pull next. Past three:
+kind. The limit is per agent and has nothing to do with the week's priorities: the priorities
+decide only what you pull next. Past three:
 push any unfinished work, say where in one comment on the issue, move it to `backlog` and clear
 its route. Each issue counts on its own; a child does not ride under its parent's slot.
 In-flight issues with no owner at all go
@@ -28,9 +26,9 @@ writes on the root of a tree Legion is running is set back and the tree's archit
 it; only a person in the dashboard, or `legion status`, stops that tree. On an issue under one, a
 status that takes it out of the flow parks that issue and stops its workers.
 
-One agent keeps the backlog's order against those priorities, with Sami
-(dispatch://AGENTC-34/ask/f6780f9e-8b96-49eb-9be7-7c7f2036d5cc). Setting an issue's priority
-stays yours ([Priority is yours to set](#priority-is-yours-to-set)); reordering the board does not.
+One agent keeps the backlog's order against those priorities, with Sami. Setting an issue's
+priority stays yours ([Priority is yours to set](#priority-is-yours-to-set)); reordering the board
+does not.
 When the top of the backlog looks wrong, or a priority's next step is not yet a ready issue,
 publish it to `notifications.role.backlog-order`, which the order keeper holds, instead of
 reordering the board yourself.
@@ -88,11 +86,11 @@ Waiting for the deploy lane is not a status and is never announced.
 
 ```ts
 // PATCH /api/v1/issues/{key} — status, title, labels, priority, external_links (merged by URL), route, parent
-dispatch_issue_update({ issue: "AGENTC-175", status: "testing" })
-dispatch_issue_update({ issue: "AGENTC-175", status: "done", reason: "Shipped in owner/repo#7; verified on the production dashboard." })
-dispatch_issue_update({ issue: "AGENTC-175", priority: 1 }) // 0–3; see Priority is yours to set
-dispatch_issue_update({ issue: "AGENTC-175", external_links: ["https://github.com/owner/repo/pull/7"] })
-dispatch_issue_update({ issue: "AGENTC-175", parent: "AGENTC-170" }) // same-project key; "" clears the parent
+dispatch_issue_update({ issue: "ACME-175", status: "testing" })
+dispatch_issue_update({ issue: "ACME-175", status: "done", reason: "Shipped in owner/repo#7; verified on the production dashboard." })
+dispatch_issue_update({ issue: "ACME-175", priority: 1 }) // 0–3; see Priority is yours to set
+dispatch_issue_update({ issue: "ACME-175", external_links: ["https://github.com/owner/repo/pull/7"] })
+dispatch_issue_update({ issue: "ACME-175", parent: "ACME-170" }) // same-project key; "" clears the parent
 ```
 
 Closing takes a `reason`, and the tool refuses `status: "done"` without one: it posts the reason on

@@ -94,7 +94,7 @@ type Claim struct {
 	LastStartRow int64
 	Locator      *runtime.Locator
 	// Enrollment is the secrets broker's record of the claim's running process, when the runtime
-	// enrolls pods (AGENTC-393): the enrollment id, and the incarnation it was made for. It is
+	// enrolls pods: the enrollment id, and the incarnation it was made for. It is
 	// revoked and cleared wherever the process is let go (letGo), so a record for another
 	// incarnation is never acted on.
 	Enrollment *Enrollment
@@ -186,7 +186,7 @@ type Deps struct {
 	Log      *slog.Logger
 	Limits   Limits
 	Timeouts Timeouts
-	// Secrets is the secrets broker's enrollment routes for the runtime's pods (AGENTC-393). nil
+	// Secrets is the secrets broker's enrollment routes for the runtime's pods. nil
 	// deploys with no broker: no identity is kept, and nothing is enrolled or revoked.
 	Secrets Enroller
 	// Identity is the git identity a role's commits carry: its App's bot. Every delivery hands it
@@ -310,7 +310,7 @@ type Machine struct {
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
 	// memory only: after a restart the boot orphan sweep has reaped every process no claim records.
 	previous *runtime.Locator
-	// identity is the latest hello2 identity for the claim's current incarnation (AGENTC-393),
+	// identity is the latest hello2 identity for the claim's current incarnation,
 	// kept until its enrollment lands; enrollmentSent is whether that enrollment has been handed
 	// to the shim over the claim's current connection.
 	identity       *heldIdentity

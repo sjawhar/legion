@@ -1,5 +1,5 @@
 -- packages/envoy/internal/broker/store/migrations/0005_credential_requests.up.sql
--- AGENTC-393 v9: credential-request records replace Dispatch asks.
+-- Broker API v9: credential-request records replace Dispatch asks.
 create table if not exists credential_requests (
   id text primary key,                -- lowercase-hex sha256 of body
   body text not null,                 -- canonical body, verbatim

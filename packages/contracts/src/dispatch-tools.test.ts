@@ -102,7 +102,7 @@ const validCalls = {
   dispatch_artifact: { issue: "DSP-1", name: "design.pdf", path: "design.pdf" },
   dispatch_read: { issue: "DSP-1" },
   dispatch_search: { query: "astrolabe" },
-  dispatch_issues: { project: "AGENTC" },
+  dispatch_issues: { project: "ACME" },
   dispatch_architecture_sync: { project: "CORE" },
   dispatch_open_asks: {},
   dispatch_whoami: {},
@@ -258,7 +258,7 @@ describe("dispatchToolSpecs", () => {
     const schema = schemaFor("dispatch_open_asks");
 
     expect(schema.safeParse({}).success).toBe(true);
-    expect(schema.safeParse({ project: "AGENTC" }).success).toBe(true);
+    expect(schema.safeParse({ project: "ACME" }).success).toBe(true);
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
   });
 
@@ -269,15 +269,15 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse(spec.example).success).toBe(true);
 
     expect(schema.safeParse({}).success).toBe(false);
-    expect(schema.safeParse({ project: "AGENTC", limit: 251 }).success).toBe(false);
-    expect(schema.safeParse({ project: "AGENTC", offset: -1 }).success).toBe(false);
-    expect(schema.safeParse({ project: "AGENTC", offset: 0.5 }).success).toBe(false);
-    expect(schema.safeParse({ project: "AGENTC", status: "not_a_status" }).success).toBe(false);
+    expect(schema.safeParse({ project: "ACME", limit: 251 }).success).toBe(false);
+    expect(schema.safeParse({ project: "ACME", offset: -1 }).success).toBe(false);
+    expect(schema.safeParse({ project: "ACME", offset: 0.5 }).success).toBe(false);
+    expect(schema.safeParse({ project: "ACME", status: "not_a_status" }).success).toBe(false);
     expect(
       schema.safeParse({
-        project: "AGENTC",
+        project: "ACME",
         status: "todo",
-        parent: "AGENTC-1",
+        parent: "ACME-1",
         label: "bug",
         priority: [0, 1, null],
         updated_since: "2026-09-01T00:00:00Z",
@@ -291,14 +291,10 @@ describe("dispatchToolSpecs", () => {
     const schema = schemaFor("dispatch_issues");
 
     for (const priority of [[0], [3, null], [null]]) {
-      expect(schema.safeParse({ project: "AGENTC", priority }).success, String(priority)).toBe(
-        true
-      );
+      expect(schema.safeParse({ project: "ACME", priority }).success, String(priority)).toBe(true);
     }
     for (const priority of [[], [4], [-1], [1.5], ["P0"], 0, null]) {
-      expect(schema.safeParse({ project: "AGENTC", priority }).success, String(priority)).toBe(
-        false
-      );
+      expect(schema.safeParse({ project: "ACME", priority }).success, String(priority)).toBe(false);
     }
   });
 

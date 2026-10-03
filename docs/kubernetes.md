@@ -465,7 +465,7 @@ with its `server`, and a terminal close (a fatal server `-ERR`, or reconnects ru
 once, as `NATS connection closed` with its `error`; the workflow's `workflow intake stopped` error
 then names the same cause as the connection's last error.
 
-Rollout order for the server's `legion-daemon` user (AGENTC-759): the server admits
+Rollout order for the server's `legion-daemon` user: the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
 every daemon gets it and restarts, and each boot line must name the daemon's own user: the
 daemon's `legion daemon connects to NATS` line reads `paneUser=false` (#1494). Only then is the
@@ -830,8 +830,8 @@ claim's pod and the image probe's.
   model, edit its line under `modelRoles` in that `overlay.yml` and run the same command again.
   Pods started after that use it; a running pod keeps the files it started with until it restarts,
   since both are mounted by `subPath`, which the kubelet never refreshes.
-- **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
-  (AGENTC-393 Plan C), so an agent in a pod runs `agent-secrets <SECRET> -- <command>` and gets only
+- **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker,
+  so an agent in a pod runs `agent-secrets <SECRET> -- <command>` and gets only
   that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback
   address); `operator` is the email of the person who approves this daemon's own machine logins on
   the Dispatch credential page — there is no launcher-token file and no manual CLI step. The daemon
