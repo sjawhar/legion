@@ -83,6 +83,39 @@ test("a chunk that fails while the page is being left does not reload over the n
   }
 });
 
+test("a navigation to another document marks the page as left where the browser has the Navigation API", () => {
+  window.sessionStorage.clear();
+  // iOS Safari fires no `beforeunload`; the Navigation API's `navigate` event is all it says.
+  const navigation = new EventTarget();
+  Object.defineProperty(window, "navigation", { configurable: true, value: navigation });
+  const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
+  const navigate = (sameDocument: boolean) =>
+    navigation.dispatchEvent(
+      Object.assign(new Event("navigate"), { destination: { sameDocument } })
+    );
+  const failChunk = () =>
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+
+  try {
+    installChunkFailureRecovery();
+    navigate(false);
+    failChunk();
+    expect(reload).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+
+    // A route change inside the app stays in this document, so the page's failures reload it.
+    window.dispatchEvent(new Event("pageshow"));
+    navigate(true);
+    failChunk();
+    expect(reload).toHaveBeenCalledTimes(1);
+  } finally {
+    window.dispatchEvent(new Event("pageshow"));
+    Reflect.deleteProperty(window, "navigation");
+    reload.mockRestore();
+    window.sessionStorage.clear();
+  }
+});
+
 test("a page still in use after a navigation began reloads for its next chunk failure", () => {
   window.sessionStorage.clear();
   installChunkFailureRecovery();

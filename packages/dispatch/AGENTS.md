@@ -298,7 +298,11 @@ The one exception is a page being left: from `beforeunload` no failure reloads i
 and Firefox cancel the chunk downloads in flight when a navigation starts (WebKit also refuses new
 ones), and a reload then would replace the reader's navigation with a reload of the page they are
 leaving (`deep-links.e2e.ts`, which the `webkit` and `firefox` projects run for that
-reason). The page counts as staying again once it is shown (`pageshow`, or the tab turning
+reason). `beforeunload` covers desktop Safari, not iOS Safari, which never fires it; there the
+Navigation API's `navigate` event to another document marks the page as left instead (iOS Safari
+26.2 and later, for a link followed or a form submitted, not an address typed), and older iOS
+Safari still reloads the page being left. Playwright drives no iOS Safari, so no e2e row covers it.
+The page counts as staying again once it is shown (`pageshow`, or the tab turning
 visible) or pressed (a pointer or a key), since a navigation cancelled at a leave prompt, stopped,
 or answered with a download fires no event of its own.
 It never default-prevents Vite's `vite:preloadError` (`installChunkFailureRecovery` says why), so

@@ -17,6 +17,22 @@ const INDEX_ASSET_PATH = /^\/assets\/index-[^/]+\.js$/;
 
 declare const __DISPATCH_BUILD__: string;
 
+// The Navigation API, as much of it as this module uses: TypeScript's DOM library does not declare
+// it yet, and a browser without it leaves `window.navigation` undefined.
+interface NavigateEvent extends Event {
+  readonly destination: { readonly sameDocument: boolean };
+}
+
+interface Navigation {
+  addEventListener(type: "navigate", listener: (event: NavigateEvent) => void): void;
+}
+
+declare global {
+  interface Window {
+    readonly navigation?: Navigation;
+  }
+}
+
 function indexAssetPath(source: string): string | undefined {
   const pathname = source.startsWith("/") ? source.split(/[?#]/, 1)[0] : new URL(source).pathname;
   return INDEX_ASSET_PATH.test(pathname) ? pathname : undefined;
@@ -61,7 +77,8 @@ async function deploymentChanged(): Promise<boolean> {
   return latest !== undefined && latest !== runningIndexAsset();
 }
 
-// Set from the start of a navigation away from this page (`beforeunload`) until the page is
+// Set from the start of a navigation away from this page (`beforeunload`, or the Navigation API's
+// `navigate` to another document, since iOS Safari never fires `beforeunload`) until the page is
 // plainly still the reader's: shown again (`pageshow`, which a back/forward-cache restore fires,
 // or the tab becoming visible again), or pressed (a pointer or a key on it). WebKit and Firefox
 // cancel the chunk downloads still in flight when a navigation starts, WebKit also refuses the ones
@@ -75,6 +92,15 @@ let leavingPage = false;
 
 function markPageLeaving(): void {
   leavingPage = true;
+}
+
+// A route change inside the app is a navigation within this document; only one to another document
+// leaves the page. iOS Safari fires `navigate` from 26.2, for a link followed or a form submitted
+// but not for an address the reader types.
+function markPageLeavingForAnotherDocument(event: NavigateEvent): void {
+  if (!event.destination.sameDocument) {
+    leavingPage = true;
+  }
 }
 
 function markPageStaying(): void {
@@ -113,6 +139,7 @@ function reloadForChunkFailure(): void {
 // once per session, never while it is being left.
 export function installChunkFailureRecovery(): void {
   window.addEventListener("beforeunload", markPageLeaving);
+  window.navigation?.addEventListener("navigate", markPageLeavingForAnotherDocument);
   window.addEventListener("pageshow", markPageStaying);
   // Captured on the window, so a handler that stops a press from propagating cannot hide it.
   window.addEventListener("pointerdown", markPageStaying, { capture: true });
