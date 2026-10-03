@@ -137,6 +137,31 @@ export function marginCard(page: Page, id: string): Locator {
   return page.locator(`[data-margin-item="${id}"]`);
 }
 
+/** The card of a margin thread the reader opened: in the Thread dialog on the phone layout, in
+ *  the margin beside the document everywhere else. */
+export function openedThreadCard(page: Page, project: string, rootId: string): Locator {
+  return project === "iphone"
+    ? page.getByRole("dialog", { name: "Thread" }).getByTestId(`margin-comment-${rootId}`)
+    : marginCard(page, rootId);
+}
+
+// On the phone layout the margin is a bottom sheet over the document. Acting on a selection
+// opens it; close it again before selecting another range, as a person would.
+export async function setSheet(page: Page, project: string, open: boolean): Promise<void> {
+  if (project !== "iphone") {
+    return;
+  }
+  const sheet = page.getByTestId("margin-sheet");
+  if ((await sheet.getAttribute("data-expanded")) !== String(open)) {
+    if (open) {
+      await page.getByRole("button", { name: /Open review panel/ }).click();
+    } else {
+      await page.mouse.click(1, 1);
+    }
+  }
+  await expect(sheet).toHaveAttribute("data-expanded", String(open));
+}
+
 /** The thread card rendered inside a Conversation turn (the margin renders the same thread as
  *  its own card, so a bare `[data-margin-item]` lookup would match both). */
 export function threadCard(page: Page, rootId: string): Locator {
