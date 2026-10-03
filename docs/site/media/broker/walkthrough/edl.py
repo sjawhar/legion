@@ -15,6 +15,8 @@ running, and the live grant.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import NamedTuple
 
 
@@ -33,26 +35,10 @@ class Clip(NamedTuple):
     narration: tuple[tuple[str, At], ...] = ()
 
 
-# The narration parts in speaking order; narrate.ts sends each with its neighbours' text. Names are
-# written as they are said: DEMO_API_KEY as "the demo API key".
-NARRATION: dict[str, str] = {
-    "open": "This command just got a key that a person approved.",
-    "login": "First, the machine logs in, and prints a code to enter in Dispatch.",
-    "machine-code": "There, alice types it into the machine login page.",
-    "machine-approve": "It names example-host-build. She approves it.",
-    "session-issued": "Back on the machine, the login is issued.",
-    "session-register": "Next, it registers a session for an agent.",
-    "session-self": "The broker calls this session an enrollment; its operator is alice.",
-    "request-ask": "Now the session asks for the demo API key to run one command, and says why.",
-    "request-wait": "Now it waits for a person.",
-    "approve-inbox": "The request is in alice's Inbox.",
-    "approve-record": "Its page shows the enrollment, the lifetime, and the agent's reason.",
-    "approve-click": "She approves it.",
-    "ran-runs": "The waiting command gets the key, and runs.",
-    "ran-status": "Its status says alice decided it.",
-    "grants-list": "Settings lists the live grant, with alice as its approver.",
-    "grants-revoke": "Each live grant has a Revoke button.",
-}
+# The narration parts in speaking order, from narration.json, which narrate.ts reads too; narrate.ts
+# sends each with its neighbours' text. Names are written as they are said: DEMO_API_KEY as "the
+# demo API key".
+NARRATION: dict[str, str] = json.loads((Path(__file__).parent / "narration.json").read_text())
 
 # The ran beat is three windows of one cast. ran ends and ran-status starts on the same frozen frame
 # (the command's line under a fresh prompt), so that join shows no seam while it drops the seconds
