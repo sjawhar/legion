@@ -4063,6 +4063,58 @@ describe("executeDispatchTool", () => {
     );
   });
 
+  // A version moves an open request back to its agent, the agent's own revision included, which
+  // sends that agent no event, so the document's approval line says whom the request waits on.
+  test("dispatch_doc_read says whom an awaiting approval request waits on", async () => {
+    for (const waitingOn of ["agent", "human"] as const) {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/issues/DSP-42") {
+          return response({
+            key: "DSP-42",
+            primary_artifact_id: "artifact-42",
+            artifacts: [
+              {
+                id: "artifact-42",
+                slug: "spec",
+                name: "spec.md",
+                primary: true,
+                approval: {
+                  state: "awaiting",
+                  latest_version: 4,
+                  ask_id: "ask-9",
+                  requested_by: { kind: "session", id: "session-1" },
+                  waiting_on: waitingOn,
+                },
+              },
+            ],
+            open_asks: [],
+          });
+        }
+        if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
+          return response({ markdown: "# Spec", version: 4 });
+        }
+        if (target.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+
+      const result = await executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { issue: "DSP-42" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+      expect(result.text).toBe(
+        `# Spec\n\nApproval: awaiting, waiting on ${waitingOn} (requested by session-1, ask ask-9)`
+      );
+    }
+  });
+
   test("resolves a project artifact by its filename when the slug route 404s", async () => {
     const paths: string[] = [];
     const artifact = {

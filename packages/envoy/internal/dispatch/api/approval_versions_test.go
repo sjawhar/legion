@@ -3,13 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -495,147 +492,6 @@ func TestAReplyQueuedBehindAHandBackTakesTheTurn(t *testing.T) {
 	}
 }
 
-func TestCommentOnMovedApprovalAskReportsItsDerivedWaitingOn(t *testing.T) {
-	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
-		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-		return documentService
-	})
-	issue := createInteractionIssue(t, handler, "TEST", "Moved approval comment", "A spec")
-	requested := sessionRequest(t, handler, http.MethodPost,
-		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
-		map[string]any{"actor": sessionActor(), "summary": "Names the initial proposal."})
-	if requested.Code != http.StatusCreated {
-		t.Fatalf("request approval: status=%d body=%s", requested.Code, requested.Body.String())
-	}
-	askID := decodeBody[struct {
-		Ask struct {
-			ID string `json:"id"`
-		} `json:"ask"`
-	}](t, requested).Ask.ID
-	if _, err := documentService.ReplaceText(
-		context.Background(), issue.PrimaryArtifactID, "A revised spec",
-		model.Actor{Kind: "session", ID: sessionActor()["id"].(string)},
-	); err != nil {
-		t.Fatalf("revise document: %v", err)
-	}
-	if named := dispatchRequest(t, handler, http.MethodPost,
-		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
-		map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
-		t.Fatalf("name revised version: status=%d body=%s", named.Code, named.Body.String())
-	}
-	comment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
-		map[string]any{"actor": sessionActor(), "ask_id": askID, "body": "The revision is ready."})
-	if comment.Code != http.StatusCreated {
-		t.Fatalf("comment on moved approval: status=%d body=%s", comment.Code, comment.Body.String())
-	}
-	// The derived turn is on the wire once, as ask_waiting_on: the comment row itself carries none.
-	response := decodeBody[map[string]any](t, comment)
-	event := latestCommentCreatedPayload(t, handler, issue.Key)
-	if response["ask_waiting_on"] != "agent" || event["ask_waiting_on"] != "agent" {
-		t.Fatalf("comment ask_waiting_on = %#v, comment.created ask_waiting_on = %#v, want agent on both", response["ask_waiting_on"], event["ask_waiting_on"])
-	}
-	if _, ok := response["waiting_on"]; ok {
-		t.Fatalf("comment response carries waiting_on beside ask_waiting_on: %#v", response)
-	}
-	if _, ok := event["waiting_on"]; ok {
-		t.Fatalf("comment.created carries waiting_on beside ask_waiting_on: %#v", event)
-	}
-	if detail := readAskDetail(t, handler, askID); detail.WaitingOn != "agent" {
-		t.Fatalf("ask detail waiting_on = %q, want agent", detail.WaitingOn)
-	}
-	if inbox := readInboxRow(t, handler, askID); inbox.WaitingOn != "agent" {
-		t.Fatalf("Inbox waiting_on = %q, want agent", inbox.WaitingOn)
-	}
-}
-
-func TestApprovalWaitingOnSupportsTheMigrationMaximumVersion(t *testing.T) {
-	handler, database := newInteractionHandler(t, nil)
-	issue := createInteractionIssue(t, handler, "TEST", "Large approval version", "A spec")
-	requested := sessionRequest(t, handler, http.MethodPost,
-		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
-		map[string]any{"actor": sessionActor(), "summary": "Names the large version."})
-	if requested.Code != http.StatusCreated {
-		t.Fatalf("request approval: status=%d body=%s", requested.Code, requested.Body.String())
-	}
-	askID := decodeBody[struct {
-		Ask struct {
-			ID string `json:"id"`
-		} `json:"ask"`
-	}](t, requested).Ask.ID
-	if _, err := database.Pool.Exec(context.Background(), `
-		update asks
-		set approval = $2::jsonb
-		where id = $1
-	`, askID,
-		`{"artifact_id":"`+issue.PrimaryArtifactID+`","name":"spec.md","version":3000000000,"requested_version":3000000000}`,
-	); err != nil {
-		t.Fatalf("set maximum approval version: %v", err)
-	}
-	if inbox := readInboxRow(t, handler, askID); inbox.WaitingOn != "human" {
-		t.Fatalf("Inbox waiting_on = %q, want human", inbox.WaitingOn)
-	}
-}
-
-// The longest summary the route accepts at version 1 still fits the ask cap once a version move
-// rebuilds the question at version 10, whose number is one character longer.
-func TestAVersionMoveKeepsTheLongestAcceptedSummaryWithinTheAskCap(t *testing.T) {
-	var documentService *docs.Service
-	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
-		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
-		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-		return documentService
-	})
-	issue := createInteractionIssue(t, handler, "TEST", "Long summary", "A spec")
-	request := func(summary string) *httptest.ResponseRecorder {
-		return sessionRequest(t, handler, http.MethodPost,
-			"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
-			map[string]any{"actor": sessionActor(), "summary": summary})
-	}
-	refused := request(strings.Repeat("é", maxAskQuestion16))
-	match := regexp.MustCompile(`the (\d+)-character limit`).FindStringSubmatch(refused.Body.String())
-	if refused.Code != http.StatusBadRequest || match == nil {
-		t.Fatalf("summary past the cap: status=%d body=%s, want CAP_EXCEEDED naming the limit", refused.Code, refused.Body.String())
-	}
-	limit, err := strconv.Atoi(match[1])
-	if err != nil {
-		t.Fatalf("parse the summary limit %q: %v", match[1], err)
-	}
-	summary := strings.Repeat("é", limit)
-	requested := request(summary)
-	if requested.Code != http.StatusCreated {
-		t.Fatalf("request approval with the longest summary: status=%d body=%s", requested.Code, requested.Body.String())
-	}
-	askID := decodeBody[struct {
-		Ask struct {
-			ID string `json:"id"`
-		} `json:"ask"`
-	}](t, requested).Ask.ID
-	// Versions 2 to 9 are written directly, so the next version a route writes is the first with
-	// two digits.
-	if _, err := database.Pool.Exec(context.Background(), `
-		insert into artifact_versions (artifact_id, number, markdown, authors)
-		select v.artifact_id, n, v.markdown, '[]'
-		from artifact_versions v, generate_series(2, 9) n
-		where v.artifact_id = $1 and v.number = 1
-	`, issue.PrimaryArtifactID); err != nil {
-		t.Fatalf("write versions 2 to 9: %v", err)
-	}
-	if named := dispatchRequest(t, handler, http.MethodPost,
-		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
-		map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
-		t.Fatalf("name version 10: status=%d body=%s", named.Code, named.Body.String())
-	}
-	moved := readAskDetail(t, handler, askID)
-	if moved.Question != "Approve spec.md (version 10)? "+summary {
-		t.Fatalf("moved question = %q, want version 10 with the summary unchanged", moved.Question)
-	}
-	if length := len16(moved.Question); length > maxAskQuestion16 {
-		t.Fatalf("moved question is %d units, past the %d-unit ask cap", length, maxAskQuestion16)
-	}
-}
-
 // A human can still use the document header while the card has moved to a newer version but has
 // not been handed back. The action answers that same open card and pins its review to the version
 // the human saw, rather than resolving the card and losing its thread.
@@ -898,8 +754,10 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			if moved.State != "open" || moved.Approval.Version != 2 || moved.Approval.RequestedVersion != 1 {
 				t.Fatalf("the ask after %s = %#v, want the same open request at version 2 waiting for its agent", write.name, moved)
 			}
-			if got := readApproval(t, doc.handler, doc.artifactID); got.Approval.State != "awaiting" || got.Approval.LatestVersion != 2 || got.Approval.AskID == nil || *got.Approval.AskID != doc.askID {
-				t.Fatalf("approval after %s = %#v, want awaiting on the moved ask %s", write.name, got.Approval, doc.askID)
+			// Whoever wrote the version, the moved request waits on its agent, and the document's
+			// approval says so: an agent whose own revision moved it hears no event about that.
+			if got := readApproval(t, doc.handler, doc.artifactID); got.Approval.State != "awaiting" || got.Approval.WaitingOn != "agent" || got.Approval.LatestVersion != 2 || got.Approval.AskID == nil || *got.Approval.AskID != doc.askID {
+				t.Fatalf("approval after %s = %#v, want awaiting on the moved ask %s, waiting on its agent", write.name, got.Approval, doc.askID)
 			}
 			var logged []struct {
 				Type    string      `json:"type"`
@@ -930,9 +788,9 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 				t.Fatalf("approval events for %s: edits=%d resolved=%d, want one move and no resolution", doc.askID, edited, resolved)
 			}
 
-			destinations := askEditDestinations(t, doc.database, doc.documentService, doc.askID)
-			if heard := slices.Contains(destinations, contracts.AgentSubject(asker.ID)); heard != write.askerHears {
-				t.Fatalf("the outbox published the move to %v; the asking session's topic among them = %t, want %t", destinations, heard, write.askerHears)
+			deliveries := askEventDeliveries(t, doc.database, doc.documentService, "ask.edited", doc.askID)
+			if heard := slices.Contains(deliveries[0].Destinations, contracts.AgentSubject(asker.ID)); heard != write.askerHears {
+				t.Fatalf("the outbox published the move to %v; the asking session's topic among them = %t, want %t", deliveries[0].Destinations, heard, write.askerHears)
 			}
 		})
 	}
@@ -949,8 +807,8 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		if still := decodeBody[askRead](t, dispatchRequest(t, doc.handler, http.MethodGet, "/api/v1/asks/"+doc.askID, nil, "alice")).Ask; still.State != "open" {
 			t.Fatalf("the ask at the latest version after an edit that versions nothing = %#v, want open", still)
 		}
-		if got := readApproval(t, doc.handler, doc.artifactID); got.Approval.State != "awaiting" || got.Approval.LatestVersion != 1 || got.Approval.AskID == nil || *got.Approval.AskID != doc.askID {
-			t.Fatalf("approval after an edit that versions nothing = %#v, want awaiting on ask %s", got.Approval, doc.askID)
+		if got := readApproval(t, doc.handler, doc.artifactID); got.Approval.State != "awaiting" || got.Approval.WaitingOn != "human" || got.Approval.LatestVersion != 1 || got.Approval.AskID == nil || *got.Approval.AskID != doc.askID {
+			t.Fatalf("approval after an edit that versions nothing = %#v, want awaiting on ask %s, waiting on the human", got.Approval, doc.askID)
 		}
 	})
 
@@ -979,11 +837,65 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			t.Fatalf("the ask after a version no writer is credited with = %#v, want an open moved ask", ask)
 		}
 	})
+
+	// A further version of a request already waiting on its agent changes only the version it
+	// names, so it is recorded as a human's unnamed version is: on the issue's own topic with notify
+	// off, and on no follower's. Only the move that takes the request from the human wakes anyone,
+	// and once the agent hands it back the next version's move wakes again.
+	t.Run("a human typing settled versions one after another", func(t *testing.T) {
+		doc := open(t, 50*time.Millisecond)
+		typist := connect(t, doc, humanPeer)
+		typeVersion := func(note string, version int) {
+			t.Helper()
+			typeNote(t, typist, note)
+			waitForArtifactVersion(t, doc.handler, doc.artifactID, version)
+		}
+		typeVersion("A first note.", 2)
+		typeVersion("A second note.", 3)
+		typeVersion("A third note.", 4)
+		if handedBack := sessionRequest(t, doc.handler, http.MethodPost, "/api/v1/artifacts/"+doc.artifactID+"/approval-requests",
+			map[string]any{"actor": sessionActor()}); handedBack.Code != http.StatusCreated {
+			t.Fatalf("hand approval back: status=%d body=%s", handedBack.Code, handedBack.Body.String())
+		}
+		typeVersion("A fourth note.", 5)
+
+		deliveries := askEventDeliveries(t, doc.database, doc.documentService, "ask.edited", doc.askID)
+		if len(deliveries) != 4 {
+			t.Fatalf("ask.edited events = %#v, want one move to each of versions 2 to 5", deliveries)
+		}
+		var wakes, routed []int
+		for move, delivery := range deliveries {
+			if delivery.Notify {
+				wakes = append(wakes, move)
+			}
+			issueTopics := 0
+			for _, topic := range delivery.Destinations {
+				if strings.HasPrefix(topic, contracts.AgentTopicPrefix) {
+					routed = append(routed, move)
+				} else {
+					issueTopics++
+				}
+			}
+			if issueTopics != 1 {
+				t.Fatalf("move %d reached %v, want the issue's own topic once", move, delivery.Destinations)
+			}
+		}
+		if want := []int{0, 3}; !slices.Equal(wakes, want) || !slices.Equal(routed, want) {
+			t.Fatalf("moves that woke anyone = %v and reached a session's topic = %v, want %v for both: the first move and the first after the hand-back", wakes, routed, want)
+		}
+	})
 }
 
-// askEditDestinations runs the outbox over every committed event and returns the topics it
-// published askID's version-moving ask.edited to.
-func askEditDestinations(t *testing.T, database *store.Store, documentService docs.API, askID string) []string {
+// askEventDelivery is what the outbox did with one event: whether it woke anyone, and the topics it
+// published the event to.
+type askEventDelivery struct {
+	Notify       bool
+	Destinations []string
+}
+
+// askEventDeliveries runs the outbox until it has published every eventType event about askID, and
+// returns what each one reached, oldest first.
+func askEventDeliveries(t *testing.T, database *store.Store, documentService docs.API, eventType, askID string) []askEventDelivery {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
@@ -995,24 +907,34 @@ func askEditDestinations(t *testing.T, database *store.Store, documentService do
 		cancel()
 		<-stopped
 	}()
+	const about = `from events where type = $1 and payload->>'id' = $2`
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		var destinations []string
-		err := database.Pool.QueryRow(context.Background(), `
-			select published_destinations from events
-			where type = 'ask.edited' and payload->>'id' = $1 and published_at is not null
-		`, askID).Scan(&destinations)
-		if err == nil {
-			return destinations
+		var unpublished, total int
+		if err := database.Pool.QueryRow(context.Background(), `select count(*) filter (where published_at is null), count(*) `+about,
+			eventType, askID).Scan(&unpublished, &total); err != nil {
+			t.Fatalf("count %s events for %s: %v", eventType, askID, err)
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			t.Fatalf("read the moved approval's published destinations: %v", err)
+		if total > 0 && unpublished == 0 {
+			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the outbox never published ask.edited for %s", askID)
+			t.Fatalf("the outbox left %d of %d %s events for %s unpublished", unpublished, total, eventType, askID)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	rows, err := database.Pool.Query(context.Background(), `select notify, published_destinations `+about+` order by id`, eventType, askID)
+	if err != nil {
+		t.Fatalf("read %s deliveries for %s: %v", eventType, askID, err)
+	}
+	deliveries, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (askEventDelivery, error) {
+		var delivery askEventDelivery
+		return delivery, row.Scan(&delivery.Notify, &delivery.Destinations)
+	})
+	if err != nil {
+		t.Fatalf("decode %s deliveries for %s: %v", eventType, askID, err)
+	}
+	return deliveries
 }
 
 // acceptingPublisher takes every envelope the outbox publishes; the outbox records each topic on

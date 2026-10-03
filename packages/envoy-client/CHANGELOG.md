@@ -13,6 +13,10 @@
   is. `DispatchClient.comment` and `artifactComment` return `CommentWriteResponse`, the comment
   plus `ask_waiting_on` on a reply to an open ask, which `dispatch_comment` reports as the ask's
   state after the reply. Delivery accepts the new `ask.handed_back` event, whose payload is the ask.
+  A document's approval line in `dispatch_read` and `dispatch_doc_read` says whom an awaiting
+  request waits on (`Approval: awaiting, waiting on agent (…)`), so an agent whose own revision
+  moved its request, which sends it no event, reads that the request waits on it.
+  `DispatchClient.requestApproval` answers `ApprovalRequestResponse` plus `recorded`.
 - `DispatchClient.requestApproval` takes `{ actor, summary }`, and `dispatch_request_approval`
   sends `summary` and quotes the question the server returned in its result (LEGION-387).
 - `dispatch_request_approval` is refused, with no request sent, while the version it would name

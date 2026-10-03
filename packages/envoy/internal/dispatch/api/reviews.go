@@ -118,21 +118,23 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 	}
 
 	type openRequest struct {
-		id     string
-		author model.Actor
+		id        string
+		author    model.Actor
+		waitingOn string
 	}
 	requests := map[string]openRequest{}
 	askRows, err := q.Query(ctx, `
-		select id::text, author, approval->>'artifact_id'
-		from asks where kind = 'approval' and state = 'open' and approval->>'artifact_id' = any($1::text[])
+		select a.id::text, a.author, a.approval->>'artifact_id', `+waitingOnExpression+`
+		from asks a`+lastReplyJoin+`
+		where a.kind = 'approval' and a.state = 'open' and a.approval->>'artifact_id' = any($1::text[])
 	`, ids)
 	if err != nil {
 		return fmt.Errorf("load open approval asks: %w", err)
 	}
 	for askRows.Next() {
-		var id, artifactID string
+		var id, artifactID, waitingOn string
 		var author []byte
-		if err := askRows.Scan(&id, &author, &artifactID); err != nil {
+		if err := askRows.Scan(&id, &author, &artifactID, &waitingOn); err != nil {
 			askRows.Close()
 			return err
 		}
@@ -141,7 +143,7 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 			askRows.Close()
 			return fmt.Errorf("decode approval ask author: %w", err)
 		}
-		requests[artifactID] = openRequest{id: id, author: actor}
+		requests[artifactID] = openRequest{id: id, author: actor, waitingOn: waitingOn}
 	}
 	askRows.Close()
 	if err := askRows.Err(); err != nil {
@@ -179,6 +181,7 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 			approval.State = "awaiting"
 			approval.RequestedBy = &author
 			approval.AskID = &id
+			approval.WaitingOn = request.waitingOn
 		}
 		artifact.Approval = approval
 	}
@@ -436,9 +439,8 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	}
 	ask := open
 	var events []model.Event
-	approval := *artifact.Approval
 	if open != nil {
-		if events, err = s.renewApprovalAsk(r.Context(), tx, owner, open, actor, version, summary); err != nil {
+		if events, err = s.renewApprovalAsk(r.Context(), tx, open, actor, version, summary); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -449,9 +451,11 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		events = []model.Event{opened}
-		approval.State = "awaiting"
-		approval.RequestedBy = &actor
-		approval.AskID = &ask.ID
+	}
+	// The approval as this request leaves it: awaiting, waiting on whom the request now waits on.
+	if err := s.attachApproval(r.Context(), tx, &artifact); err != nil {
+		s.writeHandlerError(w, err)
+		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
@@ -464,7 +468,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	if len(events) > 0 {
 		status = http.StatusCreated
 	}
-	WriteJSON(w, status, response{Ask: ask, ArtifactID: artifact.ID, Version: version, Approval: approval})
+	WriteJSON(w, status, response{Ask: ask, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
 }
 
 // openApprovalAsk inserts the document's approval request at version, asking question, and appends
@@ -551,7 +555,6 @@ func (s *server) openApprovalAsk(
 func (s *server) renewApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,
-	owner owner,
 	open *model.Ask,
 	actor model.Actor,
 	version int,
@@ -584,7 +587,7 @@ func (s *server) renewApprovalAsk(
 			}
 			events = append(events, edited)
 		}
-		handedBack, err := s.handBackApprovalAsk(ctx, tx, owner, open, actor, version)
+		handedBack, err := s.handBackApprovalAsk(ctx, tx, open, actor, version)
 		if err != nil {
 			return nil, err
 		}
@@ -607,7 +610,7 @@ func (s *server) renewApprovalAsk(
 // after the one recorded and decides the turn, however early its own transaction began. The
 // question is left as it stands: a request that changes it rewords first through
 // docs.RewriteApprovalAsk, which ask.edited records.
-func (s *server) handBackApprovalAsk(ctx context.Context, tx pgx.Tx, owner owner, ask *model.Ask, actor model.Actor, version int) (model.Event, error) {
+func (s *server) handBackApprovalAsk(ctx context.Context, tx pgx.Tx, ask *model.Ask, actor model.Actor, version int) (model.Event, error) {
 	ask.Approval.RequestedVersion = version
 	approval, err := docs.EncodeApproval(ask.Approval)
 	if err != nil {
@@ -620,7 +623,7 @@ func (s *server) handBackApprovalAsk(ctx context.Context, tx pgx.Tx, owner owner
 	`, ask.ID, approval); err != nil {
 		return model.Event{}, fmt.Errorf("hand approval ask back: %w", err)
 	}
-	return s.appendEvent(ctx, tx, owner.event(
+	return s.appendEvent(ctx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
 		"ask.handed_back", actor, model.NewAskEventPayload(*ask, model.ReferenceChanges{}),
 	))
 }

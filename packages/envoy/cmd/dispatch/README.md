@@ -274,8 +274,9 @@ a write that closes the cycle within that second fails `0066` and one that close
 itself the victim, answered `500`. `0066` therefore sets its own `lock_timeout` of 500 ms, shorter
 than `deadlock_timeout`: it gives up first (`55P03`, nothing applied), the write finishes, and the
 next boot applies it; the cost is that a comment write holding `comments` past half a second fails
-that boot too. Every census answers `0`: 0053's check guarantees every approval ask a `version` to
-backfill from, and the other two change no row.
+that boot too, and so does an autovacuum of either table where `deadlock_timeout` is not shorter,
+which the census refuses (below). Every census answers `0`: 0053's check guarantees every approval
+ask a `version` to backfill from, and the other two change no row.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
@@ -350,7 +351,10 @@ census like every later one. It refuses:
   that session has waited `deadlock_timeout`, so an autovacuum passes at any age, with the grant or
   without (to a role without it, autovacuum is the holder that runs as no role), except an
   anti-wraparound vacuum, which Postgres does not cancel, or one on a server whose
-  `deadlock_timeout` is not shorter than the migration's five-second lock timeout. Postgres marks a
+  `deadlock_timeout` is not shorter than a lock timeout the migration waits under: the runner's five
+  seconds, or the one its own `SET LOCAL lock_timeout` sets, which Postgres reads in a savepoint of
+  the census's (a value it refuses there refuses the migration). `0066` sets 500 ms, so an
+  autovacuum on `asks` or `comments` refuses it at the default one second. Postgres marks a
   vacuum anti-wraparound when it launches it, in its activity, which only a role with
   `pg_read_all_stats` can read, and which Postgres records only with `track_activities` on; where
   the census cannot read it, it refuses every vacuum of a table past its freeze age
@@ -530,7 +534,7 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | cookie, trusted header, or bearer | Read a document version or download a blob. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions` | POST | cookie, trusted header, or bearer | Create a named live-document version. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/edits` | POST | cookie, trusted header, or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
-| `/api/v1/artifacts/{id}/approval-requests` | POST | cookie, trusted header, or bearer | Ask a human to approve a document's latest settled version. The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`; past the ask cap at the longest version a request can reach, ten digits, is `400 CAP_EXCEEDED` naming `summary`). One open approval row follows every document version in place, rewording its question and emitting `ask.edited`; while its `requested_version` is below the new version it waits on the agent. Calling this route again while the row waits on the agent - moved, or a thread reply newer than its last hand-back holds the turn - hands it back to the human: a summary that changes its question rewords it first (`ask.edited`; an omitted summary keeps its prior one), then `requested_version` becomes the latest version and `ask.handed_back` is emitted, leaving `edited_at` as it was. While the row waits on the human, the same summary or none is a repeat that answers `200` with no event, and a different one is `409 APPROVAL_WAITS_ON_HUMAN` and changes nothing, since it would rewrite the card the human is reading. It answers `201` when it wrote anything. |
+| `/api/v1/artifacts/{id}/approval-requests` | POST | cookie, trusted header, or bearer | Ask a human to approve a document's latest settled version. The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`; past the ask cap at the longest version a request can reach, ten digits, is `400 CAP_EXCEEDED` naming `summary`). One open approval row follows every document version in place, rewording its question and emitting `ask.edited`; while its `requested_version` is below the new version it waits on the agent. Only the move that takes it from the human notifies; a later move while it already waits on the agent is `quiet: true`, `notify: false`, and reaches no follower. Calling this route again while the row waits on the agent - moved, or a thread reply newer than its last hand-back holds the turn - hands it back to the human: a summary that changes its question rewords it first (`ask.edited`; an omitted summary keeps its prior one), then `requested_version` becomes the latest version and `ask.handed_back` is emitted, leaving `edited_at` as it was. While the row waits on the human, the same summary or none is a repeat that answers `200` with no event, and a different one is `409 APPROVAL_WAITS_ON_HUMAN` and changes nothing, since it would rewrite the card the human is reading. It answers `201` when it wrote anything, with the document's `approval` as the call left it (`waiting_on` while awaiting). |
 | `/api/v1/artifacts/{id}/asks?state=` | GET, POST | cookie, trusted header, or bearer | List or create asks on an unlinked document. |
 | `/api/v1/artifacts/{id}/comments` | GET, POST | cookie, trusted header, or bearer | List or create comments and suggestions on an unlinked document. |
 | `/api/v1/artifacts/{id}/events` | GET | cookie, trusted header, or bearer | Read an unlinked document's events. |

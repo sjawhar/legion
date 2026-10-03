@@ -3,9 +3,9 @@ import type {
   Actor,
   Advised,
   Agent,
+  ApprovalRequestResponse,
   ArchitectureSource,
   Artifact,
-  ArtifactApproval,
   ArtifactBlock,
   ArtifactReferences,
   ArtifactText,
@@ -498,19 +498,12 @@ export class DispatchClient {
   async requestApproval(
     artifactID: string,
     input: { actor: Actor; summary: string }
-  ): Promise<{
-    ask: Ask | null;
-    artifact_id: string;
-    version: number;
-    approval: ArtifactApproval;
-    recorded: boolean;
-  }> {
-    const answer = await this.#jsonAnswer<{
-      ask: Ask | null;
-      artifact_id: string;
-      version: number;
-      approval: ArtifactApproval;
-    }>("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
+  ): Promise<ApprovalRequestResponse & { recorded: boolean }> {
+    const answer = await this.#jsonAnswer<ApprovalRequestResponse>(
+      "POST",
+      ["api", "v1", "artifacts", artifactID, "approval-requests"],
+      input
+    );
     return { ...answer.payload, recorded: answer.status === 201 };
   }
 

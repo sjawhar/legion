@@ -7,8 +7,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 type turnAskRow struct {
@@ -452,5 +455,88 @@ func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
 				t.Fatalf("inbox rows = %#v, want %s (waiting on human after %s's reply) above %s", rows, askID, path.author, otherAskID)
 			}
 		})
+	}
+}
+
+func TestCommentOnMovedApprovalAskReportsItsDerivedWaitingOn(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Moved approval comment", "A spec")
+	requested := sessionRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
+		map[string]any{"actor": sessionActor(), "summary": "Names the initial proposal."})
+	if requested.Code != http.StatusCreated {
+		t.Fatalf("request approval: status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	askID := decodeBody[struct {
+		Ask struct {
+			ID string `json:"id"`
+		} `json:"ask"`
+	}](t, requested).Ask.ID
+	if _, err := documentService.ReplaceText(
+		context.Background(), issue.PrimaryArtifactID, "A revised spec",
+		model.Actor{Kind: "session", ID: sessionActor()["id"].(string)},
+	); err != nil {
+		t.Fatalf("revise document: %v", err)
+	}
+	if named := dispatchRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
+		map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
+		t.Fatalf("name revised version: status=%d body=%s", named.Code, named.Body.String())
+	}
+	comment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
+		map[string]any{"actor": sessionActor(), "ask_id": askID, "body": "The revision is ready."})
+	if comment.Code != http.StatusCreated {
+		t.Fatalf("comment on moved approval: status=%d body=%s", comment.Code, comment.Body.String())
+	}
+	// The derived turn is on the wire once, as ask_waiting_on: the comment row itself carries none.
+	response := decodeBody[map[string]any](t, comment)
+	event := latestCommentCreatedPayload(t, handler, issue.Key)
+	if response["ask_waiting_on"] != "agent" || event["ask_waiting_on"] != "agent" {
+		t.Fatalf("comment ask_waiting_on = %#v, comment.created ask_waiting_on = %#v, want agent on both", response["ask_waiting_on"], event["ask_waiting_on"])
+	}
+	if _, ok := response["waiting_on"]; ok {
+		t.Fatalf("comment response carries waiting_on beside ask_waiting_on: %#v", response)
+	}
+	if _, ok := event["waiting_on"]; ok {
+		t.Fatalf("comment.created carries waiting_on beside ask_waiting_on: %#v", event)
+	}
+	if detail := readAskDetail(t, handler, askID); detail.WaitingOn != "agent" {
+		t.Fatalf("ask detail waiting_on = %q, want agent", detail.WaitingOn)
+	}
+	if inbox := readInboxRow(t, handler, askID); inbox.WaitingOn != "agent" {
+		t.Fatalf("Inbox waiting_on = %q, want agent", inbox.WaitingOn)
+	}
+}
+
+func TestApprovalWaitingOnSupportsTheMigrationMaximumVersion(t *testing.T) {
+	handler, database := newInteractionHandler(t, nil)
+	issue := createInteractionIssue(t, handler, "TEST", "Large approval version", "A spec")
+	requested := sessionRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
+		map[string]any{"actor": sessionActor(), "summary": "Names the large version."})
+	if requested.Code != http.StatusCreated {
+		t.Fatalf("request approval: status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	askID := decodeBody[struct {
+		Ask struct {
+			ID string `json:"id"`
+		} `json:"ask"`
+	}](t, requested).Ask.ID
+	if _, err := database.Pool.Exec(context.Background(), `
+		update asks
+		set approval = $2::jsonb
+		where id = $1
+	`, askID,
+		`{"artifact_id":"`+issue.PrimaryArtifactID+`","name":"spec.md","version":3000000000,"requested_version":3000000000}`,
+	); err != nil {
+		t.Fatalf("set maximum approval version: %v", err)
+	}
+	if inbox := readInboxRow(t, handler, askID); inbox.WaitingOn != "human" {
+		t.Fatalf("Inbox waiting_on = %q, want human", inbox.WaitingOn)
 	}
 }

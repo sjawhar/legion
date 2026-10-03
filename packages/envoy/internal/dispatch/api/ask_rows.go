@@ -37,34 +37,32 @@ const newestReply = `select c.id, c.author, c.created_at, c.turn from comments c
 const lastReplyJoin = `
 		left join lateral (` + newestReply + `) lr on true`
 
-// waitingOnExpression is the one turn rule every open-ask read, the Inbox order, a reply's
-// waiting_on and the approval route's hand-back decision share. A moved approval request waits on
-// its agent until that agent hands its current version back. A hand-back records the reply that
-// was newest when it ran (handed_back_reply_id), so the request waits on the human until a newer
-// reply's turn decides it. Every other ask follows its newest reply's turn.
+// approvalMoved says the ask aliased a is an approval request a version moved past the version its
+// agent last handed to the human. waitingOnExpression and describeAsk, which reads it for a reply's
+// waiting_on (commentThreadTarget.waitingOnAfter), share it.
+const approvalMoved = `(a.kind = 'approval'
+		and (a.approval->>'requested_version')::bigint < (a.approval->>'version')::bigint)`
+
+// waitingOnExpression is the one turn rule every open-ask read, the Inbox order, a document's
+// awaiting approval and the approval route's hand-back decision share; a reply's own waiting_on
+// applies it to the reply it just inserted (commentThreadTarget.waitingOnAfter). A moved approval
+// request waits on its agent until that agent hands its current version back. A hand-back records
+// the reply that was newest when it ran (handed_back_reply_id), so the request waits on the human
+// until a newer reply's turn decides it. Every other ask follows its newest reply's turn.
 const waitingOnExpression = `case
-	when a.kind = 'approval'
-		and (a.approval->>'requested_version')::bigint < (a.approval->>'version')::bigint
+	when ` + approvalMoved + `
 	then 'agent'
 	when a.kind = 'approval' and lr.id = a.handed_back_reply_id
 	then 'human'
 	else coalesce(lr.turn, 'human')
 end`
 
-// askWaitingOnQuery reads whom the open ask $1 waits on. askWaitingOn runs it on its own, and a
-// comment's insert sends it in the same round trip, right behind the insert
-// (commentThreadTarget.insertComment).
-const askWaitingOnQuery = `select ` + waitingOnExpression + `
-		from asks a` + lastReplyJoin + `
-		where a.id = $1 and a.state = 'open'`
-
+// askWaitingOn reads whom the open ask askID waits on, for the approval route's hand-back decision.
 func askWaitingOn(ctx context.Context, q queryer, askID string) (string, error) {
-	return scanAskWaitingOn(q.QueryRow(ctx, askWaitingOnQuery, askID))
-}
-
-func scanAskWaitingOn(row pgx.Row) (string, error) {
 	var waitingOn string
-	if err := row.Scan(&waitingOn); err != nil {
+	if err := q.QueryRow(ctx, `select `+waitingOnExpression+`
+		from asks a`+lastReplyJoin+`
+		where a.id = $1 and a.state = 'open'`, askID).Scan(&waitingOn); err != nil {
 		return "", fmt.Errorf("read ask waiting_on: %w", err)
 	}
 	return waitingOn, nil
