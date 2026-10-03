@@ -278,18 +278,18 @@ the broadcast page writes for the replies it shows and the unread count leaves o
 per-session read mark, and its `(login, session_id)` index, which the read mark's prune of one
 session's rows reads. It creates a table and touches no row; its census answers `0`.
 
-Migration `0068_search_vector_bound` creates `search_vector` and replaces the bodies of four
+Migration `0069_search_vector_bound` creates `search_vector` and replaces the bodies of four
 search triggers' functions (documents, comments, asks and messages) so that each builds its vector
 with it ([Search](#search)). Replacing a function locks no table, and for every text whose vector
 fits, which is every row already stored, the new functions build the vector the old ones did, so
 it re-indexes nothing; its census answers `0`.
 
-Migrations `0069_issues_title_lexemes` and `0070_issues_title_lexemes_backfill` store each issue
-title's lexemes, which the duplicate-title check reads ([Search](#search)). `0069` adds
+Migrations `0070_issues_title_lexemes` and `0071_issues_title_lexemes_backfill` store each issue
+title's lexemes, which the duplicate-title check reads ([Search](#search)). `0070` adds
 `issues.title_lexemes` with the constant default `{}`, a catalog change that rewrites no row, so it
 holds `issues` `ACCESS EXCLUSIVE` for milliseconds (3 ms on 2,905 issues with production's titles),
 creates `title_lexemes(title)`, the one definition of a title's lexemes, and has the issues trigger
-build `search` with `search_vector` and fill the column on every insert and every retitle. `0070`
+build `search` with `search_vector` and fill the column on every insert and every retitle. `0071`
 fills it on every issue stored before, under `issues` `EXCLUSIVE` taken before it writes a row: a
 read does not wait, while every write of an issue's row, and of a row that references an issue,
 waits until it commits (0.58 s on those issues at load 85). The update alone locked each issue's
@@ -477,7 +477,7 @@ limited to 1,000 characters. Search covers issue titles, the latest settled docu
 comments, asks (questions and free-text answers), and messages. Live document text takes up to
 the 2 s settle delay to appear in search results.
 
-Every trigger builds its vector with `search_vector` (0068; the issues trigger's from 0069).
+Every trigger builds its vector with `search_vector` (0069; the issues trigger's from 0070).
 Postgres holds at most 1,048,575 bytes of lexemes and positions in one vector. Prose stays far
 below that, since its words repeat, but text of words no two alike passes it well inside a
 document's 1 MiB: about 700 KB of `w000001 w000002 …`, or 475 KB of UUIDs. `search_vector` indexes a
@@ -493,7 +493,7 @@ references skip it. An issue title is at most 1,000 characters (`contracts.Issue
 units after trimming), on creation and on a retitle, and a longer one is `400 CAP_EXCEEDED` before
 the duplicate check runs. The check compares the new title's lexemes with those of every other
 title in the project, read from `issues.title_lexemes`, which the issues trigger fills with
-`title_lexemes(title)` (0069), the function the check calls for the new title, so a creation parses
+`title_lexemes(title)` (0070), the function the check calls for the new title, so a creation parses
 one title; a candidate's snippet marks the words its title shares with the new one, and the
 `POSSIBLE_DUPLICATE` message quotes a candidate's whole title. The cap bounds what one stored title
 adds to every later creation in its project, and how long that message can be: beside 2,000 stored
