@@ -67,19 +67,34 @@ type SessionInfo struct {
 	RegisteredAt string `json:"registered_at"`
 }
 
+// The codes a helper answers a request it refuses with. Every one carries a doc comment: the
+// broker's generated error reference (scripts/docs/broker/refgen) prints it and refuses a code
+// without one.
 const (
+	// CodeNotASession answers sign, sign-request or unregister from a process that descends from no
+	// session `agent-secrets register` registered.
 	CodeNotASession = "NOT_A_SESSION"
 	// CodeNotEnrolled answers sign or sign-request for a registered session that is still
 	// enrolling: the helper holds a launcher credential, and its enroll loop has not succeeded yet.
 	CodeNotEnrolled = "NOT_ENROLLED"
-	// CodeNoCredential answers them instead while the helper holds no launcher credential, from
-	// every restart until the operator logs the machine in: it enrolls no one, so the session has
-	// no broker identity. A register reply for such a session carries it too, beside OK.
-	CodeNoCredential   = "NO_CREDENTIAL"
-	CodeBadRequest     = "BAD_REQUEST"
-	CodeUnidentified   = "PEER_UNIDENTIFIED"
-	CodeLoginFailed    = "LOGIN_FAILED"
-	CodeEnrollFailed   = "ENROLL_FAILED"
+	// CodeNoCredential answers sign or sign-request while the helper holds no launcher credential,
+	// from every restart until the operator logs the machine in: it enrolls no one, so the session
+	// has no broker identity. A register reply for such a session carries it too, beside OK.
+	CodeNoCredential = "NO_CREDENTIAL"
+	// CodeBadRequest answers a request that is not one JSON object per line, names an unknown op,
+	// or leaves out a field its op needs.
+	CodeBadRequest = "BAD_REQUEST"
+	// CodeUnidentified answers a caller the kernel could not identify, or one whose process exited
+	// or changed while the helper was identifying it.
+	CodeUnidentified = "PEER_UNIDENTIFIED"
+	// CodeLoginFailed answers a login the helper could not start with the broker; the error says
+	// why.
+	CodeLoginFailed = "LOGIN_FAILED"
+	// CodeEnrollFailed answers an enroll-box the broker refused or could not be asked; the error
+	// says why.
+	CodeEnrollFailed = "ENROLL_FAILED"
+	// CodeUnenrollFailed answers an unenroll-box the broker refused or could not be asked; the
+	// error says why.
 	CodeUnenrollFailed = "UNENROLL_FAILED"
 )
 

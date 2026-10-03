@@ -66,7 +66,7 @@ func decodeMessage(subject, project string, repositories []ghrepo.Repository, da
 		if envelope.Source != "github" {
 			return decodedMessage{}, fmt.Errorf("GitHub subject has envelope source %q", envelope.Source)
 		}
-		fact, unread, err = decodeGitHubFact(subject, repositories, envelope.Payload, envelope.IssuedAt)
+		fact, unread, err = decodeGitHubFact(subject, repositories, envelope.Payload)
 	default:
 		return decodedMessage{}, fmt.Errorf("unsupported durable subject %q", subject)
 	}
@@ -220,7 +220,7 @@ func isJSONObject(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &item) == nil && item != nil
 }
 
-func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload string, issuedAt int64) (Fact, []string, error) {
+func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload string) (Fact, []string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil || raw == nil {
 		return nil, nil, nil
@@ -248,7 +248,7 @@ func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload 
 	case "push":
 		fact, err = decodePush(repository, raw)
 	case "checks":
-		fact, err = decodeChecks(subject, repository, raw, issuedAt)
+		fact, err = decodeChecks(subject, repository, raw)
 	}
 	// Comments, and every other kind, route to the current role but do not change the durable
 	// workflow record.
@@ -340,7 +340,7 @@ func decodePush(repository ghrepo.Repository, raw map[string]json.RawMessage) (F
 		Truncated: truncated, Forced: forced, Pusher: pusher}, nil
 }
 
-func decodeChecks(subject string, repository ghrepo.Repository, raw map[string]json.RawMessage, issuedAt int64) (Fact, error) {
+func decodeChecks(subject string, repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, error) {
 	number, ok := rawNumber(raw, "number")
 	if !ok || subject != githubRepositoryPrefix(repository)+".pr."+strconv.Itoa(number)+".checks" {
 		return nil, nil
@@ -369,21 +369,13 @@ func decodeChecks(subject string, repository ghrepo.Repository, raw map[string]j
 	if !ok {
 		return nil, nil
 	}
-	settledAt := time.UnixMilli(issuedAt).UTC()
-	if value, present := raw["settled_at"]; present {
-		milliseconds, ok := rawInt64Value(value)
-		if !ok || milliseconds < 0 {
-			return nil, nil
-		}
-		settledAt = time.UnixMilli(milliseconds).UTC()
-	}
 	verdict := ""
 	if len(failed) > 0 {
 		verdict = "red"
 	} else if len(cancelled) == 0 {
 		verdict = "green"
 	}
-	return PullRequestChecks{Repo: repository.String(), Number: number, HeadSHA: headSHA, CheckRuns: runs, Generation: generation, Snapshot: snapshot, Verdict: verdict, Failing: failed, SettledAt: settledAt}, nil
+	return PullRequestChecks{Repo: repository.String(), Number: number, HeadSHA: headSHA, CheckRuns: runs, Generation: generation, Snapshot: snapshot, Verdict: verdict, Failing: failed}, nil
 }
 
 func githubIdentity(raw map[string]json.RawMessage) (int, string, bool) {

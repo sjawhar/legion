@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -869,6 +870,74 @@ func TestDecisionsTakeOnlyTheApproversLogin(t *testing.T) {
 	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", map[string]any{"approver": "mallory"})
 	if status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
 		t.Fatalf("approve the decided record as mallory = %d %s, want 403 NOT_APPROVER", status, body)
+	}
+}
+
+// TestRecordCancelledWithNoEventLeavesThePendingList pins GET /v1/pending and GET
+// /v1/credential-requests/{id} against the record of a request cancelled with no terminal event on
+// the record, which an enrollment that ended before the broker wrote that event left behind: the
+// list leaves it out and its read says cancelled, at the time its request was, while a pending
+// request's record and a pending machine login are both still listed and a denied machine login
+// is not.
+func TestRecordCancelledWithNoEventLeavesThePendingList(t *testing.T) {
+	ts := newTestServer(t)
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	create := func(reason string) wireCreateRequestResponse {
+		t.Helper()
+		_, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+			map[string]any{"request": signAgentSecretRequest(t, sessionKey, ts.URL, reason, "DEEL_API_KEY"), "session_id": nil})
+		created := decode[wireCreateRequestResponse](t, body)
+		if created.State != "pending" || created.RecordID == nil {
+			t.Fatalf("create %q = %s, want a pending request with a record", reason, body)
+		}
+		return created
+	}
+
+	ended := create("asked before its session ended")
+	cancelledAt := time.Now().Add(-time.Hour).UTC().Truncate(time.Microsecond)
+	if _, err := ts.Store.Pool.Exec(context.Background(), `update requests set state='cancelled', decided_at=$2, decided_by='broker',
+		decision_detail='the requesting enrollment ended: its lease lapsed' where id=$1`, ended.RequestID, cancelledAt); err != nil {
+		t.Fatalf("cancel the request with no record event: %v", err)
+	}
+	pending := create("still waiting")
+	machineLogin := func(host string) (recordID, code string) {
+		t.Helper()
+		_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
+			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, host)})
+		code = decode[struct {
+			Code string `json:"code"`
+		}](t, body).Code
+		_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+		return decode[wireRecord](t, body).RecordID, code
+	}
+	login, _ := machineLogin("example-host-devbox")
+	denied, deniedCode := machineLogin("example-host-denied")
+	if status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+denied+"/deny",
+		map[string]any{"approver": testApprover, "code": deniedCode}); status != http.StatusOK {
+		t.Fatalf("deny the second machine login = %d: %s", status, body)
+	}
+
+	status, body := ts.ui(t, http.MethodGet, "/v1/pending?approver="+testApprover, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /v1/pending = %d: %s", status, body)
+	}
+	var listed []string
+	for _, entry := range decode[struct {
+		Pending []wirePendingEntry `json:"pending"`
+	}](t, body).Pending {
+		listed = append(listed, entry.RecordID)
+	}
+	if want := []string{login, *pending.RecordID}; !slices.Equal(listed, want) {
+		t.Fatalf("GET /v1/pending lists %v, want the machine login and the pending request's record, newest first: %v", listed, want)
+	}
+
+	_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+*ended.RecordID, nil)
+	if read := decode[wireRecord](t, body); read.State != "cancelled" || read.Decided == nil || read.Decided.Event != "cancelled" || !read.Decided.At.Equal(cancelledAt) {
+		t.Fatalf("record of the cancelled request = %s, want state cancelled, decided cancelled at %s", body, cancelledAt)
+	}
+	_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+*pending.RecordID, nil)
+	if read := decode[wireRecord](t, body); read.State != "pending" || read.Decided != nil {
+		t.Fatalf("record of the pending request = %s, want pending and undecided", body)
 	}
 }
 

@@ -1591,10 +1591,11 @@ NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its re-
 helper revokes a lapsed id before the session enrolls again, and while the session lives its
 record keeps that id until the revoke lands, so a restart meanwhile, even a second one before any
 login, still revokes it. A session that ends first takes its record with it and hands the id to a
-bounded revoke (three tries); before a login those fail, and the id ends with its lease. A revoke
-refused 403 `OPERATOR_MISMATCH` (an enrollment made under another operator's launcher credential)
-counts as done, and the session enrolls afresh. `agent-secrets launcher login-status`, which the
-helper answers, exits 0 while the helper holds a launcher credential and prints `issued`. A
+bounded revoke (three tries); before a login those fail, and the broker's sweeper ends the id once
+its lease lapses. A revoke refused 403 `OPERATOR_MISMATCH` (an enrollment made under another
+operator's launcher credential) counts as done, and the session enrolls afresh.
+`agent-secrets launcher login-status`, which the helper answers, exits 0 while the helper holds a
+launcher credential and prints `issued`. A
 re-login that is denied, expires unapproved or is still pending leaves the credential an earlier
 login installed in place, and the helper keeps enrolling sessions with it, so login-status still
 exits 0 and prints `issued`, and stderr names the most recent login and its code
@@ -1637,8 +1638,7 @@ login-status says `issued`, once the pinned release carries that answer and the 
 restarted on it; its login-status probe stays, since it also finds a helper that does not answer.
 Against an older helper an unconditional `--wait 10` stalls every launch 10 s while no credential
 exists. With `--wait N --exec`, a session the helper cannot enroll for want of a credential starts
-with a warning that its `agent-secrets` calls fail, and secret-run uses secretsd, until the machine
-is logged in.
+with a warning that its `agent-secrets` calls fail until the machine is logged in.
 
 `config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
 `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required; a literal
@@ -1755,7 +1755,13 @@ nothing pending, the request and, if granted, its grant are written with no reco
 needing approval writes the request row and a `credential_requests` record together, in one
 transaction serialized by an advisory lock keyed on the enrollment and the sorted name set, so an
 identical concurrent request coalesces onto the same record (`coalesced: true`) instead of writing
-a second one. `ApplyDecision` decides a pending record on the deciding human's login — approve
+a second one. Each of those write transactions first locks the requesting enrollment `for share`
+while it is live, before any request or grant row, so a request racing the sweep or a revoke
+writes nothing on an enrollment that ended after `Create` first read it (`401 PROOF_INVALID`, as
+for one that had ended before). A pending request leaves `pending` without a human only through
+`store.EndPendingRequests` (the session's cancel, the sweeper's expiry, an enrollment's end): one
+statement moves the request rows and writes each one's audit row and its record's terminal event.
+`ApplyDecision` decides a pending record on the deciding human's login — approve
 mints the grant while the requesting enrollment is still live, deny denies it — re-deriving the
 record's id, refusing any login but the record's approver whatever the record's state
 (`record.ErrNotApprover`, `403 NOT_APPROVER`), re-verifying its embedded request object, and
@@ -1764,7 +1770,12 @@ audit row in one transaction; a non-pending record, and one past its expiry that
 not yet expired, is `409 RECORD_TERMINAL` for its approver (a duplicate or late decision changes
 nothing) — but a record past its expiry, whether the sweeper has recorded it expired or not,
 answers with a message saying it expired before its approver acted (`requests.ErrExpired`), never
-that it was decided. `Values` releases a
+that it was decided. An `agent_secret` record is pending while its request is: `GET /v1/pending`
+(`PendingForApprover`) lists it only then, and `GET /v1/credential-requests/{id}` (`ReadRecord`)
+reads it as pending only then; a decided record's terminal event names the decision, and a request
+cancelled with no cancelled event on its record, the shape an ended enrollment's requests had
+before `endEnrollment` wrote one, reads as `cancelled` from its request row. A machine login is
+pending while it carries no terminal event. `Values` releases a
 live grant's inject-delivery values, re-checking the enrollment, the
 grant, its whole approval chain (`VerifyChain`), and — when the rules changed since the grant was
 decided — that the current rules still allow every granted name (`stillAllowed`: a name the rules no
@@ -1818,10 +1829,18 @@ behind it never authenticates. `proof.Verifier.Verify` distinguishes a session p
 carries `eid`) from a launcher proof (payload carries `lid`, never both or neither) but otherwise
 checks the same things: `alg` exactly ES256, the embedded JWK's thumbprint matching the stored one,
 signature, `iat` skew, `htm`/`htu`, and `jti` replay. `internal/broker/requests.Sweeper` is the one
-thing that moves pending state without a human: every `BROKER_SWEEP_SECONDS` tick it expires
-overdue pending `agent_secret` requests (waking each one's owner through the Envoy wake seam) and
-overdue pending machine logins, reading fresh from Postgres every time so a restart resumes
-exactly where the rows are.
+thing that moves state without a human: every `BROKER_SWEEP_SECONDS` tick it first ends every
+enrollment whose lease has lapsed (`enroll.Service.EndLapsed`: a gone pod, a box whose launcher
+stopped renewing, a host session whose helper died), as a revoke ends one, so its grants are
+revoked and its pending requests cancelled and dropped from the approver's list, with an
+`enrollment.expired` audit row and one log line each; then it expires overdue pending
+`agent_secret` requests (waking each one's owner through the Envoy wake seam) and overdue pending
+machine logins. It reads fresh from Postgres every time, so a restart resumes exactly where the
+rows are. Lapsed means what proof lookup means by not live (`lease_expires_at` no later than
+Postgres's `now()`), so a session that keeps renewing is never ended, and rows a concurrent renew
+or revoke holds are left to the next tick. Each ended enrollment's live grants are found through
+`grants_enrollment_live` (migration 0008), so a backlog of lapsed enrollments costs one index
+lookup each rather than a scan of `grants`.
 
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
 ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/...`. The Postgres-backed tests skip, rather

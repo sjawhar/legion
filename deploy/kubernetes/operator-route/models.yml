@@ -3,7 +3,7 @@
 # directory with overlay.yml, puts the model endpoint's base URL in place of the baseUrl
 # placeholder, and applies both with apply.sh (README.md beside this file).
 #
-# anthropic through the Hawk model gateway (middleman), keyed by the pod's projected
+# anthropic through the operator's model gateway, keyed by the pod's projected
 # ServiceAccount token. The gateway reads the key from x-api-key; Oh My Pi caches the command's
 # value for the process and runs it again on a 401, so the token the kubelet rotated is read on
 # the first refusal. `auth: apiKey` makes these models plain API-key callers: without it Oh My Pi

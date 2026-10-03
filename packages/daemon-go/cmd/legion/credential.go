@@ -82,15 +82,16 @@ func redeemGrant(ctx context.Context, route string) (*http.Response, error) {
 // may invoke store or erase after it has used the one-command credential; those two operations
 // must be successful no-ops so the helper never persists an installation token.
 func runCredential(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	action := "get"
-	if len(args) == 1 {
-		action = args[0]
-	} else if len(args) > 1 {
-		fmt.Fprintln(stderr, "usage: legion credential [get|store|erase]")
-		return 2
+	flags := newFlags("credential", "usage: legion credential [get|store|erase]", stderr)
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
 	}
-	if action != "get" && action != "store" && action != "erase" {
-		fmt.Fprintln(stderr, "usage: legion credential [get|store|erase]")
+	action := "get"
+	if flags.NArg() == 1 {
+		action = flags.Arg(0)
+	}
+	if flags.NArg() > 1 || (action != "get" && action != "store" && action != "erase") {
+		flags.Usage()
 		return 2
 	}
 	if _, err := io.ReadAll(os.Stdin); err != nil {
