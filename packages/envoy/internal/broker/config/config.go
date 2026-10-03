@@ -174,17 +174,17 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 	ints := []struct {
-		name string
-		dst  *int
-		def  int
-		max  int
+		name     string
+		dst      *int
+		def      int
+		min, max int
 	}{
-		{"BROKER_LEASE_SECONDS", &cfg.LeaseSeconds, 900, 3600},
-		{"BROKER_PROOF_SKEW_SECONDS", &cfg.ProofSkewSeconds, 60, 300},
-		{"BROKER_MAX_GRANT_SECONDS", &cfg.MaxGrantSeconds, 43200, 43200},
-		{"BROKER_RULES_RELOAD_SECONDS", &cfg.RulesReloadSeconds, 300, 3600},
-		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 604800, 2592000},
-		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 60},
+		{"BROKER_LEASE_SECONDS", &cfg.LeaseSeconds, 900, 1, 3600},
+		{"BROKER_PROOF_SKEW_SECONDS", &cfg.ProofSkewSeconds, 60, 1, 300},
+		{"BROKER_MAX_GRANT_SECONDS", &cfg.MaxGrantSeconds, 43200, 1, 43200},
+		{"BROKER_RULES_RELOAD_SECONDS", &cfg.RulesReloadSeconds, 300, 1, 3600},
+		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 604800, 1, 2592000},
+		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 1, 60},
 	}
 	for _, i := range ints {
 		raw := getenv(i.name)
@@ -193,8 +193,8 @@ func Load(getenv func(string) string) (Config, error) {
 			continue
 		}
 		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > i.max {
-			return Config{}, fmt.Errorf("%s must be a whole number between 1 and %d, got %q", i.name, i.max, raw)
+		if err != nil || n < i.min || n > i.max {
+			return Config{}, fmt.Errorf("%s must be a whole number between %d and %d, got %q", i.name, i.min, i.max, raw)
 		}
 		*i.dst = n
 	}

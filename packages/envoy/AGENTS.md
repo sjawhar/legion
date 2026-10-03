@@ -1711,8 +1711,9 @@ configuration that means nothing any more. It also refuses: a missing required v
 `BROKER_PUBLIC_URL` that isn't an absolute URL with no path; both or neither of
 `BROKER_RULES_FILE`/`BROKER_RULES_S3_URI` set; a `BROKER_RULES_S3_URI` without an `s3://` prefix;
 exactly one of `BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a `_SECONDS` variable
-that isn't a whole number between 1 and its max (non-numeric fails the same check as out of
-range). `cmd/broker/main.go` reads one thing `config.Load` does not: when `BROKER_RULES_FILE`
+that isn't a whole number between the min and max its row of Load's `ints` table gives
+(non-numeric fails the same check as out of range). `cmd/broker/main.go` reads one thing
+`config.Load` does not: when `BROKER_RULES_FILE`
 selects local rules (rather than `BROKER_RULES_S3_URI`, which pairs with AWS Secrets Manager for
 secret values), it requires `BROKER_FAKE_SECRETS_FILE` and refuses to start without it — a
 local-dev-only path. The broker takes no flags, and refuses any flag it is given.
@@ -1725,8 +1726,10 @@ response struct of `internal/broker/api` (never a map literal), every JSON field
 response body (and of an object it holds) a doc comment saying what it is, a response type that is
 one of several answers of a route a doc comment saying when, every `Config` field a doc comment
 opening with the `BROKER_*` variables it reads and a colon (`BROKER_FAKE_SECRETS_FILE`'s is in
-`cmd/broker/main.go`), and every helper `Code*` constant and `agent-secrets` `exit*` constant a
-comment. It also checks where those codes are produced: every helper `Response` literal that is not
+`cmd/broker/main.go`; any `BROKER_*` name `config` or `cmd/broker` spells out as a string counts as
+read), every `removedVars` row a reason, and every helper `Code*` constant and `agent-secrets`
+`exit*` constant a comment. It also checks where those codes are produced: every helper `Response`
+literal that is not
 `OK: true` must name its fields and set `Code` to a documented `Code*` constant, and every
 `int`-returning function in `cmd/agent-secrets` (and every `os.Exit` there) may return only `0`, `1`,
 a documented `exit*` constant or another such function's result. The CLI reference is the built

@@ -26,11 +26,12 @@ var brokerVar = regexp.MustCompile(`^BROKER_[A-Z0-9_]+$`)
 // "BROKER_X, BROKER_X_FILE: …".
 var documentedVars = regexp.MustCompile(`^((?:BROKER_[A-Z0-9_]+)(?:, BROKER_[A-Z0-9_]+)*): (.*)$`)
 
-// readConfig reads every BROKER_* variable config.Load and cmd/broker read: each one's
-// description from the doc comment that opens with its name (a Config field's, or a comment in
-// cmd/broker), its default and accepted range from Load's own tables, and the variables Load
-// refuses because they were removed. It refuses a variable the code reads that no comment
-// documents, and a comment that documents a variable nothing reads.
+// readConfig reads every BROKER_* variable config.Load and cmd/broker read (any BROKER_* name the
+// two spell out as a string is one they read): each one's description from the doc comment that
+// opens with its name (a Config field's, or a comment in cmd/broker), its default and accepted
+// range from Load's own tables, and the variables Load refuses because they were removed. It
+// refuses a variable the code reads that no comment documents, a comment that documents a variable
+// nothing reads, and a removed variable with no reason.
 func readConfig(root string) ([]variable, error) {
 	cfg, err := parseDir(root, configDir)
 	if err != nil {
@@ -86,6 +87,9 @@ func readConfig(root string) ([]variable, error) {
 			if name == "" || !ok {
 				return nil, fmt.Errorf("%s: a removedVars row is {name, reason}", cfg.at(row))
 			}
+			if strings.TrimSpace(reason) == "" {
+				return nil, fmt.Errorf("%s: removed variable %s has no reason saying why it is gone", cfg.at(row), name)
+			}
 			vars[name] = &variable{Name: name, Removed: true, Doc: reason, At: cfg.at(row)}
 		}
 	}
@@ -112,17 +116,18 @@ func readConfig(root string) ([]variable, error) {
 					}
 				}
 			case *ast.CompositeLit:
-				// Load's integer table: {"BROKER_X", &cfg.Field, default, max}.
-				if len(x.Elts) != 4 {
+				// Load's integer table: {"BROKER_X", &cfg.Field, default, min, max}.
+				if len(x.Elts) != 5 {
 					return true
 				}
 				name, ok := strLit(x.Elts[0])
 				def, ok2 := intLit(x.Elts[2])
-				max, ok3 := intLit(x.Elts[3])
-				if ok && ok2 && ok3 && brokerVar.MatchString(name) {
+				lo, ok3 := intLit(x.Elts[3])
+				hi, ok4 := intLit(x.Elts[4])
+				if ok && ok2 && ok3 && ok4 && brokerVar.MatchString(name) {
 					read(cfg, name, x)
 					vars[name].Default = fmt.Sprint(def)
-					vars[name].Accepted = fmt.Sprintf("whole number from 1 to %d", max)
+					vars[name].Accepted = fmt.Sprintf("whole number from %d to %d", lo, hi)
 				}
 			case *ast.BasicLit:
 				// Every other name the loader spells out, such as the required-variable list and
@@ -136,16 +141,11 @@ func readConfig(root string) ([]variable, error) {
 	}
 	for _, f := range main.files {
 		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok || len(call.Args) != 1 {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Getenv" {
-				return true
-			}
-			if name, ok := strLit(call.Args[0]); ok && brokerVar.MatchString(name) {
-				read(main, name, call)
+			// Every name cmd/broker spells out is one it reads, whichever call reads it.
+			if lit, ok := n.(*ast.BasicLit); ok {
+				if name, ok := strLit(lit); ok && brokerVar.MatchString(name) {
+					read(main, name, lit)
+				}
 			}
 			return true
 		})
