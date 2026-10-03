@@ -148,6 +148,20 @@ async function stop(child: ChildProcess): Promise<void> {
 async function dumpGoroutines(dispatch: Started): Promise<void> {
   const tail = readFileSync(dispatch.log, "utf8").split("\n").slice(-40).join("\n");
   console.error(`--- dispatch's last lines when the run stopped:\n${tail}`);
+  const ps = Bun.spawnSync([
+    "ps",
+    "-eo",
+    "pid,ppid,stat,pcpu,rss,etime,wchan:32,args",
+    "--sort=-pcpu",
+  ]);
+  console.error(
+    `--- processes when the run stopped:\n${ps.stdout
+      .toString()
+      .split("\n")
+      .slice(0, 40)
+      .map((line) => line.slice(0, 300))
+      .join("\n")}`
+  );
   const { child } = dispatch;
   if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
   process.kill(child.pid, "SIGQUIT");

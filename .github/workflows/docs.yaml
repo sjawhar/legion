@@ -82,6 +82,7 @@ jobs:
         timeout-minutes: 15
         env:
           DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+          DEBUG: pw:api,pw:browser
       # What each failed shot's page showed, and the harness's process logs: a hang leaves the
       # Dispatch server's goroutines at the end of dispatch.log.
       - if: failure()
