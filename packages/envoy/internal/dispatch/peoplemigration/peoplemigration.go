@@ -132,7 +132,9 @@ var loginColumns = []loginColumn{
 	}},
 	// A person recorded under a login, which only a header-identity harness records, becomes their
 	// email, signed in since the earlier of the two; a row the email already has keeps the refresh
-	// token and confirmation a sign-in through the pool gave it.
+	// token and confirmation a sign-in through the pool gave it. Unlike the other entries, the join
+	// compares p.email without lower(): migration 0068 checks email = lower(email), so a login
+	// recorded here is already lowercase, as people_map's are.
 	{table: "people", column: "email", rewrite: []string{`
 		insert into people (email, signed_in_at)
 		select m.email, min(p.signed_in_at) from people p join people_map m on m.login = p.email

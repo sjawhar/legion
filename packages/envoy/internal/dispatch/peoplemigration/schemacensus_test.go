@@ -9,18 +9,29 @@ import (
 )
 
 // A login the map names, left by the move in a column no field of the move knows - a table added
-// after this code was written - fails the run, which then changes nothing: whether the column
-// holds it as its whole value, as an array's element, or anywhere in a JSON value.
+// after this code was written - fails the run, which then changes nothing: in a column of every
+// type the census searches, whether the column holds it as its whole value, as an array's element,
+// or anywhere in a JSON value, an object's key in any case at any depth included.
 func TestRunRefusesALoginLeftInAColumnItDoesNotKnow(t *testing.T) {
 	for _, test := range []struct{ name, create, insert, hit string }{
 		{"a text column", `create table later_owners (id int primary key, owner text)`,
 			`insert into later_owners values (1, 'Ada-Example'), (2, 'carol@example.com')`, "later_owners.owner (1 rows)"},
+		{"a character varying column", `create table later_assignees (id int primary key, assignee varchar(64))`,
+			`insert into later_assignees values (1, 'Ada-Example'), (2, 'carol@example.com')`, "later_assignees.assignee (1 rows)"},
+		{"a character column", `create table later_leads (id int primary key, owner character(32))`,
+			`insert into later_leads values (1, 'carol@example.com'), (2, 'Ada-Example')`, "later_leads.owner (1 rows)"},
+		{"a citext column", `create extension if not exists citext; create table later_handles (id int primary key, handle citext)`,
+			`insert into later_handles values (1, 'BOB-EXAMPLE')`, "later_handles.handle (1 rows)"},
 		{"a character varying array", `create table later_watchers (id int primary key, watchers varchar(64)[])`,
 			`insert into later_watchers values (1, '{"carol@example.com","BOB-EXAMPLE"}')`, "later_watchers.watchers (1 rows)"},
+		{"a character array", `create table later_pairs (id int primary key, pair character(32)[])`,
+			`insert into later_pairs values (1, '{"carol@example.com","Ada-Example"}')`, "later_pairs.pair (1 rows)"},
+		{"a citext array", `create extension if not exists citext; create table later_mentions (id int primary key, mentioned citext[])`,
+			`insert into later_mentions values (1, '{"Bob-Example"}')`, "later_mentions.mentioned (1 rows)"},
 		{"a string deep in jsonb", `create table later_reviews (id int primary key, detail jsonb)`,
 			`insert into later_reviews values (1, '{"rounds":[{"by":"ada-example","ok":true}]}')`, "later_reviews.detail (1 rows)"},
-		{"a jsonb object key", `create table later_seen (id int primary key, seen jsonb)`,
-			`insert into later_seen values (1, '{"bob-example":{"at":"2026-09-01"}}')`, "later_seen.seen (1 rows)"},
+		{"a mixed-case jsonb object key below the top level", `create table later_seen (id int primary key, seen jsonb)`,
+			`insert into later_seen values (1, '{"meta":{"Bob-Example":{"at":"2026-09-01"}}}')`, "later_seen.seen (1 rows)"},
 		{"a json column", `create table later_raw (id int primary key, body json)`,
 			`insert into later_raw values (1, '["Ada-Example"]')`, "later_raw.body (1 rows)"},
 	} {
