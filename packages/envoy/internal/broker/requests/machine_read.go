@@ -48,7 +48,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	if err := m.VerifyChain(ctx, grantID); err != nil {
 		return nil, time.Time{}, err
 	}
-	granted, err := grantedSecrets(ctx, m.Store.Pool, requestID)
+	granted, err := requestedSecrets(ctx, m.Store.Pool, requestID)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -79,24 +79,28 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	return values, expires, nil
 }
 
-// grantedSecret is one name a request did not deny, as frozen when the request was decided.
-type grantedSecret struct{ name, source, decision string }
+// requestedSecret is one name a request asked for that the policy did not deny when the request
+// was made: the secret it froze (source) and the decision the policy gave it then.
+type requestedSecret struct{ name, source, decision string }
 
-func grantedSecrets(ctx context.Context, q querier, requestID string) ([]grantedSecret, error) {
+// requestedSecrets reads request requestID's names that the policy did not deny, in name order:
+// what a granted request's grant releases (Values, reuseLiveGrant), and what a pending request
+// waits to have approved (currentPolicyAdmits), since one denied name denies the whole request.
+func requestedSecrets(ctx context.Context, q querier, requestID string) ([]requestedSecret, error) {
 	rows, err := q.Query(ctx, `select name, source, decision from request_secrets where request_id=$1 and decision <> 'deny' order by name`, requestID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var granted []grantedSecret
+	var requested []requestedSecret
 	for rows.Next() {
-		var g grantedSecret
+		var g requestedSecret
 		if err := rows.Scan(&g.name, &g.source, &g.decision); err != nil {
 			return nil, err
 		}
-		granted = append(granted, g)
+		requested = append(requested, g)
 	}
-	return granted, rows.Err()
+	return requested, rows.Err()
 }
 
 // stillAllowed re-checks one granted name against a policy newer than the one its request was

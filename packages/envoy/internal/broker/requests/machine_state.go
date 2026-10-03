@@ -504,7 +504,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 // approver, so it leaves the approval to the record's approver; Values refuses a grant of the last
 // two at its first read.
 func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID string, requester policy.Requester, login string) error {
-	names, err := grantedSecrets(ctx, tx, requestID)
+	names, err := requestedSecrets(ctx, tx, requestID)
 	if err != nil {
 		return err
 	}
@@ -713,7 +713,7 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enrollmentID string, names
 		return Request{}, false, err
 	}
 	if rulesVersion != set.Version {
-		granted, err := grantedSecrets(ctx, m.Store.Pool, id)
+		granted, err := requestedSecrets(ctx, m.Store.Pool, id)
 		if err != nil {
 			return Request{}, false, err
 		}
