@@ -453,7 +453,9 @@ func loadPeopleMap(ctx context.Context, tx pgx.Tx, people Map) error {
 	return nil
 }
 
-// scanDatabase counts the rows of every field that name a person by login.
+// scanDatabase counts the rows of every field that name a person by login, with one query per
+// field over its whole table. No count reads a row through pageActorTable, so the census that
+// decides whether the run commits cannot share a fault with the read that moves the rows.
 func scanDatabase(ctx context.Context, tx pgx.Tx) (*census, error) {
 	found := newCensus()
 	for _, column := range loginColumns {
@@ -479,23 +481,72 @@ func scanDatabase(ctx context.Context, tx pgx.Tx) (*census, error) {
 			return nil, fmt.Errorf("scan %s: %w", field, err)
 		}
 	}
-	err := eachActorValue(ctx, tx, func(field string, value any, rowType string, column actorColumn) {
-		holds := false
-		swapPeople(value, rowType, column, func(person string) string {
-			if isLogin(person) {
-				holds = true
-				found.found(field, person, true)
+	for _, table := range actorTables {
+		for _, column := range table.columns {
+			if err := countActorColumn(ctx, tx, table, column, found); err != nil {
+				return nil, err
 			}
-			return person
-		})
-		if holds {
-			found.counts[field]++
 		}
-	})
-	if err != nil {
-		return nil, err
 	}
 	return found, nil
+}
+
+// countActorColumn counts the rows whose value in column names a person by login, and each login
+// it names, reading the value as swapPeople does: a user actor's id, a session actor's owner, an
+// assignee and an answer's user anywhere in it, and the person its root names.
+func countActorColumn(ctx context.Context, tx pgx.Tx, table actorTable, column actorColumn, found *census) error {
+	field := table.table + "." + column.name
+	var root string
+	var args []any
+	if column.root != "" {
+		root = fmt.Sprintf(`
+			union all select t.ctid, t.%[2]s->>'%[3]s' from %[1]s t where jsonb_typeof(t.%[2]s->'%[3]s') = 'string'`,
+			table.table, column.name, column.root)
+		if column.rootTypes != nil {
+			root += fmt.Sprintf(` and t.%s = any($1::text[])`, table.typeColumn)
+			args = append(args, column.rootTypes)
+		}
+	}
+	rows, err := tx.Query(ctx, fmt.Sprintf(`
+		with recursive walk(row, node) as (
+			select t.ctid, t.%[2]s from %[1]s t where t.%[2]s is not null
+			union all
+			select walk.row, child.value from walk, lateral (
+				select value from jsonb_each(case when jsonb_typeof(walk.node) = 'object' then walk.node else '{}' end)
+				union all
+				select value from jsonb_array_elements(case when jsonb_typeof(walk.node) = 'array' then walk.node else '[]' end)
+			) child
+		), person(row, name) as (
+			select row, node->>'id' from walk where node->>'kind' = 'user' and jsonb_typeof(node->'id') = 'string'
+			union all select row, node->>'owner' from walk where node->>'kind' = 'session' and jsonb_typeof(node->'owner') = 'string'
+			union all select row, node->>'assignee' from walk where jsonb_typeof(node->'assignee') = 'string'
+			union all select row, node->'answer'->>'user' from walk where jsonb_typeof(node->'answer'->'user') = 'string'%[3]s
+		)
+		select lower(name), count(distinct row) from person
+		where name <> '' and position('@' in name) = 0
+		group by grouping sets ((lower(name)), ())
+	`, table.table, column.name, root), args...)
+	if err != nil {
+		return fmt.Errorf("scan %s: %w", field, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		// The row without a login is the grouping set over every login: the rows holding any.
+		var login *string
+		var count int
+		if err := rows.Scan(&login, &count); err != nil {
+			return fmt.Errorf("scan %s: %w", field, err)
+		}
+		if login == nil {
+			found.counts[field] = count
+			continue
+		}
+		found.found(field, *login, true)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("scan %s: %w", field, err)
+	}
+	return nil
 }
 
 // moveActorRows rewrites every login in every JSON column to the email people gives it.
@@ -536,24 +587,6 @@ func moveActorRows(ctx context.Context, tx pgx.Tx, people Map) error {
 	return nil
 }
 
-// eachActorValue hands visit every non-null value of every JSON column.
-func eachActorValue(ctx context.Context, tx pgx.Tx, visit func(field string, value any, rowType string, column actorColumn)) error {
-	for _, table := range actorTables {
-		err := pageActorTable(ctx, tx, table, func(row actorRow) error {
-			for index, column := range table.columns {
-				if row.values[index] != nil {
-					visit(table.table+"."+column.name, row.values[index], row.rowType, column)
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 type actorRow struct {
 	key     []string
 	values  []any
@@ -564,12 +597,16 @@ type actorRow struct {
 const actorPage = 500
 
 // pageActorTable hands visit every row of table, decoded, in primary-key order, a page at a time;
-// visit may write the row, since a page is read whole before any row of it is visited.
+// visit may write the row, since a page is read whole before any row of it is visited. The key is
+// read back as text under a name of its own, and both the order and the cursor name the key column
+// itself, qualified so neither can resolve to that text: ordered by the text, a numeric key sorts
+// "10000" before "9" while the cursor compares numbers, and every row between is skipped.
 func pageActorTable(ctx context.Context, tx pgx.Tx, table actorTable, visit func(actorRow) error) error {
-	var keyNames, keyText, keyArgs []string
+	var keyColumns, keyText, keyArgs []string
 	for index, key := range table.key {
-		keyNames = append(keyNames, key.name)
-		keyText = append(keyText, key.name+"::text")
+		column := table.table + "." + key.name
+		keyColumns = append(keyColumns, column)
+		keyText = append(keyText, fmt.Sprintf("%s::text as page_key_%d", column, index))
 		keyArgs = append(keyArgs, fmt.Sprintf("$%d::%s", index+1, key.cast))
 	}
 	selected := append(slices.Clone(keyText), func() []string {
@@ -583,12 +620,12 @@ func pageActorTable(ctx context.Context, tx pgx.Tx, table actorTable, visit func
 		selected = append(selected, table.typeColumn)
 	}
 	query := "select " + strings.Join(selected, ", ") + " from " + table.table
-	order := " order by " + strings.Join(keyNames, ", ") + fmt.Sprintf(" limit %d", actorPage)
+	order := " order by " + strings.Join(keyColumns, ", ") + fmt.Sprintf(" limit %d", actorPage)
 	var after []any
 	for {
 		statement := query + order
 		if after != nil {
-			statement = query + " where (" + strings.Join(keyNames, ", ") + ") > (" + strings.Join(keyArgs, ", ") + ")" + order
+			statement = query + " where (" + strings.Join(keyColumns, ", ") + ") > (" + strings.Join(keyArgs, ", ") + ")" + order
 		}
 		page, err := readActorPage(ctx, tx, table, statement, after)
 		if err != nil {

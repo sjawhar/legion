@@ -453,11 +453,14 @@ editor's user name when a browser did) is a label nothing compares, and is left 
 A value holding an `@` is already an email and is left alone, so a second run changes nothing. A
 login the map has no email for stops the run before it writes anything, naming each such login and
 every field holding it. The database's rows move in one transaction, which commits only when a
-second scan inside it finds no login left. The run prints each field's count of logins before and
-after (`migrate-people: before issues.assignee=2` … `migrate-people: after documents.answered_by=0`)
-and how many people it recorded. Exit 0 when everyone moved; 1 when it refused, changing nothing,
-or when a document could not be read or renamed (each named), in which case the database has moved
-and a second run finishes the documents once they can be read.
+second census inside it finds no login left. Each census counts a field with one query over its
+whole table, never through the page-at-a-time read that moves the rows, so a row that read misses
+is counted as left and the run changes nothing. The run prints each field's count of logins before
+and after (`migrate-people: before issues.assignee=2` … `migrate-people: after
+documents.answered_by=0`) and how many people it recorded. Exit 0 when everyone moved; 1 when it
+refused, changing nothing, when a login was left after the move, also changing nothing, or when a
+document could not be read or renamed (each named), in which case the database has moved and a
+second run finishes the documents once they can be read.
 
 ## Reference graph
 
