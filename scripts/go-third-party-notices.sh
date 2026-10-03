@@ -49,10 +49,10 @@ trap 'rm -rf "$scratch"' EXIT
 set -- "$@" $("$go_cmd" list -m -f '--ignore={{.Path}}')
 
 # Exits 1, naming the library, for one with no identifiable license file or a forbidden or unknown
-# license type.
+# license type, and also when the packages cannot be loaded at all (a module download failing).
 if ! "$tool" check "$@" 2>"$scratch/check.log"; then
   cat "$scratch/check.log" >&2
-  echo "go-third-party-notices: a module's license could not be determined or is not allowed (above)" >&2
+  echo "go-third-party-notices: go-licenses check failed (above): a module's license is missing, unknown or not allowed, or its packages could not be loaded" >&2
   exit 1
 fi
 
