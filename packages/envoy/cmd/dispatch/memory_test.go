@@ -976,8 +976,7 @@ type admittedShape struct {
 
 // heaviestAdmittedShapes are the heaviest documents of the shapes that cost the most memory per
 // element - italic spans, delimiter runs, table cells, headings, list items, hard breaks and inline
-// HTML, the heaviest of all to store - that the element limit admits, each found by the parser the
-// server writes with.
+// HTML - that the element limit admits, each found by the parser the server writes with.
 func heaviestAdmittedShapes(t *testing.T) []admittedShape {
 	t.Helper()
 	repeated := func(unit string) func(int) string {

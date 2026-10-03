@@ -20,11 +20,11 @@ import (
 // read-back of each run, the read-back of the whole document, the live document - and in every read
 // and settlement of the document it stores: a mebibyte of `)_` makes 786,432 of them and held a
 // gigabyte (LEGION-481). The heaviest document of each shape measured at this limit holds at most
-// about 220 MiB above the server's idle memory to store and settle, and 200 MiB to read
-// (cmd/dispatch's memory tests). Over this repository's 606 markdown files (MeasureDocument), every
-// one of 4 KiB or more weighs 1.5 to 379 elements a kibibyte, so prose passes to the 1 MiB cap and
-// the densest, a comparison matrix, to about 173 KiB; smaller files run denser, up to 986 a
-// kibibyte for a 189-byte test fixture of adjacent lists.
+// about 190 MiB above the server's idle memory to store and settle (a four-column table), and
+// 150 MiB to read (cmd/dispatch's memory tests). Over this repository's 617 markdown files
+// (MeasureDocument), every one of 4 KiB or more weighs 1.5 to 379 elements a kibibyte, so prose
+// passes to the 1 MiB cap and the densest, a comparison matrix, to about 173 KiB; smaller files run
+// denser, up to 1,296 a kibibyte for a 147-byte test fixture of empty list items.
 const MaxDocumentElements = 65_536
 
 // nodeGuard is how many times MaxDocumentElements goldmark may make nodes, lines and table cells,

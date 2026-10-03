@@ -227,21 +227,24 @@
   (LEGION-481): every element the markdown makes costs memory in the parse, the read-back, the
   render and the live document. A caller's markdown - a spec, an uploaded document or version,
   an edit batch's inserts and replaces, the `find` of an edit and the quote of a comment or ask -
-  may now make at most 65,536 elements (a block weighs 3, a table cell 4, a hard line break 3, an
-  autolink 2, a piece of inline syntax, a mark, a line of text or an escape 1); past that a write is
-  `413 CAP_EXCEEDED`, refused while goldmark parses, naming the line where the markdown passes the
-  limit or, where the parse stopped first, the line it stopped reading at; a quote is matched by its
-  text alone. An escape - a backslash before punctuation, or a character reference, in text outside
-  a code span - makes no node in goldmark's tree, but the document holds the character it spells
-  bare, every rendering spells it again, and the renderer reads it back as the delimiter or link
-  opener it would be unescaped: a mebibyte of `\~a`, `)\_`, `\)\_` or `\[a` weighed four elements
-  and allocated 330 to 720 MiB to parse and 260 to 620 MiB to render, and the stored `\)\_` held 256
-  MiB to read cold and 973 MiB for four reads at once. Every markdown file of 4 KiB or more among
-  this repository's 606 weighs 1.5 to 379 elements a kibibyte, so prose passes to the 1 MiB cap and
-  the densest of them, a comparison matrix, to about 173 KiB; smaller files run denser, up to 986 a
-  kibibyte for a 189-byte test fixture of adjacent lists. A paragraph of link reference
-  definitions, which goldmark took time quadratic in its lines to read (a mebibyte of them took a
-  minute to refuse), is read only as far as its first 1,024 lines.
+  may now make at most 65,536 elements (a block weighs 3, a table cell 4, a hard line break 3, a
+  piece of inline HTML 2, an autolink 2, a piece of inline syntax, a mark, a line of text or an
+  escape 1); past that a write is `413 CAP_EXCEEDED`, refused while goldmark parses, naming the line
+  where the markdown passes the limit or, where the parse stopped first, the line it stopped reading
+  at; a quote is matched by its text alone. An escape - a backslash before punctuation, or a
+  character reference, in text outside a code span - makes no node in goldmark's tree, but the
+  document holds the character it spells bare, every rendering spells it again, and the renderer
+  reads it back as the delimiter or link opener it would be unescaped: a mebibyte of `\~a`, `)\_`,
+  `\)\_` or `\[a` weighed four elements and allocated 330 to 720 MiB to parse and 260 to 620 MiB to
+  render, and the stored `\)\_` held 256 MiB to read cold and 973 MiB for four reads at once. A
+  piece of inline HTML, a tag or a comment, is an element of its own in the document, carrying the
+  HTML and splitting its text: weighed as one, the heaviest document of `<b>a</b>` spans the limit
+  admitted held 213 to 257 MiB to store, past the 256 MiB a request may hold. Every markdown file of
+  4 KiB or more among this repository's 617 weighs 1.5 to 379 elements a kibibyte, so prose passes
+  to the 1 MiB cap and the densest of them, a comparison matrix, to about 173 KiB; smaller files run
+  denser, up to 1,296 a kibibyte for a 147-byte test fixture of empty list items. A paragraph of
+  link reference definitions, which goldmark took time quadratic in its lines to read (a mebibyte of
+  them took a minute to refuse), is read only as far as its first 1,024 lines.
 - A write may no longer grow a stored document past what one upload may hold, measured as an
   upload is measured. Thirty-two 900 KB inserts of prose, each within both limits, grew one document
   to 29.5 MB, on which a one-word edit then held a gigabyte; a few dozen thousand headings' worth
