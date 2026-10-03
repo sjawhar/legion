@@ -65,12 +65,16 @@ import (
 
 // Exit codes beyond 0 (done) and 1 (failed): 75 (EX_TEMPFAIL) and 77 (EX_NOPERM) follow BSD
 // sysexits.h, chosen so a caller of the "request" and NAME... -- <command> forms can tell "still
-// waiting" from "refused" without parsing stderr. Each carries a comment: the broker's generated
-// error reference (scripts/docs/broker/refgen) prints it and refuses a code without one.
+// waiting" from "refused" without parsing stderr, and 126 and 127 are the shell's own for a command
+// that cannot run or is not there. Each carries a comment, and every exit code is 0, 1 or one of
+// these: the broker's generated error reference (cmd/broker-refgen) prints them and refuses a code
+// without a comment or a function that returns any other.
 const (
-	exitUsageError = 2  // a usage error: an unknown flag or argument, or a required one or AGENT_SECRETS_URL missing
-	exitPending    = 75 // the request is still waiting for a person to approve it; nothing was run
-	exitDenied     = 77 // the request was denied; nothing was run
+	exitUsageError = 2   // a usage error: an unknown flag or argument, or a required one or AGENT_SECRETS_URL missing
+	exitPending    = 75  // the request is still waiting for a person to approve it; nothing was run
+	exitDenied     = 77  // the request was denied; nothing was run
+	exitCannotRun  = 126 // the command `register --exec` was given exists but could not be run
+	exitNotFound   = 127 // the command `register --exec` was given was not found
 )
 
 // command is one form of agent-secrets, as usage lists it and its own -h describes it.
