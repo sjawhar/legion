@@ -28,6 +28,7 @@ import {
 } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
 import { CredentialRequestsSection } from "../credentials/CredentialRequestsSection";
+import { useCredentialRequests } from "../credentials/pending";
 import { PriorityControl } from "../issue/PriorityControl";
 import { useIssueAssignee } from "../issue/useIssueAssignee";
 import { actorLabel } from "../refs/actor";
@@ -351,6 +352,8 @@ export function Inbox(): ReactNode {
   // views below are client-side partitions of it, so an answered row leaves every surface at once.
   const inbox = useQuery(inboxQuery());
   const whoAmI = useQuery(whoAmIQuery());
+  // The credential requests the Inbox lists above its asks, read as the section reads them.
+  const credentials = useCredentialRequests();
   // `/auth/whoami` echoes GitHub's casing; issues carry the lowercase login.
   const login = whoAmI.data?.login;
   const viewer = login?.toLowerCase();
@@ -726,23 +729,34 @@ export function Inbox(): ReactNode {
     />
   ) : null;
 
+  // Nothing in any band. The credential requests above the bands wait on the viewer as much as an
+  // ask whose turn is theirs, so the empty state speaks only once their list has come back empty:
+  // while it loads, or after it fails, the Inbox cannot say nothing needs them. The section stays
+  // mounted meanwhile rather than giving way to a skeleton: a list that has never loaded is fetched
+  // again whenever an observer of it mounts, and each fetch puts it back to loading, so a section
+  // unmounted while loading would refetch it forever. An agent filter's line is about that agent's
+  // asks alone.
   if (shown.length === 0 && held === undefined) {
+    const emptyMessage =
+      agent !== undefined
+        ? `No open asks from ${agentTitle}`
+        : credentials.status !== "listed" || credentials.requests.length > 0
+          ? undefined
+          : view === "mine"
+            ? "Nothing needs you"
+            : "Nothing needs anyone";
     return (
       <div className="space-y-6">
         <CredentialRequestsSection />
         {viewSwitch}
         {chip}
+        {agent === undefined ? (
+          <BlockedOnYou asks={inView(inbox.data)} credentialRequests={credentials.requests} />
+        ) : null}
         {bulkBar}
-        <EmptyState
-          label="Inbox empty state"
-          message={
-            agent === undefined
-              ? view === "mine"
-                ? "Nothing needs you"
-                : "Nothing needs anyone"
-              : `No open asks from ${agentTitle}`
-          }
-        />
+        {emptyMessage === undefined ? null : (
+          <EmptyState label="Inbox empty state" message={emptyMessage} />
+        )}
       </div>
     );
   }
@@ -785,7 +799,9 @@ export function Inbox(): ReactNode {
       <CredentialRequestsSection />
       {viewSwitch}
       {chip}
-      {agent === undefined ? <BlockedOnYou asks={inView(inbox.data)} /> : null}
+      {agent === undefined ? (
+        <BlockedOnYou asks={inView(inbox.data)} credentialRequests={credentials.requests} />
+      ) : null}
       {bulkBar}
       <ul className="space-y-3">
         {sections.flatMap(({ rows, section, shownRows }, index) => [

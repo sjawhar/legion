@@ -1,7 +1,9 @@
+import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
-import type { InboxRow } from "../../api/types";
+import { inboxQuery } from "../../api/queries";
+import type { CredentialPendingRow, InboxRow } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
 import {
   borderDefault,
@@ -11,6 +13,7 @@ import {
   textSecondaryOnSurface,
   textSecondaryOnSurfaceMuted,
 } from "../../theme/classes";
+import { useCredentialRequests } from "../credentials/pending";
 import { formatAskAge } from "./ask-age";
 import { isSnoozed } from "./snooze";
 
@@ -26,17 +29,30 @@ export function waitingOnYou<
   return asks.filter((ask) => ask.waiting_on === "human" && !isSnoozed(ask));
 }
 
+/** How many of the things the Inbox lists wait for the viewer: its asks whose turn is theirs, and
+ *  every pending credential request, each of which names the viewer as its approver. The rail's
+ *  and the compact top bar's `Needs you N` count the whole inbox; the banner counts the view. */
+export function useNeedsYouCount(): number {
+  const inbox = useQuery(inboxQuery());
+  const { requests } = useCredentialRequests();
+  return waitingOnYou(inbox.data ?? []).length + requests.length;
+}
+
 export function BlockedOnYou({
   asks,
   className,
+  credentialRequests = [],
   variant = "banner",
 }: {
   asks: readonly InboxRow[];
   className?: string;
+  /** The credential requests the Inbox lists above its asks; the project pill has none. */
+  credentialRequests?: readonly CredentialPendingRow[];
   variant?: "banner" | "pill";
 }): ReactNode {
   const waiting = waitingOnYou(asks);
-  if (waiting.length === 0) return null;
+  const count = waiting.length + credentialRequests.length;
+  if (count === 0) return null;
 
   if (variant === "pill") {
     return (
@@ -44,16 +60,16 @@ export function BlockedOnYou({
         className={`${className ?? ""} inline-flex min-h-11 items-center rounded-full px-3 text-xs font-medium md:min-h-9 md:px-2 ${surfaceMutedStrongBg} ${textSecondaryOnSurface} ${textSecondaryHoverToPrimary}`}
         to="/"
       >
-        Blocked on you · {waiting.length}
+        Blocked on you · {count}
       </Link>
     );
   }
 
-  const oldest = waiting.reduce((earlier, ask) =>
-    compareTimestamps(ask.created_at, earlier.created_at) < 0 ? ask : earlier
-  );
+  const oldest = [
+    ...waiting.map((ask) => ask.created_at),
+    ...credentialRequests.map((request) => request.requested_at),
+  ].reduce((earlier, at) => (compareTimestamps(at, earlier) < 0 ? at : earlier));
 
-  const count = waiting.length;
   // A count of every waiting ask, not one urgency, so the strip stays structural: the spec
   // reserves the urgency hues for urgency and priority. `w-full` is load-bearing - below
   // 1280 px an unlayered `a:not(.prose a) { display: inline-flex }` in styles.css beats
@@ -63,8 +79,7 @@ export function BlockedOnYou({
       className={`block w-full rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${surfaceMutedBg} ${textSecondaryOnSurfaceMuted}`}
       to="/"
     >
-      Blocked on you: {count} {count === 1 ? "item" : "items"}, oldest{" "}
-      {formatAskAge(oldest.created_at)}
+      Blocked on you: {count} {count === 1 ? "item" : "items"}, oldest {formatAskAge(oldest)}
     </Link>
   );
 }

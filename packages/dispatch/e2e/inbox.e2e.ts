@@ -16,6 +16,7 @@ import {
   replyToCommentDelivery,
 } from "./api";
 import { recordClipboard } from "./clipboard";
+import { setPendingCredentialRequests } from "./fake-broker-helpers";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -739,6 +740,60 @@ test("a snoozed row leaves Later, the banner and the Needs-you badge alone until
 
     await page.reload();
     await expect(row).toHaveAttribute("data-inbox-section", "human");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A credential request is listed above the asks and waits on its approver as much as an ask
+// whose turn is theirs, so it is as much a reason not to say "Nothing needs you" and as much a
+// part of the Needs-you badge and the Blocked-on-you banner. A request waiting on someone else
+// is in neither.
+test("a pending credential request alone is listed, counted, and keeps the empty state away", async ({
+  browser,
+}, testInfo) => {
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const empty = page.getByText("Nothing needs you");
+    const badge = page.getByText(/^Needs you \d+$/);
+    await page.goto("/");
+    await expect(empty).toBeVisible();
+    await expect(badge).toHaveCount(0);
+
+    await setPendingCredentialRequests([
+      {
+        approver: "alice",
+        identifiers: ["DEMO_API_KEY"],
+        kind: "agent_secret",
+        record_id: "record-alice",
+        requested_at: new Date().toISOString(),
+      },
+      {
+        approver: "bob",
+        identifiers: ["BOB_API_KEY"],
+        kind: "agent_secret",
+        record_id: "record-bob",
+        requested_at: new Date().toISOString(),
+      },
+    ]);
+    // The broker publishes nothing to Dispatch's event stream, so the list is read on load.
+    await page.reload();
+    const requests = page.getByRole("region", { name: "Credential requests" });
+    await expect(requests.getByRole("link")).toHaveCount(1);
+    await expect(requests.getByRole("link")).toContainText("Secret request");
+    await expect(requests.getByRole("link")).toContainText("DEMO_API_KEY");
+    await expect(requests.getByRole("link")).toHaveAttribute("href", "/credentials/record-alice");
+    await expect(empty).toHaveCount(0);
+    await expect(page.getByText(/^Needs you 1$/).first()).toBeVisible();
+    await expect(page.getByText(/^Blocked on you: 1 item, oldest/)).toBeVisible();
+
+    const shot = testInfo.outputPath(`inbox-credential-request-${testInfo.project.name}.png`);
+    await page.screenshot({ path: shot });
+    await testInfo.attach(`inbox credential request (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: shot,
+    });
   } finally {
     await alice.close();
   }
