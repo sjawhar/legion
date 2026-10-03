@@ -43,6 +43,15 @@ PUBLIC_URL="http://127.0.0.1:0"
 UI_TOKEN="${BROKER_UI_TOKEN:-dev}"
 APPROVER_LOGIN="ada@example.com"
 
+# DEV_BROKER_POSTGRES_URL is checked before anything is created, so a malformed one leaves nothing
+# behind.
+if [ -n "${DEV_BROKER_POSTGRES_URL:-}" ] && ! [[ "$DEV_BROKER_POSTGRES_URL" =~ ^(postgres(ql)?://[^/?]+)/[^/?]*(\?.*)?$ ]]; then
+  echo "dev-broker: DEV_BROKER_POSTGRES_URL must be postgres://<user>@<host>:<port>/<database>" >&2
+  exit 2
+fi
+POSTGRES_SERVER="${BASH_REMATCH[1]:-}"
+POSTGRES_QUERY="${BASH_REMATCH[3]:-}"
+
 WORK_DIR="$(mktemp -d /tmp/agent-secrets-dev.XXXXXX)"
 BIN_DIR="$WORK_DIR/bin"
 BROKER_BIN="$BIN_DIR/broker"
@@ -55,12 +64,7 @@ OPERATOR_FILE="$WORK_DIR/operator"
 # explicitly rather than rely on that.
 DB_NAME="dev_broker_$(printf '%s' "${WORK_DIR##*.}" | tr '[:upper:]' '[:lower:]')"
 if [ -n "${DEV_BROKER_POSTGRES_URL:-}" ]; then
-  if ! [[ "$DEV_BROKER_POSTGRES_URL" =~ ^(postgres(ql)?://[^/?]+)/[^/?]*(\?.*)?$ ]]; then
-    echo "dev-broker: DEV_BROKER_POSTGRES_URL must be postgres://<user>@<host>:<port>/<database>" >&2
-    rm -rf "$WORK_DIR"
-    exit 2
-  fi
-  POSTGRES_URL="${BASH_REMATCH[1]}/${DB_NAME}${BASH_REMATCH[3]}"
+  POSTGRES_URL="${POSTGRES_SERVER}/${DB_NAME}${POSTGRES_QUERY}"
   POSTGRES_WHERE="the server DEV_BROKER_POSTGRES_URL names"
   admin_psql() { psql "$DEV_BROKER_POSTGRES_URL" -v ON_ERROR_STOP=1 -q "$@"; }
 else
@@ -70,15 +74,21 @@ else
 fi
 
 BROKER_PID=""
+# Set once this run's own create database succeeded: a run whose create failed (the name taken by
+# another run) must never drop that other run's database.
+CREATED_DB=false
 cleanup() {
   if [ -n "$BROKER_PID" ] && kill -0 "$BROKER_PID" 2>/dev/null; then
     kill "$BROKER_PID" 2>/dev/null || true
     wait "$BROKER_PID" 2>/dev/null || true
   fi
-  # Best-effort: cleanup runs on every exit path and must never itself fail, even if the server is
-  # already gone or the drop fails for some other reason.
-  admin_psql -c "drop database if exists ${DB_NAME};" 2>/dev/null || true
-  echo "dev-broker: dropped this instance's database $DB_NAME in $POSTGRES_WHERE; workdir kept at $WORK_DIR (rm -rf it once its helper has stopped)" >&2
+  if [ "$CREATED_DB" = true ]; then
+    # Best-effort: cleanup runs on every exit path and must never itself fail, even if the server
+    # is already gone or the drop fails for some other reason.
+    admin_psql -c "drop database if exists ${DB_NAME};" 2>/dev/null || true
+    echo "dev-broker: dropped this instance's database $DB_NAME in $POSTGRES_WHERE" >&2
+  fi
+  echo "dev-broker: workdir kept at $WORK_DIR (rm -rf it once its helper has stopped)" >&2
 }
 trap cleanup EXIT
 
@@ -110,8 +120,21 @@ if [ -z "${DEV_BROKER_POSTGRES_URL:-}" ]; then
 fi
 
 # --- Create this instance's own isolated database (never the shared "dispatch" database). ---
-echo "dev-broker: created isolated database $DB_NAME" >&2
 admin_psql -c "create database ${DB_NAME};"
+CREATED_DB=true
+echo "dev-broker: created isolated database $DB_NAME" >&2
+
+# A dbname= in DEV_BROKER_POSTGRES_URL's query string overrides the URL's own database, which
+# would point the broker, and its migrations, at a database this run neither created nor drops.
+if [ -n "${DEV_BROKER_POSTGRES_URL:-}" ]; then
+  connected="$(psql "$POSTGRES_URL" -v ON_ERROR_STOP=1 -Atqc 'select current_database()')"
+  if [ "$connected" != "$DB_NAME" ]; then
+    echo "dev-broker: refused: the broker's database URL connects to '$connected', not this run's $DB_NAME; drop any dbname= from DEV_BROKER_POSTGRES_URL's query string" >&2
+    exit 1
+  fi
+fi
+# The banner names the database without any password the URL carries.
+DISPLAY_URL="$(printf '%s' "$POSTGRES_URL" | sed -E 's#^(postgres(ql)?://[^:/@?]+):[^@/?]*@#\1:***@#')"
 
 # --- Build the broker and the clients a second shell drives it with. ---
 echo "dev-broker: building broker, agent-secrets, agent-secrets-helper and agent-secrets-devrelay..." >&2
@@ -227,7 +250,7 @@ dev-broker: ready.
   fake secrets file:   $FAKE_SECRETS_FILE  (source -> value, for confirming a released grant)
   rules file:          $RULES_FILE
   approver login:      $APPROVER_LOGIN (devrelay approve/deny --login \$AGENT_SECRETS_APPROVER decides as this human)
-  database:            $POSTGRES_URL  (this instance's own; created and dropped by this script)
+  database:            $DISPLAY_URL  (this instance's own; created and dropped by this script)
 
   One automatic secret (DEMO_READ_TOKEN) and one approval-required secret (DEMO_API_KEY,
   approver: $APPROVER_LOGIN) are configured for a box or host session $APPROVER_LOGIN operates.
