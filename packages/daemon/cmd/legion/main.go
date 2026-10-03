@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -47,40 +49,102 @@ var release string
 
 type command func(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
-var commands = map[string]command{
-	"version":        runVersion,
-	"start":          runStart,
-	"stop":           runStop,
-	"state":          runState,
-	"legions":        runLegions,
-	"status":         runStatus,
-	"restart":        runRestart,
-	"worker-shim":    runWorkerShim,
-	"claims":         runClaims,
-	"gh":             runGh,
-	"credential":     runCredential,
-	"handoff":        runHandoff,
-	"threads":        runThreads,
-	"push":           runPush,
-	"probe-image":    runProbeImage,
-	"workspace-init": runWorkspaceInit,
-	"controller":     runController,
+// commandEntry is one `legion` command: what runs it, and its line in `legion --help`.
+type commandEntry struct {
+	run     command
+	summary string
+}
+
+var commands = map[string]commandEntry{
+	"version":        {runVersion, "print the version and the commit the binary was built from"},
+	"start":          {runStart, "run the Legion daemon from legion.yaml in the foreground; --check-config validates the file and exits"},
+	"stop":           {runStop, "stop the daemon registered for legion.yaml's project"},
+	"state":          {runState, "print the daemon's state: admission, issues, pending Dispatch status writes (--json for all of it)"},
+	"legions":        {runLegions, "list the daemons registered on this machine"},
+	"status":         {runStatus, "say whether a team's daemon is running, or set an issue's Dispatch status"},
+	"restart":        {runRestart, "stop a registered daemon and start it again from the configuration it recorded"},
+	"worker-shim":    {runWorkerShim, "bridge an agent's Oh My Pi to the daemon's worker stream (the daemon starts it in every pod)"},
+	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
+	"gh":             {runGh, "run gh with a GitHub token from this session's grant; merges and GitHub-issue writes are refused"},
+	"credential":     {runCredential, "git credential helper answering with a token from this session's grant"},
+	"handoff":        {runHandoff, "write or read a phase's .legion/ handoff, or report the phase complete"},
+	"threads":        {runThreads, "resolve a pull request's review threads whose opener accepted the reply"},
+	"push":           {runPush, "push the issue branch (@-) to legion/<issue>, the one push every phase worker uses"},
+	"probe-image":    {runProbeImage, "run the worker image's launch probes (the image build and the daemon's probe Sandbox run it)"},
+	"workspace-init": {runWorkspaceInit, "a Sandbox pod's two init containers: fetch the repository, provision the issue's workspace"},
+	"controller":     {runController, "start the controller, the interactive Oh My Pi session an operator talks to"},
+}
+
+// helpRequested says whether a command's first argument asks for its usage.
+func helpRequested(arg string) bool {
+	return arg == "-h" || arg == "-help" || arg == "--help"
+}
+
+// usage is `legion --help`: every command, alphabetically, with its one line.
+func usage(w io.Writer) {
+	fmt.Fprintln(w, "usage: legion <command> [flags]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Commands:")
+	for _, name := range slices.Sorted(maps.Keys(commands)) {
+		fmt.Fprintf(w, "  %-16s %s\n", name, commands[name].summary)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Run `legion <command> --help` for a command's flags.")
+}
+
+// runSubcommand runs the subcommand of `legion <name>` that args[0] names, from table, the one
+// list of them: -h, -help or --help prints subcommandUsage and exits 0, and no subcommand or an
+// unknown one is a usage error.
+func runSubcommand(ctx context.Context, name string, table map[string]command, args []string, stdout, stderr io.Writer) int {
+	line := subcommandUsage(name, table)
+	if len(args) > 0 && helpRequested(args[0]) {
+		fmt.Fprintln(stderr, line)
+		return 0
+	}
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, line)
+		return 2
+	}
+	sub, ok := table[args[0]]
+	if !ok {
+		fmt.Fprintf(stderr, "legion %s: unknown subcommand %q\n%s\n", name, args[0], line)
+		return 2
+	}
+	return sub(ctx, args[1:], stdout, stderr)
+}
+
+// subcommandUsage is `legion <name>`'s usage line, naming every subcommand of table
+// alphabetically: `usage: legion <name> a|b|… [flags]`.
+func subcommandUsage(name string, table map[string]command) string {
+	return "usage: legion " + name + " " + strings.Join(slices.Sorted(maps.Keys(table)), "|") + " [flags]"
 }
 
 func run(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
 	if len(argv) < 2 {
-		fmt.Fprintln(stderr, "usage: legion <command> [flags]")
+		usage(stderr)
 		return 2
+	}
+	if argv[1] == "help" || helpRequested(argv[1]) {
+		usage(stdout)
+		return 0
 	}
 	cmd, ok := commands[argv[1]]
 	if !ok {
-		fmt.Fprintf(stderr, "legion: unknown command %q\n", argv[1])
+		fmt.Fprintf(stderr, "legion: unknown command %q; run legion --help for the commands\n", argv[1])
 		return 2
 	}
-	return cmd(ctx, argv[2:], stdout, stderr)
+	return cmd.run(ctx, argv[2:], stdout, stderr)
 }
 
-func runVersion(_ context.Context, _ []string, stdout, _ io.Writer) int {
+func runVersion(_ context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := newFlags("version", "usage: legion version", stderr)
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
+	}
+	if flags.NArg() > 0 {
+		flags.Usage()
+		return 2
+	}
 	version := "(devel)"
 	if release != "" {
 		version = release
@@ -96,11 +160,11 @@ func runVersion(_ context.Context, _ []string, stdout, _ io.Writer) int {
 }
 
 func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlags("start", stderr)
+	flags := newFlags("start", "usage: legion start [flags]", stderr)
 	configPath := flags.String("config", defaultConfigPath, "path to legion.yaml")
 	checkConfig := flags.Bool("check-config", false, "validate the configuration, run none of its key commands, and exit without starting")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
 	}
 	// The configuration is named only by --config: a file given as an argument would otherwise be
 	// ignored while ./legion.yaml is read, and --check-config would vouch for the wrong file.
@@ -209,10 +273,10 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 }
 
 func runStop(_ context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlags("stop", stderr)
+	flags := newFlags("stop", "usage: legion stop [flags]", stderr)
 	configPath := flags.String("config", defaultConfigPath, "path to legion.yaml")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
 	}
 	if flags.NArg() > 0 {
 		fmt.Fprintf(stderr, "legion stop: unexpected argument %q; name the configuration with --config <file>\n", flags.Arg(0))
@@ -260,12 +324,12 @@ func runStop(_ context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlags("state", stderr)
+	flags := newFlags("state", "usage: legion state [flags]", stderr)
 	asJSON := flags.Bool("json", false, "print the state as the daemon serves it")
 	configPath := flags.String("config", "", "path to legion.yaml (default "+defaultConfigPath+")")
 	port := flags.Int("port", 0, "port to read, overriding the configured one")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
 	}
 	if flags.NArg() > 0 {
 		fmt.Fprintf(stderr, "legion state: unexpected argument %q; name the configuration with --config <file>\n", flags.Arg(0))
@@ -359,10 +423,10 @@ func stateAddress(configPath string, port int) (string, error) {
 }
 
 func runLegions(_ context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlags("legions", stderr)
+	flags := newFlags("legions", "usage: legion legions [flags]", stderr)
 	asJSON := flags.Bool("json", false, "print the registry as JSON")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
 	}
 
 	legions, err := registryPath()
@@ -399,12 +463,12 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	if len(args) >= 2 && !strings.HasPrefix(args[0], "-") && !strings.HasPrefix(args[1], "-") {
 		return runIssueStatus(ctx, args[0], args[1], args[2:], stdout, stderr)
 	}
-	flags := newFlags("status", stderr)
-	if err := flags.Parse(args); err != nil {
-		return 2
+	flags := newFlags("status", "usage: legion status <team>\n       "+issueStatusSynopsis, stderr)
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
 	}
 	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: legion status <team>")
+		flags.Usage()
 		return 2
 	}
 	team := flags.Arg(0)
@@ -443,12 +507,12 @@ func dialHost(bind string) string {
 }
 
 func runRestart(ctx context.Context, args []string, _, stderr io.Writer) int {
-	flags := newFlags("restart", stderr)
-	if err := flags.Parse(args); err != nil {
-		return 2
+	flags := newFlags("restart", "usage: legion restart <team>", stderr)
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
 	}
 	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: legion restart <team>")
+		flags.Usage()
 		return 2
 	}
 	team := flags.Arg(0)
@@ -527,10 +591,29 @@ func get(ctx context.Context, url string) ([]byte, error) {
 	return body, nil
 }
 
-func newFlags(name string, stderr io.Writer) *flag.FlagSet {
+// newFlags is `legion <name>`'s flag set, reporting on stderr. Its Usage, which Parse prints for
+// -h, -help and --help and after a flag it refuses, is usage and then every flag.
+func newFlags(name, usage string, stderr io.Writer) *flag.FlagSet {
 	flags := flag.NewFlagSet("legion "+name, flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	flags.Usage = func() {
+		fmt.Fprintln(stderr, usage)
+		flags.PrintDefaults()
+	}
 	return flags
+}
+
+// parseFlags parses args into flags. When ok is false Parse has printed flags' Usage, and code
+// is the command's exit: 0 for a help request, 2 for a flag it refused.
+func parseFlags(flags *flag.FlagSet, args []string) (code int, ok bool) {
+	switch err := flags.Parse(args); {
+	case err == nil:
+		return 0, true
+	case errors.Is(err, flag.ErrHelp):
+		return 0, false
+	default:
+		return 2, false
+	}
 }
 
 // processEnvironment is this process's environment by name, the last entry for a name winning as
