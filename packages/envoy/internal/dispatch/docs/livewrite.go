@@ -372,9 +372,9 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 // lock across its callback, so a deletion landing after it is not reported, and a deletion
 // landing before it is. That point is the room as of one moment under its document lock
 // (readLive), since the room's peers write it while the check walks it, and the walk
-// (pmdoc.AuthoredTextRuns) takes no lock. The room's update observer has already brought its
-// replica up to date with this write, so the check reads the write's own blocks rather than a copy
-// of the whole document. It is deliberately taken without a Yjs transaction of its own: an empty
+// (pmdoc.AuthoredTextRuns) takes no lock. The reads' replica takes only what the room gained since
+// the room's last read, so the check walks the write's own blocks rather than copying the whole
+// document first. It is deliberately taken without a Yjs transaction of its own: an empty
 // transaction still fires the room's update observers, so it would put an empty update through
 // ygo's persistence worker - a durable doc_updates row - on every edit.
 func (s *Service) recordPublishedLoss(write *liveWrite) {

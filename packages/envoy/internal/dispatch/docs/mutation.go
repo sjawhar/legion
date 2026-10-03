@@ -1062,11 +1062,12 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	// only with that update's text. The room itself is read as of one moment under its document
 	// lock (liveTree), as a peer or service write holds that lock while it applies and a direct
 	// walk of the live tree takes none. The locks are taken in one order - the state lock, then the
-	// replica's, which a read only tries (readLive), then the document's - and nothing reverses
-	// it: the update observer releases the replica's lock before it takes the state lock
-	// (recordUpdateClass), and only a Yjs transaction's own function holds a document's lock, which
-	// takes neither. The read is taken inside the Apply that loads and holds the room, as docTree
-	// reads it: a room looked up again once that Apply returned can have been evicted in between.
+	// reads' replica's, which a read only tries (readLive), then the document's - and nothing
+	// reverses it: the update observer never takes the reads' replica, and takes the state lock
+	// only once it has released its own (recordUpdateClass); only a Yjs transaction's own function
+	// holds a document's lock, and it takes neither. The read is taken inside the Apply that loads
+	// and holds the room, as docTree reads it: a room looked up again once that Apply returned can
+	// have been evicted in between.
 	var tree *pmdoc.Node
 	var capture versionPending
 	var authors []model.Actor
