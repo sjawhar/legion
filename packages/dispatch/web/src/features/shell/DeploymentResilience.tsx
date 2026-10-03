@@ -11,6 +11,9 @@ import {
 } from "../../theme/classes";
 import * as MarkdownBody from "../refs/MarkdownBody";
 
+// The session's one reload for a chunk that failed to download. `web/index.html`'s inline script
+// spends the same key for an entry chunk that failed before any of this bundle ran, so a page
+// reloads once per session whichever of the two failed first.
 const CHUNK_RELOAD_STORAGE_KEY = "dispatch.reloaded-for-chunk";
 const VERSION_CHECK_INTERVAL_MS = 60_000;
 const INDEX_ASSET_PATH = /^\/assets\/index-[^/]+\.js$/;

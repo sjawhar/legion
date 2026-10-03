@@ -3,7 +3,6 @@ package prompts
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -22,9 +21,8 @@ import (
 // Go daemon's text is the role's own part, then the part every architect or every phase worker
 // shares.
 func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
-	rolesDir := completeRolesDir(t)
 	stateDir := t.TempDir()
-	composer, err := New(rolesDir, stateDir)
+	composer, err := New(stateDir)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -65,6 +63,17 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 			if !reflect.DeepEqual(parts.RolePromptPaths, want) {
 				t.Fatalf("RolePromptPaths = %q, want %q", parts.RolePromptPaths, want)
 			}
+			// A pane reads each shared part from the snapshot by path, so the snapshot holds the
+			// embedded part byte for byte.
+			for _, part := range tc.shared {
+				got, err := os.ReadFile(filepath.Join(stateDir, "prompts", "shared", part))
+				if err != nil {
+					t.Fatalf("read the snapshot's %s: %v", part, err)
+				}
+				if string(got) != rolePart(t, part) {
+					t.Errorf("the snapshot's %s is not the embedded part", part)
+				}
+			}
 			// The runtimes join the parts byte for byte ($(cat …)), so the role's part and the shared
 			// one must meet at one blank line, as the paragraphs within a part do.
 			var text strings.Builder
@@ -93,102 +102,15 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 	}
 }
 
-// A daemon must fail before any worker is launched when the configured role-prompt directory is
-// incomplete; otherwise a production launch reports an opaque shell-level cat failure.
-func TestNewRefusesEveryMissingSharedRolePrompt(t *testing.T) {
-	rolesDir := t.TempDir()
-	_, err := New(rolesDir, t.TempDir())
-	if err == nil {
-		t.Fatal("New succeeded with no shared role prompt files")
-	}
-	if !strings.Contains(err.Error(), rolesDir) {
-		t.Errorf("New error = %q, want directory %q", err, rolesDir)
-	}
-	for _, name := range []string{
-		"architect-root.md", "controller-root.md", "architect.md", "planner.md", "implementer.md",
-		"tester.md", "reviewer.md", "merger.md", "core/common.md", "core/planner.md",
-		"core/implementer.md", "core/tester.md", "core/reviewer.md", "core/oracle.md",
-		"mechanics/headless.md", "mechanics/interactive.md",
-	} {
-		if !strings.Contains(err.Error(), name) {
-			t.Errorf("New error = %q, want missing file %q", err, name)
-		}
-	}
-}
-
-// A release binary runs independently of its build checkout. With no override, it must resolve
-// its prompt bundle next to itself and refuse that exact directory when it is absent.
-func TestResolveRolePromptsDirUsesTheBinarysAdjacentBundle(t *testing.T) {
-	t.Run("a copied binary reads the sidecar bundle", func(t *testing.T) {
-		binary := copyTestBinary(t)
-		rolesDir := filepath.Join(filepath.Dir(binary), "role-prompts")
-		writeCompleteRolesDir(t, rolesDir)
-
-		if got := resolveRolePromptsDirInCopiedBinary(t, binary); got != "dir="+rolesDir {
-			t.Fatalf("ResolveRolePromptsDir = %q, want %q", got, "dir="+rolesDir)
-		}
-	})
-
-	t.Run("a copied binary refuses the missing sidecar bundle", func(t *testing.T) {
-		binary := copyTestBinary(t)
-		rolesDir := filepath.Join(filepath.Dir(binary), "role-prompts")
-		got := resolveRolePromptsDirInCopiedBinary(t, binary)
-
-		for _, want := range append([]string{"error=Role prompts directory " + rolesDir, "LEGION_ROLE_PROMPTS_DIR"}, sharedPromptFiles...) {
-			if !strings.Contains(got, want) {
-				t.Errorf("ResolveRolePromptsDir = %q, want %q", got, want)
-			}
-		}
-	})
-}
-
-// Once boot validates a bundle, panes read its state-directory snapshot. Removing the deployment
-// bundle afterwards must not turn a future pane launch into a missing-prompt failure.
-func TestNewSnapshotsSharedRolePromptsBeforeComposing(t *testing.T) {
-	rolesDir := completeRolesDir(t)
+// The planner this daemon composes runs the gap analyst before it drafts and the plan reviewer
+// after (LEGION-421). Only the shared headless residue dispatches them: the core is also composed
+// with the interactive fragment, whose subagent dispatches nothing, and the Go daemon's own parts
+// leave the checks to the shared text.
+func TestTheComposedPlannerDispatchesItsPlanChecksFromTheHeadlessResidue(t *testing.T) {
 	stateDir := t.TempDir()
-	composer, err := New(rolesDir, stateDir)
+	composer, err := New(stateDir)
 	if err != nil {
 		t.Fatalf("New: %v", err)
-	}
-	if err := os.RemoveAll(rolesDir); err != nil {
-		t.Fatalf("remove the deployment bundle: %v", err)
-	}
-
-	parts, err := composer.Compose(claim.RolePlanner, false)
-	if err != nil {
-		t.Fatalf("Compose: %v", err)
-	}
-	want := []string{
-		filepath.Join(stateDir, "prompts", "shared", "core", "common.md"),
-		filepath.Join(stateDir, "prompts", "shared", "core", "planner.md"),
-		filepath.Join(stateDir, "prompts", "shared", "mechanics", "headless.md"),
-		filepath.Join(stateDir, "prompts", "shared", "planner.md"),
-		filepath.Join(stateDir, "prompts", "go", "planner.md"),
-		filepath.Join(stateDir, "prompts", "go", "worker-common.md"),
-	}
-	if !reflect.DeepEqual(parts.RolePromptPaths, want) {
-		t.Fatalf("RolePromptPaths = %q, want %q", parts.RolePromptPaths, want)
-	}
-	for _, path := range parts.RolePromptPaths {
-		if _, err := os.ReadFile(path); err != nil {
-			t.Errorf("read snapshot %s: %v", path, err)
-		}
-	}
-}
-
-// The planner this daemon composes from the shipped bundle runs the gap analyst before it drafts
-// and the plan reviewer after (LEGION-421), each a task agent the plugin ships in agents/, where Oh
-// My Pi finds it in a pane and in a pod; an agent missing there is one the boot gate refuses by
-// name. Only the shared headless residue dispatches them: the core is also composed with the
-// interactive fragment, whose subagent dispatches nothing, and the Go daemon's own parts leave the
-// checks to the shared text. The boot gate reads the same references (RoleReferences).
-func TestTheComposedPlannerDispatchesItsPlanChecksToShippedAgents(t *testing.T) {
-	plugin := filepath.Join("..", "..", "..", "pi-envoy")
-	stateDir := t.TempDir()
-	composer, err := New(filepath.Join(plugin, "roles"), stateDir)
-	if err != nil {
-		t.Fatalf("New on the shipped bundle: %v", err)
 	}
 	parts, err := composer.Compose(claim.RolePlanner, false)
 	if err != nil {
@@ -202,9 +124,11 @@ func TestTheComposedPlannerDispatchesItsPlanChecksToShippedAgents(t *testing.T) 
 			t.Fatalf("read %s: %v", path, err)
 		}
 		text.Write(body)
-		if err := dispatched.File(stateDir, path, "state"); err != nil {
-			t.Fatalf("references of %s: %v", path, err)
+		rel, err := filepath.Rel(stateDir, path)
+		if err != nil {
+			t.Fatal(err)
 		}
+		dispatched.Text(filepath.Join("state", rel), body)
 	}
 	gap := strings.Index(text.String(), "`task(agent=\"plan-gap-analyst\")`")
 	review := strings.Index(text.String(), "`task(agent=\"plan-reviewer\")`")
@@ -222,96 +146,53 @@ func TestTheComposedPlannerDispatchesItsPlanChecksToShippedAgents(t *testing.T) 
 		if !slices.Equal(files, residue) {
 			t.Errorf("task agent %s is dispatched by %q, want the headless residue %q alone", agent, files, residue)
 		}
-		if _, err := os.Stat(filepath.Join(plugin, "agents", agent+".md")); err != nil {
-			t.Errorf("task agent %s, dispatched by %q, is not shipped in the plugin's agents/: %v", agent, files, err)
-		}
-	}
-	gated, err := RoleReferences(filepath.Join(plugin, "roles"))
-	if err != nil {
-		t.Fatalf("RoleReferences on the shipped bundle: %v", err)
-	}
-	for _, agent := range want {
-		if files := gated[promptrefs.TaskAgents][agent]; !slices.Equal(files, []string{filepath.Join("roles", "planner.md")}) {
-			t.Errorf("the boot gate's references name task agent %s from %q, want roles/planner.md", agent, files)
-		}
 	}
 }
 
-func TestResolveRolePromptsDirInCopiedBinary(t *testing.T) {
-	if os.Getenv("LEGION_TEST_RESOLVE_ROLE_PROMPTS_DIR") != "1" {
-		return
-	}
-	dir, err := ResolveRolePromptsDir(nil)
-	if err != nil {
-		fmt.Printf("error=%v\n", err)
-		return
-	}
-	fmt.Printf("dir=%s\n", dir)
-}
-
-func copyTestBinary(t *testing.T) string {
-	t.Helper()
-	source, err := os.Executable()
-	if err != nil {
-		t.Fatalf("resolve test binary: %v", err)
-	}
-	body, err := os.ReadFile(source)
-	if err != nil {
-		t.Fatalf("read test binary: %v", err)
-	}
-	binary := filepath.Join(t.TempDir(), "legion")
-	if err := os.WriteFile(binary, body, 0o700); err != nil {
-		t.Fatalf("copy test binary: %v", err)
-	}
-	return binary
-}
-
-func resolveRolePromptsDirInCopiedBinary(t *testing.T, binary string) string {
-	t.Helper()
-	cmd := exec.Command(binary, "-test.run=^TestResolveRolePromptsDirInCopiedBinary$")
-	for _, variable := range os.Environ() {
-		if !strings.HasPrefix(variable, "LEGION_ROLE_PROMPTS_DIR=") {
-			cmd.Env = append(cmd.Env, variable)
-		}
-	}
-	cmd.Env = append(cmd.Env, "LEGION_TEST_RESOLVE_ROLE_PROMPTS_DIR=1")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run copied binary: %v\n%s", err, output)
-	}
-	return strings.Split(strings.TrimSpace(string(output)), "\n")[0]
-}
-
-// A state directory outlives the daemon binary that wrote its Go parts, so a boot of a newer daemon
-// finds the older daemon's words there. A part whose content is not the running binary's is
-// rewritten: a prompt that contradicts the daemon's own behaviour (who posts READY) is the defect,
-// and nothing treats these files as the operator's to edit (the operator's text is `instructions`).
-// A part already holding the running binary's content is left as it is, so an ordinary restart
-// writes nothing.
-func TestNewRewritesAGoPartTheRunningDaemonDidNotWrite(t *testing.T) {
-	rolesDir := completeRolesDir(t)
+// A state directory outlives the daemon binary that wrote its prompt snapshot, so a boot of a newer
+// daemon finds the older daemon's words there. A part whose content is not the running binary's is
+// rewritten, shared or the daemon's own: a prompt that contradicts the daemon's own behaviour (who
+// posts READY) is the defect, and nothing treats these files as the operator's to edit (the
+// operator's text is `instructions`). A part already holding the running binary's content is left
+// as it is, so an ordinary restart writes nothing.
+func TestNewRewritesAPartTheRunningDaemonDidNotWrite(t *testing.T) {
 	stateDir := t.TempDir()
-	if _, err := New(rolesDir, stateDir); err != nil {
+	if _, err := New(stateDir); err != nil {
 		t.Fatalf("first New: %v", err)
 	}
-	stale := filepath.Join(stateDir, "prompts", "go", "merger.md")
-	current := filepath.Join(stateDir, "prompts", "go", "tester.md")
-	if err := os.WriteFile(stale, []byte("an older daemon's merger prompt\n"), 0o600); err != nil {
-		t.Fatalf("write the older part: %v", err)
+	snapshot := func(name string) string { return filepath.Join(stateDir, "prompts", name) }
+	embedded := map[string]string{
+		"go/merger.md":          "go/merger.md",
+		"go/tester.md":          "go/tester.md",
+		"shared/merger.md":      "roles/merger.md",
+		"shared/core/tester.md": "roles/core/tester.md",
+	}
+	stale := []string{"go/merger.md", "shared/merger.md"}
+	current := []string{"go/tester.md", "shared/core/tester.md"}
+	for _, name := range stale {
+		if err := os.WriteFile(snapshot(name), []byte("an older daemon's "+name+"\n"), 0o600); err != nil {
+			t.Fatalf("write the older part: %v", err)
+		}
 	}
 	written := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	if err := os.Chtimes(current, written, written); err != nil {
-		t.Fatalf("date the current part: %v", err)
+	for _, name := range current {
+		if err := os.Chtimes(snapshot(name), written, written); err != nil {
+			t.Fatalf("date the current part: %v", err)
+		}
 	}
-	if _, err := New(rolesDir, stateDir); err != nil {
+	if _, err := New(stateDir); err != nil {
 		t.Fatalf("second New: %v", err)
 	}
-	for _, name := range []string{"merger.md", "tester.md"} {
-		want, err := goParts.ReadFile("go/" + name)
-		if err != nil {
-			t.Fatalf("read embedded %s: %v", name, err)
+	for name, source := range embedded {
+		parts := goParts
+		if strings.HasPrefix(source, "roles/") {
+			parts = roleParts
 		}
-		got, err := os.ReadFile(filepath.Join(stateDir, "prompts", "go", name))
+		want, err := parts.ReadFile(source)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", source, err)
+		}
+		got, err := os.ReadFile(snapshot(name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
@@ -319,27 +200,9 @@ func TestNewRewritesAGoPartTheRunningDaemonDidNotWrite(t *testing.T) {
 			t.Errorf("%s after the second New = %q, want the running daemon's part", name, got)
 		}
 	}
-	if info, err := os.Stat(current); err != nil || !info.ModTime().Equal(written) {
-		t.Errorf("the part already holding the running daemon's content was written again: %v %v", info.ModTime(), err)
-	}
-}
-
-func completeRolesDir(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	writeCompleteRolesDir(t, dir)
-	return dir
-}
-
-func writeCompleteRolesDir(t *testing.T, dir string) {
-	t.Helper()
-	for _, name := range sharedPromptFiles {
-		path := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatalf("make prompt directory: %v", err)
-		}
-		if err := os.WriteFile(path, []byte("# "+name+"\n"), 0o600); err != nil {
-			t.Fatalf("write prompt: %v", err)
+	for _, name := range current {
+		if info, err := os.Stat(snapshot(name)); err != nil || !info.ModTime().Equal(written) {
+			t.Errorf("%s, already holding the running daemon's content, was written again: %v", name, err)
 		}
 	}
 }
