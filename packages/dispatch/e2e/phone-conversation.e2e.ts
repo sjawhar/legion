@@ -1,7 +1,14 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { holdPosts, refusePosts } from "./agents";
-import { createComment, createIssue, createMessage, createProject, resolveComment } from "./api";
+import {
+  createComment,
+  createIssue,
+  createMessage,
+  createProject,
+  patchIssue,
+  resolveComment,
+} from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -31,6 +38,28 @@ async function openThread(page: Page, commentId: string): Promise<Locator> {
 async function leaveThread(page: Page): Promise<void> {
   await threadView(page).getByRole("button", { name: "Back" }).click();
   await expect(threadView(page)).toHaveCount(0);
+}
+
+/** Fails unless `pill` and `region` share no point on screen: the pill covers none of it. */
+async function expectUncovered(pill: Locator, region: Locator): Promise<void> {
+  const covering = await pill.boundingBox();
+  const covered = await region.boundingBox();
+  expect(covering).not.toBeNull();
+  expect(covered).not.toBeNull();
+  if (covering === null || covered === null) return;
+  const apart =
+    covering.x + covering.width <= covered.x ||
+    covered.x + covered.width <= covering.x ||
+    covering.y + covering.height <= covered.y ||
+    covered.y + covered.height <= covering.y;
+  expect(apart, `the pill at ${JSON.stringify(covering)} covers ${JSON.stringify(covered)}`).toBe(
+    true
+  );
+}
+
+/** Scrolls the page to its foot, past the latest turn, as a reader browsing older turns does. */
+async function scrollToOldest(page: Page): Promise<void> {
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
 }
 
 test.beforeEach(async () => {
@@ -411,6 +440,92 @@ test("on a phone, a thread reply the server never answers is refused at the dead
     expect(send.posts()).toBe(1);
     await back.click();
     await expect(threadView(page)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// On a phone the docked composer sits at the foot of the screen, and a refusal's row grows it
+// upward. `Jump to latest` shows while the reader is scrolled down, which is when they reach for
+// the refusal's Retry, or a closed issue's Discard draft, so it never sits over the composer.
+test("on a phone, Jump to latest covers none of the docked composer's Retry or Discard draft", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Pill over a refusal" });
+  for (let index = 0; index < 15; index += 1) {
+    await createMessage(issue.key, { body: `Older turn ${index}` }, session);
+  }
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(page.getByText("Older turn 14")).toBeVisible();
+    const form = page.getByRole("form", { name: "Comment composer" });
+    const field = form.getByLabel("Comment");
+    const jump = page.getByTestId("jump-to-latest");
+    const comments = `**/api/v1/issues/${issue.key}/comments`;
+    const refuse = await refusePosts(page, comments);
+    await field.fill("Kept through every refusal");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+
+    await scrollToOldest(page);
+    await expect(jump).toBeVisible();
+    await expectUncovered(jump, form);
+    // Retry, pressed while the pill shows, goes out; the issue closes under it, and the server's
+    // refusal leaves Discard draft in its place.
+    await page.unroute(comments);
+    const send = await holdPosts(page, comments);
+    await form.getByRole("button", { name: "Retry" }).click();
+    await expect(field).toBeDisabled();
+    expect(send.posts()).toBe(1);
+    await patchIssue(issue.key, { status: "done" }, { login: "bob" });
+    await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
+    send.release();
+    await expect(form.getByText("Couldn't send — issue is closed")).toBeVisible();
+
+    await scrollToOldest(page);
+    await expect(jump).toBeVisible();
+    await expectUncovered(jump, form);
+    await form.getByRole("button", { name: "Discard draft" }).click();
+    await expect(form).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A thread opened full-screen covers the Conversation, and the pill acts on the Conversation's
+// place, which the reader cannot see from the thread: it stays off the thread view, where it would
+// sit over the thread's own reply composer, and comes back with the Conversation on Back.
+test("on a phone, Jump to latest stays off a thread opened over the Conversation", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Pill over a thread" });
+  const oldest = await createComment(issue.key, { body: "Oldest comment" });
+  for (let index = 0; index < 15; index += 1) {
+    await createMessage(issue.key, { body: `Newer turn ${index}` }, session);
+  }
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(page.getByText("Newer turn 14")).toBeVisible();
+    const jump = page.getByTestId("jump-to-latest");
+    await scrollToOldest(page);
+    await expect(jump).toBeVisible();
+
+    await openThread(page, oldest.id);
+    await expect(jump).toHaveCount(0);
+    await leaveThread(page);
+    await scrollToOldest(page);
+    await expect(jump).toBeVisible();
   } finally {
     await alice.close();
   }

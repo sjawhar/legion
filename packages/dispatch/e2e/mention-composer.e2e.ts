@@ -320,10 +320,6 @@ test("a docked send out when its issue closes keeps the draft and shows the refu
       "aria-disabled",
       "true"
     );
-    // On a phone the page has scrolled under the docked composer, and `Jump to latest` floats
-    // over its lower rows; back at the latest turn, as a reader taps it, the pill goes.
-    await page.evaluate(() => window.scrollTo(0, 0));
-    await expect(page.getByTestId("jump-to-latest")).toHaveCount(0);
     await form.getByRole("button", { name: "Discard draft" }).click();
     await expect(page.getByRole("form", { name: "Comment composer" })).toHaveCount(0);
   } finally {
