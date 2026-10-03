@@ -9,10 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"net/textproto"
 	"os"
 	"strings"
 	"testing"
@@ -23,6 +21,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
+	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -222,30 +221,12 @@ func dispatchRequest(t *testing.T, handler http.Handler, method, target string, 
 
 func multipartRequest(t *testing.T, handler http.Handler, target string, fields map[string]string, filename, contentType string, content []byte, login string) *httptest.ResponseRecorder {
 	t.Helper()
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	for key, value := range fields {
-		if err := writer.WriteField(key, value); err != nil {
-			t.Fatalf("write multipart field: %v", err)
-		}
-	}
-	header := textproto.MIMEHeader{}
-	header.Set("Content-Disposition", `form-data; name="file"; filename="`+filename+`"`)
-	if contentType != "" {
-		header.Set("Content-Type", contentType)
-	}
-	part, err := writer.CreatePart(header)
+	body, bodyType, err := apitest.MultipartUpload(fields, filename, contentType, content)
 	if err != nil {
-		t.Fatalf("create multipart file part: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := part.Write(content); err != nil {
-		t.Fatalf("write multipart file: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("finish multipart request: %v", err)
-	}
-	request := httptest.NewRequest(http.MethodPost, target, &body)
-	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request := httptest.NewRequest(http.MethodPost, target, body)
+	request.Header.Set("Content-Type", bodyType)
 	if login != "" {
 		request.Header.Set("X-Dispatch-User", login)
 	}
