@@ -13,12 +13,17 @@ import (
 // (dispatch://AGENTC-393/artifact/plan-overview-md): a machine request object naming login_hint
 // (the approving operator) and one launcher_credential detail.
 type machineLoginBody struct {
+	// The machine's signed login request: a compact ES256 JWS carrying the machine's new public
+	// key, signed with that key, whose login_hint names the person who must approve the login.
 	Request string `json:"request"`
 }
 
+// machineLoginResponse is POST /v1/launcher-credentials's answer.
 type machineLoginResponse struct {
+	// The opaque id the machine polls the login by; only the machine knows it.
 	PendingID string `json:"pending_id"`
-	Code      string `json:"code"`
+	// The XXXX-XXXX confirmation code the machine shows and the approver types into Dispatch.
+	Code string `json:"code"`
 }
 
 // machineLoginStateResponse is GET /v1/launcher-credentials/{pending}'s answer.

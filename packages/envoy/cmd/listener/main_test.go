@@ -2477,6 +2477,63 @@ func TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException(t *testing.
 	}
 }
 
+// A role message can reach a listener whose session cache has not yet seen the holder another
+// listener registered and gave the role a moment ago: during a rolling deploy the old task and the
+// replacement share the machine's role lane, and each takes some of its messages. The holder is live
+// in the session bucket, so the message is forwarded to it and the claim stays. Releasing the claim
+// on the cache's word reports this message delivery_failed and leaves every later one no_holder until
+// the holder claims again.
+func TestListenerDeliveryHandler_RoleLaneForwardsToAHolderItsSessionCacheHasNotSeen(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const (
+		holderID = "ses_unseen_holder"
+		role     = "unseen-holder"
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := harness.sessions.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("warm the session cache: %v", err)
+	}
+	harness.sessions.StopWatch()
+	claimant, err := session.OpenSessionRegistry(harness.client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open the claimant's session registry: %v", err)
+	}
+	if err := claimant.Put(holderID, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register the holder: %v", err)
+	}
+	if _, err := harness.registry.SetRole(holderID, "test-machine", role, false); err != nil {
+		t.Fatalf("claim the role: %v", err)
+	}
+	var forwardedTo []string
+	cfg := harness.config
+	cfg.forwardRole = func(subject string, _ contracts.Envelope, _ time.Duration) error {
+		forwardedTo = append(forwardedTo, subject)
+		return nil
+	}
+	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "unseen-holder-delivery")
+	item.Payload = `{"type":"worker-queued"}`
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush exception probe: %v", err)
+	}
+
+	coreNATSDeliveryHandler(cfg)(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+	if len(forwardedTo) != 1 || forwardedTo[0] != contracts.AgentSubject(holderID) {
+		t.Fatalf("the role message was forwarded to %v, want once to %s", forwardedTo, contracts.AgentSubject(holderID))
+	}
+	if message, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("a forwarded role message emitted an exception (or the probe failed): %v %v", message, err)
+	}
+	if holder, err := harness.registry.RoleHolder(role); err != nil || holder != holderID {
+		t.Fatalf("the claim after the delivery = %q, %v; want %s's", holder, err, holderID)
+	}
+}
+
 func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "forward-publish-error"
