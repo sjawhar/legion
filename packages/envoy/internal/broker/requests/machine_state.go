@@ -51,9 +51,13 @@ var (
 // proof.Verifier's own retention margin.
 const jtiRetentionMargin = time.Minute
 
+// SecretDecision is how the rules decided one name of a request.
 type SecretDecision struct {
-	Name     string `json:"name"`
+	// The secret's name.
+	Name string `json:"name"`
+	// "automatic", "approval" or "deny".
 	Decision string `json:"decision"`
+	// "inject" or "proxy".
 	Delivery string `json:"delivery"`
 	Source   string `json:"-"`
 }

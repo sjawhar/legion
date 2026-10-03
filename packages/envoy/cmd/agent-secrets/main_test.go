@@ -7,6 +7,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -189,11 +190,17 @@ func writeJSON(w http.ResponseWriter, v any) {
 // subcommand.
 func newKeyDir(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
 	key, err := proof.NewKey()
 	if err != nil {
 		t.Fatalf("proof.NewKey: %v", err)
 	}
+	return writeKeyDir(t, key, testEnrollmentID)
+}
+
+// writeKeyDir writes key as key.pem and enrollmentID as the enrollment file into a new key dir.
+func writeKeyDir(t *testing.T, key *ecdsa.PrivateKey, enrollmentID string) string {
+	t.Helper()
+	dir := t.TempDir()
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
@@ -202,7 +209,7 @@ func newKeyDir(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, "key.pem"), pemBytes, 0o600); err != nil {
 		t.Fatalf("write key.pem: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "enrollment"), []byte(testEnrollmentID+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "enrollment"), []byte(enrollmentID+"\n"), 0o600); err != nil {
 		t.Fatalf("write enrollment: %v", err)
 	}
 	return dir

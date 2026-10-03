@@ -106,9 +106,10 @@ type SessionInfo struct {
 	RegisteredAt string `json:"registered_at"`
 }
 
-// The codes a helper answers a request it refuses with. Every one carries a doc comment: the
-// broker's generated error reference (scripts/docs/broker/refgen) prints it and refuses a code
-// without one.
+// The codes a helper answers a request it refuses with. Every one carries a doc comment, and every
+// refusal the helper builds names one of them: the broker's generated error reference
+// (cmd/broker-refgen) prints them and refuses a code without a comment or a refusal with any other
+// code.
 const (
 	// CodeNotASession answers sign, sign-request or unregister from a process that descends from no
 	// session `agent-secrets register` registered.
@@ -135,6 +136,12 @@ const (
 	// CodeUnenrollFailed answers an unenroll-box the broker refused or could not be asked; the
 	// error says why.
 	CodeUnenrollFailed = "UNENROLL_FAILED"
+	// CodeKeygen answers a register the helper could not make the new session's signing key for;
+	// the error says why.
+	CodeKeygen = "KEYGEN"
+	// CodeSign answers sign or sign-request when signing the proof or the request object failed;
+	// the error says why.
+	CodeSign = "SIGN"
 )
 
 const maxLine = 64 << 10

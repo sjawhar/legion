@@ -1711,11 +1711,32 @@ configuration that means nothing any more. It also refuses: a missing required v
 `BROKER_PUBLIC_URL` that isn't an absolute URL with no path; both or neither of
 `BROKER_RULES_FILE`/`BROKER_RULES_S3_URI` set; a `BROKER_RULES_S3_URI` without an `s3://` prefix;
 exactly one of `BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a `_SECONDS` variable
-that isn't a whole number between 1 and its max (non-numeric fails the same check as out of
-range). `cmd/broker/main.go` reads one thing `config.Load` does not: when `BROKER_RULES_FILE`
+that isn't a whole number between the min and max its row of Load's `ints` table gives
+(non-numeric fails the same check as out of range). `cmd/broker/main.go` reads one thing
+`config.Load` does not: when `BROKER_RULES_FILE`
 selects local rules (rather than `BROKER_RULES_S3_URI`, which pairs with AWS Secrets Manager for
 secret values), it requires `BROKER_FAKE_SECRETS_FILE` and refuses to start without it — a
 local-dev-only path. The broker takes no flags, and refuses any flag it is given.
+
+The docs site's broker reference pages are generated at site build from this source by
+`cmd/broker-refgen` (through `docs/site/generators/broker-reference.sh`), which fails the build on
+an undocumented item: every `routes()` row needs a comment above it saying what the route does,
+every adapter a reader label in refgen's `credentialLabels`, every handler's success answer a named
+response struct of `internal/broker/api` passed to `writeJSON` (never a map literal; the one success
+without a body is `w.WriteHeader(http.StatusNoContent)`, and any other `WriteHeader` status is
+refused), every JSON field of a request or response body (and of an object it holds) a doc comment
+saying what it is, a response type that is one of several answers of a route a doc comment saying
+when (a branch on a boolean the route passes as `true` or `false` counts only where it is taken,
+so approve and deny each document their own answer), every `Config` field a doc comment
+opening with the `BROKER_*` variables it reads and a colon (`BROKER_FAKE_SECRETS_FILE`'s is in
+`cmd/broker/main.go`; any `BROKER_*` name `config` or `cmd/broker` spells out as a string counts as
+read), every `removedVars` row a reason, and every helper `Code*` constant and `agent-secrets`
+`exit*` constant a comment. It also checks where those codes are produced: every helper `Response`
+literal that is not
+`OK: true` must name its fields and set `Code` to a documented `Code*` constant, and every
+`int`-returning function in `cmd/agent-secrets` (and every `os.Exit` there) may return only `0`, `1`,
+a documented `exit*` constant or another such function's result. The CLI reference is the built
+binaries' own `--help`, so every form must answer `-h` with exit 0.
 
 `internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
@@ -1894,11 +1915,14 @@ for Dispatch's relay: it sends the broker's UI routes the UI bearer and a login,
 when a signed-in human clicks Approve) run a whole local broker stack by hand for manual smoke
 testing; neither ships in `docker/Dockerfile`, which builds exactly `envoy-listener`,
 `envoy-dispatch`, `envoy-broker`, and `agent-secrets`. `dev-broker.sh` prints the exports a second
-shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_UI_TOKEN`, `AGENT_SECRETS_APPROVER`). Each
-`dev-broker.sh` run creates and drops its own isolated database on the shared `dispatch-pg`
-container, so concurrent instances never see each other's enrollments, requests or grants, and
-listens on the port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`;
-AGENTC-833), so concurrent instances can never collide on a shared port either.
+shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_UI_TOKEN`, `AGENT_SECRETS_APPROVER`, the helper's
+`AGENT_SECRETS_HELPER_SOCK` and `AGENT_SECRETS_OPERATOR_FILE`, both in its workdir, where it writes
+the operator file, and `DEV_BROKER_DIR`, the workdir itself). Each `dev-broker.sh` run creates
+and drops its own isolated database, on the shared `dispatch-pg` container or, with
+`DEV_BROKER_POSTGRES_URL` set, through `psql` on the server that URL names (no Docker), so
+concurrent instances never see each other's enrollments, requests or grants, and listens on the
+port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`; AGENTC-833), so
+concurrent instances can never collide on a shared port either.
 `dev-broker.test.sh` proves both kinds of isolation with fakes (no real Postgres or network) and
 runs in CI's `envoy-go` job.
 
