@@ -142,6 +142,10 @@ func resolveEdges(ctx context.Context, q Queryer, query Query) ([]resolvedEdge, 
 			edge.Excerpt = &model.GraphExcerpt{Text: text.HeadRunes(node.text, excerptRunes)}
 		}
 		if query.Direction == "in" && row.kind == "mentions" && row.otherKind == "artifact" &&
+			!row.excerptReady {
+			edge.ExcerptPending = true
+		}
+		if query.Direction == "in" && row.kind == "mentions" && row.otherKind == "artifact" &&
 			row.excerptReady && row.excerptText != "" {
 			edge.Excerpt = &model.GraphExcerpt{BlockID: row.excerptBlockID, Text: row.excerptText}
 		}

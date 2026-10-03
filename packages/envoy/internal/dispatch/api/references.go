@@ -65,6 +65,12 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	if query.Direction == "in" {
+		if err := s.documentMentionExcerpts(r.Context(), query, edges); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	WriteJSON(w, http.StatusOK, model.GraphReferences{Node: node, Edges: edges})
 }
 
@@ -110,6 +116,47 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 		query.Since = &value
 	}
 	return query, ref, nil
+}
+
+// documentMentionExcerpts keeps unbackfilled document rows on their pre-cutover read path while
+// the online backfill records their stored excerpts.
+func (s *server) documentMentionExcerpts(ctx context.Context, query refs.Query, edges []model.GraphEdge) error {
+	type rendered struct {
+		markdown string
+		blocks   []model.ArtifactBlock
+	}
+	documents := make(map[string]rendered)
+	for index := range edges {
+		edge := &edges[index]
+		if !edge.ExcerptPending {
+			continue
+		}
+		document, loaded := documents[edge.Node.ID]
+		if !loaded {
+			markdown, blocks, err := s.deps.Docs.TextWithBlocks(ctx, edge.Node.ID)
+			if err != nil {
+				return fmt.Errorf("render document %s for reference excerpt: %w", edge.Node.ID, err)
+			}
+			document = rendered{markdown: markdown, blocks: blocks}
+			documents[edge.Node.ID] = document
+		}
+		for _, located := range text.ExtractAt(document.markdown, s.deps.ServerURL) {
+			if located.Kind != query.Kind || refs.ToID(located.Ref) != query.ID {
+				continue
+			}
+			for _, block := range document.blocks {
+				if block.From <= located.Offset && located.Offset < block.To {
+					edge.Excerpt = &model.GraphExcerpt{
+						BlockID: block.ID,
+						Text:    text.HeadRunes(document.markdown[block.From:block.To], refs.DocumentExcerptRunes),
+					}
+					break
+				}
+			}
+			break
+		}
+	}
+	return nil
 }
 
 func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {

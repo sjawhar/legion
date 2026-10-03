@@ -186,16 +186,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	needsExcerptBackfill, err := refs.NeedsDocumentExcerptBackfill(ctx, database.Pool)
-	if err != nil {
-		slog.Error("dispatch: check reference excerpts", "error", err)
-		os.Exit(1)
-	}
-	if needsExcerptBackfill {
-		slog.Error("dispatch: stored reference excerpts are incomplete; run envoy-dispatch backfill-reference-excerpts before serving")
-		os.Exit(1)
-	}
-
 	if err := seedRepoProjects(ctx, database, boot.RepoProjects); err != nil {
 		slog.Error("dispatch: seed repository projects", "error", err)
 		os.Exit(1)
@@ -285,6 +275,30 @@ func main() {
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
+	go func() {
+		for {
+			reports, err := documentService.BackfillReferenceExcerpts(ctx)
+			if err != nil {
+				if ctx.Err() == nil {
+					slog.Error("dispatch: backfill reference excerpts", "error", err)
+				}
+				return
+			}
+			for _, report := range reports {
+				if report.Err != nil {
+					slog.Warn("dispatch: reference excerpt backfill skipped document", "artifact_id", report.ArtifactID, "error", report.Err)
+				}
+			}
+			if len(reports) < docs.ReferenceExcerptBackfillBatch {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
+		}
+	}()
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {

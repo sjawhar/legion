@@ -8,6 +8,9 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
+// ReferenceExcerptBackfillBatch bounds the number of document rooms one online backfill pass loads.
+const ReferenceExcerptBackfillBatch = 100
+
 // ReferenceExcerptBackfill reports one document whose existing mention edges received stored
 // excerpts. A document that cannot load stays unprepared so the server does not serve a changed
 // backlink panel.
@@ -28,7 +31,8 @@ func (s *Service) BackfillReferenceExcerpts(ctx context.Context) ([]ReferenceExc
 		join refs r on r.from_kind = 'artifact' and r.from_id = a.id::text
 		where a.kind = 'doc' and not r.excerpt_ready
 		order by a.id::text
-	`)
+		limit $1
+	`, ReferenceExcerptBackfillBatch)
 	if err != nil {
 		return nil, fmt.Errorf("list document reference excerpts: %w", err)
 	}

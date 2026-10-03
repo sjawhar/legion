@@ -324,6 +324,34 @@ func TestReferencesReadDocumentExcerptsFromStoredData(t *testing.T) {
 	source := createProjectDocument(t, handler, "OPS", "Source notes",
 		"Opening context.\n\nThis source cites dispatch://"+target.Key+".\n")
 
+	if _, err := deps.Store.Pool.Exec(context.Background(), `
+		update refs set excerpt_ready = false
+		where from_kind = 'artifact' and from_id = $1
+	`, source.ID); err != nil {
+		t.Fatalf("mark source excerpt unprepared: %v", err)
+	}
+	fallbackFound := false
+	for _, edge := range graphEdges(t, handler, url.Values{"to": {"dispatch://" + target.Key}}).Edges {
+		if edge.Kind != "mentions" || edge.Node.ID != source.ID {
+			continue
+		}
+		if edge.Excerpt == nil || edge.Excerpt.BlockID == "" ||
+			edge.Excerpt.Text != "This source cites dispatch://"+target.Key+"." {
+			t.Fatalf("unprepared document mention excerpt = %#v", edge.Excerpt)
+		}
+		fallbackFound = true
+		break
+	}
+	if !fallbackFound {
+		t.Fatal("unprepared document mention was absent")
+	}
+	if _, err := deps.Store.Pool.Exec(context.Background(), `
+		update refs set excerpt_ready = true
+		where from_kind = 'artifact' and from_id = $1
+	`, source.ID); err != nil {
+		t.Fatalf("restore stored excerpt: %v", err)
+	}
+
 	wrappedDocs := &noTextWithBlocksDocs{API: deps.Docs}
 	deps.Docs = wrappedDocs
 	storedDataHandler := http.NewServeMux()
