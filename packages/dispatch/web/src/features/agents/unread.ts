@@ -3,7 +3,13 @@ import { useEffect, useRef, useState } from "react";
 
 import { api } from "../../api/client";
 import { userAgentStateQuery } from "../../api/queries";
-import type { Message, MessageRead, UserAgentState, UserAgentStates } from "../../api/types";
+import type {
+  Message,
+  MessageRead,
+  UserAgentState,
+  UserAgentStateInput,
+  UserAgentStates,
+} from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
 
 /** The badge an unread count wears wherever it shows: the navigation, the compact header, and
@@ -77,6 +83,41 @@ export function storeAgentState(
 }
 
 /**
+ * The write both read hooks make: `input(key)` for `sessionId`, once per `key`, whenever the
+ * server counts one of the session's replies unread, with the answer put into the shared
+ * agent-state query. A failed write is retried twice with backoff; if it still fails the key is
+ * forgotten, so it is sent again when the unread count or the key next changes or the view is
+ * reopened, rather than the badge staying up until the session replies once more.
+ */
+function useSendReadMark(
+  sessionId: string,
+  key: string | undefined,
+  input: (key: string) => UserAgentStateInput
+): void {
+  const queryClient = useQueryClient();
+  const unread = useQuery(userAgentStateQuery()).data?.[sessionId]?.unread_replies ?? 0;
+  // The key this view last sent, so a re-render does not send it again.
+  const marked = useRef<string | undefined>(undefined);
+  const { mutate } = useMutation({
+    mutationFn: (body: UserAgentStateInput) => api.putAgentState(sessionId, body),
+    onError: () => {
+      marked.current = undefined;
+    },
+    onSuccess: (next) => storeAgentState(queryClient, sessionId, next),
+    retry: 2,
+  });
+  useEffect(() => {
+    if (unread === 0 || key === undefined || marked.current === key) return;
+    marked.current = key;
+    mutate(input(key));
+  }, [input, key, mutate, unread]);
+}
+
+const readThrough = (newest: string): UserAgentStateInput => ({ read_through: newest });
+
+const readReplies = (ids: string): UserAgentStateInput => ({ read_replies: ids.split(" ") });
+
+/**
  * Records that the viewer has read a session's conversation, through the newest reply the
  * session wrote in `exchanges`, whenever the server counts one unread. Call it only where the
  * whole conversation is on screen: the expanded agent row and the live view. The mark is the
@@ -87,29 +128,7 @@ export function useMarkRepliesRead(
   sessionId: string,
   exchanges: readonly MessageRead[] | undefined
 ): void {
-  const queryClient = useQueryClient();
-  const states = useQuery(userAgentStateQuery());
-  const unread = states.data?.[sessionId]?.unread_replies ?? 0;
-  const newest = newestSessionReply(exchanges ?? [], sessionId);
-  // The reply this view last sent a read mark for, so a re-render does not send it again. A
-  // failed write is retried twice with backoff; if it still fails the mark is cleared, so it is
-  // sent again when the unread count or the newest reply next changes or the view is reopened,
-  // rather than the badge staying up until the session replies once more.
-  const marked = useRef<string | undefined>(undefined);
-  const { mutate } = useMutation({
-    mutationFn: (readThrough: string) =>
-      api.putAgentState(sessionId, { read_through: readThrough }),
-    onError: () => {
-      marked.current = undefined;
-    },
-    onSuccess: (next) => storeAgentState(queryClient, sessionId, next),
-    retry: 2,
-  });
-  useEffect(() => {
-    if (unread === 0 || newest === undefined || marked.current === newest) return;
-    marked.current = newest;
-    mutate(newest);
-  }, [mutate, newest, unread]);
+  useSendReadMark(sessionId, newestSessionReply(exchanges ?? [], sessionId), readThrough);
 }
 
 /**
@@ -121,28 +140,11 @@ export function useMarkRepliesRead(
  * these, stay unread until a view shows them.
  */
 export function useMarkShownRepliesRead(sessionId: string, replies: readonly Message[]): void {
-  const queryClient = useQueryClient();
-  const states = useQuery(userAgentStateQuery());
-  const unread = states.data?.[sessionId]?.unread_replies ?? 0;
-  // The same id test as `newestSessionReply`: a session id and a login never collide.
+  // The server's own test for an id it takes (`putUserAgentState`): a message whose author is the
+  // session, by kind and id. It refuses the whole write over one id that fails it.
   const shown = replies
-    .filter((reply) => reply.author.id === sessionId)
+    .filter((reply) => reply.author.kind === "session" && reply.author.id === sessionId)
     .map((reply) => reply.id)
     .join(" ");
-  // The replies this view last sent a mark for, kept and cleared as `useMarkRepliesRead` keeps
-  // its own: sent once per set of replies shown, and again after a write that failed.
-  const marked = useRef<string | undefined>(undefined);
-  const { mutate } = useMutation({
-    mutationFn: (ids: readonly string[]) => api.putAgentState(sessionId, { read_replies: ids }),
-    onError: () => {
-      marked.current = undefined;
-    },
-    onSuccess: (next) => storeAgentState(queryClient, sessionId, next),
-    retry: 2,
-  });
-  useEffect(() => {
-    if (unread === 0 || shown === "" || marked.current === shown) return;
-    marked.current = shown;
-    mutate(shown.split(" "));
-  }, [mutate, shown, unread]);
+  useSendReadMark(sessionId, shown === "" ? undefined : shown, readReplies);
 }
