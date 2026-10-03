@@ -204,7 +204,7 @@ func settleAll(pr record.PullRequest, settlements []namedSettlement) (record.Pul
 }
 
 func freshHead(sha string) record.PullRequest {
-	return record.PullRequest{HeadSHA: sha, Failing: []string{}, FailingStatuses: []string{}}
+	return record.PullRequest{HeadSHA: sha, Failing: []string{}}
 }
 
 // recreatedRecord is candidate as the listener record recreated after its TTL holds it: the new

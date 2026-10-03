@@ -21,6 +21,14 @@ type ControllerStore interface {
 	RegisterController(ctx context.Context, project string, generation uint64, session string, secretHash []byte, at time.Time) (bool, error)
 }
 
+// ControllerSecretRequest is `POST /legion/v1/controller/secret`'s body: the daemon API contract
+// `legion controller start` held the controller's plugin to before it asked (its own
+// DaemonAPIVersion, which its probe found the plugin's manifest declares). The daemon compares it
+// before it mints, since the mint revokes the incumbent controller.
+type ControllerSecretRequest struct {
+	PluginContract int `json:"pluginContract"`
+}
+
 // ControllerSecretResponse is `POST /legion/v1/controller/secret`'s answer: the capability the
 // controller's Oh My Pi registers with, and the project's design gate policy (`gates.design`),
 // which `legion controller start` tells the controller so its take comment promises a design
@@ -50,16 +58,31 @@ type ControllerRegisterResponse struct {
 // handleControllerSecret, packages/daemon/src/daemon/api/routes/controller.ts:61-88): the
 // operator's bearer, compared in constant time, buys a fresh controller capability. The mint
 // replaces the previous capability and its registration, and ends every controller grant, so the
-// controller it replaces stops being able to act the moment this answers — last start wins. Every
-// refusal is one log line and mints nothing.
+// controller it replaces stops being able to act the moment this answers — last start wins. A
+// request whose plugin contract is not this daemon's is refused before the mint, naming both: the
+// controller it would start is refused at registration, so minting for it would only cut the
+// running controller off (a `legion` binary replaced before its daemon restarted, or the other way
+// round). Every refusal is one log line and mints nothing.
 func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 	if !s.operatorAuthorized(r) {
 		s.log.Warn("api: refused a controller secret: no operator bearer, or the wrong one")
 		writeJSON(w, http.StatusForbidden, errorBody(invalidOperatorToken))
 		return
 	}
-	var req struct{}
+	var req ControllerSecretRequest
 	if !readBody(w, r, &req) {
+		return
+	}
+	if req.PluginContract != DaemonAPIVersion {
+		s.log.Warn("api: refused a controller secret: legion controller start holds the plugin to another daemon API contract",
+			"pluginContract", req.PluginContract, "daemonApiVersion", DaemonAPIVersion)
+		named := "names no daemon API contract"
+		if req.PluginContract != 0 {
+			named = fmt.Sprintf("holds the controller's pi-legion-envoy to daemon API contract %d", req.PluginContract)
+		}
+		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
+			"legion controller start %s; this daemon requires %d: run the legion built with this daemon",
+			named, DaemonAPIVersion)))
 		return
 	}
 	secret := rand.Text()
@@ -80,7 +103,7 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 // req's session as the project's controller when the token is the current controller capability,
 // and answers the one refusal an unknown token gets otherwise. No boot gate checks the operator's
 // Oh My Pi — the daemon gates only the panes it launches — so a controller whose plugin speaks
-// another Go daemon API contract is refused here, naming both, and nothing is recorded. The
+// another daemon API contract is refused here, naming both, and nothing is recorded. The
 // registration is issued a secret of its own, persisted by its hash before this answers, which
 // the session's controller grants authenticate with.
 func (s *server) registerController(w http.ResponseWriter, r *http.Request, req claim.RegisterRequest) {
@@ -97,11 +120,11 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 		writeJSON(w, claim.InvalidBootToken.Status, claim.InvalidBootToken)
 		return
 	}
-	if req.PluginContract != GoDaemonAPIVersion {
-		s.log.Warn("api: refused a controller registration: its plugin speaks another Go daemon API contract",
-			"session", req.SessionID, "pluginContract", req.PluginContract, "goDaemonApiVersion", GoDaemonAPIVersion)
+	if req.PluginContract != DaemonAPIVersion {
+		s.log.Warn("api: refused a controller registration: its plugin speaks another daemon API contract",
+			"session", req.SessionID, "pluginContract", req.PluginContract, "daemonApiVersion", DaemonAPIVersion)
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
-			"pi-legion-envoy speaks Go daemon API contract %d; this daemon requires %d", req.PluginContract, GoDaemonAPIVersion)))
+			"pi-legion-envoy speaks daemon API contract %d; this daemon requires %d", req.PluginContract, DaemonAPIVersion)))
 		return
 	}
 	secret := rand.Text()

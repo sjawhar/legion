@@ -435,7 +435,7 @@ func TestAControllerRegistrationIsInTheStateAndSurvivesARestart(t *testing.T) {
 		t.Fatalf("controllerLocator before any controller = %+v, want none", state.ControllerLocator)
 	}
 
-	status, body := d.request(http.MethodPost, "/legion/v1/controller/secret", struct{}{}, true)
+	status, body := d.request(http.MethodPost, "/legion/v1/controller/secret", api.ControllerSecretRequest{PluginContract: api.DaemonAPIVersion}, true)
 	if status != http.StatusOK {
 		t.Fatalf("controller secret = %d; body %s", status, body)
 	}
@@ -445,7 +445,7 @@ func TestAControllerRegistrationIsInTheStateAndSurvivesARestart(t *testing.T) {
 	}
 	status, body = d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: capability.Secret, SessionID: "ses_controller", OmpSessionFile: "/sessions/ses_controller.jsonl",
-		AgentID: "ses_controller", PluginContract: api.GoDaemonAPIVersion,
+		AgentID: "ses_controller", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusOK {
 		t.Fatalf("register the controller = %d; body %s", status, body)
