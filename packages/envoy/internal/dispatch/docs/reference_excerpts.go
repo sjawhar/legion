@@ -14,7 +14,7 @@ import (
 type ReferenceExcerptBackfill struct {
 	ArtifactID string
 	References int
-	Err         error
+	Err        error
 }
 
 // BackfillReferenceExcerpts records stored excerpts for every document mention created before

@@ -28,7 +28,6 @@ func (s *server) replaceReferences(
 	return refs.ReplaceCounted(ctx, tx, fromKind, fromID, body, s.deps.ServerURL)
 }
 
-
 // getReferences reads one node's edges in the reference graph: ?to= lists every edge pointing
 // at the node (backlinks), ?from= every edge it writes; exactly one is required. ?kind= narrows
 // edge types and ?since= keeps mentions introduced after an events.id, which excludes
@@ -112,7 +111,6 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 	}
 	return query, ref, nil
 }
-
 
 func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {

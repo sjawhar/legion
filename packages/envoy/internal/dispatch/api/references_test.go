@@ -316,7 +316,6 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	}
 }
 
-
 func TestReferencesReadDocumentExcerptsFromStoredData(t *testing.T) {
 	handler, _, deps := newTestServer(t, testServerOptions{})
 	createReferenceAPIProject(t, handler, "CORE")
