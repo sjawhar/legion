@@ -4,164 +4,98 @@
 # The secrets broker's demo rig: every surface the broker's screenshots and walkthrough show,
 # running on one machine on example data. It starts
 #
-#   - Postgres: a throwaway container, or the server DATABASE_URL names;
 #   - the broker (packages/envoy/cmd/broker) on a local rules file and its fake secrets file
 #     (internal/broker/secrets' development store), holding one secret, DEMO_API_KEY, whose value
-#     is made up;
-#   - the Dispatch e2e harness (packages/dispatch/e2e: fake Envoy, fake GitHub, run-server.sh)
-#     pointed at that broker, with the e2e workspace seeded; its signed-in human is `alice`;
-#   - an agent machine whose hostname is example-host-build, running agent-secrets-helper (the
-#     host side of the broker) for the operator `alice`.
+#     is made up, in a database of its own beside DATABASE_URL's, created and dropped by this run;
+#   - the Dispatch e2e harness (packages/dispatch/e2e: fake Envoy, fake GitHub, run-server.sh) on
+#     DATABASE_URL, pointed at that broker, with the e2e workspace seeded; its signed-in human is
+#     `alice`;
+#   - an agent machine whose hostname is example-host-build: agent-secrets-helper (the host side of
+#     the broker) for the operator `alice`, alone in a UTS namespace of its own, with the agent's
+#     shells on this machine.
 #
 # It prints how to drive it and stays in the foreground; Ctrl-C (or the exit of the command given
 # after --) stops all of it.
 #
-#   bash docs/site/media/broker/rig.sh                  # interactive
-#   bash docs/site/media/broker/rig.sh -- <command...>  # run <command> against the rig, then stop
+#   DATABASE_URL=<url> bash docs/site/media/broker/rig.sh                  # interactive
+#   DATABASE_URL=<url> bash docs/site/media/broker/rig.sh -- <command...>  # run <command>, then stop
 #
-# The command runs with BROKER_RIG_STATE naming the rig's state file (agent.ts reads it), which
-# names agent-exec: a script that runs its arguments on the agent machine, in its demo directory,
-# with its environment (an interactive shell when stdin is a terminal: `agent-exec bash`).
+# The command runs with BROKER_RIG_DISPATCH_URL, Dispatch's address, and BROKER_RIG_AGENT_EXEC, a
+# script that runs its arguments on the agent machine, in its demo directory, with its environment
+# (an interactive shell when stdin is a terminal: `agent-exec bash`); flow.ts reads both.
 #
-# Inputs, all optional:
-#   DATABASE_URL     a Postgres database this run may truncate for the Dispatch workspace, as the
-#                    e2e harness requires; the broker's database is created beside it
-#                    (<name>_broker) and dropped on exit. Unset, the rig runs its own Postgres.
-#   DISPATCH_E2E_PORT, FAKE_ENVOY_PORT, FAKE_GITHUB_PORT
-#                    the harness's ports (packages/dispatch/e2e/harness-ports.ts).
-#   BROKER_RIG_NAME  the prefix of the containers it runs (default legion-docs-broker).
-#   BROKER_RIG_AGENT_RUNTIME
-#                    how the agent machine gets its hostname: `docker` (the default), a container
-#                    on the host network; or `unshare`, the helper alone in a UTS namespace of its
-#                    own (passwordless sudo; for a machine where containers are unavailable),
-#                    with the sessions on this machine.
+# DATABASE_URL, the one input, names a Postgres database this run may empty, as the e2e harness
+# requires. Every port is the run's own: the harness's three are picked (scripts/e2e/lib/rig.sh's
+# pick_port), and the broker binds one the kernel assigns.
 #
-# Needs go, bun, psql, curl, openssl and setsid on PATH, and docker for its own Postgres or the
-# docker agent runtime; nothing else from the machine: no credential, private hostname or
-# production service.
+# Needs go, bun, psql, curl, openssl and setsid, and passwordless sudo with unshare and setpriv,
+# which give the helper its hostname; nothing else from the machine: no credential, private
+# hostname or production service.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-NAME="${BROKER_RIG_NAME:-legion-docs-broker}"
-AGENT_RUNTIME="${BROKER_RIG_AGENT_RUNTIME:-docker}"
+root="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 OPERATOR="alice"
 AGENT_HOST="example-host-build"
-AGENT_IMAGE="debian:bookworm-slim"
-POSTGRES_IMAGE="postgres:16"
 
-export DISPATCH_E2E_PORT="${DISPATCH_E2E_PORT:-8777}"
-export FAKE_ENVOY_PORT="${FAKE_ENVOY_PORT:-9021}"
-export FAKE_GITHUB_PORT="${FAKE_GITHUB_PORT:-9022}"
-DISPATCH_URL="http://127.0.0.1:${DISPATCH_E2E_PORT}"
-
-command_after=()
 if [ "${1:-}" = "--" ]; then
   shift
-  command_after=("$@")
 elif [ "$#" -gt 0 ]; then
   echo "rig: unexpected argument $1 (usage: rig.sh [-- <command...>])" >&2
   exit 2
 fi
-
-tools=(go bun psql curl openssl setsid)
-case "$AGENT_RUNTIME" in
-  docker) tools+=(docker) ;;
-  unshare) tools+=(sudo unshare setpriv) ;;
-  *)
-    echo "rig: BROKER_RIG_AGENT_RUNTIME must be docker or unshare, not $AGENT_RUNTIME" >&2
-    exit 2
-    ;;
-esac
-[ -n "${DATABASE_URL:-}" ] || tools+=(docker)
-for tool in "${tools[@]}"; do
+: "${DATABASE_URL:?DATABASE_URL must name a Postgres database this run may empty}"
+for tool in go bun psql curl openssl setsid sudo unshare setpriv; do
   command -v "$tool" >/dev/null || { echo "rig: $tool is required on PATH" >&2; exit 1; }
 done
-if [ "$AGENT_RUNTIME" = unshare ] && ! sudo -n true 2>/dev/null; then
-  echo "rig: BROKER_RIG_AGENT_RUNTIME=unshare needs passwordless sudo" >&2
+sudo -n true 2>/dev/null || { echo "rig: the agent machine's helper needs passwordless sudo" >&2; exit 1; }
+
+# scripts/e2e/lib/rig.sh's bounded waits, port picks and process start and stop: each service
+# logs to $work/logs/<name>.log.
+work="$(mktemp -d /tmp/legion-docs-broker.XXXXXX)"
+evidence=$work
+timeout_hook=
+note() { printf 'rig: %s\n' "$*" >&2; }
+fail() {
+  note "$*"
   exit 1
-fi
+}
+# shellcheck source-path=SCRIPTDIR/../../../.. source=scripts/e2e/lib/rig.sh
+. "$root/scripts/e2e/lib/rig.sh"
+mkdir -p "$work/logs" "$work/bin" "$work/agent"
 
-WORK_DIR="$(mktemp -d /tmp/legion-docs-broker.XXXXXX)"
-LOG_DIR="$WORK_DIR/logs"
-mkdir -p "$LOG_DIR" "$WORK_DIR/bin" "$WORK_DIR/agent"
-pids=()
-helper_pid=""
-owned_postgres=false
-broker_database=""
-admin_url=""
-
+# What cleanup stops: the pids start_process sets (<name>_pid) and the helper's own, and the
+# broker's database. The ports are pick_port's.
+broker_pid='' fake_envoy_pid='' fake_github_pid='' dispatch_pid='' helper_pid=''
+broker_database='' admin_url='' dispatch_port='' fake_envoy_port='' fake_github_port=''
 cleanup() {
-  local status=$?
-  if [ -z "$helper_pid" ] && [ -s "$WORK_DIR/agent/helper.pid" ]; then
-    helper_pid="$(cat "$WORK_DIR/agent/helper.pid")"
+  local status=$? pid
+  if [ -z "$helper_pid" ] && [ -s "$work/agent/helper.pid" ]; then
+    helper_pid="$(cat "$work/agent/helper.pid")"
   fi
-  # Every process the rig starts (but the unshare runtime's sudo) leads a process group of its
-  # own, so this reaches its children too: run-server.sh's `go run` leaves the compiled Dispatch
-  # server running when only it is signalled.
-  for pid in "${pids[@]}"; do
-    kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+  # The helper runs as this user under the root-owned sudo and unshare that started it, which exit
+  # with it. Every other service leads a process group of its own (setsid), signalled whole so its
+  # children go too: run-server.sh's `flock … go build`, before it execs the server, is one.
+  stop_pid "$helper_pid"
+  for pid in "$dispatch_pid" "$fake_github_pid" "$fake_envoy_pid" "$broker_pid"; do
+    [ -z "$pid" ] || kill -TERM -- "-$pid" 2>/dev/null || true
+    stop_pid "$pid"
   done
-  if [ -n "$helper_pid" ]; then
-    kill "$helper_pid" 2>/dev/null || true
-  fi
-  for pid in "${pids[@]}"; do
-    wait "$pid" 2>/dev/null || true
-  done
-  if [ "$AGENT_RUNTIME" = docker ]; then
-    docker rm -f "$NAME-agent" >/dev/null 2>&1 || true
-  fi
-  if [ "$owned_postgres" = true ]; then
-    docker rm -f "$NAME-pg" >/dev/null 2>&1 || true
-  elif [ -n "$broker_database" ]; then
+  if [ -n "$broker_database" ]; then
     PGOPTIONS="-c client_min_messages=warning" psql "$admin_url" -q \
       -c "drop database if exists ${broker_database} with (force)" >/dev/null 2>&1 || true
   fi
-  echo "rig: stopped; logs kept in $LOG_DIR" >&2
+  note "stopped; logs kept in $work/logs"
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-# wait_for <seconds> <description> <command...>: polls the command once a second, failing the rig
-# naming the description when it never succeeds. A process the rig started that has exited fails
-# it at once, with its logs. (ps rather than kill -0, which cannot probe the unshare runtime's
-# sudo, a root process.)
-wait_for() {
-  local seconds="$1" what="$2"
-  shift 2
-  for _ in $(seq 1 "$seconds"); do
-    if "$@" >/dev/null 2>&1; then
-      return 0
-    fi
-    for pid in "${pids[@]}"; do
-      if ! ps -p "$pid" >/dev/null; then
-        echo "rig: a rig process exited while waiting for $what; logs in $LOG_DIR" >&2
-        tail -n 20 "$LOG_DIR"/*.log >&2 || true
-        exit 1
-      fi
-    done
-    sleep 1
-  done
-  echo "rig: $what never came up within ${seconds}s; logs in $LOG_DIR" >&2
-  exit 1
-}
-
 # --- Binaries: the broker, and the client and host helper the agent machine runs. -------------
-echo "rig: building the broker, agent-secrets and agent-secrets-helper" >&2
-(cd "$ROOT/packages/envoy" && CGO_ENABLED=0 go build -o "$WORK_DIR/bin/" ./cmd/broker ./cmd/agent-secrets ./cmd/agent-secrets-helper)
+note "building the broker, agent-secrets and agent-secrets-helper"
+(cd "$root/packages/envoy" && CGO_ENABLED=0 go build -o "$work/bin/" ./cmd/broker ./cmd/agent-secrets ./cmd/agent-secrets-helper)
 
-# --- Postgres. -----------------------------------------------------------------------------------
-if [ -z "${DATABASE_URL:-}" ]; then
-  echo "rig: starting a throwaway Postgres ($NAME-pg)" >&2
-  docker rm -f "$NAME-pg" >/dev/null 2>&1 || true
-  docker run -d --name "$NAME-pg" --tmpfs /var/lib/postgresql/data \
-    -e POSTGRES_PASSWORD=demo -e POSTGRES_DB=dispatch -p 127.0.0.1::5432 "$POSTGRES_IMAGE" >/dev/null
-  owned_postgres=true
-  pg_port="$(docker port "$NAME-pg" 5432/tcp | head -n1 | cut -d: -f2)"
-  export DATABASE_URL="postgres://postgres:demo@127.0.0.1:${pg_port}/dispatch?sslmode=disable"
-  wait_for 120 "Postgres" psql "$DATABASE_URL" -c "select 1"
-fi
+# --- The broker's database, beside DATABASE_URL's. ----------------------------------------------
 url_base="${DATABASE_URL%%\?*}"
 url_query="${DATABASE_URL#"$url_base"}"
 broker_database="${url_base##*/}_broker"
@@ -171,7 +105,7 @@ PGOPTIONS="-c client_min_messages=warning" psql "$admin_url" -v ON_ERROR_STOP=1 
   -c "drop database if exists ${broker_database} with (force)" -c "create database ${broker_database}"
 
 # --- The broker, on example rules and a made-up secret. -------------------------------------------
-cat >"$WORK_DIR/agent-secret-rules.yaml" <<EOF
+cat >"$work/agent-secret-rules.yaml" <<EOF
 version: 1
 secrets:
   DEMO_API_KEY:
@@ -182,129 +116,96 @@ secrets:
     requesters:
       - {kind: host, operator: ${OPERATOR}, decision: approval, approver: operator}
 EOF
-printf '%s\n' "example/agent-secrets/DEMO_API_KEY=demo-key-not-a-real-secret-7f3a" >"$WORK_DIR/fake-secrets.env"
-chmod 600 "$WORK_DIR/fake-secrets.env"
+printf '%s\n' "example/agent-secrets/DEMO_API_KEY=demo-key-not-a-real-secret-7f3a" >"$work/fake-secrets.env"
+chmod 600 "$work/fake-secrets.env"
 ui_token="$(openssl rand -hex 32)"
 
-echo "rig: starting the broker" >&2
-setsid env -i PATH="$PATH" \
+note "starting the broker"
+start_process broker setsid env -i PATH="$PATH" \
   BROKER_DATABASE_URL="$broker_database_url" \
   BROKER_LISTEN_ADDR=127.0.0.1:0 \
   BROKER_PUBLIC_URL=http://127.0.0.1:0 \
   BROKER_UI_TOKEN="$ui_token" \
-  BROKER_RULES_FILE="$WORK_DIR/agent-secret-rules.yaml" \
-  BROKER_FAKE_SECRETS_FILE="$WORK_DIR/fake-secrets.env" \
-  "$WORK_DIR/bin/broker" >"$LOG_DIR/broker.log" 2>&1 &
-pids+=("$!")
-broker_bound() { grep -q 'broker listening addr=' "$LOG_DIR/broker.log"; }
-wait_for 60 "the broker" broker_bound
-BROKER_URL="http://$(grep -o 'broker listening addr=[^ ]*' "$LOG_DIR/broker.log" | head -n1 | sed 's/.*addr=//')"
-wait_for 30 "the broker's health check" curl -sf "$BROKER_URL/healthz"
+  BROKER_RULES_FILE="$work/agent-secret-rules.yaml" \
+  BROKER_FAKE_SECRETS_FILE="$work/fake-secrets.env" \
+  "$work/bin/broker"
+await_start broker "$broker_pid" 0 60 "the broker to report its address" \
+  grep -q 'broker listening addr=' "$work/logs/broker.log"
+broker_url="http://$(sed -n 's/.*broker listening addr=\([^ ]*\).*/\1/p' "$work/logs/broker.log" | head -n1)"
+until_true 30 "the broker's health check" curl -sf "$broker_url/healthz"
 
-# --- Dispatch: the e2e harness's three servers, the server pointed at the broker. ---------------
-if [ ! -f "$ROOT/packages/dispatch/web/dist/index.html" ]; then
-  echo "rig: building the Dispatch dashboard" >&2
-  (cd "$ROOT" && bun install --frozen-lockfile >/dev/null)
-  (cd "$ROOT/packages/dispatch" && bun run build:web >/dev/null)
+# --- Dispatch: the e2e harness's three servers on picked ports, the server pointed at the broker. -
+if [ ! -f "$root/packages/dispatch/web/dist/index.html" ]; then
+  note "building the Dispatch dashboard"
+  (cd "$root" && bun install --frozen-lockfile >/dev/null)
+  (cd "$root/packages/dispatch" && bun run build:web >/dev/null)
 fi
-echo "rig: starting Dispatch at $DISPATCH_URL" >&2
-if curl -s -o /dev/null "$DISPATCH_URL/"; then
-  # Its readiness check below would pass on that server rather than the rig's.
-  echo "rig: something already answers at $DISPATCH_URL; stop it or set DISPATCH_E2E_PORT" >&2
-  exit 1
-fi
-setsid bun "$ROOT/packages/dispatch/e2e/fake-envoy.ts" >"$LOG_DIR/fake-envoy.log" 2>&1 &
-pids+=("$!")
-setsid bun "$ROOT/packages/dispatch/e2e/fake-github.ts" >"$LOG_DIR/fake-github.log" 2>&1 &
-pids+=("$!")
-DISPATCH_E2E_AGENT_SECRETS_URL="$BROKER_URL" DISPATCH_E2E_AGENT_SECRETS_TOKEN="$ui_token" \
-  setsid bash "$ROOT/packages/dispatch/e2e/run-server.sh" >"$LOG_DIR/dispatch.log" 2>&1 &
-pids+=("$!")
-wait_for 600 "Dispatch" curl -sf "$DISPATCH_URL/"
-echo "rig: seeding the e2e workspace" >&2
+pick_port dispatch_port
+pick_port fake_envoy_port
+pick_port fake_github_port
+export DISPATCH_E2E_PORT=$dispatch_port FAKE_ENVOY_PORT=$fake_envoy_port FAKE_GITHUB_PORT=$fake_github_port
+dispatch_url="http://127.0.0.1:${dispatch_port}"
+note "starting Dispatch at $dispatch_url"
+start_process fake_envoy setsid bun "$root/packages/dispatch/e2e/fake-envoy.ts"
+start_process fake_github setsid bun "$root/packages/dispatch/e2e/fake-github.ts"
+DISPATCH_E2E_AGENT_SECRETS_URL="$broker_url" DISPATCH_E2E_AGENT_SECRETS_TOKEN="$ui_token" \
+  start_process dispatch setsid bash "$root/packages/dispatch/e2e/run-server.sh"
+await_start fake_envoy "$fake_envoy_pid" 0 60 "the fake Envoy" curl -s -o /dev/null "http://127.0.0.1:$fake_envoy_port/"
+await_start fake_github "$fake_github_pid" 0 60 "the fake GitHub" curl -s -o /dev/null "http://127.0.0.1:$fake_github_port/"
+await_start dispatch "$dispatch_pid" 0 600 "Dispatch" curl -sf "$dispatch_url/"
+note "seeding the e2e workspace"
 bun "$SCRIPT_DIR/seed.ts"
 
 # --- The agent machine: agent-secrets-helper under the example hostname, and agent-exec. --------
-printf '%s\n' "$OPERATOR" >"$WORK_DIR/agent/operator"
-agent_exec="$WORK_DIR/agent-exec"
-echo "rig: starting the agent machine $AGENT_HOST ($AGENT_RUNTIME)" >&2
-if [ "$AGENT_RUNTIME" = docker ]; then
-  docker rm -f "$NAME-agent" >/dev/null 2>&1 || true
-  docker run -d --name "$NAME-agent" --network host --hostname "$AGENT_HOST" \
-    -e AGENT_SECRETS_URL="$BROKER_URL" \
-    -e AGENT_SECRETS_HELPER_SOCK=/run/agent-secrets/helper.sock \
-    -e AGENT_SECRETS_OPERATOR_FILE=/etc/agent-secrets/operator \
-    -e AGENT_SECRETS_APPROVE_URL="$DISPATCH_URL" \
-    -v "$WORK_DIR/bin/agent-secrets:/usr/local/bin/agent-secrets:ro" \
-    -v "$WORK_DIR/bin/agent-secrets-helper:/usr/local/bin/agent-secrets-helper:ro" \
-    -v "$WORK_DIR/agent/operator:/etc/agent-secrets/operator:ro" \
-    -v "$SCRIPT_DIR/agent/bashrc:/root/.bashrc:ro" \
-    -v "$SCRIPT_DIR/agent/demo:/root/demo:ro" \
-    -w /root/demo \
-    "$AGENT_IMAGE" agent-secrets-helper serve >/dev/null
-  cat >"$agent_exec" <<EOF
-#!/usr/bin/env bash
-if [ -t 0 ]; then exec docker exec -it $NAME-agent "\$@"; fi
-exec docker exec -i $NAME-agent "\$@"
-EOF
-  helper_listening() { docker logs "$NAME-agent" 2>&1 | grep -q 'agent-secrets-helper listening'; }
-else
-  # Only the helper takes the example hostname: the broker learns a host from the helper alone
-  # (its machine login and each session's runtime id). It drops back to this user before it runs.
-  home="$WORK_DIR/agent/home"
-  mkdir -p "$home"
-  cp "$SCRIPT_DIR/agent/bashrc" "$home/.bashrc"
-  # Ubuntu's /etc/bash.bashrc greets a sudo-group user's every new shell with a sudo hint unless
-  # $HOME/.hushlogin exists; the agent's shells are this user's.
-  touch "$home/.hushlogin"
-  cp -r "$SCRIPT_DIR/agent/demo" "$home/demo"
-  sudo -n unshare --uts --fork -- env -i PATH="$WORK_DIR/bin:/usr/bin:/bin" \
-    AGENT_SECRETS_URL="$BROKER_URL" \
-    AGENT_SECRETS_HELPER_SOCK="$WORK_DIR/agent/helper.sock" \
-    AGENT_SECRETS_OPERATOR_FILE="$WORK_DIR/agent/operator" \
-    sh -c 'hostname "$1" && echo $$ >"$2" && exec setpriv --reuid="$3" --regid="$4" --init-groups agent-secrets-helper serve' \
-    helper "$AGENT_HOST" "$WORK_DIR/agent/helper.pid" "$(id -u)" "$(id -g)" >"$LOG_DIR/helper.log" 2>&1 &
-  pids+=("$!")
-  wait_for 30 "the helper's pid" test -s "$WORK_DIR/agent/helper.pid"
-  helper_pid="$(cat "$WORK_DIR/agent/helper.pid")"
-  cat >"$agent_exec" <<EOF
+# Only the helper takes the example hostname: the broker learns a host from the helper alone (its
+# machine login and each session's runtime id). It drops back to this user before it runs.
+printf '%s\n' "$OPERATOR" >"$work/agent/operator"
+home="$work/agent/home"
+mkdir -p "$home"
+cp "$SCRIPT_DIR/agent/bashrc" "$home/.bashrc"
+# Ubuntu's /etc/bash.bashrc greets a sudo-group user's every new shell with a sudo hint unless
+# $HOME/.hushlogin exists; the agent's shells are this user's.
+touch "$home/.hushlogin"
+cp -r "$SCRIPT_DIR/agent/demo" "$home/demo"
+note "starting the agent machine $AGENT_HOST"
+# shellcheck disable=SC2016 # the inner sh expands its own positional parameters
+start_process agent sudo -n unshare --uts --fork -- env -i PATH="$work/bin:/usr/bin:/bin" \
+  AGENT_SECRETS_URL="$broker_url" \
+  AGENT_SECRETS_HELPER_SOCK="$work/agent/helper.sock" \
+  AGENT_SECRETS_OPERATOR_FILE="$work/agent/operator" \
+  sh -c 'hostname "$1" && echo $$ >"$2" && exec setpriv --reuid="$3" --regid="$4" --init-groups agent-secrets-helper serve' \
+  helper "$AGENT_HOST" "$work/agent/helper.pid" "$(id -u)" "$(id -g)"
+until_true 30 "the helper's pid" test -s "$work/agent/helper.pid"
+helper_pid="$(cat "$work/agent/helper.pid")"
+# The helper's own pid, not sudo's: kill -0 cannot probe a root process.
+await_start agent "$helper_pid" 0 600 "agent-secrets-helper" \
+  grep -q 'agent-secrets-helper listening' "$work/logs/agent.log"
+agent_exec="$work/agent-exec"
+cat >"$agent_exec" <<EOF
 #!/usr/bin/env bash
 cd "$home/demo"
-exec env -i PATH="$WORK_DIR/bin:/usr/bin:/bin" HOME="$home" TERM="\${TERM:-xterm-256color}" LANG=C.UTF-8 \\
-  AGENT_SECRETS_URL="$BROKER_URL" AGENT_SECRETS_HELPER_SOCK="$WORK_DIR/agent/helper.sock" \\
-  AGENT_SECRETS_APPROVE_URL="$DISPATCH_URL" "\$@"
+exec env -i PATH="$work/bin:/usr/bin:/bin" HOME="$home" TERM="\${TERM:-xterm-256color}" LANG=C.UTF-8 \\
+  AGENT_SECRETS_URL="$broker_url" AGENT_SECRETS_HELPER_SOCK="$work/agent/helper.sock" \\
+  AGENT_SECRETS_APPROVE_URL="$dispatch_url" "\$@"
 EOF
-  helper_listening() { grep -q 'agent-secrets-helper listening' "$LOG_DIR/helper.log"; }
-fi
 chmod +x "$agent_exec"
-wait_for 600 "agent-secrets-helper" helper_listening
-
-state_file="$WORK_DIR/rig.env"
-cat >"$state_file" <<EOF
-BROKER_RIG_AGENT_EXEC=$agent_exec
-BROKER_RIG_BROKER_URL=$BROKER_URL
-BROKER_RIG_DISPATCH_URL=$DISPATCH_URL
-BROKER_RIG_OPERATOR=$OPERATOR
-BROKER_RIG_LOG_DIR=$LOG_DIR
-EOF
 
 cat >&2 <<EOF
 
 rig: ready.
 
-  Dispatch    $DISPATCH_URL  (sign in as $OPERATOR, the e2e workspace's human, at $DISPATCH_URL/auth/_dev/signin?login=$OPERATOR)
-  broker      $BROKER_URL
+  Dispatch    $dispatch_url  (sign in as $OPERATOR, the e2e workspace's human, at $dispatch_url/auth/_dev/signin?login=$OPERATOR)
+  broker      $broker_url
   agent       $agent_exec bash   (hostname $AGENT_HOST; agent-secrets-helper for $OPERATOR)
-  state       $state_file
-  logs        $LOG_DIR
+  logs        $work/logs
 
-  On the agent machine: agent-secrets launcher login, type its code at $DISPATCH_URL/credentials/machine,
+  On the agent machine: agent-secrets launcher login, type its code at $dispatch_url/credentials/machine,
   then agent-secrets register --wait 10 --exec -- bash, then
   agent-secrets DEMO_API_KEY --reason "<why>" -- ./check-demo-key.sh
 EOF
 
-if [ "${#command_after[@]}" -gt 0 ]; then
-  BROKER_RIG_STATE="$state_file" "${command_after[@]}"
+if [ "$#" -gt 0 ]; then
+  BROKER_RIG_DISPATCH_URL="$dispatch_url" BROKER_RIG_AGENT_EXEC="$agent_exec" "$@"
 else
-  wait "${pids[0]}"
+  wait "$broker_pid"
 fi

@@ -2,8 +2,8 @@
 # docs/site/media/broker/screenshots.sh
 #
 # Retakes the broker's screenshots into docs/site/public/media/broker/: boots the rig (rig.sh) and
-# runs screenshots.spec.ts against it, then stops the rig. Takes rig.sh's inputs (DATABASE_URL,
-# the harness ports). The spec runs under packages/dispatch's Playwright, the one installed copy:
+# runs screenshots.spec.ts against it, then stops the rig. Takes rig.sh's input, DATABASE_URL.
+# The spec runs under packages/dispatch's Playwright, the one installed copy:
 # a node_modules link in this directory (gitignored) is how its files resolve @playwright/test.
 set -euo pipefail
 

@@ -20,26 +20,23 @@ production service is involved.
 ## The rig
 
 ```bash
-bash docs/site/media/broker/rig.sh
+DATABASE_URL=<url> bash docs/site/media/broker/rig.sh
 ```
 
-It builds the broker, `agent-secrets` and `agent-secrets-helper`; starts Postgres (a throwaway
-container, or the server `DATABASE_URL` names); starts the broker on a local rules file and its
-development secrets file; starts the Dispatch e2e harness's three servers with the server pointed
-at the broker (`packages/dispatch/e2e/run-server.sh`'s `DISPATCH_E2E_AGENT_SECRETS_URL`), and seeds
+It builds the broker, `agent-secrets` and `agent-secrets-helper`; creates the broker's database
+beside `DATABASE_URL`'s and starts the broker on a local rules file and its development secrets
+file; starts the Dispatch e2e harness's three servers on `DATABASE_URL` with the server pointed at
+the broker (`packages/dispatch/e2e/run-server.sh`'s `DISPATCH_E2E_AGENT_SECRETS_URL`), and seeds
 the workspace; and starts the agent machine, `agent-secrets-helper` for `alice` under the hostname
-`example-host-build`. It prints the addresses, then waits; Ctrl-C stops everything it started.
+`example-host-build`, alone in a UTS namespace of its own, with the agent's shells on this
+machine. It prints the addresses, then waits; Ctrl-C stops everything it started and drops the
+broker's database.
 
-It needs `go`, `bun`, `psql`, `curl`, `openssl` and `setsid`. Its inputs are optional:
-`DATABASE_URL` (a database it may truncate, as the e2e harness requires; the broker's database is
-created beside it), the harness ports `DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT` and `FAKE_GITHUB_PORT`
-(8777, 9021, 9022 by default), `BROKER_RIG_NAME`, the prefix of its containers, and
-`BROKER_RIG_AGENT_RUNTIME`: `docker` (the default) runs the agent machine as a container on the
-host network, and `unshare` runs the helper alone in a UTS namespace of its own, with the agent's
-shells on this machine (it needs passwordless `sudo`, `unshare` and `setpriv`).
-
-Without `DATABASE_URL` the rig runs Postgres in Docker. On a machine without Docker, Postgres from
-the distribution's package serves, unpacked rather than installed (Ubuntu 24.04 shown):
+It needs `go`, `bun`, `psql`, `curl`, `openssl`, `setsid`, and passwordless `sudo` with `unshare`
+and `setpriv`. Its one input, `DATABASE_URL`, names a Postgres database it may empty, as the e2e
+harness requires. It picks its ports itself (`scripts/e2e/lib/rig.sh`'s `pick_port`), so two rigs
+on one machine never meet. Postgres from the distribution's package serves, unpacked rather than
+installed (Ubuntu 24.04 shown):
 
 ```bash
 apt-get download postgresql-16 && dpkg-deb -x postgresql-16_*.deb /tmp/pgroot
@@ -47,19 +44,18 @@ pgbin=/tmp/pgroot/usr/lib/postgresql/16/bin
 $pgbin/initdb -D /tmp/pgdata -U postgres --auth=trust
 $pgbin/pg_ctl -D /tmp/pgdata -l /tmp/pg.log -o "-c listen_addresses=127.0.0.1 -c port=55432 -c unix_socket_directories=/tmp" -w start
 psql "postgres://postgres@127.0.0.1:55432/postgres" -c "create database dispatch"
-DATABASE_URL="postgres://postgres@127.0.0.1:55432/dispatch?sslmode=disable" BROKER_RIG_AGENT_RUNTIME=unshare \
-  bash docs/site/media/broker/rig.sh
+DATABASE_URL="postgres://postgres@127.0.0.1:55432/dispatch?sslmode=disable" bash docs/site/media/broker/rig.sh
 ```
 
 `$pgbin/pg_ctl -D /tmp/pgdata stop` and removing `/tmp/pgroot` and `/tmp/pgdata` undo it.
 
 Dispatch signs a person in with its session cookie, which the harness server mints at its dev
-sign-in route: open `http://127.0.0.1:8777/auth/_dev/signin?login=alice` in the browser (by
-`127.0.0.1`, never `localhost`, which the server refuses). Both specs sign in the same way, through
-the e2e harness's `signIn` (`packages/dispatch/e2e/users.ts`).
+sign-in route: open the sign-in address the rig prints, `<Dispatch>/auth/_dev/signin?login=alice`,
+in the browser (by `127.0.0.1`, never `localhost`, which the server refuses). Both specs sign in the
+same way, through the e2e harness's `signIn` (`packages/dispatch/e2e/users.ts`).
 
-From a shell on the agent machine (`agent-exec bash`, where `agent-exec` is the script the rig's
-state file names in `BROKER_RIG_AGENT_EXEC`), the flow the walkthrough shows is:
+From a shell on the agent machine (`agent-exec bash`, where `agent-exec` is the script the rig
+prints, and hands a command in `BROKER_RIG_AGENT_EXEC`), the flow the walkthrough shows is:
 
 ```bash
 agent-secrets launcher login                    # prints a code; approve it at /credentials/machine

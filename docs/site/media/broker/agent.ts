@@ -1,45 +1,33 @@
 // docs/site/media/broker/agent.ts
 //
-// Drives the rig's agent machine (docs/site/media/broker/rig.sh) from a script: reads the state
-// file the rig writes, starts a machine login and a secret request on the agent machine,
-// and hands back what each prints that a person acts on (the machine login's code, the request's
-// Dispatch record), so the browser side can approve it.
+// Drives the rig's agent machine (docs/site/media/broker/rig.sh) from a script: reads the two
+// values the rig hands its command, starts a machine login and a secret request on the agent
+// machine, and hands back what each prints that a person acts on (the machine login's code, the
+// request's Dispatch record), so the browser side can approve it.
 import { type ChildProcess, spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
 export interface RigState {
   /** rig.sh's agent-exec: runs its arguments on the agent machine, in its demo directory. */
   agentExec: string;
-  brokerUrl: string;
   dispatchUrl: string;
+  /** The e2e workspace's human, the agent machine's operator and every request's approver. */
   operator: string;
 }
 
-/** The rig's state file, which `rig.sh -- <command>` names in BROKER_RIG_STATE. */
+/** What `rig.sh -- <command>` hands its command: BROKER_RIG_AGENT_EXEC and BROKER_RIG_DISPATCH_URL. */
 export function rigState(): RigState {
-  const path = process.env.BROKER_RIG_STATE;
-  if (path === undefined || path === "") {
-    throw new Error(
-      "BROKER_RIG_STATE is unset: run this under docs/site/media/broker/rig.sh -- <command>"
-    );
-  }
-  const values = new Map(
-    readFileSync(path, "utf8")
-      .split("\n")
-      .filter((line) => line.includes("="))
-      .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)])
-  );
-  const value = (key: string): string => {
-    const found = values.get(key);
-    if (found === undefined || found === "") throw new Error(`${path} has no ${key}`);
+  const value = (name: string): string => {
+    const found = process.env[name];
+    if (found === undefined || found === "") {
+      throw new Error(`${name} is unset: run this under docs/site/media/broker/rig.sh -- <command>`);
+    }
     return found;
   };
   return {
     agentExec: value("BROKER_RIG_AGENT_EXEC"),
-    brokerUrl: value("BROKER_RIG_BROKER_URL"),
     dispatchUrl: value("BROKER_RIG_DISPATCH_URL"),
-    operator: value("BROKER_RIG_OPERATOR"),
+    operator: "alice",
   };
 }
 
