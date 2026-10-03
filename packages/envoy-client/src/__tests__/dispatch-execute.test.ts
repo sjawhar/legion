@@ -51,6 +51,16 @@ function repoExec(repo: string): ExecFn {
 }
 
 const config = { enabled: true, url: "http://dispatch.test", token: "secret", error: null };
+const releaseQuestion = "The release is ready. How should we proceed?";
+const changedReleaseQuestion =
+  "The change is ready but needs a release decision. How should we proceed?";
+const firstReleaseQuestion = "The first release needs sequencing. How should we proceed?";
+const secondReleaseQuestion = "The second release needs sequencing. How should we proceed?";
+const runbookQuestion = "The runbook is ready for readers. How should we publish it?";
+const revisedPlanQuestion =
+  "The revised plan changes the release, but it has not been reviewed. How should we proceed?";
+const documentReviewQuestion = "The document needs review before approval. How should we proceed?";
+const reopenQuestion = "The closed issue may need further work. How should we proceed?";
 
 function executeAsk(args: Record<string, unknown>, fetchImpl: typeof fetch) {
   return executeDispatchTool({
@@ -182,7 +192,7 @@ describe("executeDispatchTool", () => {
         id: "ask-1",
         issue_key: "DSP-41",
         author: { kind: "session", id: "session-1" },
-        question: "Ship it?",
+        question: releaseQuestion,
         options: [],
         multiple: false,
         urgency: "med",
@@ -195,7 +205,7 @@ describe("executeDispatchTool", () => {
 
     const result = await executeDispatchTool({
       tool: "dispatch_ask",
-      args: { question: "Ship it?" },
+      args: { question: releaseQuestion },
       cwd: "/workspace",
       host: "omp",
       sessionId: "session-1",
@@ -210,7 +220,7 @@ describe("executeDispatchTool", () => {
       requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
     ).toEqual(["/api/v1/issues/resolve?ref=owner%2Frepo%2341", "/api/v1/issues/DSP-41/asks"]);
     expect(JSON.parse(requests[1]?.init.body as string)).toMatchObject({
-      question: "Ship it?",
+      question: releaseQuestion,
       actor: {
         kind: "session",
         id: "session-1",
@@ -224,7 +234,7 @@ describe("executeDispatchTool", () => {
     });
     expect(result.details).not.toHaveProperty("topic");
     expect(result.text).toBe(
-      "Asked ask-1 on DSP-41 (urgency med): Ship it?\n" +
+      `Asked ask-1 on DSP-41 (urgency med): ${releaseQuestion}\n` +
         "You follow this ask: its answer and replies reach you directly. " +
         "For every event on DSP-41: envoy_subscribe notifications.dispatch.issue.DSP-41.>"
     );
@@ -246,15 +256,15 @@ describe("executeDispatchTool", () => {
     };
 
     const result = await executeAsk(
-      { issue: "DSP-41", question: "Ship this change?", ref },
+      { issue: "DSP-41", question: changedReleaseQuestion, ref },
       fetchImpl as typeof fetch
     );
 
     expect(requests).toEqual([
-      expect.objectContaining({ question: `Ship this change?\n\nRef: ${ref}` }),
+      expect.objectContaining({ question: `${changedReleaseQuestion}\n\nRef: ${ref}` }),
     ]);
     expect(result.text).toStartWith(
-      `Asked ask-1 on DSP-41 (urgency med): Ship this change?\n\nRef: ${ref}\n`
+      `Asked ask-1 on DSP-41 (urgency med): ${changedReleaseQuestion}\n\nRef: ${ref}\n`
     );
   });
 
@@ -394,7 +404,7 @@ describe("executeDispatchTool", () => {
     }) as unknown as typeof fetch;
 
     await expect(
-      executeAsk({ issue: "DSP-41", question: "Should this ship?" }, fetchImpl)
+      executeAsk({ issue: "DSP-41", question: releaseQuestion }, fetchImpl)
     ).rejects.toThrow(
       "If the Dispatch URL changed, restart this agent process so it picks up the new configuration."
     );
@@ -403,7 +413,7 @@ describe("executeDispatchTool", () => {
   test("does not duplicate an ask ref already in the question", async () => {
     const requests: unknown[] = [];
     const ref = "dispatch://DSP-41/message/message-1";
-    const question = `Ship this change?\n\nRef: ${ref}`;
+    const question = `${changedReleaseQuestion}\n\nRef: ${ref}`;
     const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const body = JSON.parse(String(init?.body));
       requests.push(body);
@@ -444,7 +454,7 @@ describe("executeDispatchTool", () => {
       executeAsk(
         {
           issue: "DSP-41",
-          question: "Ship this change?",
+          question: changedReleaseQuestion,
           ref: "https://dispatch.test/issues/DSP-41",
         },
         fetchImpl
@@ -564,8 +574,8 @@ describe("executeDispatchTool", () => {
         return response({
           key: "DSP-41",
           open_asks: [
-            { id: "01234567-0000-4000-8000-000000000001", question: "Should we ship first?" },
-            { id: "89abcdef-0000-4000-8000-000000000002", question: "Should we ship second?" },
+            { id: "01234567-0000-4000-8000-000000000001", question: firstReleaseQuestion },
+            { id: "89abcdef-0000-4000-8000-000000000002", question: secondReleaseQuestion },
           ],
         });
       }
@@ -589,7 +599,7 @@ describe("executeDispatchTool", () => {
     expect(failure).toBeInstanceOf(ToolInputError);
     if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(failure.problems).toEqual([
-      "ask IDs are UUIDs; use the full ask ID; this issue's open asks: 01234567… Should we ship first?, 89abcdef… Should we ship second?",
+      `ask IDs are UUIDs; use the full ask ID; this issue's open asks: 01234567… ${firstReleaseQuestion}, 89abcdef… ${secondReleaseQuestion}`,
     ]);
     expect(requests).toEqual(["/api/v1/issues/DSP-41"]);
   });
@@ -1372,7 +1382,7 @@ describe("executeDispatchTool", () => {
           {
             id: "ask-1",
             ref: "/issues/LEGION-1?ask=ask-1",
-            question: "Should we ship?",
+            question: releaseQuestion,
             kind: "question",
             urgency: "high",
             created_at: "2026-09-13T00:00:00Z",
@@ -1421,7 +1431,7 @@ describe("executeDispatchTool", () => {
         "2 unanswered asks you authored on active issues and project documents.",
         "",
         "Waiting on human (1):",
-        "- 1m 5s · P0 · LEGION-1: Reminder · Should we ship? · http://dispatch.test/issues/LEGION-1?ask=ask-1",
+        `- 1m 5s · P0 · LEGION-1: Reminder · ${releaseQuestion} · http://dispatch.test/issues/LEGION-1?ask=ask-1`,
         "",
         "Waiting on agent (1):",
         "- 2h · OPS / Runbook · Which region? · http://dispatch.test/projects/OPS/documents/runbook?ask=ask-2",
@@ -4766,7 +4776,7 @@ describe("executeDispatchTool", () => {
     ],
     [
       "dispatch_ask",
-      { project: "CORE", artifact: "runbook-md", question: "Publish?" },
+      { project: "CORE", artifact: "runbook-md", question: runbookQuestion },
       "/api/v1/artifacts/artifact-42/asks",
       true,
     ],
@@ -4811,7 +4821,7 @@ describe("executeDispatchTool", () => {
     ],
     [
       "dispatch_ask",
-      { ref: "dispatch://CORE/artifact/runbook-md", question: "Publish?" },
+      { ref: "dispatch://CORE/artifact/runbook-md", question: runbookQuestion },
       "/api/v1/artifacts/artifact-42/asks",
       true,
     ],
@@ -4880,7 +4890,7 @@ describe("executeDispatchTool", () => {
               id: "ask-42",
               issue_key: null,
               artifact_id: artifact.id,
-              question: "Publish?",
+              question: runbookQuestion,
             })
           : response([]);
       }
@@ -4977,7 +4987,7 @@ describe("executeDispatchTool", () => {
     };
 
     for (const [tool, args] of [
-      ["dispatch_ask", { project: "CORE", artifact: artifactReference, question: "Publish?" }],
+      ["dispatch_ask", { project: "CORE", artifact: artifactReference, question: runbookQuestion }],
       ["dispatch_comment", { project: "CORE", artifact: artifactReference, body: "Looks good." }],
       [
         "dispatch_suggest",
@@ -5362,8 +5372,11 @@ describe("executeDispatchTool", () => {
             id: "aaaaaaaa-0000-4000-8000-000000000042",
             issue_key: "DSP-42",
             author: { kind: "session", id: "author-1" },
-            question: "Which API should we ship?",
-            options: [{ label: "JSON", description: "Use the HTTP API." }, { label: "MCP" }],
+            question: "The service needs a public API. Which approach should we use?",
+            options: [
+              { label: "JSON API", description: "Use the HTTP API." },
+              { label: "MCP API" },
+            ],
             multiple: false,
             urgency: "high",
             anchor: null,
@@ -5445,10 +5458,10 @@ describe("executeDispatchTool", () => {
 
     expect(result).toEqual({
       text: [
-        "Question: Which API should we ship?",
+        "Question: The service needs a public API. Which approach should we use?",
         "Options:",
-        "- JSON — Use the HTTP API.",
-        "- MCP",
+        "- JSON API — Use the HTTP API.",
+        "- MCP API",
         "State: answered",
         "Answer:",
         "- By: sami",
@@ -5745,7 +5758,7 @@ describe("executeDispatchTool", () => {
       });
       if (pathname === `/api/v1/asks/${askUuid}`) {
         return response({
-          ask: { id: askUuid, issue_key: "DSP-42", question: "Ship it?" },
+          ask: { id: askUuid, issue_key: "DSP-42", question: releaseQuestion },
           replies: [],
           edits: [],
           followers: [{ session_id: "session-1", since: "2026-09-14T00:00:00Z" }],
@@ -6313,7 +6326,7 @@ describe("executeDispatchTool", () => {
             id: "aaaaaaaa-0000-4000-8000-000000000042",
             issue_key: "DSP-42",
             author: { kind: "session", id: "author-1" },
-            question: "Which API should we ship?",
+            question: "The service needs a public API. Which approach should we use?",
             options: [],
             multiple: false,
             urgency: "med",
@@ -6387,7 +6400,7 @@ describe("executeDispatchTool", () => {
               service: "system:serviceaccount:legion:legion-worker",
             },
             created_at: "2026-09-09T00:03:00Z",
-            payload: { question: "Should we ship?" },
+            payload: { question: releaseQuestion },
           },
         ]);
       }
@@ -6406,7 +6419,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text.split("\n")).toContain(
-      "- #3 ask.opened · session s1 (as legion/legion-worker) · 2026-09-09T00:03:00Z · Should we ship?"
+      `- #3 ask.opened · session s1 (as legion/legion-worker) · 2026-09-09T00:03:00Z · ${releaseQuestion}`
     );
   });
   test("reading an issue summary does not subscribe the session to the issue", async () => {
@@ -6745,7 +6758,7 @@ describe("executeDispatchTool", () => {
             type: "ask.opened",
             actor: { kind: "session", id: "s1" },
             created_at: "2026-09-09T00:03:00Z",
-            payload: { question: "Should we ship?" },
+            payload: { question: releaseQuestion },
           },
           {
             seq: 4,
@@ -6753,7 +6766,7 @@ describe("executeDispatchTool", () => {
             actor: { kind: "user", id: "sami" },
             created_at: "2026-09-09T00:04:00Z",
             payload: {
-              question: "Should we ship?",
+              question: releaseQuestion,
               answer: { selected: ["Keep the limits"], text: "No, trim the asks." },
             },
           },
@@ -6783,7 +6796,7 @@ describe("executeDispatchTool", () => {
             type: "ask.anchor_refreshed",
             actor: { kind: "user", id: "sami" },
             created_at: "2026-09-09T00:08:00Z",
-            payload: { question: "Should we reopen this?" },
+            payload: { question: reopenQuestion },
           },
         ]);
       }
@@ -6806,12 +6819,12 @@ describe("executeDispatchTool", () => {
         "Key: DSP-42",
         "Events:",
         `- #2 comment.created · user sami · 2026-09-09T00:02:00Z · Looks good. ${"x".repeat(108)}…`,
-        "- #3 ask.opened · session s1 · 2026-09-09T00:03:00Z · Should we ship?",
-        "- #4 ask.answered · user sami · 2026-09-09T00:04:00Z · Should we ship? -> Keep the limits - No, trim the asks.",
+        `- #3 ask.opened · session s1 · 2026-09-09T00:03:00Z · ${releaseQuestion}`,
+        `- #4 ask.answered · user sami · 2026-09-09T00:04:00Z · ${releaseQuestion} -> Keep the limits - No, trim the asks.`,
         "- #5 artifact.version · session s1 · 2026-09-09T00:05:00Z · spec.md v3: Record D1",
         "- #6 issue.updated · user sami · 2026-09-09T00:06:00Z · status in_progress",
         "- #7 comment.anchor_refreshed · user sami · 2026-09-09T00:07:00Z · Anchor moved after the document edit.",
-        "- #8 ask.anchor_refreshed · user sami · 2026-09-09T00:08:00Z · Should we reopen this?",
+        `- #8 ask.anchor_refreshed · user sami · 2026-09-09T00:08:00Z · ${reopenQuestion}`,
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
@@ -6969,7 +6982,7 @@ describe("executeDispatchTool", () => {
       requested.push(target.pathname);
       if (target.pathname === "/api/v1/issues/DSP-42/asks") {
         return response([
-          { id: full, question: "Ship it?" },
+          { id: full, question: releaseQuestion },
           { id: "9999aaaa-1c2d-4e5f-8a9b-0c1d2e3f4a5b", question: "Other" },
         ]);
       }
@@ -6977,7 +6990,7 @@ describe("executeDispatchTool", () => {
         return response({
           ask: {
             id: full,
-            question: "Ship it?",
+            question: releaseQuestion,
             options: [],
             state: "open",
             answer: null,
@@ -7001,7 +7014,7 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(result.text).toContain("Question: Ship it?");
+    expect(result.text).toContain(`Question: ${releaseQuestion}`);
     expect(requested).toEqual([
       "/api/v1/issues/DSP-42/asks",
       `/api/v1/asks/${full}`,
@@ -7020,7 +7033,7 @@ describe("executeDispatchTool", () => {
       fetchImpl: (async (url: RequestInfo | URL) => {
         expect(new URL(String(url)).pathname).toBe("/api/v1/issues/DSP-42/asks");
         return response([
-          { id: full, question: "Ship it?" },
+          { id: full, question: releaseQuestion },
           { id: "7430fab3-ffff-4e5f-8a9b-0c1d2e3f4a5b", question: "Other" },
         ]);
       }) as typeof fetch,
@@ -7418,7 +7431,7 @@ test("edits an open ask with the calling session identity", async () => {
     return response({
       id: "a5c42000-0000-4000-8000-000000000042",
       issue_key: "DSP-42",
-      question: "Ship the revised plan?",
+      question: revisedPlanQuestion,
       state: "open",
     });
   };
@@ -7427,8 +7440,10 @@ test("edits an open ask with the calling session identity", async () => {
     tool: "dispatch_edit_ask",
     args: {
       ask: "dispatch://DSP-42/ask/a5c42000-0000-4000-8000-000000000042",
-      question: "Ship the revised plan?",
-      options: [{ label: "Ship", description: "Approve the revision." }],
+      question: revisedPlanQuestion,
+      options: [
+        { label: "Review the revised plan", description: "Keeps the review gate in place." },
+      ],
       multiple: true,
       urgency: "high",
     },
@@ -7442,7 +7457,7 @@ test("edits an open ask with the calling session identity", async () => {
   });
 
   expect(result).toEqual({
-    text: "Ask edited: Ship the revised plan?",
+    text: `Ask edited: ${revisedPlanQuestion}`,
     details: { issue: "DSP-42", ask: "a5c42000-0000-4000-8000-000000000042" },
   });
   expect(requests).toEqual([
@@ -7450,8 +7465,10 @@ test("edits an open ask with the calling session identity", async () => {
       method: "PATCH",
       pathname: "/api/v1/asks/a5c42000-0000-4000-8000-000000000042",
       body: {
-        question: "Ship the revised plan?",
-        options: [{ label: "Ship", description: "Approve the revision." }],
+        question: revisedPlanQuestion,
+        options: [
+          { label: "Review the revised plan", description: "Keeps the review gate in place." },
+        ],
         multiple: true,
         urgency: "high",
         actor: {
@@ -7476,7 +7493,7 @@ test("reports why an answered ask cannot be edited", async () => {
       tool: "dispatch_edit_ask",
       args: {
         ask: "a5c42000-0000-4000-8000-000000000042",
-        question: "Ship the revised plan?",
+        question: revisedPlanQuestion,
       },
       cwd: "/workspace",
       host: "omp",
@@ -7522,7 +7539,7 @@ test("rejects a non-ask Dispatch reference before issuing a request", async () =
       tool: "dispatch_edit_ask",
       args: {
         ask: "dispatch://DSP-42/comment/comment-42",
-        question: "Ship the revised plan?",
+        question: revisedPlanQuestion,
       },
       cwd: "/workspace",
       host: "omp",
@@ -7545,7 +7562,7 @@ test("editing a document ask reports the document it lives on without claiming a
         id: "a5cd0c00-0000-4000-8000-0000000000d0",
         issue_key: null,
         artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
-        question: "Approve the document?",
+        question: documentReviewQuestion,
         state: "open",
       });
     }
@@ -7564,7 +7581,7 @@ test("editing a document ask reports the document it lives on without claiming a
     tool: "dispatch_edit_ask",
     args: {
       ask: "a5cd0c00-0000-4000-8000-0000000000d0",
-      question: "Approve the document?",
+      question: documentReviewQuestion,
     },
     cwd: "/workspace",
     host: "omp",
@@ -7576,7 +7593,7 @@ test("editing a document ask reports the document it lives on without claiming a
   });
 
   expect(result).toEqual({
-    text: "Ask edited: Approve the document?",
+    text: `Ask edited: ${documentReviewQuestion}`,
     details: {
       project: "CORE",
       artifact: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
@@ -7621,7 +7638,7 @@ function openAsksBody(asks: readonly { readonly id: string; readonly question: s
 const askWriteTools = [
   {
     tool: "dispatch_edit_ask",
-    args: (ask: string) => ({ ask, question: "Ship the revised plan?" }),
+    args: (ask: string) => ({ ask, question: revisedPlanQuestion }),
     writes: [`PATCH /api/v1/asks/${askUUID}`],
   },
   {
@@ -7648,7 +7665,7 @@ function askWriteFetch(requests: string[], openAsks: () => Response): typeof fet
       const ask = {
         id: askUUID,
         issue_key: "DSP-42",
-        question: "Ship the revised plan?",
+        question: revisedPlanQuestion,
         state: "open",
         resolution: {
           actor: { kind: "session", id: "session-42" },
@@ -7695,14 +7712,14 @@ for (const { tool, args, writes } of askWriteTools) {
   test(`${tool} refuses a short ask id with the uuid rule and this session's open asks`, async () => {
     const requests: string[] = [];
     const fetchImpl = askWriteFetch(requests, () =>
-      response(openAsksBody([{ id: askUUID, question: "Ship the revised plan?" }]))
+      response(openAsksBody([{ id: askUUID, question: revisedPlanQuestion }]))
     );
 
     const error = await refusal(executeAskWrite(tool, args("42"), fetchImpl));
 
     expect(error.problems).toEqual([
       "ask ids are uuids (a prefix of at least 8 hex characters works); " +
-        "your open asks: 7430fab3 — Ship the revised plan?",
+        `your open asks: 7430fab3 — ${revisedPlanQuestion}`,
     ]);
     expect(requests).toEqual(["GET /api/v1/asks/open"]);
   });
@@ -7731,7 +7748,7 @@ for (const { tool, args, writes } of askWriteTools) {
     const fetchImpl = askWriteFetch(requests, () =>
       response(
         openAsksBody([
-          { id: askUUID, question: "Ship the revised plan?" },
+          { id: askUUID, question: revisedPlanQuestion },
           { id: "9999aaaa-1c2d-4e5f-8a9b-0c1d2e3f4a5b", question: "A different question" },
         ])
       )

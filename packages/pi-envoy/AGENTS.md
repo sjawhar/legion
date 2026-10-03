@@ -258,6 +258,29 @@ contract, and the daemon refuses its registration with 409. A later
 takes `--operator-token-file`, which buys a controller grant over the operator's bearer and, like
 `legion claims`, is refused when its group or others can read it.
 
+## Session titles
+
+Every Legion session names itself as soon as it starts, under either daemon, in a tmux pane or a
+pod: `Legion <role> · <ISSUE>` for a root architect or a phase worker (a sub-architect included),
+from `LEGION_ROLE` and `LEGION_ISSUE`, and `Legion controller · <PROJECT>` for a controller, from
+`LEGION_PROJECT` displayed in uppercase (the daemon carries that token in lowercase for subjects
+and paths; without it the title is `Legion controller`, so no daemon contract number moves for it).
+`session_start` in `extensions/legion.ts` calls `pi.setSessionName`
+(`src/legion/session-title.ts`) after the subagent check and before any daemon
+call or Envoy role claim, so the claim's registration already carries the title the Envoy listener
+lists, and every Dispatch write stamps it as `origin.session_title` (`getSessionName`, read at
+call time). Oh My Pi titles a session itself from the first message typed at its terminal or given
+on its command line, so a headless `omp --mode rpc` session the daemon prompts otherwise has none.
+The controller also titles the session a `/new`, `/resume`, `/fork`, branch or tree navigation
+leaves it on, before it re-claims.
+
+Oh My Pi persists the title in the transcript with its source, and a pane relaunched with
+`--resume` keeps it. A session already carrying the Legion title is left as it is; a title Oh My Pi
+generated (`titleSource: "auto"`) is replaced; any other title is a person's (a `/rename`, the RPC
+`set_session_name`) and is kept. Oh My Pi records an extension's `setSessionName` as `user` too, so
+its own title model never replaces the Legion title. A `task` subagent and a session with no Legion
+environment get no title from this extension.
+
 ## Phase workers' handoff actions and the phase-stall follow-up
 
 A worker's handoff operations are actions of the `legion` tool, never shell text:
@@ -461,7 +484,7 @@ state never nudges.
 | Task | Location | Notes |
 | --- | --- | --- |
 | OMP extension entries | `extensions/envoy.ts`, `extensions/legion.ts` | Both ship in the published npm package and load in every installed OMP session; `legion.ts` is inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment |
-| Legion lifecycle modules | `src/legion/` | Classification, the two daemon clients (`daemon-client.ts` for the TypeScript daemon, `go-daemon-client.ts` for the Go daemon) and the Go-only bootstrap (`go-bootstrap.ts`; see Daemon contract), grant file (`grant-file.ts`: the `tool_call` hook mints one grant per call that redeems one — every `bash` command, the `github` tool, and any tool whose `path`/`paths` names a `pr://` or `issue://` URL, which Oh My Pi serves by running `gh` (`needsGrant` in `extensions/legion.ts`) — writes it atomically to the pane's `LEGION_GRANT_FILE` as 0600, creating its directory 0700 when absent, and returns `undefined` — it never touches the tool's input; the static gh environment and the `LEGION_GRANT_FILE` pointer are the daemon's pane environment), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), control directives, tools |
+| Legion lifecycle modules | `src/legion/` | Classification, the two daemon clients (`daemon-client.ts` for the TypeScript daemon, `go-daemon-client.ts` for the Go daemon) and the Go-only bootstrap (`go-bootstrap.ts`; see Daemon contract), grant file (`grant-file.ts`: the `tool_call` hook mints one grant per call that redeems one — every `bash` command, the `github` tool, and any tool whose `path`/`paths` names a `pr://` or `issue://` URL, which Oh My Pi serves by running `gh` (`needsGrant` in `extensions/legion.ts`) — writes it atomically to the pane's `LEGION_GRANT_FILE` as 0600, creating its directory 0700 when absent, and returns `undefined` — it never touches the tool's input; the static gh environment and the `LEGION_GRANT_FILE` pointer are the daemon's pane environment), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), the session title (`session-title.ts`; see Session titles), control directives, tools |
 | Controller session | `src/legion/controller-session.ts` | Owns controller identity, its resume transcript, claim and reclaim hooks, and recovery-less grant minting through a per-daemon adapter: under the TypeScript daemon its claim reports `ompSessionFile` on `/controller/ready` and grants are minted with the capability; under the Go daemon (`goControllerDaemon`) it registers on `claims/register` and mints with the registration's secret. The event router writes each returned grant through `grant-file.ts` to `LEGION_GRANT_FILE`. |
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |

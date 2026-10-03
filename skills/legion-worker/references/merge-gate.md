@@ -96,7 +96,8 @@ completion leaves the issue in reviewing until you finish.
   carrying the Legion footer, and a `dispatch_message` on the issue — the reviewer and merger
   read GitHub, the architect reads the issue. When the deploy that carries the merge has not
   happened (a shared profile still holding the previous plugin release, a daemon still running
-  the previous commit, a slot nobody has run), open a `dispatch_ask` naming the exact install or
-  restart step, with options for its outcomes, keep the `Production:` line at `pending <what is
-  missing>`, and complete the check once the human answers that it is done. Never record a
-  staging pass as the production check, and never let the architect sign off on a `pending` line.
+  the previous commit, a slot nobody has run), open a `dispatch_ask` that starts with the
+  production gap and why it matters, then names the required install or restart step, its risk,
+  and outcome-named options. Keep the `Production:` line at `pending <what is missing>`, and
+  complete the check once the human answers. Never record a staging pass as the production check,
+  and never let the architect sign off on a `pending` line.

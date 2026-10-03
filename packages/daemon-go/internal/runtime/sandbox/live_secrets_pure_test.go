@@ -11,9 +11,9 @@ import (
 )
 
 // agentSecretsBlockReason is secretsBlocked's logic: the four broker inputs every secrets-* check
-// needs (the production broker's URL, the login this run's machine login is approved by, the
-// automatic rule's dummy value's hash, and the checkout's agent-secrets binary), named for
-// whichever are unset. Empty means the run is not blocked.
+// needs (the production broker's URL, the email of the person this run's machine login is
+// approved by, the automatic rule's dummy value's hash, and the checkout's agent-secrets binary),
+// named for whichever are unset. Empty means the run is not blocked.
 func agentSecretsBlockReason(url, operator, autoSHA, bin string) string {
 	var missing []string
 	for name, value := range map[string]string{

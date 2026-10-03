@@ -25,10 +25,19 @@ export interface SessionContext {
   readonly sessionManager: {
     readonly getSessionId: () => string;
     /**
-     * Live display title. OMP assigns it after the first turn, so it is often
-     * undefined at session_start.
+     * Live display title: what `pi.setSessionName`, a rename, or OMP's title model last stored.
+     * OMP titles a session (`auto`) from the first message typed at its terminal or given on its
+     * command line; a Legion session sets its own at session_start (`src/legion/session-title.ts`).
      */
     readonly getSessionName?: () => string | undefined;
+    /**
+     * The session header (`ReadonlySessionManager.getHeader`); `titleSource` says who set the
+     * title: `auto` for OMP's title model, `user` for a rename or an extension's `setSessionName`.
+     */
+    readonly getHeader?: () => {
+      readonly title?: string;
+      readonly titleSource?: "auto" | "user";
+    } | null;
     readonly getSessionFile: () => string | undefined;
     /**
      * Force the session's transcript onto disk even before it has an
@@ -341,6 +350,11 @@ export interface PiApi {
   readonly askEphemeral?: SideTurn;
   /** Persist extension state in the session transcript; never sent to the model. */
   readonly appendEntry: <T = unknown>(customType: string, data?: T) => void;
+  /**
+   * Sets the session's display title and persists it in the transcript, so a `--resume` keeps it.
+   * The host stores it with `titleSource: "user"`, which OMP's own title model never overwrites.
+   */
+  readonly setSessionName: (name: string) => Promise<void>;
   readonly getActiveTools: () => readonly string[];
   readonly setActiveTools: (tools: string[]) => Promise<void>;
   readonly on: <Event extends keyof PiEventContract>(
