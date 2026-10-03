@@ -26,8 +26,12 @@ python3 build.py           # builds build/walkthrough.mp4 and checks it, writes 
 `build.py` refuses footage whose length is off its section's wall clock (a browser recording
 shorter than its actions or longer than its page's life, by more than 5%; a cast more than 1.5 s
 shorter than its section, or longer), a clip or part naming a mark its section did not record, a
-window outside its file, a narration part that starts before its clip, overlaps the next or runs
-past its clip's end, and a part whose text in `narration.json` is missing or blank.
+window outside its file, a cast's clip that ends within 0.2 s of the cast's last event, a narration
+part that starts before its clip, overlaps the next or runs past its clip's end, and a part whose
+text in `narration.json` is missing or blank. A cast's last event is the detached client's
+farewell, which clears the screen to `[detached (from session agent)]`, and agg's frames can show
+it on a clip's last frame or two, so `build.py` places a cast's `end` mark 0.2 s before it
+(`FAREWELL_GUARD`): a clip that plays to the end of a cast ends at `At("end")`.
 Nothing is stretched or held: a clip is its window of the file, at its own speed, and the audio is
 padded with silence, never the video with frames. It prints the cut it resolved (each clip's
 window in its file and where each part falls in the video). It writes the video into `build/`,
@@ -123,12 +127,11 @@ part falls in the video:
  68.4s grants: b3-grants.webm 2.34-12.73s (10.40s); grants-list at 70.5s, grants-revoke at 75.6s
 ```
 
-Every offset in `edl.py` is the last take's but two: `login` and `request`, which play to the end
-of their casts, now stop 0.2 s before `end`. In this take agg's frames showed the detached client's
-farewell, a cleared screen reading `[detached (from session agent)]`, on the last frame of `login`
-and the last two of `request` when they ended at `end`, where the take before it had ended on the
-waiting cursor. The narration and its MP3s are unchanged: every part still fits its clip and says
-only what the new footage shows.
+Every offset in `edl.py` is the last take's. `login` and `request` play to the end of their casts,
+at `end`, which `build.py` places 0.2 s before the detached client's farewell: in this take, cut at
+the farewell itself, agg's frames showed its cleared screen on the last frame of `login` and the
+last two of `request`, where the take before it had ended on the waiting cursor. The narration and
+its MP3s are unchanged: every part still fits its clip and says only what the new footage shows.
 
 Capture rates, as `build.py` prints them (file length against the section's wall clock), and how
 closely each browser section's last frames match its result (`sections.json`):

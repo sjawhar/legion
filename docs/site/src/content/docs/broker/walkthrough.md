@@ -27,7 +27,8 @@ On the agent's machine, `agent-secrets launcher login` prints a code and the add
 machine-login page, `/credentials/machine`. Alice opens that page, types the code, and checks the
 record it finds: a machine login for `example-host-build`, with her as its approver. She approves
 it, and the login on the machine returns. `agent-secrets launcher login-status` checks the machine
-login at any time: it prints `issued` while the machine holds one.
+login at any time: it prints `issued` while the machine holds one, and says when that login
+expires. The broker does not renew it, so before then a person must approve a new machine login.
 
 ![The machine login page with a code looked up: a machine login for example-host-build, approver alice, with Approve and Deny buttons](/legion/media/broker/machine-login.png)
 

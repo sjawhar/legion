@@ -3,10 +3,11 @@
 Each clip is a window of one raw file, cut hard: no speed change, no held frame. Its start, its
 end and each narration part's start are a mark the recorder set in that file
 (walkthrough.record.ts's `mark(...)`, recorded in raw/sections.json) plus an offset in seconds, so
-a new take re-times the cut itself. `start` and `end` are every file's first and last instants.
-build.py fails when a part runs past its clip's end, into the next part, or starts before its
-clip. The narration was written after the cut, to each clip's measured length, and says only what
-the clip shows.
+a new take re-times the cut itself. `start` and `end` are every file's first and last instants,
+except that a cast's `end` stops short of the detached client's farewell, its last event, by
+build.py's FAREWELL_GUARD. build.py fails when a cast's clip ends after its `end`, or a part runs
+past its clip's end, into the next part, or starts before its clip. The narration was written
+after the cut, to each clip's measured length, and says only what the clip shows.
 
 The video opens on its payoff, the command that received the key, then shows how it got there in
 order: the machine's login, its approval, the session, the request, its approval, the command
@@ -46,20 +47,16 @@ NARRATION: dict[str, str] = json.loads((Path(__file__).parent / "narration.json"
 # before the request id's first character, and ran-result jumps the id, typed a character at a
 # time, to its end. The recorder sets `status-word` just before it sends the id's first character,
 # so the cut sits a few hundredths of a second before the mark.
-#
-# A cast's `end` is the detached client's farewell, which clears the screen to `[detached (from
-# session agent)]`; agg's frames can show it a frame or two before its time, so a clip that plays
-# to the end of a cast stops 0.2 s before `end`.
 CLIPS: list[Clip] = [
     # The payoff: the command's line, just after the key reached it.
     Clip("open", "t4-ran.cast", At("key", 0.05), At("key", 4.35), (("open", At("key", 0.1)),)),
-    Clip("login", "t1-login.cast", At("start", 0.2), At("end", -0.2), (("login", At("start", 0.35)),)),
+    Clip("login", "t1-login.cast", At("start", 0.2), At("end"), (("login", At("start", 0.35)),)),
     Clip("machine", "b1-machine.webm", At("page", 0.2), At("result", 1.4),
          (("machine-code", At("typing", -1.2)), ("machine-approve", At("record", 0.6)))),
     Clip("session", "t2-session.cast", At("status-typing", -0.3), At("self", 4.4),
          (("session-issued", At("status-typing", -0.2)), ("session-register", At("register-typing", -0.1)),
           ("session-self", At("self-typing", -0.3)))),
-    Clip("request", "t3-request.cast", At("typing", -0.4), At("end", -0.2),
+    Clip("request", "t3-request.cast", At("typing", -0.4), At("end"),
          (("request-ask", At("typing", -0.2)), ("request-wait", At("waiting", 0.0)))),
     # Opens on the request in the Inbox: before `inbox` the page may still be loading.
     Clip("approve", "b2-approve.webm", At("inbox"), At("result", 1.3),
