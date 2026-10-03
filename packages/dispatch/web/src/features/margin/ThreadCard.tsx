@@ -420,25 +420,25 @@ export function ThreadCard({
               </ol>
             )}
             {/* Mounted on a closed issue too, where the composer shows only a reply of its own
-                still out or its refusal (`closed`), and its frame collapses with it otherwise. */}
+                still out or its refusal (`closed`), and otherwise renders nothing, its frame with
+                it. */}
             {terminalSuggestion || hideReplyComposer ? null : (
-              <div className={`empty:hidden ${composerClassName ?? ""}`}>
-                <MentionComposer
-                  closed={isClosed}
-                  inline
-                  kind="comment"
-                  mutationKey={replyMutationKey}
-                  onCancelReply={onToggle}
-                  onClose={onToggle}
-                  onSent={() => {}}
-                  owner={
-                    owner.kind === "issue"
-                      ? { issueKey: owner.key, kind: "issue" }
-                      : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
-                  }
-                  replyTo={{ author: "", excerpt: "", id: root.id, parentKind: "comment" }}
-                />
-              </div>
+              <MentionComposer
+                closed={isClosed}
+                frame={composerClassName}
+                inline
+                kind="comment"
+                mutationKey={replyMutationKey}
+                onCancelReply={onToggle}
+                onClose={onToggle}
+                onSent={() => {}}
+                owner={
+                  owner.kind === "issue"
+                    ? { issueKey: owner.key, kind: "issue" }
+                    : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
+                }
+                replyTo={{ author: "", excerpt: "", id: root.id, parentKind: "comment" }}
+              />
             )}
           </>
         ) : (

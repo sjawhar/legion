@@ -372,6 +372,10 @@ interface MentionComposerProps {
    *  kept for a reopen. */
   readonly closed?: boolean;
   readonly docked?: boolean;
+  /** The box a host places the composer in - its border, padding and place on screen - which the
+   *  composer draws around itself, so the box goes with it: a closed owner's composer with nothing
+   *  of its own to show renders neither. */
+  readonly frame?: string;
   readonly edit?: { readonly body: string; readonly id: string };
   /** The channel's own mentions: seeded at mount, again by every reset (a send, Discard), and
    *  into the live draft whenever they change (`seededDraft`). */
@@ -401,6 +405,7 @@ export function MentionComposer({
   autoFocus = false,
   closed = false,
   docked = false,
+  frame,
   edit,
   seedMentions = [],
   inline = false,
@@ -419,6 +424,7 @@ export function MentionComposer({
   const textarea = useRef<HTMLTextAreaElement>(null);
   const replacementTextarea = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
+  const frameRef = useRef<HTMLDivElement>(null);
   const lastFocusedField = useRef<HTMLElement | null>(null);
   const optionLabelRefs = useRef<Array<HTMLInputElement | null>>([]);
   const focusAddedOption = useRef(false);
@@ -1330,10 +1336,9 @@ export function MentionComposer({
     </fieldset>
   );
   // A closed owner's composer stays mounted, keeping its draft, and shows itself only for a send
-  // of its own that is out or that send's refusal; a host's frame around it collapses with it
-  // (`empty:hidden`).
+  // of its own that is out or that send's refusal; otherwise it renders nothing, its frame with it.
   if (dormant) return null;
-  return (
+  const form = (
     <form
       aria-label="Comment composer"
       className={
@@ -1348,5 +1353,12 @@ export function MentionComposer({
     >
       {composerControls}
     </form>
+  );
+  return frame === undefined ? (
+    form
+  ) : (
+    <div className={frame} ref={frameRef}>
+      {form}
+    </div>
   );
 }

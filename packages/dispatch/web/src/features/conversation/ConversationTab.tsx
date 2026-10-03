@@ -1578,14 +1578,10 @@ export function ConversationTab({
             </ol>
           )}
           {phone.replyTo === null ? null : (
-            // `empty:hidden`: on a closed issue the composer renders nothing unless it holds a
-            // send or its refusal, and its frame goes with it.
-            <div
-              className={`fixed inset-x-0 bottom-0 z-20 border-t px-4 pt-4 pb-2 empty:hidden ${card} ${borderDefault}`}
-              hidden={!phoneReplyTargetsThread}
-            >
+            <div hidden={!phoneReplyTargetsThread}>
               <MentionComposer
                 closed={isClosed}
+                frame={`fixed inset-x-0 bottom-0 z-20 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}
                 mutationKey={phone.composerKey}
                 onCancelReply={phone.endReply}
                 onClose={phone.endReply}

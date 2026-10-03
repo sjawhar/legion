@@ -71,8 +71,9 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   from the thread view is out leaves the view open, full-screen at any width, until Back. And a
   closed issue keeps its composers mounted (`closed` on `MentionComposer`): one shows itself only
   for a send of its own still out or that send's refusal, with Send refused and `Discard draft` in
-  place of Retry, and otherwise renders nothing, its draft kept for a reopen, so an issue closed,
-  or closed and reopened, under a send leaves that send's composer where it was.
+  place of Retry, and otherwise renders nothing - the box a host places it in, its `frame`, with
+  it - its draft kept for a reopen, so an issue closed, or closed and reopened, under a send leaves
+  that send's composer where it was.
   `Jump to latest` takes an edge of the screen the docked composer leaves free, so it never covers
   the composer's controls. Below `sm`, where the composer sits at the foot of the screen and grows
   upward with a refusal's Retry or Discard draft, the pill sits where the turns begin and sticks at

@@ -79,13 +79,13 @@ export function MarginComposerSlot({
   return (
     // The margin scrolls this into its scrollport when it opens: a composer the reader started
     // from the document renders at the top of the margin's scroll content, which can be thousands
-    // of pixels above wherever the margin is parked. `empty:hidden`: a closed issue's composer
-    // with nothing to show renders nothing.
-    <div className="pt-3 empty:hidden" data-margin-composer="" hidden={hidden}>
+    // of pixels above wherever the margin is parked.
+    <div data-margin-composer="" hidden={hidden}>
       <MentionComposer
         anchor={composer.anchor}
         autoFocus
         closed={isClosed}
+        frame="pt-3"
         kind={composer.kind}
         mutationKey={MARGIN_COMPOSER_SEND_KEY}
         onClose={onClose}
