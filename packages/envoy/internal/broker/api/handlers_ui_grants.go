@@ -17,13 +17,26 @@ import (
 // approved it: the list also holds grants on enrollments the login operates that another login
 // approved.
 type approverGrantResp struct {
-	GrantID    string               `json:"grant_id"`
-	RecordID   *string              `json:"record_id"`
+	// The grant's id, which the revoke route takes.
+	GrantID string `json:"grant_id"`
+	// The credential-request record its approval rests on.
+	RecordID *string `json:"record_id"`
+	// The session holding it.
 	Enrollment recordEnrollmentResp `json:"enrollment"`
-	Names      []string             `json:"names"`
-	Approver   string               `json:"approver"`
-	ExpiresAt  time.Time            `json:"expires_at"`
-	CreatedAt  time.Time            `json:"created_at"`
+	// The secrets it covers.
+	Names []string `json:"names"`
+	// The login that approved it.
+	Approver string `json:"approver"`
+	// When it expires.
+	ExpiresAt time.Time `json:"expires_at"`
+	// When it was granted.
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// approverGrantsResponse is GET /v1/grants's answer.
+type approverGrantsResponse struct {
+	// The live grants the named person approved, and those on sessions they operate.
+	Grants []approverGrantResp `json:"grants"`
 }
 
 func (s *server) listGrantsForApprover(w http.ResponseWriter, r *http.Request) {
@@ -47,12 +60,13 @@ func (s *server) listGrantsForApprover(w http.ResponseWriter, r *http.Request) {
 			Names: names, Approver: g.Approver, ExpiresAt: g.ExpiresAt, CreatedAt: g.CreatedAt,
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"grants": out})
+	writeJSON(w, http.StatusOK, approverGrantsResponse{Grants: out})
 }
 
 // revokeByApproverBody is {"approver"}: the revoking human's Dispatch login, which Dispatch's
 // server sets from its own session.
 type revokeByApproverBody struct {
+	// The Dispatch login of the person revoking: the grant's approver or its session's operator.
 	Approver string `json:"approver"`
 }
 
@@ -83,5 +97,5 @@ func (s *server) revokeByApprover(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, "revoke grant", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"state": "revoked"})
+	writeJSON(w, http.StatusOK, stateResponse{State: "revoked"})
 }

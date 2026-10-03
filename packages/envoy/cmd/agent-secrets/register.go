@@ -79,11 +79,11 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	path, err := exec.LookPath(command[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets register: %v\n", err)
-		return 127
+		return exitNotFound
 	}
 	if err := syscall.Exec(path, command, os.Environ()); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets register: exec: %v\n", err)
-		return 126
+		return exitCannotRun
 	}
 	return 0 // unreachable: syscall.Exec replaces this process image on success
 }
