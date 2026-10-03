@@ -53,28 +53,34 @@ harness as `127.0.0.1:<port>`, never `localhost`: under that flag the router
 refuses any other `Host`. The server process has no caller Home or XDG
 directory and receives no inherited `DISPATCH_*`, `ENVOY_*` or `NATS_*`
 variable, so neither a shell setting nor `~/.config/opencode/envoy.json` /
-`~/.local/share/dispatch` can redirect it. The one opt-in is
-`DISPATCH_E2E_AGENT_SECRETS_URL` with `DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE`,
-which the secrets broker's docs rig (`docs/site/media/broker/rig.sh`) sets to
-point the server's credential requests at a broker it started; unset, those
-routes answer `404 FEATURE_OFF`.
+`~/.local/share/dispatch` can redirect it. The one way in from outside is the
+broker switch below: a URL in `DISPATCH_E2E_AGENT_SECRETS_URL`, with its bearer
+in `DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE`, points the server's credential
+requests at a broker the caller runs, as the secrets broker's docs rig
+(`docs/site/media/broker/rig.sh`) does.
 
 `DATABASE_URL` is required and must name an isolated loopback database:
 `e2e/seed.ts` truncates it before every scenario and never selects a shared
 default, and the dev sign-in flag refuses a non-loopback host. psql runs without
 `PGHOSTADDR` (`e2e/psql.ts`), which would otherwise send it somewhere the server
 never checked. The harness ports `DISPATCH_E2E_PORT` (default `8777`),
-`FAKE_ENVOY_PORT` (default `9021`), `FAKE_GITHUB_PORT` (default `9022`) and
-`PLAIN_HTTP_PORT` (default `9023`) are its other inputs, resolved for the whole
-suite by `e2e/harness-ports.ts`. A local run starts its own servers on those four
-ports and refuses before any of them starts if one is taken, so it never
+`FAKE_ENVOY_PORT` (default `9021`), `FAKE_GITHUB_PORT` (default `9022`),
+`PLAIN_HTTP_PORT` (default `9023`) and `FAKE_BROKER_PORT` (default `9024`) are
+its other inputs, resolved for the whole suite by `e2e/harness-ports.ts`. A
+local run starts its own servers on those five ports and refuses before any of
+them starts if one is taken, so it never
 truncates the database behind a server it did not start;
 `DISPATCH_E2E_REUSE_SERVERS=1` is the opt-in for running against a harness you
 started yourself. `AGENTS.md`'s end-to-end section states that rule in full —
 the accepted values, what a bad or duplicated port does, and which invocations
 skip the probe. The harness starts `e2e/fake-envoy.ts` on `FAKE_ENVOY_PORT`
 and that listener is the only Envoy the server ever talks to; tests seed its
-live sessions with `setLiveSessions` from `e2e/agents.ts`. It also starts
+live sessions with `setLiveSessions` from `e2e/agents.ts`. It starts
+`e2e/fake-broker.ts` on `FAKE_BROKER_PORT` as the secrets broker, so the
+credential-request feature is on, and tests seed its pending requests with
+`setPendingCredentialRequests` from `e2e/fake-broker-helpers.ts`; an empty
+`DISPATCH_E2E_AGENT_SECRETS_URL` runs the suite with no broker instead, as a
+deployment that configures none (`AGENTS.md` has the switch). It also starts
 `e2e/plain-http-proxy.ts` on `PLAIN_HTTP_PORT` for the plain-HTTP project.
 
 Run the local harness with its isolated database available:

@@ -184,7 +184,7 @@ frames):
 | 70.9 s | Settings lists the live grant, with alice as its approver. | Settings clicked at 69.8 s, scrolled to Live grants by 71.2 s: the example-host-build enrollment, DEMO_API_KEY, Approver alice. |
 | 76.1 s | Each live grant has a Revoke button. | The pointer on Revoke from 74.9 s to 77.9 s. |
 
-Outside the video: the Inbox shows "Nothing needs you" directly under the pending credential
-request, since that line speaks for asks and the Inbox renders credential requests in a section of
-their own above it; and the cut shows about 2.8 s from the click to the key, where the agent's poll
+Outside the video: the footage and `inbox-credential-request.png` were recorded before LEGION-500
+(#1717), so they show "Nothing needs you" directly under the pending credential request, which the
+Inbox no longer does; and the cut shows about 2.8 s from the click to the key, where the agent's poll
 took 8.1 s (the cast's `approve` and `key` marks), which the walkthrough page says.
