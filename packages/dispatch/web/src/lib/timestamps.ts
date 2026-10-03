@@ -25,9 +25,12 @@ function instant(value: string): Instant {
 
 /**
  * Orders two timestamps by the instants they name: negative when `left` is earlier, positive when
- * it is later, and zero for one instant however it is written. It parses the server's
- * `time.RFC3339Nano` output and throws when JavaScript cannot parse a value, since an order built
- * around it would be a guess.
+ * it is later, and zero for one instant however it is written. It accepts the form the server's
+ * `time.RFC3339Nano` writes and throws on anything else, since an order built around such a value
+ * would be a guess. A value must match the hand-written `RFC3339` pattern above, and `Date.parse`
+ * must then read its whole second. So `2023-01-01`, which `Date.parse` reads, throws, as do a
+ * lowercase `t` or `z` and the leap second `23:59:60`, both of which RFC 3339 allows, while an
+ * impossible date such as `2026-02-30T00:00:00Z` passes both checks and is ordered as 2 March.
  */
 export function compareTimestamps(left: string, right: string): number {
   const a = instant(left);
