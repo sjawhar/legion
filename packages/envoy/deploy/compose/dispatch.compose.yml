@@ -8,7 +8,9 @@ services:
     entrypoint: ["/usr/local/bin/envoy-dispatch"]
     restart: unless-stopped
     # A SIGTERM runs Dispatch's ordered shutdown: up to 5 s for HTTP, then up to 10 s for the
-    # document service to settle what is owed. Docker's 10 s default would SIGKILL it partway.
+    # document service to settle what is owed. Docker's 10 s default would SIGKILL it partway. A
+    # process whose database stops answering waits on its connections past both budgets, and this
+    # grace period is what ends it.
     stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://${DISPATCH_LISTEN_HOST:-127.0.0.1}:${DISPATCH_PORT:-8766}/healthz"]

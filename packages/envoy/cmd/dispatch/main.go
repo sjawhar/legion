@@ -42,19 +42,9 @@ const (
 	// defaultListenPort is the port when DISPATCH_PORT is unset; listenAddress joins it to the host.
 	defaultListenPort = "8766"
 	// defaultEnvoyURL is the Envoy listener when ENVOY_URL is unset: this machine's.
-	defaultEnvoyURL = "http://127.0.0.1:9020"
-	// httpShutdownTimeout bounds http.Server.Shutdown at SIGTERM: the requests in flight finishing.
-	// An open event stream holds none of it, since every stream ends with the process context
-	// (api.Deps.Lifetime), which is cancelled before Shutdown starts.
-	httpShutdownTimeout = 5 * time.Second
-	// documentShutdownTimeout is the document service's own budget, counted from when HTTP shutdown
-	// returns: up to docs' five-second drain budget settling the documents that owe it, then joining
-	// the settlements that budget cut short, closing the editors connected to the rooms they
-	// settled, and reading back which committed, which docs.Service.Shutdown cannot do once this
-	// deadline has passed. A runtime's stop grace period must allow both budgets.
-	documentShutdownTimeout = 10 * time.Second
-	readHeaderTimeout       = 10 * time.Second
-	idleTimeout             = 2 * time.Minute
+	defaultEnvoyURL   = "http://127.0.0.1:9020"
+	readHeaderTimeout = 10 * time.Second
+	idleTimeout       = 2 * time.Minute
 )
 
 // buildCommit is the legion commit this binary was built from. Only the image build stamps it
@@ -324,18 +314,7 @@ func main() {
 
 	<-ctx.Done()
 	slog.Info("dispatch: shutting down")
-	httpCtx, cancelHTTP := context.WithTimeout(context.Background(), httpShutdownTimeout)
-	defer cancelHTTP()
-	if err := server.Shutdown(httpCtx); err != nil {
-		slog.Warn("dispatch: shutdown", "error", err)
-	}
-	// The document service's budget starts once HTTP shutdown has returned, so the time the
-	// requests in flight took is not taken from the settlements owed.
-	documentCtx, cancelDocuments := context.WithTimeout(context.Background(), documentShutdownTimeout)
-	defer cancelDocuments()
-	if err := documentService.Shutdown(documentCtx); err != nil {
-		slog.Warn("dispatch: shutdown document service", "error", err)
-	}
+	shutdown(server, documentService)
 	select {
 	case err := <-serveErr:
 		slog.Error("dispatch: serve", "error", err)
