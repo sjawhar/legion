@@ -3,6 +3,7 @@
 // notices with every copy, so a build that writes a bundle writes this beside it.
 import { readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
+import parseSpdxExpression from "spdx-expression-parse";
 
 const LICENSE_FILE = /^(licen[cs]e|copying|notice)([.-].*)?$/i;
 const NODE_MODULES = `${sep}node_modules${sep}`;
@@ -71,6 +72,16 @@ async function readPackage(root: string): Promise<BundledPackage> {
     typeof manifest.license === "string"
       ? manifest.license
       : (manifest.license?.type ?? (legacy.length > 0 ? legacy.join(" OR ") : null));
+  if (license !== null) {
+    try {
+      parseSpdxExpression(license);
+    } catch {
+      throw new Error(
+        `${manifest.name}@${manifest.version} declares an unrecognized license ${license}; ` +
+          "find its terms before bundling it"
+      );
+    }
+  }
   const names = (await readdir(root)).filter((name) => LICENSE_FILE.test(name)).sort();
   const files = await Promise.all(
     names.map(async (name) => ({ name, text: (await readFile(join(root, name), "utf8")).trim() }))

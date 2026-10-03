@@ -123,6 +123,9 @@ jobs:
       - name: Test release scripts
         run: .github/scripts/release-push.test.sh
 
+      - name: Test third-party notices
+        run: bun test scripts/third-party-notices.test.ts
+
       - name: Test the Bun pin check
         run: .github/scripts/check-bun-version.test.sh
 
