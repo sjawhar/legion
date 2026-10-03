@@ -745,10 +745,12 @@ export type AskEventPayload = Ask & ReferenceChangesPayload;
 export type AskEditEventPayload = AskEventPayload & {
   readonly previous: AskEditPrevious;
   readonly edited_by: Actor;
-  /** A version move of an approval request that already waits on its agent: it changes only the
-   *  version the request names, so its event, like a human's unnamed `artifact.version`, carries
-   *  `notify: false` and reaches no follower. Absent on every other edit, the move that takes the
-   *  request from the human included. */
+  /** A version move of an approval request that an earlier version already moved since it was
+   *  opened or last handed back (`requested_version < version`): it changes only the version the
+   *  request names, so its event, like a human's unnamed `artifact.version`, carries
+   *  `notify: false` and reaches no follower. Absent on every other edit, the first move after an
+   *  opening or a hand-back included, even when a thread reply left the request waiting on its
+   *  agent. */
   readonly quiet?: true;
 };
 

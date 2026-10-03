@@ -66,9 +66,10 @@ func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 // RewriteApprovalAsk rewords one open approval row to name version with summary, indexes its new
 // question, stamps edited_at, and records its ask.edited event. A document version move and a
 // request with a new summary both reword; neither hands the request back, so requested_version
-// stays as it was. A move of a request that already waits on its agent, requested_version below the
-// version it named, is recorded quiet (model.AskEditEventPayload.Quiet): it changes only that
-// version, so like a human's unnamed version it wakes nobody.
+// stays as it was. A move of a request that an earlier version already moved since it was opened
+// or handed back, requested_version below the version it named, is recorded quiet
+// (model.AskEditEventPayload.Quiet): it changes only that version, so like a human's unnamed version
+// it wakes nobody.
 func RewriteApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,

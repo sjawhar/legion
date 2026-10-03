@@ -1532,8 +1532,9 @@ the synchronous listener call records the sent or failed attempt instead of blin
   of `notify` and of the issue's route, so a session-authored reply on an ask reaches its followers
   even though it wakes nobody through the issue topic; the acting session is skipped and a session
   already reached by the issue's route is not sent the envelope twice. A quiet `ask.edited` (a
-  version move of an approval request already waiting on its agent, `quiet: true`) has `notify`
-  false and reaches no follower, as a human's unnamed `artifact.version` reaches nobody. A
+  version move of an approval request that an earlier version already moved since it was opened or
+  last handed back, `quiet: true`) has `notify` false and reaches no follower, as a human's unnamed
+  `artifact.version` reaches nobody; the first move after an opening or a hand-back is not quiet. A
   notifying comment-thread or message-reply event without an `ask_id` keeps the author routes:
   a comment reply's
   thread-root author and its direct parent author when different; a message reply's direct parent
