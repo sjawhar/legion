@@ -206,14 +206,15 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 	return snapshot, nil
 }
 
-// newDocumentCopy is a document to decode into the state this server encoded from a document it
-// holds: a snapshot, a write's fork. ygo's decoder parks each later item of a client behind one
-// whose parent it cannot place yet - a container in a later client's group, or one its garbage
-// collection emptied when a peer deleted it - and refuses the whole update once 100,000 are parked
-// (crdt.WithMaxPendingItems), so a copy of a room whose deleted subtree or one client's writes
-// run past that fails where the room itself serves. That cap guards against a peer's update; this
-// one is the server's own, and no update ygo decodes carries more than maxUpdateItems items, so
-// the queue of a copy is bounded at that.
+// newDocumentCopy is a document to decode a document's state into: a snapshot or a write's fork of
+// a room this server holds, or the document's stored history (loadDocument, validateUpdate), which
+// the room itself decodes with the same queue (New sets Server.MaxPendingItems). ygo's decoder
+// parks each later item of a client behind one whose parent it cannot place yet - a container in a
+// later client's group, or one its garbage collection emptied when a peer deleted it - and refuses
+// the whole update once 100,000 are parked, its default (crdt.WithMaxPendingItems; LEGION-502), so
+// a copy or a load of a document whose deleted subtree or one client's writes run past that fails
+// where the room that holds it serves. No update ygo decodes carries more than maxUpdateItems
+// items, so a queue that long holds every item one update can park.
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems))...)
 }

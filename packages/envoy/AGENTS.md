@@ -257,16 +257,27 @@ room's state lock. A read that may load its room (a version's capture, `docView`
 subscription) takes what it reads inside the `Server.Apply` that loads and holds the room: a room
 looked up again with `GetDoc` once that Apply returned can have been evicted in between.
 
-The copy, like a write's fork (`forkLive`), decodes into a document whose pending queue is as long
-as the most items one update can carry (`newDocumentCopy`, `maxUpdateItems`). ygo's decoder defers
-an item whose parent it cannot place yet - a container a later client's group holds, or one garbage
-collection emptied when a peer deleted it - and parks every later item of that client behind it as
-a clock gap, refusing the update once 100,000 are parked, its default for a peer's update. A room
-whose peer deleted a chain of 200,000 nested blocks, or whose lower-numbered client wrote 100,000
-items after one such deferral, then failed every copy with `crdt: invalid update` while the room
-itself served it (`TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`,
-`TestACopyHoldsEveryItemItsRoomParksForOneClient`). The copy's update is the server's own, so its
-queue is bounded by the update rather than by that default.
+Every decode of a document's whole state takes a pending queue as long as the most items one
+update can carry (`newDocumentCopy`, `maxUpdateItems`): the copy, a write's fork (`forkLive`), and
+every decode of the stored history - a read with no room resident (`loadDocument`), the history
+check behind a room's load and a rebuild's refusal (`validateUpdate`), and the room's own load
+(`Server.MaxPendingItems`, set in `New`). ygo's decoder defers an item whose parent it cannot place
+yet - a container a later client's group holds, or one garbage collection emptied when a peer
+deleted it - and parks every later item of that client behind it as a clock gap, refusing the
+update once 100,000 are parked, its default (LEGION-502). A room whose peer deleted a chain of
+200,000 nested blocks, or whose lower-numbered client wrote 100,000 items after one such deferral,
+then failed every copy with `crdt: invalid update` while the room itself served it
+(`TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`,
+`TestACopyHoldsEveryItemItsRoomParksForOneClient`). Once that room was evicted or the server
+restarted, the same document read as `409 DOCUMENT_UNLOADABLE`, its room did not open, and the
+rebuild that code offers, whose history check refused it too, replaced its history with its latest
+saved version (`TestAStoredHistoryLoadsWhatItsRoomParksForOneClient`). ygo refuses any update that
+declares more than `maxUpdateItems` items, so no decode of one parks past that queue; in a room,
+which keeps what it parks across updates, it is also the most the room's peers can park, about ten
+times ygo's default. Two checks still decode one update alone at ygo's default: the store's, of
+each update it appends (`appendUpdate`, `AppendUpdateTx`), and ygo's, of an update the service
+broadcasts (`Server.BroadcastUpdate`). Each refuses an update of more than 100,000 items that lean
+on items outside it, such as a settlement that stamps that many blocks' ids, and the room fails.
 
 A room whose last peer leaves stays resident until it has been idle for a minute
 (`roomIdleTimeout`), when ygo's idle sweeper evicts it. ygo's default, eager eviction, evicts a room

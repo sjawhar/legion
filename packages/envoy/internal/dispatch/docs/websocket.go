@@ -140,11 +140,14 @@ func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) er
 	return err
 }
 
+// validateUpdate decodes a stored history, or an update about to replace one, as the room will
+// decode it: into a document with the server's pending queue (newDocumentCopy), so a history a room
+// served is never judged one that cannot load.
 func validateUpdate(update []byte) error {
 	if len(update) == 0 {
 		return nil
 	}
-	return crdt.ApplyUpdateV1(crdt.New(), update, nil)
+	return crdt.ApplyUpdateV1(newDocumentCopy(), update, nil)
 }
 
 // preloadedDocument is the durable state a document socket's admission check decoded, kept for the

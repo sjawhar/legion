@@ -447,7 +447,7 @@ func (s *Service) loadDocument(ctx context.Context, artifactID string) (*crdt.Do
 	if len(loaded.Update) == 0 {
 		return nil, &loaded, nil
 	}
-	doc := crdt.New()
+	doc := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
 		// The room carries the decode failure as its cause, which a reader that meets the
 		// failed room answers as DOC_SERVICE_UNAVAILABLE; this read met the history itself.
