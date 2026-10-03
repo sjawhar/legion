@@ -357,7 +357,7 @@ const legion: ShotSet<LegionJourney> = {
         const versions = (await api.getArtifact(journey.spec)).versions.length;
         await api.answerAsk(decision.id, { expected_edited_at: null, selected: ["Server"] });
         // The answer is written into the decision block as a new spec version. An approval asked
-        // for before that version lands goes stale with it, and its ask is resolved.
+        // for before that version lands would move to it and wait on the architect to hand it back.
         await expect
           .poll(async () => (await api.getArtifact(journey.spec)).versions.length)
           .toBeGreaterThan(versions);

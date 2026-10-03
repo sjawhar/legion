@@ -880,8 +880,9 @@ export const dispatchToolSpecs = [
       "followed by the summary; the answer pins a review to that version and arrives as " +
       "artifact.approved or artifact.changes_requested. An open request follows the document: a " +
       "later version moves it to that version and leaves it waiting on you, as a human's reply in " +
-      "its thread does. A move sends you an event only when someone else's version takes the " +
-      "request from the human; dispatch_doc_read shows whom it waits on. Once the revision is " +
+      "its thread does. Only the first move since the request was opened or handed back sends an " +
+      "event, and never to the session whose version made it; dispatch_doc_read shows whom it " +
+      "waits on. Once the revision is " +
       "complete and the human has agreed to every point in it, call this again to hand that same " +
       "Inbox row back. The request carries nothing new. A call while it already waits on the " +
       "human hands nothing back: the same summary changes nothing, and a different one is " +

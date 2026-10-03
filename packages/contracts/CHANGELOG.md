@@ -14,9 +14,10 @@
   to the human, at the version `approval.requested_version` names. `ask.edited` stays a rewording:
   a hand-back that changes no wording records only `ask.handed_back` and leaves `edited_at` as it
   was, and one with a new summary records `ask.edited` and then `ask.handed_back` (LEGION-470).
-- Added `AskEditEventPayload.quiet`: `true` on a version move of an approval request that already
-  waits on its agent, which carries `notify: false` and reaches no follower, as a human's unnamed
-  `artifact.version` does; only the move that takes the request from the human wakes anyone
+- Added `AskEditEventPayload.quiet`: `true` on a version move of an approval request that an
+  earlier version already moved since it was opened or last handed back (`requested_version <
+  version`), which carries `notify: false` and reaches no follower, as a human's unnamed
+  `artifact.version` does; only the first move after an opening or a hand-back wakes anyone
   (LEGION-470).
 - Added `ArtifactApproval.waiting_on`, whose move an `awaiting` approval's request waits on, and
   `ApprovalRequestResponse`, the answer of `POST /api/v1/artifacts/{id}/approval-requests`
