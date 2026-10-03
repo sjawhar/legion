@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -15,7 +16,7 @@ import {
 // The phase-stall follow-up on the real Oh My Pi (src/legion/phase-stall.ts): only the real binary
 // shows when the host fires `session_stop`, how it turns the returned follow-up into the next turn,
 // what the model is sent, and that the transcript keeps the state a resumed worker restores.
-// LEGION_TEST_OMP names the binary: the fork pin in packages/daemon/src/daemon/omp-pin.ts, which
+// LEGION_TEST_OMP names the binary: the fork pin in the repository's .omp-pin, which
 // CI's pi-envoy job installs; on the devbox, `mise where <pin>`/bin/omp. A run without one skips,
 // except on GitHub Actions, where a skip would hide the only run of the check on the host that
 // ships it (GITHUB_ACTIONS, not CI: agent harnesses on the devbox export CI=true).
@@ -25,6 +26,14 @@ import {
 // The WAITING self-check case below fails if that ever changes.
 const omp = process.env.LEGION_TEST_OMP;
 const onActions = process.env.GITHUB_ACTIONS === "true";
+/** The daemon's golden registration answer (`packages/daemon/internal/api`), so a field the daemon
+ * adds to it reaches the stub below. */
+const registered: Record<string, unknown> = JSON.parse(
+  readFileSync(
+    path.resolve(import.meta.dir, "../../contracts/fixtures/daemon-api/register.json"),
+    "utf8"
+  )
+);
 
 interface Pane {
   /** Every request the stand-in served: the model gateway's, the daemon's, and the listener's. */
@@ -172,6 +181,7 @@ async function runPane(
     }
     if (url.pathname === "/legion/v1/claims/register") {
       return Response.json({
+        ...registered,
         claimToken: "legion-stall-stall-2-implementer",
         tree: "STALL-1",
         issue: "STALL-2",

@@ -22430,7 +22430,7 @@
         }
       ]
     },
-    "yjs_update_v1_b64": "ARQBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEQQSBzZW50ZW5jZSB3aXRoIIYBEQxwcm9vZkNvbW1lbnQceyJpZCI6ImMxIiwiYnkiOiJ1c2VyOnNhbWkifYQBEhBhIGNvbW1lbnRlZCBzcGFuhgEiDHByb29mQ29tbWVudARudWxshAEjBSBhbmQghgEoC2Rpc3BhdGNoQXNrH3siaWQiOiJhMSIsImJ5Ijoic2Vzc2lvbjowMWEwIn2EASkLYW4gYXNrIHNwYW6GATQLZGlzcGF0Y2hBc2sEbnVsbIQBNQEuKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCXBhcmFncmFwaAcAATgGBAABOQlQcm9wb3NlZCCGAUIPcHJvb2ZTdWdnZXN0aW9umQJ7ImlkIjoiczEiLCJraW5kIjoicmVwbGFjZSIsImJ5Ijoic2Vzc2lvbjowMWEwIiwiY29udGVudCI6bnVsbCwic3RhdHVzIjpudWxsLCJjcmVhdGVkQXQiOm51bGwsInJ1bklkIjpudWxsLCJmb2N1c0FyZWFJZCI6bnVsbCwiZm9jdXNBcmVhTmFtZSI6bnVsbCwiYWdlbnRJZCI6bnVsbCwicHJvcG9zYWxJZCI6bnVsbCwicHJvdmlzaW9uYWwiOm51bGwsIm9yY2hlc3RyYXRvciI6bnVsbCwiZGVidWdBdXRvRml4ZWRRdW90ZXMiOm51bGwsImRlYnVnQXV0b0ZpeGVkUXVvdGVzUmVhc29uIjpudWxsfYQBQwtyZXBsYWNlbWVudIYBTg9wcm9vZlN1Z2dlc3Rpb24EbnVsbIQBTwYgaGVyZS4oAAE4B2Jsb2NrSWQBdwhiLTAwMDAwMgA=",
+    "yjs_update_v1_b64": "ARQBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEQQSBzZW50ZW5jZSB3aXRoIIYBERZwcm9vZkNvbW1lbnQtLU5xOFFKaW9GHHsiaWQiOiJjMSIsImJ5IjoidXNlcjpzYW1pIn2EARIQYSBjb21tZW50ZWQgc3BhboYBIhZwcm9vZkNvbW1lbnQtLU5xOFFKaW9GBG51bGyEASMFIGFuZCCGASgVZGlzcGF0Y2hBc2stLS9kd0llcXJhH3siaWQiOiJhMSIsImJ5Ijoic2Vzc2lvbjowMWEwIn2EASkLYW4gYXNrIHNwYW6GATQVZGlzcGF0Y2hBc2stLS9kd0llcXJhBG51bGyEATUBLigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwlwYXJhZ3JhcGgHAAE4BgQAATkJUHJvcG9zZWQghgFCGXByb29mU3VnZ2VzdGlvbi0tMXdLYWZKQXCZAnsiaWQiOiJzMSIsImtpbmQiOiJyZXBsYWNlIiwiYnkiOiJzZXNzaW9uOjAxYTAiLCJjb250ZW50IjpudWxsLCJzdGF0dXMiOm51bGwsImNyZWF0ZWRBdCI6bnVsbCwicnVuSWQiOm51bGwsImZvY3VzQXJlYUlkIjpudWxsLCJmb2N1c0FyZWFOYW1lIjpudWxsLCJhZ2VudElkIjpudWxsLCJwcm9wb3NhbElkIjpudWxsLCJwcm92aXNpb25hbCI6bnVsbCwib3JjaGVzdHJhdG9yIjpudWxsLCJkZWJ1Z0F1dG9GaXhlZFF1b3RlcyI6bnVsbCwiZGVidWdBdXRvRml4ZWRRdW90ZXNSZWFzb24iOm51bGx9hAFDC3JlcGxhY2VtZW50hgFOGXByb29mU3VnZ2VzdGlvbi0tMXdLYWZKQXAEbnVsbIQBTwYgaGVyZS4oAAE4B2Jsb2NrSWQBdwhiLTAwMDAwMgA=",
     "rendered_by_milkdown": "A sentence with <span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:sami\">a commented span</span> and <span data-dispatch=\"ask\" data-id=\"a1\" data-by=\"session:01a0\">an ask span</span>.\n\nProposed <span data-proof=\"suggestion\" data-id=\"s1\" data-by=\"session:01a0\" data-kind=\"replace\">replacement</span> here.\n"
   },
   {
@@ -24349,6 +24349,388 @@
     },
     "yjs_update_v1_b64": "AX4BAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEgMS4gbm90IGEgbGlzdCAyKSBhbHNvIG5vdCBhIGxpc3QoAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMLYnVsbGV0X2xpc3QHAAEjAwlsaXN0X2l0ZW0HAAEkAwlwYXJhZ3JhcGgHAAElBgQAASYNQSB0aWdodCBpdGVtLigAASUHYmxvY2tJZAF3CGItMDAwMDA0hwElAwpibG9ja3F1b3RlBwABNQMMb3JkZXJlZF9saXN0BwABNgMJbGlzdF9pdGVtBwABNwMJcGFyYWdyYXBoBwABOAYEAAE5GlF1b3RlZCwgbnVtYmVyZWQgZnJvbSB0d28uKAABOAdibG9ja0lkAXcIYi0wMDAwMDgoAAE3BWxhYmVsAXcD4oCiKAABNwhsaXN0VHlwZQF3BmJ1bGxldCgAATcGc3ByZWFkAXkoAAE3B2Jsb2NrSWQBdwhiLTAwMDAwNygAATYFb3JkZXIBfQIoAAE2BnNwcmVhZAF5KAABNgdibG9ja0lkAXcIYi0wMDAwMDYoAAE1B2Jsb2NrSWQBdwhiLTAwMDAwNSgAASQFbGFiZWwBdwPigKIoAAEkCGxpc3RUeXBlAXcGYnVsbGV0KAABJAZzcHJlYWQBeSgAASQHYmxvY2tJZAF3CGItMDAwMDAzhwEkAwlsaXN0X2l0ZW0HAAFhAwlwYXJhZ3JhcGgHAAFiBgQAAWMIQW5vdGhlci4oAAFiB2Jsb2NrSWQBdwhiLTAwMDAxMIcBYgMKYmxvY2txdW90ZQcAAW0DCmJsb2NrcXVvdGUHAAFuAwxvcmRlcmVkX2xpc3QHAAFvAwlsaXN0X2l0ZW0HAAFwAwlwYXJhZ3JhcGgHAAFxBgQAAXIQVHdvIHF1b3RlcyBkb3duLigAAXEHYmxvY2tJZAF3CGItMDAwMDE1KAABcAVsYWJlbAF3A+KAoigAAXAIbGlzdFR5cGUBdwZidWxsZXQoAAFwBnNwcmVhZAF5KAABcAdibG9ja0lkAXcIYi0wMDAwMTQoAAFvBW9yZGVyAX0DKAABbwZzcHJlYWQBeSgAAW8HYmxvY2tJZAF3CGItMDAwMDEzKAABbgdibG9ja0lkAXcIYi0wMDAwMTIoAAFtB2Jsb2NrSWQBdwhiLTAwMDAxMSgAAWEFbGFiZWwBdwPigKIoAAFhCGxpc3RUeXBlAXcGYnVsbGV0KAABYQZzcHJlYWQBeSgAAWEHYmxvY2tJZAF3CGItMDAwMDA5hwFhAwlsaXN0X2l0ZW0HAAGRAQMJcGFyYWdyYXBoBwABkgEGBAABkwEOQW4gZW1wdHkgaXRlbS4oAAGSAQdibG9ja0lkAXcIYi0wMDAwMTeHAZIBAwpibG9ja3F1b3RlBwABowEDC2J1bGxldF9saXN0BwABpAEDCWxpc3RfaXRlbQcAAaUBAwlwYXJhZ3JhcGgoAAGmAQdibG9ja0lkAXcIYi0wMDAwMjEoAAGlAQVsYWJlbAF3A+KAoigAAaUBCGxpc3RUeXBlAXcGYnVsbGV0KAABpQEGc3ByZWFkAXkoAAGlAQdibG9ja0lkAXcIYi0wMDAwMjAoAAGkAQZzcHJlYWQBeSgAAaQBB2Jsb2NrSWQBdwhiLTAwMDAxOSgAAaMBB2Jsb2NrSWQBdwhiLTAwMDAxOCgAAZEBBWxhYmVsAXcD4oCiKAABkQEIbGlzdFR5cGUBdwZidWxsZXQoAAGRAQZzcHJlYWQBeSgAAZEBB2Jsb2NrSWQBdwhiLTAwMDAxNigAASMGc3ByZWFkAXkoAAEjB2Jsb2NrSWQBdwhiLTAwMDAwMocBIwMJcGFyYWdyYXBoBwABtQEGBAABtgEtQSBwYXJhZ3JhcGggbGluZSAwMS4gdGhhdCBubyBsaXN0IGludGVycnVwdHMuKAABtQEHYmxvY2tJZAF3CGItMDAwMDIyhwG1AQMJcGFyYWdyYXBoBwAB5QEGBAAB5gEWQW5vdGhlciAwMDEpIGxpa2V3aXNlLigAAeUBB2Jsb2NrSWQBdwhiLTAwMDAyM4cB5QEDCXBhcmFncmFwaAcAAf4BBgQAAf8BB0FuZCBvbmUoAAH+AQdibG9ja0lkAXcIYi0wMDAwMjSHAf4BAwxvcmRlcmVkX2xpc3QHAAGIAgMJbGlzdF9pdGVtBwABiQIDCXBhcmFncmFwaAcAAYoCBgQAAYsCF3RoYXQgYSBsaXN0IGludGVycnVwdHMuKAABigIHYmxvY2tJZAF3CGItMDAwMDI3KAABiQIFbGFiZWwBdwPigKIoAAGJAghsaXN0VHlwZQF3BmJ1bGxldCgAAYkCBnNwcmVhZAF5KAABiQIHYmxvY2tJZAF3CGItMDAwMDI2KAABiAIFb3JkZXIBfQEoAAGIAgZzcHJlYWQBeSgAAYgCB2Jsb2NrSWQBdwhiLTAwMDAyNYcBiAIDCmJsb2NrcXVvdGUHAAGrAgMJcGFyYWdyYXBoBwABrAIGBAABrQIQUXVvdGVkIDAxLiB0ZXh0LigAAawCB2Jsb2NrSWQBdwhiLTAwMDAyOSgAAasCB2Jsb2NrSWQBdwhiLTAwMDAyOIcBqwIDCXBhcmFncmFwaAcAAcACBgQAAcECD0luIGEgZGVmaW5pdGlvbocBwQIDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAdECBWxhYmVsAXcBb4cB0QIGBAAB0wIBOigAAcACB2Jsb2NrSWQBdwhiLTAwMDAzMIcBwAIDCmJsb2NrcXVvdGUHAAHWAgMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAdcCAwlwYXJhZ3JhcGgHAAHYAgYEAAHZAgdhIDAxLiBiKAAB2AIHYmxvY2tJZAF3CGItMDAwMDMzKAAB1wIFbGFiZWwBdwFvKAAB1wIHYmxvY2tJZAF3CGItMDAwMDMyKAAB1gIHYmxvY2tJZAF3CGItMDAwMDMxAA==",
     "rendered_by_milkdown": "1\\. not a list 2) also not a list\n\n* A tight item.\n  > 2. Quoted, numbered from two.\n* Another.\n  > > 3. Two quotes down.\n* An empty item.\n  > *\n\nA paragraph line 01. that no list interrupts.\n\nAnother 001) likewise.\n\nAnd one\n\n1. that a list interrupts.\n\n> Quoted 01. text.\n\nIn a definition[^o]:\n\n> [^o]: a 01. b\n"
+  },
+  {
+    "name": "overlapping-marks",
+    "markdown": "Two readers' comments may cover the same text, and a mark of one kind does not end another of its kind.\n\nOverlapping: <span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:bob\">quick </span><span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:bob\"><span data-proof=\"comment\" data-id=\"c2\" data-by=\"user:alice\">brown</span></span><span data-proof=\"comment\" data-id=\"c2\" data-by=\"user:alice\"> fox</span> jumps.\n\nOne inside another, as runs: <span data-proof=\"comment\" data-id=\"c3\" data-by=\"user:bob\">quick </span><span data-proof=\"comment\" data-id=\"c3\" data-by=\"user:bob\"><span data-proof=\"comment\" data-id=\"c4\" data-by=\"user:alice\">brown</span></span><span data-proof=\"comment\" data-id=\"c3\" data-by=\"user:bob\"> fox</span> jumps.\n\nOne inside another, nested: <span data-proof=\"comment\" data-id=\"c5\" data-by=\"user:bob\">quick <span data-proof=\"comment\" data-id=\"c6\" data-by=\"user:alice\">brown</span> fox</span> jumps.\n\nTwo asks on one word: <span data-dispatch=\"ask\" data-id=\"a1\" data-by=\"user:bob\"><span data-dispatch=\"ask\" data-id=\"a2\" data-by=\"user:alice\">brown</span></span> fox.\n\nAn ask inside another: <span data-dispatch=\"ask\" data-id=\"a3\" data-by=\"user:bob\">quick <span data-dispatch=\"ask\" data-id=\"a4\" data-by=\"user:alice\">brown</span> fox</span> jumps.\n\nA suggestion inside a comment: <span data-proof=\"comment\" data-id=\"c7\" data-by=\"user:bob\">the <span data-proof=\"suggestion\" data-id=\"s1\" data-by=\"user:alice\" data-kind=\"replace\">quick</span> fox</span> jumps.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Two readers' comments may cover the same text, and a mark of one kind does not end another of its kind."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Overlapping: "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c1",
+                    "by": "user:bob"
+                  }
+                }
+              ],
+              "text": "quick "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c1",
+                    "by": "user:bob"
+                  }
+                },
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c2",
+                    "by": "user:alice"
+                  }
+                }
+              ],
+              "text": "brown"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c2",
+                    "by": "user:alice"
+                  }
+                }
+              ],
+              "text": " fox"
+            },
+            {
+              "type": "text",
+              "text": " jumps."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "One inside another, as runs: "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c3",
+                    "by": "user:bob"
+                  }
+                }
+              ],
+              "text": "quick "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c3",
+                    "by": "user:bob"
+                  }
+                },
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c4",
+                    "by": "user:alice"
+                  }
+                }
+              ],
+              "text": "brown"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c3",
+                    "by": "user:bob"
+                  }
+                }
+              ],
+              "text": " fox"
+            },
+            {
+              "type": "text",
+              "text": " jumps."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "One inside another, nested: "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c5",
+                    "by": "user:bob"
+                  }
+                }
+              ],
+              "text": "quick "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c5",
+                    "by": "user:bob"
+                  }
+                },
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c6",
+                    "by": "user:alice"
+                  }
+                }
+              ],
+              "text": "brown"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c5",
+                    "by": "user:bob"
+                  }
+                }
+              ],
+              "text": " fox"
+            },
+            {
+              "type": "text",
+              "text": " jumps."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Two asks on one word: "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "dispatchAsk",
+                  "attrs": {
+                    "id": "a1",
+                    "by": "user:bob"
+                  }
+                },
+                {
+                  "type": "dispatchAsk",
+                  "attrs": {
+                    "id": "a2",
+                    "by": "user:alice"
+                  }
+                }
+              ],
+              "text": "brown"
+            },
+            {
+              "type": "text",
+              "text": " fox."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "An ask inside another: "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "dispatchAsk",
+                  "attrs": {
+                    "id": "a3",
+                    "by": "user:bob"
+                  }
+                }
+              ],
+              "text": "quick "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "dispatchAsk",
+                  "attrs": {
+                    "id": "a3",
+                    "by": "user:bob"
+                  }
+                },
+                {
+                  "type": "dispatchAsk",
+                  "attrs": {
+                    "id": "a4",
+                    "by": "user:alice"
+                  }
+                }
+              ],
+              "text": "brown"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "dispatchAsk",
+                  "attrs": {
+                    "id": "a3",
+                    "by": "user:bob"
+                  }
+                }
+              ],
+              "text": " fox"
+            },
+            {
+              "type": "text",
+              "text": " jumps."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A suggestion inside a comment: "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c7",
+                    "by": "user:bob"
+                  }
+                }
+              ],
+              "text": "the "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "proofSuggestion",
+                  "attrs": {
+                    "id": "s1",
+                    "kind": "replace",
+                    "by": "user:alice",
+                    "content": null,
+                    "status": null,
+                    "createdAt": null,
+                    "runId": null,
+                    "focusAreaId": null,
+                    "focusAreaName": null,
+                    "agentId": null,
+                    "proposalId": null,
+                    "provisional": null,
+                    "orchestrator": null,
+                    "debugAutoFixedQuotes": null,
+                    "debugAutoFixedQuotesReason": null
+                  }
+                },
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c7",
+                    "by": "user:bob"
+                  }
+                }
+              ],
+              "text": "quick"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "proofComment",
+                  "attrs": {
+                    "id": "c7",
+                    "by": "user:bob"
+                  }
+                }
+              ],
+              "text": " fox"
+            },
+            {
+              "type": "text",
+              "text": " jumps."
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AV4BAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQFnVHdvIHJlYWRlcnMnIGNvbW1lbnRzIG1heSBjb3ZlciB0aGUgc2FtZSB0ZXh0LCBhbmQgYSBtYXJrIG9mIG9uZSBraW5kIGRvZXMgbm90IGVuZCBhbm90aGVyIG9mIGl0cyBraW5kLigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwlwYXJhZ3JhcGgHAAFqBgQAAWsNT3ZlcmxhcHBpbmc6IIYBeBZwcm9vZkNvbW1lbnQtLVdJQmUzSWF4G3siaWQiOiJjMSIsImJ5IjoidXNlcjpib2IifYQBeQZxdWljayCGAX8WcHJvb2ZDb21tZW50LS1XSUJlM0lheARudWxshgGAARZwcm9vZkNvbW1lbnQtLVdJQmUzSWF4G3siaWQiOiJjMSIsImJ5IjoidXNlcjpib2IifYYBgQEWcHJvb2ZDb21tZW50LS1VVnVuaExDSR17ImlkIjoiYzIiLCJieSI6InVzZXI6YWxpY2UifYQBggEFYnJvd26GAYcBFnByb29mQ29tbWVudC0tV0lCZTNJYXgEbnVsbIYBiAEWcHJvb2ZDb21tZW50LS1VVnVuaExDSQRudWxshgGJARZwcm9vZkNvbW1lbnQtLVVWdW5oTENJHXsiaWQiOiJjMiIsImJ5IjoidXNlcjphbGljZSJ9hAGKAQQgZm94hgGOARZwcm9vZkNvbW1lbnQtLVVWdW5oTENJBG51bGyEAY8BByBqdW1wcy4oAAFqB2Jsb2NrSWQBdwhiLTAwMDAwMocBagMJcGFyYWdyYXBoBwABmAEGBAABmQEdT25lIGluc2lkZSBhbm90aGVyLCBhcyBydW5zOiCGAbYBFnByb29mQ29tbWVudC0tQWNlaGx4VTYbeyJpZCI6ImMzIiwiYnkiOiJ1c2VyOmJvYiJ9hAG3AQZxdWljayCGAb0BFnByb29mQ29tbWVudC0tQWNlaGx4VTYEbnVsbIYBvgEWcHJvb2ZDb21tZW50LS1BY2VobHhVNht7ImlkIjoiYzMiLCJieSI6InVzZXI6Ym9iIn2GAb8BFnByb29mQ29tbWVudC0tUWdHVWJLdFYdeyJpZCI6ImM0IiwiYnkiOiJ1c2VyOmFsaWNlIn2EAcABBWJyb3duhgHFARZwcm9vZkNvbW1lbnQtLUFjZWhseFU2BG51bGyGAcYBFnByb29mQ29tbWVudC0tUWdHVWJLdFYEbnVsbIYBxwEWcHJvb2ZDb21tZW50LS1BY2VobHhVNht7ImlkIjoiYzMiLCJieSI6InVzZXI6Ym9iIn2EAcgBBCBmb3iGAcwBFnByb29mQ29tbWVudC0tQWNlaGx4VTYEbnVsbIQBzQEHIGp1bXBzLigAAZgBB2Jsb2NrSWQBdwhiLTAwMDAwM4cBmAEDCXBhcmFncmFwaAcAAdYBBgQAAdcBHE9uZSBpbnNpZGUgYW5vdGhlciwgbmVzdGVkOiCGAfMBFnByb29mQ29tbWVudC0tYmwvTHpxdTkbeyJpZCI6ImM1IiwiYnkiOiJ1c2VyOmJvYiJ9hAH0AQZxdWljayCGAfoBFnByb29mQ29tbWVudC0tYmwvTHpxdTkEbnVsbIYB+wEWcHJvb2ZDb21tZW50LS1ibC9MenF1ORt7ImlkIjoiYzUiLCJieSI6InVzZXI6Ym9iIn2GAfwBFnByb29mQ29tbWVudC0tcDZPUXBVbmEdeyJpZCI6ImM2IiwiYnkiOiJ1c2VyOmFsaWNlIn2EAf0BBWJyb3duhgGCAhZwcm9vZkNvbW1lbnQtLWJsL0x6cXU5BG51bGyGAYMCFnByb29mQ29tbWVudC0tcDZPUXBVbmEEbnVsbIYBhAIWcHJvb2ZDb21tZW50LS1ibC9MenF1ORt7ImlkIjoiYzUiLCJieSI6InVzZXI6Ym9iIn2EAYUCBCBmb3iGAYkCFnByb29mQ29tbWVudC0tYmwvTHpxdTkEbnVsbIQBigIHIGp1bXBzLigAAdYBB2Jsb2NrSWQBdwhiLTAwMDAwNIcB1gEDCXBhcmFncmFwaAcAAZMCBgQAAZQCFlR3byBhc2tzIG9uIG9uZSB3b3JkOiCGAaoCFWRpc3BhdGNoQXNrLS1WU0wrcmExRxt7ImlkIjoiYTEiLCJieSI6InVzZXI6Ym9iIn2GAasCFWRpc3BhdGNoQXNrLS1vZFFJM0VSaB17ImlkIjoiYTIiLCJieSI6InVzZXI6YWxpY2UifYQBrAIFYnJvd26GAbECFWRpc3BhdGNoQXNrLS1WU0wrcmExRwRudWxshgGyAhVkaXNwYXRjaEFzay0tb2RRSTNFUmgEbnVsbIQBswIFIGZveC4oAAGTAgdibG9ja0lkAXcIYi0wMDAwMDWHAZMCAwlwYXJhZ3JhcGgHAAG6AgYEAAG7AhdBbiBhc2sgaW5zaWRlIGFub3RoZXI6IIYB0gIVZGlzcGF0Y2hBc2stLUd4bExhTDRZG3siaWQiOiJhMyIsImJ5IjoidXNlcjpib2IifYQB0wIGcXVpY2sghgHZAhVkaXNwYXRjaEFzay0tR3hsTGFMNFkEbnVsbIYB2gIVZGlzcGF0Y2hBc2stLUd4bExhTDRZG3siaWQiOiJhMyIsImJ5IjoidXNlcjpib2IifYYB2wIVZGlzcGF0Y2hBc2stLXNNWk1TUVlNHXsiaWQiOiJhNCIsImJ5IjoidXNlcjphbGljZSJ9hAHcAgVicm93boYB4QIVZGlzcGF0Y2hBc2stLUd4bExhTDRZBG51bGyGAeICFWRpc3BhdGNoQXNrLS1zTVpNU1FZTQRudWxshgHjAhVkaXNwYXRjaEFzay0tR3hsTGFMNFkbeyJpZCI6ImEzIiwiYnkiOiJ1c2VyOmJvYiJ9hAHkAgQgZm94hgHoAhVkaXNwYXRjaEFzay0tR3hsTGFMNFkEbnVsbIQB6QIHIGp1bXBzLigAAboCB2Jsb2NrSWQBdwhiLTAwMDAwNocBugIDCXBhcmFncmFwaAcAAfICBgQAAfMCH0Egc3VnZ2VzdGlvbiBpbnNpZGUgYSBjb21tZW50OiCGAZIDFnByb29mQ29tbWVudC0tb2ZHbGRDazYbeyJpZCI6ImM3IiwiYnkiOiJ1c2VyOmJvYiJ9hAGTAwR0aGUghgGXAxZwcm9vZkNvbW1lbnQtLW9mR2xkQ2s2BG51bGyGAZgDGXByb29mU3VnZ2VzdGlvbi0tR2txa3ZWNlqXAnsiaWQiOiJzMSIsImtpbmQiOiJyZXBsYWNlIiwiYnkiOiJ1c2VyOmFsaWNlIiwiY29udGVudCI6bnVsbCwic3RhdHVzIjpudWxsLCJjcmVhdGVkQXQiOm51bGwsInJ1bklkIjpudWxsLCJmb2N1c0FyZWFJZCI6bnVsbCwiZm9jdXNBcmVhTmFtZSI6bnVsbCwiYWdlbnRJZCI6bnVsbCwicHJvcG9zYWxJZCI6bnVsbCwicHJvdmlzaW9uYWwiOm51bGwsIm9yY2hlc3RyYXRvciI6bnVsbCwiZGVidWdBdXRvRml4ZWRRdW90ZXMiOm51bGwsImRlYnVnQXV0b0ZpeGVkUXVvdGVzUmVhc29uIjpudWxsfYYBmQMWcHJvb2ZDb21tZW50LS1vZkdsZENrNht7ImlkIjoiYzciLCJieSI6InVzZXI6Ym9iIn2EAZoDBXF1aWNrhgGfAxlwcm9vZlN1Z2dlc3Rpb24tLUdrcWt2VjZaBG51bGyGAaADFnByb29mQ29tbWVudC0tb2ZHbGRDazYEbnVsbIYBoQMWcHJvb2ZDb21tZW50LS1vZkdsZENrNht7ImlkIjoiYzciLCJieSI6InVzZXI6Ym9iIn2EAaIDBCBmb3iGAaYDFnByb29mQ29tbWVudC0tb2ZHbGRDazYEbnVsbIQBpwMHIGp1bXBzLigAAfICB2Jsb2NrSWQBdwhiLTAwMDAwNwA=",
+    "rendered_by_milkdown": "Two readers' comments may cover the same text, and a mark of one kind does not end another of its kind.\n\nOverlapping: <span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:bob\">quick <span data-proof=\"comment\" data-id=\"c2\" data-by=\"user:alice\">brown</span></span> <span data-proof=\"comment\" data-id=\"c2\" data-by=\"user:alice\">fox</span> jumps.\n\nOne inside another, as runs: <span data-proof=\"comment\" data-id=\"c3\" data-by=\"user:bob\">quick <span data-proof=\"comment\" data-id=\"c4\" data-by=\"user:alice\">brown</span> fox</span> jumps.\n\nOne inside another, nested: <span data-proof=\"comment\" data-id=\"c5\" data-by=\"user:bob\">quick <span data-proof=\"comment\" data-id=\"c6\" data-by=\"user:alice\">brown</span> fox</span> jumps.\n\nTwo asks on one word: <span data-dispatch=\"ask\" data-id=\"a1\" data-by=\"user:bob\"><span data-dispatch=\"ask\" data-id=\"a2\" data-by=\"user:alice\">brown</span></span> fox.\n\nAn ask inside another: <span data-dispatch=\"ask\" data-id=\"a3\" data-by=\"user:bob\">quick <span data-dispatch=\"ask\" data-id=\"a4\" data-by=\"user:alice\">brown</span> fox</span> jumps.\n\nA suggestion inside a comment: <span data-proof=\"comment\" data-id=\"c7\" data-by=\"user:bob\">the <span data-proof=\"suggestion\" data-id=\"s1\" data-by=\"user:alice\" data-kind=\"replace\">quick</span> fox</span> jumps.\n"
   },
   {
     "name": "paragraphs",

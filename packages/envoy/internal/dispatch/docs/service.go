@@ -37,6 +37,9 @@ const maxSettleFailures = 3
 const (
 	maxLiveRooms       = 1_000
 	maxRoomConnections = 1_000
+	// roomIdleTimeout is how long a room stays resident after its last peer leaves (New). A peer
+	// that returns within it rejoins the warm room rather than reloading the document.
+	roomIdleTimeout = time.Minute
 )
 
 // Deps configures the live document service.
@@ -55,9 +58,14 @@ type Deps struct {
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
 // store. Document writes that join an API transaction use AppendUpdateTx, classifying
 // the update as content or not the way the room's update observer classifies a live one.
+// RebuildTx replaces an unreadable history inside the rebuild's transaction, through the same
+// persistence boundary as its preflight load. Head is the version Load would fold up to now, which
+// says whether a state loaded earlier is still the stored one.
 type VersionedStore interface {
 	persistence.VersionedPersistence
 	AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error)
+	RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error)
+	Head(ctx context.Context, room string) (persistence.Version, error)
 }
 
 // Service owns live Yjs documents and their durable Dispatch versions.
@@ -85,6 +93,10 @@ type Service struct {
 	// afterSettleLock runs after settleRoom has taken the document's advisory lock and before
 	// it touches the room. Nil outside tests; tests use it to fail the room in that window.
 	afterSettleLock func(room string)
+	// afterReadWarm runs once a read that may load its room holds that room - a version's
+	// capture (captureLiveTextAndAuthors) and VerifyMark - and before the read takes anything from
+	// it. Nil outside tests; tests use it to evict the room in that window.
+	afterReadWarm func(room string)
 	// afterSettleRead runs after settleRoom has read the document and before it stamps block ids
 	// into the room. Nil outside tests; tests use it to edit the room in that window.
 	afterSettleRead func(room string)
@@ -136,6 +148,12 @@ type Service struct {
 	// write's (liveWriteOrigin), is a connected peer.
 	serviceOrigins   sync.Map
 	conditionalGates sync.Map
+	// rebuilding names the documents a rebuild holds (RebuildDocument): their rooms refuse
+	// loads and injections until the rebuild's transaction ends (Ledger.endRebuilds).
+	rebuilding sync.Map
+	// preloads holds, per room, the durable state a document socket's admission check decoded
+	// (*preloadedDocument), for the room load that socket makes next (takePreload).
+	preloads sync.Map
 }
 
 type roomState struct {
@@ -524,6 +542,32 @@ func New(deps Deps) *Service {
 	// append it inside the API transaction, so persistence stays per update.
 	srv.PersistCoalesceWindow = -1
 	srv.CompactEvery = 200
+	// A room decodes its stored history into its own document, so it takes the pending queue
+	// every other decode of that history takes (newDocumentCopy). At ygo's default of 100,000 a
+	// room refuses a history the room that wrote it served, once a lower-numbered client wrote
+	// more items than that after one ygo had to defer (LEGION-502), and the document reads as one
+	// whose history cannot load, which offers its rebuild. The queue is maxUpdateItems because ygo
+	// refuses any one update declaring more items than that, so no load of a stored history can
+	// park past it. It is also the most a room's peers can park in it, about ten times ygo's
+	// default; bounding what one peer's update can do to a room is LEGION-487.
+	srv.MaxPendingItems = maxUpdateItems
+	// A room whose last peer leaves stays resident until it has been idle for roomIdleTimeout.
+	// Eager eviction, ygo's default, evicts the room the moment its last peer leaves, even while
+	// a Server.Apply is inside its callback on that room (reearth/ygo v1.49.5,
+	// provider/websocket/peer.go:477-504 checks peers alone): the callback's write then lands on
+	// the evicted room and reaches the store only through its retiring persistence worker, while
+	// the next access has already loaded the store without it and serves, and takes, the next
+	// write on a state missing the first. The two writes, each made from the same document, merge
+	// into a document neither wrote, which can hold no block at all. Idle eviction refuses a
+	// room any Apply holds, or has touched since its last peer left (idle_sweep.go:185), so every
+	// write a room the sweeper evicts has taken is durable before a successor can load. CloseRoom
+	// checks peers alone too (inject.go:475-621), and the service still calls it to close an
+	// issue's rooms (SetIssueClosed), for a room with an editor at Shutdown, and to evict one
+	// (evictRoom): a write that commits on a room it has retired reaches the store through ygo's
+	// stranded persistence, on the committing goroutine (persistence.go:126-163). A published
+	// write's suppression slot is finished before ygo's persistence observer runs
+	// (onLoadDocument), so that persistence never waits on the publish it is running in.
+	srv.RoomIdleTimeout = roomIdleTimeout
 
 	service.srv = srv
 	srv.Authorize = service.authorize
@@ -1092,8 +1136,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// one, before the database work; reconciled is the tree the ask blocks are reconciled on, the
 	// stamp's when it stamped ids; versioned is the one the version is rendered from, read again
 	// after the repairs when the settlement wrote any. A browser's edit made in between is in a
-	// later one and not an earlier one.
-	read, err := treeOf(doc)
+	// later one and not an earlier one. read and versioned are each taken from a copy under the
+	// document's lock (lockedTreeOf), and the stamp reads inside its own transaction: the room's
+	// peers and the service can write it while a walk of the live tree, which takes no lock, reads
+	// it, and a torn read would be versioned as the document.
+	read, err := lockedTreeOf(doc)
 	if err != nil {
 		if errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
@@ -1512,7 +1559,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	// block's repeated id changes the `#id` its directive carries.
 	var stampedChanged bool
 	slot, update, err := s.applySuppressed(backfillCtx, artifactID, nil, func(doc *crdt.Doc, origin any) (bool, error) {
-		read, err := treeOf(doc)
+		read, err := lockedTreeOf(doc)
 		if err != nil {
 			return false, err
 		}

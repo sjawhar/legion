@@ -16,7 +16,7 @@
 #   1. unpack the tarball into <dir>           worker.Dockerfile's `tar xzf ./*.tgz -C /out/pi-legion-envoy`
 #   2. OMP_PROFILE=<name> omp plugin install   worker.Dockerfile's `omp plugin install /opt/legion/pi-legion-envoy`
 #   3. verify with OMP_PROFILE=<name> omp plugin list
-# Steps 2 and 3 run the Oh My Pi the daemons pin (omp-pin.ts) under HOME=<home>.
+# Steps 2 and 3 run the Oh My Pi the daemon pins (.omp-pin) under HOME=<home>.
 # Each source is cited by what it runs, never by line number: the lines move with every edit
 # above them. The tarball is written under this run's temp directory, so an interrupted run strands
 # no .tgz in the checkout (the release's `rm -f ./*.tgz` guards the same stale-glob case).
@@ -88,10 +88,10 @@ if [ -e "$dest" ] && { [ ! -d "$dest" ] || [ -n "$(ls -A -- "$dest")" ]; }; then
   refuse "--dest $dest exists and is not an empty directory"
 fi
 
-# The Oh My Pi both daemons run (omp-pin.ts), under the run's home and the operator's mise tool
+# The Oh My Pi the daemon runs (.omp-pin), under the run's home and the operator's mise tool
 # store, from the unpacked plugin's directory, where no mise config is: an operator's `omp` wrapper
 # reads its own files from HOME, which is the run's here.
-pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
+pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 mise_data=${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}
 run_omp() { (cd "$dest" && HOME=$home MISE_DATA_DIR=$mise_data OMP_PROFILE=$profile mise x "$pin" -- omp "$@"); }

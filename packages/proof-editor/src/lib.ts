@@ -90,7 +90,8 @@ import { dispatchMarkEventsPlugin } from './dispatch-mark-events';
 import { remarkSoftBreakAsSpace } from './dispatch-soft-breaks';
 import { configureDispatchLinks } from './dispatch-links';
 import { trailingNewlineInputPlugin } from './trailing-newline-input';
-import { recordMarkHistoryPlugin, setComposerMark as setComposerRecordMark } from './record-mark-history';
+import { recordMarkHistoryPlugin } from './record-mark-history';
+import { editorHighlightsPlugin, pulseHighlight, setActiveHighlights } from './editor-highlights';
 import { removeRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
 import type { RetypeOutcome } from './record-mark-retype';
 
@@ -174,14 +175,15 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   /** Replaces a provisional record mark with a fresh one of `kind` over the same text, as the
    *  margin composer's kind switch needs; a refusal names why nothing changed. */
   retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome;
-  /** Names the record mark the open margin composer holds, or null when none is open; a write
-   *  that cuts into it is the composer's own (./record-mark-history.ts). */
-  setComposerMark(markId: string | null): void;
   /** Scrolls a mark's anchor into view and pulses it. Works for both the
    *  unified marks system and dispatchAsk marks: both render `data-id`. */
   focusMark(markId: string): void;
   /** Scrolls a block into view by its stable `blockId` and pulses it. */
   focusBlock(blockId: string): void;
+  /** Highlights the marks a host has selected without changing the document. */
+  setActiveMarks(markIds: readonly string[]): void;
+  /** Highlights the blocks a host has selected without changing the document. */
+  setActiveBlocks(blockIds: readonly string[]): void;
   /** The stable id of the block containing the selection head, if any. */
   blockIdAtSelection(): string | null;
   /** Tear down the editor and any collab bindings. */
@@ -235,9 +237,6 @@ function installCollabCursorsWhenReady(
 
   attemptInstall(0);
 }
-
-const PULSE_CLASS = 'dispatch-mark-pulse';
-const PULSE_DURATION_MS = 1200;
 
 function cssEscapeAttrValue(value: string): string {
   if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value);
@@ -317,6 +316,7 @@ export async function createProofEditor(
     .use(trailingNewlineInputPlugin)
     // The composer's own record-mark writes are never undo steps
     .use(recordMarkHistoryPlugin)
+    .use(editorHighlightsPlugin)
     .use(placeholderPlugin)
     .config((ctx) => {
       ctx.update(remarkStringifyOptionsCtx, (prev) => ({
@@ -417,26 +417,25 @@ export async function createProofEditor(
     retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome {
       return retypeRecordMark(view, markId, kind, opts.user.name);
     },
-    setComposerMark(markId: string | null): void {
-      setComposerRecordMark(view, markId);
-    },
     focusMark(markId: string): void {
       const escaped = cssEscapeAttrValue(markId);
       const elements = view.dom.querySelectorAll<HTMLElement>(`[data-id="${escaped}"]`);
       if (elements.length === 0) return;
       elements[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-      for (const element of elements) {
-        element.classList.add(PULSE_CLASS);
-        window.setTimeout(() => element.classList.remove(PULSE_CLASS), PULSE_DURATION_MS);
-      }
+      pulseHighlight(view, 'mark', markId);
     },
     focusBlock(blockId: string): void {
       const escaped = cssEscapeAttrValue(blockId);
       const element = view.dom.querySelector<HTMLElement>(`[${BLOCK_ID_DOM_ATTR}="${escaped}"]`);
       if (element === null) return;
       element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      element.classList.add(PULSE_CLASS);
-      window.setTimeout(() => element.classList.remove(PULSE_CLASS), PULSE_DURATION_MS);
+      pulseHighlight(view, 'block', blockId);
+    },
+    setActiveMarks(markIds: readonly string[]): void {
+      setActiveHighlights(view, 'mark', markIds);
+    },
+    setActiveBlocks(blockIds: readonly string[]): void {
+      setActiveHighlights(view, 'block', blockIds);
     },
     blockIdAtSelection(): string | null {
       const $head = view.state.selection.$head;

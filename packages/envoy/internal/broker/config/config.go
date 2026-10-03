@@ -4,7 +4,7 @@
 // variable refuses to start naming the variable.
 //
 // Each Config field's doc comment opens with the variables it reads and a colon; the broker's
-// generated configuration reference (scripts/docs/broker/refgen) is built from those comments
+// generated configuration reference (cmd/broker-refgen) is built from those comments
 // and refuses a variable Load reads that no field documents.
 package config
 
@@ -79,9 +79,9 @@ type Config struct {
 	TrustedProxyHeader string
 }
 
-// noDispatchCredential is why AGENTC-393 v9 removed the broker's Dispatch variables: it asks and
-// issues nothing in Dispatch.
-const noDispatchCredential = "the broker holds no Dispatch credential (AGENTC-393 v9)"
+// noDispatchCredential is why the broker's Dispatch variables are gone: it asks and issues nothing
+// in Dispatch.
+const noDispatchCredential = "the broker holds no Dispatch credential"
 
 // removedVars are environment variables the broker no longer reads. A stale deployment still
 // setting one must fail loudly rather than silently running on configuration that means nothing
@@ -92,7 +92,7 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_DISPATCH_TOKEN_FILE", noDispatchCredential},
 	{"BROKER_DISPATCH_PROJECT", noDispatchCredential},
 	{"BROKER_ASK_POLL_SECONDS", noDispatchCredential},
-	{"BROKER_UI_ORIGIN", "approval is by Dispatch login, so the broker checks no WebAuthn origin (AGENTC-393)"},
+	{"BROKER_UI_ORIGIN", "approval is by Dispatch login, so the broker checks no WebAuthn origin"},
 }
 
 // databasePasswordPlaceholder is substituted in BROKER_DATABASE_URL with the URL-escaped value of
@@ -174,17 +174,17 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 	ints := []struct {
-		name string
-		dst  *int
-		def  int
-		max  int
+		name     string
+		dst      *int
+		def      int
+		min, max int
 	}{
-		{"BROKER_LEASE_SECONDS", &cfg.LeaseSeconds, 900, 3600},
-		{"BROKER_PROOF_SKEW_SECONDS", &cfg.ProofSkewSeconds, 60, 300},
-		{"BROKER_MAX_GRANT_SECONDS", &cfg.MaxGrantSeconds, 43200, 43200},
-		{"BROKER_RULES_RELOAD_SECONDS", &cfg.RulesReloadSeconds, 300, 3600},
-		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 604800, 2592000},
-		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 60},
+		{"BROKER_LEASE_SECONDS", &cfg.LeaseSeconds, 900, 1, 3600},
+		{"BROKER_PROOF_SKEW_SECONDS", &cfg.ProofSkewSeconds, 60, 1, 300},
+		{"BROKER_MAX_GRANT_SECONDS", &cfg.MaxGrantSeconds, 43200, 1, 43200},
+		{"BROKER_RULES_RELOAD_SECONDS", &cfg.RulesReloadSeconds, 300, 1, 3600},
+		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 604800, 1, 2592000},
+		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 1, 60},
 	}
 	for _, i := range ints {
 		raw := getenv(i.name)
@@ -193,8 +193,8 @@ func Load(getenv func(string) string) (Config, error) {
 			continue
 		}
 		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > i.max {
-			return Config{}, fmt.Errorf("%s must be a whole number between 1 and %d, got %q", i.name, i.max, raw)
+		if err != nil || n < i.min || n > i.max {
+			return Config{}, fmt.Errorf("%s must be a whole number between %d and %d, got %q", i.name, i.min, i.max, raw)
 		}
 		*i.dst = n
 	}

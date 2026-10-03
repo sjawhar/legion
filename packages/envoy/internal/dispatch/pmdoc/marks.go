@@ -1,7 +1,34 @@
 package pmdoc
 
+import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+)
+
 // The mark vocabulary the reader and the writer share: which marks a text is written under, in
 // what order, with what delimiters, and how two mark sets compare.
+
+// markAttributeKey is the Y.Text attribute key a mark is stored under. A mark whose type excludes
+// itself is stored under its type name, as y-prosemirror stores it. A record mark (anchorMarkTypes)
+// does not exclude itself, so two of one type may share a character, and y-prosemirror stores such
+// a mark under `<type>--<8 characters>` (sync-plugin.js marksToAttributes), one key per mark; the
+// writer does the same, or a second record mark of the type would overwrite the first.
+//
+// The 8 characters are this package's own digest (the first 6 bytes of a SHA-256 over the type and
+// the canonical attributes, in standard base64), not y-prosemirror's (lib0's encodeAny over
+// mark.toJSON(), which carries every schema default). That is enough: both readers strip the suffix
+// by its shape (yattrMarkSuffix here, hashedMarkNameRegex there) and compare marks by name and
+// attributes, never by key, so a mark one side wrote and the other rewrote under a different key on
+// an adjacent run reads as one mark across both.
+func markAttributeKey(mark Mark) string {
+	if !anchorMarkTypes[mark.Type] {
+		return mark.Type
+	}
+	canonical, _ := json.Marshal(tokenMark{Type: mark.Type, Attrs: canonicalAttrs(mark.Attrs)})
+	digest := sha256.Sum256(canonical)
+	return mark.Type + "--" + base64.StdEncoding.EncodeToString(digest[:6])
+}
 
 func containsMark(marks []Mark, markType string) bool {
 	for _, mark := range marks {

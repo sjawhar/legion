@@ -1,8 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
-import { isCredentialFeatureOff } from "../../api/client";
 import type { CredentialPendingRow } from "../../api/types";
 import { LabelPill } from "../../components/Pill";
 import {
@@ -13,7 +11,7 @@ import {
   textMutedOnCanvas,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
-import { credentialPendingQuery } from "./pending";
+import type { CredentialRequests } from "./pending";
 
 /** A `launcher_credential` (machine) record is decided only through the code-lookup route (contract
  *  v9 ruling 13): its inbox row links to the code-entry page rather than trying to deep-link the
@@ -24,22 +22,19 @@ function pendingRowPath(row: CredentialPendingRow): string {
     : `/credentials/${row.record_id}`;
 }
 
-/** The Inbox's supplementary credential-requests section, mounted above the ask sections. A
- *  404 FEATURE_OFF (the broker isn't configured for this deployment) hides the whole section
- *  silently - the one deliberate quiet path; any other failure is surfaced instead. */
-export function CredentialRequestsSection(): ReactNode {
-  const pending = useQuery(credentialPendingQuery());
-
-  if (pending.isPending) {
-    return null;
-  }
-  if (pending.isError) {
-    if (isCredentialFeatureOff(pending.error)) {
-      return null;
-    }
+/** The Inbox's supplementary credential-requests section, mounted above the ask sections, from the
+ *  Inbox's own reading of the list (`useCredentialRequests`), which its banner and empty state read
+ *  too. A Dispatch with no secrets broker lists none, so the whole section hides silently - the one
+ *  deliberate quiet path; a failure to load the list is surfaced instead. */
+export function CredentialRequestsSection({
+  credentials: { requests, status },
+}: {
+  credentials: CredentialRequests;
+}): ReactNode {
+  if (status === "failed") {
     return <p className={dangerText}>Couldn't load credential requests.</p>;
   }
-  if (pending.data.pending.length === 0) {
+  if (requests.length === 0) {
     return null;
   }
 
@@ -52,7 +47,7 @@ export function CredentialRequestsSection(): ReactNode {
         Credential requests
       </h2>
       <ul className="mt-2 space-y-2">
-        {pending.data.pending.map((row) => (
+        {requests.map((row) => (
           <li key={row.record_id}>
             <Link
               className={`flex flex-wrap items-center gap-2 rounded-lg text-sm outline-none focus-visible:ring-2 ${focusVisibleRing} ${linkText} ${linkHoverText}`}

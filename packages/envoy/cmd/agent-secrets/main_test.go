@@ -7,12 +7,14 @@ package main
 
 import (
 	"bufio"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -47,19 +49,28 @@ func buildAgentSecrets(t *testing.T) string {
 
 // brokerCounters records how many times fakeBroker served each route, so a test can assert on
 // call counts (e.g. "no second ask", "never entered the polling loop") instead of only on the
-// final observable outcome, plus (guarded by mu) the last session_id POST /v1/requests recorded.
+// final observable outcome, plus (guarded by mu) the last session_id POST /v1/requests recorded
+// and the gate a test may hold the pending request's status polls behind.
 type brokerCounters struct {
 	createRequest int32
 	getRequest    int32
 
 	mu            sync.Mutex
 	lastSessionID string
+	pendingPoll   chan struct{}
 }
 
 func (c *brokerCounters) sessionID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.lastSessionID
+}
+
+// holdPendingPolls makes GET /v1/requests/req-pending wait until gate is closed.
+func (c *brokerCounters) holdPendingPolls(gate chan struct{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pendingPoll = gate
 }
 
 // fakeBroker serves just enough of the shared broker contract
@@ -144,6 +155,16 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		counters.mu.Lock()
+		gate := counters.pendingPoll
+		counters.mu.Unlock()
+		if gate != nil {
+			select {
+			case <-gate:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		writeJSON(w, map[string]any{"state": "pending", "grant_id": nil, "record_id": "rec-pending-1", "decided_at": nil, "decision": nil})
 	})
 	mux.HandleFunc("POST /v1/grants/grant-granted/values", func(w http.ResponseWriter, r *http.Request) {
@@ -189,11 +210,17 @@ func writeJSON(w http.ResponseWriter, v any) {
 // subcommand.
 func newKeyDir(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
 	key, err := proof.NewKey()
 	if err != nil {
 		t.Fatalf("proof.NewKey: %v", err)
 	}
+	return writeKeyDir(t, key, testEnrollmentID)
+}
+
+// writeKeyDir writes key as key.pem and enrollmentID as the enrollment file into a new key dir.
+func writeKeyDir(t *testing.T, key *ecdsa.PrivateKey, enrollmentID string) string {
+	t.Helper()
+	dir := t.TempDir()
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
@@ -202,7 +229,7 @@ func newKeyDir(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, "key.pem"), pemBytes, 0o600); err != nil {
 		t.Fatalf("write key.pem: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "enrollment"), []byte(testEnrollmentID+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "enrollment"), []byte(enrollmentID+"\n"), 0o600); err != nil {
 		t.Fatalf("write enrollment: %v", err)
 	}
 	return dir
@@ -298,22 +325,79 @@ func TestExecFormGrantRunsChildWithValueInEnvironment(t *testing.T) {
 	}
 }
 
+// TestExecFormPendingExitsSeventyFiveWithNoChild also pins what the wait says, and that it says it
+// before it waits: the request id and the bound, and where to decide it — the record's Dispatch
+// page under AGENT_SECRETS_APPROVE_URL, or the Inbox when that is unset. The fake broker holds the
+// first status poll until the test has read those two lines from the command's stderr, so lines
+// printed only once the wait ends never arrive in time.
 func TestExecFormPendingExitsSeventyFiveWithNoChild(t *testing.T) {
 	binary := buildAgentSecrets(t)
-	broker, _ := fakeBroker(t)
+	broker, counters := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
-		"PENDING_ME", "--wait", "200ms", "--", "sh", "-c", "echo ran-the-child")
-	if exit != exitPending {
-		t.Fatalf("exit = %d, want %d (pending): stdout=%q stderr=%q", exit, exitPending, stdout, stderr)
-	}
-	if strings.Contains(stdout, "ran-the-child") {
-		t.Fatalf("child ran while request was still pending: stdout=%q", stdout)
-	}
-	if !strings.Contains(stderr, "agent-secrets status req-pending") {
-		t.Fatalf("stderr = %q, want the request id and the status command to check it", stderr)
+	for _, tc := range []struct {
+		name, approveURL, where string
+	}{
+		{"inbox", "", "agent-secrets: approve or deny it under Credential requests in the Dispatch Inbox\n"},
+		{"record page", "https://dispatch.example/", "agent-secrets: approve or deny it at https://dispatch.example/credentials/rec-pending-1\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			announced := make(chan struct{})
+			counters.holdPendingPolls(announced)
+			released := false
+			release := func() {
+				if !released {
+					released = true
+					close(announced)
+				}
+			}
+			defer release()
+
+			cmd := exec.Command(binary, "PENDING_ME", "--wait", "200ms", "--", "sh", "-c", "echo ran-the-child")
+			cmd.Env = append(os.Environ(), "AGENT_SECRETS_URL="+broker.URL, "AGENT_SECRETS_KEY_DIR="+keyDir,
+				"AGENT_SECRETS_APPROVE_URL="+tc.approveURL)
+			var stdout strings.Builder
+			cmd.Stdout = &stdout
+			pipe, err := cmd.StderrPipe()
+			if err != nil {
+				t.Fatalf("stderr pipe: %v", err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("start agent-secrets: %v", err)
+			}
+			stderr := bufio.NewReader(pipe)
+			lines := make(chan string, 1)
+			go func() {
+				first, _ := stderr.ReadString('\n')
+				second, _ := stderr.ReadString('\n')
+				lines <- first + second
+			}()
+			want := "agent-secrets: request req-pending is waiting for approval; waiting up to 200ms\n" + tc.where
+			select {
+			case got := <-lines:
+				if got != want {
+					t.Errorf("stderr began %q, want %q", got, want)
+				}
+			case <-time.After(10 * time.Second):
+				release()
+				t.Errorf("stderr said nothing within 10s while the status poll was held, and %q once it returned; want %q before the wait",
+					<-lines, want)
+			}
+			release()
+			rest, _ := io.ReadAll(stderr)
+			err = cmd.Wait()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != exitPending {
+				t.Fatalf("exit = %v, want %d (pending): stdout=%q stderr=%q", err, exitPending, stdout.String(), rest)
+			}
+			if strings.Contains(stdout.String(), "ran-the-child") {
+				t.Fatalf("child ran while request was still pending: stdout=%q", stdout.String())
+			}
+			if !strings.Contains(string(rest), "agent-secrets status req-pending") {
+				t.Fatalf("stderr = %q, want the request id and the status command to check it", rest)
+			}
+		})
 	}
 }
 

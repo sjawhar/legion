@@ -6,6 +6,7 @@ import type {
   ArchitectureTree,
   Artifact,
   ArtifactBlock,
+  ArtifactRebuildReport,
   ArtifactReview,
   ArtifactReviewState,
   ArtifactText,
@@ -129,24 +130,39 @@ export function isSourceNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "SOURCE_NOT_FOUND";
 }
 
-// A broker deployed without credential requests configured (no DISPATCH_AGENT_SECRETS_URL)
-// answers every credential route with this 404 — the same class as the architecture-source
-// 404 above it: retrying changes nothing, and every credential query (the Inbox's requests
-// section, Settings' live grants) treats it as "not configured" rather than a failure.
+// A Dispatch with no secrets broker configured (no DISPATCH_AGENT_SECRETS_URL) answers every
+// credential route but the pending list with this 404 — the same class as the architecture-source
+// 404 above it: retrying changes nothing. The pending list, which every page reads, answers `null`
+// instead (`getCredentialPending`).
 export function isCredentialFeatureOff(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "FEATURE_OFF";
 }
 
+// A stored document outside the Proof schema is a repairable state, not a transient failure:
+// retrying the read cannot repair it, while opening its live editor could let the browser rewrite it.
+export function isDocumentSchemaError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.code === "DOC_SCHEMA";
+}
+
+// A document whose stored history cannot load at all: the state a rebuild from its latest saved
+// version repairs, and retrying the read cannot.
+export function isDocumentUnloadable(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.code === "DOCUMENT_UNLOADABLE";
+}
+
 // The retry policy every query in the app shares: an auth outcome (401/403), a missing
-// architecture source, or an unconfigured credential broker is definitive and retrying it
-// changes nothing; any other failure (dropped connection, 5xx) is worth a couple of automatic
-// attempts before surfacing a Retry affordance to the user.
+// architecture source, an unconfigured credential broker, a stored document outside Proof's
+// schema, or a stored history that cannot load is definitive and retrying it changes nothing; any
+// other failure (dropped connection, 5xx) is worth a couple of automatic attempts before surfacing
+// a Retry affordance to the user.
 export function isRetryableQueryError(error: unknown): boolean {
   return (
     !isUnauthorized(error) &&
     !isForbidden(error) &&
     !isSourceNotFound(error) &&
-    !isCredentialFeatureOff(error)
+    !isCredentialFeatureOff(error) &&
+    !isDocumentSchemaError(error) &&
+    !isDocumentUnloadable(error)
   );
 }
 
@@ -555,6 +571,12 @@ export class DispatchApiClient {
     return this.json<ArtifactText>(`/api/v1/artifacts/${pathSegment(id)}/text`);
   }
 
+  rebuildArtifact(id: string, markdown?: string): Promise<ArtifactRebuildReport> {
+    return this.post<ArtifactRebuildReport>(`/api/v1/artifacts/${pathSegment(id)}/rebuild`, {
+      ...(markdown === undefined ? {} : { markdown }),
+    });
+  }
+
   getArtifactBlocks(id: string): Promise<ArtifactBlock[]> {
     return this.json<ArtifactBlock[]>(`/api/v1/artifacts/${pathSegment(id)}/blocks`);
   }
@@ -668,9 +690,10 @@ export class DispatchApiClient {
   }
 
   /** `GET /api/v1/credential-requests?approver=me`: every request waiting on the viewer, as
-   *  the Inbox's credential-requests section lists them. */
-  getCredentialPending(): Promise<CredentialPendingResponse> {
-    return this.json<CredentialPendingResponse>(
+   *  the Inbox's credential-requests section lists them, or `null` when this Dispatch has no
+   *  secrets broker. */
+  getCredentialPending(): Promise<CredentialPendingResponse | null> {
+    return this.json<CredentialPendingResponse | null>(
       pathWithQuery("/api/v1/credential-requests", { approver: "me" })
     );
   }
