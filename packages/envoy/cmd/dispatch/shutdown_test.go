@@ -125,7 +125,7 @@ func TestSIGTERMWhileARequestHoldsHTTPShutdownStillSettlesTheOwedDocument(t *tes
 // settle delay than its whole shutdown budget, so only Shutdown can version the edit.
 func TestSIGTERMWithAnEditorConnectedSettlesItsDocumentBeforeExit(t *testing.T) {
 	database := storetest.Open(t)
-	process := startDispatchProcessWithSettleDelay(t, database.Pool.Config().ConnString(), 30*time.Second)
+	process := startDispatchProcessWithSettleDelay(t, database.Pool.Config().ConnString(), time.Minute)
 	process.waitHealthy(t)
 	_, artifactID := process.createIssue(t)
 	editor := process.openEditor(t, artifactID, "before\n")
