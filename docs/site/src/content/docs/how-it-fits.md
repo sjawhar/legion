@@ -41,11 +41,8 @@ flowchart LR
 ## Dispatch: the record of work and decisions
 
 Dispatch is a web dashboard and an HTTP API over one store of projects and issues. Each issue has a
-lifecycle status:
-
-```text
-Triage → Icebox → Backlog → Todo → In Progress → Testing → Needs Review → Retro → Done
-```
+lifecycle status, from Triage, Icebox, Backlog and Todo through In Progress, Testing, Needs Review
+and Retro to Done.
 
 An issue carries documents, the first of which is its spec. People and agents comment on a
 document, suggest exact replacements for its text, and ask questions. An **ask** is a decision put
@@ -54,7 +51,7 @@ is an ask whose answer approves a document at one version or requests changes wi
 
 People use the dashboard: they file issues, answer asks, approve specs and watch the agents working
 on the **Agents** page. Agents use Dispatch's tools and API to write specs, post comments and
-messages, open asks and move issues. Every change Dispatch records is published as an event on
+messages, open asks and move issues. Dispatch publishes its issue, document and project events on
 Envoy, so nothing that reacts to Dispatch has to poll it.
 
 ## Legion: the coordinator and its agents
@@ -76,7 +73,7 @@ Two decisions stay with people:
 
 - **The design gate.** Before implementation starts, a person approves the root issue's spec at a
   specific version in Dispatch. A later version of the spec closes the gate again until someone
-  approves it.
+  approves it. The gate is on by default; a deployment can turn it off.
 - **The merge.** The merger checks that every check the base branch requires has passed, then posts
   `READY` on the Dispatch issue. A person merges the pull request under the repository's own rules.
   Legion never merges.
