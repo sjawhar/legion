@@ -449,6 +449,13 @@ func (s *Service) consumeSuppressedPersistence(room string, update []byte) bool 
 			continue
 		}
 		if slot.canceled {
+			// A discarded repair's slot is consumed by that repair's own update alone. ygo runs the
+			// observers of two transactions in either order (renderedReplica), so another writer's
+			// update can reach the worker ahead of the repair's, and it is stored as any other.
+			if slot.committed != nil && !bytes.Equal(slot.committed, update) {
+				s.suppressMu.Unlock()
+				return false
+			}
 			s.consumeHeadSlotLocked(room)
 			discarded := slot.discarded
 			s.suppressMu.Unlock()
