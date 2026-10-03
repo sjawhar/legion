@@ -254,6 +254,9 @@ else
   home="$WORK_DIR/agent/home"
   mkdir -p "$home"
   cp "$SCRIPT_DIR/agent/bashrc" "$home/.bashrc"
+  # Ubuntu's /etc/bash.bashrc greets a sudo-group user's every new shell with a sudo hint unless
+  # $HOME/.hushlogin exists; the agent's shells are this user's.
+  touch "$home/.hushlogin"
   cp -r "$SCRIPT_DIR/agent/demo" "$home/demo"
   sudo -n unshare --uts --fork -- env -i PATH="$WORK_DIR/bin:/usr/bin:/bin" \
     AGENT_SECRETS_URL="$BROKER_URL" \
