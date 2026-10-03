@@ -795,6 +795,14 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				}
 			})
 		},
+		"DISPATCH_ASSET_STORE_BUCKET": func(t *testing.T) {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_ASSET_STORE_BUCKET": " retained-assets "}); boot.AssetStoreBucket != "retained-assets" {
+				t.Errorf("AssetStoreBucket = %q", boot.AssetStoreBucket)
+			}
+			if boot := resolveWith(t, nil); boot.AssetStoreBucket != "" {
+				t.Errorf("unset AssetStoreBucket = %q, want disabled", boot.AssetStoreBucket)
+			}
+		},
 		"DISPATCH_WEB_DIST": func(t *testing.T) {
 			if dir, err := defaultWebDistDir(resolveWith(t, map[string]string{"DISPATCH_WEB_DIST": "/srv/dispatch/dist"}).WebDist); err != nil || dir != "/srv/dispatch/dist" {
 				t.Errorf("web dist = %q, %v", dir, err)

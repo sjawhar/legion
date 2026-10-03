@@ -19,6 +19,7 @@ below add only what a setting's one line cannot say.
 | `DATABASE_URL` | Postgres connection string. Dispatch applies embedded migrations before serving. The pool size is fixed in code (`store.sharedPoolSize`), so a connection string carrying `pool_max_conns` is refused at startup; remove the parameter. |
 | `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. |
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount test-only routes: `POST /api/v1/events/_test/disconnect` closes every open SSE connection; `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements; and `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses. Leave unset in every real deployment. |
+| `DISPATCH_ASSET_STORE_BUCKET` | Optional bucket of immutable dashboard assets from prior builds. When a local `/assets/*` file is absent, Dispatch fetches the same key through the AWS SDK default credential chain, with a 3-second request bound and an 8 MiB size limit. It never reads `index.html` or any non-asset path from the bucket. An absent object stays a 404; a store failure or invalid object returns 502. Leave it unset for local-only static serving. |
 | `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<login>&next=<path>`, which signs an allowlisted login in with no GitHub step, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`), and the GitHub proxy answers `503 GITHUB_TOKEN_UNAVAILABLE` for every login. The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the login's session generation and deletes its stored GitHub token pair, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
@@ -482,11 +483,14 @@ then method. `envoy-dispatch routes` prints the same body from the table alone, 
 or listener and never a test hook; the docs site's HTTP API reference is generated from it. The
 table below is a summary. An unknown path under `/api`, `/v1`, `/auth`, `/ws`,
 or `/healthz` is a JSON 404 `{"code":"NOT_FOUND","error":"no route for GET
-/v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell; a missing file
-under `/assets` stays `404 {"error":"not found"}`. The dashboard's pages (`index.html` and the
-shell served for a browser route) carry `Cache-Control: no-cache` and an `ETag` of their bytes, no
-`Last-Modified`, and its hashed `/assets` files `public, max-age=31536000, immutable`, so a
-browser keeps no page from another build.
+/v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell. When
+`DISPATCH_ASSET_STORE_BUCKET` is configured, a missing local file under `/assets/` is fetched
+from the same key in the retained-assets bucket; it never reads `index.html` or a non-asset path
+from that bucket. An absent object remains `404 {"error":"not found"}` and a store failure or
+invalid object is 502; without the setting every local asset miss remains the 404. The dashboard's
+pages (`index.html` and the shell served for a browser route) carry `Cache-Control: no-cache` and
+an `ETag` of their bytes, no `Last-Modified`, and its hashed `/assets` files
+`public, max-age=31536000, immutable`, so a browser keeps no page from another build.
 
 | Path | Method | Identity | Purpose |
 | --- | --- | --- | --- |

@@ -219,10 +219,14 @@ to the SPA shell. Every page the static handler serves (`index.html` and that fa
 `Cache-Control: no-cache` and an `ETag` of its bytes, never a `Last-Modified` (`servePage` in
 `routes/router.go`): a browser revalidates it before running it, gets a 304 only for the page this
 server holds, and gets this server's page in place of any other, since the servers behind one load
-balancer can hold different builds whose file times say nothing about which is newer (a rollback
-serves the older file). A file under `/assets`, Vite's content-hashed output, carries
-`public, max-age=31536000, immutable`; any other file (the favicon) carries none, and a missing
-asset's 404 carries none either.
+balancer can hold different builds whose pages' file times say nothing about which is newer (a
+rollback serves the older file). A file under `/assets`, Vite's content-hashed output, carries
+`public, max-age=31536000, immutable`. With `DISPATCH_ASSET_STORE_BUCKET` set, a local miss under
+`/assets/` fetches the same key from the bucket through the AWS SDK default credential chain,
+bounded to three seconds and 8 MiB; it never reads a page or another path from the bucket. An
+absent object stays a 404 without caching, while a store failure or invalid object is a 502 without
+caching. Unset, the setting leaves every local asset miss a 404. Any other file (the favicon)
+carries no cache header.
 
 Every `/api/v1` route accepts an authenticated user or an agent bearer unless
 the table says human only.

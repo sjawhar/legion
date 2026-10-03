@@ -83,6 +83,8 @@ type bootConfig struct {
 	// WebDist is DISPATCH_WEB_DIST: the dashboard directory to serve, or empty to find it from
 	// the binary (defaultWebDistDir).
 	WebDist string
+	// AssetStoreBucket is DISPATCH_ASSET_STORE_BUCKET. Empty preserves local-only asset serving.
+	AssetStoreBucket string
 	// SigningKey is DISPATCH_SIGNING_KEY: the session cookie key, or empty to keep one in the
 	// data dir (sessionSigningKey).
 	SigningKey string
@@ -207,6 +209,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	var assetStore routes.AssetStore
+	if boot.AssetStoreBucket != "" {
+		assetStore, err = routes.NewS3AssetStore(ctx, boot.AssetStoreBucket)
+		if err != nil {
+			slog.Error("dispatch: configure retained asset store", "error", err)
+			os.Exit(1)
+		}
+	}
+
 	users := store.NewPgUserStore(database.Pool)
 	sessions := store.NewPgSessionStore(database.Pool)
 
@@ -246,6 +257,7 @@ func main() {
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
 		SigningKey:  signingKey,
 		WebDistDir:  webDistDir,
+		AssetStore:  assetStore,
 		Users:       users,
 		Sessions:    sessions,
 		Identity:    requestIdentity,
@@ -432,6 +444,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		NATSDisabled:     env.get("DISPATCH_NATS_DISABLED") == "1",
 		TestHooksEnabled: env.get("DISPATCH_TEST_HOOKS") == "1",
 		WebDist:          env.get("DISPATCH_WEB_DIST"),
+		AssetStoreBucket: strings.TrimSpace(env.get("DISPATCH_ASSET_STORE_BUCKET")),
 		SigningKey:       env.get("DISPATCH_SIGNING_KEY"),
 		InsecureCookie:   env.get("DISPATCH_INSECURE_COOKIE") != "",
 		EnvoyToken:       env.get("ENVOY_TOKEN"),

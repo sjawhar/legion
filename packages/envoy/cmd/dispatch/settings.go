@@ -96,6 +96,8 @@ var settings = []setting{
 		Description: "Bearer token Dispatch sends the secrets broker."},
 	{Name: "DISPATCH_WEB_DIST", Default: "the `packages/dispatch/web/dist` directory found from the binary's location", Required: "no",
 		Description: "Directory of the built dashboard the server serves."},
+	{Name: "DISPATCH_ASSET_STORE_BUCKET", Required: "no",
+		Description: "Bucket holding immutable assets from prior dashboard builds. Unset, Dispatch serves only its local dashboard files."},
 	{Name: "DISPATCH_DEV_SIGNIN", Required: "no",
 		Description: "Set to `1` on a loopback-only local server to sign any allowed login in at `/auth/_dev/signin` without GitHub."},
 	{Name: "DISPATCH_TEST_HOOKS", Required: "no",

@@ -67,6 +67,31 @@ func (s *memorySessionStore) RevokeSessions(_ context.Context, login string) err
 	return nil
 }
 
+type fakeAssetStore struct {
+	assets map[string]RetainedAsset
+	err    error
+	keys   []string
+}
+
+func (s *fakeAssetStore) GetAsset(_ context.Context, key string) (RetainedAsset, error) {
+	s.keys = append(s.keys, key)
+	if s.err != nil {
+		return RetainedAsset{}, s.err
+	}
+	asset, ok := s.assets[key]
+	if !ok {
+		return RetainedAsset{}, ErrAssetNotFound
+	}
+	return asset, nil
+}
+
+func fakeRetainedAsset(body string) RetainedAsset {
+	return RetainedAsset{
+		Body:          io.NopCloser(strings.NewReader(body)),
+		ContentLength: int64(len(body)),
+	}
+}
+
 type callbackHTTPClient struct {
 	login string
 }
@@ -589,6 +614,156 @@ func TestStaticHandlerServesBuiltAssets(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/missing.js", nil))
 	if response.Code != http.StatusNotFound || response.Body.String() != "{\"error\":\"not found\"}\n" {
 		t.Fatalf("missing asset: status %d body %q", response.Code, response.Body.String())
+	}
+}
+
+func TestStaticHandlerPrefersLocalAssetOverRetainedAsset(t *testing.T) {
+	webDist := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(webDist, "assets"), 0o700); err != nil {
+		t.Fatalf("make assets dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(webDist, "assets", "index-abc123.js"), []byte("current"), 0o600); err != nil {
+		t.Fatalf("write local asset: %v", err)
+	}
+	store := &fakeAssetStore{assets: map[string]RetainedAsset{
+		"assets/index-abc123.js": fakeRetainedAsset("retained"),
+	}}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+	context.AssetStore = store
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/index-abc123.js", nil))
+
+	if response.Code != http.StatusOK || response.Body.String() != "current" {
+		t.Fatalf("local asset: status %d body %q, want local file", response.Code, response.Body.String())
+	}
+	if len(store.keys) != 0 {
+		t.Errorf("local asset consulted retained store for %q", store.keys)
+	}
+}
+
+func TestStaticHandlerServesRetainedAssetOnLocalMiss(t *testing.T) {
+	store := &fakeAssetStore{assets: map[string]RetainedAsset{
+		"assets/previous-build.js": fakeRetainedAsset("console.log('previous build')"),
+	}}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = t.TempDir()
+	context.AssetStore = store
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	response, err := http.Get(server.URL + "/assets/previous-build.js")
+	if err != nil {
+		t.Fatalf("GET retained asset: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read retained asset: %v", err)
+	}
+
+	if response.StatusCode != http.StatusOK || string(body) != "console.log('previous build')" {
+		t.Fatalf("retained asset: status %d body %q", response.StatusCode, body)
+	}
+	if got := response.Header.Get("Cache-Control"); got != assetCacheControl {
+		t.Errorf("retained asset Cache-Control = %q, want %q", got, assetCacheControl)
+	}
+	if got := response.Header.Get("Content-Type"); got != "text/javascript; charset=utf-8" {
+		t.Errorf("retained asset Content-Type = %q, want JavaScript", got)
+	}
+	if got := store.keys; !reflect.DeepEqual(got, []string{"assets/previous-build.js"}) {
+		t.Errorf("retained asset keys = %q, want one matching key", got)
+	}
+}
+
+func TestStaticHandlerReturns404ForMissingRetainedAsset(t *testing.T) {
+	store := &fakeAssetStore{}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = t.TempDir()
+	context.AssetStore = store
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/missing-build.js", nil))
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing retained asset: status %d body %q, want 404", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Cache-Control"); got != "" {
+		t.Errorf("missing retained asset Cache-Control = %q, want none", got)
+	}
+}
+
+func TestStaticHandlerDoesNotConsultRetainedAssetsOutsideAssets(t *testing.T) {
+	store := &fakeAssetStore{assets: map[string]RetainedAsset{
+		"missing.js": fakeRetainedAsset("must not serve"),
+	}}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = t.TempDir()
+	context.AssetStore = store
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/missing.js", nil))
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("non-asset: status %d body %q, want 404", response.Code, response.Body.String())
+	}
+	if len(store.keys) != 0 {
+		t.Errorf("non-asset consulted retained store for %q", store.keys)
+	}
+}
+
+func TestStaticHandlerLeavesRetainedAssetsDisabledWithoutAStore(t *testing.T) {
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = t.TempDir()
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/previous-build.js", nil))
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("disabled retained assets: status %d body %q, want 404", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Cache-Control"); got != "" {
+		t.Errorf("disabled retained assets Cache-Control = %q, want none", got)
+	}
+}
+
+func TestStaticHandlerReturnsBadGatewayForRetainedAssetStoreError(t *testing.T) {
+	store := &fakeAssetStore{err: fmt.Errorf("object store unavailable")}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = t.TempDir()
+	context.AssetStore = store
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/previous-build.js", nil))
+
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("retained asset store error: status %d body %q, want 502", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Cache-Control"); got != "" {
+		t.Errorf("retained asset store error Cache-Control = %q, want none", got)
+	}
+}
+
+func TestStaticHandlerRefusesOversizeRetainedAsset(t *testing.T) {
+	store := &fakeAssetStore{assets: map[string]RetainedAsset{
+		"assets/too-large.js": {
+			Body:          io.NopCloser(strings.NewReader("body is never sent")),
+			ContentLength: maxRetainedAssetSize + 1,
+		},
+	}}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = t.TempDir()
+	context.AssetStore = store
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/too-large.js", nil))
+
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("oversize retained asset: status %d body %q, want 502", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Cache-Control"); got != "" {
+		t.Errorf("oversize retained asset Cache-Control = %q, want none", got)
 	}
 }
 
