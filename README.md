@@ -1,13 +1,13 @@
 # Legion
 
 Legion runs teams of coding agents on the issues you hand it, and brings each one back as a pull
-request that is ready to merge. Root processes own issue trees: each issue gets an architect that
-writes the spec and runs a planner, an implementer, a tester, a reviewer and a merger over the
-change. The Legion daemon keeps the durable state, gives each agent its credentials and routes the
-events between them. Issues, specs and every decision a person makes live in Dispatch. Legion is for
-people who want agents to work tracked issues end to end while they keep the decisions: what to
-build, whether the spec is right, the answers to the agents' questions, which credentials the agents
-may use, and the merge.
+request that is ready to merge. Root processes own issue trees: each root issue gets an architect
+that writes its spec and splits the work, and the daemon runs a planner, an implementer, a tester, a
+reviewer and a merger over each change. The Legion daemon keeps the durable state, gives each agent
+its credentials and routes the events between them. Issues, specs and every decision a person makes
+live in Dispatch. Legion is for people who want agents to work tracked issues end to end while they
+keep the decisions: what to build, whether the spec is right, the answers to the agents' questions,
+which credentials the agents may use, and the merge.
 
 Documentation: <https://sjawhar.github.io/legion/>
 
@@ -15,11 +15,13 @@ Documentation: <https://sjawhar.github.io/legion/>
 
 ### Legion
 
-The coordinator: a Go daemon and the `legion` CLI. The daemon admits each Dispatch issue labelled
-`legion` when a slot is free and starts its architect, which writes the spec and asks you what only
-you can answer. Once you approve the spec, the daemon runs the phase workers in turn: planner,
-implementer, tester, reviewer and merger. Each agent is an [Oh My Pi](https://github.com/sjawhar/oh-my-pi)
-session, in a tmux pane on one host or in an [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
+The coordinator: a Go daemon and the `legion` CLI. The daemon works the Dispatch issues labelled
+`legion`. A controller session the operator starts labels and admits the highest-priority `todo`
+issue whenever a slot frees; you can also label an issue yourself. Each admitted issue gets an
+architect, which writes the spec, splits the work and asks you what only you can answer. Once you
+approve the spec, the daemon runs the phase workers in turn: planner, implementer, tester, reviewer
+and merger. Each agent is an [Oh My Pi](https://github.com/sjawhar/oh-my-pi) session, in a tmux
+pane on one host or in an [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
 pod on Kubernetes, and each phase commits a handoff under `.legion/` on the issue branch for a
 restarted agent to recover from. The daemon writes the issue's status back to Dispatch as it moves
 from Todo through In Progress, Testing, Needs Review and Retro to Done. Legion never merges: the
