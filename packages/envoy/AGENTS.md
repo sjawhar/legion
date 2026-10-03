@@ -234,6 +234,26 @@ writer's `context.Canceled` in its cause. Nor does that read wait for a failed r
 (`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`,
 `GET /blocks` and the block route wait.
 
+A read of a resident room never walks the live tree. That walk takes no lock
+(`YXmlFragment.Children`), while every peer update and service write holds the document's lock as
+it applies, so beside a write it reads the write halfway, which `-race` reports (LEGION-499).
+`readDocument` (`GET /text`, `GET /blocks`, the block route, `anchor_block`, reference excerpts),
+`docView` (a read outside any transaction), a version's capture (`captureLiveTextAndAuthors`), a
+published write's loss check (`recordPublishedLoss`), settlement (`settleRoomWithin`,
+`ensureBlockIDsInDocument`) and the block-id backfill read a copy taken under that lock
+(`snapshotDocument`); the unrecorded-mark sweep (`unmarkExpired`) reads inside the transaction
+that unmarks; and the room's update observer (`updateChangesMarkdown`) renders a replica it brings
+up to date under the lock with what the room gained since (`renderedReplica`), so a keystroke
+costs no whole copy. A copy holds the lock only while it encodes: on a document of 524 KiB of
+markdown the encode took about 32 ms and a read through the copy about 190 ms, where the unlocked
+walk took about 39 ms. Every copy, a write's fork (`buildFork`) included, decodes into a document
+whose pending queue is as long as one update can carry (`newDocumentCopy`, `maxUpdateItems`): ygo
+parks the items under a container garbage collection emptied, and a deleted chain nested past
+100,000 levels parks more than its default allows, which refused the copy of a room the room
+itself served (`TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`).
+`TestReadsOfALiveDocumentRunBesideItsPeers` runs each of these reads while a websocket peer types,
+and CI's `envoy-go-race` job runs the `docs` and `api` packages under `-race`.
+
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
 block a `replace`, like an accepted suggestion, writes `with` as the code's literal text

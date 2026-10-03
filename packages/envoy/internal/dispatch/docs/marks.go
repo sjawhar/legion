@@ -871,12 +871,14 @@ func (s *Service) unmarkExpired(room string, expired []pmdoc.MarkRef) error {
 		transact, release := s.serviceTransact(transact, nil)
 		defer release()
 		fragment := doc.GetXmlFragment(fragmentName)
-		fresh, readErr := treeOf(doc)
-		if readErr != nil {
-			sweepErr = readErr
-			return
-		}
+		// The tree is read inside the transaction that unmarks it, under the document's lock: a
+		// walk of the live tree outside one takes no lock and can read a peer's write halfway.
 		transact(func(txn *crdt.Transaction) {
+			fresh, readErr := treeOfTransaction(txn, fragment)
+			if readErr != nil {
+				sweepErr = readErr
+				return
+			}
 			for _, mark := range expired {
 				if _, _, found := pmdoc.FindMark(fresh, mark.Type, mark.ID); !found {
 					continue

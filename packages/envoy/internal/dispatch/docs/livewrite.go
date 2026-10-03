@@ -216,7 +216,7 @@ func buildFork(write *liveWrite, incremental bool, gained []byte) (*crdt.Doc, er
 		}
 		return write.fork, nil
 	}
-	fork := crdt.New(crdt.WithClientID(write.clientID))
+	fork := newDocumentCopy(crdt.WithClientID(write.clientID))
 	if err := crdt.ApplyUpdateV1(fork, gained, nil); err != nil {
 		return nil, fmt.Errorf("fork live document: %w", err)
 	}
@@ -290,7 +290,8 @@ func (s *Service) joinRead(ctx context.Context, artifactID string) (*crdt.Doc, e
 }
 
 // docView runs read against the document the caller sees: the transaction's fork when there is
-// one (joinRead), otherwise the live room, which it loads.
+// one (joinRead), otherwise a copy of the live room, which it loads, taken under the room's lock
+// (snapshotDocument): the room's peers and the service write it while read walks it.
 func (s *Service) docView(ctx context.Context, artifactID string, read func(*crdt.Doc)) error {
 	fork, err := s.joinRead(ctx, artifactID)
 	if err != nil {
@@ -300,9 +301,16 @@ func (s *Service) docView(ctx context.Context, artifactID string, read func(*crd
 		read(fork)
 		return nil
 	}
+	var copyErr error
 	err = s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
-		read(doc)
+		var snapshot *crdt.Doc
+		if snapshot, copyErr = snapshotDocument(doc); copyErr == nil {
+			read(snapshot)
+		}
 	})
+	if copyErr != nil {
+		return copyErr
+	}
 	if errors.Is(err, websocket.ErrNoChanges) {
 		return nil
 	}
@@ -363,16 +371,23 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 //
 // The read is a point-in-time statement, as the spec says it must be: srv.Apply holds no room
 // lock across its callback, so a deletion landing after it is not reported, and a deletion
-// landing before it is. It is deliberately taken without a Yjs transaction of its own: an empty
-// transaction still fires the room's update observers, so it would put an empty update through
-// ygo's persistence worker - a durable doc_updates row - on every edit.
+// landing before it is. That point is a copy of the room taken under its document lock
+// (snapshotDocument), since the room's peers write it while the check walks it. It is
+// deliberately taken without a Yjs transaction of its own: an empty transaction still fires the
+// room's update observers, so it would put an empty update through ygo's persistence worker - a
+// durable doc_updates row - on every edit.
 func (s *Service) recordPublishedLoss(write *liveWrite) {
 	if write.loss == nil {
 		write.lost, write.lostVerdict = nil, true
 		return
 	}
-	doc := s.srv.GetDoc(write.artifactID)
-	if doc == nil {
+	live := s.srv.GetDoc(write.artifactID)
+	if live == nil {
+		return
+	}
+	doc, err := snapshotDocument(live)
+	if err != nil {
+		slog.Warn("dispatch: copy a published write's room to read its text back", "room", write.artifactID, "error", err)
 		return
 	}
 	lost, err := write.loss.lost(doc)

@@ -327,8 +327,9 @@ func (s *Service) TextWithToken(ctx context.Context, artifactID string) (string,
 
 // readDocument returns the document the caller sees without loading or writing its room, so it
 // also reads a closed issue's document: the calling transaction's fork when it has one
-// (joinRead), else the resident room, else the persisted document. A document with no persisted
-// state is nil.
+// (joinRead), else a copy of the resident room taken under its document lock (snapshotDocument),
+// since its peers and the service write it while the caller walks it, else the persisted
+// document. A document with no persisted state is nil.
 func (s *Service) readDocument(ctx context.Context, artifactID string) (*crdt.Doc, error) {
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
 		return nil, err
@@ -338,7 +339,7 @@ func (s *Service) readDocument(ctx context.Context, artifactID string) (*crdt.Do
 		return fork, err
 	}
 	if doc := s.srv.GetDoc(artifactID); doc != nil {
-		return doc, nil
+		return snapshotDocument(doc)
 	}
 	loaded, err := s.persistence.Load(ctx, artifactID)
 	if err != nil {
@@ -1008,15 +1009,24 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		}
 	}
 
+	// The room's state lock is held from the read to the authors it captures, so an author the
+	// update observer credits (creditContentChange, after the update is in the room) is captured
+	// only with that update's text. The room is read through a copy taken under its document lock
+	// (snapshotDocument), since its peers write it while the tree is walked. Nothing holding a
+	// document's lock - only a Yjs transaction's own function does - takes a room's state lock,
+	// so taking the document lock under the state lock cannot invert.
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	doc := fork
 	if doc == nil {
-		doc = s.srv.GetDoc(room)
-	}
-	if doc == nil {
-		return nil, "", versionPending{}, nil, errors.New("warm live document did not retain room")
+		live := s.srv.GetDoc(room)
+		if live == nil {
+			return nil, "", versionPending{}, nil, errors.New("warm live document did not retain room")
+		}
+		if doc, err = snapshotDocument(live); err != nil {
+			return nil, "", versionPending{}, nil, err
+		}
 	}
 	tree, err := treeOf(doc)
 	if err != nil {

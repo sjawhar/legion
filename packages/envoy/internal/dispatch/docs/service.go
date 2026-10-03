@@ -801,9 +801,16 @@ func ArtifactVersionEventPayload(
 	return payload
 }
 
+// ensureBlockIDsInDocument stamps the block ids doc's tree lacks or repeats. It reads the tree
+// through a copy taken under the document's lock (snapshotDocument): a walk of the live tree takes
+// none, so beside a peer's write it can read that write halfway through.
 func ensureBlockIDsInDocument(doc *crdt.Doc, origin any) (*pmdoc.Node, int, error) {
 	fragment := doc.GetXmlFragment(fragmentName)
-	tree, err := treeOf(doc)
+	copied, err := snapshotDocument(doc)
+	if err != nil {
+		return nil, 0, err
+	}
+	tree, err := treeOf(copied)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -949,7 +956,15 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		retry(err)
 		return
 	}
-	tree, err := treeOf(doc)
+	// The room is read through a copy taken under its document lock (snapshotDocument): its peers
+	// and the service can write it while a walk of the live tree, which takes no lock, reads it,
+	// and a torn read would be versioned as the document.
+	copied, err := snapshotDocument(doc)
+	if err != nil {
+		retry(err)
+		return
+	}
+	tree, err := treeOf(copied)
 	if err != nil {
 		if errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
@@ -987,6 +1002,13 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			}
 			retry(err)
 			return
+		}
+		if len(updates) == 0 {
+			// A write between the two reads left nothing to stamp, so the room recorded no
+			// update for the slot to match, and a slot left open holds every later update of the
+			// room's persistence behind it (consumeSuppressedPersistence waits on it).
+			s.cancelSuppressedPersistence(room, slot)
+			slot = nil
 		}
 	}
 
@@ -1392,7 +1414,11 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	// block's repeated id changes the `#id` its directive carries.
 	var stampedChanged bool
 	updates, err := s.applyCaptured(backfillCtx, artifactID, origin, func(doc *crdt.Doc) error {
-		before, beforeErr := renderDocument(doc)
+		copied, err := snapshotDocument(doc)
+		if err != nil {
+			return err
+		}
+		before, beforeErr := renderDocument(copied)
 		stamped, count, stampErr := ensureBlockIDsInDocument(doc, origin)
 		report.Stamped = count
 		if stampErr != nil {
