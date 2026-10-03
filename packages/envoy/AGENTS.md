@@ -1812,7 +1812,9 @@ revoked and its pending requests cancelled and dropped from the approver's list,
 machine logins. It reads fresh from Postgres every time, so a restart resumes exactly where the
 rows are. Lapsed means what proof lookup means by not live (`lease_expires_at` no later than
 Postgres's `now()`), so a session that keeps renewing is never ended, and rows a concurrent renew
-or revoke holds are left to the next tick.
+or revoke holds are left to the next tick. Each ended enrollment's live grants are found through
+`grants_enrollment_live` (migration 0008), so a backlog of lapsed enrollments costs one index
+lookup each rather than a scan of `grants`.
 
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
 ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/...`. The Postgres-backed tests skip, rather
