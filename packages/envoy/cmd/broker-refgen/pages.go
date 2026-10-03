@@ -253,7 +253,7 @@ func errorsPage(root string, a *api) (string, error) {
 	}
 	for _, c := range a.classes {
 		for _, o := range refusals(c.Refusals) {
-			add(o, fmt.Sprintf("every `%s` route", c.Wrapper))
+			add(o, fmt.Sprintf("every %s route", c.Label))
 		}
 	}
 	for i, r := range a.routes {
