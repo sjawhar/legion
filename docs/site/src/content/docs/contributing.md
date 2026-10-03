@@ -83,7 +83,7 @@ generators, and `bun run generate` (part of `dev` and `build`) runs them under t
   the content directory is `docs/site/src/content/docs`. A `.ts` generator runs through Bun.
 - **Binaries.** Before any generator runs, `docs/site/scripts/build-binaries.sh` builds the Go
   binaries from the same commit and puts them first on the generator's `PATH`: `legion`,
-  `envoy-dispatch`, `envoy-broker` and `agent-secrets`.
+  `envoy-dispatch`, `envoy-broker`, `agent-secrets` and `agent-secrets-helper`.
 - **Output.** It writes its pages, with frontmatter like any other page, under
   `<content dir>/<section>/reference/`. That directory is emptied before the generators run and is
   ignored by git. The sidebar shows it as the section's **Reference** group.
