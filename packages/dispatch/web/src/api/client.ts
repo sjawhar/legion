@@ -6,6 +6,7 @@ import type {
   ArchitectureTree,
   Artifact,
   ArtifactBlock,
+  ArtifactRebuildReport,
   ArtifactReview,
   ArtifactReviewState,
   ArtifactText,
@@ -130,12 +131,31 @@ export function isCredentialFeatureOff(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "FEATURE_OFF";
 }
 
-// The retry policy every query in the app shares: an auth outcome (401), a missing
-// architecture source, or an unconfigured credential broker is definitive and retrying it
-// changes nothing; any other failure (dropped connection, 5xx) is worth a couple of automatic
-// attempts before surfacing a Retry affordance to the user.
+// A stored document outside the Proof schema is a repairable state, not a transient failure:
+// retrying the read cannot repair it, while opening its live editor could let the browser rewrite it.
+export function isDocumentSchemaError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.code === "DOC_SCHEMA";
+}
+
+// A document whose stored history cannot load at all: the state a rebuild from its latest saved
+// version repairs, and retrying the read cannot.
+export function isDocumentUnloadable(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.code === "DOCUMENT_UNLOADABLE";
+}
+
+// The retry policy every query in the app shares: an auth outcome (401), a missing architecture
+// source, an unconfigured credential broker, a stored document outside Proof's schema, or a
+// stored history that cannot load is definitive and retrying it changes nothing; any other failure
+// (dropped connection, 5xx) is worth a couple of automatic attempts before surfacing a Retry
+// affordance to the user.
 export function isRetryableQueryError(error: unknown): boolean {
-  return !isUnauthorized(error) && !isSourceNotFound(error) && !isCredentialFeatureOff(error);
+  return (
+    !isUnauthorized(error) &&
+    !isSourceNotFound(error) &&
+    !isCredentialFeatureOff(error) &&
+    !isDocumentSchemaError(error) &&
+    !isDocumentUnloadable(error)
+  );
 }
 
 // The reason to show a reader for a failed write: the server's own message when it answered
@@ -541,6 +561,12 @@ export class DispatchApiClient {
 
   getArtifactText(id: string): Promise<ArtifactText> {
     return this.json<ArtifactText>(`/api/v1/artifacts/${pathSegment(id)}/text`);
+  }
+
+  rebuildArtifact(id: string, markdown?: string): Promise<ArtifactRebuildReport> {
+    return this.post<ArtifactRebuildReport>(`/api/v1/artifacts/${pathSegment(id)}/rebuild`, {
+      ...(markdown === undefined ? {} : { markdown }),
+    });
   }
 
   getArtifactBlocks(id: string): Promise<ArtifactBlock[]> {

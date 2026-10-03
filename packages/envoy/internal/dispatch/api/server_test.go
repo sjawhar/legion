@@ -58,6 +58,9 @@ type testServerOptions struct {
 	// envoyTimeout shortens that client's window, so a test can exercise a receipt timeout
 	// without holding a stand-in listener for the production five seconds.
 	envoyTimeout time.Duration
+	// persistence is an optional document-store seam for API handlers that need the document
+	// service to observe a persistence boundary condition.
+	persistence func(*store.Store) docs.VersionedStore
 	// agentStream is the live agent conversation relay; nil is the deployment with no NATS,
 	// where the viewer route answers 503.
 	agentStream agentstream.Source
@@ -114,7 +117,11 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 	}
 	database := storetest.Open(t)
 	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: settle})
+	var documentPersistence docs.VersionedStore
+	if options.persistence != nil {
+		documentPersistence = options.persistence(database)
+	}
+	documentService := docs.New(docs.Deps{Store: database, Persistence: documentPersistence, Events: broker, ServerURL: "https://dispatch.example", Settle: settle})
 	t.Cleanup(func() {
 		if err := documentService.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)
