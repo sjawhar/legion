@@ -62,7 +62,7 @@ func TestAWSReadWrapsGenericErrorInsteadOfMappingToErrNotFound(t *testing.T) {
 
 // TestLocalFromFileServesTheFileAsSecretsManagerWould pins the development file's shape: each
 // secret is listed under its name with its tags and key, filtered by name prefix as Secrets
-// Manager filters, and read by name or by the ARN the listing gave it.
+// Manager filters, case-sensitively, and read by name or by the ARN the listing gave it.
 func TestLocalFromFileServesTheFileAsSecretsManagerWould(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "secrets.json")
 	content := `{"secrets": [
@@ -77,13 +77,23 @@ func TestLocalFromFileServesTheFileAsSecretsManagerWould(t *testing.T) {
 		t.Fatalf("LocalFromFile: %v", err)
 	}
 	ctx := context.Background()
-	listed, err := local.ListSecrets(ctx, &secretsmanager.ListSecretsInput{
-		Filters: []types.Filter{{Key: types.FilterNameStringTypeName, Values: []string{"DEV/agent-secrets/"}}},
-	})
-	if err != nil || len(listed.SecretList) != 1 {
-		t.Fatalf("ListSecrets = %+v, %v; want only dev/agent-secrets/demo-key", listed, err)
+	listByPrefix := func(prefix string) []types.SecretListEntry {
+		listed, err := local.ListSecrets(ctx, &secretsmanager.ListSecretsInput{
+			Filters: []types.Filter{{Key: types.FilterNameStringTypeName, Values: []string{prefix}}},
+		})
+		if err != nil {
+			t.Fatalf("ListSecrets(%s): %v", prefix, err)
+		}
+		return listed.SecretList
 	}
-	entry := listed.SecretList[0]
+	if listed := listByPrefix("DEV/agent-secrets/"); len(listed) != 0 {
+		t.Fatalf("ListSecrets(DEV/agent-secrets/) = %+v; want nothing, as Secrets Manager's name filter is case-sensitive", listed)
+	}
+	listed := listByPrefix("dev/agent-secrets/")
+	if len(listed) != 1 {
+		t.Fatalf("ListSecrets(dev/agent-secrets/) = %+v; want only dev/agent-secrets/demo-key", listed)
+	}
+	entry := listed[0]
 	if aws.ToString(entry.Name) != "dev/agent-secrets/demo-key" || aws.ToString(entry.KmsKeyId) != "alias/dev" || len(entry.Tags) != 2 {
 		t.Fatalf("listed entry = %+v, want its name, key and two tags", entry)
 	}

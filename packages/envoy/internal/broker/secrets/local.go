@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 
@@ -115,7 +114,7 @@ func (l *Local) Alias(keyARN, alias string) {
 }
 
 // ListSecrets answers every secret in one page, filtered as Secrets Manager filters by name: each
-// name filter value matches a name it prefixes, case-insensitively.
+// name filter value matches a name it prefixes, case-sensitively.
 func (l *Local) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -133,9 +132,6 @@ func (l *Local) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInp
 		}
 		out.SecretList = append(out.SecretList, entry)
 	}
-	sort.Slice(out.SecretList, func(i, j int) bool {
-		return aws.ToString(out.SecretList[i].Name) < aws.ToString(out.SecretList[j].Name)
-	})
 	return out, nil
 }
 
@@ -146,7 +142,7 @@ func matchesNameFilters(name string, filters []types.Filter) bool {
 		}
 		matched := false
 		for _, v := range f.Values {
-			matched = matched || strings.HasPrefix(strings.ToLower(name), strings.ToLower(v))
+			matched = matched || strings.HasPrefix(name, v)
 		}
 		if !matched {
 			return false

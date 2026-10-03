@@ -158,9 +158,10 @@ func (n noAliases) ListAliases(context.Context, *kms.ListAliasesInput, ...func(*
 }
 
 // TestLoadReadsEveryPageOfThePrefixOnly pins that the loader asks Secrets Manager for the
-// namespace prefix alone, reads every page, skips a name the prefix filter matched only
-// case-insensitively without logging it as refused (it is not in the namespace, and the alarm
-// counts refusals), and never resolves aliases nobody used.
+// namespace prefix alone, reads every page, skips a name the lister answered outside the namespace
+// (here the prefix in upper case: the namespace is the prefix as written) without logging it as
+// refused (it is not in the namespace, and the alarm counts refusals), and never resolves aliases
+// nobody used.
 func TestLoadReadsEveryPageOfThePrefixOnly(t *testing.T) {
 	entry := func(name string) smtypes.SecretListEntry {
 		return smtypes.SecretListEntry{

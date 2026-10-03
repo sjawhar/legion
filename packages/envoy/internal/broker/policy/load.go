@@ -101,7 +101,8 @@ func (l Loader) Load(ctx context.Context) (*Set, error) {
 	digest := sha256.New()
 	for _, e := range entries {
 		id := aws.ToString(e.Name)
-		// The name filter matches prefixes case-insensitively; the namespace is case-sensitive.
+		// The namespace is the prefix as written: a name outside it is skipped, whatever the
+		// lister answered.
 		slug, ok := strings.CutPrefix(id, l.Prefix)
 		if !ok {
 			continue
