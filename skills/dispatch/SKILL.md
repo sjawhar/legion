@@ -294,11 +294,9 @@ References belong in the question text; `ref` is sugar that appends its `dispatc
 
 An ask is read on a phone by someone who has not read the code. Write its question and options as
 [Writing for the human](#writing-for-the-human) says, and apply its phone test before posting.
-No file path, line number, sequence number, document version or role token leads the question; the
-question itself explains the problem. Evidence under it may cite one where the reader would check
-it, or anchor the ask to the passage. Anchor a document question with
-`anchor: { artifact, quote, occurrence? }`; `occurrence` is zero-based and selects a repeated
-quote. A quote anchor is pinned to its lowest complete
+Never lead a question with a file path, line number, sequence number, document version or role token: its own text explains the problem.
+Evidence below it may cite one where the reader checks it, or anchor the ask to the passage with `anchor: { artifact, quote, occurrence? }`; `occurrence` is zero-based and selects a repeated quote.
+A quote anchor is pinned to its lowest complete
 containing block while retaining its quote as display text, so rewording the passage keeps it
 attached; a quote spanning top-level blocks, and existing anchors without a block, stay readable
 against their original document version if their quote disappears.
