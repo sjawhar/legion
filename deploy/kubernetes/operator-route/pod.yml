@@ -4,9 +4,10 @@
 # file lists what each piece is). The Go live harnesses run on these values, with the token audience
 # they are given in place of its placeholder.
 #
-# The ConfigMap named here, legion-operator-route, holds a models.yml and an overlay.yml; apply.sh
-# creates it. A live harness run creates its own copy instead, legion-operator-route-<run>, points
-# its pods at that name, and deletes it after, so a run sharing the namespace never touches it.
+# The ConfigMap named here, legion-operator-route, holds the operator's models.yml and overlay.yml;
+# apply.sh writes it from the operator's directory. A live harness run creates its own copy
+# instead, legion-operator-route-<run>, points its pods at that name, and deletes it after, so a run
+# sharing the namespace never touches it.
 env:
   # The operator's settings overlay (overlay.yml), named after Legion's pod baseline, so it
   # outranks the baseline and every repository's .omp/config.yml.

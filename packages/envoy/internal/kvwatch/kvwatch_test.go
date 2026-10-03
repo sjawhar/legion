@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +14,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/goroutinetest"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -80,9 +80,7 @@ var lockedInWatch = regexp.MustCompile(`sync\.\(\*Mutex\)\.Lock\([^\n]*\n\t[^\n]
 // waits for this before it releases the apply, so the watch is already queued for the lock the
 // release frees.
 func waitingForTheApplyLock() bool {
-	buf := make([]byte, 1<<22)
-	buf = buf[:runtime.Stack(buf, true)]
-	for _, goroutine := range strings.Split(string(buf), "\n\n") {
+	for _, goroutine := range goroutinetest.Traces() {
 		if strings.Contains(goroutine, "[sync.Mutex.Lock") && lockedInWatch.MatchString(goroutine) {
 			return true
 		}

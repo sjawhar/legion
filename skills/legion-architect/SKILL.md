@@ -263,8 +263,9 @@ Preserve this order exactly:
    task. It drives the changed path in production through the user's own access path and records
    what it saw on the pull request and on this issue. Close only after the implementer's production
    report exists. A defect it finds is a corrective child issue of this tree, not a note on a
-   closed one; a deploy the implementer cannot perform is its `dispatch_ask` naming that deploy,
-   with options for its outcomes, and the issue waits for it.
+   closed one; if the implementer cannot perform the deploy, it opens a `dispatch_ask` that starts
+   with the production gap and why it matters, then names the required step, its risk, and
+   outcome-named options. The issue waits for that answer.
 
 What returns the tree to review: a changed diff — a commit above the approved head that
 touches anything outside `docs/solutions/`, or a conflict-resolution merge whose fingerprint
