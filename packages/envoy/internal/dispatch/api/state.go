@@ -370,6 +370,27 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 		}
 		announce = announce || inserted.RowsAffected() > 0
 	}
+	if readThrough != nil {
+		// A reply at or before the session's read mark is read whatever user_agent_reply_read
+		// holds, and the mark only moves forward, so the rows of the replies it now passes are dead
+		// and are deleted here; without this the table grows by one row per reply ever read by id.
+		// The rows are the path session's own replies, the only ids read_replies takes for it, and
+		// a session answers only what was delivered to it, so its replies sit under roots targeted
+		// at it, where this mark is the one the unread count reads. A Clear plays no part: it can
+		// move back.
+		if _, err := tx.Exec(r.Context(), `
+			delete from user_agent_reply_read
+			using messages, user_agent_read
+			where user_agent_reply_read.login = $1
+			  and user_agent_read.login = $1 and user_agent_read.session_id = $2
+			  and messages.id = user_agent_reply_read.reply_id
+			  and messages.author->>'kind' = 'session' and messages.author->>'id' = $2
+			  and messages.created_at <= user_agent_read.read_through
+		`, canonicalLogin(actor.ID), sessionID); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	// Replies read by id that were all read already change nothing, so nothing is announced: a
 	// broadcast page sends its replies again on every visit while the session has an unread reply
 	// elsewhere, and each event would refetch the badge in every tab the viewer has open.

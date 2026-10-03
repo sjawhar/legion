@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -1185,6 +1187,59 @@ func TestRepliesReadByIDAgainRecordNoEvent(t *testing.T) {
 	read(answer.ID, followUp.ID)
 	if got := announced(); got != 2 {
 		t.Fatalf("after a read that adds the follow-up: %d events, want 2", got)
+	}
+}
+
+// A reply at or before the session's read mark is read whatever user_agent_reply_read holds, so
+// the write that moves the mark deletes the rows of the replies it passes: the table keeps only
+// replies newer than the mark, and a reply read by id that the mark has not reached keeps its row
+// and stays read. The login is mixed-case so a delete keyed on another spelling would leave rows.
+func TestAReadMarkDeletesTheRowsOfRepliesItPasses(t *testing.T) {
+	handler, database, _, reply, _ := directConversationFrom(t, "Alice")
+	first := decodeBody[model.Message](t, reply("First."))
+	second := decodeBody[model.Message](t, reply("Second."))
+	if !second.CreatedAt.After(first.CreatedAt) {
+		t.Fatalf("both answers carry %s, so no read mark sits between them", first.CreatedAt)
+	}
+	rows := func() []string {
+		t.Helper()
+		read, err := database.Pool.Query(context.Background(), `
+			select reply_id::text from user_agent_reply_read where login = 'alice' order by 1
+		`)
+		if err != nil {
+			t.Fatalf("read user_agent_reply_read: %v", err)
+		}
+		ids, err := pgx.CollectRows(read, pgx.RowTo[string])
+		if err != nil {
+			t.Fatalf("read user_agent_reply_read: %v", err)
+		}
+		return ids
+	}
+	put := func(state map[string]any) {
+		t.Helper()
+		marked := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", state, "Alice")
+		if marked.Code != http.StatusOK {
+			t.Fatalf("PUT %v: status=%d body=%s", state, marked.Code, marked.Body.String())
+		}
+	}
+
+	put(map[string]any{"read_replies": []string{first.ID, second.ID}})
+	if got := rows(); len(got) != 2 {
+		t.Fatalf("after reading both by id: rows %v, want both answers", got)
+	}
+	put(map[string]any{"read_through": first.CreatedAt})
+	if got := rows(); len(got) != 1 || got[0] != second.ID {
+		t.Fatalf("after a read mark through the first answer: rows %v, want only %s", got, second.ID)
+	}
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
+		t.Fatalf("after a read mark through the first answer: %#v, want nothing unread", got)
+	}
+	put(map[string]any{"read_through": second.CreatedAt})
+	if got := rows(); len(got) != 0 {
+		t.Fatalf("after a read mark through every answer read by id: rows %v, want none", got)
+	}
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
+		t.Fatalf("after a read mark through both answers: %#v, want nothing unread", got)
 	}
 }
 
