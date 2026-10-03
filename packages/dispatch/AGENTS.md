@@ -218,16 +218,20 @@ pinned events retain their original event body and have an `Unpin` action, so a 
 comment lifecycle event began folding into its comment turn remains removable.
 
 A margin thread's own reply holds its draft and refusal while its send is out, as every composer
-does. The margin expands one thread at a time, so a card keeps its reply composer from its first
-expansion on, hidden while collapsed (`keepReplyComposer` on `ThreadCard`): opening another thread
-leaves the reply, a send it has out and that send's refusal for the reader's return. A thread whose
-reply holds a send of its own - out, or refused and not yet sent again or dropped
-(`onHoldingChange` on `MentionComposer`) -
-stays in the list it was in, open or resolved, whoever resolves or reopens it, the reader's own
-Resolve included (`held` on `useMarginItems`), since moving it between the lists would remount its
-card. An inline reply's Cancel reply drops the draft and any refusal with it. On a phone the
-thread fills the screen instead, and its Back and Escape wait for its reply until the send's
-deadline, as a Conversation phone thread's do.
+does, whatever unmounts its card. The margin owns each thread's reply composer from the first time
+a card shows the thread (`MarginReply.tsx`): `MarginSheet` keeps the composer mounted, rendered
+into an element of its own, and the card showing the thread takes that element into its slot
+while it is expanded (`MarginReplySlot`). Collapsing the card for another thread, the Pinned tab,
+the desktop margin's rail and a move between the open and resolved lists leave the reply as it
+was; leaving the document keeps it while it holds a send of its own - out, or refused and not yet
+sent again or dropped (`onHoldingChange` on `MentionComposer`) - and keeps the margin mounted
+for it, so the thread the reader comes back to has the draft, the refusal and a Retry. A thread
+whose reply holds a send of its own also stays in the list it was in, open or resolved, whoever
+resolves or reopens it, the reader's own Resolve included (`held` on `useMarginItems`), so the
+card the reader was in stays on screen. An inline reply's Cancel reply drops the draft and any
+refusal with it. On a phone the thread fills the screen instead, and its Back and Escape wait for
+its reply until the send's deadline, as a Conversation phone thread's do; past it they leave the
+thread and the reply keeps its send, and otherwise they drop the reply, draft and refusal with it.
 
 The composer a selection-bar action opens is anchored to the provisional mark the editor wrote, and
 the margin owns that mark from then on (`margin-context.tsx`): its Comment / Suggest / Ask switch

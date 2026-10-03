@@ -1,5 +1,6 @@
 import { type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 
+import { MarginReplySlot } from "./MarginReply";
 import { ThreadCard } from "./ThreadCard";
 import type { CommentActionFailure } from "./useCommentActionQueue";
 import {
@@ -12,6 +13,8 @@ import {
 
 interface ThreadListProps {
   actionFailure: CommentActionFailure | undefined;
+  /** Takes the margin's reply composer for a thread into its card's slot (`MarginReplySlot`). */
+  attachReply(key: string, slot: HTMLElement): () => void;
   artifactSlug: string;
   expandedThreadKey: string | undefined;
   editingCommentId: string | undefined;
@@ -26,9 +29,6 @@ interface ThreadListProps {
   onAction(id: string, action: MarginItemAction): void;
   onEdit(id: string, body: string): Promise<unknown>;
   onRetryAction(): void;
-  /** A card's reply composer holds a send of its own, or no longer does: the margin keeps that
-   *  thread where it is while it does. */
-  onReplyHolding(key: string, holding: boolean): void;
   onSelect(id: string, blockID: string | undefined): void;
   onToggle(key: string): void;
   onToggleResolved(): void;
@@ -99,6 +99,7 @@ function regionOrigin(region: HTMLElement): number {
 
 export function ThreadList({
   actionFailure,
+  attachReply,
   artifactSlug,
   expandedThreadKey,
   editingCommentId,
@@ -112,7 +113,6 @@ export function ThreadList({
   onAction,
   onEdit,
   onRetryAction,
-  onReplyHolding,
   onSelect,
   onToggle,
   onToggleResolved,
@@ -196,19 +196,16 @@ export function ThreadList({
       onEditingChange={onEditingChange}
       hovered={hoveredItemId === thread.key || hoveredMarkId === threadMarkId(thread)}
       isClosed={isClosed}
-      // One thread is expanded at a time, so expanding another collapses this card: it keeps
-      // its reply composer, and what that composer holds, for the reader's return.
-      keepReplyComposer
       key={thread.key}
       onAction={onAction}
       onEdit={onEdit}
       onRetryAction={onRetryAction}
-      onReplyHolding={(holding) => onReplyHolding(thread.key, holding)}
       onSelect={() => onSelect(thread.key, thread.anchor?.block_id ?? undefined)}
       onToggle={() => onToggle(thread.key)}
       owner={owner}
       selected={selectedItemId === thread.key}
       pendingAction={pendingActionIds.has(thread.key)}
+      replySlot={<MarginReplySlot attach={attachReply} threadKey={thread.key} />}
       thread={thread}
       viewerLogin={viewerLogin}
     />

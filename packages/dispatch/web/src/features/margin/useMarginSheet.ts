@@ -1,5 +1,5 @@
 import { itemFromSearch } from "@legion/contracts";
-import { type MutationKey, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 
@@ -19,6 +19,7 @@ import {
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, PHONE_VIEWPORT_QUERY } from "../shell/useDialog";
 import type { MarginComposer } from "./CommentsTab";
+import { type MarginReply, type MarginReplyEntry, marginReplySendKey } from "./MarginReply";
 import type { MarginSheetModel } from "./MarginSheet";
 import { marginComposeSendKey, useMargin } from "./margin-context";
 import {
@@ -105,8 +106,8 @@ export function useMarginSheet(): MarginSheetModel {
   const [savingCommentEditId, setSavingCommentEditId] = useState<string>();
   const [sheetThreadKey, setSheetThreadKey] = useState<string>();
   const [showResolved, setShowResolved] = useState(false);
-  // Threads whose card's reply composer holds a send of its own: each stays where it is
-  // (`useMarginItems`'s `held`), whoever resolves it meanwhile.
+  // Threads whose reply holds a send of its own: each stays where it is (`useMarginItems`'s
+  // `held`), whoever resolves it meanwhile.
   const [heldReplies, setHeldReplies] = useState<ReadonlySet<string>>(() => new Set());
   const onReplyHolding = useCallback((key: string, holding: boolean) => {
     setHeldReplies((current) => {
@@ -117,13 +118,19 @@ export function useMarginSheet(): MarginSheetModel {
       return next;
     });
   }, []);
-  // The phone margin thread's card names its reply's send, so the thread's Back and Escape hold
-  // while it is out: leaving would unmount the composer that holds it. No thread has the empty
-  // key, so with none open nothing matches.
-  const sheetReplyKey = useMemo<MutationKey>(
-    () => ["margin-thread-reply", sheetThreadKey ?? ""],
-    [sheetThreadKey]
-  );
+  // Every thread's reply composer the margin keeps (`MarginReply`), from the first time a card
+  // shows the thread, and the element each renders into, which `attachReply` hands a card before
+  // the reply is in state. A reply goes when the reader leaves its document, unless it holds a
+  // send of its own then, and with a phone thread's Back.
+  const [replies, setReplies] = useState<readonly MarginReply[]>([]);
+  const replyNodes = useRef(new Map<string, HTMLElement>());
+  const dropReplies = useCallback((keys: ReadonlySet<string>) => {
+    for (const key of keys) replyNodes.current.delete(key);
+    setReplies((current) => current.filter((reply) => !keys.has(reply.key)));
+  }, []);
+  // The phone margin thread's reply names its send, so the thread's Back and Escape hold while it
+  // is out, until its deadline. No thread has the empty key, so with none open nothing matches.
+  const sheetReplyKey = useMemo(() => marginReplySendKey(sheetThreadKey ?? ""), [sheetThreadKey]);
   const { sending: sheetReplySending, sendingNow: sheetReplySendingNow } = useSending(
     sheetReplyKey,
     { untilDeadline: true }
@@ -131,7 +138,16 @@ export function useMarginSheet(): MarginSheetModel {
   const closeThread = useCallback(() => {
     if (sheetReplySendingNow()) return;
     setSheetThreadKey(undefined);
-  }, [sheetReplySendingNow]);
+    // Back drops the thread's reply, its draft and a refusal with it, as a Conversation phone
+    // thread's does - unless its send is still out past the deadline, when the reply keeps the
+    // send, and its answer, for the thread's return.
+    if (
+      sheetThreadKey !== undefined &&
+      queryClient.isMutating({ mutationKey: marginReplySendKey(sheetThreadKey) }) === 0
+    ) {
+      dropReplies(new Set([sheetThreadKey]));
+    }
+  }, [dropReplies, queryClient, sheetReplySendingNow, sheetThreadKey]);
   const marginRef = useRef<HTMLElement>(null);
   const issue = useQuery({
     enabled: issueKey !== undefined,
@@ -345,6 +361,69 @@ export function useMarginSheet(): MarginSheetModel {
       }
     },
     [closeThread, ownerId, sheetExpanded]
+  );
+  // A card showing a thread takes the thread's reply element into its slot, and the margin keeps
+  // the reply from then on, sending as the owner the thread was shown under.
+  const visibleArtifactId = visibleArtifact?.id;
+  const attachReply = useCallback(
+    (key: string, slot: HTMLElement) => {
+      let node = replyNodes.current.get(key);
+      if (node === undefined) {
+        node = document.createElement("div");
+        node.className = "contents";
+        replyNodes.current.set(key, node);
+      }
+      const element = node;
+      slot.appendChild(element);
+      if (owner !== undefined && visibleArtifactId !== undefined) {
+        setReplies((current) =>
+          current.some((reply) => reply.key === key)
+            ? current
+            : [...current, { artifact: visibleArtifactId, key, node: element, owner }]
+        );
+      }
+      return () => {
+        if (element.parentNode === slot) slot.removeChild(element);
+      };
+    },
+    [owner, visibleArtifactId]
+  );
+  // A reply goes once the reader has left its document and no card shows it - unless it holds a
+  // send of its own, out or refused, which it keeps for their return, as a held selection-bar
+  // composer does.
+  useEffect(() => {
+    const left = new Set(
+      replies
+        .filter(
+          (reply) =>
+            reply.artifact !== visibleArtifactId &&
+            !reply.node.isConnected &&
+            !heldReplies.has(reply.key) &&
+            queryClient.isMutating({ mutationKey: marginReplySendKey(reply.key) }) === 0
+        )
+        .map((reply) => reply.key)
+    );
+    if (left.size > 0) dropReplies(left);
+  }, [dropReplies, heldReplies, queryClient, replies, visibleArtifactId]);
+  // A reply's Cancel reply and close close the thread it answers: a phone thread as its Back does,
+  // which drops the reply, and an expanded card by collapsing it.
+  const closeReply = useCallback(
+    (key: string) => {
+      if (key === sheetThreadKey && window.matchMedia(PHONE_VIEWPORT_QUERY).matches) closeThread();
+      else onToggleThread(key);
+    },
+    [closeThread, onToggleThread, sheetThreadKey]
+  );
+  const replyEntries = useMemo<readonly MarginReplyEntry[]>(
+    () =>
+      replies.map((reply) => {
+        const shown = reply.artifact === visibleArtifactId;
+        const accepted = shown
+          ? threadsByKey.get(reply.key)?.root.comment.suggestion?.accepted
+          : undefined;
+        return { ...reply, finishing: accepted !== undefined && accepted !== null, shown };
+      }),
+    [replies, threadsByKey, visibleArtifactId]
   );
   // A composer's close and save name the compose they belong to, so a send of a compose the reader
   // left behind, landing after a newer one opened, closes and settles nothing of the newer one.
@@ -582,7 +661,6 @@ export function useMarginSheet(): MarginSheetModel {
       onEdit,
       onUnpin: unpin,
       onRetryAction: retryItem,
-      onReplyHolding,
       onRetryAnsweredAsk: retryAnsweredAsk,
       onRetryComments: retryComments,
       onRetryIssue: () => void issue.refetch(),
@@ -622,6 +700,12 @@ export function useMarginSheet(): MarginSheetModel {
       blockPlacements,
       markPlacements,
     },
+    replies: {
+      attach: attachReply,
+      close: closeReply,
+      entries: replyEntries,
+      onHolding: onReplyHolding,
+    },
     selection: {
       expandedThreadKey,
       editingCommentId,
@@ -634,7 +718,6 @@ export function useMarginSheet(): MarginSheetModel {
     sheet: {
       closeThread,
       expanded: sheetExpanded,
-      replyKey: sheetReplyKey,
       replySending: sheetReplySending,
       thread: sheetThreadKey === undefined ? undefined : threadsByKey.get(sheetThreadKey),
       toggle: toggleSheet,

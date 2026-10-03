@@ -30,7 +30,6 @@ test("an issue margin offers Comments and Pinned, Comments first", () => {
           onComposerKindChange: () => undefined,
           onEdit: async () => undefined,
           onRetryAction: () => {},
-          onReplyHolding: () => {},
           onUnpin: () => {},
           onRetryAnsweredAsk: undefined,
           onRetryComments: () => {},
@@ -68,6 +67,7 @@ test("an issue margin offers Comments and Pinned, Comments first", () => {
           blockPlacements: new Map(),
           markPlacements: new Map(),
         },
+        replies: { attach: () => () => {}, close: () => {}, entries: [], onHolding: () => {} },
         selection: {
           expandedThreadKey: undefined,
           editingCommentId: undefined,
@@ -80,7 +80,6 @@ test("an issue margin offers Comments and Pinned, Comments first", () => {
         sheet: {
           closeThread: () => {},
           expanded: false,
-          replyKey: ["margin-thread-reply", ""],
           replySending: false,
           thread: undefined,
           toggle: () => {},
@@ -124,7 +123,6 @@ test("a document owner shows the Comments tab and comment composer only", () => 
             onComposerKindChange: () => undefined,
             onEdit: async () => undefined,
             onRetryAction: () => {},
-            onReplyHolding: () => {},
             onUnpin: () => {},
             onRetryAnsweredAsk: undefined,
             onRetryComments: () => {},
@@ -183,6 +181,7 @@ test("a document owner shows the Comments tab and comment composer only", () => 
             },
           },
           placement: { blockPlacements: new Map(), markPlacements: new Map() },
+          replies: { attach: () => () => {}, close: () => {}, entries: [], onHolding: () => {} },
           selection: {
             expandedThreadKey: undefined,
             editingCommentId: undefined,
@@ -195,7 +194,6 @@ test("a document owner shows the Comments tab and comment composer only", () => 
           sheet: {
             closeThread: () => {},
             expanded: true,
-            replyKey: ["margin-thread-reply", ""],
             replySending: false,
             thread: undefined,
             toggle: () => {},
@@ -273,7 +271,6 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
               onComposerKindChange: () => undefined,
               onEdit: async () => undefined,
               onRetryAction: () => {},
-              onReplyHolding: () => {},
               onUnpin: () => {},
               onRetryAnsweredAsk: undefined,
               onRetryComments: () => {},
@@ -317,6 +314,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
               visibleArtifact: specArtifact,
             },
             placement: { blockPlacements: new Map(), markPlacements: new Map() },
+            replies: { attach: () => () => {}, close: () => {}, entries: [], onHolding: () => {} },
             selection: {
               expandedThreadKey: root.id,
               editingCommentId: undefined,
@@ -331,7 +329,6 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
                 closed = true;
               },
               expanded: true,
-              replyKey: ["margin-thread-reply", root.id],
               replySending: false,
               thread: {
                 anchor: root.anchor,
@@ -424,7 +421,6 @@ test("the standalone document phone sheet shows each suggestion's diff and Accep
               onComposerKindChange: () => undefined,
               onEdit: async () => undefined,
               onRetryAction: () => {},
-              onReplyHolding: () => {},
               onUnpin: () => {},
               onRetryAnsweredAsk: undefined,
               onRetryComments: () => {},
@@ -478,6 +474,7 @@ test("the standalone document phone sheet shows each suggestion's diff and Accep
               },
             },
             placement: { blockPlacements: new Map(), markPlacements: new Map() },
+            replies: { attach: () => () => {}, close: () => {}, entries: [], onHolding: () => {} },
             selection: {
               expandedThreadKey: undefined,
               editingCommentId: undefined,
@@ -490,7 +487,6 @@ test("the standalone document phone sheet shows each suggestion's diff and Accep
             sheet: {
               closeThread: () => {},
               expanded: true,
-              replyKey: ["margin-thread-reply", ""],
               replySending: false,
               thread: undefined,
               toggle: () => {},

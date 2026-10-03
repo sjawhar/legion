@@ -37,6 +37,8 @@ interface CommentsTabProps {
   actionFailure: CommentActionFailure | undefined;
   answeredAsksPending: boolean;
   artifactSlug: string;
+  /** Takes the margin's reply composer for a thread into its card (`MarginReplySlot`). */
+  attachReply: (key: string, slot: HTMLElement) => () => void;
   asksPending: boolean;
   commentsError: boolean;
   commentsPending: boolean;
@@ -55,7 +57,6 @@ interface CommentsTabProps {
   onAction: (id: string, action: MarginItemAction) => void;
   onEdit: (id: string, body: string) => Promise<unknown>;
   onRetryAction: () => void;
-  onReplyHolding: (key: string, holding: boolean) => void;
   onRetryAnsweredAsk: (() => void) | undefined;
   onRetryComments: () => void;
   onSelectCard: (id: string, blockID: string | undefined) => void;
@@ -160,6 +161,7 @@ export function CommentsTab({
   actionFailure,
   answeredAsksPending,
   artifactSlug,
+  attachReply,
   asksPending,
   commentsError,
   commentsPending,
@@ -179,7 +181,6 @@ export function CommentsTab({
   onEdit,
   onRetryAction,
   onRetryAnsweredAsk,
-  onReplyHolding,
   onRetryComments,
   onSelectCard,
   onToggleResolved,
@@ -260,7 +261,7 @@ export function CommentsTab({
               onAction={onAction}
               onEdit={onEdit}
               onRetryAction={onRetryAction}
-              onReplyHolding={onReplyHolding}
+              attachReply={attachReply}
               onSelect={onSelectCard}
               onToggle={onToggleThread}
               onToggleResolved={onToggleResolved}

@@ -73,8 +73,14 @@ export function Margin({
   // preference is untouched, so it returns as they left it on the next issue or document.
   // `routeHasMargin` is the one answer the shell reserves its gutter from too. A composer held for
   // a send that was out when the reader left its document keeps the margin mounted there, hidden,
-  // so that composer's draft and refusal are there when the reader comes back.
-  if (!isCompactViewport && !hasMargin && model.composers.length === 0) {
+  // so that composer's draft and refusal are there when the reader comes back; so does a thread's
+  // reply held for a send of its own (`MarginReply`).
+  if (
+    !isCompactViewport &&
+    !hasMargin &&
+    model.composers.length === 0 &&
+    model.replies.entries.length === 0
+  ) {
     return null;
   }
 

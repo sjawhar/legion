@@ -1,4 +1,3 @@
-import type { MutationKey } from "@tanstack/react-query";
 import { type ReactNode, type RefObject, useRef } from "react";
 
 import type { Artifact, Ask, Event } from "../../api/types";
@@ -22,6 +21,7 @@ import {
   useMediaQuery,
 } from "../shell/useDialog";
 import { CommentsTab, type MarginComposer, MarginComposerSlot } from "./CommentsTab";
+import { MarginReplyComposer, type MarginReplyEntry, MarginReplySlot } from "./MarginReply";
 import { PinnedTab } from "./PinnedTab";
 import { ThreadCard } from "./ThreadCard";
 import type { CommentActionFailure } from "./useCommentActionQueue";
@@ -41,8 +41,6 @@ export interface MarginSheetModel {
     onComposerKindChange: (kind: ComposerKind) => string | undefined;
     onEdit: (id: string, body: string) => Promise<unknown>;
     onRetryAction: () => void;
-    /** A card's reply composer holds a send of its own, or no longer does. */
-    onReplyHolding: (key: string, holding: boolean) => void;
     onUnpin: (eventId: number) => void;
     onRetryAnsweredAsk: (() => void) | undefined;
     onRetryComments: () => void;
@@ -79,6 +77,17 @@ export interface MarginSheetModel {
     viewerLogin: string;
     visibleArtifact: Artifact | undefined;
   };
+  /** Every margin thread's reply composer the margin keeps (`MarginReply`). */
+  replies: {
+    /** Takes a thread's reply composer into a card's slot, keeping the reply from then on; the
+     *  returned call takes it back out. */
+    attach: (key: string, slot: HTMLElement) => () => void;
+    /** The reply's Cancel reply and close: the thread it answers closes. */
+    close: (key: string) => void;
+    entries: readonly MarginReplyEntry[];
+    /** A reply holds a send of its own, or no longer does. */
+    onHolding: (key: string, holding: boolean) => void;
+  };
   placement: {
     blockPlacements: ReadonlyMap<string, MarkPlacement>;
     markPlacements: ReadonlyMap<string, MarkPlacement>;
@@ -93,12 +102,11 @@ export interface MarginSheetModel {
     showResolved: boolean;
   };
   sheet: {
-    /** Back and Escape: refused while the thread's card has its reply out, until the send's
-     *  deadline, since leaving would unmount the composer that holds it. */
+    /** Back and Escape: refused while the thread's reply is out, until the send's deadline. Past
+     *  it they close the thread and the reply keeps its send; otherwise the reply goes with the
+     *  thread, its draft and a refusal with it, as a Conversation phone thread's does. */
     closeThread: () => void;
     expanded: boolean;
-    /** The name of the phone thread card's reply send. */
-    replyKey: MutationKey;
     /** That reply is out: Back holds. */
     replySending: boolean;
     thread: Thread | undefined;
@@ -116,7 +124,7 @@ export interface MarginSheetModel {
 
 interface MarginSheetProps {
   /** The desktop margin is collapsed to its rail: the sheet stays mounted, hidden, holding only
-   *  its composers. */
+   *  its composers and its threads' replies. */
   collapsed?: boolean;
   desktopControl?: ReactNode;
   model: MarginSheetModel;
@@ -157,6 +165,7 @@ export function MarginSheet({
     filter,
     placement,
     selection,
+    replies,
     sheet,
     tab,
   } = model;
@@ -250,7 +259,9 @@ export function MarginSheet({
         {/* The tabs and what they show. Mounted under a phone margin thread and under the
             collapsed rail too, holding only the composers then: a composer a selection-bar action
             opened lives as long as its compose, so its draft, a send it has out and that send's
-            refusal survive whatever the margin shows over it, another document included. */}
+            refusal survive whatever the margin shows over it, another document included. Each
+            thread's reply renders into an element of its own that the card showing the thread
+            takes in (`MarginReply`), so the reply survives the same. */}
         <div
           className={sheet.expanded ? "px-4 pb-4 xl:px-0 xl:pb-0" : "hidden xl:block"}
           hidden={covered}
@@ -334,6 +345,20 @@ export function MarginSheet({
               />
             );
           })}
+          {replies.entries.map((reply) => (
+            <MarginReplyComposer
+              closed={reply.shown && isClosed}
+              frame={
+                isPhoneViewport && phoneThread?.key === reply.key
+                  ? `fixed inset-x-0 bottom-0 z-10 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`
+                  : undefined
+              }
+              key={reply.key}
+              onClose={replies.close}
+              onHoldingChange={replies.onHolding}
+              reply={reply}
+            />
+          ))}
           {tab.value === "comments" &&
           !covered &&
           owner !== undefined &&
@@ -343,6 +368,7 @@ export function MarginSheet({
               answeredAsksPending={answeredAsksPending}
               artifactSlug={visibleArtifact.slug}
               asksPending={asksPending}
+              attachReply={replies.attach}
               commentsError={commentsError}
               commentsPending={commentsPending}
               expandedThreadKey={selection.expandedThreadKey}
@@ -360,7 +386,6 @@ export function MarginSheet({
               onAction={actions.onAction}
               onEdit={actions.onEdit}
               onRetryAction={actions.onRetryAction}
-              onReplyHolding={actions.onReplyHolding}
               onRetryAnsweredAsk={actions.onRetryAnsweredAsk}
               onRetryComments={actions.onRetryComments}
               onSelectCard={onSelectCard}
@@ -402,7 +427,6 @@ export function MarginSheet({
                 actionFailure={actionFailure?.id === phoneThread.key ? actionFailure : undefined}
                 artifactSlug={visibleArtifact.slug}
                 className="min-h-full pb-32"
-                composerClassName={`fixed inset-x-0 bottom-0 z-10 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}
                 expanded
                 hovered={selection.hoveredMarkId === phoneThread.anchor?.mark_id}
                 editingCommentId={selection.editingCommentId}
@@ -418,7 +442,7 @@ export function MarginSheet({
                 onToggle={sheet.closeThread}
                 owner={owner}
                 pendingAction={pendingActionIds.has(phoneThread.key)}
-                replyMutationKey={sheet.replyKey}
+                replySlot={<MarginReplySlot attach={replies.attach} threadKey={phoneThread.key} />}
                 thread={phoneThread}
                 viewerLogin={viewerLogin}
               />

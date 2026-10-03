@@ -8,8 +8,9 @@ import { asUser } from "./users";
 
 // A margin thread's own reply holds its draft until the server answers, like every composer.
 // These rows put each thing that would move or unmount its card in the middle of the reply's send
-// - someone else resolving the thread, the reader opening another one, the reader's own Resolve -
-// and expect the draft and the refusal back in the thread the reply was sent from.
+// - someone else resolving the thread, the reader opening another one, the reader's own Resolve,
+// the Pinned tab, the margin's rail, another page - and expect the draft and the refusal back in
+// the thread the reply was sent from.
 const spec = "The quick brown fox";
 const refused = "Couldn't send — the server is down";
 
@@ -36,6 +37,35 @@ async function openSpec(page: Page, issueKey: string): Promise<void> {
   await page.goto(`/issues/${issueKey}/spec`);
   await expect(documentEditor(page)).toContainText(spec);
   await expect(connectedDot(page)).toHaveText("connected");
+}
+
+/** In-app navigation, as a link does: a reload would drop a send with the page. */
+async function navigateInApp(page: Page, path: string): Promise<void> {
+  await page.evaluate((to) => {
+    window.history.pushState(null, "", to);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  }, path);
+}
+
+/** The refusal `refusePosts` hands the reply, once the page has it. */
+function refusal(page: Page, issueKey: string) {
+  return page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      response.url().endsWith(`/api/v1/issues/${issueKey}/comments`) &&
+      response.status() === 503
+  );
+}
+
+/** On a phone the Thread dialog's Back waits for the reply until the send's deadline; past it,
+ *  Back takes the reader out of the thread while the reply's send is still out. The page's clock
+ *  has to be installed before the page loads. */
+async function leavePhoneThreadPastDeadline(page: Page): Promise<void> {
+  const back = page.getByRole("dialog", { name: "Thread" }).getByRole("button", { name: "Back" });
+  await expect(back).toBeDisabled();
+  await page.clock.fastForward(30_500);
+  await back.click();
+  await expect(page.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
 }
 
 /** Opens a margin thread: expanded beside the document, or in the Thread dialog on a phone. */
@@ -153,6 +183,129 @@ test("the reader's own Resolve while a margin reply is out keeps the reply's dra
       page.locator(`section[aria-label="Anchored comments"] [data-margin-item="${id}"]`);
     await expect(openCard(second.id)).toHaveCount(1);
     await expect(openCard(first.id)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The Pinned tab takes the Comments tab's place, its threads' cards with it; the reply is the
+// margin's, so the thread finds it again. On a phone the thread fills the screen and Back waits for
+// the reply, so the Pinned tab is reachable only once Back lets go at the send's deadline.
+test("the Pinned tab while a margin thread's reply is out keeps the reply's draft and refusal", async ({
+  browser,
+}, testInfo) => {
+  const { comments, first, issueKey } = await seed("Pinned under a margin reply");
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    const project = testInfo.project.name;
+    if (project === "iphone") await page.clock.install();
+    await openSpec(page, issueKey);
+    await openThread(page, project, first.id);
+    const refuse = await refusePosts(page, comments);
+    await sendReply(openedThreadCard(page, project, first.id), "Reply under the Pinned tab");
+    if (project === "iphone") await leavePhoneThreadPastDeadline(page);
+
+    const margin = page.getByTestId("margin-sheet");
+    await margin.getByRole("tab", { name: "Pinned" }).click();
+    await expect(marginCard(page, first.id)).toHaveCount(0);
+    const answered = refusal(page, issueKey);
+    refuse();
+    await answered;
+    await margin.getByRole("tab", { name: "Comments" }).click();
+
+    const card =
+      project === "iphone"
+        ? await openThread(page, project, first.id)
+        : openedThreadCard(page, project, first.id);
+    await expect(card).toHaveAttribute("aria-expanded", "true");
+    const form = card.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    await expect(form.getByText(refused)).toBeVisible();
+    await expect(field).toHaveValue("Reply under the Pinned tab");
+    await expect(field).toBeEnabled();
+  } finally {
+    await alice.close();
+  }
+});
+
+// Collapsing the desktop margin to its rail takes its tabs off screen, the threads' cards with
+// them; the reply is the margin's, so the thread finds it again when the margin comes back.
+test("collapsing the margin to its rail while a thread's reply is out keeps the reply's draft and refusal", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "below xl the margin is a sheet, with no rail");
+  const { comments, first, issueKey } = await seed("Rail under a margin reply");
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 900, width: 1440 });
+    await openSpec(page, issueKey);
+    const card = await openThread(page, testInfo.project.name, first.id);
+    const refuse = await refusePosts(page, comments);
+    const { field, form } = await sendReply(card, "Reply under the rail");
+
+    await page.getByRole("button", { name: "Hide margin" }).click();
+    await expect(page.getByTestId("margin-rail")).toBeVisible();
+    await expect(card).toBeHidden();
+    const answered = refusal(page, issueKey);
+    refuse();
+    await answered;
+    await page.getByRole("button", { name: "Show margin" }).click();
+
+    await expect(card).toHaveAttribute("aria-expanded", "true");
+    await expect(form.getByText(refused)).toBeVisible();
+    await expect(field).toHaveValue("Reply under the rail");
+    await expect(field).toBeEnabled();
+  } finally {
+    await alice.close();
+  }
+});
+
+// Leaving the document takes its margin's cards with it; the reply is the margin's, and it holds
+// the send while the reader is away, so the thread they come back to has the draft, the refusal
+// and a Retry that still answers the thread.
+test("leaving the document while a margin thread's reply is out keeps the reply's draft and refusal for the return", async ({
+  browser,
+}, testInfo) => {
+  const { comments, first, issueKey } = await seed("Left under a margin reply");
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    const project = testInfo.project.name;
+    await openSpec(page, issueKey);
+    await openThread(page, project, first.id);
+    const refuse = await refusePosts(page, comments);
+    await sendReply(openedThreadCard(page, project, first.id), "Reply left on another page");
+
+    // The Inbox has no margin at all, so nothing of the thread is on screen there.
+    await navigateInApp(page, "/");
+    await expect(page.locator("main").getByRole("heading", { name: "Inbox" })).toBeVisible();
+    await expect(page.getByRole("form", { name: "Comment composer" })).toHaveCount(0);
+    const answered = refusal(page, issueKey);
+    refuse();
+    await answered;
+
+    // The thread the reader left is open again on their return, with its reply.
+    await navigateInApp(page, `/issues/${issueKey}/spec`);
+    await expect(documentEditor(page)).toContainText(spec);
+    const card = openedThreadCard(page, project, first.id);
+    await expect(card).toHaveAttribute("aria-expanded", "true");
+    const form = card.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    await expect(form.getByText(refused)).toBeVisible();
+    await expect(field).toHaveValue("Reply left on another page");
+    await expect(field).toBeEnabled();
+
+    await page.unroute(comments);
+    await form.getByRole("button", { name: "Retry" }).click();
+    await expect(
+      card.getByRole("list", { name: "Replies" }).getByText("Reply left on another page")
+    ).toBeVisible();
+    await expect(field).toHaveValue("");
   } finally {
     await alice.close();
   }
