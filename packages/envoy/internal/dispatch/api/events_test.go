@@ -1,15 +1,15 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"reflect"
+	"net/http/httptest"
+	"strings"
 	"testing"
-
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 func TestReadEventsKeepsNonAskPayloadRaw(t *testing.T) {
@@ -63,9 +63,9 @@ func TestReadEventsKeepsNonAskPayloadRaw(t *testing.T) {
 	}
 }
 
-func TestEventResponsesMatchLegacyPayloadEncodingForEveryEventKind(t *testing.T) {
-	handler, database, deps := newTestServer(t, testServerOptions{})
-	issue := createInteractionIssue(t, handler, "TEST", "Event response compatibility", "A spec")
+func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Event response bytes", "A spec")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Which path?",
 		"actor":    sessionActor(),
@@ -95,54 +95,124 @@ func TestEventResponsesMatchLegacyPayloadEncodingForEveryEventKind(t *testing.T)
 		"ask.opened": true, "ask.anchor_refreshed": true, "ask.answered": true, "ask.resolved": true,
 		"ask.edited": true, "ask.handed_back": true,
 	}
-	var nextSeq int
-	if err := database.Pool.QueryRow(context.Background(), `select last_seq from issues where key = $1`, issue.Key).Scan(&nextSeq); err != nil {
+	type storedEvent struct {
+		eventType string
+		ask       bool
+		payload   []byte
+	}
+	var lastSeq int
+	if err := database.Pool.QueryRow(context.Background(), `select last_seq from issues where key = $1`, issue.Key).Scan(&lastSeq); err != nil {
 		t.Fatalf("read issue sequence: %v", err)
 	}
+	firstSeq := lastSeq
+	var firstID int64
+	stored := map[int64]storedEvent{}
+	const nonAskPayload = `{"zeta":"last","scaled":1.00,"precise":9007199254740993,"alpha":{"kept":true},"values":["one","two"]}`
 	for _, eventType := range eventTypes {
-		nextSeq++
-		payload := `{"body":"payload compatibility","nested":{"kept":true},"values":["one","two"]}`
-		if askEventTypes[eventType] {
+		lastSeq++
+		payload := nonAskPayload
+		isAsk := askEventTypes[eventType]
+		if isAsk {
 			payload = fmt.Sprintf(`{"id":%q,"anchor":null}`, ask.ID)
 		}
-		if _, err := database.Pool.Exec(context.Background(), `
+		var id int64
+		var text string
+		if err := database.Pool.QueryRow(context.Background(), `
 			insert into events (issue_key, seq, type, actor, payload, notify)
 			values ($1, $2, $3, '{"kind":"session","id":"session-0123456789abcdef"}'::jsonb, $4::jsonb, false)
-		`, issue.Key, nextSeq, eventType, payload); err != nil {
+			returning id, payload::text
+		`, issue.Key, lastSeq, eventType, payload).Scan(&id, &text); err != nil {
 			t.Fatalf("insert %s event: %v", eventType, err)
+		}
+		if firstID == 0 {
+			firstID = id
+		}
+		var compacted bytes.Buffer
+		if err := json.Compact(&compacted, []byte(text)); err != nil {
+			t.Fatalf("compact stored %s payload %s: %v", eventType, text, err)
+		}
+		stored[id] = storedEvent{eventType: eventType, ask: isAsk, payload: compacted.Bytes()}
+	}
+
+	type servedEvent struct {
+		ID      int64           `json:"id"`
+		Type    string          `json:"type"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	checkServed := func(surface string, served []servedEvent) {
+		t.Helper()
+		seen := map[int64]bool{}
+		for _, event := range served {
+			want, ok := stored[event.ID]
+			if !ok {
+				continue
+			}
+			seen[event.ID] = true
+			if event.Type != want.eventType {
+				t.Fatalf("%s event %d type = %s, want %s", surface, event.ID, event.Type, want.eventType)
+			}
+			if !want.ask {
+				if !bytes.Equal(event.Payload, want.payload) {
+					t.Fatalf("%s %s payload = %s, want stored jsonb text %s", surface, event.Type, event.Payload, want.payload)
+				}
+				continue
+			}
+			var payload map[string]json.RawMessage
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatalf("%s decode %s payload: %v", surface, event.Type, err)
+			}
+			for _, field := range []string{"opened_event_id", "referenced_by_count"} {
+				if _, ok := payload[field]; !ok {
+					t.Fatalf("%s %s payload = %s, want hydrated %s", surface, event.Type, event.Payload, field)
+				}
+			}
+			if string(payload["id"]) != fmt.Sprintf("%q", ask.ID) {
+				t.Fatalf("%s %s payload id = %s, want %q", surface, event.Type, payload["id"], ask.ID)
+			}
+		}
+		if len(seen) != len(stored) {
+			t.Fatalf("%s returned %d of %d inserted events", surface, len(seen), len(stored))
 		}
 	}
 
-	events, err := directServer(deps).readEvents(context.Background(), issueOwner(issue.Key), eventListOptions{limit: 200})
-	if err != nil {
-		t.Fatalf("read events: %v", err)
+	response := dispatchRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/v1/issues/%s/events?after=%d&limit=200", issue.Key, firstSeq), nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("read issue events: status=%d body=%s", response.Code, response.Body.String())
 	}
-	current, err := json.Marshal(events)
+	checkServed("HTTP", decodeBody[[]servedEvent](t, response))
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	request, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v1/events?since=%d", server.URL, firstID-1), nil)
 	if err != nil {
-		t.Fatalf("encode current response: %v", err)
+		t.Fatalf("construct SSE request: %v", err)
 	}
-	legacy := append([]model.Event(nil), events...)
-	for index := range legacy {
-		raw, ok := legacy[index].Payload.(json.RawMessage)
-		if !ok {
-			t.Fatalf("%s payload type = %T, want json.RawMessage", legacy[index].Type, legacy[index].Payload)
+	request.Header.Set("Authorization", "Bearer agent-token")
+	stream, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("open SSE stream: %v", err)
+	}
+	defer stream.Body.Close()
+	if stream.StatusCode != http.StatusOK {
+		t.Fatalf("SSE status = %d, want 200", stream.StatusCode)
+	}
+	scanner := bufio.NewScanner(stream.Body)
+	frames := make([]servedEvent, 0, len(stored))
+	for read := 0; len(frames) < len(stored); read++ {
+		if read == len(stored)+20 {
+			t.Fatalf("SSE replay held %d of %d inserted events after %d frames", len(frames), len(stored), read)
 		}
-		if err := json.Unmarshal(raw, &legacy[index].Payload); err != nil {
-			t.Fatalf("decode %s legacy payload: %v", legacy[index].Type, err)
+		frame := readSSEFrame(t, scanner)
+		if len(frame) != 3 || !strings.HasPrefix(frame[2], "data: ") {
+			t.Fatalf("SSE frame = %#v, want id, event and data", frame)
+		}
+		var event servedEvent
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(frame[2], "data: ")), &event); err != nil {
+			t.Fatalf("decode SSE frame %#v: %v", frame, err)
+		}
+		if _, ok := stored[event.ID]; ok {
+			frames = append(frames, event)
 		}
 	}
-	previous, err := json.Marshal(legacy)
-	if err != nil {
-		t.Fatalf("encode legacy response: %v", err)
-	}
-	var currentJSON, previousJSON any
-	if err := json.Unmarshal(current, &currentJSON); err != nil {
-		t.Fatalf("decode current response: %v", err)
-	}
-	if err := json.Unmarshal(previous, &previousJSON); err != nil {
-		t.Fatalf("decode legacy response: %v", err)
-	}
-	if !reflect.DeepEqual(currentJSON, previousJSON) {
-		t.Fatalf("event response changed after raw payload pass-through:\ncurrent: %s\nlegacy: %s", current, previous)
-	}
+	checkServed("SSE replay", frames)
 }
