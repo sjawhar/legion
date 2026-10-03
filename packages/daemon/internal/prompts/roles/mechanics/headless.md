@@ -18,7 +18,7 @@ Use `legion gh -- <gh arguments>` for GitHub operations. Never obtain or expose 
 
 ## Completion
 
-Send your evidence-backed report to the architect with `envoy_publish` to its encoded role token (never `hub` -- the architect is a separate process). A standalone human question may go through `dispatch_ask` directly.
+Send your evidence-backed report to the architect with `envoy_publish` to its encoded role token (never `hub` -- the architect is a separate process). Send a product, scope, or design decision to the architect the same way: it writes any decision block the human must answer, never you, since a new version of an approved root spec closes the tree's design gate. A standalone to-do only a human can do is a `dispatch_ask`.
 
 When your phase work is done, call the `legion` tool with `op: "handoff_complete"` and `summary`: two sentences for the architect. That tool call, not the `legion handoff` shell command, ends your phase: the extension records it, and a turn that ends with your phase still open gets one reminder.
 

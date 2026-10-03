@@ -361,9 +361,10 @@ func removedBlockError(blockID string, removal batchRemoval) error {
 // document before the batch, every operation that left the tree as it was, and what each
 // operation wrote (see writes).
 type editBatch struct {
-	tree      *pmdoc.Node
-	before    string
-	unchanged []int
+	tree       *pmdoc.Node
+	beforeTree *pmdoc.Node
+	before     string
+	unchanged  []int
 	// operations is how many operations the batch resolved, which is what tells the one-operation
 	// batch - every insertion is that operation's, with nothing to diff - from the rest.
 	operations int
@@ -436,7 +437,13 @@ func (b editBatch) outcome(applied int) (EditOutcome, error) {
 	if err != nil {
 		return EditOutcome{}, err
 	}
-	return EditOutcome{Applied: applied, Changed: after != b.before, Unchanged: b.unchanged, Token: after}, nil
+	return EditOutcome{
+		Applied:        applied,
+		Changed:        after != b.before,
+		Unchanged:      b.unchanged,
+		Token:          after,
+		AskBlocksAdded: addedAskBlocks(b.beforeTree, b.tree),
+	}, nil
 }
 
 // applyOperations applies each operation to its predecessor's tree so a
@@ -450,6 +457,7 @@ func applyOperations(tree *pmdoc.Node, ops []model.EditOp) (editBatch, error) {
 // budget; each run of a batch - a conditional one runs to check its anchors and preconditions as
 // well as to apply - takes its own, so no run charges the batch's padding twice.
 func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validate operationValidator) (editBatch, error) {
+	beforeTree := tree
 	budget := pmdoc.NewTablePaddingBudget()
 	before, err := nodeToken(tree)
 	if err != nil {
@@ -508,6 +516,7 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 	}
 	return editBatch{
 		tree:       tree,
+		beforeTree: beforeTree,
 		before:     before,
 		unchanged:  unchanged,
 		operations: len(ops),
