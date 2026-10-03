@@ -6,7 +6,8 @@ import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import type { Agent, Comment, Message } from "../../api/types";
-import { type ComposerOwner, MentionComposer, reconcileMentions } from "./MentionComposer";
+import type { ComposerOwner } from "./composer-model";
+import { MentionComposer, reconcileMentions } from "./MentionComposer";
 import { SEND_DEADLINE_MS } from "./send-request";
 
 const planner: Agent = {

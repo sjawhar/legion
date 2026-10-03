@@ -4,11 +4,8 @@ import type { Ask } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { QueryError } from "../../components/QueryError";
 import { borderDefault, highlightRing, textPrimaryOnSurface } from "../../theme/classes";
-import {
-  type ComposerAnchor,
-  type ComposerKind,
-  MentionComposer,
-} from "../conversation/MentionComposer";
+import type { ComposerAnchor, ComposerKind } from "../conversation/composer-model";
+import { MentionComposer } from "../conversation/MentionComposer";
 import { AskCard } from "../inbox/AskCard";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
 import { MARGIN_COMPOSER_SEND_KEY } from "./margin-context";

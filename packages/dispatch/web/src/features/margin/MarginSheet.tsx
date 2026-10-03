@@ -13,7 +13,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import type { ComposerKind } from "../conversation/MentionComposer";
+import type { ComposerKind } from "../conversation/composer-model";
 import {
   COMPACT_VIEWPORT_QUERY,
   PHONE_VIEWPORT_QUERY,

@@ -62,6 +62,7 @@ import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDial
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { Avatar } from "./Avatar";
 import { type Author, resolveAuthor } from "./authors";
+import type { ReplyTarget } from "./composer-model";
 import {
   buildConversationItems,
   type CommentDeliveryAttempt,
@@ -83,7 +84,7 @@ import {
   receiptAnsweredWithError,
   withGuidance,
 } from "./delivery";
-import { MentionComposer, type ReplyTarget } from "./MentionComposer";
+import { MentionComposer } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
 import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
 import { ReplyTurn, ThreadReplies, TurnActions } from "./ReplyTurn";

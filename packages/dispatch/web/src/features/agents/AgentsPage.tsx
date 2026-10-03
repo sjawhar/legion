@@ -51,8 +51,8 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
+import type { ReplyTarget } from "../conversation/composer-model";
 import { capabilityLabel, MODE_LABELS } from "../conversation/delivery";
-import type { ReplyTarget } from "../conversation/MentionComposer";
 import { firstLine, replyQuoteText } from "../conversation/ReplyQuote";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";

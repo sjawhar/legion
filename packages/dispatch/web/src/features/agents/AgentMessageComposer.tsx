@@ -24,7 +24,8 @@ import {
   textMutedOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { MentionComposer, type ReplyTarget } from "../conversation/MentionComposer";
+import type { ReplyTarget } from "../conversation/composer-model";
+import { MentionComposer } from "../conversation/MentionComposer";
 import { focusOnDocument } from "../shell/roving";
 import { AGENT_ROW_SELECTOR, ISSUE_PICKER_SELECTOR } from "./keyboard";
 

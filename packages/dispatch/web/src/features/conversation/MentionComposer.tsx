@@ -17,7 +17,7 @@ import {
 
 import { ApiError, api, apiErrorMessage } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
-import type { Agent, AskOption, AskUrgency, DeliveryCapability } from "../../api/types";
+import type { Agent, AskOption, AskUrgency } from "../../api/types";
 import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
 import { RefusableButton } from "../../components/RefusableButton";
@@ -60,9 +60,17 @@ import { uploadErrorMessage, uploadFile } from "../artifacts/ArtifactUpload";
 import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import { buildDispatchReference, composerReferences } from "../refs/routes";
+import type {
+  AcceptedMention,
+  ComposerAnchor,
+  ComposerKind,
+  ComposerOwner,
+  ReplyTarget,
+} from "./composer-model";
 import { MODE_LABELS } from "./delivery";
 import { ReplyQuote, replyQuoteText } from "./ReplyQuote";
 import {
+  DELIVERY_COMMANDS,
   type DeliveryPlan,
   deliveryPlan,
   mentionText,
@@ -73,47 +81,9 @@ import {
 } from "./send-request";
 import { useAgents } from "./useAgents";
 
-export type ComposerOwner =
-  | { readonly kind: "issue"; readonly issueKey: string }
-  | { readonly kind: "artifact"; readonly artifactId: string; readonly project: string }
-  | { readonly kind: "session"; readonly sessionId: string };
-
-export type ComposerKind = "ask" | "comment" | "suggestion";
-export interface ComposerAnchor {
-  readonly artifact: string;
-  readonly mark_id: string;
-  readonly quote: string;
-}
-
-export interface MentionReplyTarget {
-  readonly author: string;
-  readonly excerpt: string;
-  readonly id: string;
-  readonly parentKind: "comment" | "message";
-  /** Canonical targets carried by a comment parent, prefilled as editable @ mentions. */
-  readonly mentions?: readonly { readonly target: string; readonly title: string }[];
-  /** Kept while old targeted-message threads remain readable; S2 writes comments only. */
-  readonly thread?: {
-    readonly delivery: DeliveryCapability;
-    readonly target: string;
-    readonly title: string;
-  };
-  readonly to?: string;
-}
-
-export type ReplyTarget = MentionReplyTarget;
-
 interface TextEditRange {
   readonly end: number;
   readonly start: number;
-}
-
-/** One accepted mention: the target, and the span of the body that names it. */
-export interface AcceptedMention {
-  readonly end: number;
-  readonly start: number;
-  readonly target: string;
-  readonly text: string;
 }
 
 /** A draft as the composer holds it: the text, the mentions accepted in it, and, when it is a
@@ -258,11 +228,6 @@ function mentionQuery(
   return { query: before.slice(at + 1), start: at };
 }
 
-/** The prefix that sends a comment or message in a mode other than a Send, the default one, as the
- *  composer's does-not-advertise warning names it. `parseDelivery` (`send-request.ts`) matches
- *  the same two prefixes with its own pattern. */
-const DELIVERY_PREFIXES = { aside: "/aside", btw: "/btw" } as const;
-
 function mentionDisplay(title: string, target: string): string {
   const trimmed = title.trim();
   if (trimmed !== "" && !/^(?:session|role):/i.test(trimmed) && !/[@\r\n]/.test(trimmed)) {
@@ -384,8 +349,13 @@ function draftRefusal(
   }
   if (body.trim() === "")
     return kind === "ask" ? "Type the question first." : "Type a message first.";
-  if (kind === "comment" && outbound.delivery !== undefined && outbound.body.trim() === "") {
-    return `Type the message after ${outbound.delivery === "btw" ? "/btw" : "/aside"}.`;
+  if (
+    kind === "comment" &&
+    outbound.delivery !== undefined &&
+    outbound.delivery !== "steer" &&
+    outbound.body.trim() === ""
+  ) {
+    return `Type the message after ${DELIVERY_COMMANDS[outbound.delivery]}.`;
   }
   return undefined;
 }
@@ -414,7 +384,7 @@ interface MentionComposerProps {
   readonly onClose: () => void;
   readonly onSent: () => void;
   readonly owner: ComposerOwner;
-  readonly replyTo?: MentionReplyTarget | null;
+  readonly replyTo?: ReplyTarget | null;
   readonly saveEdit?: (id: string, body: string) => Promise<unknown>;
   /** Shows the Comment / Suggest / Ask switch and hands each pick to the host, which answers
    *  through `kind` - a selected document mark is the only surface where the kind can change, and
@@ -1111,7 +1081,7 @@ export function MentionComposer({
           failed attempt.
           {alternatives.length === 0
             ? null
-            : ` Prefix with ${alternatives.map((mode) => DELIVERY_PREFIXES[mode]).join(" or ")} to send it as ${alternatives
+            : ` Prefix with ${alternatives.map((mode) => DELIVERY_COMMANDS[mode]).join(" or ")} to send it as ${alternatives
                 .map((mode) => `${mode === "aside" ? "an" : "a"} ${MODE_LABELS[mode]}`)
                 .join(" or ")} instead.`}
         </p>

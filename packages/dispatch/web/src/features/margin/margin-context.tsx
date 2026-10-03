@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { ComposerAnchor, ComposerKind } from "../conversation/MentionComposer";
+import type { ComposerAnchor, ComposerKind } from "../conversation/composer-model";
 import type { RetypeOutcome, RetypeRefusal } from "../doc/editor";
 import { pulseBlock } from "../doc/marks";
 import type { MarkPlacement } from "./useMarginItems";

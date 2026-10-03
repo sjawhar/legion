@@ -22,7 +22,10 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   draft, and an edit's comment and save - into one `SentRequest`, and `sendRequest`
   (`send-request.ts`, beside the composer) builds the call from that value alone, so no Reply,
   issue pick, kind switch or newer anchor, in Send's own task or later, can change what the send
-  is or where it goes, in any host.
+  is or where it goes, in any host. The types both read - the owner, the kind, the anchor, the
+  reply target and an accepted mention - are the composer's model (`composer-model.ts`), which
+  imports neither, and `DELIVERY_COMMANDS` (`send-request.ts`) is the one table of the `/btw` and
+  `/aside` commands that the send strips and the composer names.
   While a send is out its draft is the server's, in every host: one disabled control fieldset
   holds the whole draft — the body, accepted mentions, a suggestion's Replacement, ask controls,
   and an anchored composer's Close — and the composer's own synchronous submit guard covers the

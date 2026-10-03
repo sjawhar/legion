@@ -10,8 +10,8 @@ import type {
   ComposerAnchor,
   ComposerKind,
   ComposerOwner,
-  MentionReplyTarget,
-} from "./MentionComposer";
+  ReplyTarget,
+} from "./composer-model";
 
 /** A send's own copy of the draft, taken when it starts: what the request is built from, and
  *  what a refusal hands back. Mentions are offsets into that exact text. */
@@ -46,13 +46,23 @@ export interface SentRequest {
     | undefined;
   readonly kind: ComposerKind;
   readonly owner: ComposerOwner;
-  readonly replyTo: MentionReplyTarget | null;
+  readonly replyTo: ReplyTarget | null;
 }
 
+/** The command, at the start of a body, that sends it in a mode other than Send, the default one.
+ *  `deliveryPlan` strips it from what goes out, and the composer names it where it tells the
+ *  reader how to send in another mode or what a bare command still needs. */
+export const DELIVERY_COMMANDS = { aside: "/aside", btw: "/btw" } as const satisfies Record<
+  Exclude<DeliveryCapability, "steer">,
+  string
+>;
+
 function parseDelivery(body: string): { body: string; delivery: DeliveryCapability } {
-  const match = /^(\/btw |\/aside )/.exec(body);
-  if (match === null) return { body, delivery: "steer" };
-  return { body: body.slice(match[0].length), delivery: match[0] === "/btw " ? "btw" : "aside" };
+  for (const mode of ["btw", "aside"] as const) {
+    const command = `${DELIVERY_COMMANDS[mode]} `;
+    if (body.startsWith(command)) return { body: body.slice(command.length), delivery: mode };
+  }
+  return { body, delivery: "steer" };
 }
 
 export interface DeliveryPlan {
