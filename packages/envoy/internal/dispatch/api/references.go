@@ -28,8 +28,6 @@ func (s *server) replaceReferences(
 	return refs.ReplaceCounted(ctx, tx, fromKind, fromID, body, s.deps.ServerURL)
 }
 
-// blockExcerptRunes bounds the containing block shown for a document mention.
-const blockExcerptRunes = 480
 
 // getReferences reads one node's edges in the reference graph: ?to= lists every edge pointing
 // at the node (backlinks), ?from= every edge it writes; exactly one is required. ?kind= narrows
@@ -67,12 +65,6 @@ func (s *server) getReferences(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
-	}
-	if query.Direction == "in" {
-		if err := s.documentMentionExcerpts(r.Context(), query, edges); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
 	}
 	WriteJSON(w, http.StatusOK, model.GraphReferences{Node: node, Edges: edges})
 }
@@ -121,57 +113,6 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 	return query, ref, nil
 }
 
-// documentMentionExcerpts replaces the excerpt of every mention written by a document with the
-// block containing the mention: the block id (a #b-<id> jump target) and its markdown. The live
-// tree is rendered once per document; a mention in an edit not yet settled has no block until
-// the closer runs and keeps the document's name.
-func (s *server) documentMentionExcerpts(ctx context.Context, query refs.Query, edges []model.GraphEdge) error {
-	type rendered struct {
-		markdown string
-		blocks   []model.ArtifactBlock
-	}
-	documents := make(map[string]rendered)
-	for index := range edges {
-		edge := &edges[index]
-		if edge.Kind != "mentions" || edge.Node.Kind != "artifact" {
-			continue
-		}
-		document, loaded := documents[edge.Node.ID]
-		if !loaded {
-			markdown, blocks, err := s.deps.Docs.TextWithBlocks(ctx, edge.Node.ID)
-			if err != nil {
-				return fmt.Errorf("render document %s for reference excerpt: %w", edge.Node.ID, err)
-			}
-			document = rendered{markdown: markdown, blocks: blocks}
-			documents[edge.Node.ID] = document
-		}
-		block, found := mentionBlock(document.markdown, document.blocks, s.deps.ServerURL, query.Kind, query.ID)
-		if !found {
-			continue
-		}
-		edge.Excerpt = &model.GraphExcerpt{
-			BlockID: block.ID,
-			Text:    text.HeadRunes(document.markdown[block.From:block.To], blockExcerptRunes),
-		}
-	}
-	return nil
-}
-
-// mentionBlock finds the block whose byte range contains the first mention of (kind, id) in
-// markdown.
-func mentionBlock(markdown string, blocks []model.ArtifactBlock, serverURL, kind, id string) (model.ArtifactBlock, bool) {
-	for _, located := range text.ExtractAt(markdown, serverURL) {
-		if located.Kind != kind || refs.ToID(located.Ref) != id {
-			continue
-		}
-		for _, block := range blocks {
-			if block.From <= located.Offset && located.Offset < block.To {
-				return block, true
-			}
-		}
-	}
-	return model.ArtifactBlock{}, false
-}
 
 func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {

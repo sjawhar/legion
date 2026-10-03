@@ -20,6 +20,9 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
+// DocumentExcerptRunes bounds the containing document block shown for a mention.
+const DocumentExcerptRunes = 480
+
 // Queryer is the query surface shared by a pool and a transaction.
 type Queryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
@@ -61,6 +64,126 @@ func ReplaceCounted(
 		return model.ReferenceChanges{}, err
 	}
 	return CountedChanges(ctx, tx, changed)
+}
+
+// ReplaceDocumentCounted reconciles one document's references and records the first containing
+// block excerpt for each target. The reference panel can then read those stored excerpts without
+// loading the source document.
+func ReplaceDocumentCounted(
+	ctx context.Context,
+	tx pgx.Tx,
+	artifactID, markdown string,
+	blocks []model.ArtifactBlock,
+	serverURL string,
+) (model.ReferenceChanges, error) {
+	changed, err := replace(ctx, tx, "artifact", artifactID, markdown, serverURL)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	if err := StoreDocumentExcerpts(ctx, tx, artifactID, markdown, blocks, serverURL); err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return CountedChanges(ctx, tx, changed)
+}
+
+// StoreDocumentExcerpts records the first containing block for each target in one document. It
+// marks every existing document edge ready so an edge whose current source has no containing block
+// preserves the graph reader's source-name fallback without a live-document read.
+func StoreDocumentExcerpts(
+	ctx context.Context,
+	tx pgx.Tx,
+	artifactID, markdown string,
+	blocks []model.ArtifactBlock,
+	serverURL string,
+) error {
+	excerpts := documentExcerpts(markdown, blocks, serverURL)
+	kinds := make([]string, 0, len(excerpts))
+	ids := make([]string, 0, len(excerpts))
+	blockIDs := make([]string, 0, len(excerpts))
+	texts := make([]string, 0, len(excerpts))
+	for _, excerpt := range excerpts {
+		kinds = append(kinds, excerpt.Kind)
+		ids = append(ids, excerpt.ID)
+		blockIDs = append(blockIDs, excerpt.BlockID)
+		texts = append(texts, excerpt.Text)
+	}
+	if _, err := tx.Exec(ctx, `
+		update refs r
+		set excerpt_block_id = excerpt.block_id, excerpt_text = excerpt.text, excerpt_ready = true
+		from unnest($2::text[], $3::text[], $4::text[], $5::text[])
+			as excerpt(kind, id, block_id, text)
+		where r.from_kind = 'artifact' and r.from_id = $1
+		  and r.to_kind = excerpt.kind and r.to_id = excerpt.id
+		  and (
+			r.excerpt_block_id is distinct from excerpt.block_id
+			or r.excerpt_text is distinct from excerpt.text
+			or not r.excerpt_ready
+		  )
+	`, artifactID, kinds, ids, blockIDs, texts); err != nil {
+		return fmt.Errorf("store document reference excerpts: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		update refs r
+		set excerpt_block_id = '', excerpt_text = '', excerpt_ready = true
+		where r.from_kind = 'artifact' and r.from_id = $1
+		  and not exists (
+			select 1
+			from unnest($2::text[], $3::text[]) as excerpt(kind, id)
+			where r.to_kind = excerpt.kind and r.to_id = excerpt.id
+		  )
+		  and (r.excerpt_block_id <> '' or r.excerpt_text <> '' or not r.excerpt_ready)
+	`, artifactID, kinds, ids); err != nil {
+		return fmt.Errorf("clear document reference excerpts: %w", err)
+	}
+	return nil
+}
+
+type documentExcerpt struct {
+	Target
+	BlockID string
+	Text    string
+}
+
+func documentExcerpts(markdown string, blocks []model.ArtifactBlock, serverURL string) []documentExcerpt {
+	excerpts := []documentExcerpt{}
+	seen := make(map[Target]struct{})
+	for _, located := range text.ExtractAt(markdown, serverURL) {
+		if located.Kind == "url" {
+			continue
+		}
+		target := Target{Kind: located.Kind, ID: ToID(located.Ref)}
+		if _, duplicate := seen[target]; duplicate {
+			continue
+		}
+		seen[target] = struct{}{}
+		excerpt := documentExcerpt{Target: target}
+		for _, block := range blocks {
+			if block.From <= located.Offset && located.Offset < block.To {
+				excerpt.BlockID = block.ID
+				excerpt.Text = text.HeadRunes(markdown[block.From:block.To], DocumentExcerptRunes)
+				break
+			}
+		}
+		excerpts = append(excerpts, excerpt)
+	}
+	return excerpts
+}
+
+// NeedsDocumentExcerptBackfill reports whether a document mention still lacks its stored excerpt.
+// Serving while one does would silently replace the dashboard's block excerpt with the source name.
+func NeedsDocumentExcerptBackfill(ctx context.Context, q Queryer) (bool, error) {
+	var needed bool
+	if err := q.QueryRow(ctx, `
+		select exists (
+			select 1
+			from refs r
+			join artifacts a on a.id::text = r.from_id
+			where r.from_kind = 'artifact' and a.kind = 'doc' and not r.excerpt_ready
+		)
+	`).Scan(&needed); err != nil {
+		return false, fmt.Errorf("check document reference excerpts: %w", err)
+	}
+	return needed, nil
 }
 
 // replace reconciles the Dispatch references written by one source with body: targets no

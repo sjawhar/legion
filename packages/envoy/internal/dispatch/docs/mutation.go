@@ -214,30 +214,58 @@ func mergeUpdates(updates [][]byte) ([]byte, error) {
 	}
 }
 
-// SeedText writes a new room's first Yjs update inside the caller's artifact
-// creation transaction. A new room is loaded from this update on first use.
+// SeedText writes a new room's first Yjs update inside the caller's artifact creation
+// transaction. A new room is loaded from this update on first use.
 func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error) {
+	canonical, _, err := s.seedText(ctx, artifactID, markdown, actor)
+	return canonical, err
+}
+
+// SeedTextWithBlocks writes a new document and returns the blocks that index its canonical
+// markdown. Creation has no committed room to read yet, so callers that index references must
+// take these blocks from the tree that supplied the durable update.
+func (s *Service) SeedTextWithBlocks(
+	ctx context.Context,
+	artifactID, markdown string,
+	actor model.Actor,
+) (string, []model.ArtifactBlock, error) {
+	canonical, tree, err := s.seedText(ctx, artifactID, markdown, actor)
+	if err != nil {
+		return "", nil, err
+	}
+	_, blocks, err := documentReferenceBlocks(tree)
+	if err != nil {
+		return "", nil, err
+	}
+	return canonical, blocks, nil
+}
+
+func (s *Service) seedText(
+	ctx context.Context,
+	artifactID, markdown string,
+	actor model.Actor,
+) (string, *pmdoc.Node, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {
-		return "", errUnjoined
+		return "", nil, errUnjoined
 	}
 	tree, err := parseInput(markdown)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if err := pmdoc.AskContentError(tree); err != nil {
-		return "", &ErrInvalidAskBlock{Reason: err}
+		return "", nil, &ErrInvalidAskBlock{Reason: err}
 	}
 	canonical, err := renderTree(tree)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	update, err := encodeDocumentTree(tree)
 	if err != nil {
-		return "", fmt.Errorf("seed live document tree: %w", err)
+		return "", nil, fmt.Errorf("seed live document tree: %w", err)
 	}
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, true); err != nil {
-		return "", fmt.Errorf("seed live document: %w", err)
+		return "", nil, fmt.Errorf("seed live document: %w", err)
 	}
 	// The seeding actor is the caller's own first version author (written directly by the
 	// caller, never through writeVersionTx), so it must not join `pending` - only the
@@ -245,7 +273,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	// makes the document's room, so it waits for the seed to be written: a room leaves only when
 	// it is evicted, and a refused seed would hold one of the live-room slots for good.
 	s.recordLastActor(artifactID, actor)
-	return canonical, nil
+	return canonical, tree, nil
 }
 
 // ReplaceText replaces the entire live document tree so connected clients
@@ -482,13 +510,19 @@ func (s *Service) Blocks(ctx context.Context, artifactID string) ([]model.Artifa
 // TextWithBlocks renders the document the caller sees (readDocument) once and returns its
 // canonical markdown beside the blocks whose byte ranges index into it.
 func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string, []model.ArtifactBlock, error) {
-	doc, err := s.readDocument(ctx, artifactID)
-	if err != nil || doc == nil {
-		return "", nil, err
-	}
-	tree, err := treeOf(doc)
+	var tree *pmdoc.Node
+	var treeErr error
+	err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
+		tree, treeErr = treeOf(doc)
+	})
 	if err != nil {
 		return "", nil, err
+	}
+	if treeErr != nil {
+		return "", nil, treeErr
+	}
+	if tree == nil {
+		return "", nil, nil
 	}
 	tableDescendants, err := pmdoc.TableDescendantIDs(tree)
 	if err != nil {
@@ -498,6 +532,21 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 	if err != nil {
 		return "", nil, documentSchemaError(err)
 	}
+	markdown, blocks, err := documentReferenceBlocks(tree)
+	if err != nil {
+		return "", nil, err
+	}
+	for index := range blocks {
+		blocks[index].Token = tokens[blocks[index].ID]
+		blocks[index].DescendantIDs = tableDescendants[blocks[index].ID]
+	}
+	return markdown, blocks, nil
+}
+
+// documentReferenceBlocks renders the canonical markdown beside each block that can supply a
+// stored reference excerpt. Callers that do not need document tokens or table-anchor counts use
+// it to avoid computing them.
+func documentReferenceBlocks(tree *pmdoc.Node) (string, []model.ArtifactBlock, error) {
 	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 	if err != nil {
 		return "", nil, documentSchemaError(err)
@@ -505,12 +554,10 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 	blocks := make([]model.ArtifactBlock, len(offsets))
 	for index, offset := range offsets {
 		blocks[index] = model.ArtifactBlock{
-			ID:            offset.ID,
-			Type:          offset.Type,
-			From:          offset.From,
-			To:            offset.To,
-			Token:         tokens[offset.ID],
-			DescendantIDs: tableDescendants[offset.ID],
+			ID:   offset.ID,
+			Type: offset.Type,
+			From: offset.From,
+			To:   offset.To,
 		}
 	}
 	return markdown, blocks, nil
@@ -1227,6 +1274,14 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 		return versionWriteResult{}, s.refreshAnchors(ctx, tx, artifactID, tree, actor)
 	}
 
+	excerptMarkdown, excerptBlocks, err := documentReferenceBlocks(tree)
+	if err != nil {
+		return versionWriteResult{}, fmt.Errorf("render document reference excerpts: %w", err)
+	}
+	if excerptMarkdown != markdown {
+		return versionWriteResult{}, fmt.Errorf("document reference excerpt rendering differs from version markdown")
+	}
+
 	encodedAuthors, err := json.Marshal(write.authors)
 	if err != nil {
 		return versionWriteResult{}, fmt.Errorf("encode document version authors: %w", err)
@@ -1247,7 +1302,14 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	if err := json.Unmarshal(authorsRaw, &version.Authors); err != nil {
 		return versionWriteResult{}, fmt.Errorf("decode document version authors: %w", err)
 	}
-	changes, err := refs.ReplaceCounted(ctx, tx, "artifact", artifactID, markdown, s.serverURL)
+	changes, err := refs.ReplaceDocumentCounted(
+		ctx,
+		tx,
+		artifactID,
+		markdown,
+		excerptBlocks,
+		s.serverURL,
+	)
 	if err != nil {
 		return versionWriteResult{}, err
 	}

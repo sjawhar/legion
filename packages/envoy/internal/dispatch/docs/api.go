@@ -17,6 +17,7 @@ import (
 // API is the live document operation surface used by Dispatch's HTTP handlers.
 type API interface {
 	SeedText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error)
+	SeedTextWithBlocks(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, []model.ArtifactBlock, error)
 	ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error)
 	RebuildDocument(ctx context.Context, artifactID string, markdown *string, actor model.Actor) (RebuildReport, VersionResult, error)
 	InjectSchemaInvalidForTest(ctx context.Context, artifactID string) error

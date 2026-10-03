@@ -287,7 +287,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
 	defer ledger.Discard()
-	markdown, err = s.deps.Docs.SeedText(documentCtx, artifactID, markdown, actor)
+	markdown, excerptBlocks, err := s.deps.Docs.SeedTextWithBlocks(documentCtx, artifactID, markdown, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -304,7 +304,14 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	specChanges, err := refs.ReplaceCounted(r.Context(), tx, "artifact", artifactID, markdown, s.deps.ServerURL)
+	specChanges, err := refs.ReplaceDocumentCounted(
+		r.Context(),
+		tx,
+		artifactID,
+		markdown,
+		excerptBlocks,
+		s.deps.ServerURL,
+	)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
