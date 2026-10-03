@@ -37,10 +37,20 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   `/aside` commands that the send strips and the composer names.
   While a send is out its draft is the server's, in every host: one disabled control fieldset
   holds the whole draft — the body, accepted mentions, a suggestion's Replacement, ask controls,
-  and an anchored composer's Close — and the composer's own synchronous submit guard covers the
-  same task before React disables it. The guard is never shared, so a composer that mounts while
-  another one's send is out takes typing. Sending closes a `Discard draft?` prompt, mention
-  suggestions, and a reference picker; Escape raises no prompt or ends no reply; the reference
+  and an anchored composer's Close — and the held send covers the same task before React disables
+  it. A send belongs to its target, not to the composer that made it: the held-send store
+  (`features/conversation/held-sends.ts`, one per app beside its `QueryClient`, above the router)
+  holds each send that is out or refused - its request, its draft, its refusal and, for a margin
+  compose, the mark it names - under the composer's send name (`mutationKey`), and every
+  `MentionComposer` reads and writes through it (`useComposerSend`). Whatever unmounts a composer
+  - a collapse, a fold, another page, its session leaving - the send stays, a composer that mounts
+  under the same name shows it (the draft held, `Still sending`, or the refusal with Retry), and a
+  host restores the address it was sent with (the docked composer's and the phone thread
+  composer's reply, an Agents row's reply and issue). An entry leaves when its send lands - the
+  store refreshes what it wrote whether or not a composer is mounted - or when the reader discards
+  its refusal; a reload loses every entry, as it loses the page, and what the reader wrote over a
+  refusal goes back to the entry as its composer unmounts. Sending closes a `Discard draft?`
+  prompt, mention suggestions, and a reference picker; Escape raises no prompt or ends no reply; the reference
   picker and an upload's Retry wait for the answer; and Conversation and Agents hold every Reply,
   and Agents its issue picker, from Send's own task on, by reading the send from TanStack's
   mutation cache (`hooks/useSending.ts`), which counts it from the task `mutate` runs in and until
@@ -118,10 +128,11 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   draft in place (`seededDraft`); a message on its way holds the picker, every Reply and Cancel
   reply, and the composer its whole draft (above), until the server answers, and a refusal hands
   back exactly the draft that was sent. An opened row reads its send through one `useSending` on
-  `useAgentSendKey` (`AgentRowDetails`, which mounts on the row's first open, so a row never
-  opened watches no send), a name that belongs to that one mount (`useId`), so a row that comes
-  back while a send it lost is still out holds nothing for it. An upload's reference names where
-  the file went, whatever was picked while it was out.
+  `agentSendKey` (`AgentRowDetails`, which mounts on the row's first open, so a row never opened
+  watches no send), a name that belongs to the session, so a row that comes back - the reader
+  left the page, or the session left the registry and returned - shows the send the store holds
+  for it and holds its picker and Reply until it lands. An upload's reference names where the
+  file went, whatever was picked while it was out.
 - A person's direct Send or Aside reaches an Oh My Pi session as that person's own user turn once
   the session has accepted the attempt with Dispatch, so the live view shows it from the stream,
   where the session took it. When the stream tags it with its Dispatch id (`dispatchTurns` in
@@ -219,47 +230,39 @@ pinned events retain their original event body and have an `Unpin` action, so a 
 comment lifecycle event began folding into its comment turn remains removable.
 
 A margin thread's own reply holds its draft and refusal while its send is out, as every composer
-does, whatever unmounts its card. The margin owns each thread's reply composer from the first time
-a card shows the thread (`MarginReply.tsx`): `MarginSheet` keeps the composer mounted, rendered
-into an element of its own, and the card showing the thread takes that element into its slot
-while it is expanded (`MarginReplySlot`). Collapsing the card for another thread, the Pinned tab,
-the desktop margin's rail and a move between the open and resolved lists leave the reply as it
-was; leaving the document keeps it while it holds a send of its own - out, or refused and not yet
-sent again or dropped (`onHoldingChange` on `MentionComposer`) - and keeps the margin mounted
-for it, so the thread the reader comes back to has the draft, the refusal and a Retry. A thread
-whose reply holds a send of its own also stays in the list it was in, open or resolved, whoever
-resolves or reopens it, the reader's own Resolve included (`held` on `useMarginItems`), so the
-card the reader was in stays on screen. An inline reply's Cancel reply drops the draft and any
-refusal with it. On a phone the thread fills the screen instead, and its Back and Escape wait for
-its reply until the send's deadline, as a Conversation phone thread's do; past it they leave the
-thread and the reply keeps its send, and otherwise they drop the reply, draft and refusal with it.
+does, whatever unmounts its card: the card mounts its reply composer whenever it expands, under
+the thread's reply send name (`marginReplySendKey`), and the held-send store keeps a reply that
+is out or refused for the thread - through another thread expanded, the Pinned tab, the desktop
+margin's rail, a move between the open and resolved lists, another document or another page.
+Coming back to a document opens a thread whose reply is held there. A thread whose reply the
+store holds also stays in the list it was in, open or resolved, whoever resolves or reopens it,
+the reader's own Resolve included (`held` on `useMarginItems`), so the card the reader was in
+stays on screen. An inline reply's Cancel reply drops the draft and any refusal with it. On a
+phone the thread fills the screen instead, and its Back and Escape wait for its reply until the
+send's deadline, as a Conversation phone thread's do; past it they leave the thread and the reply
+keeps its send, and otherwise they drop the reply, draft and refusal with it.
 
 The composer a selection-bar action opens is anchored to the provisional mark the editor wrote, and
 the margin owns that mark from then on (`margin-context.tsx`): its Comment / Suggest / Ask switch
 retypes the mark through `ProofEditorHandle.retypeMark` so the server verifies a mark of the kind
 being sent, and the mark is removed when the composer ends unsaved — cancelled, or replaced by a
-newer composer. Each compose names its send beneath `MARGIN_COMPOSER_SEND_KEY`
-(`marginComposeSendKey`). A newer selection-bar action while the open compose's own send is out is
-refused and the editor takes its mark back, so a send's outcome lands on the composer and mark it
-was sent from; the margin then brings the open composer back on screen - the Comments tab, the
-compact sheet - saying the new selection waits on its send. Every compose the margin publishes,
-this one and a new one alike, opens the desktop margin out of its rail (`Margin.tsx`).
-A compose the reader leaves behind holds no other: once they leave its document, a selection-bar
-action on the next one opens a compose of its own, and the earlier send's answer closes and
-settles only its own compose (`settleCompose` takes the compose's `seq`). A composer lives as
-long as its compose, whatever the margin shows: `MarginSheet` keeps it mounted, hidden, under the
-Pinned tab, under a phone margin thread, and under the rail the desktop margin collapses to
-(`Margin.tsx` keeps the sheet mounted there), so its draft, a send it has out and that send's
-refusal are where the reader left them. Leaving the document, or the issue closing, ends an idle
-composer. One whose send is out then is held (`held` on `MarginComposer`, at most one composer
-per document): it stays until that send lands or the reader discards its refusal, and so does its
-mark, since the send names it - the margin resolves the editor's promise rather than rejecting it
-(`settleCompose`'s `left`). Off its document it is hidden, in a margin `Margin.tsx` keeps mounted
-even on a route that has none, and it is not the open compose; back on its document it shows
-again and is the open compose again (`resumeCompose`), so a newer selection-bar action there
-waits on its send. On a closed issue it shows only that send and then its outcome, as a closed
-issue's composers do. Leaving the page ends it, and the send still lands. The margin also names
-the mark the open composer holds to the editor
+newer composer. Each document has one compose send (`marginComposeSendKey`, beneath
+`MARGIN_COMPOSER_SEND_KEY`), and from Send on the compose is that send's: the margin hands its
+mark to the held-send store, which keeps it until the send lands or the reader discards the
+refusal (the margin then removes the mark), and the editor's promise resolves. A newer
+selection-bar action on a document whose compose send is out is refused and the editor takes its
+mark back, so a send's outcome lands on the composer and mark it was sent from; the margin then
+brings that composer back on screen - the Comments tab, the compact sheet - saying the new
+selection waits on its send. A refused send gives way: the newer compose takes the composer the
+reader has there, which keeps its draft, and the refusal and its mark go. Every compose the margin
+shows, a new one, a turned-away one or one held for the document the reader comes back to, opens
+the desktop margin out of its rail (`Margin.tsx`). A send on another document holds no compose
+here: the check is the document's own. `MarginSheet` keeps the composer mounted, hidden, under
+the Pinned tab, under a phone margin thread, and under the rail the desktop margin collapses to,
+so an unsent draft is where the reader left it. Leaving the document, or the issue closing, ends
+an unsent compose; a sent one is the store's, shown again on its document, and on a closed issue
+it shows only that send and then its outcome, as a closed issue's composers do. The margin also
+names the mark the composer on the open document holds to the editor
 (`ProofEditorHandle.setComposerMark`). The composer's own mark writes are never undo steps
 (`@legion/proof-editor`'s `recordMarkHistoryPlugin`), in prosemirror-history or y-prosemirror's
 UndoManager: neither undo nor redo writes one back, beside a recorded suggestion or after the

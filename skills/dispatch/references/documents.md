@@ -91,7 +91,8 @@ dispatch_resolve_comment({ comment })
 8+ character id prefix is resolved against the owner's comments). It returns the owner details plus `comment`, and takes no reason —
 say what you did in a `reply_to` first if the thread needs it. The server lets any session or human resolve any open comment, so
 resolve only threads you opened or were asked to close; reopening a resolved thread is human-only (from the dashboard), though your
-reply to it reopens it. Asks are closed with `dispatch_resolve_ask` instead.
+reply to it reopens it - except a decided suggestion's, which your reply joins and leaves accepted or rejected. A reply to a pending
+suggestion whose text an edit removed lands as well. Asks are closed with `dispatch_resolve_ask` instead.
 
 An exact replacement for document text is a suggestion (`dispatch_suggest`), never a comment; a
 comment is for a question or a note the human answers in words. A human accepts a suggestion with
