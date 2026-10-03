@@ -1,11 +1,18 @@
 package api
 
 import (
+	"context"
+	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func createIssueRequest(t *testing.T, handler http.Handler, body map[string]any) *httptest.ResponseRecorder {
@@ -222,4 +229,172 @@ func TestCreateIssueOrdersDuplicateCandidates(t *testing.T) {
 	if len(body.Candidates) != 3 || body.Candidates[0].Key != highest.Key || body.Candidates[1].Key != newer.Key || body.Candidates[2].Key != older.Key {
 		t.Fatalf("candidate ordering = %#v, want %q, %q, then %q", body.Candidates, highest.Key, newer.Key, older.Key)
 	}
+}
+
+// duplicateQueryFromTitles is the duplicate check as it ran before migration 0069 stored each
+// title's lexemes: every title's, the parent's included, built from its text on each creation.
+// issues.title_lexemes holds what this built, so the check must answer from it what this answers
+// from the titles.
+const duplicateQueryFromTitles = `
+with parent as (select coalesce((select title from issues where key = $3), '') as title),
+new_title as (
+  select array(select unnest(tsvector_to_array(search_vector('', search_text($2))))
+               except select unnest(tsvector_to_array(search_vector('', search_text(p.title))))) as lex
+    from parent p),
+cand as (
+  select i.key, i.title, i.status, i.updated_at,
+         array(select unnest(tsvector_to_array(search_vector('', search_text(i.title))))
+               except select unnest(tsvector_to_array(search_vector('', search_text(p.title))))) as lex
+    from issues i, parent p
+   where i.project_key = $1 and i.key <> $3),
+scored as (
+  select c.key, c.title, c.status, c.updated_at,
+         array(select unnest(c.lex) intersect select unnest(n.lex)) as shared_lex,
+         least(cardinality(c.lex), cardinality(n.lex)) as shorter
+    from cand c, new_title n
+   where c.lex && n.lex)
+select key, title, status, cardinality(shared_lex) as shared,
+       ts_headline('english', search_text(title),
+         to_tsquery('simple', (select string_agg(quote_literal(x), ' | ') from unnest(shared_lex[1:$5]) x)), $4) as headline
+  from scored
+ where (cardinality(shared_lex) >= 3 and 2 * cardinality(shared_lex) >= shorter)
+    or (cardinality(shared_lex) >= 1 and cardinality(shared_lex) = shorter)
+ order by shared desc, updated_at desc
+ limit 5
+`
+
+// The duplicate check reads every stored title's lexemes from issues.title_lexemes, which the issues
+// trigger writes on every insert and retitle, and answers what it answered when it built them from
+// the titles: the same candidates in the same order, with the same shared counts and snippets, with
+// and without a parent. The titles share words with each other and with their own keys (DUP-12's
+// key holds `dup` and `12`), repeat a stem, hold the parent's words, a hyphenated word, an
+// underscore run search_text breaks, accented letters, or only stop words, and some were retitled
+// after they were created.
+func TestDuplicateCheckFromStoredLexemesMatchesTheCheckFromTitles(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	vocabulary := strings.Fields(`dispatch global search searching searches issue issues document
+		documents title parser ranking model-routing withdrawn credentials café résumé dup 3 12 the and
+		of see/a_b_c_d_e_f_g_h_i_j_k_l_m_n_o_p_q_r.txt astrolabe calibration launch window settlement`)
+	random := rand.New(rand.NewPCG(505, 1725))
+	randomTitle := func() string {
+		words := make([]string, 2+random.IntN(9))
+		for i := range words {
+			words[i] = vocabulary[random.IntN(len(vocabulary))]
+		}
+		return strings.Join(words, " ")
+	}
+	type seed struct{ project, key, parent, title string }
+	seeds := []seed{{"DUP", "DUP-1", "", "Dispatch global search"}}
+	for range 10 {
+		seeds = append(seeds, seed{"DUP", "", "DUP-1", "Dispatch global search: " + randomTitle()})
+	}
+	for _, title := range []string{"the and of", "DUP 12 parser ranking", "Searching searches searched",
+		"Café résumé launch window", "Model-routing withdrawn credentials"} {
+		seeds = append(seeds, seed{"DUP", "", "", title})
+	}
+	for range 150 {
+		seeds = append(seeds, seed{"DUP", "", "", randomTitle()})
+	}
+	for range 20 {
+		seeds = append(seeds, seed{"OTHER", "", "", randomTitle()})
+	}
+	if _, err := database.Pool.Exec(ctx, `insert into projects (key, name) values ('DUP', 'Dup'), ('OTHER', 'Other')`); err != nil {
+		t.Fatalf("seed projects: %v", err)
+	}
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	numbers := map[string]int{}
+	var stored []string
+	for n, issue := range seeds {
+		numbers[issue.project]++
+		key := fmt.Sprintf("%s-%d", issue.project, numbers[issue.project])
+		var parent *string
+		if issue.parent != "" {
+			parent = &issue.parent
+		}
+		status := "todo"
+		if n%5 == 0 {
+			status = "done"
+		}
+		if _, err := database.Pool.Exec(ctx, `
+			insert into issues (key, project_key, number, title, parent_key, status, created_by, rank, updated_at)
+			values ($1, $2, $3, $4, $5, $6, '{"kind":"user","id":"alice"}', $7, $8)`,
+			key, issue.project, numbers[issue.project], issue.title, parent, status, fmt.Sprintf("%06d", n), base.Add(time.Duration(n)*time.Second)); err != nil {
+			t.Fatalf("insert %s: %v", key, err)
+		}
+		if issue.project == "DUP" {
+			stored = append(stored, issue.title)
+		}
+	}
+	for n := 2; n <= numbers["DUP"]; n += 7 {
+		retitle := randomTitle()
+		if _, err := database.Pool.Exec(ctx, `update issues set title = $2, updated_at = $3 where key = $1`,
+			fmt.Sprintf("DUP-%d", n), retitle, base.Add(time.Duration(len(seeds)+n)*time.Second)); err != nil {
+			t.Fatalf("retitle DUP-%d: %v", n, err)
+		}
+		stored = append(stored, retitle)
+	}
+
+	probes := []string{"dup 12 parser", "DUP 12 parser ranking", "the and of", "searched search", "café résumé",
+		"Dispatch global search: parser ranking", "Dispatch global search", "model-routing credentials"}
+	for range 80 {
+		probes = append(probes, randomTitle())
+	}
+	for n := 0; n < len(stored); n += 9 {
+		probes = append(probes, stored[n])
+	}
+	answered, full, parentMatters := 0, 0, false
+	for _, probe := range probes {
+		var withoutParent []model.DuplicateCandidate
+		for _, parent := range []string{"", "DUP-1"} {
+			got, err := (&server{}).duplicateCandidates(ctx, database.Pool, "DUP", probe, parent)
+			if err != nil {
+				t.Fatalf("duplicate check of %q under parent %q: %v", probe, parent, err)
+			}
+			want := duplicateCandidatesFromTitles(t, ctx, database.Pool, probe, parent)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("%q under parent %q:\n stored lexemes %#v\n titles         %#v", probe, parent, got, want)
+			}
+			if len(want) > 0 {
+				answered++
+			}
+			if len(want) == 5 {
+				full++
+			}
+			if parent == "" {
+				withoutParent = want
+			} else if !reflect.DeepEqual(withoutParent, want) {
+				parentMatters = true
+			}
+		}
+	}
+	if answered < 20 || full == 0 || !parentMatters {
+		t.Fatalf("the fixture is too weak to compare: %d answers held a candidate, %d held five, the parent changed one: %v", answered, full, parentMatters)
+	}
+}
+
+// duplicateCandidatesFromTitles runs duplicateQueryFromTitles and reads its rows as
+// duplicateCandidates reads the check's.
+func duplicateCandidatesFromTitles(t *testing.T, ctx context.Context, q queryer, title, parentKey string) []model.DuplicateCandidate {
+	t.Helper()
+	rows, err := q.Query(ctx, duplicateQueryFromTitles, "DUP", title, parentKey, duplicateHeadlineOptions, duplicateHeadlineWords)
+	if err != nil {
+		t.Fatalf("duplicate check from titles of %q: %v", title, err)
+	}
+	defer rows.Close()
+	candidates := []model.DuplicateCandidate{}
+	for rows.Next() {
+		var candidate model.DuplicateCandidate
+		var headline string
+		if err := rows.Scan(&candidate.Key, &candidate.Title, &candidate.Status, &candidate.SharedTerms, &headline); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		candidate.Snippet = markSnippet(headline)
+		candidate.Href = "/issues/" + candidate.Key
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the check from titles of %q: %v", title, err)
+	}
+	return candidates
 }
