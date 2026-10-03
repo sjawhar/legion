@@ -1,5 +1,5 @@
 // Package brokertest is a public re-export of internal/broker/brokertest's real-broker test rig,
-// existing solely so a module outside github.com/sjawhar/envoy — packages/daemon-go's
+// existing solely so a module outside github.com/sjawhar/envoy — packages/daemon's
 // agentsecrets contract test — can drive it: Go's internal-package rule refuses to let any
 // package whose own import path does not start with github.com/sjawhar/envoy import a package
 // under github.com/sjawhar/envoy/internal/..., which blocks a foreign module from importing

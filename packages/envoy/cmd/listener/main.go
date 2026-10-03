@@ -80,6 +80,17 @@ func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
 	return err == nil
 }
 
+// roleHolderMayBeLive is the role reaper's liveness check: a claim's holder is gone only when the
+// session bucket itself says so (roleHolderSession), so the reaper never ends a claim another listener
+// accepted a moment ago. A read that did not answer keeps the claim for the next cycle.
+func roleHolderMayBeLive(logger *logging.Logger, sessions *session.SessionRegistry, sessionID string) bool {
+	_, err := roleHolderSession(sessions, sessionID, registered)
+	if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+		logger.Warn("role claim reaper kept a claim whose holder's session it could not read", slog.String("session_id", sessionID), slog.String("error", err.Error()))
+	}
+	return !errors.Is(err, nats.ErrKeyNotFound)
+}
+
 // rewatchListenerKVWatchers recreates cache watchers that are not represented
 // by bus.Client subscriptions. It attempts every one so a failed rebuild of one
 // cannot leave the other caches permanently stale too.
@@ -712,7 +723,7 @@ func main() {
 	// Cross-references envoy_sessions (5-min TTL) with envoy_interests (permanent)
 	// to prune orphaned interests from dead sessions.
 	registry.StartReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute)
-	registry.StartRoleClaimReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, sessions.TTL())
+	registry.StartRoleClaimReaper(func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, 5*time.Minute, sessions.TTL())
 
 	// Phase 6b1: Collect the interest bucket's delete markers, which the reaper above leaves one of
 	// per dead session on a key that is never reused and which nothing else removes, so every

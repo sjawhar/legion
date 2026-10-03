@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { GrantResponse } from "@legion/contracts";
+import type { LegionGrant } from "@legion/contracts/legion-api";
 import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
@@ -63,7 +63,7 @@ function needsGrant({ toolName, input }: ToolCallEvent): boolean {
 }
 
 async function wrapWithGrant(
-  mint: () => Promise<GrantResponse>
+  mint: () => Promise<LegionGrant>
 ): Promise<ToolCallEventResult | undefined> {
   try {
     await writeMintedGrant(async () => (await mint()).grantId);
@@ -338,7 +338,7 @@ function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): s
   return undefined;
 }
 
-// Read by the daemon's boot gate (packages/daemon-go/internal/daemon/bootgate.go) to prove this
+// Read by the daemon's boot gate (packages/daemon/internal/daemon/bootgate.go) to prove this
 // extension actually loaded from an ambient installed-plugin discovery -- not just that a
 // manifest file exists, which stays true even when the plugin is disabled or unregistered in
 // OMP's own plugin registry.
@@ -371,8 +371,8 @@ export default function legionExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url, instance });
   (globalThis as Record<symbol, unknown>)[LEGION_LOADED_MARKER] = import.meta.url;
 
-  // Gates both session_start and tool_call below; memoised so it runs once per session, not
-  // once per tool call.
+  // Gates session_start, tool_call and the session-change re-claim below, one call per hook; its
+  // settled answer is kept, so it runs once per session, not once per tool call.
   const checkSubagentSession = subagentSessionCheck();
   // The pane rules this pane is held to (PANE_RULES), judged from the environment on the first
   // tool_call. A subagent's own instance inherits the pane's environment, so the rules bind it
@@ -415,7 +415,6 @@ export default function legionExtension(pi: PiApi): void {
   const controllerSession = createControllerSession({
     daemon: roleDaemon,
     persistedTranscript,
-    checkSubagentSession,
   });
 
   /**
@@ -454,14 +453,11 @@ export default function legionExtension(pi: PiApi): void {
   // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree
   // navigation carries no reason, and every one of them can leave the pane on a new session id.
   // The controller re-claims whatever session the pane is left on, so that session takes the
-  // controller's title first; a session that keeps its id keeps its title.
+  // controller's title first; a session that keeps its id keeps its title. A `task` subagent's
+  // instance does neither, and the subagent check is asked once for both.
   const afterSessionChange = async (context: SessionContext): Promise<void> => {
-    if (
-      classifySession(process.env).kind === "controller" &&
-      !(await checkSubagentSession(context))
-    ) {
-      await titleSession(context);
-    }
+    if (await checkSubagentSession(context)) return;
+    if (classifySession(process.env).kind === "controller") await titleSession(context);
     await controllerSession.reclaimAfterSessionChange(context);
   };
   pi.on("session_switch", (_event, context) => afterSessionChange(context));

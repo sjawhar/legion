@@ -1,9 +1,9 @@
 import {
   controllerToken,
-  type GrantResponse,
   legionControllerNoticeSubject,
   legionProjectToken,
 } from "@legion/contracts";
+import type { LegionGrant } from "@legion/contracts/legion-api";
 import { messageFor } from "@legion/envoy-client/errors";
 import pkg from "../../package.json";
 import type { CommandContext, SessionContext } from "../pi-types";
@@ -21,7 +21,7 @@ export interface ControllerSession {
   readonly handleSessionStart: (context: SessionContext) => Promise<void>;
   readonly reclaimAfterSessionChange: (context: SessionContext) => Promise<void>;
   readonly isClaimedSession: (sessionID: string) => boolean;
-  readonly mintGrant: (sessionID: string) => Promise<GrantResponse>;
+  readonly mintGrant: (sessionID: string) => Promise<LegionGrant>;
 }
 
 /**
@@ -32,12 +32,11 @@ export interface ControllerSession {
 export function createControllerSession(deps: {
   readonly daemon: () => LegionDaemonClient;
   readonly persistedTranscript: PersistedTranscript;
-  readonly checkSubagentSession: (context: SessionContext) => Promise<boolean>;
 }): ControllerSession {
-  const { daemon, persistedTranscript, checkSubagentSession } = deps;
+  const { daemon, persistedTranscript } = deps;
   let controllerSessionID: string | undefined;
   let controllerCapability: string | undefined;
-  let mintControllerGrant: (() => Promise<GrantResponse>) | undefined;
+  let mintControllerGrant: (() => Promise<LegionGrant>) | undefined;
   // The controller's own transcript as of the last successful claim, which a session navigation
   // compares to decide whether to claim again; a hand-started takeover records none.
   let controllerTranscript: string | undefined;
@@ -69,9 +68,9 @@ export function createControllerSession(deps: {
     const sessionID = context.sessionManager.getSessionId();
     const capability = controllerCapability ?? requiredControllerCapability(process.env);
     controllerCapability = capability;
-    // The controller's own transcript (isSubagentSession's ensureOnDisk already persisted it) is
-    // recorded so the controller's own `task` subagents are recognised even when the transcript
-    // is not a file on disk; a hand-started takeover records nothing.
+    // The controller's own transcript, which persistedTranscript puts on disk, is recorded so the
+    // controller's own `task` subagents are recognised even when the transcript is not a file on
+    // disk; a hand-started takeover records nothing.
     const { sessionFile, agentId } = await persistedTranscript(context);
     const launched = classifySession(process.env).kind === "controller";
     if (launched) recordBootstrappedSession(sessionFile);
@@ -128,9 +127,11 @@ export function createControllerSession(deps: {
     }
   };
 
-  /** `/new`, `/resume`, or `/fork` can replace the controller session and its transcript in place. */
+  /**
+   * `/new`, `/resume`, or `/fork` can replace the controller session and its transcript in place.
+   * The caller never passes a `task` subagent's session (legion.ts `afterSessionChange`).
+   */
   const reclaimAfterSessionChange = async (context: SessionContext): Promise<void> => {
-    if (await checkSubagentSession(context)) return;
     if (classifySession(process.env).kind !== "controller") return;
     if (
       context.sessionManager.getSessionId() === controllerSessionID &&
@@ -151,7 +152,7 @@ export function createControllerSession(deps: {
   const isClaimedSession = (sessionID: string): boolean =>
     controllerSessionID === sessionID && mintControllerGrant !== undefined;
 
-  const mintGrant = async (sessionID: string): Promise<GrantResponse> => {
+  const mintGrant = async (sessionID: string): Promise<LegionGrant> => {
     if (controllerSessionID !== sessionID || mintControllerGrant === undefined) {
       throw new Error("Controller session is not registered; cannot mint its grant");
     }

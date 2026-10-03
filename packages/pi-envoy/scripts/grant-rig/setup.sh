@@ -100,24 +100,22 @@ else
 fi
 
 # Scratch state directory: what the daemon's `state_dir` holds for a pane.
-mkdir -p "$RIG/state/bin" "$RIG/state/secrets" "$RIG/state/gh" "$RIG/ws"
+mkdir -p "$RIG/state/secrets" "$RIG/state/gh" "$RIG/ws"
 chmod 0700 "$RIG/state/secrets"
 printf 'rig-boot\n' > "$RIG/state/secrets/boot"
 chmod 0600 "$RIG/state/secrets/boot"
 
-# The `gh` shim, installed the way the daemon installs it at startup. A checkout without the
-# module (main before LEGION-54) gets none here: its 1.17.x extensions wrote the shim themselves.
-if test -f "$SRC/packages/daemon/src/daemon/worker-bin.ts"; then
-  bun "$SRC/packages/daemon/src/daemon/worker-bin.ts" "$RIG/state" >/dev/null
-fi
+# The checkout's own Go `legion`, built beside the state directory as the daemon's own binary is.
+test -f "$SRC/packages/daemon/cmd/legion/main.go" || {
+  echo "the checkout has no Go legion to build (packages/daemon/cmd/legion): $SRC" >&2
+  exit 2
+}
+(cd "$SRC/packages/daemon" && go build -o "$RIG/legion" ./cmd/legion)
 
-# The checkout's own `legion` command-line tool, the way `<state_dir>/bin/legion` re-execs the
-# daemon's runtime in production.
-cat > "$RIG/state/bin/legion" <<EOF
-#!/bin/sh
-exec "$(command -v bun)" "$SRC/packages/daemon/src/cli/index.ts" "\$@"
-EOF
-chmod 0755 "$RIG/state/bin/legion"
+# worker-bin/gh and bin/legion, installed by the daemon's own boot step (workerbin.Install, run
+# through daemon-pane.ts): the `gh` shim drops its own directory from PATH and execs `legion gh`,
+# and the launcher execs the daemon's binary, here the one just built.
+WORKER_BIN=$(bun "$SRC/packages/pi-envoy/scripts/grant-rig/daemon-pane.ts" "$SRC/packages/daemon" install "$RIG/state" "$RIG/legion")
 
 # Appends what the calling shell command actually ran under, so the worker prompt never has to
 # name the credential: the grant file's contents and mode (file delivery), then the plain
@@ -141,9 +139,10 @@ if ! test -d "$RIG/ws/.jj"; then
   jj git init "$RIG/ws" >/dev/null
 fi
 
-# What this rig runs, for report.json.
+# What this rig runs, for report.json, and the gh shim's directory, which verdict G expects first
+# on the pane's PATH.
 cat > "$RIG/rig-mode.json" <<EOF
-{"plugins":"$PLUGINS_MODE","legionBuild":"$LEGION_BUILD","commit":"$BUILD_COMMIT","checkout":"$SRC"}
+{"plugins":"$PLUGINS_MODE","legionBuild":"$LEGION_BUILD","commit":"$BUILD_COMMIT","checkout":"$SRC","workerBin":"$WORKER_BIN"}
 EOF
 
 : > "$RIG/standin.log"

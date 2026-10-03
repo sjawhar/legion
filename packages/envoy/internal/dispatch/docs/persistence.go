@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -61,6 +62,16 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	return persistence.LoadResult{Update: update, Version: head}, nil
 }
 
+// Head is the version Load folds the room up to now, read through the pool that owns loads, as
+// Load reads it: a room load (servicePersistenceAdapter.LoadDoc) asks it.
+func (p *PgVersioned) Head(ctx context.Context, room string) (persistence.Version, error) {
+	rooms, err := p.store.Pool.Rooms()
+	if err != nil {
+		return 0, err
+	}
+	return p.head(ctx, rooms, room)
+}
+
 // AppendUpdate validates and stores one incremental V1 update as content.
 func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
 	return p.appendUpdate(ctx, room, update, true)
@@ -72,7 +83,7 @@ func (p *PgVersioned) AppendUpdateWithClass(ctx context.Context, room string, up
 }
 
 func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
+	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		return 0, err
 	}
 	var version persistence.Version
@@ -97,7 +108,7 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 // AppendUpdateTx appends an already validated V1 update inside tx, recording whether it changes
 // the document's content: settlement versions a document only past a content update.
 func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
+	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		// ygo refuses an update declaring more than maxUpdateItems items with the same error it
 		// gives a malformed one. The server encoded this update itself, so when its header
 		// declares more than the cap, the cap is the cause and the document is the caller's to
@@ -426,6 +437,8 @@ func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persis
 // state (stateThrough): what the document still holds of them, and none of the content they
 // inserted that a later update deleted. The room's state is unchanged, and so is every retained
 // version's. Updates whose state does not read back as the document they make are left as stored.
+// Under a context compactIfIdle marked, it leaves a room whose lock another holder has for a later
+// compaction.
 func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -434,7 +447,8 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		return 0, nil
 	}
 	deleted := 0
-	err := p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
+	_, idleOnly := ctx.Value(compactIfIdleKey{}).(bool)
+	err := p.lockRoom(ctx, room, !idleOnly, func(conn *pgxpool.Conn) error {
 		tx, err := conn.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("begin compact document: %w", err)
@@ -508,7 +522,52 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		}
 		return nil
 	})
+	if errors.Is(err, errRoomLockBusy) {
+		return 0, nil
+	}
 	return deleted, err
+}
+
+// RebuildTx replaces a room's durable history with one fresh update at the next version, inside
+// tx, which holds the room's lock until it ends. Its caller has already proved that ygo cannot load
+// the old merged history; this method never makes that destructive decision itself.
+func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
+	if err := validateUpdate(seed); err != nil {
+		return RebuildReport{}, fmt.Errorf("validate rebuilt document seed: %w", err)
+	}
+	if err := lockDocumentRoom(ctx, tx, room); err != nil {
+		return RebuildReport{}, err
+	}
+	if err := p.recoverPruneTx(ctx, tx, room); err != nil {
+		return RebuildReport{}, err
+	}
+	head, err := p.head(ctx, tx, room)
+	if err != nil {
+		return RebuildReport{}, err
+	}
+	var report RebuildReport
+	for _, deletion := range []struct {
+		query string
+		count *int64
+	}{
+		{`delete from doc_updates where artifact_id = $1`, &report.RemovedUpdates},
+		{`delete from doc_checkpoints where artifact_id = $1`, &report.RemovedCheckpoints},
+		{`delete from doc_snapshots where artifact_id = $1`, &report.RemovedSnapshots},
+	} {
+		result, err := tx.Exec(ctx, deletion.query, room)
+		if err != nil {
+			return RebuildReport{}, fmt.Errorf("delete rebuilt document data: %w", err)
+		}
+		*deletion.count = result.RowsAffected()
+	}
+	report.Head = int64(head) + 1
+	if _, err := tx.Exec(ctx, `
+		insert into doc_updates (artifact_id, version, update, content_changed)
+		values ($1, $2, $3, true)
+	`, room, report.Head, seed); err != nil {
+		return RebuildReport{}, fmt.Errorf("seed rebuilt document: %w", err)
+	}
+	return report, nil
 }
 
 // Delete removes all persisted Yjs data for a document room.
@@ -573,67 +632,17 @@ func (p *PgVersioned) head(ctx context.Context, q Queryer, room string) (persist
 // renumber or drop what the stored updates hold. stateThrough then returns the stored updates
 // merged whole, as they were read before it folded them, and reports that it did not fold them,
 // so a compaction keeps them as stored. That merge still holds the skip, and a room that loads it
-// drops the missing update if it arrives later, as it did before.
+// drops the missing update if it arrives later, as it did before. So does a log the document
+// cannot apply, such as one parking more than ygo's pending queue holds: its merge is what a load
+// of it decodes and refuses (ErrDocumentUnloadable), which offers its rebuild.
 //
 // A log of one update is returned as stored: compaction leaves the state as one update, and a
 // document's first update deletes nothing an earlier one inserted.
 func stateThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) ([]byte, bool, error) {
-	var doc *crdt.Doc
-	apply := func(update []byte) error {
-		if doc == nil {
-			doc = crdt.New()
-		}
-		if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
-			return fmt.Errorf("apply document update: %w", err)
-		}
-		return nil
-	}
-	var first []byte
-	seen := 0
-	if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
-		seen++
-		switch seen {
-		case 1:
-			first = update
-			return nil
-		case 2:
-			if err := apply(first); err != nil {
-				return err
-			}
-			first = nil
-		}
-		return apply(update)
-	}); err != nil {
+	state, misread, err := foldThrough(ctx, tx, room, version)
+	if err != nil {
 		return nil, false, err
 	}
-	switch seen {
-	case 0:
-		return nil, true, nil
-	case 1:
-		return first, true, nil
-	}
-	state := crdt.EncodeStateAsUpdateV1(doc, nil)
-	made := doc.StateVector()
-	if parked := doc.PendingStats(); parked.Items > 0 || parked.DeleteRanges > 0 {
-		parts := [][]byte{state}
-		if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
-			rest, err := crdt.DiffUpdateV1(update, made)
-			if err != nil {
-				return fmt.Errorf("read parked document update: %w", err)
-			}
-			parts = append(parts, rest)
-			return nil
-		}); err != nil {
-			return nil, false, err
-		}
-		kept, err := crdt.MergeUpdatesV1(parts...)
-		if err != nil {
-			return nil, false, fmt.Errorf("keep parked document updates: %w", err)
-		}
-		state = kept
-	}
-	doc = nil
-	misread := readsBackOtherwise(state, made)
 	if misread == nil {
 		return state, true, nil
 	}
@@ -653,10 +662,72 @@ func stateThrough(ctx context.Context, tx pgx.Tx, room string, version persisten
 	return merged, false, nil
 }
 
+// errUnfoldable marks a stored update the fold's document could not apply.
+var errUnfoldable = errors.New("apply a stored document update")
+
+// foldThrough is stateThrough's fold: the state, or misread naming why the stored updates through
+// version do not fold into a state that reads back as them.
+func foldThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) (state []byte, misread error, err error) {
+	var doc *crdt.Doc
+	apply := func(update []byte) error {
+		if doc == nil {
+			doc = newDocumentCopy()
+		}
+		if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
+			return fmt.Errorf("%w: %w", errUnfoldable, err)
+		}
+		return nil
+	}
+	var first []byte
+	seen := 0
+	err = eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
+		seen++
+		switch seen {
+		case 1:
+			first = update
+			return nil
+		case 2:
+			if err := apply(first); err != nil {
+				return err
+			}
+			first = nil
+		}
+		return apply(update)
+	})
+	switch {
+	case errors.Is(err, errUnfoldable):
+		return nil, err, nil
+	case err != nil:
+		return nil, nil, err
+	case seen <= 1:
+		return first, nil, nil
+	}
+	state = crdt.EncodeStateAsUpdateV1(doc, nil)
+	made := doc.StateVector()
+	if parked := doc.PendingStats(); parked.Items > 0 || parked.DeleteRanges > 0 {
+		parts := [][]byte{state}
+		if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
+			rest, err := crdt.DiffUpdateV1(update, made)
+			if err != nil {
+				return fmt.Errorf("read parked document update: %w", err)
+			}
+			parts = append(parts, rest)
+			return nil
+		}); err != nil {
+			return nil, nil, err
+		}
+		if state, err = crdt.MergeUpdatesV1(parts...); err != nil {
+			return nil, nil, fmt.Errorf("keep parked document updates: %w", err)
+		}
+	}
+	doc = nil
+	return state, readsBackOtherwise(state, made), nil
+}
+
 // readsBackOtherwise names how state, decoded into a fresh document, differs from the state vector
 // made, the state vector of the document that encoded it, or returns nil when it does not.
 func readsBackOtherwise(state []byte, made crdt.StateVector) error {
-	doc := crdt.New()
+	doc := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
 		return fmt.Errorf("decode the folded state: %w", err)
 	}
@@ -716,13 +787,41 @@ func (p *PgVersioned) recoverPruneTx(ctx context.Context, tx pgx.Tx, room string
 	return nil
 }
 
+// compactIfIdleKey marks a context whose compaction skips a room whose lock another holder has
+// (compactIfIdle).
+type compactIfIdleKey struct{}
+
+// compactIfIdle marks ctx so Compact leaves a room whose lock another holder has for a later
+// compaction rather than waiting for the lock. The room's persistence worker compacts under it
+// (servicePersistenceAdapter.Compact): the worker compacts as it exits, and a settlement holding
+// the room's lock can be waiting for that exit, since an update the settlement commits into a room
+// whose worker is leaving is stored on the settlement's own goroutine once the worker has gone
+// (ygo's persistStranded). A compaction that waited for the lock would wait for itself. Compaction
+// is housekeeping, and the next one folds what a skipped one would have.
+func compactIfIdle(ctx context.Context) context.Context {
+	return context.WithValue(ctx, compactIfIdleKey{}, true)
+}
+
+// errRoomLockBusy is a room lock another holder has, for work that does not wait for it.
+var errRoomLockBusy = errors.New("document room lock is held")
+
 func (p *PgVersioned) withRoomLock(ctx context.Context, room string, fn func(*pgxpool.Conn) error) error {
+	return p.lockRoom(ctx, room, true, fn)
+}
+
+// lockRoom runs fn holding a pooled connection and the room's advisory lock. When wait is false
+// it takes neither lock another holder has, and returns errRoomLockBusy instead.
+func (p *PgVersioned) lockRoom(ctx context.Context, room string, wait bool, fn func(*pgxpool.Conn) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	value, _ := p.locks.LoadOrStore(room, &sync.Mutex{})
 	lock := value.(*sync.Mutex)
-	lock.Lock()
+	if wait {
+		lock.Lock()
+	} else if !lock.TryLock() {
+		return errRoomLockBusy
+	}
 	defer lock.Unlock()
 
 	conn, err := p.pool().Acquire(ctx)
@@ -734,8 +833,18 @@ func (p *PgVersioned) withRoomLock(ctx context.Context, room string, fn func(*pg
 	// reads through them, never through a second pooled connection.
 	ctx, releaseMark := store.HoldsConnection(ctx)
 	defer releaseMark()
-	if _, err := conn.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, room); err != nil {
-		return fmt.Errorf("lock document room: %w", err)
+	if wait {
+		if _, err := conn.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, room); err != nil {
+			return fmt.Errorf("lock document room: %w", err)
+		}
+	} else {
+		var locked bool
+		if err := conn.QueryRow(ctx, `select pg_try_advisory_lock(hashtext($1))`, room).Scan(&locked); err != nil {
+			return fmt.Errorf("lock document room: %w", err)
+		}
+		if !locked {
+			return errRoomLockBusy
+		}
 	}
 	defer func() { _, _ = conn.Exec(context.Background(), `select pg_advisory_unlock(hashtext($1))`, room) }()
 	return fn(conn)

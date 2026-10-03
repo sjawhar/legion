@@ -66,7 +66,7 @@ func TestRegisterWaitReturnsAtOnceWithoutALauncherCredential(t *testing.T) {
 	if err != nil || strings.TrimSpace(string(out)) != "ran" {
 		t.Fatalf("the command must still run: %q %v (stderr %q)", out, err, stderr.String())
 	}
-	const warning = "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets launcher login) this session's agent-secrets calls fail and secret-run uses secretsd\n"
+	const warning = "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets launcher login) this session's agent-secrets calls fail\n"
 	if stderr.String() != warning {
 		t.Fatalf("stderr %q, want the no-credential warning %q", stderr.String(), warning)
 	}
@@ -135,28 +135,29 @@ func TestCommandsOnAHelperWithoutALauncherCredentialPrintTheNotice(t *testing.T)
 	}
 }
 
-// TestLoginStatusSaysARefusedCredentialWasRefused: the broker answers 401 LAUNCHER_INVALID for any
-// launcher proof it rejects, a clock step or an AGENT_SECRETS_URL mismatch as well as an expired
-// or revoked credential, so a refused credential must not be reported as merely expired.
-// login-status keeps the word the dotfiles launcher gate matches, "expired", and says on stderr
-// that the broker refused it when the helper reports so. Without that report it says only that
-// the login is expired: the "not reported refused" row is both a login that expired unapproved and
-// a helper from before login_refused answering for a credential the broker refused (it keeps
-// running after the client is upgraded, until the installer can restart it), since both send this
-// same reply, so the client must claim neither.
-func TestLoginStatusSaysARefusedCredentialWasRefused(t *testing.T) {
+// TestLoginStatusSaysWhyTheHelperDroppedItsCredential: the helper drops its launcher credential
+// when the broker refuses it (401 LAUNCHER_INVALID, which the broker answers for a clock step or an
+// AGENT_SECRETS_URL mismatch as well as an expired or revoked credential) or when it reaches the
+// expiry the broker named, and such a credential must not be reported as a login that merely
+// expired unapproved. login-status keeps the word the dotfiles launcher gate matches, "expired",
+// and says on stderr the cause the helper names (credential_dropped), in the words of the helper's
+// own journal line. A helper from before credential_dropped sets login_refused alone, and only for
+// a broker refusal, so that reads as one; with neither, "expired" is a login nobody approved.
+func TestLoginStatusSaysWhyTheHelperDroppedItsCredential(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	for _, tc := range []struct {
 		name    string
 		refused bool
+		dropped string
 		want    string
 	}{
-		{"refused", true, "the broker refused this machine's launcher credential (expired, revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login"},
-		{"not reported refused", false, "the last machine login is expired; run: agent-secrets launcher login"},
+		{"dropped at its expiry", true, "the launcher credential reached its expiry", "the launcher credential reached its expiry; run: agent-secrets launcher login"},
+		{"refused, from a helper before credential_dropped", true, "", "the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login"},
+		{"a login nobody approved", false, "", "the most recent machine login expired before anyone approved it; run: agent-secrets launcher login"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sock := filepath.Join(t.TempDir(), "h.sock")
-			fakeHelperAt(t, sock, helper.Response{OK: true, LoginState: "expired", LoginRefused: tc.refused})
+			fakeHelperAt(t, sock, helper.Response{OK: true, LoginState: "expired", LoginRefused: tc.refused, CredentialDropped: tc.dropped})
 			stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
 				[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login-status")
 			want := "agent-secrets launcher login-status: " + tc.want + "\n"
