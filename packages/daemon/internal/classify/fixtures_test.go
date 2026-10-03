@@ -409,11 +409,13 @@ func (fixture fixturePullRequest) record() record.PullRequest {
 	if fixture.PendingPush != nil {
 		pushes = []record.ClassifiedPush{*fixture.PendingPush}
 	}
-	// The shipped state's verdict is always its head's: a new head cleared it.
+	// The shipped state's verdict is always its head's: a new head cleared it. The shipped daemon
+	// judged every check its settlement named, so the replay's base branch requires each check the
+	// state names failing: a red state is then red under the required set (HeadVerdict) too.
 	return record.PullRequest{Issue: fixture.Key, Repo: fixture.Repo, Number: fixture.Number, Branch: fixture.Branch, HeadSHA: fixture.HeadSHA, CheckedHead: fixture.HeadSHA,
 		HeadUpdatedAt: timestampJSON(fixture.HeadUpdatedAt), Verdict: fixture.Verdict, Failing: append([]string{}, fixture.Failing...),
 		FixAttempts: fixture.FixAttempts, BlockedAttempts: blocked, CheckRuns: checkRuns, Generation: generation, Snapshot: snapshot,
-		Pushes: pushes, HeadCounted: headCounted, PlannedRed: fixture.PlannedRed}
+		Pushes: pushes, HeadCounted: headCounted, PlannedRed: fixture.PlannedRed, Required: append([]string{}, fixture.Failing...)}
 }
 
 type fixtureGate struct {

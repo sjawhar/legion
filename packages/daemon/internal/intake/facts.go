@@ -147,8 +147,11 @@ func (PullRequestReview) isFact() {}
 // CheckRun is one latest-run identity in a checks settlement.
 type CheckRun = record.AttemptRun
 
-// PullRequestChecks is Envoy's settled checks observation. Verdict is "red", "green", or empty
-// when every check is cancelled; Failing contains the normalized failed check names.
+// PullRequestChecks is Envoy's settled checks observation. Failing is every check the settlement
+// names as not passed: failed (any failing conclusion) or cancelled, since a required check that
+// was cancelled keeps the head from merging as a failed one does. Verdict is "red" when it names
+// any and "green" otherwise; which of them is red for the workflow is the base branch's required
+// set's to say (classify.HeadVerdict).
 type PullRequestChecks struct {
 	Repo       string
 	Number     int
@@ -161,6 +164,18 @@ type PullRequestChecks struct {
 }
 
 func (PullRequestChecks) isFact() {}
+
+// RequiredChecks is the checks a pull request's base branch requires, as the daemon read them from
+// GitHub with its implement App's installation token (requiredchecks.Required): never decoded from
+// an event, applied as a synthetic fact by the daemon's own read of each open pull request
+// (workflowRuntime.watchRequiredChecks). An empty Names is a base that requires no check.
+type RequiredChecks struct {
+	Repo   string
+	Number int
+	Names  []string
+}
+
+func (RequiredChecks) isFact() {}
 
 // PullRequestMerged records GitHub's terminal merged observation.
 type PullRequestMerged struct {

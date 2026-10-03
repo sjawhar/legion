@@ -172,6 +172,12 @@ type PullRequest struct {
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
+	// Required is the checks the pull request's base branch requires (its rulesets' required status
+	// checks and its branch protection's), as the daemon last read them from GitHub
+	// (intake.RequiredChecks). Only a required check decides the checks verdict
+	// (classify.HeadVerdict), so nil, a set never read, decides none; an empty set is a base that
+	// requires no check, where nothing is red.
+	Required []string
 	// ReviewSeen is the newest deciding review (changes requested or approved) GitHub reported for
 	// the pull request: a deciding review not after it was submitted before one already processed,
 	// and records nothing. A comment decides nothing and leaves it as it is. It lasts as long as the
@@ -232,6 +238,8 @@ type Store interface {
 	PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error)
 	PullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*PullRequest, error)
 	PullRequestByNumber(ctx context.Context, tx pgx.Tx, repo string, number int) (*PullRequest, error)
+	// OpenPullRequests is every open pull request of the Dispatch project key project's issues.
+	OpenPullRequests(ctx context.Context, tx pgx.Tx, project string) ([]PullRequest, error)
 	PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest) error
 	// SessionClaimsTree says whether the agent session holds a claim in the tree.
 	SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error)

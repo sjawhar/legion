@@ -110,13 +110,21 @@ func seedReview(t *testing.T, pool *pgxpool.Pool, verdict string) {
 }
 
 // seedReviewOf seeds LEGION-208 in reviewing, its pull request's head at head with verdict
-// settled on it, and its reviewer's round not yet completed.
+// settled on it, and its reviewer's round not yet completed. The base branch requires the one
+// check, ci, every settlement these tests apply names.
 func seedReviewOf(t *testing.T, pool *pgxpool.Pool, head, verdict string) {
 	t.Helper()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-		Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, Verdict: verdict})
+	pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, Verdict: verdict, Required: []string{"ci"}}
+	switch verdict {
+	case "green":
+		pr.CheckRuns = []record.AttemptRun{{Name: "ci", ID: 1}}
+	case "red":
+		pr.CheckRuns, pr.Failing = []record.AttemptRun{{Name: "ci", ID: 1}}, []string{"ci"}
+	}
+	seedPR(t, pool, pr)
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 }
@@ -188,14 +196,13 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a code push delivered after the branch was reset to the approved head", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete"}, want: phase.Reviewing},
 		{name: "a code push delivered after the branch was reset to the approved head, then the reviewer's handoff push", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete", "push handoff from=head head-4", "sync head-4", "green head-4"}, want: phase.Retro},
 		// A handoff push can carry GitHub's skip-checks trailer and start no CI, so the code head's
-		// settlement stands for the handoff head that replaced it, whenever it arrives.
-		// An absence of information never displaces information: a settlement whose checks all
-		// ended cancelled records no verdict, and the code head's green stands for the handoff head
-		// whether the cancelled one is the handoff head's own run, a re-settlement of the code head,
-		// or arrives first.
-		{name: "the handoff head's own run cancelled after the code head's green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled", "complete"}, want: phase.Retro, unsettled: true},
-		{name: "a cancelled re-settlement of the code head after its green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Retro, unsettled: true},
-		{name: "the handoff head's own run cancelled before the code head's green", steps: []string{"approve head", "sync", "push handoff", "cancelled", "green head", "complete"}, want: phase.Retro, unsettled: true},
+		// settlement stands for the handoff head that replaced it, whenever it arrives. A required
+		// check that ended cancelled is red, as READY refuses it: the handoff head's own cancelled
+		// run, a cancelled re-settlement of the code head, or the handoff head's cancelled run that
+		// outranks the code head's later green, each leaves the approved round to the reviewer.
+		{name: "the handoff head's own run cancelled after the code head's green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled", "complete"}, want: phase.Reviewing, unsettled: true},
+		{name: "a cancelled re-settlement of the code head after its green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Reviewing, unsettled: true},
+		{name: "the handoff head's own run cancelled before the code head's green", steps: []string{"approve head", "sync", "push handoff", "cancelled", "green head", "complete"}, want: phase.Reviewing, unsettled: true},
 		{name: "the code head's checks settle after the reviewer's handoff head", steps: []string{"approve head", "sync", "push handoff", "green head", "complete"}, want: phase.Retro, unsettled: true},
 		{name: "the code head's checks settle before the reviewer's handoff head, its push last", steps: []string{"green head", "approve head", "sync", "push handoff", "complete"}, want: phase.Retro, unsettled: true},
 		{name: "the code head's checks settle before the reviewer's handoff head, its push first", steps: []string{"green head", "approve head", "push handoff", "sync", "complete"}, want: phase.Retro, unsettled: true},
@@ -295,9 +302,10 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 					fact = intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head,
 						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 3}}, Generation: 2, Snapshot: "red-" + head, Verdict: "red", Failing: []string{"ci"}}
 				case "cancelled":
-					// Every check ended cancelled and none failed: the listener's settlement records no verdict.
+					// Every check ended cancelled and none failed: the listener's cancelled group,
+					// which the settlement names failing (intake.PullRequestChecks).
 					fact = intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head,
-						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 4}}, Generation: 3, Snapshot: "cancelled-" + head, Verdict: "", Failing: []string{}}
+						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 4}}, Generation: 3, Snapshot: "cancelled-" + head, Verdict: "red", Failing: []string{"ci"}}
 				case "complete":
 					fact = intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim",
 						Summary: "reviewed", Commit: "review-1"}

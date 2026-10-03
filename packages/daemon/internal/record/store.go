@@ -183,7 +183,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at,
 	verdict, failing, fix_attempts, blocked_attempts, check_runs,
 	generation, snapshot, pushes, head_counted, planned_red, review_seen, review_seen_at, state,
-	checked_head`
+	checked_head, required`
 
 func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
 	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where issue = $1", issue))
@@ -221,6 +221,28 @@ func (s *Postgres) PullRequestByNumber(ctx context.Context, tx pgx.Tx, repo stri
 	return pr, nil
 }
 
+// OpenPullRequests is every open pull request of the Dispatch project's issues, by issue key.
+func (s *Postgres) OpenPullRequests(ctx context.Context, tx pgx.Tx, project string) ([]PullRequest, error) {
+	rows, err := tx.Query(ctx, "select "+pullRequestColumns+" from pull_requests where state = $1 and issue in (select key from issues where project = $2) order by issue",
+		PullRequestOpen, project)
+	if err != nil {
+		return nil, fmt.Errorf("list the open pull requests of %s: %w", project, err)
+	}
+	defer rows.Close()
+	open := []PullRequest{}
+	for rows.Next() {
+		pr, err := scanPullRequest(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list the open pull requests of %s: %w", project, err)
+		}
+		open = append(open, *pr)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the open pull requests of %s: %w", project, err)
+	}
+	return open, nil
+}
+
 func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest) error {
 	failing, err := json.Marshal(pr.Failing)
 	if err != nil {
@@ -234,10 +256,17 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: encode pushes: %w", pr.Issue, err)
 	}
+	// A set never read is null, never an empty list, which is a base that requires no check.
+	var required []byte
+	if pr.Required != nil {
+		if required, err = json.Marshal(pr.Required); err != nil {
+			return fmt.Errorf("put pull request for %s: encode required checks: %w", pr.Issue, err)
+		}
+	}
 	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
 		verdict, failing, fix_attempts, blocked_attempts, check_runs, generation, snapshot, pushes,
-		head_counted, planned_red, review_seen, review_seen_at, state, checked_head)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		head_counted, planned_red, review_seen, review_seen_at, state, checked_head, required)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
 		verdict = excluded.verdict, failing = excluded.failing, fix_attempts = excluded.fix_attempts,
@@ -245,11 +274,12 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 		generation = excluded.generation, snapshot = excluded.snapshot,
 		pushes = excluded.pushes, head_counted = excluded.head_counted,
 		planned_red = excluded.planned_red, review_seen = excluded.review_seen,
-		review_seen_at = excluded.review_seen_at, state = excluded.state, checked_head = excluded.checked_head`,
+		review_seen_at = excluded.review_seen_at, state = excluded.state, checked_head = excluded.checked_head,
+		required = excluded.required`,
 		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt,
 		pr.Verdict, failing, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
 		pr.Generation, pr.Snapshot, pushes, pr.HeadCounted, pr.PlannedRed,
-		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead,
+		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead, required,
 	)
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: %w", pr.Issue, err)
@@ -307,11 +337,11 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 
 func scanPullRequest(row scanner) (*PullRequest, error) {
 	var pr PullRequest
-	var failing, checkRuns, pushes []byte
+	var failing, checkRuns, pushes, required []byte
 	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
 		&pr.Verdict, &failing, &pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot,
 		&pushes, &pr.HeadCounted, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
-		&pr.CheckedHead); err != nil {
+		&pr.CheckedHead, &required); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(failing, &pr.Failing); err != nil {
@@ -322,6 +352,11 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	}
 	if err := json.Unmarshal(pushes, &pr.Pushes); err != nil {
 		return nil, fmt.Errorf("decode pushes: %w", err)
+	}
+	if required != nil {
+		if err := json.Unmarshal(required, &pr.Required); err != nil {
+			return nil, fmt.Errorf("decode required checks: %w", err)
+		}
 	}
 	return &pr, nil
 }

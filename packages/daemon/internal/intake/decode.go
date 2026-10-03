@@ -369,13 +369,17 @@ func decodeChecks(subject string, repository ghrepo.Repository, raw map[string]j
 	if !ok {
 		return nil, nil
 	}
-	verdict := ""
-	if len(failed) > 0 {
+	// A cancelled check has not passed, so it is failing as a failed one is: the workflow judges
+	// only the base branch's required checks, and a required check that was cancelled keeps the
+	// head from merging (requiredchecks.Standing.Red).
+	failing := append(slices.Clone(failed), cancelled...)
+	slices.Sort(failing)
+	failing = slices.Compact(failing)
+	verdict := "green"
+	if len(failing) > 0 {
 		verdict = "red"
-	} else if len(cancelled) == 0 {
-		verdict = "green"
 	}
-	return PullRequestChecks{Repo: repository.String(), Number: number, HeadSHA: headSHA, CheckRuns: runs, Generation: generation, Snapshot: snapshot, Verdict: verdict, Failing: failed}, nil
+	return PullRequestChecks{Repo: repository.String(), Number: number, HeadSHA: headSHA, CheckRuns: runs, Generation: generation, Snapshot: snapshot, Verdict: verdict, Failing: failing}, nil
 }
 
 func githubIdentity(raw map[string]json.RawMessage) (int, string, bool) {

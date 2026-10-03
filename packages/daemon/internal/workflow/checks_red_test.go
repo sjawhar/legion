@@ -55,7 +55,7 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
 			pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", PlannedRed: tc.planned}
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", PlannedRed: tc.planned, Required: []string{"python-cli-tests / test (pytest)"}}
 			if tc.handoffHead {
 				pr.Pushes = []record.ClassifiedPush{{SHA: "head", Before: "code", HandoffOnly: true}}
 			}

@@ -124,7 +124,16 @@ Legion uses GitHub's own review mechanisms rather than labels:
 - The **reviewer** submits a GitHub review: an approval of the head by its commit, or changes
   requested. A plain comment decides nothing, and the architect is told the round is stuck.
 - **CI** on the pull request's head counts: red checks while testing or reviewing send the issue
-  back to the implementer, naming the failing checks.
+  back to the implementer, naming the failing checks. Only the checks the base branch requires
+  count, the same set the merger's `READY` checks (its rulesets' required status checks and its
+  branch protection's): CI is red when one of them failed, was cancelled, or reported no result
+  once the head's checks settled. A failing check the base branch does not require, such as a lane
+  started by hand or an advisory review check, never makes CI red, and on a base branch that
+  requires no check nothing does. The daemon judges the check runs GitHub reports, so a required
+  check that only a commit status reports reads as no result to it, where `READY` reads the status.
+  The daemon reads each open pull request's required set with the implement App as it starts and
+  every two minutes after; until a read succeeds, no verdict stands for the head, and a read GitHub
+  refuses is logged with the repository and the HTTP status.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
 - Two limits stop a loop: after `review_round_cap` review rounds (three by default), or once

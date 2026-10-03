@@ -74,6 +74,11 @@ type workflowRuntime struct {
 	// means the production defaults. A test shortens both to bound how long the warning takes to
 	// observe.
 	holdWarnAfter, holdWarnEvery time.Duration
+	// githubAPI is the GitHub REST root watchRequiredChecks reads under; empty, in production, is
+	// https://api.github.com, and a test points it at a stand-in.
+	githubAPI string
+	// requiredInterval is watchRequiredChecks' period; zero means requiredChecksInterval.
+	requiredInterval time.Duration
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
@@ -391,6 +396,10 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 	})
 	group.Go(func() error {
 		w.tickController(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.watchRequiredChecks(running)
 		return nil
 	})
 	group.Go(func() error {
