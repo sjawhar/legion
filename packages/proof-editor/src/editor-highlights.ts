@@ -142,13 +142,22 @@ function holdsHighlightedTarget(content: Fragment, value: EditorHighlights): boo
   return found;
 }
 
-/** Plain text and structure edits can move decorations. A mark, attribute or inserted highlighted
- *  target can change which nodes carry the selected id, so those transactions rebuild. */
+/** Edits inside one node move decorations, and mapping carries them along. An edit that can change
+ *  which nodes carry a highlighted id, or where a highlighted block ends, rebuilds: a mark or
+ *  attribute step, inserted content that holds a highlighted target, and, while a block is
+ *  highlighted, a replace whose range starts and ends in different nodes. That replace deletes the
+ *  boundary between them (a join, or a deletion across a block's end), and mapping drops a node
+ *  decoration whose closing token it deleted, though the block and its id remain. */
 function mapsHighlights(transaction: Transaction, value: EditorHighlights): boolean {
   if (!hasHighlights(value)) return true;
-  return transaction.steps.every(
-    (step) => step instanceof ReplaceStep && !holdsHighlightedTarget(step.slice.content, value)
-  );
+  const blockHighlighted = value.block.active.size > 0 || value.block.pulsed.size > 0;
+  return transaction.steps.every((step, index) => {
+    if (!(step instanceof ReplaceStep) || holdsHighlightedTarget(step.slice.content, value)) {
+      return false;
+    }
+    const before = transaction.docs[index];
+    return !blockHighlighted || before.resolve(step.from).sameParent(before.resolve(step.to));
+  });
 }
 
 function dispatchHighlightChange(view: EditorView, change: HighlightChange): void {

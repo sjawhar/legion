@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { Slice } from "@milkdown/kit/prose/model";
 import type { EditorState } from "@milkdown/kit/prose/state";
 import { DecorationSet, type EditorView } from "@milkdown/kit/prose/view";
 import { comment } from "proof-sdk-upstream/src/editor/plugins/marks";
@@ -161,6 +162,56 @@ test("an active or pulsed block is drawn on that block alone, through typing bef
     handle.setActiveBlocks([]);
     expect(drawn(view, "dispatch-block-active")).toEqual([]);
   });
+});
+
+test("an active block stays drawn through an edit that opens or closes it", async () => {
+  // "First paragraph" is the document's first block: its text ends at 16, the second block's
+  // starts at 18.
+  const edits = [
+    {
+      name: "the next block joined into it",
+      run: (view: EditorView) => view.state.tr.join(17),
+      text: "First paragraphSecond paragraph",
+    },
+    {
+      name: "a deletion across its end",
+      run: (view: EditorView) => view.state.tr.delete(7, 25),
+      text: "First paragraph",
+    },
+    {
+      // Each pasted paragraph has an id of its own, so the paste stamps none. The replace puts a
+      // copy of the first block, id and all, at the slice's open start.
+      name: "two pasted paragraphs splitting it",
+      run: (view: EditorView) => {
+        const { schema } = view.state;
+        const pasted = [" pasted", "Pasted"].map((text, index) =>
+          schema.nodes.paragraph.create({ blockId: `pasted-${index}` }, schema.text(text))
+        );
+        const slice = new Slice(schema.nodes.doc.create(null, pasted).content, 1, 1);
+        return view.state.tr.replace(16, 16, slice);
+      },
+      text: "First paragraph pasted",
+    },
+  ];
+  const drawnAfter: Array<{ edit: string; drawn: string[] }> = [];
+  for (const edit of edits) {
+    await withMarksEditor("First paragraph\n\nSecond paragraph", ({ handle, view }) => {
+      const first = blockIdOf(view.state.doc.child(0));
+      if (first === null) throw new Error("the first paragraph has no block id");
+      handle.setActiveBlocks([first]);
+      expect(drawn(view, "dispatch-block-active")).toEqual(["First paragraph"]);
+
+      view.dispatch(edit.run(view));
+
+      expect({
+        edit: edit.name,
+        id: blockIdOf(view.state.doc.child(0)),
+        text: view.state.doc.child(0).textContent,
+      }).toEqual({ edit: edit.name, id: first, text: edit.text });
+      drawnAfter.push({ edit: edit.name, drawn: drawn(view, "dispatch-block-active") });
+    });
+  }
+  expect(drawnAfter).toEqual(edits.map((edit) => ({ edit: edit.name, drawn: [edit.text] })));
 });
 
 test("a pulsed mark stays pulsed until the latest focus's duration ends", async () => {
