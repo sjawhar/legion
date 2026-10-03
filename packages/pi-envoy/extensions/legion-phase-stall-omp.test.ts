@@ -170,15 +170,17 @@ async function runPane(
         })),
       });
     }
-    if (url.pathname === "/legion/v1/worker/started") {
+    if (url.pathname === "/legion/v1/claims/register") {
       return Response.json({
-        roleToken: "legion-stall-stall-2-implementer",
+        claimToken: "legion-stall-stall-2-implementer",
+        tree: "STALL-1",
+        issue: "STALL-2",
+        role: "implementer",
+        generation: 1,
         secret: "stall-secret",
-        gitName: "Legion Worker",
-        gitEmail: "worker@example.test",
       });
     }
-    if (url.pathname === "/legion/v1/worker/ready") return Response.json({});
+    if (url.pathname === "/legion/v1/claims/ready") return new Response(null, { status: 204 });
     if (url.pathname === "/legion/v1/grants") {
       grants += 1;
       return Response.json({
@@ -345,7 +347,7 @@ test.skipIf(omp === undefined && !onActions)(
     // The worker registered through the daemon's routes, and its handoff_complete minted a grant.
     expect(
       pane.requests.map((request) => request.path).filter((p) => p.startsWith("/legion/"))
-    ).toEqual(["/legion/v1/worker/started", "/legion/v1/worker/ready", "/legion/v1/grants"]);
+    ).toEqual(["/legion/v1/claims/register", "/legion/v1/claims/ready", "/legion/v1/grants"]);
     const turns = pane.turns();
     // Three turns in one run: the text-only one, the follow-up's, and the reply to the tool result.
     // None after: the handoff closed the phase, so the last settle sent nothing.
