@@ -1,8 +1,9 @@
 ---
 title: Legion
-description: Legion turns a Dispatch issue into a reviewed, merged and production-checked pull request, with a team of agents doing the work and a person making each decision that matters.
+description: The coordinator that runs coding agents on the Dispatch issues handed to it.
 sidebar:
-  order: 1
+  label: Introduction
+  order: 0
 ---
 
 Legion is a team of coding agents that works the issues you hand it. You write an issue in

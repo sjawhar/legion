@@ -412,6 +412,70 @@ func TestStaticHandlerServesIndexAtRoot(t *testing.T) {
 	}
 }
 
+func TestStaticHandlerServesDistDirectorySpelledThroughDotDot(t *testing.T) {
+	parent := t.TempDir()
+	webDist := filepath.Join(parent, "web", "dist")
+	for _, dir := range []string{webDist, filepath.Join(parent, "web", "build")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("make %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	// The directory as an operator can spell it from a sibling package, never cleaned:
+	// DISPATCH_WEB_DIST="$PWD/../dispatch/web/dist" run from packages/envoy.
+	sep := string(filepath.Separator)
+	context.WebDistDir = filepath.Join(parent, "web", "build") + sep + ".." + sep + "dist"
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusOK || response.Body.String() != "<!doctype html>" {
+		t.Fatalf("root through %q: got %d %q, want 200 and the dashboard shell", context.WebDistDir, response.Code, response.Body.String())
+	}
+}
+
+// The static handler is called directly, not through the router's mux: the mux redirects a path
+// holding `..` before any handler runs, so only the handler's own rooted clean of the request path
+// is under test here. A request whose `..` would climb out of the dist directory answers exactly as
+// a file missing inside it does, so a file outside it is neither served nor told apart from one
+// that is not there.
+func TestStaticHandlerKeepsRequestsInsideTheDistDirectory(t *testing.T) {
+	parent := t.TempDir()
+	webDist := filepath.Join(parent, "dist")
+	if err := os.MkdirAll(webDist, 0o700); err != nil {
+		t.Fatalf("make %s: %v", webDist, err)
+	}
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "secret.txt"), []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	_, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+	static := &router{ctx: context}
+	serve := func(path string) *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		static.staticHandler(response, httptest.NewRequest(http.MethodGet, path, nil))
+		return response
+	}
+
+	missing := serve("/absent.txt")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("a file missing from the dist directory: got %d %q, want 404", missing.Code, missing.Body.String())
+	}
+	for _, path := range []string{"/../secret.txt", "/%2e%2e/secret.txt", "/../absent.txt"} {
+		t.Run(path, func(t *testing.T) {
+			response := serve(path)
+			if response.Code != missing.Code || response.Body.String() != missing.Body.String() {
+				t.Fatalf("%s: got %d %q, want the dist directory's own missing-file answer %d %q", path, response.Code, response.Body.String(), missing.Code, missing.Body.String())
+			}
+		})
+	}
+}
+
 func TestStaticHandlerServesSpaShellForBrowserDeepLink(t *testing.T) {
 	webDist := t.TempDir()
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
