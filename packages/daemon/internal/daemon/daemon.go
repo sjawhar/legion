@@ -90,9 +90,6 @@ type overrides struct {
 	// workflowTokens replaces the GitHub App token manager in a workflow integration test. The
 	// production daemon always mints through appauth.New.
 	workflowTokens appauth.Tokens
-	// roleReferences reads the task agents and skills the current prompt bundle names; nil is
-	// promptrefs.Roles.
-	roleReferences func(string) (promptrefs.Names, error)
 	// listen opens the API listener; nil is net.Listen.
 	listen func(network, address string) (net.Listener, error)
 }
@@ -325,8 +322,8 @@ type plan struct {
 	// dispatchToken is the Dispatch bearer dispatch_token_file names; "" without Dispatch.
 	dispatchToken string
 	prompts       *prompts.Composer
-	// roleReferences are the task agents and skills the state-local role prompt snapshot names
-	// (promptrefs.Roles), which the gate on either runtime resolves beside the plugin's own.
+	// roleReferences are the task agents and skills the shared role prompts name
+	// (prompts.RoleReferences), which the gate on either runtime resolves beside the plugin's own.
 	roleReferences promptrefs.Names
 	// stream is the worker stream's address: the listener binds it, and every agent's shim dials it.
 	stream     string
@@ -370,21 +367,9 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return plan{}, fmt.Errorf("create state directory %s: %w", cfg.StateDir, err)
 	}
-	composer, err := prompts.New(reads.rolesDir, cfg.StateDir)
+	composer, err := prompts.New(cfg.StateDir)
 	if err != nil {
 		return plan{}, fmt.Errorf("construct role prompts: %w", err)
-	}
-	roleReferences := o.roleReferences
-	if roleReferences == nil {
-		roleReferences = prompts.RoleReferences
-	}
-	sharedRolesDir, err := composer.SharedRolePromptsDir()
-	if err != nil {
-		return plan{}, err
-	}
-	references, err := roleReferences(sharedRolesDir)
-	if err != nil {
-		return plan{}, err
 	}
 
 	instructions := ""
@@ -405,7 +390,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	secretsEnroller, secretsLogin := newSecretsLogin(cfg, log)
 	p := plan{
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
-		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: references,
+		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep,
 		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin,
 	}

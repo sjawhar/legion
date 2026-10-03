@@ -297,34 +297,22 @@ lock and none takes a room's state lock. A read that may load its room (a versio
 and holds the room: a room looked up again with `GetDoc` once that Apply returned can have been
 evicted in between.
 
-Every decode of a document's whole state takes a pending queue as long as the most items one
-update can carry (`newDocumentCopy`, `maxUpdateItems`): the copy, a write's fork (`forkLive`), and
-every decode of the stored history - a read with no room resident (`loadDocument`), the history
-check behind a room's load and a rebuild's refusal (`validateUpdate`), and the room's own load
-(`Server.MaxPendingItems`, set in `New`) - and so does the store's check of each update it appends
-(`appendUpdate`, `AppendUpdateTx`), which decodes the update alone. ygo's decoder defers an item
-whose parent it cannot place yet - a container a later client's group holds, one outside the
-update it decodes, or one garbage collection emptied when a peer deleted it - and parks every later
-item of that client behind it as a clock gap, refusing the update once 100,000 are parked, its
-default (LEGION-502). A room whose peer deleted a chain of 200,000 nested blocks, or whose
-lower-numbered client wrote 100,000 items after one such deferral, then failed every copy with
-`crdt: invalid update` while the room itself served it
-(`TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`,
-`TestACopyHoldsEveryItemItsRoomParksForOneClient`). Once that room was evicted or the server
-restarted, the same document read as `409 DOCUMENT_UNLOADABLE`, its room did not open, and the
-rebuild that code offers, whose history check refused it too, replaced its history with its latest
-saved version (`TestAStoredHistoryLoadsWhatItsRoomParksForOneClient`). A browser update of more
-than 100,000 items written against blocks the document already holds, such as 75,000 paragraphs
-with their block ids written ahead of one, failed the store's check, so the room failed and dropped
-the edit (`TestTheStoreTakesOneBrowserUpdateItsRoomTook`). ygo refuses any update that declares
-more than `maxUpdateItems` items, so no decode of one parks past that queue; in a room, which keeps
-what it parks across updates, it is also the most the room's peers can park, about ten times ygo's
-default. One check still decodes one update alone at ygo's default: ygo's, of an update the
-service broadcasts (`Server.BroadcastUpdate`). It refuses an update of more than 100,000 items that
-lean on items outside it, such as a settlement that stamps that many blocks' ids, and the room
-fails.
+Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment
+(`internal/dispatch/docs/persistence.go`) states the rule and its reason: whether the service builds
+the decoder (`newDocumentCopy`: the copy, a write's fork, every decode of the stored history, and
+the store's check of each update it appends) or ygo builds it for the service
+(`Server.MaxPendingItems`, set in `New`: the rooms, and ygo's check of each update the service
+broadcasts). In a room, which keeps what it parks across updates, the queue is also the most the
+room's peers can park, about ten times ygo's default. `TestTheStoreTakesOneBrowserUpdateItsRoomTook`
+and `TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates ygo's default queue refuses,
+which fail the room; `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`,
+`TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and
+`TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer
+deleted a chain of 200,000 nested blocks, or whose lower-numbered client wrote 150,000 items ahead
+of a block the server wrote, is copied, read, opened and kept from a rebuild whole.
 
-A room whose last peer leaves stays resident until it has been idle for a minute
+A room whose last peer leaves, or that only the service's `Server.Apply` touches - an agent's
+edit, a read outside any transaction - stays resident until it has been idle for a minute
 (`roomIdleTimeout`), when ygo's idle sweeper evicts it. ygo's default, eager eviction, evicts a room
 the moment its last peer leaves even while a `Server.Apply` is inside its callback on it (reearth/ygo
 v1.49.5, `provider/websocket/peer.go` checks only the peers): the callback's write then lands on the
@@ -332,11 +320,14 @@ evicted room and reaches the store only through its retiring persistence worker,
 access has already loaded the store without it and serves, and takes, the next write on a document
 missing the first. Two such writes, each a diff of the same document, merge into a document neither
 wrote, and into one holding no block at all once each kept a block the other replaced: the
-healthy-room probe met it as a socket closed with `DOC_SCHEMA`. The idle sweeper evicts only a room
-no Apply holds or has touched since its last peer left (`provider/websocket/idle_sweep.go`), so every
-write a room the sweeper evicts has taken is durable before another instance of it loads, and a peer
-that returns within the minute rejoins the warm room. `TestAHealthyRoomUnderWritesIsNeverRefused`
-checks every load of a room against the writes its earlier instances took. ygo's `CloseRoom` checks
+healthy-room probe met it as a socket closed with `DOC_SCHEMA`. The idle sweeper evicts a room only
+while no Apply holds it, counts its idle minute from its last peer leaving or the last Apply on it
+returning, and flushes it before it evicts it (`provider/websocket/idle_sweep.go`), so every write a
+room the sweeper evicts has taken is durable before another instance of it loads, and a peer that
+returns within the minute rejoins the warm room. `TestAHealthyRoomUnderWritesIsNeverRefused`
+checks every load of a room against the writes its earlier instances took, and
+`TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout` that a room only the API touches is
+evicted and reads back what the API wrote. ygo's `CloseRoom` checks
 only the peers as well, and the service still calls it to close an issue's rooms (`SetIssueClosed`),
 for a room with an editor at `Shutdown`, and to evict one (`evictRoom`): a write that commits on a
 room it has retired reaches the store through ygo's stranded persistence, on the committing goroutine
@@ -1338,9 +1329,10 @@ canonical markdown.
 - Slack topics must use the real Slack `team_id`, not a workspace slug.
 - NATS peer storage uses named Docker volumes, not repo-path bind mounts.
 - Role lanes use core NATS, not JetStream: the listener queue subscriber resolves the live holder at delivery time, then makes a receipt-backed request to that holder's agent subject (`bus.Client.RequestCoreTo`). The agent pump returns an empty receipt after accepting the envelope. No receipt within two seconds from a registered, live holder is `receipt_timeout` (the message was forwarded and not acknowledged; the Legion daemon treats it as delivered to a live process) — keyed on `bus.ErrReceiptTimeout`, which `RequestCoreTo` returns only after the publish and the flush both succeeded, the server was shown to have accepted the forward, and the receipt wait ran out; the flush is bounded by the same two-second window, and a forward whose window ends while NATS is reconnecting, or a flush that fails or times out (a stalled connection still buffering the forward), is the client's own error, so it is `delivery_failed`, never `receipt_timeout`. So is a forward the server denies under the listener's grant (`bus.ErrPublishDenied`, returned as soon as the flush answers), and one the server cannot be shown to have accepted when no receipt came; `bus.confirmPublished` holds how either is told apart from an accepted forward. `delivery_failed` is a claim whose message is not known to have reached the holder (holder lookup failed, holder stale, the publish or flush failed or was denied); `no_holder` is no claim at all. Every reason emits an exception; the attempt cache holds an entry only while a forward is in flight and both forward failures roll it back, while the dedupe cache records a forward only when its receipt arrived — so a publish that re-uses a `dedupe_key` after a `receipt_timeout` is forwarded again, while one after a delivered forward is skipped. Do not add durable role consumers or retry transit for role messages.
-- Role ownership is durable in the `envoy_roles` JetStream KV bucket. Each role key records `holder_session_id`, `claimed_at`, and `previous_session_id`; listener restart restores the claim from that record, but routes only while the holder is present in the `envoy_sessions` registry. Reaping stale interests never releases a role; a restored absent holder gets one registry TTL to re-register, then loses its claim atomically on the role reaper or next resolution, while the first core role delivery still emits its normal delivery exception. A listener reads a claim from the role bucket itself but a holder's liveness from its cache of `envoy_sessions`, which trails that bucket, so a holder another listener registered and gave the role a moment ago is in both buckets before it is in this cache; during a rolling deploy the old task resolves every claim the replacement accepts. Nothing is taken from a holder on the cache's word: before a lookup or a role delivery releases a claim as lapsed, the role reaper ends one, or a soft claim supersedes its holder, a holder the cache misses (or, for a role delivery, holds with a heartbeat older than `session.ClaimStaleAfter`) is read from the bucket itself (`roleHolderSession`, `session.SessionRegistry.Refresh`). A holder no session can register as (a key `bus.KeyValue` refuses, or one outside nats.go's key alphabet such as `ses:bad`) counts as gone. A read that does not answer within `roleHolderReadTimeout` (2 s, inside the 10 s HTTP write timeout) releases nothing: a lookup answers 500, a soft claim 503, a role delivery reports `delivery_failed`, and the reaper keeps the claim and logs a WARN. That read is a direct get, so the listener's NATS user needs publish on `$JS.API.DIRECT.GET.KV_envoy_sessions.>`.
-- `store.Open` snapshots the revision of every stored claim (`roleRevisions`, `internal/store/kv.go`) so a restored claim keeps its grace only while the bucket still holds the revision the restart read. It takes that snapshot from one watch over the bucket's existing keys, as the interest, session and CI caches read theirs (`internal/kvwatch`), so listener readiness costs one pass over the bucket rather than a round trip per claim (LEGION-360). A scan that does not reach the end of the bucket fails the start rather than restoring part of it: nats.go ends one early both by closing the updates channel and, on its own idle timeout, by sending the same nil marker a complete scan ends with, so the snapshot reads `Error()` at the marker. The timer belongs to the watch, not to this reader — `nats.KeyValue.Keys()` has it as well — so a build that lists the keys and reads each one back restores a partial snapshot just the same over a link that goes quiet for the JetStream `MaxWait` and then recovers. Unlike those three, this one is a snapshot and not a live cache — the grace window is anchored to the moment `Open` returns — so nothing rewatches it. The snapshot names no key, so it also carries a claim stored under a key this build cannot read (`bus.ErrRefused`); that claim still gets no grace, because `ReleaseExpiredRoleClaim` reads the claim itself first and cannot, and the role reaper deletes it. A start logs the snapshot it restored as one INFO line, `restored role claims`, with `restored` (claims that kept their grace) and `delete_markers` (tombstones streamed past) as disjoint fields; a single total of the two reads as claims the restart failed to restore. `internal/store` writes it, and both reaper cycles, through the logger the listener passes to `store.Open` (`store.WithLogger`), so they are JSON records with `machine_id`. The listener must not reach that by `slog.SetDefault`: that also routes `internal/bus` and the stdlib `log` package into the JSON handler, and the deployed CloudWatch metric filters for publish failures, webhook refusals and dropped stream subjects are space-delimited text patterns anchored on that package's date and time prefix, so three alarms would stop matching without anything failing.
+- Role ownership is durable in the `envoy_roles` JetStream KV bucket. Each role key records `holder_session_id`, `claimed_at`, and `previous_session_id`; listener restart restores the claim from that record, but routes only while the holder is present in the `envoy_sessions` registry. Reaping stale interests never releases a role; a restored absent holder gets one registry TTL to re-register, then loses its claim atomically on the role reaper or next resolution, while the first core role delivery still emits its normal delivery exception. A listener reads a claim from the role bucket itself but a holder's liveness from its cache of `envoy_sessions`, which trails that bucket, so a holder another listener registered and gave the role a moment ago is in both buckets before it is in this cache; during a rolling deploy the old task resolves every claim the replacement accepts. Nothing is taken from a holder on the cache's word: before a lookup or a role delivery releases a claim as lapsed, the role reaper ends one, or a soft claim supersedes its holder, a holder the cache misses (or, for a role delivery, holds with a heartbeat older than `session.ClaimStaleAfter`) is read from the bucket itself (`roleHolderSession`, `session.SessionRegistry.Refresh`). A holder no session can register as (a key `bus.KeyValue` refuses, one outside nats.go's key alphabet such as `ses:bad` among them) counts as gone. A read that does not answer within `roleHolderReadTimeout` (2 s, inside the 10 s HTTP write timeout) releases nothing: a lookup answers 500, a soft claim 503, a role delivery reports `delivery_failed`, and the reaper keeps the claim and logs a WARN. That read is a direct get, so the listener's NATS user needs publish on `$JS.API.DIRECT.GET.KV_envoy_sessions.>`.
+- `store.Open` snapshots the revision of every stored claim (`roleRevisions`, `internal/store/kv.go`) so a restored claim keeps its grace only while the bucket still holds the revision the restart read. It takes that snapshot from one watch over the bucket's existing keys, as the interest, session and CI caches read theirs (`internal/kvwatch`), so listener readiness costs one pass over the bucket rather than a round trip per claim (LEGION-360). A scan that does not reach the end of the bucket fails the start rather than restoring part of it: nats.go ends one early both by closing the updates channel and, on its own idle timeout, by sending the same nil marker a complete scan ends with, so the snapshot reads `Error()` at the marker. The timer belongs to the watch, not to this reader — `nats.KeyValue.Keys()` has it as well — so a build that lists the keys and reads each one back restores a partial snapshot just the same over a link that goes quiet for the JetStream `MaxWait` and then recovers. Unlike those three, this one is a snapshot and not a live cache — the grace window is anchored to the moment `Open` returns — so nothing rewatches it. The snapshot names no key, so it also carries a claim stored under a key this build cannot read (`bus.ErrRefused`: too long, or outside nats.go's key alphabet); that claim still gets no grace, because `ReleaseExpiredRoleClaim` reads the claim itself first and cannot, and the role reaper deletes it, or skips it with a WARN every cycle when no KV call can delete it either, as with a key outside the alphabet, which an operator purges by hand (the command is in the bullet on refused keys below). A start logs the snapshot it restored as one INFO line, `restored role claims`, with `restored` (claims that kept their grace) and `delete_markers` (tombstones streamed past) as disjoint fields; a single total of the two reads as claims the restart failed to restore. `internal/store` writes it, and both reaper cycles, through the logger the listener passes to `store.Open` (`store.WithLogger`), so they are JSON records with `machine_id`. The listener must not reach that by `slog.SetDefault`: that also routes `internal/bus` and the stdlib `log` package into the JSON handler, and the deployed CloudWatch metric filters for publish failures, webhook refusals and dropped stream subjects are space-delimited text patterns anchored on that package's date and time prefix, so three alarms would stop matching without anything failing.
 - The bucket's subject count is not its claim count, and sizing a restart from `nats stream info KV_envoy_roles` overstates it. A limits-retention KV keeps a delete marker on the subject of every key ever deleted, and both `nats kv ls` and `nats.KeyValue.Keys()` hide them, so most of a long-lived bucket's subjects are markers of claims that ended. A marker is not a claim and gets no grace; it costs one header-only message in the snapshot above, so readiness grows with the subject count at the link's bandwidth rather than by a round trip each. Nothing expires markers, and a KV `MaxAge` would expire claims with them; `nats kv compact envoy_roles` (`KeyValue.PurgeDeletes`) purges marker subjects alone and leaves live claims at their revisions, keeping markers under 30 minutes old.
+- Every KV bucket is opened through `bus.EnsureKeyValue` or `bus.OpenKeyValue`, whose handle checks its keys as the bus checks a subject (`bus.ErrRefused`), since a KV call builds its subjects from the key: a key that would take one past the server's 4 KiB protocol line, or holding an empty token, is refused before anything is sent, and nats.go's own refusal of a key outside its key alphabet (`ses:bad`), which it makes on every read, write, delete and watch before sending anything, is named the refusal it is (`bus.ErrInvalidKey`, naming the key). A write is held to the longest subject its key makes (a watcher's create request), so a key written now stays readable, watchable and deletable; any other call only to its own subject, so a key an earlier build stored past that bound still lists and deletes. The stores skip a key they cannot read or rewrite, with a WARN whose `error` names it (or, past the bound, its size), rather than fail a start, a sweep or a caller's own request, and the reapers delete it. No build writes a key outside the alphabet, but a direct bucket write can store one, and an earlier build's bare-string role claim can name one as its holder; no KV call deletes it either, so the reapers skip it with that WARN every cycle until an operator purges it by hand with the purge nats.go would send for it, `nats pub '$KV.<bucket>.<key>' '' -H 'KV-Operation:PURGE' -H 'Nats-Rollup:sub'`. That removes every revision of the key, every listener's cache drops it at once, and the purge marker it leaves is collected as any other (the interest bucket's marker collection, `nats kv compact <bucket>` for the others). A JetStream purge filtered to the subject (`nats req '$JS.API.STREAM.PURGE.KV_<bucket>' '{"filter":"$KV.<bucket>.<key>"}'`) leaves no marker, but nothing a watcher sees, so a listener's interest cache keeps the key, and its reaper keeps warning, until the listener restarts.
 - A failed control delivery or a terminal capability refusal during generic fanout emits `notifications.envoy.exceptions.<original-topic>`. Control exceptions keep their ordinary transport; a generic fanout refusal uses core NATS because the fanout API accepts arbitrary non-control topics, so retaining every possible exception subject would also retain role exception lanes. The payload preserves `original_topic`, `event_id`, `reason` (one of `no_holder`, `delivery_failed`, `receipt_timeout`), `recipient_session` when a recipient is known (the receiving session, not `source_session`; omitted rather than empty when unknown), `payload_summary`, the original machine `payload`, `dedupe_key`, `source`, and `source_session`; the exception lane is not recursively exceptional. Each refusal records its recipient before publishing its exception, so an identical redelivery emits at most one exception during the attempt-cache window and never NAKs the original envelope. An API publish to an unheld role is rejected synchronously with 404 instead.
 - **Source-specific vs generic ingestion**: Envoy has two ingestion paths: listener-hosted webhook handlers behind the listener's starting gate (`internal/webhook/{github,slack,ghostwispr}.go`, `startingGate` in `cmd/listener/main.go`) and the generic MCP bridge (`cmd/mcp/`). The MCP bridge connects to any MCP server that publishes resources, so it's the low-maintenance default for new sources. Building source-specific webhook logic adds maintenance burden — consider whether the cost justifies the benefit over the generic MCP bridge before adding custom source-specific logic to Envoy. When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
 
@@ -1396,10 +1388,11 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 `expects_reply`, and `expires_at`, and `publish` additionally `dedupe_key`; empty optional
 fields are omitted. `urgency` is `low`, `med`, `high`, or `blocking`; `expects_reply` is
 `none`, `optional`, or `required`. A session id or role that becomes a KV key NATS would refuse
-(`bus.EnsureKeyValue`) is a 413 when too long and a 400 when it holds an empty token or
-whitespace, on every route that reads or writes one. Every `/v1` 4xx/5xx response, including
-the startup gate's 503, is JSON: `{"error":"<message>","expected":["field"]}`. `expected`
-appears when the caller must provide a field.
+(`bus.EnsureKeyValue`) is a 413 naming its size when too long and a 400 naming the key when it
+holds an empty token or whitespace, or a character outside nats.go's key alphabet (`ses:bad`,
+`bus.ErrInvalidKey`), on every route that reads or writes one. Every `/v1` 4xx/5xx response,
+including the startup gate's 503, is JSON: `{"error":"<message>","expected":["field"]}`.
+`expected` appears when the caller must provide a field.
 
 ## Targeted Dispatch messages
 
@@ -1592,15 +1585,8 @@ the synchronous listener call records the sent or failed attempt instead of blin
   (`bus.ErrRefused`): an envelope past the server's max payload or a subject past the server's 4 KiB
   protocol line, over which the server would close the listener's connection (`bus.ErrTooLarge`,
   naming the size), or a subject holding whitespace or an empty token, which no stream matches
-  (`bus.ErrInvalidSubject`). Every KV bucket is opened through `bus.EnsureKeyValue` or
-  `bus.OpenKeyValue`, whose handle checks its keys the same way, since a KV call builds its subjects
-  from the key: a key that would take one past the protocol line, or holding an empty token, is
-  refused before anything is sent. A write is held to the longest subject its key makes (a watcher's
-  create request), so a key written now stays readable, watchable and deletable; any other call only
-  to its own subject, so a key an earlier build stored past that bound still lists and deletes. The
-  stores skip such a key where they cannot read or rewrite it, with a WARN, rather than fail a
-  start, a sweep or a caller's own request, and the reapers delete it. The webhook is answered 422,
-  which Dispatch's redelivery sweep takes as terminal, and logged `<source> publish refused` (or
+  (`bus.ErrInvalidSubject`). The webhook is answered 422, which Dispatch's
+  redelivery sweep takes as terminal, and logged `<source> publish refused` (or
   `github ci record refused`); any other failure stays a 503 logged `<source> publish failed`. A
   commit's CI record is bounded at 384 KiB (`maxRecordBytes`, about 1,300 checks) and its settlement
   at 960 KiB (`maxSettlementBytes`; a failing check's `"` costs three times as much there), since
@@ -1653,7 +1639,7 @@ the synchronous listener call records the sent or failed attempt instead of blin
 
 ## Secrets broker
 
-AGENTC-393's secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
+The secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
 and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/agent-secrets` is its
 client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
@@ -1682,7 +1668,7 @@ ALREADY_ENROLLED`, and the rules never see the slot: every slot of a pod matches
 service account alone. Migration 0007 is forward-only: an older broker binary's conflict lookup
 reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled
 back past it once a slotted enrollment exists. `internal/broker/rules` evaluates
-`agent-secret-rules.yaml` policy per request (the AGENTC-393 overview document is its contract; a
+`agent-secret-rules.yaml` policy per request (the broker's design overview is its contract; a
 file that still has an `approvers:` section is refused, naming the removal); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
 credential; `internal/broker/machine` decides typed-code machine logins and mints the launcher
@@ -1839,7 +1825,7 @@ binaries' own `--help`, so every form must answer `-h` with exit 0.
 
 `internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
-contract for every row is the AGENTC-393 overview document. Each row's handler is
+contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
 which fixes both the credential `server.authenticate` checks and the caller the handler receives (a
 launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route — the UI bearer
@@ -1901,7 +1887,7 @@ still-live grant covering the exact same name set (`reuseLiveGrant`: no new requ
 as long as the current rules still allow it and the grant's whole chain still verifies), then
 evaluates the rules per name: any `deny` denies the whole request with no record written at all; a
 name no rule mentions at all aborts the whole call with `rules.ErrUnknownSecret` (`400
-UNKNOWN_SECRET`, per the AGENTC-393 overview document) instead of being folded into an ordinary
+UNKNOWN_SECRET`, per the broker's design overview) instead of being folded into an ordinary
 `deny` decision — no request row is written either, matching the "at record time" wording; a name
 needing approval that names a *different* approver than an already-approval-needing name in the
 same request is refused `400 MIXED_APPROVERS`; when every name is decided (`granted`/`denied`) with
@@ -2020,7 +2006,7 @@ the operator file, and `DEV_BROKER_DIR`, the workdir itself). Each `dev-broker.s
 and drops its own isolated database, on the shared `dispatch-pg` container or, with
 `DEV_BROKER_POSTGRES_URL` set, through `psql` on the server that URL names (no Docker), so
 concurrent instances never see each other's enrollments, requests or grants, and listens on the
-port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`; AGENTC-833), so
+port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`), so
 concurrent instances can never collide on a shared port either.
 `dev-broker.test.sh` proves both kinds of isolation with fakes (no real Postgres or network) and
 runs in CI's `envoy-go` job.
@@ -2033,7 +2019,7 @@ smoke-tests and pushes `ghcr.io/sjawhar/legion/envoy:<commit sha>`, labelled
 dispatch publishes one immutable image, for a dev slot to pin before merge, and moves no tag.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
-`cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper` (AGENTC-393): each of
+`cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper`: each of
 `agent-secrets-amd64.tar.gz` and `agent-secrets-arm64.tar.gz` wraps `bin/agent-secrets` and
 `bin/agent-secrets-helper` in one top-level `agent-secrets/` directory — mise's `github:`
 backend auto-strips exactly one leading directory, so the installed tree still ends up
@@ -2041,5 +2027,6 @@ backend auto-strips exactly one leading directory, so the installed tree still e
 `bin/...` top level would itself be the directory mise strips. The release job builds them, once
 it has decided the tag, so it can stamp that tag into both, and attests the two tarballs; the
 build job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone). This is the release a
-host installs both binaries from (AGENTC-834's dotfiles Plan B).
+host installs both binaries from (through the operator's dotfiles, under the broker design's
+devbox-enrollment plan).
 

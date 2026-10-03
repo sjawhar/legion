@@ -35,6 +35,37 @@ func TestWaitForJetStreamRetriesTheOperationUntilItIsReady(t *testing.T) {
 	}
 }
 
+// A create right after a stream delete can meet nats-server still removing the account's streams
+// directory, and is answered with the store failure; RecreateKeyValue tries it again. Every other
+// answer is the test's own failure and must not be retried into a slower one or a pass.
+func TestRetryStreamStoreFailureRetriesOnlyTheStoreFailure(t *testing.T) {
+	storeFailure := &natsgo.APIError{Code: 500, ErrorCode: streamCreateErrorCode, Description: streamStoreFailed}
+	t.Run("store failure", func(t *testing.T) {
+		attempts := 0
+		err := retryStreamStoreFailure(func() error {
+			attempts++
+			if attempts < 3 {
+				return storeFailure
+			}
+			return nil
+		})
+		if err != nil || attempts != 3 {
+			t.Fatalf("err = %v after %d attempts, want nil after 3", err, attempts)
+		}
+	})
+	t.Run("any other error", func(t *testing.T) {
+		other := &natsgo.APIError{Code: 500, ErrorCode: streamCreateErrorCode, Description: "insufficient storage resources available"}
+		attempts := 0
+		err := retryStreamStoreFailure(func() error {
+			attempts++
+			return other
+		})
+		if err != other || attempts != 1 {
+			t.Fatalf("err = %v after %d attempts, want %v after 1", err, attempts, other)
+		}
+	})
+}
+
 // The package's tests share one server, and each gets it as a fresh container was: a stream and its
 // messages left by one test are not there when the next asks for the server, which hands it an
 // account of its own.

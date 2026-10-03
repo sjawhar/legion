@@ -74,7 +74,7 @@ change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds.
 ## The worker image
 
 Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's plugin, the
-`legion` CLI, the role prompts and a general toolchain (git, jj, gh, Node, uv, the AWS CLI).
+`legion` CLI and a general toolchain (git, jj, gh, Node, uv, the AWS CLI).
 `legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
 is published in each Worker Image workflow run's summary and in the body of each `legion-v<version>`
 GitHub release; for any tag, `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>`
@@ -201,21 +201,20 @@ own, so run it under a process supervisor you trust. `legion stop --config legio
 and `legion legions` lists the daemons registered on the machine.
 
 The `legion` binary the daemon runs and the worker image must come from the same commit. The
-image carries that binary at `/opt/legion/bin/legion`, its role prompts at `/opt/legion/roles`
-and Legion's Oh My Pi plugin at `/opt/legion/pi-legion-envoy`, so you can take all three from the
-image you pinned:
+image carries that binary, which embeds Legion's role prompts, at `/opt/legion/bin/legion` and
+Legion's Oh My Pi plugin at `/opt/legion/pi-legion-envoy`, so you can take both from the image
+you pinned:
 
 ```sh
 image=ghcr.io/sjawhar/legion-worker@sha256:<digest>
 id=$(docker create --platform linux/amd64 "$image")
 docker cp "$id:/opt/legion/bin/legion" ./legion
-docker cp "$id:/opt/legion/roles" ./role-prompts      # the daemon reads role-prompts/ beside its binary
 docker cp "$id:/opt/legion/pi-legion-envoy" ./pi-legion-envoy
 docker rm "$id"
 ```
 
 The binary is static and built for linux/amd64. Elsewhere, build `legion` from the same commit
-with Go, and point `LEGION_ROLE_PROMPTS_DIR` at the role prompts.
+with Go.
 
 ## Start the controller
 
@@ -248,7 +247,7 @@ Closing the terminal leaves the project without one, and the daemon logs
 ## Upgrade
 
 1. **Pick the new image** and note its digest ([The worker image](#the-worker-image)), and take the
-   `legion` binary, role prompts and plugin from it.
+   `legion` binary and plugin from it.
 2. **Update `legion.yaml`**: set `runtime.kubernetes.image` to the new digest and run
    `legion start --config legion.yaml --check-config`.
 3. **Restart the daemon** with the new binary: stop it through your supervisor (or

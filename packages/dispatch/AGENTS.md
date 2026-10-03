@@ -184,7 +184,7 @@ names its count. The full vocabulary, with the reason each call beat its alterna
 
 ## Credential requests
 
-`features/credentials/` renders the whole AGENTC-393 credential-request approval surface —
+`features/credentials/` renders the whole secrets-broker credential-request approval surface —
 directed, signature-verified, immutable-record requests the broker owns and decides; Dispatch
 relays, renders, and names the deciding human. The feature is off — the inbox section and the
 Settings grants section hidden — whenever `DISPATCH_AGENT_SECRETS_URL` is unset on the server, and
@@ -381,6 +381,26 @@ After the first paint, Dispatch warms that schema and headless Markdown engine s
 holds the lazy chunk through an SPA replacement. A stale Vite chunk reloads the page once per
 session (never while the browser is offline — that is an outage, not a deployment); if rendering
 still fails, `MarkdownBody` exposes its literal-text fallback with `data-markdown-fallback`.
+A stale entry chunk reloads the page too, from that same budget. During a rolling deploy the load
+balancer can send a page's HTML to one server and its hashed assets to the other, which never
+built them and answers 404 before any bundle code has run, so `web/index.html` holds an inline
+script that reloads the page when a script of this origin under `/assets/` (the entry chunk, or
+one it imports statically) fails to load. A script of another origin is never this build's,
+whatever its path: an extension's `chrome-extension://<id>/assets/…` that fails leaves the page
+alone. It spends `installChunkFailureRecovery`'s sessionStorage key (`CHUNK_RELOAD_STORAGE_KEY`),
+so the two reload a page at most once per session between them, keeps its offline rule, and skips
+a page being left from `beforeunload` or `pagehide` until `pageshow` (no `navigate` handler: a
+page whose entry has not run has no link to follow). `pagehide` fires as a navigation commits,
+after Firefox has already cancelled the entry's download, so in a browser that fires no
+`beforeunload` it does not stop that reload; Chromium and WebKit fire no error for a download a
+navigation cancels. `shell.e2e.ts` misses the entry once (the page reloads and renders), on every
+load (it reloads once and stays blank), after a page chunk spent the reload (it stays), while
+offline (it stays), and after each leaving event (it stays until `pageshow`, then recovers), and
+fails another origin's `/assets/` script on a rendered page (it stays, budget unspent). Dispatch
+sends no Content-Security-Policy; one would have to allow that script by its hash. The server
+makes the browser revalidate every page and keep every hashed asset
+(`packages/envoy/cmd/dispatch/AGENTS.md`, "Routes"), so no cached page from an older build asks
+for assets that are gone.
 On focus no more than once a minute, the SPA checks the server health and fresh `index.html`; a
 new entry chunk offers a dismissible **Reload** notice.
 

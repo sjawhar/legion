@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 // The tester-proof pane, as the Legion daemon's tmux runtime launches a phase worker, pointed at
 // rig.sh's daemon stand-in: the grant rig's `workerPane` over <base env file> (the variables rig.sh
-// gives every agent), read from <checkout>'s own daemon module, whose role prompts it composes from
-// <checkout>'s bundle. Writes two files into the run directory:
+// gives every agent), read from <checkout>'s own daemon module, whose embedded role prompts it
+// composes. Writes two files into the run directory:
 //   worker.env   the pane's environment, one KEY=value line each
 //   system-args  the pane's one `--append-system-prompt` argument, as shell text
 //
@@ -47,10 +47,7 @@ const pane = workerPane(
   { rig: runDir, port: Number(port), profile },
   base,
   { project, issue, role },
-  {
-    daemonModule: path.join(checkout, "packages", "daemon"),
-    rolesDir: path.join(checkout, "packages", "pi-envoy", "roles"),
-  }
+  { daemonModule: path.join(checkout, "packages", "daemon"), systemPrompt: true }
 );
 for (const [key, value] of Object.entries(pane.env)) {
   if (value.includes("\n")) {

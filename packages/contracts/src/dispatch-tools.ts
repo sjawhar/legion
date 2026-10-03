@@ -1002,7 +1002,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_issues",
-    example: { project: "AGENTC", limit: 250, offset: 250 },
+    example: { project: "PROJ", limit: 250, offset: 250 },
     description:
       "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " +
       "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " +
