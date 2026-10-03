@@ -92,11 +92,7 @@ import type {
   ToolResult,
 } from "../src/pi-types";
 import { sideTurn } from "../src/side-turn";
-import {
-  isRegisteredSubagent,
-  type SessionIdentityContext,
-  subagentSessionCheck,
-} from "../src/subagent-session";
+import { type SessionIdentityContext, subagentSessionCheck } from "../src/subagent-session";
 import { toolFailure, toolSuccess } from "../src/tool-result";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
@@ -1361,12 +1357,10 @@ export default function envoyExtension(pi: PiApi): void {
 
   // A `task` subagent loads its own instance of this module in the parent's process and fires
   // its own session_start. It shares the parent's Envoy identity: registering it would list an
-  // untitled session per subagent, heartbeated for as long as the parent process lives. Two
-  // tests, either enough: the transcript layout (file storage), and the host's own roster
-  // (any storage, any transcript or none).
-  const isSubagentTranscript = subagentSessionCheck();
-  const isSubagent = async (context: SessionIdentityContext): Promise<boolean> =>
-    (await isSubagentTranscript(context)) || isRegisteredSubagent(context);
+  // untitled session per subagent, heartbeated for as long as the parent process lives. The
+  // host's own roster decides (any storage, any transcript or none), and the transcript layout
+  // only where the roster gives no opinion.
+  const isSubagent = subagentSessionCheck();
 
   /**
    * The Envoy address a reply to this instance reaches, and the source session its sends carry.
@@ -1378,14 +1372,16 @@ export default function envoyExtension(pi: PiApi): void {
    * top-level one that spawned it, resolved from its transcript path
    * (`resolveEnvoySession`). That resolves to `""` when this process cannot say which
    * top-level session that is, and an empty address is what the caller reports and sends —
-   * naming an unrelated live session would send peers to a session that never spawned it.
+   * naming an unrelated live session would send peers to a session that never spawned it. A hook
+   * that already asked the subagent check passes its answer as `subagent`, so it asks once.
    */
   const replyAddress = async (
     context: SessionIdentityContext,
-    liveSessionID = ""
+    liveSessionID = "",
+    subagent?: boolean
   ): Promise<string> => {
     if (sessionID !== "") return liveSessionID || sessionID;
-    if (!(await isSubagent(context))) return liveSessionID;
+    if (!(subagent ?? (await isSubagent(context)))) return liveSessionID;
     return resolveEnvoySession(context.sessionManager.getSessionFile());
   };
 
@@ -1601,7 +1597,7 @@ export default function envoyExtension(pi: PiApi): void {
     ) {
       return undefined;
     }
-    // Memoized per instance: one transcript stat for the life of the session.
+    // Memoized per instance once settled: one answer for the life of the session.
     if (await isSubagent(context)) return undefined;
     // The user typed, so a check still in flight is about to answer for a run they have moved
     // past. This runs before the arming query rather than in `armAskAwareness`: a slow Dispatch
@@ -1977,7 +1973,8 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.publish: {
           const topic = stringFor(parameters, "topic");
-          const source = await replyAddress(context);
+          const inSubagent = await isSubagent(context);
+          const source = await replyAddress(context, "", inSubagent);
           const result = await client.publish({
             sourceSessionID: source,
             topic,
@@ -1991,8 +1988,7 @@ export default function envoyExtension(pi: PiApi): void {
           // the role case is visible here (a plain topic's subscribers are not in the answer);
           // AGENTS.md and the envoy skill carry the general rule. A direct envoy_send is
           // unaffected: the agent-subject lane has no such skip.
-          const undelivered =
-            source !== "" && result.holder === source && (await isSubagent(context));
+          const undelivered = source !== "" && result.holder === source && inSubagent;
           const published =
             result.holder === undefined
               ? `published ${result.envelope.event_id}`
@@ -2020,7 +2016,7 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.whoami: {
           const inSubagent = await isSubagent(context);
-          const address = await replyAddress(context);
+          const address = await replyAddress(context, "", inSubagent);
           // A `task` subagent registers no Envoy session of its own, so the address a reply
           // reaches is the session that spawned it. Its own host id is reported beside that,
           // never as the reply address: nothing is listening on it.

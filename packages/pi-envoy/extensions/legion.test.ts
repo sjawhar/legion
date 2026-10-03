@@ -24,6 +24,7 @@ import {
 import * as os from "node:os";
 import * as path from "node:path";
 import { type IssueKey, LEGION_ROLES, type LegionRole, roleToken } from "@legion/contracts";
+import { logger } from "@oh-my-pi/pi-utils";
 import pkg from "../package.json";
 import { noteInjectedUserTurn, resetInjectedUserTurnsForTests } from "../src/dispatch-user-turn";
 import { classifySession } from "../src/legion/classify";
@@ -94,7 +95,7 @@ mock.module("nats", () => ({
   }),
 }));
 
-import { hostAgentRegistryMock } from "./test-host-registry";
+import { hostAgentRegistryMock, testAgentRoster } from "./test-host-registry";
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   copyToClipboard: async () => undefined,
@@ -213,6 +214,7 @@ afterEach(async () => {
   natsConnectGates.clear();
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   resetLegionBootstrappedSessionForTests();
+  testAgentRoster().splice(0);
   resetInjectedUserTurnsForTests();
   for (const key of environmentKeys) {
     const value = baselineEnvironment[key];
@@ -493,8 +495,9 @@ interface ClaimPane {
  * visible in `requests` and never mistaken for a success. Each pane is an Oh My Pi process of its
  * own, so nothing an earlier pane recorded process-wide (its bootstrapped session, its Envoy role
  * bridge) carries over. `branch` is what the session's `getBranch()` returns: a resumed session's
- * transcript entries. `title` is the title the session already carries when it starts. Nothing
- * runs until `start()`; `bootPane` is the started pane. */
+ * transcript entries. `title` is the title the session already carries when it starts.
+ * `bindEnvoy: false` loads legion.ts alone (`createPi`'s option). Nothing runs until `start()`;
+ * `bootPane` is the started pane. */
 async function claimPane(options: {
   readonly role: LegionRole;
   readonly tree?: IssueKey;
@@ -510,6 +513,7 @@ async function claimPane(options: {
   readonly ensureOnDisk?: () => Promise<void>;
   readonly branch?: readonly unknown[];
   readonly title?: { readonly name: string; readonly source: "auto" | "user" };
+  readonly bindEnvoy?: boolean;
 }): Promise<ClaimPane> {
   resetLegionBootstrappedSessionForTests();
   resetLegionRoleClaimBridgeForTests();
@@ -590,7 +594,7 @@ async function claimPane(options: {
     throw new Error("process would exit");
   });
   const intervals: (() => void)[] = [];
-  const fixture = createPi();
+  const fixture = createPi({ bindEnvoy: options.bindEnvoy });
   if (options.title !== undefined) {
     fixture.title.name = options.title.name;
     fixture.title.source = options.title.source;
@@ -941,6 +945,148 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toBeUndefined();
     expect(daemonRequests(pane.requests)).toEqual([]);
+  });
+  // Oh My Pi's `ensureOnDisk` publishes the transcript and throws its SessionLockError when another
+  // writer holds that file's publish lock; the rewrite is discarded and a later publish may succeed.
+  const sessionLockError = (sessionFile: string): Error => {
+    const error = new Error(
+      `Session publish lock unavailable for ${sessionFile}: another writer holds the publish lock. The staged rewrite was discarded without publishing.`
+    );
+    error.name = "SessionLockError";
+    return error;
+  };
+  /** A hook's outcome: a rejected hook is a failed tool call (or session start). */
+  type HookOutcome = { readonly value: unknown } | { readonly error: string };
+  /** Each hook's outcome, run one after another in order. */
+  const hookOutcomes = async (hooks: readonly (() => unknown)[]): Promise<HookOutcome[]> => {
+    const outcomes: HookOutcome[] = [];
+    for (const hook of hooks) {
+      outcomes.push(
+        await Promise.resolve()
+          .then(hook)
+          .then(
+            (value) => ({ value }),
+            (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) })
+          )
+      );
+    }
+    return outcomes;
+  };
+  test("a subagent whose first transcript publish loses the session lock is still recognised at the next hook, and no tool call fails", async () => {
+    const { childFile } = await createSubagentTranscriptPaths();
+    // The host's roster does not list this session, so the transcript decides; its first publish
+    // loses the lock to another writer and every later one succeeds.
+    const lockError = sessionLockError(childFile);
+    let publishes = 0;
+    // legion.ts alone, so the publish that loses the lock is this instance's own first check (each
+    // extension instance keeps its own answer; envoy.ts asks through the same check).
+    const pane = await claimPane({
+      role: "implementer",
+      sessionId: "ses_sub_lock",
+      sessionFile: childFile,
+      bindEnvoy: false,
+      ensureOnDisk: async () => {
+        publishes++;
+        if (publishes === 1) throw lockError;
+      },
+    });
+    const bash = (id: string) =>
+      pane.toolCall({ toolName: "bash", toolCallId: id, input: { command: "ls" } }, pane.context);
+    const warnings: string[] = [];
+    const stopSink = logger.registerLogSink((entry) => {
+      if (entry.level === "warn") warnings.push(JSON.stringify(entry));
+    });
+    let outcomes: HookOutcome[];
+    try {
+      outcomes = await hookOutcomes([
+        () => pane.start(),
+        () => bash("call-sub-lock-first"),
+        () => bash("call-sub-lock-second"),
+      ]);
+    } finally {
+      stopSink();
+    }
+
+    // Every hook answers as a subagent's: no claim, and a bash call an unregistered phase worker
+    // would have had blocked passes through ungated.
+    expect(outcomes).toEqual([{ value: undefined }, { value: undefined }, { value: undefined }]);
+    expect(daemonRequests(pane.requests)).toEqual([]);
+    expect(pane.exits).toEqual([]);
+    expect(pane.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+    // The failed publish was asked again once, at the next hook, and the settled answer is kept.
+    expect(publishes).toBe(2);
+    expect(warnings.filter((warning) => warning.includes(lockError.message))).toHaveLength(1);
+  });
+  test("a subagent the host's roster names is recognised without publishing its transcript", async () => {
+    // No parent transcript sits beside this path (a `--no-session` parent's subagents land in a
+    // temporary omp-task-* directory), and every publish loses the lock: only the roster can say.
+    const baseDirectory = await mkdtemp(path.join(os.tmpdir(), "legion-roster-subagent-"));
+    temporaryPaths.push(baseDirectory);
+    const childFile = path.join(baseDirectory, "omp-task-scout", "Scout.jsonl");
+    testAgentRoster().push(
+      {
+        id: "Main",
+        kind: "main",
+        session: { sessionManager: { getSessionId: () => "ses_roster_parent" } },
+        sessionFile: null,
+      },
+      {
+        id: "Scout",
+        kind: "sub",
+        session: { sessionManager: { getSessionId: () => "ses_roster_sub" } },
+        sessionFile: childFile,
+      }
+    );
+    let publishes = 0;
+    const pane = await claimPane({
+      role: "architect",
+      issue: "REPO-42",
+      sessionId: "ses_roster_sub",
+      sessionFile: childFile,
+      ensureOnDisk: async () => {
+        publishes++;
+        throw sessionLockError(childFile);
+      },
+    });
+
+    const outcomes = await hookOutcomes([
+      () => pane.start(),
+      () =>
+        pane.toolCall(
+          { toolName: "bash", toolCallId: "call-roster-sub-bash", input: { command: "ls" } },
+          pane.context
+        ),
+    ]);
+
+    expect(outcomes).toEqual([{ value: undefined }, { value: undefined }]);
+    expect(daemonRequests(pane.requests)).toEqual([]);
+    expect(pane.exits).toEqual([]);
+    expect(pane.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+    expect(publishes).toBe(0);
+  });
+  test("a session the host's roster calls main boots as the top-level session even where its transcript sits like a subagent's", async () => {
+    // The roster's answer outranks the transcript layout. A check that let the layout win would
+    // need the transcript, and so a publish, before it could answer: LEGION-491's lock race again.
+    // On disk the layout says subagent: a `.jsonl` sits beside this transcript's directory.
+    const { childFile } = await createSubagentTranscriptPaths();
+    testAgentRoster().push({
+      id: "Main",
+      kind: "main",
+      session: { sessionManager: { getSessionId: () => "ses_roster_main" } },
+      sessionFile: childFile,
+    });
+    const pane = await bootPane({
+      role: "architect",
+      issue: "REPO-42",
+      sessionId: "ses_roster_main",
+      sessionFile: childFile,
+    });
+
+    expect(daemonRequests(pane.requests).map((request) => request.path)).toContain(
+      "/legion/v1/claims/register"
+    );
+    expect(pane.tools.find((tool) => tool.name === "legion")).toBeDefined();
+    expect(pane.exits).toEqual([]);
   });
   test("throws naming the missing variable when a phase worker boots without LEGION_BOOT_TOKEN", async () => {
     const pane = await claimPane({ role: "tester" });
