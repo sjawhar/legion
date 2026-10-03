@@ -42,8 +42,9 @@ interface AskAnswerFailure {
 /**
  * The refusals the same answer is refused with again however often it is sent, and what the card
  * says for each: the ask was answered or closed elsewhere, its question changed (the card reloads
- * it, so the next answer is to the new wording), or the answer would make its document larger than
- * the server stores (the server's reason says what to shorten). Any other failure may pass on a
+ * it, so the next answer is to the new wording), or writing it would leave its document one the
+ * server could not load again (the server's reason says so; an answer its document has no room for
+ * is still taken, kept on the ask and left out of the document). Any other failure may pass on a
  * retry.
  */
 function answerFailure(error: Error): AskAnswerFailure {
@@ -62,7 +63,13 @@ function answerFailure(error: Error): AskAnswerFailure {
           retryable: false,
         };
       case "CAP_EXCEEDED":
-        return { message: apiErrorMessage(error, "Your answer is too long."), retryable: false };
+        return {
+          message: apiErrorMessage(
+            error,
+            "Your answer was not saved, because its document would be too large to load."
+          ),
+          retryable: false,
+        };
     }
   }
   return { message: "Could not save your answer.", retryable: true };

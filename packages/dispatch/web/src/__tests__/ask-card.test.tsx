@@ -852,9 +852,9 @@ test("an approval-kind ask submits Approve with an optional note", async () => {
 });
 
 // A refusal of what the answer says, or of the ask it answers, is refused again however often it
-// is sent, so the card says why and offers no Retry; anything else may pass on a retry. An answer
-// that would make its document larger than the server stores shows the server's own reason, which
-// says what to shorten.
+// is sent, so the card says why and offers no Retry; anything else may pass on a retry. The server
+// takes an answer its document has no room for and leaves it out of the document, so the one 413
+// left is a write that would leave the document unable to load, and the card shows its reason.
 for (const refusal of [
   {
     code: "ASK_CLOSED",
@@ -872,8 +872,8 @@ for (const refusal of [
   {
     code: "CAP_EXCEEDED",
     error:
-      "document too large to store: a markdown document is at most 1 MiB (1048576 bytes), and this change would make the document's markdown 1048600 bytes (it was 1048000); shorten the change, or split the document",
-    message: "this change would make the document's markdown 1048600 bytes",
+      "document too large to store: this change would leave the document too large for the server to load again with room to spare (its live copy would park more than 90000 of the 100000 items a load may wait on); shorten the change, or split the document",
+    message: "too large for the server to load again",
     status: 413,
   },
 ]) {
