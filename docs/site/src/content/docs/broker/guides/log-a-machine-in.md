@@ -59,11 +59,13 @@ terminal shows. A machine login can only be selected by its code: no link approv
 
 Back on the machine, `agent-secrets launcher login` exits 0 and the helper logs
 `machine login issued; the helper holds a launcher credential`: the machine credential the approval
-minted, which the helper now enrolls sessions with. Check it at any time:
+minted, which the helper now enrolls sessions with. Check it at any time; it also says when the
+credential expires, since the broker has no renewal:
 
 ```console
 $ agent-secrets launcher login-status
 issued
+agent-secrets launcher login-status: the launcher credential expires at 2026-10-10T03:21:40Z (in 6d23h59m); the broker has no renewal, so a new machine login a human approves must replace it before then
 ```
 
 ## 4. Start agents as sessions
@@ -97,7 +99,9 @@ it only in memory, so log in again after it expires or after the helper restarts
 ```console
 $ agent-secrets launcher login-status
 none
-agent-secrets launcher login-status: no machine login has run on this helper; run: agent-secrets launcher login
+agent-secrets launcher login-status: no machine login since the helper started; a restart discards the launcher credential; run: agent-secrets launcher login
 ```
 
-A login nobody approves [expires](/legion/broker/concepts/#machine-login); start a new one.
+A login nobody approves [expires](/legion/broker/concepts/#machine-login); start a new one. When
+the credential reaches its expiry, or the broker refuses it, the helper drops it and logs why at
+ERROR, and `login-status` prints `expired` with that reason.
