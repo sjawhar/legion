@@ -154,6 +154,9 @@ type Service struct {
 	// preloads holds, per room, the durable state a document socket's admission check decoded
 	// (*preloadedDocument), for the room load that socket makes next (takePreload).
 	preloads sync.Map
+	// closeGates holds, per room, the gate between a repair's commit into the room and the
+	// service's own close of it (closeGate).
+	closeGates sync.Map
 }
 
 type roomState struct {
@@ -300,8 +303,9 @@ func (s *Service) applyCaptured(ctx context.Context, room string, origin any, mu
 
 // errRoomReplaced is a repair refused because the room no longer holds the document its caller
 // read - the room was evicted, its last browser having left or a CloseRoom having closed it, and
-// the write would load a replacement from the store - or given up because the room left the
-// server while the repair's transaction committed into it.
+// the write would load a replacement from the store - or because the service is closing the room
+// (closeRoom), or given up because the room left the server while the repair's transaction
+// committed into it.
 var errRoomReplaced = errors.New("document room was replaced")
 
 // applySuppressed writes one repair - settlement's, or the block-id backfill's - into room's live
@@ -320,8 +324,10 @@ var errRoomReplaced = errors.New("document room was replaced")
 //
 // A repair is written only into want, the document its caller read, when want is not nil: one
 // written into a replacement the room loaded since would be versioned from want, which never got
-// it. It is refused, writing nothing, with errRoomReplaced. A room can also retire under the
-// repair's transaction, between Server.Apply finding it and the commit: the commit's update then
+// it. It is written only into the document the room holds while no close of the service's is under
+// way, and it holds off those closes until its transaction's update is in the room's persistence
+// (closeGate). A refused repair writes nothing and returns errRoomReplaced. A CloseRoom made around
+// the service can still retire the room under the repair's transaction: the commit's update then
 // reaches the store's adapter on this goroutine, which consumeSuppressedPersistence answers by
 // discarding it, so a repair whose room is gone once it has written returns its slot with
 // errRoomReplaced, and its caller fails the room as for any write it gives up.
@@ -332,6 +338,18 @@ func (s *Service) applySuppressed(ctx context.Context, room string, want *crdt.D
 	wrote := false
 	updates, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
 		if want != nil && doc != want {
+			return errRoomReplaced
+		}
+		// Taken here, after Server.Apply's injection check, which waits for a failed room's
+		// eviction outside a transaction, and never waited for: a close holds the gate while the
+		// room's worker compacts under the document's lock, which a settlement writing this repair
+		// holds.
+		gate := s.closeGate(room)
+		if !gate.TryRLock() {
+			return errRoomReplaced
+		}
+		defer gate.RUnlock()
+		if s.srv.GetDoc(room) != doc {
 			return errRoomReplaced
 		}
 		written = doc
@@ -407,9 +425,10 @@ func (s *Service) consumeSuppressedPersistence(room string, update []byte) bool 
 
 		// A repair's update committed into a room whose persistence worker has retired reaches
 		// this adapter on the repair's own goroutine, inside its commit (ygo's persistStranded),
-		// and a room retires only once it has left the server. Waiting there for the slot, which
-		// that goroutine finishes or discards once its commit returns, would never end. The repair
-		// finds its room gone and gives the write up (applySuppressed), so its update is
+		// and a room retires only once it has left the server. The service's own closes wait for
+		// the commit (closeRoom); a CloseRoom made around it does not. Waiting there for the slot,
+		// which that goroutine finishes or discards once its commit returns, would never end. The
+		// repair finds its room gone and gives the write up (applySuppressed), so its update is
 		// discarded here instead.
 		if own && s.srv.GetDoc(room) != committedTo {
 			s.suppressMu.Lock()
@@ -561,12 +580,13 @@ func New(deps Deps) *Service {
 	// into a document neither wrote, which can hold no block at all. Idle eviction refuses a
 	// room any Apply holds, or has touched since its last peer left (idle_sweep.go:185), so every
 	// write a room the sweeper evicts has taken is durable before a successor can load. CloseRoom
-	// checks peers alone too (inject.go:475-621), and the service still calls it to close an
-	// issue's rooms (SetIssueClosed), for a room with an editor at Shutdown, and to evict one
-	// (evictRoom): a write that commits on a room it has retired reaches the store through ygo's
-	// stranded persistence, on the committing goroutine (persistence.go:126-163). A published
-	// write's suppression slot is finished before ygo's persistence observer runs
-	// (onLoadDocument), so that persistence never waits on the publish it is running in.
+	// checks peers alone too (inject.go:475-621), and the service still calls it, through
+	// closeRoom, to close an issue's rooms (SetIssueClosed), for a room with an editor at Shutdown,
+	// and to evict one (evictRoom): a write that commits on a room it has retired reaches the store
+	// through ygo's stranded persistence, on the committing goroutine (persistence.go:126-163).
+	// closeRoom waits for a repair's commit, so a repair never meets it; a published write's
+	// suppression slot is finished before ygo's persistence observer runs (onLoadDocument), so
+	// that persistence never waits on the publish it is running in.
 	srv.RoomIdleTimeout = roomIdleTimeout
 
 	service.srv = srv
@@ -622,7 +642,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	for _, room := range connectedRooms {
 		closed := make(chan error, 1)
 		go func(room string) {
-			closed <- s.srv.CloseRoom(room, true)
+			closed <- s.closeRoom(room)
 		}(room)
 		select {
 		case err := <-closed:
@@ -1683,7 +1703,7 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 		}
 		state.mu.Unlock()
 		if closed && changed {
-			_ = s.srv.CloseRoom(room, true)
+			_ = s.closeRoom(room)
 		}
 	}
 }
@@ -1709,7 +1729,7 @@ func (s *Service) evictRoom(room string, state *roomState) error {
 	// persistence-suppression slot, so a state removed before the close would let a failed
 	// settlement's discarded identity update reach the store. A settlement armed on this
 	// state during the close is re-armed by its own timer (see scheduleSettleAfterLocked).
-	err := s.srv.CloseRoom(room, true)
+	err := s.closeRoom(room)
 	if state != nil {
 		s.rooms.CompareAndDelete(room, state)
 	}
@@ -1717,6 +1737,39 @@ func (s *Service) evictRoom(room string, state *roomState) error {
 		return fmt.Errorf("evict live document: %w", err)
 	}
 	return nil
+}
+
+// closeRoom closes room through ygo's CloseRoom, which retires the room's persistence worker
+// whatever holds the room, once no repair is committing into it, and holds off every repair while
+// it closes (closeGate).
+//
+// A settlement writes its repairs while it holds the document's advisory lock, and ygo hands a
+// commit's update to the room's persistence inside the commit. Were the worker retired under the
+// commit, that update would go to ygo's stranded persistence on the repair's own goroutine, which
+// waits for the worker to exit and then queues behind every other stranded write into the same
+// document, and neither wait could end (LEGION-498): a failed room's worker compacts under the
+// lock before it exits, and the settlement holding the lock waits for that exit; a second
+// writer's stranded write, waiting for the repair's suppression slot or for the lock to append,
+// holds the repair's write behind it. With the close waiting for the commit, the worker takes the
+// update while the room is still the server's, and a failed room's eviction compacts under the lock
+// once the settlement that holds it returns. A repair never waits for the gate, so no cycle runs
+// through it.
+func (s *Service) closeRoom(room string) error {
+	gate := s.closeGate(room)
+	gate.Lock()
+	defer gate.Unlock()
+	return s.srv.CloseRoom(room, true)
+}
+
+// closeGate is room's gate between a repair's commit into the room (applySuppressed), which
+// holds it shared and never waits for it, and the service's own close of the room (closeRoom),
+// which holds it exclusively.
+func (s *Service) closeGate(room string) *sync.RWMutex {
+	if gate, ok := s.closeGates.Load(room); ok {
+		return gate.(*sync.RWMutex)
+	}
+	gate, _ := s.closeGates.LoadOrStore(room, &sync.RWMutex{})
+	return gate.(*sync.RWMutex)
 }
 
 func (s *Service) failRoom(room string, cause error) {
