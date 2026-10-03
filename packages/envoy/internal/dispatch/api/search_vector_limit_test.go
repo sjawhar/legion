@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // distinctWords is n words no two alike, `w000001 w000002 …`, joined by separator, with paragraph
@@ -72,57 +74,55 @@ func TestADocumentPastTheSearchVectorLimitVersionsAndIsFound(t *testing.T) {
 	}
 }
 
-// An issue whose title's whole search vector would pass the limit is created, is found by its key
-// and the words that open its title, and is checked against its project's titles and they against
-// it. The duplicate check reads every title through the same bound, and marks a candidate's
-// headline with the words the two titles share, of which two titles of distinct words share tens
-// of thousands. Before 0068 its creation answered 500 (`string is too long for tsvector`), and a
-// headline query of every word the new title held overflowed Postgres's stack (`stack depth limit
-// exceeded`), which a title whose vector fit reached as well.
-func TestAnIssueTitlePastTheSearchVectorLimitIsCreatedAndChecked(t *testing.T) {
+// A title whose whole search vector would pass Postgres's limit on one tsvector is far past
+// contracts.IssueTitleMax, so creating an issue with it, forced or not, and retitling one to it are
+// refused before the duplicate check reads a title: the issue titled with its first word, which
+// that check names as its near-duplicate, goes unnamed. Before 0068 such a creation answered 500
+// (`string is too long for tsvector`); with 0068 alone it was created, and every later creation in
+// its project read its 800 KB in the duplicate check. The store's
+// TestTextPastTheSearchVectorLimitIsWrittenAndIndexedFromItsOpening writes such a title straight
+// into issues, where the trigger still indexes its opening.
+func TestAnIssueTitlePastTheSearchVectorLimitIsRefused(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "WORDS", "name": "Words"}, "alice"); response.Code != http.StatusCreated {
 		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
 	}
-	create := func(title string, force bool) *httptest.ResponseRecorder {
-		return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+	first := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "WORDS", "title": "w000001"}, "alice")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("create an issue titled w000001: status=%d body=%.300s", first.Code, first.Body.String())
+	}
+	word := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, first).Key
+
+	// The words end in a space, which the routes trim before they count.
+	title := strings.TrimSpace(distinctWords(100_000, " "))
+	want := fmt.Sprintf("title is %d characters over the %d-character limit (%d/%d)",
+		len(title)-contracts.IssueTitleMax, contracts.IssueTitleMax, len(title), contracts.IssueTitleMax)
+	refused := func(what string, response *httptest.ResponseRecorder) {
+		t.Helper()
+		body := response.Body.String()
+		refusal := decodeBody[struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}](t, response)
+		if response.Code != http.StatusBadRequest || refusal.Code != "CAP_EXCEEDED" || refusal.Error != want {
+			t.Fatalf("%s: status=%d body=%.300s, want 400 CAP_EXCEEDED %q", what, response.Code, body, want)
+		}
+	}
+	for _, force := range []bool{false, true} {
+		refused(fmt.Sprintf("create the long title, force %t", force), dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
 			"project": "WORDS", "title": title, "force": force,
-		}, "alice")
+		}, "alice"))
 	}
-	created := func(what string, response *httptest.ResponseRecorder) string {
-		t.Helper()
-		if response.Code != http.StatusCreated {
-			t.Fatalf("create %s: status=%d body=%.300s", what, response.Code, response.Body.String())
-		}
-		return decodeBody[struct {
-			Key string `json:"key"`
-		}](t, response).Key
-	}
-	refused := func(what string, response *httptest.ResponseRecorder, candidate string) {
-		t.Helper()
-		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"POSSIBLE_DUPLICATE"`) || !strings.Contains(response.Body.String(), `"key":"`+candidate+`"`) {
-			t.Fatalf("%s: status=%d body=%.300s, want 409 POSSIBLE_DUPLICATE naming %s", what, response.Code, response.Body.String(), candidate)
-		}
-	}
+	refused("retitle "+word+" to the long title", dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+word, map[string]any{"title": title}, "alice"))
 
-	word := created("an issue titled w000001", create("w000001", false))
-	title := distinctWords(100_000, " ")
-	// The long title holds w000001, all of the first issue's title, so that issue is its
-	// near-duplicate, and its headline marks the one word they share.
-	refused("the long title beside an issue titled with its first word", create(title, false), word)
-	long := created("the long title, forced", create(title, true))
-	// The same title again shares every word its vector holds with the stored one.
-	refused("the long title again", create(title, false), long)
-
-	for _, query := range []string{long, "w000001"} {
-		found := false
-		for _, result := range searchResponse(t, handler, "q="+query).Results {
-			if result.Kind == "issue" && result.ID == long {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("search %q did not find %s", query, long)
-		}
+	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=WORDS", nil, "alice")
+	issues := decodeBody[[]struct {
+		Key   string `json:"key"`
+		Title string `json:"title"`
+	}](t, listed)
+	if len(issues) != 1 || issues[0].Key != word || issues[0].Title != "w000001" {
+		t.Fatalf("WORDS holds %+v, want only %s titled w000001", issues, word)
 	}
 }

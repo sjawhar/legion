@@ -4,6 +4,10 @@
 
 ### Changed
 
+- Added `ISSUE_TITLE_MAX` (1,000), the longest issue title in UTF-16 units that
+  `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept, generated into Go as
+  `contracts.IssueTitleMax`; the dashboard's title fields take it as their `maxLength`
+  (LEGION-505).
 - `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary
   and no question, and an approval is requested only once the human has agreed to every point in
   the document (LEGION-475).

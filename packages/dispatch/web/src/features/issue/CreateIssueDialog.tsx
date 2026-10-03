@@ -1,3 +1,4 @@
+import { ISSUE_TITLE_MAX } from "@legion/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -139,6 +140,7 @@ export function CreateIssueDialog({
             <input
               className={`mt-1 block min-h-11 w-full rounded-lg border px-3 py-2 text-sm font-normal outline-none ${inputClasses(true)}`}
               disabled={mutation.isPending}
+              maxLength={ISSUE_TITLE_MAX}
               onChange={(event) => setTitle(event.target.value)}
               ref={titleRef}
               type="text"
