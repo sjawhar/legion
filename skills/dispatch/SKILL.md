@@ -85,8 +85,8 @@ a new version that keeps the human's own text, never a second "spec" artifact be
   design, rewrite the text it changes and fold the answered decision into it; the document's
   versions keep the history.
 - **No placeholders.** No TBD, TODO, or hedging ("might", "could consider"): an open item is a
-  decision block, a technical decision your lane makes and records in the text, or, for a
-  contract between two lanes, a question you settle with the other lane over Envoy (see
+  decision block, a technical decision your lane makes where the work happens, outside the spec,
+  or, for a contract between two lanes, a question you settle with the other lane over Envoy (see
   [Before you ask](#before-you-ask) under Asking).
 - **No progress.** The spec records the design and its decisions, never status, timestamps, an
   "Update HH:MMZ" section, a pull-request list, or handoff notes. Progress is not a Dispatch
@@ -222,10 +222,11 @@ Every `dispatch_ask` passes four gates first:
 1. **Does it need his authority, taste, or risk appetite?** This is the bar for a decision
    written as an `:::ask` block in context ([Decision blocks](#decision-blocks)). Technical
    decisions inside your outcome do not: schema shapes, table layouts, field names, and migration
-   internals are your lane's to decide and record in the spec. A contract between two lanes is
-   settled by those two lanes over Envoy, and you open no ask for it. A halt condition (a change
-   to IAM, deletion or exposure of production data, anything that reaches a customer) passes this
-   gate: it is your own `dispatch_ask` to Sami on your own issue.
+   internals are your lane's to decide where the work happens, in the plan or the code, not in the
+   spec. A contract between two lanes is settled by those two lanes over Envoy, and you open no ask
+   for it. A halt condition (a change to IAM, deletion or exposure of production data, anything
+   that reaches a customer) passes this gate: it is your own `dispatch_ask` to Sami on your own
+   issue.
 2. **Is there genuine uncertainty, and have you measured what you can?** If there is none, it is
    a plan you execute. The one legitimate ask without uncertainty is permission for an action
    only a human can authorise — a production write, an external send, a console action. Start it
@@ -383,26 +384,28 @@ version has not been approved. A Legion root spec under an armed design gate alw
 once all three hold (`skill://legion-architect`).
 
 When all three hold, request it in the pass that finishes the spec: a design waiting with nothing in
-the human's Inbox waits on nobody. After that, hand the request back once per revision, when the
-revision is complete, never after each edit. How the request follows the document and whom it
-waits on, and what each call does after an answer, is in
-[Approval requests](skill://dispatch/references/documents.md#approval-requests). A human who
-comments on the request instead of answering it is continuing the design conversation: reply in
-the thread; when the comment raises a choice that is theirs, write it into the spec as a decision
-block; when it changes the design, rewrite the text and then hand the request back once. A reply
-that only answers the comment returns the request to the human by itself. When a human asks for
-approval while a block is open, do not request it and do not hold it silently: name each open
-block and ask them to answer it or waive it. For a waiver, close the block with
-`dispatch_resolve_ask` (`kind: "resolved"`, their words as `reason`), then write their decision
-into the text in their words and request. `dispatch_request_approval` refuses while any block is
-open.
+the human's Inbox waits on nobody. When a human asks for approval while a block is open, do not
+request it and do not hold it silently: name each open block and ask them to answer it or waive
+it. For a waiver, close the block with `dispatch_resolve_ask` (`kind: "resolved"`, their words as
+`reason`), then write their decision into the text in their words and request.
+`dispatch_request_approval` refuses while any block is open.
+
+Once a request is open, hand it back once per revision, when the revision is complete, never after
+each edit. A human who comments on the request instead of answering it is continuing the design
+conversation: reply in the thread; when the comment raises a choice that is theirs, write it into
+the spec as a decision block; when it changes the design, rewrite the text and then hand the
+request back once. A reply that only answers the comment returns the request to the human by
+itself.
 
 An approval request carries nothing new: a point the human has not agreed to gets its own decision
-block first, with your recommendation, or comes out of the spec; it never reaches them through
-`summary`. `summary` says in one to three sentences what the human is approving and nothing else:
-no commentary on itself or on the conversation, and no open question. The Inbox shows it after
-"Approve spec.md (version N)?". Never write "Approve" options into an ordinary `dispatch_ask`; only
-humans approve.
+block first, with your recommendation, or, when it is a choice you can make yourself
+([Before you ask](#before-you-ask), gate 1) and the human will not want a say in it, comes out of
+the spec and is made where the work happens; an inference you cannot defend in a decision block
+comes out of the spec. `summary` says in one to three sentences what the human is approving and
+nothing else: no commentary on itself or on the conversation, and no open question. The Inbox
+shows it after "Approve spec.md (version N)?". Never write "Approve" options into an ordinary
+`dispatch_ask`; only humans approve. The call, its result and its answer:
+[Approval requests](skill://dispatch/references/documents.md#approval-requests).
 
 ## The Spec
 
