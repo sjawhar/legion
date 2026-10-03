@@ -45,10 +45,11 @@ A video that passes gets its captions and poster, as the site's other videos hav
 `walkthrough.vtt` holds one WebVTT cue per narration part: the part's text in `narration.json`,
 from where the part starts in the video until the next part in its clip starts, or the clip ends.
 Each clip starts where the clips before it end, at their rendered lengths, which a frame or an
-audio packet can take a few hundredths of a second past their cut lengths. `walkthrough.jpg` is the
-video's first frame: the opening payoff, the command's line once the key reached it. Only then are
-the three copied to `docs/site/public/media/broker/`; a failed build leaves the published ones as
-they were.
+audio packet can take a few hundredths of a second past their cut lengths, and the whole video
+starts 23 ms late, the first clip's AAC priming, which `build.py` reads off the first frame's
+start. `walkthrough.jpg` is the video's first frame: the opening payoff, the command's line once
+the key reached it. Only then are the three copied to `docs/site/public/media/broker/`; a failed
+build leaves the published ones as they were.
 
 ## Change the narration
 

@@ -78,6 +78,11 @@ def duration(path: Path) -> float:
     return float(run("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)).strip())
 
 
+def video_start(path: Path) -> float:
+    """When the file's first frame shows, in its own seconds."""
+    return float(run("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=start_time", "-of", "csv=p=0", str(path)).strip())
+
+
 @functools.cache
 def cast_duration(path: Path) -> float:
     last = 0.0
@@ -336,9 +341,11 @@ def main() -> int:
               f" it must be {LUFS} LUFS within {LOUDNESS_SLACK} LU, peaking at {TRUE_PEAK} dBTP or under", file=sys.stderr)
         print(unchanged, file=sys.stderr)
         return 1
-    # The concat starts each clip where the one before it ends: at the clips' rendered lengths, which
-    # a frame or an audio packet can take past their spans.
-    starts = list(itertools.accumulate(map(duration, rendered[:-1]), initial=0.0))
+    # The concat starts each clip where the one before it ends, at the clips' rendered lengths (which
+    # a frame or an audio packet can take past their spans), and moves the whole video later by the
+    # first clip's AAC priming, a packet before its zero: its first frame moves by as much.
+    shift = video_start(BUILT) - video_start(rendered[0])
+    starts = [shift + start for start in itertools.accumulate(map(duration, rendered[:-1]), initial=0.0)]
     CAPTIONS.write_text(vtt(resolved, starts))
     # The poster is the first frame: the opening payoff, the command's line once the key reached it.
     run("ffmpeg", "-y", "-v", "error", "-i", str(BUILT), "-frames:v", "1", "-q:v", "3", str(POSTER))
