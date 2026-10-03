@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"path"
 	"strconv"
@@ -22,6 +25,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 const (
@@ -124,12 +128,27 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "a markdown document is at most 1 MiB; a larger file is stored as a binary artifact under another content type")
 		return
 	}
+	// A markdown document is stored as text. Its inline content was read as a JSON string, which
+	// holds no byte that is not UTF-8 and was read for U+0000, so only a multipart file reaches here
+	// holding either. Any other file is stored as bytes, beside its part's Content-Type as text; the
+	// document path stores no part header.
+	if kind == "doc" && !text.StorableBytes(input.content) {
+		s.writeHandlerError(w, unstorableText("file", string(input.content)))
+		return
+	}
+	if kind != "doc" {
+		if refusal := unstorableText("file Content-Type", input.contentType); refusal != nil {
+			s.writeHandlerError(w, refusal)
+			return
+		}
+	}
 	s.storeArtifact(w, r, input, actor, kind, target)
 }
 
 func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (artifactUploadInput, bool) {
 	var body jsonArtifactUpload
-	decoder := json.NewDecoder(r.Body)
+	var read bytes.Buffer
+	decoder := json.NewDecoder(io.TeeReader(r.Body, &read))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&body); err != nil {
 		var maxBytesError *http.MaxBytesError
@@ -142,6 +161,10 @@ func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (art
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		writeError(w, "INVALID_JSON", http.StatusBadRequest, "request body must contain one JSON value")
+		return artifactUploadInput{}, false
+	}
+	if refusal := unstorableJSON("", read.Bytes()); refusal != nil {
+		s.writeHandlerError(w, refusal)
 		return artifactUploadInput{}, false
 	}
 	if body.Primary != nil {
@@ -165,8 +188,27 @@ func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (art
 }
 
 func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request) (artifactUploadInput, bool) {
+	// Only the size limits are 413: the body past maxArtifactBlobSize and a megabyte of fields
+	// (uploadArtifactFor's MaxBytesReader), or fields past what the parser holds in memory. A file
+	// the server cannot spool to its temporary directory is the server's failure, 500. Any other
+	// refusal is a body the parser cannot read, answered with its reason.
 	if err := r.ParseMultipartForm(1 << 20); err != nil {
-		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+		var tooLarge *http.MaxBytesError
+		var spool *fs.PathError
+		switch {
+		case errors.As(err, &tooLarge):
+			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+		case errors.Is(err, multipart.ErrMessageTooLarge):
+			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "the upload's form fields are too large to read")
+		case errors.As(err, &spool):
+			s.writeHandlerError(w, fmt.Errorf("spool multipart upload: %w", err))
+		default:
+			writeError(w, "ARTIFACT_INPUT", http.StatusBadRequest, "invalid multipart body: "+err.Error())
+		}
+		return artifactUploadInput{}, false
+	}
+	if refusal := unstorableForm(r.MultipartForm.Value); refusal != nil {
+		s.writeHandlerError(w, refusal)
 		return artifactUploadInput{}, false
 	}
 	var supplied *model.Actor
@@ -174,6 +216,10 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 		var actor model.Actor
 		if err := json.Unmarshal([]byte(raw), &actor); err != nil {
 			writeError(w, "INVALID_JSON", http.StatusBadRequest, "invalid multipart actor")
+			return artifactUploadInput{}, false
+		}
+		if refusal := unstorableJSON("actor", []byte(raw)); refusal != nil {
+			s.writeHandlerError(w, refusal)
 			return artifactUploadInput{}, false
 		}
 		supplied = &actor

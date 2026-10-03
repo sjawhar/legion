@@ -658,11 +658,11 @@ type compactIfIdleKey struct{}
 
 // compactIfIdle marks ctx so Compact leaves a room whose lock another holder has for a later
 // compaction rather than waiting for the lock. The room's persistence worker compacts under it
-// (servicePersistenceAdapter.Compact): the worker compacts as it exits, and a settlement holding
-// the room's lock can be waiting for that exit, since an update the settlement commits into a room
-// whose worker is leaving is stored on the settlement's own goroutine once the worker has gone
-// (ygo's persistStranded). A compaction that waited for the lock would wait for itself. Compaction
-// is housekeeping, and the next one folds what a skipped one would have.
+// (servicePersistenceAdapter.Compact) as it exits. roomServer prevents that exit from racing a
+// repair, but intentionally does not gate a published live write: it is already durable, and its
+// room can still retire under publishLiveUpdate's Apply. Compaction is housekeeping, so that
+// worker leaves a busy room for the next compaction rather than waiting behind a document-lock
+// holder. A failed room's eviction is the exception: it compacts under the lock before recovery.
 func compactIfIdle(ctx context.Context) context.Context {
 	return context.WithValue(ctx, compactIfIdleKey{}, true)
 }

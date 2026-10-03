@@ -582,7 +582,7 @@ func TestTypedBlockOpeningWrittenAsTextOnPurposeIsKept(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Parse(%q) = %v, want the opening kept as text", markdown, err)
 			}
-			if len(doc.Children) != 1 || doc.Children[0].Type != "paragraph" || !strings.Contains(textContent(doc.Children[0]), opening) {
+			if len(doc.Children) != 1 || doc.Children[0].Type != "paragraph" || !strings.Contains(TextContent(doc.Children[0]), opening) {
 				t.Fatalf("Parse(%q) = %#v, want one paragraph holding %q", markdown, doc.Children, opening)
 			}
 		})
