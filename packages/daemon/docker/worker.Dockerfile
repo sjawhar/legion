@@ -12,8 +12,7 @@
 # mise's github backend exactly as a tmux host resolves an `omp_invocation` naming it;
 # @sjawhar/pi-legion-envoy packed from this checkout's packages/pi-envoy and @bopstack/pi-codegraph
 # (from npm, pinned) linked into the isolated OMP profile `legion`, backed by the CodeGraph CLI
-# (@colbymchenry/codegraph, pinned) at /opt/codegraph/bin; the role prompts (packages/pi-envoy/roles)
-# at /opt/legion/roles for the in-cluster daemon; jj; git at /usr/bin/git (>= 2.42, from the
+# (@colbymchenry/codegraph, pinned) at /opt/codegraph/bin; jj; git at /usr/bin/git (>= 2.42, from the
 # debian:trixie-slim runtime base — jj's git backend requires it); gh; and a generic toolchain for the
 # repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and corepack's
 # pnpm and yarn, and the AWS CLI v2, each on PATH at /usr/local/bin. The last three RUNs gate the
@@ -228,13 +227,6 @@ COPY --from=plugin --chown=legion:legion /out/pi-legion-envoy /opt/legion/pi-leg
 # CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
 # Node runtime + app), never the npm package's own launcher shim — see the plugin stage's comment.
 COPY --from=plugin /out/codegraph /opt/codegraph
-# The role prompt parts (`packages/pi-envoy/roles/core/*.md`, `mechanics/*.md`, and per-role
-# residues — not part of the packed plugin, whose `files` is `dist`): the in-cluster daemon reads the
-# configured parts for each process and concatenates them into its pod command. A standalone `legion`
-# reads them from `role-prompts` beside its own executable unless LEGION_ROLE_PROMPTS_DIR names a
-# bundle, so it names this copy (packages/daemon/internal/prompts, ResolveRolePromptsDir — boot
-# refuses if any prompt part is missing here).
-COPY --from=plugin /repo/packages/pi-envoy/roles /opt/legion/roles
 # OMP_PROFILE=legion: the isolated profile the plugin is linked into (plugins resolve to
 # /home/legion/.omp/profiles/legion/plugins/node_modules). LEGION_OMP_PATH: how `legion probe-image`
 # — and a daemon pointed at this image — names the OMP executable without mise. HOME is explicit
@@ -244,7 +236,6 @@ COPY --from=plugin /repo/packages/pi-envoy/roles /opt/legion/roles
 # this image, must never phone home for an automatic, non-opt-in tool.
 ENV OMP_PROFILE=legion \
     LEGION_OMP_PATH=/opt/omp/bin/omp \
-    LEGION_ROLE_PROMPTS_DIR=/opt/legion/roles \
     HOME=/home/legion \
     DO_NOT_TRACK=1 \
     PATH=/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin

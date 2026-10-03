@@ -55,40 +55,45 @@ func referencePlugin(t *testing.T, dir string, agent, rubric bool) string {
 }
 
 // The names the gate resolves are every task agent and skill a Legion prompt names: in the
-// plugin's shipped skills and agent definitions and in the role prompts the daemon hands each pane,
-// each named with the files that name it.
+// plugin's shipped skills and agent definitions, and in the role prompts the daemon hands each pane
+// (prompts.RoleReferences, merged in), each named with the files that name it. Only Markdown
+// names anything, and a plugin directory that is a link is walked as the directory it names.
 func TestPromptReferencesReadTheSkillsTheAgentsAndTheRolePrompts(t *testing.T) {
 	dir := t.TempDir()
-	root := referencePlugin(t, dir, true, false)
-	roles := filepath.Join(dir, "roles")
-	// LEGION_ROLE_PROMPTS_DIR may name a link to the directory, which the walk must follow.
-	link := filepath.Join(dir, "roles-link")
-	if err := os.Symlink(roles, link); err != nil {
-		t.Fatal(err)
-	}
+	root := referencePlugin(t, dir, false, false)
+	agents := filepath.Join(dir, "agents")
 	for name, content := range map[string]string{
-		filepath.Join("core", "planner.md"): "Consult `task(agent=\"oracle\")` on a hard tradeoff.\n",
-		"reviewer.md":                       "Run `task(agent=\"thermonuclear-deep-review\")` after `skill://ce-simplify-code`.\n",
-		"tester.md":                         "Follow skill://legion-worker.\n",
-		"notes.txt":                         "task(agent=\"not-a-prompt\") skill://not-a-prompt\n",
+		"thermonuclear-deep-review.md": "---\nname: thermonuclear-deep-review\ndescription: test\n---\n" +
+			"Load `skill://thermonuclear-deep-review` and use its rubric.\n",
+		"notes.txt": "task(agent=\"not-a-prompt\") skill://not-a-prompt\n",
 	} {
-		path := filepath.Join(roles, name)
-		mkdir(t, filepath.Dir(path))
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		mkdir(t, agents)
+		if err := os.WriteFile(filepath.Join(agents, name), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.Symlink(agents, filepath.Join(root, "agents")); err != nil {
+		t.Fatal(err)
+	}
+	roles := promptrefs.New()
+	for file, prompt := range map[string]string{
+		"roles/core/planner.md": "Consult `task(agent=\"oracle\")` on a hard tradeoff.\n",
+		"roles/reviewer.md":     "Run `task(agent=\"thermonuclear-deep-review\")` after `skill://ce-simplify-code`.\n",
+		"roles/tester.md":       "Follow skill://legion-worker.\n",
+	} {
+		roles.Text(file, []byte(prompt))
 	}
 
 	worker := filepath.Join("dist", "skills", "legion-worker", "SKILL.md")
 	want := promptrefs.Names{
 		promptrefs.TaskAgents: {
-			"oracle":                    {filepath.Join("roles", "core", "planner.md")},
+			"oracle":                    {"roles/core/planner.md"},
 			"scout":                     {worker},
-			"thermonuclear-deep-review": {worker, filepath.Join("roles", "reviewer.md")},
+			"thermonuclear-deep-review": {worker, "roles/reviewer.md"},
 		},
 		promptrefs.Skills: {
-			"ce-simplify-code":          {filepath.Join("roles", "reviewer.md")},
-			"legion-worker":             {worker, filepath.Join("roles", "tester.md")},
+			"ce-simplify-code":          {"roles/reviewer.md"},
+			"legion-worker":             {worker, "roles/tester.md"},
 			"thermonuclear-deep-review": {filepath.Join("agents", "thermonuclear-deep-review.md")},
 		},
 	}
@@ -97,20 +102,14 @@ func TestPromptReferencesReadTheSkillsTheAgentsAndTheRolePrompts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, rolesDir := range []string{roles, link} {
-		names, err := promptReferences(manifest, plugin.skills)
-		if err != nil {
-			t.Fatal(err)
-		}
-		references, err := promptrefs.Roles(rolesDir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		names.Merge(references)
-		for _, kind := range promptrefs.Kinds {
-			if !maps.EqualFunc(names[kind], want[kind], slices.Equal) {
-				t.Errorf("the gate's names over %s: %ss = %v, want %v", rolesDir, promptKinds[kind].noun, names[kind], want[kind])
-			}
+	names, err := promptReferences(manifest, plugin.skills)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names.Merge(roles)
+	for _, kind := range promptrefs.Kinds {
+		if !maps.EqualFunc(names[kind], want[kind], slices.Equal) {
+			t.Errorf("the gate's %ss = %v, want %v", promptKinds[kind].noun, names[kind], want[kind])
 		}
 	}
 }

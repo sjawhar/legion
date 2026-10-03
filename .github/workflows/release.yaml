@@ -54,15 +54,14 @@ jobs:
         with:
           filters: |
             # The Go `legion` the legion job releases and worker.Dockerfile's go stage compiles: its
-            # module, the modules go.work binds it to (packages/envoy is also copied whole into the
-            # image for the agent-secrets binary it builds, AGENTC-393), and the role prompts every
-            # release archive carries beside the binary.
+            # module, which embeds the role prompts, and the modules go.work binds it to
+            # (packages/envoy is also copied whole into the image for the agent-secrets binary it
+            # builds, AGENTC-393).
             legion:
               - 'packages/daemon/**'
               - 'go.work'
               - 'go.work.sum'
               - 'packages/envoy/**'
-              - 'packages/pi-envoy/roles/**'
             envoy_plugin:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'
@@ -97,12 +96,11 @@ jobs:
               - '.dockerignore'
               - '.github/workflows/worker-image.yaml'
 
-  # The Go `legion`: linux and darwin archives of the binary with the role prompts it reads beside
-  # itself (role-prompts/, which a standalone `legion` needs unless LEGION_ROLE_PROMPTS_DIR names
-  # another bundle), on a legion-v* tag of the commit the run checked out. Nothing is committed: a
-  # Go module carries no version file, so the tag alone records the version, and `legion version`
-  # names it. Only main releases one: a workflow_dispatch from another branch skips this job, and the
-  # worker image job below then publishes that commit's sha- tag alone, as it does for any branch.
+  # The Go `legion`: linux and darwin archives of the binary, which embeds its role prompts, on a
+  # legion-v* tag of the commit the run checked out. Nothing is committed: a Go module carries no
+  # version file, so the tag alone records the version, and `legion version` names it. Only main
+  # releases one: a workflow_dispatch from another branch skips this job, and the worker image job
+  # below then publishes that commit's sha- tag alone, as it does for any branch.
   legion:
     needs: changes
     if: >-
@@ -136,16 +134,14 @@ jobs:
           else
             PREV_VERSION="${PREV_TAG#legion-v}"
           fi
-          # The role prompts ship as runtime: packages/pi-envoy/roles is each archive's role-prompts/,
-          # and the binary embeds internal/prompts/go, so a docs: commit to either still releases.
+          # The binary embeds its prompts (internal/prompts), so a docs: commit there still releases.
           # release-bump.sh reads a --patch-path only when it is also one of the paths after --.
           VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" \
-            --patch-path packages/pi-envoy/roles/ --patch-path packages/daemon/internal/prompts/go/ \
-            -- packages/daemon/ packages/pi-envoy/roles/ packages/daemon/internal/prompts/go/)
+            --patch-path packages/daemon/internal/prompts/ -- packages/daemon/ packages/daemon/internal/prompts/)
 
           if [ "$VERSION" = "empty" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "No commits in packages/daemon/ or packages/pi-envoy/roles/ since $PREV_TAG"
+            echo "No commits in packages/daemon/ since $PREV_TAG"
             exit 0
           fi
           if [ "$VERSION" = "none" ]; then
@@ -170,8 +166,7 @@ jobs:
             packages/envoy/go.sum
       # CGO_ENABLED=0: a static binary, as the worker image builds it, so a linux archive runs on any
       # distribution. Each archive holds one top-level directory, legion-<os>-<arch>, with `legion`
-      # and `role-prompts/` in it: mise's github backend strips that one directory, leaving the
-      # binary beside its prompts.
+      # in it: mise's github backend strips that one directory, leaving the binary.
       - name: Build legion
         if: steps.version.outputs.skip != 'true'
         env:
@@ -186,7 +181,6 @@ jobs:
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C packages/daemon build -buildvcs=false \
               -ldflags "-X main.revision=$GITHUB_SHA -X main.release=v$VERSION" \
               -o "$GITHUB_WORKSPACE/out/$dir/legion" ./cmd/legion
-            cp -R packages/pi-envoy/roles "out/$dir/role-prompts"
             tar czf "assets/$dir.tar.gz" -C out "$dir"
           done
           (cd assets && sha256sum -- * > SHA256SUMS)

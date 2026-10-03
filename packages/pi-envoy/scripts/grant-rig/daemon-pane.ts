@@ -55,11 +55,11 @@ export interface PaneRequest {
   readonly natsUrls: readonly string[];
   readonly bootTokenFile: string;
   readonly path: string;
-  readonly rolesDir?: string;
+  readonly systemPrompt?: boolean;
 }
 
-/** What the daemon tells the pane: every variable, PATH included, and, for a request that names a
- * role bundle, the one `--append-system-prompt` argument as shell text. */
+/** What the daemon tells the pane: every variable, PATH included, and, for a request that asks for
+ * it, the one `--append-system-prompt` argument as shell text. */
 export interface DaemonPane {
   readonly env: Record<string, string>;
   readonly systemPromptArgument?: string;

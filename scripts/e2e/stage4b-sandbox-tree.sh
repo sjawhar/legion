@@ -208,8 +208,6 @@ blocked() {
 . "$root/scripts/e2e/lib/namespace-rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 
 rk() { timeout --foreground 300 kubectl --kubeconfig "$runtime_kubeconfig" --context "$runtime_context" "$@"; }
@@ -1533,7 +1531,6 @@ pass
 
 begin boot
 (cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
-stage_role_prompts "$root" "$work"
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion") || fail "lib/built-from.sh could not say what the run built"
 while IFS= read -r line; do note "$line"; done <<<"$built"
 # The build's source is the run's recorded source, or the tree changed between the two.
