@@ -190,7 +190,8 @@ func (n noAliases) ListAliases(context.Context, *kms.ListAliasesInput, ...func(*
 
 // TestLoadReadsEveryPageOfThePrefixOnly pins that the loader asks Secrets Manager for the
 // namespace prefix alone, reads every page, skips a name the prefix filter matched only
-// case-insensitively, and never resolves aliases nobody used.
+// case-insensitively without logging it as refused (it is not in the namespace, and the alarm
+// counts refusals), and never resolves aliases nobody used.
 func TestLoadReadsEveryPageOfThePrefixOnly(t *testing.T) {
 	entry := func(name string) smtypes.SecretListEntry {
 		return smtypes.SecretListEntry{
@@ -206,12 +207,16 @@ func TestLoadReadsEveryPageOfThePrefixOnly(t *testing.T) {
 		entry(strings.ToUpper(policytest.Prefix) + "third"), entry(policytest.Prefix + "fourth"),
 	}}
 	loader := policy.Loader{Secrets: sm, Aliases: noAliases{t}, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
+	logged := captureLog(t)
 	set, err := loader.Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(set.Secrets) != 3 || set.Secrets["FIRST"].ARN != "arn:"+policytest.Prefix+"first" || set.Secrets["FOURTH"].Name != "FOURTH" {
 		t.Fatalf("served %+v, want FIRST, SECOND and FOURTH", set.Secrets)
+	}
+	if logged.String() != "" {
+		t.Fatalf("a name outside the namespace was logged rather than skipped:\n%s", logged)
 	}
 	if len(sm.filters) != 4 {
 		t.Fatalf("asked for %d pages, want 4", len(sm.filters))
@@ -288,8 +293,35 @@ func await(t *testing.T, done func() bool) {
 
 // TestVersionNamesThePolicyNotItsListingOrder pins that the version is a function of the served
 // policy alone: the same secrets listed in another order give the same version, and any owner,
-// tier or ARN change gives another.
+// tier, name or ARN change gives another.
 func TestVersionNamesThePolicyNotItsListingOrder(t *testing.T) {
+	// Secrets Manager promises no listing order, so these listings come back in the order given.
+	listed := func(entries ...smtypes.SecretListEntry) string {
+		t.Helper()
+		loader := policy.Loader{Secrets: &pagedSecrets{entries: entries}, Aliases: noAliases{t}, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
+		set, err := loader.Load(context.Background())
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		return set.Version
+	}
+	entry := func(slug, arn string) smtypes.SecretListEntry {
+		return smtypes.SecretListEntry{
+			Name: aws.String(policytest.Prefix + slug), ARN: aws.String(arn), KmsKeyId: aws.String(policytest.KeyARN),
+			Tags: []smtypes.Tag{
+				{Key: aws.String(policy.TagOwner), Value: aws.String(policy.OwnerShared)},
+				{Key: aws.String(policy.TagTier), Value: aws.String(policy.TierAgent)},
+			},
+		}
+	}
+	first, second := entry("a-key", "arn:a-key-1"), entry("b-key", "arn:b-key-1")
+	if listed(first, second) != listed(second, first) {
+		t.Fatal("the same secrets in another order gave another version")
+	}
+	if listed(first, entry("b-key", "arn:b-key-2")) == listed(first, second) {
+		t.Error("a secret created again under its name, with a new ARN, left the version unchanged")
+	}
+
 	load := func(ss ...secrets.LocalSecret) string {
 		t.Helper()
 		set, err := policytest.Loader(secrets.NewLocal(ss...)).Load(context.Background())
@@ -301,9 +333,6 @@ func TestVersionNamesThePolicyNotItsListingOrder(t *testing.T) {
 	a := policytest.Secret("A_KEY", owner, policy.TierAgent, "v")
 	b := policytest.Secret("B_KEY", policy.OwnerShared, policy.TierHuman, "v")
 	base := load(a, b)
-	if load(b, a) != base {
-		t.Fatal("the same secrets in another order gave another version")
-	}
 	value := b
 	value.Value = "another value"
 	if load(a, value) != base {
