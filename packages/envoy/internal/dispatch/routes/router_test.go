@@ -391,6 +391,44 @@ func TestStaticHandlerServesSpaShellForUnknownRoute(t *testing.T) {
 	}
 }
 
+func TestStaticHandlerServesNoticesAsPlainText(t *testing.T) {
+	webDist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(webDist, "THIRD_PARTY_NOTICES.txt"), []byte("notices"), 0o600); err != nil {
+		t.Fatalf("write notices: %v", err)
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/THIRD_PARTY_NOTICES.txt", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("notices status: got %d, want %d", response.Code, http.StatusOK)
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "text/plain; charset=utf-8" {
+		t.Fatalf("notices Content-Type: got %q, want text/plain; charset=utf-8", contentType)
+	}
+}
+
+func TestStaticHandlerServesExportedPNGsAsImages(t *testing.T) {
+	webDist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(webDist, "agent.png"), []byte("png"), 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/agent.png", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("image status: got %d, want %d", response.Code, http.StatusOK)
+	}
+	if contentType := response.Header().Get("Content-Type"); contentType != "image/png" {
+		t.Fatalf("image Content-Type: got %q, want image/png", contentType)
+	}
+}
+
 func TestStaticHandlerServesIndexAtRoot(t *testing.T) {
 	webDist := t.TempDir()
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
