@@ -38,7 +38,7 @@ hands it to its reader. `envoy-dispatch settings` prints the table, and the docs
 site's configuration reference (`docs/site/generators/dispatch-config.ts`) is
 generated from it. A variable a release stopped reading leaves the table for
 `removedSettings`, beside it, with what replaced it: the table reads it too, and
-`resolveBootConfig` refuses to start while it is set.
+`resolveBootConfig` refuses to start while it is set (`refuseRemovedSettings`).
 
 `dispatchHandler` mounts the one `GET /healthz` the process serves on its own
 mux, above the dashboard router, and the probe reads the database through
