@@ -163,8 +163,8 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/credential-requests/machine-lookup", authHuman, "Resolve a pending machine login by its typed confirmation code, returning its facts.", s.lookupMachineCredential},
 		{http.MethodGet, "/api/v1/credential-grants", authHuman, "List credential grants the caller may revoke (?approver=me only).", s.listCredentialGrants},
 		{http.MethodPost, "/api/v1/credential-grants/{id}/revoke", authHuman, "Revoke a credential grant as the caller, its approver or its enrollment's operator.", s.revokeCredentialGrant},
-		{http.MethodGet, "/api/v1/machine-logins", authHuman, "List the caller's live machine logins: the secrets broker's launcher credentials the caller is the operator of.", s.listMachineLogins},
-		{http.MethodPost, "/api/v1/machine-logins/{id}/revoke", authHuman, "Revoke one of the caller's machine logins before it expires, ending every session it enrolled; the broker refuses anyone but its operator.", s.revokeMachineLogin},
+		{http.MethodGet, "/api/v1/machine-logins", authHuman, "List the live machine logins the caller approved: the secrets broker's launcher credentials for the caller's own machines and for any service whose login the caller approved.", s.listMachineLogins},
+		{http.MethodPost, "/api/v1/machine-logins/{id}/revoke", authHuman, "Revoke a machine login the caller approved before it expires, ending every session it enrolled, a service's pods included; the broker refuses anyone but the person who approved it.", s.revokeMachineLogin},
 	}
 	if s.deps.TestHooksEnabled {
 		routes = append(routes,

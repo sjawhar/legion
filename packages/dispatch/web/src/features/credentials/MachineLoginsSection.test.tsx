@@ -12,12 +12,21 @@ const devbox: MachineLogin = {
   expires_at: "2026-10-10T12:00:00Z",
   host: "devbox.example.com",
   issued_at: "2026-10-03T12:00:00Z",
+  service: null,
 };
 const laptop: MachineLogin = {
   credential_id: "cred-laptop",
   expires_at: "2026-10-09T08:00:00Z",
   host: "laptop.example.com",
   issued_at: "2026-10-02T08:00:00Z",
+  service: null,
+};
+const daemon: MachineLogin = {
+  credential_id: "cred-daemon",
+  expires_at: "2026-10-10T09:00:00Z",
+  host: "cluster.example.com",
+  issued_at: "2026-10-03T09:00:00Z",
+  service: "legion-daemon",
 };
 
 function renderPage() {
@@ -70,6 +79,47 @@ test("the machine-login page lists the viewer's machine logins, and Revoke ends 
     await waitFor(() => expect(section.queryByText("devbox.example.com")).toBeNull());
     expect(section.getByText("laptop.example.com")).toBeDefined();
     expect(revokeMachineLogin).toHaveBeenCalledTimes(1);
+  } finally {
+    cleanup();
+    window.confirm = originalConfirm;
+    getMachineLogins.mockRestore();
+    revokeMachineLogin.mockRestore();
+  }
+});
+
+test("a service's login the viewer approved is listed by its service, and its Revoke says its pods end", async () => {
+  let live = [daemon, devbox];
+  const getMachineLogins = spyOn(api, "getMachineLogins").mockImplementation(async () => ({
+    credentials: live,
+  }));
+  const revokeMachineLogin = spyOn(api, "revokeMachineLogin").mockImplementation(async (id) => {
+    live = live.filter((login) => login.credential_id !== id);
+  });
+  const originalConfirm = window.confirm;
+  const asked: string[] = [];
+  window.confirm = (message?: string) => {
+    asked.push(message ?? "");
+    return true;
+  };
+
+  try {
+    renderPage();
+    const section = within(await screen.findByRole("region", { name: "Your machine logins" }));
+    const daemonRow = (await section.findByText("legion-daemon on cluster.example.com")).closest(
+      "tr"
+    );
+    expect(daemonRow).not.toBeNull();
+    expect(section.getByText("devbox.example.com")).toBeDefined();
+
+    fireEvent.click(within(daemonRow as HTMLElement).getByRole("button", { name: "Revoke" }));
+    expect(asked).toEqual([
+      "Revoke the legion-daemon login on cluster.example.com? Every session it started, its worker pods included, ends at once, and legion-daemon needs a new login approval before it starts any more.",
+    ]);
+    await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-daemon"));
+    await waitFor(() =>
+      expect(section.queryByText("legion-daemon on cluster.example.com")).toBeNull()
+    );
+    expect(section.getByText("devbox.example.com")).toBeDefined();
   } finally {
     cleanup();
     window.confirm = originalConfirm;

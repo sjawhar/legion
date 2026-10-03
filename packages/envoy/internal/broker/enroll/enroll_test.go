@@ -68,8 +68,16 @@ func str(s string) *string { return &s }
 // returns the Credential these Create/Revoke tests exercise. These tests care about Create and
 // Revoke given an already-minted credential, not about how a credential comes to exist (that is
 // machine_test.go's job, including AuthenticateLauncher's own issuance-chain re-verification), so
-// there is no record to back this credential and no need for one.
+// there is no record to back this credential and no need for one. A test of who may list or revoke
+// a credential, which follows its record's approver, mints one with mintApprovedCredential.
 func mintCredential(t *testing.T, svc *Service, operator, service *string, host string) Credential {
+	t.Helper()
+	return mintCredentialFrom(t, svc, operator, service, host, "")
+}
+
+// mintCredentialFrom is mintCredential minting from credential-request record recordID ("" for
+// none).
+func mintCredentialFrom(t *testing.T, svc *Service, operator, service *string, host, recordID string) Credential {
 	t.Helper()
 	key, err := proof.NewKey()
 	if err != nil {
@@ -83,7 +91,7 @@ func mintCredential(t *testing.T, svc *Service, operator, service *string, host 
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := svc.mintLauncherCredential(context.Background(), svc.Store.Pool, operator, service, host, thumbprint, jwk, "", time.Now().Add(time.Hour))
+	id, err := svc.mintLauncherCredential(context.Background(), svc.Store.Pool, operator, service, host, thumbprint, jwk, recordID, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("mintLauncherCredential: %v", err)
 	}
@@ -91,6 +99,29 @@ func mintCredential(t *testing.T, svc *Service, operator, service *string, host 
 		operator = new(record.CanonicalLogin(*operator))
 	}
 	return Credential{ID: id, Operator: operator, Service: service, Host: host}
+}
+
+// insertRecord writes a credential-request record of kind naming approver, and returns its id.
+func insertRecord(t *testing.T, svc *Service, kind, approver string) string {
+	t.Helper()
+	id := strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := svc.Store.Pool.Exec(context.Background(), `insert into credential_requests (id, body, kind, approver, expires_at)
+		values ($1,'body',$2,$3, now() + interval '1 hour')`, id, kind, approver); err != nil {
+		t.Fatalf("insert %s record: %v", kind, err)
+	}
+	return id
+}
+
+// mintApprovedCredential mints a launcher credential as machine.Service.ApplyDecision does once
+// approver approves a machine login: from a launcher_credential record naming approver, with
+// approver its operator for a person's own machine, or no operator for a service's login.
+func mintApprovedCredential(t *testing.T, svc *Service, approver string, service *string, host string) Credential {
+	t.Helper()
+	var operator *string
+	if service == nil {
+		operator = &approver
+	}
+	return mintCredentialFrom(t, svc, operator, service, host, insertRecord(t, svc, "launcher_credential", approver))
 }
 
 // TestAnOperatorCredentialEnrollsItsOwnOperator: a personal launcher credential's operator is the
@@ -883,8 +914,8 @@ func liveCredentialIDs(t *testing.T, svc *Service, operator string) []uuid.UUID 
 func TestRevokingAMachineLoginEndsEverySessionItEnrolled(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
-	devbox := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
-	laptop := mintCredential(t, svc, str("ada@example.com"), nil, "laptop")
+	devbox := mintApprovedCredential(t, svc, "ada@example.com", nil, "devbox")
+	laptop := mintApprovedCredential(t, svc, "ada@example.com", nil, "laptop")
 	host, err := svc.Create(ctx, devbox, Enrollment{Kind: "host", RuntimeID: "host-1", Thumbprint: "tp-host-1"})
 	if err != nil {
 		t.Fatalf("Create(host): %v", err)
@@ -904,7 +935,7 @@ func TestRevokingAMachineLoginEndsEverySessionItEnrolled(t *testing.T) {
 	}
 
 	if err := svc.RevokeCredential(ctx, devbox.ID.String(), " Ada@Example.com "); err != nil {
-		t.Fatalf("RevokeCredential by its operator: %v", err)
+		t.Fatalf("RevokeCredential by the person who approved it: %v", err)
 	}
 
 	for _, e := range []Enrollment{host, box} {
@@ -942,16 +973,17 @@ func TestRevokingAMachineLoginEndsEverySessionItEnrolled(t *testing.T) {
 	}
 }
 
-// TestOnlyAMachineLoginsOperatorRevokesIt: another person, an empty name and a service's credential
-// (which has no operator) are each ErrNotOperator, an unknown id is ErrNoCredential, and none of
-// them ends anything. A person's list holds only their own live credentials, never an expired one.
-func TestOnlyAMachineLoginsOperatorRevokesIt(t *testing.T) {
+// TestOnlyTheApproverRevokesAMachineLogin: another person, an empty name, and another person
+// revoking a service's login someone else approved are each ErrNotApprover, an unknown id is
+// ErrNoCredential, and none of them ends anything. A person's list holds the live credentials they
+// approved, a service's login among them, never another person's and never an expired one.
+func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
-	ada := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
-	bob := mintCredential(t, svc, str("bob@example.com"), nil, "bobs-box")
-	service := mintCredential(t, svc, nil, str("legion-daemon"), "cluster")
-	expired := mintCredential(t, svc, str("ada@example.com"), nil, "old-box")
+	ada := mintApprovedCredential(t, svc, "ada@example.com", nil, "devbox")
+	bob := mintApprovedCredential(t, svc, "bob@example.com", nil, "bobs-box")
+	service := mintApprovedCredential(t, svc, "ada@example.com", str("legion-daemon"), "cluster")
+	expired := mintApprovedCredential(t, svc, "ada@example.com", nil, "old-box")
 	if _, err := svc.Store.Pool.Exec(ctx, `update launcher_credentials set expires_at = now() - interval '1 minute' where id=$1`, expired.ID); err != nil {
 		t.Fatalf("expire a credential: %v", err)
 	}
@@ -959,23 +991,23 @@ func TestOnlyAMachineLoginsOperatorRevokesIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if got := liveCredentialIDs(t, svc, "ada@example.com"); !slices.Equal(got, []uuid.UUID{ada.ID}) {
-		t.Fatalf("LiveCredentials(ada) = %v, want her live devbox credential alone", got)
+	if got := liveCredentialIDs(t, svc, "ada@example.com"); !slices.Equal(got, []uuid.UUID{service.ID, ada.ID}) {
+		t.Fatalf("LiveCredentials(ada) = %v, want the service login she approved, then her live devbox", got)
 	}
 	if got := liveCredentialIDs(t, svc, "bob@example.com"); !slices.Equal(got, []uuid.UUID{bob.ID}) {
 		t.Fatalf("LiveCredentials(bob) = %v, want his own alone", got)
 	}
 
 	for _, tc := range []struct {
-		name, id, operator string
+		name, id, approver string
 		want               error
 	}{
-		{"another person", ada.ID.String(), "bob@example.com", ErrNotOperator},
-		{"no one", ada.ID.String(), "  ", ErrNotOperator},
-		{"a service's credential", service.ID.String(), "ada@example.com", ErrNotOperator},
+		{"another person", ada.ID.String(), "bob@example.com", ErrNotApprover},
+		{"no one", ada.ID.String(), "  ", ErrNotApprover},
+		{"another person, a service's login", service.ID.String(), "bob@example.com", ErrNotApprover},
 		{"an unknown id", uuid.NewString(), "ada@example.com", ErrNoCredential},
 	} {
-		if err := svc.RevokeCredential(ctx, tc.id, tc.operator); !errors.Is(err, tc.want) {
+		if err := svc.RevokeCredential(ctx, tc.id, tc.approver); !errors.Is(err, tc.want) {
 			t.Fatalf("RevokeCredential(%s) = %v, want %v", tc.name, err, tc.want)
 		}
 	}
@@ -985,6 +1017,115 @@ func TestOnlyAMachineLoginsOperatorRevokesIt(t *testing.T) {
 	var revoked int
 	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from launcher_credentials where revoked_at is not null`).Scan(&revoked); err != nil || revoked != 0 {
 		t.Fatalf("revoked credentials after the refused revokes = %d (%v), want none", revoked, err)
+	}
+}
+
+// TestAnApproverRevokesAServiceLoginAndEveryPodItEnrolled: a service's login, which has no
+// operator, is listed for the person who approved it and revoked by them alone, and revoking it
+// ends every pod it enrolled — each pod's grants revoked and pending requests cancelled in the
+// approver's name, its lease no longer renewable — while a pod another service login enrolled goes
+// on. The audit row names the service and both pods.
+func TestAnApproverRevokesAServiceLoginAndEveryPodItEnrolled(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	issuer, key := withPodVerifier(t, svc)
+	daemon := mintApprovedCredential(t, svc, "ada@example.com", str("legion-daemon"), "cluster")
+	other := mintApprovedCredential(t, svc, "bob@example.com", str("legion-daemon"), "other-cluster")
+	pod := func(cred Credential, uid, slot string) Enrollment {
+		t.Helper()
+		enr, err := svc.Create(ctx, cred, Enrollment{
+			Kind: "pod", RuntimeID: uid, Slot: slot, Thumbprint: "tp-" + uid + "-" + slot,
+			PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", uid),
+		})
+		if err != nil {
+			t.Fatalf("Create(pod %s, slot %s): %v", uid, slot, err)
+		}
+		return enr
+	}
+	implementer := pod(daemon, "pod-1", "implementer-g1")
+	reviewer := pod(daemon, "pod-1", "reviewer-g1")
+	elsewhere := pod(other, "pod-2", "implementer-g1")
+	grant := insertLiveGrant(t, svc, implementer.ID)
+	pending := insertPendingRequest(t, svc, reviewer.ID)
+	creds, err := svc.LiveCredentials(ctx, "ada@example.com")
+	if err != nil || len(creds) != 1 || creds[0].ID != daemon.ID || creds[0].Host != "cluster" || creds[0].Service == nil || *creds[0].Service != "legion-daemon" {
+		t.Fatalf("LiveCredentials(ada) = %+v, %v; want the legion-daemon login on cluster she approved", creds, err)
+	}
+
+	if err := svc.RevokeCredential(ctx, daemon.ID.String(), "bob@example.com"); !errors.Is(err, ErrNotApprover) {
+		t.Fatalf("RevokeCredential by bob, who approved another login = %v, want ErrNotApprover", err)
+	}
+	if _, live, err := svc.Lookup(ctx, implementer.ID.String()); err != nil || !live {
+		t.Fatalf("Lookup(implementer pod) after bob's refused revoke = live %v, %v; want live", live, err)
+	}
+	if err := svc.RevokeCredential(ctx, daemon.ID.String(), "ada@example.com"); err != nil {
+		t.Fatalf("RevokeCredential by ada, who approved it: %v", err)
+	}
+
+	for _, e := range []Enrollment{implementer, reviewer} {
+		if _, live, err := svc.Lookup(ctx, e.ID.String()); err != nil || live {
+			t.Fatalf("Lookup(pod slot %s) after the revoke = live %v, %v; want ended", e.Slot, live, err)
+		}
+		if _, err := svc.Renew(ctx, e.ID.String()); !errors.Is(err, ErrNotLive) {
+			t.Fatalf("Renew(pod slot %s) after the revoke = %v, want ErrNotLive", e.Slot, err)
+		}
+	}
+	if _, live, err := svc.Lookup(ctx, elsewhere.ID.String()); err != nil || !live {
+		t.Fatalf("Lookup(the other login's pod) = live %v, %v; want it still live", live, err)
+	}
+	var revokedBy *string
+	if err := svc.Store.Pool.QueryRow(ctx, `select revoked_by from grants where id=$1`, grant).Scan(&revokedBy); err != nil || revokedBy == nil || *revokedBy != "human:ada@example.com" {
+		t.Fatalf("grant revoked_by = %v (%v), want human:ada@example.com", revokedBy, err)
+	}
+	if state, by, _, event := requestState(t, svc, pending); state != "cancelled" || by != "human:ada@example.com" || event != "cancelled by human:ada@example.com" {
+		t.Fatalf("pending request after the revoke: state=%s decided_by=%s record event=%q, want cancelled by human:ada@example.com", state, by, event)
+	}
+	var service string
+	var ended int
+	if err := svc.Store.Pool.QueryRow(ctx, `select detail->>'service', jsonb_array_length(detail->'enrollments') from audit
+		where kind='launcher_credential.revoked' and actor='human:ada@example.com' and detail->>'credential_id'=$1`, daemon.ID.String()).Scan(&service, &ended); err != nil {
+		t.Fatalf("read the launcher_credential.revoked audit row: %v", err)
+	}
+	if service != "legion-daemon" || ended != 2 {
+		t.Fatalf("audit row names service %q and %d enrollments, want legion-daemon and 2", service, ended)
+	}
+	if got := liveCredentialIDs(t, svc, "ada@example.com"); len(got) != 0 {
+		t.Fatalf("LiveCredentials(ada) after the revoke = %v, want none", got)
+	}
+	if got := liveCredentialIDs(t, svc, "bob@example.com"); !slices.Equal(got, []uuid.UUID{other.ID}) {
+		t.Fatalf("LiveCredentials(bob) = %v, want the login he approved, untouched", got)
+	}
+}
+
+// TestOnlyALaunchersOwnRecordNamesWhoMayListAndRevokeIt: who may list and revoke a credential is
+// the approver of the launcher_credential record it was minted from, and nothing else — not its
+// operator column (a credential whose operator is ada but whose record bob approved, a shape the
+// broker never mints), not a record of another kind that names ada, and not a credential with no
+// record at all. None of the three is ada's to list or revoke; the first is bob's.
+func TestOnlyALaunchersOwnRecordNamesWhoMayListAndRevokeIt(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	bobs := mintCredentialFrom(t, svc, str("ada@example.com"), nil, "bobs-record", insertRecord(t, svc, "launcher_credential", "bob@example.com"))
+	secret := mintCredentialFrom(t, svc, str("ada@example.com"), nil, "secret-record", insertRecord(t, svc, "agent_secret", "ada@example.com"))
+	unbacked := mintCredential(t, svc, str("ada@example.com"), nil, "no-record")
+
+	if got := liveCredentialIDs(t, svc, "ada@example.com"); len(got) != 0 {
+		t.Fatalf("LiveCredentials(ada) = %v, want none: she approved no launcher record", got)
+	}
+	if got := liveCredentialIDs(t, svc, "bob@example.com"); !slices.Equal(got, []uuid.UUID{bobs.ID}) {
+		t.Fatalf("LiveCredentials(bob) = %v, want the one minted from the record he approved", got)
+	}
+	for name, c := range map[string]Credential{"another approver's record": bobs, "a record of another kind": secret, "no record": unbacked} {
+		if err := svc.RevokeCredential(ctx, c.ID.String(), "ada@example.com"); !errors.Is(err, ErrNotApprover) {
+			t.Fatalf("RevokeCredential(%s) by ada = %v, want ErrNotApprover", name, err)
+		}
+	}
+	var revoked int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from launcher_credentials where revoked_at is not null`).Scan(&revoked); err != nil || revoked != 0 {
+		t.Fatalf("revoked credentials after ada's refused revokes = %d (%v), want none", revoked, err)
+	}
+	if err := svc.RevokeCredential(ctx, bobs.ID.String(), "bob@example.com"); err != nil {
+		t.Fatalf("RevokeCredential by bob, its record's approver: %v", err)
 	}
 }
 
@@ -1056,7 +1197,7 @@ func TestAnEnrollmentRacingARevokeCannotLand(t *testing.T) {
 func TestARevokeEndsAnEnrollmentCreatedWhileItWaited(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
-	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	cred := mintApprovedCredential(t, svc, "ada@example.com", nil, "devbox")
 	tx, err := svc.Store.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)

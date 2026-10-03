@@ -28,11 +28,12 @@ import { credentialGrantsQuery } from "./grants";
 export const machineLoginsQueryKey = ["machine-logins"] as const;
 
 /**
- * The viewer's live machine logins: one row per machine whose login they approved, with when it was
- * issued and when it expires. Revoke ends a login before then: the machine enrolls no more
- * sessions, and every session it enrolled loses the broker at once, its grants with it. Dispatch
- * names the viewer as the login's operator, and the broker refuses anyone else. Rendered on the
- * machine-login page.
+ * The live machine logins the viewer approved: one row per machine logged in as them, and one per
+ * service whose login they approved (the Legion daemon's, labelled `legion-daemon on <host>`), with
+ * when it was issued and when it expires. Revoke ends a login before then: it enrolls no more
+ * sessions, and every session it enrolled (a service's worker pods) loses the broker at once, its
+ * grants with it. Dispatch names the viewer as the person revoking, and the broker refuses anyone
+ * but the login's approver. Rendered on the machine-login page.
  */
 export function MachineLoginsSection(): ReactNode {
   const queryClient = useQueryClient();
@@ -50,11 +51,10 @@ export function MachineLoginsSection(): ReactNode {
     },
   });
   const confirmRevoke = (login: MachineLogin) => {
-    if (
-      window.confirm(
-        `Revoke the machine login for ${login.host}? Every agent session it started loses its secrets at once, and the machine needs a new login.`
-      )
-    ) {
+    const question = login.service
+      ? `Revoke the ${login.service} login on ${login.host}? Every session it started, its worker pods included, ends at once, and ${login.service} needs a new login approval before it starts any more.`
+      : `Revoke the machine login for ${login.host}? Every agent session it started loses its secrets at once, and the machine needs a new login.`;
+    if (window.confirm(question)) {
       submitGuard.guard(() => revoke.mutate(login.credential_id));
     }
   };
@@ -65,8 +65,9 @@ export function MachineLoginsSection(): ReactNode {
         Your machine logins
       </h2>
       <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
-        Every machine logged in as you, until its login expires. Revoking one ends it now: the
-        machine starts no more sessions, and every session it started loses its secrets.
+        Every machine logged in as you, and every service whose login you allowed, until its login
+        expires. Revoking one ends it now: it starts no more sessions, and every session it started
+        loses its secrets.
       </p>
 
       {logins.isPending ? (
@@ -111,7 +112,7 @@ export function MachineLoginsSection(): ReactNode {
                 logins.data.credentials.map((login) => (
                   <tr className="border-b last:border-0" key={login.credential_id}>
                     <td className={`px-4 py-3 font-medium ${textPrimaryOnSurface}`}>
-                      {login.host}
+                      {login.service ? `${login.service} on ${login.host}` : login.host}
                     </td>
                     <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>
                       <Timestamp at={login.issued_at} />

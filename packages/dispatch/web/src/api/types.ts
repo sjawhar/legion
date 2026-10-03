@@ -206,12 +206,15 @@ export interface CredentialGrantsResponse {
   grants: CredentialGrant[];
 }
 
-/** One of the viewer's live machine logins on `GET /api/v1/machine-logins`: the launcher
- *  credential a machine login the viewer approved minted for one of their machines, neither
+/** One of the live machine logins the viewer approved on `GET /api/v1/machine-logins`: the
+ *  launcher credential it minted, for one of the viewer's machines or for a service, neither
  *  revoked nor expired. */
 export interface MachineLogin {
   credential_id: string;
   host: string;
+  /** The service a service's login is for (`legion-daemon`), whose sessions are its worker pods;
+   *  null for the viewer's own machine. */
+  service: string | null;
   issued_at: string;
   expires_at: string;
 }

@@ -382,12 +382,12 @@ func TestContractLoginStatusNamesWhenTheLauncherCredentialExpires(t *testing.T) 
 	}
 }
 
-// TestContractRevokingTheMachineLoginEndsItsSessionsAndTheHelperDropsIt: the operator revokes the
-// machine login a running helper holds, as Dispatch's machine-login page does (the broker's UI
-// route). Nothing tells the helper, and nothing needs to: the revoke ends the helper's session, so
-// the session's next renew is refused; revoking that lapsed enrollment through the launcher route
-// is refused 401 LAUNCHER_INVALID, so the helper drops the credential, says at ERROR that the
-// broker refused it, and login-status reports no credential held.
+// TestContractRevokingTheMachineLoginEndsItsSessionsAndTheHelperDropsIt: the person who approved
+// the machine login a running helper holds revokes it, as Dispatch's machine-login page does (the
+// broker's UI route). Nothing tells the helper, and nothing needs to: the revoke ends the helper's
+// session, so the session's next renew is refused; revoking that lapsed enrollment through the
+// launcher route is refused 401 LAUNCHER_INVALID, so the helper drops the credential, says at
+// ERROR that the broker refused it, and login-status reports no credential held.
 func TestContractRevokingTheMachineLoginEndsItsSessionsAndTheHelperDropsIt(t *testing.T) {
 	cr := newContractRig(t, brokertest.WithLease(3*time.Second))
 	b := cr.srv.Broker
@@ -402,8 +402,8 @@ func TestContractRevokingTheMachineLoginEndsItsSessionsAndTheHelperDropsIt(t *te
 		t.Fatalf("register: %+v, want the session enrolled", reg)
 	}
 
-	status, body := cr.broker.UI(t, http.MethodPost, "/v1/launcher-credentials/"+credentialID+"/revoke-by-operator",
-		map[string]any{"operator": cr.broker.Operator})
+	status, body := cr.broker.UI(t, http.MethodPost, "/v1/launcher-credentials/"+credentialID+"/revoke-by-approver",
+		map[string]any{"approver": cr.broker.Operator})
 	if status != http.StatusOK {
 		t.Fatalf("revoke the machine login = %d: %s", status, body)
 	}

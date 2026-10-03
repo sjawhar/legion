@@ -241,12 +241,14 @@ enrollment's slot under its enrollment, and has a Revoke button that POSTs `{}` 
 `/api/v1/credential-grants/{id}/revoke`; revoking an automatic grant makes that session ask before
 it gets those secrets again.
 
-`MachineLoginsSection.tsx` renders under the code entry on `/credentials/machine`: the viewer's
-live machine logins (`GET /api/v1/machine-logins`, query key `machineLoginsQueryKey`, which an
-approval on the page also invalidates), one row per machine with its host, when it was issued and
+`MachineLoginsSection.tsx` renders under the code entry on `/credentials/machine`: the live machine
+logins the viewer approved (`GET /api/v1/machine-logins`, query key `machineLoginsQueryKey`, which an
+approval on the page also invalidates), one row per login with its machine (the host, or
+`<service> on <host>` for a service's login such as the Legion daemon's), when it was issued and
 when it expires, and a Revoke button that asks `window.confirm` first and then POSTs `{}` to
-`/api/v1/machine-logins/{id}/revoke`. Revoking ends the machine's login and every session it
-enrolled, so it also invalidates the Live grants list.
+`/api/v1/machine-logins/{id}/revoke`. The confirm for a service's login says every session it
+started, its worker pods included, ends and the service needs a new login approval. Revoking ends
+the login and every session it enrolled, so it also invalidates the Live grants list.
 
 `packages/envoy/internal/dispatch/agentsecrets/client.go` is Dispatch's server-side client for the
 broker's UI-bearer API (`DISPATCH_AGENT_SECRETS_URL`/`DISPATCH_AGENT_SECRETS_TOKEN[_FILE]`,
@@ -258,8 +260,8 @@ the approving human from the request body on that bearer's word, so Dispatch bui
 body itself. `Approve` and `Deny` take an `agentsecrets.Decision{Approver, Code}`, where `Approver`
 is always `canonicalLogin` of the `requireHuman` caller and `Code` is the only field read from the
 browser's body; any other field the browser sends, an `approver` among them, is dropped.
-`RevokeByApprover` sends only the caller's canonical login, and `MachineLogins` and
-`RevokeMachineLogin` send it as the `operator`. Cookie-authenticated unsafe requests
+`RevokeByApprover`, `MachineLogins` and `RevokeMachineLogin` send only the caller's canonical login
+as the approver. Cookie-authenticated unsafe requests
 must be same-origin (`enforceCookieOrigin` in `packages/envoy/internal/dispatch/routes/router.go`),
 so another site cannot send a decision from a signed-in human's browser.
 `packages/envoy/internal/dispatch/api/credential_requests.go` mounts the nine `human`-auth proxy
@@ -281,9 +283,10 @@ against a fake broker, and `internal/dispatch/api/contract_test.go` round-trips 
 whatever login its body names, and the value released; a shared secret's request in two people's
 lists and approved by the second; an automatic grant listed as automatic, revoked, and the same
 session's next request for it waiting on its owner while another session still gets it at once;
-and a machine login listed for its operator alone, another person's revoke refused
-`403 NOT_OPERATOR` whatever their body names, and the operator's revoke ending the session it
-enrolled and its launcher proofs.
+a machine login listed for the person who approved it alone, another person's revoke refused
+`403 NOT_APPROVER` whatever their body names, and the approver's revoke ending the session it
+enrolled and its launcher proofs; and a service's login listed with its service for its approver
+alone, and revocable by them alone.
 
 ## Dark mode
 

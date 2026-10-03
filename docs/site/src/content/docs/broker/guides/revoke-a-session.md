@@ -97,24 +97,26 @@ in one step, and the approver's Inbox drops them. A session ends in one of two w
 ## End a machine's login
 
 A machine login lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from its approval, but the person who
-approved it can end it sooner: for a machine that is lost, compromised or no longer used. Dispatch's
-machine-login page (`/credentials/machine`) lists **Your machine logins**, every machine logged in
-as you, with when its login was issued and when it expires. Click **Revoke** on its row and confirm.
+approved it can end it sooner: for a machine that is lost, compromised or no longer used, or a
+Legion daemon whose pods must lose their secrets now. Dispatch's machine-login page
+(`/credentials/machine`) lists **Your machine logins**: every machine logged in as you, and every
+service whose login you approved, such as the Legion daemon's, shown as `legion-daemon on <host>`,
+each with when its login was issued and when it expires. Click **Revoke** on its row and confirm.
 The broker then, at once:
 
-- refuses the machine's credential, so the machine enrolls no more sessions; and
-- ends every session the machine enrolled, host sessions and boxes alike, as [ending a
-  session](#end-a-session) does: each one's grants are revoked and its pending requests cancelled,
-  and its next call is refused `PROOF_INVALID`.
+- refuses the login's credential, so it enrolls no more sessions; and
+- ends every session it enrolled (host sessions and boxes, or every worker pod of the Legion
+  daemon's login) as [ending a session](#end-a-session) does: each one's grants are revoked and its
+  pending requests cancelled, and its next call is refused `PROOF_INVALID`.
 
-Only the login's operator may revoke it; the broker refuses anyone else `NOT_OPERATOR`. A revoked
-login stays revoked: the machine runs `agent-secrets launcher login` again, and its operator approves
-the new code.
+Only the person who approved the login may revoke it; the broker refuses anyone else
+`NOT_APPROVER`. A revoked login stays revoked: the machine runs `agent-secrets launcher login`
+again, or the Legion daemon starts a new login, and that person approves the new code.
 
 ```console
-$ curl -s -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" "$AGENT_SECRETS_URL/v1/launcher-credentials?operator=ada@example.com"
-{"credentials":[{"credential_id":"5d2b7f0e-8a41-4c3e-9b6f-0c7e2a9d1f34","host":"example-host-devbox","issued_at":"2026-10-03T09:12:40.512Z","expires_at":"2026-10-10T09:12:40.508Z"}]}
-$ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"operator":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/launcher-credentials/5d2b7f0e-8a41-4c3e-9b6f-0c7e2a9d1f34/revoke-by-operator"
+$ curl -s -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" "$AGENT_SECRETS_URL/v1/launcher-credentials?approver=ada@example.com"
+{"credentials":[{"credential_id":"5d2b7f0e-8a41-4c3e-9b6f-0c7e2a9d1f34","host":"example-host-devbox","service":null,"issued_at":"2026-10-03T09:12:40.512Z","expires_at":"2026-10-10T09:12:40.508Z"},{"credential_id":"0b6c1d55-3e7a-4f02-8c19-6a4e2d7b9f10","host":"example-host-cluster","service":"legion-daemon","issued_at":"2026-10-02T17:40:03.101Z","expires_at":"2026-10-09T17:40:03.097Z"}]}
+$ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/launcher-credentials/5d2b7f0e-8a41-4c3e-9b6f-0c7e2a9d1f34/revoke-by-approver"
 {"state":"revoked"}
 ```
 
@@ -132,7 +134,11 @@ expired
 agent-secrets launcher login-status: the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login
 ```
 
-A helper with no session running finds out when it next enrolls one.
+A helper with no session running finds out when it next enrolls one. The Legion daemon finds out
+when it next enrolls or ends a pod: the broker refuses its credential `LAUNCHER_INVALID`, and the
+daemon drops it and starts a new machine login, whose code it logs, as when it first logged in. The
+pods it had enrolled do not wait for that: their sessions ended with the revoke, so their agents'
+`agent-secrets` calls are refused `PROOF_INVALID` from then on.
 
 Stopping the helper also stops the machine from enrolling sessions, since its credential lives only
 in the helper's memory, but it ends none: a host session lapses within `BROKER_LEASE_SECONDS` once

@@ -58,6 +58,8 @@ As the operator the login names, open Dispatch's **Enter machine login code** pa
 terminal shows. A machine login can only be selected by its code: no link approves one. Once you
 approve it, the machine is listed under **Your machine logins** on the same page, where you can
 [revoke its login](/legion/broker/guides/revoke-a-session/#end-a-machines-login) before it expires.
+A Legion daemon's login you approve is listed there too, as `legion-daemon on <host>`, and
+revoking it ends every pod it enrolled.
 
 Back on the machine, `agent-secrets launcher login` exits 0 and the helper logs
 `machine login issued; the helper holds a launcher credential`: the machine credential the approval

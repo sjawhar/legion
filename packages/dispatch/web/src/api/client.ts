@@ -740,14 +740,14 @@ export class DispatchApiClient {
     });
   }
 
-  /** `GET /api/v1/machine-logins`: the viewer's live machine logins, the launcher credentials
-   *  whose operator the viewer is. */
+  /** `GET /api/v1/machine-logins`: the live machine logins the viewer approved, their own
+   *  machines' and any service's. */
   getMachineLogins(): Promise<MachineLoginsResponse> {
     return this.json<MachineLoginsResponse>("/api/v1/machine-logins");
   }
 
-  /** Revoke one of the viewer's machine logins before it expires: Dispatch names the viewer as its
-   *  operator, and every session the login enrolled ends with it. */
+  /** Revoke a machine login the viewer approved before it expires: Dispatch names the viewer as
+   *  the person revoking, and every session the login enrolled ends with it. */
   async revokeMachineLogin(credentialId: string): Promise<void> {
     await this.response(`/api/v1/machine-logins/${pathSegment(credentialId)}/revoke`, {
       body: JSON.stringify({}),

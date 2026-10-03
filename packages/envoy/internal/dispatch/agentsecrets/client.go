@@ -2,9 +2,9 @@
 // UI-bearer API (the shared broker contract, dispatch://AGENTC-393/artifact/plan-overview-md,
 // Authentication item 3). Reads and the machine-login lookup carry and return
 // json.RawMessage, so a broker read-shape change never requires a Dispatch code change. Every
-// decision (approve, deny, revoke) instead carries a body Dispatch builds itself, naming the
-// person acting as the login Dispatch's own session resolved, which the UI bearer vouches for to
-// the broker, so nothing the browser sends can name who decided.
+// decision (approve, deny, revoke) instead carries a Decision Dispatch builds itself: its
+// approver is the login Dispatch's own session resolved, which the UI bearer vouches for to the
+// broker, so nothing the browser sends can name who decided.
 package agentsecrets
 
 import (
@@ -177,20 +177,19 @@ func (c *Client) RevokeByApprover(ctx context.Context, grantID, approver string)
 	return c.do(ctx, http.MethodPost, "/v1/grants/"+url.PathEscape(grantID)+"/revoke-by-approver", body)
 }
 
-// MachineLogins lists the live machine logins whose operator is the named person.
-func (c *Client) MachineLogins(ctx context.Context, operator string) (json.RawMessage, error) {
-	query := url.Values{"operator": {operator}}
+// MachineLogins lists the live machine logins the named person approved: their own machines' and
+// any service's login they approved.
+func (c *Client) MachineLogins(ctx context.Context, approver string) (json.RawMessage, error) {
+	query := url.Values{"approver": {approver}}
 	return c.do(ctx, http.MethodGet, "/v1/launcher-credentials?"+query.Encode(), nil)
 }
 
-// RevokeMachineLogin relays a person's revoke of one of their machine logins; the broker refuses
-// anyone but the login's operator.
-func (c *Client) RevokeMachineLogin(ctx context.Context, credentialID, operator string) (json.RawMessage, error) {
-	body, err := json.Marshal(struct {
-		Operator string `json:"operator"`
-	}{operator})
+// RevokeMachineLogin relays a person's revoke of a machine login; the broker refuses anyone but
+// the person who approved it.
+func (c *Client) RevokeMachineLogin(ctx context.Context, credentialID, approver string) (json.RawMessage, error) {
+	body, err := Decision{Approver: approver}.body()
 	if err != nil {
-		return nil, fmt.Errorf("agent-secrets: encode revoke: %w", err)
+		return nil, err
 	}
-	return c.do(ctx, http.MethodPost, "/v1/launcher-credentials/"+url.PathEscape(credentialID)+"/revoke-by-operator", body)
+	return c.do(ctx, http.MethodPost, "/v1/launcher-credentials/"+url.PathEscape(credentialID)+"/revoke-by-approver", body)
 }

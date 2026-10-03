@@ -220,7 +220,7 @@ func TestDecisionsNameTheCallerNeverTheBrowsersApprover(t *testing.T) {
 		{"/api/v1/credential-requests/rec1/deny", browserBody, `{"approver":"alice","code":"ABCD-1234"}`},
 		{"/api/v1/credential-requests/rec1/approve", nil, `{"approver":"alice"}`},
 		{"/api/v1/credential-grants/grant1/revoke", browserBody, `{"approver":"alice"}`},
-		{"/api/v1/machine-logins/cred1/revoke", map[string]any{"operator": "bob"}, `{"operator":"alice"}`},
+		{"/api/v1/machine-logins/cred1/revoke", browserBody, `{"approver":"alice"}`},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			rig := newFakeBrokerRig(t)
