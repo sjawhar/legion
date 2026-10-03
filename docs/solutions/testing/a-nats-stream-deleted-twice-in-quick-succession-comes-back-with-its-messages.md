@@ -106,6 +106,19 @@ only stream, and no API says when the server's cleanup goroutine has run, so it 
 again with `testnats.RecreateKeyValue`. That retries the create on exactly `error creating store
 for stream` and fails the test on any other answer.
 
+The Legion daemon's `packages/daemon/internal/testnats` keeps one account and empties it instead:
+its `URL(t)` deletes every stream on the shared server before handing it to a test, so the reset's
+last delete always empties the account's `streams` directory, and the test's first create meets the
+single-delete race. The daemon's tests create their streams with that package's
+`testnats.CreateStream`, which retries on exactly the same answer. It is a copy, not a shared
+helper: each module's `testnats` is an `internal` package the other module cannot import, and the
+two speak different clients (nats.go's `JetStreamContext` in Envoy, its `jetstream` package in the
+daemon) whose `APIError`s are different types. Against the widened v2.10.29 above, 1,000 resets each
+followed by a bare create failed 73 creates, every one `error creating store for stream`; through
+`CreateStream`'s retry none of 1,000 failed, 89 of them passing on a later attempt. The daemon's
+`internal/intake` tests on that server failed 6 of 10 runs before, each on that answer, and none of
+10 after. On the stock `nats:2.10` the daemon's helper runs, the bare create failed none of 2,000.
+
 One test still deletes a name twice, and the double-delete race cannot fail it:
 `internal/kvwatch`'s `TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache` deletes
 `kvwatch-test` twice on a server of its own and restores a stream snapshot right after the second

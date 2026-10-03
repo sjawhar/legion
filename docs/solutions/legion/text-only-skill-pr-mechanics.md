@@ -23,7 +23,7 @@ related_issues:
 symptoms:
   - "jj split <path> puts every hunk of that file in one commit when the plan wanted two commits"
   - "grep -c '<full sentence>' returns 0 although the sentence is present, because the replacement text wrapped it across two lines"
-  - "A reviewer finds the same defect in a skill file and in the matching packages/pi-envoy/roles/*.md prompt"
+  - "A reviewer finds the same defect in a skill file and in the matching packages/daemon/internal/prompts/roles/*.md prompt"
   - "A new lifecycle rule in one paragraph contradicts the same file's later gate section"
   - "A sentence describing code behavior is wrong because it was written from a plan's 'verified' note instead of the source line"
 ---
@@ -96,10 +96,10 @@ pending draft review.
 
 ## 5. Skill and role prompt are two copies of one rule: edit both, grep both
 
-`skills/legion-worker/SKILL.md` and `packages/pi-envoy/roles/{planner,reviewer,tester}.md` carry the
+`skills/legion-worker/SKILL.md` and `packages/daemon/internal/prompts/roles/{planner,reviewer,tester}.md` carry the
 same rules in different voices (the prompt is what the role boots with; the skill is what it reads).
 The reviewer found the fix-5 defect in both copies as two threads, and the corrective commit had to
-touch both. When you change a rule in one, `grep -rn '<distinctive phrase>' skills/ packages/pi-envoy/roles/`
+touch both. When you change a rule in one, `grep -rn '<distinctive phrase>' skills/ packages/daemon/internal/prompts/roles/`
 and change every hit in the same commit; the tester's greps for the new phrase expect one hit per file.
 
 ## 6. Small checks that catch doc-only defects a line diff hides

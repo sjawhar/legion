@@ -28,7 +28,6 @@ legion start --config legion.yaml --check-config
 | `postgres_dsn is required (or set LEGION_POSTGRES_DSN)` | Give the daemon its database. |
 | `unknown key <key>` | A typo, or a setting Legion no longer has; the message says which when it knows. |
 | `omp_invocation is not used when runtime is kubernetes: …` | Remove it: every pod runs the worker image's Oh My Pi. |
-| `resolve role prompts: Role prompts directory <dir>/role-prompts is missing …` | The binary needs Legion's role prompts beside it in `role-prompts/`, or `LEGION_ROLE_PROMPTS_DIR` naming them; take both from the same image ([Check and start the daemon](/legion/legion/running-legion/#check-and-start-the-daemon)). |
 | `<PROJECT> is already running (pid <n>)` (from `legion start` itself) | A daemon for this project is already registered on the machine: `legion status <PROJECT>`, `legion legions`. |
 
 **At boot, after the check passes**, the daemon checks the cluster and the image:

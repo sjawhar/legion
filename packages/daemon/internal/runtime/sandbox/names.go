@@ -64,7 +64,7 @@ const (
 )
 
 // imageOwnedPaths are the paths in the worker image a pod runs or loads from, which an operator's
-// mount there would hide: Legion's binaries, plugin, and role prompts (/opt/legion), Oh My Pi
+// mount there would hide: Legion's binaries and plugin (/opt/legion), Oh My Pi
 // (/opt/omp), the profile's installed plugins, and the databases Oh My Pi keeps in the profile's
 // agent directory; CheckPod adds the Tools. An operator's mount may be neither at, under, nor
 // above one.

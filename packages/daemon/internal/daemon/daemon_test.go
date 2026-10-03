@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -16,7 +15,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -32,7 +30,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
-	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
@@ -75,7 +72,6 @@ func shortTempDir(t *testing.T) string {
 // Every limit and timeout is the shipped default.
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
-	t.Setenv("LEGION_ROLE_PROMPTS_DIR", daemonTestRolePromptsDir(t))
 	stateDir := shortTempDir(t)
 	tokenFile := filepath.Join(t.TempDir(), "operator-token")
 	if err := os.WriteFile(tokenFile, []byte(testOperatorToken+"\n"), 0o600); err != nil {
@@ -113,16 +109,8 @@ func testConfig(t *testing.T) config.Config {
 	}
 }
 
-func daemonTestRolePromptsDir(t *testing.T) string {
-	t.Helper()
-	_, source, _, ok := goruntime.Caller(0)
-	if !ok {
-		t.Fatal("locate daemon test source")
-	}
-	return filepath.Clean(filepath.Join(filepath.Dir(source), "../../../pi-envoy/roles"))
-}
-
-func copyPromptBundle(t *testing.T, source, destination string) {
+// copyDir copies the tree under source to destination.
+func copyDir(t *testing.T, source, destination string) {
 	t.Helper()
 	if err := fs.WalkDir(os.DirFS(source), ".", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -138,7 +126,7 @@ func copyPromptBundle(t *testing.T, source, destination string) {
 		}
 		return os.WriteFile(target, body, 0o600)
 	}); err != nil {
-		t.Fatalf("copy role prompt bundle: %v", err)
+		t.Fatalf("copy %s: %v", source, err)
 	}
 }
 
@@ -973,63 +961,6 @@ func workflowJetStream(t *testing.T, natsURL string) jetstream.JetStream {
 	return js
 }
 
-func TestRunRefusesMissingRolePromptBundleAtBoot(t *testing.T) {
-	cfg := testConfig(t)
-	rolesDir := t.TempDir()
-	t.Setenv("LEGION_ROLE_PROMPTS_DIR", rolesDir)
-
-	err := run(context.Background(), cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
-
-	if err == nil {
-		t.Fatal("run succeeded with no role prompt files")
-	}
-	for _, want := range []string{rolesDir, "architect-root.md", "controller-root.md", "architect.md", "planner.md", "implementer.md", "tester.md", "reviewer.md", "merger.md", "core/common.md", "core/planner.md", "core/implementer.md", "core/tester.md", "core/reviewer.md", "core/oracle.md", "mechanics/headless.md", "mechanics/interactive.md"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("boot refusal = %q, want %q", err, want)
-		}
-	}
-}
-
-func TestPrepareReadsRoleReferencesFromThePromptSnapshot(t *testing.T) {
-	t.Setenv("LEGION_TEST_PG_DSN", "postgres://legion:legion@127.0.0.1:1/legion")
-	cfg := testConfig(t)
-	snapshotDir := filepath.Join(cfg.StateDir, "prompts", "shared")
-	o := fakeRuntime(fake.NewRuntime(), &built{})
-	o.roleReferences = func(dir string) (promptrefs.Names, error) {
-		if dir != snapshotDir {
-			return promptrefs.Names{}, fmt.Errorf("role references directory = %s, want prompt snapshot %s", dir, snapshotDir)
-		}
-		return promptrefs.Roles(dir)
-	}
-
-	p, err := prepare(cfg, quietLogger(), o)
-	if err != nil {
-		t.Fatalf("prepare: %v", err)
-	}
-	if p.roleReferences.Zero() {
-		t.Fatal("prepare collected no role prompt references")
-	}
-}
-
-func TestCheckStartAndPrepareReadTheSameRolePromptFiles(t *testing.T) {
-	t.Setenv("LEGION_TEST_PG_DSN", "postgres://legion:legion@127.0.0.1:1/legion")
-	cfg := testConfig(t)
-	rolesDir := filepath.Join(t.TempDir(), "roles")
-	copyPromptBundle(t, daemonTestRolePromptsDir(t), rolesDir)
-	if err := os.Symlink(filepath.Join(rolesDir, "missing.md"), filepath.Join(rolesDir, "extra.md")); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("LEGION_ROLE_PROMPTS_DIR", rolesDir)
-	t.Setenv("LEGION_OMP_PATH", "/usr/bin/true")
-
-	if _, _, err := CheckStart(cfg, os.LookupEnv); err != nil {
-		t.Fatalf("CheckStart: %v", err)
-	}
-	if _, err := prepare(cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
-		t.Fatalf("prepare: %v", err)
-	}
-}
-
 type workflowTokenRecorder struct {
 	mu    sync.Mutex
 	roles []appauth.AppRole
@@ -1061,8 +992,6 @@ func workflowNATS(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("open JetStream: %v", err)
 	}
-	if _, err := js.CreateStream(t.Context(), jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}}); err != nil {
-		t.Fatalf("create notification stream: %v", err)
-	}
+	testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
 	return url
 }

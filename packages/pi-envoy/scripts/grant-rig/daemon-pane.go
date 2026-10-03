@@ -89,15 +89,16 @@ type paneRequest struct {
 	// Path is the PATH the daemon would start under: its gh, git and jj resolve on it as at boot,
 	// and the pane's PATH is it behind the pane's worker-bin and bin.
 	Path string `json:"path"`
-	// RolesDir, when set, is the role-prompt bundle the pane's system prompt is composed from.
-	RolesDir string `json:"rolesDir"`
+	// SystemPrompt asks for the pane's system prompt, composed from the role prompts the daemon
+	// module embeds.
+	SystemPrompt bool `json:"systemPrompt"`
 }
 
 type paneResponse struct {
 	// Env is every variable the daemon tells the pane, PATH included.
 	Env map[string]string `json:"env"`
 	// SystemPromptArgument is the pane's one --append-system-prompt argument, as shell text; ""
-	// without a RolesDir.
+	// without SystemPrompt.
 	SystemPromptArgument string `json:"systemPromptArgument,omitempty"`
 }
 
@@ -135,7 +136,7 @@ func pane() error {
 		name, value, _ := strings.Cut(variable, "=")
 		res.Env[name] = value
 	}
-	if req.RolesDir != "" {
+	if req.SystemPrompt {
 		if res.SystemPromptArgument, err = systemPromptArgument(req, token); err != nil {
 			return err
 		}
@@ -144,13 +145,13 @@ func pane() error {
 }
 
 // systemPromptArgument composes the pane's role prompt as the daemon does (specs.SpawnSpec): the
-// bundle snapshotted under the state directory, the role's parts, then its addressing.
+// role prompts snapshotted under the state directory, the role's parts, then its addressing.
 func systemPromptArgument(req paneRequest, token claim.Token) (string, error) {
 	role := claim.Role(req.Role)
 	if claim.IsTreeArchitect(role, req.Issue, req.Issue) {
 		return "", errors.New("a tree architect is also told its design gate policy, which the rig does not stand in for")
 	}
-	composer, err := prompts.New(req.RolesDir, req.StateDir)
+	composer, err := prompts.New(req.StateDir)
 	if err != nil {
 		return "", err
 	}

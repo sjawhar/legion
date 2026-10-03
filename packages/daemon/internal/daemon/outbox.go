@@ -381,7 +381,7 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 // row so a retried row is one delivery. A role with no live holder refuses every attempt until
 // someone claims it, so waiting would retry forever; the Dispatch message the same READY posted
 // already carries the packet, so the issue is told the role had no holder, as the shared merger
-// prompt has the merger say (packages/pi-envoy/roles/merger.md step 4), and the row is done.
+// prompt has the merger say (internal/prompts/roles/merger.md step 4), and the row is done.
 func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload record.MergeQueuePublish) error {
 	if r.notices == nil {
 		return errors.New("merge queue executor has no Envoy publisher")
