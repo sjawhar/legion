@@ -26,7 +26,7 @@ tags:
 
 ## Problem
 
-AGENTC-833's secrets broker (`packages/envoy/internal/broker`) approves or denies a secret
+The secrets broker (`packages/envoy/internal/broker`) approves or denies a secret
 request by polling Dispatch for the answer to an ask it opened. `dispatch.Client.GetAsk`
 (`packages/envoy/internal/broker/dispatch/client.go`) decoded `GET /api/v1/asks/{id}` straight
 into a bare `Ask` struct for the whole implementation. Dispatch's real handler

@@ -366,3 +366,42 @@ func TestUpdatePreservesMarksAcrossAstralEdit(t *testing.T) {
 		t.Fatal("y-prosemirror decoded tree differs after astral edit")
 	}
 }
+
+// A run carrying two comments is written as two Y attribute keys, read back as both, decoded by
+// y-prosemirror as both, and rewritten as nothing.
+func TestUpdateWritesEachOfTwoMarksOfOneTypeOnOneRun(t *testing.T) {
+	bob := Mark{Type: "proofComment", Attrs: Attrs{"id": "c1", "by": "user:bob"}}
+	alice := Mark{Type: "proofComment", Attrs: Attrs{"id": "c2", "by": "user:alice"}}
+	want := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
+		{Type: "text", Text: "quick ", Marks: []Mark{bob}},
+		{Type: "text", Text: "brown", Marks: []Mark{bob, alice}},
+		{Type: "text", Text: " fox", Marks: []Mark{alice}},
+	}}}}
+	doc := crdt.New()
+	frag := doc.GetXmlFragment("prosemirror")
+	var err error
+	doc.Transact(func(txn *crdt.Transaction) { err = Update(txn, frag, want) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(frag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Equal(want) {
+		gotJSON, _ := got.JSON()
+		t.Fatalf("read back %s", gotJSON)
+	}
+	if decoded := decodeWithYProsemirror(t, crdt.EncodeStateAsUpdateV1(doc, nil)); !decoded.Equal(want) {
+		decodedJSON, _ := decoded.JSON()
+		t.Fatalf("y-prosemirror decoded %s", decodedJSON)
+	}
+	before := crdt.EncodeStateAsUpdateV1(doc, nil)
+	doc.Transact(func(txn *crdt.Transaction) { err = Update(txn, frag, got) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := crdt.EncodeStateAsUpdateV1(doc, nil); !bytes.Equal(before, after) {
+		t.Fatalf("Update wrote %d new bytes for an equal tree", len(after)-len(before))
+	}
+}

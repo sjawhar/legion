@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,11 +53,11 @@ func newCredentialTestHandler(t *testing.T, brokerURL string) http.Handler {
 	return mux
 }
 
-// credentialRoutes is every row this task adds, for table-driven coverage.
-var credentialRoutes = []struct {
+// featureOffRoutes is every credential route that answers 404 FEATURE_OFF without a broker: all of
+// them but the pending list, which answers null (TestListCredentialPendingWithAndWithoutABroker).
+var featureOffRoutes = []struct {
 	method, path string
 }{
-	{http.MethodGet, "/api/v1/credential-requests"},
 	{http.MethodGet, "/api/v1/credential-requests/rec1"},
 	{http.MethodPost, "/api/v1/credential-requests/rec1/approve"},
 	{http.MethodPost, "/api/v1/credential-requests/rec1/deny"},
@@ -67,7 +68,7 @@ var credentialRoutes = []struct {
 
 func TestCredentialRoutesAnswerFeatureOffWithNilClient(t *testing.T) {
 	handler := newCredentialTestHandler(t, "")
-	for _, route := range credentialRoutes {
+	for _, route := range featureOffRoutes {
 		t.Run(route.method+" "+route.path, func(t *testing.T) {
 			response := dispatchRequest(t, handler, route.method, route.path, map[string]any{}, "alice")
 			if response.Code != http.StatusNotFound {
@@ -81,6 +82,42 @@ func TestCredentialRoutesAnswerFeatureOffWithNilClient(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Every page reads the pending list, since the Needs-you badge counts it, and a Dispatch with no
+// broker is an ordinary deployment: its list answers 200 null, never the 404 a browser logs as a
+// failed request, while the request is held to the same human caller and `approver=me` as one a
+// broker would answer.
+func TestListCredentialPendingWithAndWithoutABroker(t *testing.T) {
+	t.Run("without a broker", func(t *testing.T) {
+		handler := newCredentialTestHandler(t, "")
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-requests?approver=me", nil, "alice")
+		if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != "null" {
+			t.Fatalf("pending list = %d %s, want 200 null", response.Code, response.Body.String())
+		}
+		refused := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-requests?approver=bob", nil, "alice")
+		if refused.Code != http.StatusBadRequest || decodeBody[struct {
+			Code string `json:"code"`
+		}](t, refused).Code != "APPROVER_ME_ONLY" {
+			t.Fatalf("approver=bob = %d %s, want 400 APPROVER_ME_ONLY", refused.Code, refused.Body.String())
+		}
+		agent := agentRequest(t, handler, http.MethodGet, "/api/v1/credential-requests?approver=me", nil, "agent-token")
+		if agent.Code != http.StatusForbidden {
+			t.Fatalf("agent bearer = %d %s, want 403", agent.Code, agent.Body.String())
+		}
+	})
+	t.Run("with a broker", func(t *testing.T) {
+		rig := newFakeBrokerRig(t)
+		rig.bodyByRoute["GET /v1/pending"] = `{"pending":[]}`
+		handler := newCredentialTestHandler(t, rig.server.URL)
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-requests?approver=me", nil, "alice")
+		if response.Code != http.StatusOK || response.Body.String() != `{"pending":[]}` {
+			t.Fatalf("pending list = %d %s, want the broker's 200 body verbatim", response.Code, response.Body.String())
+		}
+		if rig.calls != 1 {
+			t.Fatalf("broker was called %d times, want 1", rig.calls)
+		}
+	})
 }
 
 // fakeBrokerRig is a fake broker recording the last request it served, answering canned

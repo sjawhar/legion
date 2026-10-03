@@ -30,7 +30,7 @@ after `skill://dispatch/` is relative to this skill's base directory.
 | find who answers an ask, edit, retract or resolve one, reply with the turn, or follow a thread | [Asks after they open](skill://dispatch/references/asks.md) |
 | catch up after a restart, trace what cites a node, or write a `dispatch://` reference | [Reading back](skill://dispatch/references/reading.md) |
 | answer a BTW, Aside or Steer frame, or a message from the Agents page | [Targeted and direct messages](skill://dispatch/references/messages.md) |
-| see a worked ask, a message not to send, and where a draft goes | [Before and after](skill://dispatch/references/examples.md) |
+| see a worked ask, a reply that names its mechanism, a message not to send, and where a draft goes | [Before and after](skill://dispatch/references/examples.md) |
 | set up a token, or call a route the tools do not cover | [Authentication and the HTTP API](skill://dispatch/references/api.md) |
 
 ## Design changes are brainstormed here
@@ -55,6 +55,11 @@ not share this session's vocabulary, and is often on a phone. Write for that per
 
 - Plain English, full sentences, one idea per sentence. Never repo shorthand or nouns you coined:
   not "fix 8c", "READY-target", "PR B", "spec@v3", "the pair", "the packet" — say what the thing is.
+- A real name is not a coined noun: name a product, a tool and its operation
+  (`dispatch_request_approval`), an event type (`artifact.approved`), a route, a setting or a
+  status exactly, and say how it works in a clause ("the daemon opens the gate when Dispatch emits
+  `artifact.approved` for that document at that version"), never with a vague verb such as
+  "notice", "accept", "tell" or "pick up" ([before and after](skill://dispatch/references/examples.md#naming-the-mechanism)).
 - Expand every identifier the first time it appears: an issue key gets its title, a PR number its
   title, a file what it is for, a session id who it is. Link a URL rather than pasting a bare id.
 - A question lives in the spec or discussion it came from, placed as
@@ -63,15 +68,13 @@ not share this session's vocabulary, and is often on a phone. Write for that per
   the recommendation with its reason. It asks how to solve the problem or which outcome is wanted;
   never enumerate choices in the question. The options carry the genuinely different approaches.
   Each option has a label, and its description says what that approach costs.
-- Describe a change by what its reader stands to lose, not by what the system does. The
-  engineering sentence names the change; the reader's sentence names who can do what today, what
-  they will not be able to do after it, what still works, and what you cannot tell. It is a
-  different sentence, not a shorter one — shortening keeps the nouns — and the test before
-  sending is whether its first sentence has a human subject. Run it even on a sentence you have
-  already simplified: a lead that names what a change does inside a system leaves the reader
-  nothing to act on, and the same options and recommendation, led with who loses what, are
-  answerable at once. Where the judgment rule below applies, the judgment leads and this rule
-  shapes the sentence under it.
+- Describe a change first by what its reader stands to lose — who can do what today, what they
+  will not be able to do after it, what still works, and what you cannot tell — then by what the
+  system does, each mechanism named exactly. The reader's sentence is a different sentence, not a
+  shorter engineering one: shortening keeps the system as its subject. Test that the first sentence
+  has a human subject, even on a sentence you already simplified; a lead naming what a change does
+  inside a system leaves the reader nothing to act on. Where the judgment rule below applies, the
+  judgment leads and this rule shapes the sentence under it.
 - Before posting, test it: could Sami, reading only this text on his phone, know what he is being
   told or asked? If not, rewrite it. Length is not the problem; density is.
 - When an ask or message communicates a judgment, lead with that judgment in one sentence and put the mechanism underneath it. Do not make the reader ask a second time whether the result is a win. This shapes communication only when a judgment exists; it does not pre-decide an open question or remove its genuine options.
@@ -251,9 +254,9 @@ Every `dispatch_ask` passes four gates first:
    this issue before, but whether it asks him to re-report something he has already answered.
 3. **Can someone who has not read the code answer it on a phone?** Write it as
    [Writing for the human](#writing-for-the-human) says — who can do what today and what changes
-   for them, then two options with what each costs and your recommendation — and no slice or
-   decision numbers, no coined nouns, no internal identifiers he has never used, no jargon you
-   would have to define. If you cannot write it that way, you do not understand it well enough to ask.
+   for them, then two options with what each costs and your recommendation — with no slice or
+   decision numbers, no coined nouns, and each real tool, event, route or setting named exactly with
+   what it does. If you cannot write it that way, you do not understand it well enough to ask.
 4. **Is it outside what he has already told you he wants?** If not, that want is settled, and so
    is every choice inside it his words do not make: build it and ask nothing about it or beside it
    until it is delivered, whatever the ask says about the build. Afterwards, ask only about a choice his own
@@ -290,10 +293,10 @@ References belong in the question text; `ref` is sugar that appends its `dispatc
 
 An ask is read on a phone by someone who has not read the code. Write its question and options as
 [Writing for the human](#writing-for-the-human) says, and apply its phone test before posting.
-Never put file paths, line numbers, sequence numbers, document versions, or role tokens in the
-question; if the human needs that detail, anchor the ask to the document passage instead. Anchor a
-document question with `anchor: { artifact, quote, occurrence? }`; `occurrence`
-is zero-based and selects a repeated quote. A quote anchor is pinned to its lowest complete
+No file path, line number, sequence number, document version or role token leads the question; the
+evidence under it may cite one where the reader would check it, or anchor the ask to the passage.
+Anchor a document question with `anchor: { artifact, quote, occurrence? }`; `occurrence` is
+zero-based and selects a repeated quote. A quote anchor is pinned to its lowest complete
 containing block while retaining its quote as display text, so rewording the passage keeps it
 attached; a quote spanning top-level blocks, and existing anchors without a block, stay readable
 against their original document version if their quote disappears.
@@ -312,8 +315,6 @@ issue's comments. The rules:
   pointers an ask may carry are a `dispatch://` reference or a document `anchor`, and they cite —
   the ask still says in one line what the reader will find there and can be answered without
   following them.
-- Expand every term the reader has not used first. A product name, an internal setting, an
-  acronym, a value you coined this session — write what it is in the ask, in his words.
 - A runbook the human must execute is one ask per step, each self-contained: what to do, where,
   what result proves it, and options that name the step's outcomes. Each later step opens only
   after the previous is answered and states that step's verified result in one line ("Step 1

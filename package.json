@@ -6,6 +6,7 @@
     ]
   },
   "version": "0.16.1",
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Autonomous development swarm using Oh My Pi agents",
   "private": true,
@@ -18,12 +19,10 @@
     "packages/contracts",
     "packages/envoy-client",
     "packages/pi-envoy",
-    "packages/daemon",
     "packages/envoy-plugin",
     "packages/claude-envoy",
     "packages/proof-editor",
     "packages/dispatch",
-    "packages/workspace",
     "packages/envoy/internal/dispatch/pmdoc/gen",
     "docs/site"
   ],

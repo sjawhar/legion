@@ -1,0 +1,3 @@
+# The agent machine's shell (docs/site/media/broker/rig.sh): a prompt naming the example host and
+# nothing else, so a recorded terminal shows no real user or machine name.
+PS1='example-host-build:\w\$ '
