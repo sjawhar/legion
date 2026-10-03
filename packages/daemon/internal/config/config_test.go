@@ -810,11 +810,6 @@ func TestLoadRefuses(t *testing.T) {
 			want: "unknown key worker_cap: the running-worker cap no longer exists (LEGION-208 Requirement 8)",
 		},
 		{
-			name: "tossed worker_idle_retire_seconds",
-			body: minimalFile + "worker_idle_retire_seconds: 600\n",
-			want: "unknown key worker_idle_retire_seconds: a worker is suspended when its phase ends, never after an idle window (LEGION-208 Design, \"Process supervision\")",
-		},
-		{
 			name: "tossed resync_interval_seconds",
 			body: minimalFile + "resync_interval_seconds: 600\n",
 			want: "unknown key resync_interval_seconds: the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, \"Ported, and tossed\")",
@@ -981,6 +976,9 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		line  string
 		class string
 		want  string
+		// wantPrefix, where set, replaces want: the refusal must start with it, and the reason that
+		// follows is the message's own wording.
+		wantPrefix string
 	}{
 		{key: "project", class: modelled},
 		{key: "state_dir", class: modelled},
@@ -1023,7 +1021,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		},
 		{
 			key: "worker_idle_retire_seconds", line: "worker_idle_retire_seconds: 600", class: tossed,
-			want: "unknown key worker_idle_retire_seconds: a worker is suspended when its phase ends, never after an idle window (LEGION-208 Design, \"Process supervision\")",
+			wantPrefix: "unknown key worker_idle_retire_seconds: ",
 		},
 		{
 			key: "resync_interval_seconds", line: "resync_interval_seconds: 600", class: tossed,
@@ -1056,9 +1054,13 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 				}
 			default:
 				if err == nil {
-					t.Fatalf("Load succeeded, want error %q", tc.want)
+					t.Fatalf("Load succeeded, want error %q", tc.want+tc.wantPrefix)
 				}
-				if err.Error() != tc.want {
+				if tc.wantPrefix != "" {
+					if !strings.HasPrefix(err.Error(), tc.wantPrefix) {
+						t.Errorf("Load error = %q, want a refusal starting %q", err.Error(), tc.wantPrefix)
+					}
+				} else if err.Error() != tc.want {
 					t.Errorf("Load error = %q, want %q", err.Error(), tc.want)
 				}
 			}

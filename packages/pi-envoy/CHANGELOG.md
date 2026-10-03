@@ -4,6 +4,11 @@
 
 ### Changed
 
+- `legion.daemonApiVersion` is 13. Contract 13 changes a Sandbox locator on the daemon's
+  `GET /legion/v1/state`: every role of an issue now runs in one shared Agent Sandbox pod, so the
+  `sandbox` member names the issue's Sandbox, the pod's uid, the role container and the process
+  generation, and the incarnation is `<pod uid>/<generation>` (LEGION-462). The client's strict
+  state parse needs this release beside a daemon at 13; the daemon's boot gate refuses a 12.
 - The root architect's post-approval spec-edit rule is canonical in
   `skill://legion-architect`, section 1 (LEGION-476). The root prompt and the worker skill point
   there. A planner records every design departure in the issue's `plan.md` document and in the

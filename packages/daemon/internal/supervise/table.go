@@ -780,10 +780,12 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 
 // turnEnded is the turn over: the delivery it confirmed retires, and one queued meanwhile goes —
 // unless a suspension is held for this turn (holdSuspension), which runs instead; a stop the
-// runtime refuses leaves the claim idle, still holding it. The agent just said where it is, so
+// runtime refuses leaves the claim idle, still holding it. A turn interrupted for a start that takes
+// over the issue's phase lets that start go on (Quiesce). The agent just said where it is, so
 // nothing is left to ask it after a restart.
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	m.askFirst = false
+	m.interruptOver()
 	if m.held != nil {
 		if err := m.suspendHeld(ctx); err != nil {
 			if m.held == nil {
@@ -835,7 +837,7 @@ func noTurn(m *Machine, ctx context.Context, _ Event) error {
 	return m.promptFailed(ctx, fmt.Sprintf("acknowledged, and no turn started within %s", m.deps.Timeouts.RPC), taskRead)
 }
 
-func spawn(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx) }
+func spawn(m *Machine, ctx context.Context, _ Event) error { return m.revive(ctx) }
 
 // sessionLost is another claim of the tree finding the tree volume lost: the session this claim
 // recorded was on it, so the claim drops it and its next launch is a fresh session that recreates
@@ -885,14 +887,14 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 
 func reready(m *Machine, ctx context.Context, _ Event) error { return m.sendPending(ctx) }
 
-func resume(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx) }
+func resume(m *Machine, ctx context.Context, _ Event) error { return m.revive(ctx) }
 
 // retry is a failed or retired claim given another run: its budgets start over, and its session,
 // when it has one, is relaunched after the process the claim last ran is gone. A pending delivery
 // the claim kept goes once the agent is ready.
 func retry(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.Budgets = Budgets{}
-	return m.launch(ctx)
+	return m.revive(ctx)
 }
 
 // stop ends one claim: the runtime releases it, and it retires. A release that fails changes
@@ -1009,7 +1011,7 @@ func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
 	if err := m.queue(ctx, ev.(RequestDeliver)); err != nil {
 		return err
 	}
-	return m.launch(ctx)
+	return m.revive(ctx)
 }
 
 // exit is the agent reporting its own end. A worker's or sub-architect's claim ends with it and is

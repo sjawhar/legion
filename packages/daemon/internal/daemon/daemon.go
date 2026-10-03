@@ -138,15 +138,54 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 
 	boot, cancelBoot := context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 	defer cancelBoot()
+	// The cluster's refusals run before the store opens, so before any schema write, image probe or
+	// reconcile: Agent Sandbox must be installed, and no per-claim Sandbox of the layout before issue
+	// pods may remain. The claims' half of that layout fence runs once the store opens, before it
+	// migrates.
+	if plan.clusterCheck != nil {
+		if err := plan.clusterCheck(boot); err != nil {
+			return err
+		}
+	}
 
 	st, err := store.Open(boot, cfg.PostgresDSN)
 	if err != nil {
 		return err
 	}
+	if cfg.Runtime.Name == "kubernetes" {
+		legacy, err := st.HasLegacySandboxClaims(boot, plan.project)
+		if err != nil {
+			st.Close()
+			return err
+		}
+		if legacy {
+			st.Close()
+			return fmt.Errorf("refuse the Kubernetes runtime before any schema write: project %s still has legacy per-claim Sandbox locators", plan.project)
+		}
+	}
 	applied, err := st.Migrate(boot)
 	if err != nil {
 		st.Close()
 		return err
+	}
+	if cfg.Runtime.Name == "kubernetes" {
+		// The issue-pod cutover ships no outbox row that fails on every attempt: a tree close that
+		// could never run (one the outbox cannot decode, or naming a root generation beyond the
+		// store's) is named before the layout marker is installed or any row runs. Migration 0016
+		// repaired the older shape, and no daemon writes one since.
+		var unrunnable []int64
+		if err := pgx.BeginFunc(boot, st.Pool(), func(tx pgx.Tx) error {
+			var err error
+			unrunnable, err = record.NewStore().UnrunnableTreeCloses(boot, tx, cfg.Project)
+			return err
+		}); err != nil {
+			st.Close()
+			return err
+		}
+		if len(unrunnable) > 0 {
+			st.Close()
+			return fmt.Errorf("refuse the Kubernetes runtime's issue-pod layout: outbox tree close rows %v can never run (the outbox cannot decode them, or their linger is beyond the store's generations), so each would fail on every attempt; delete them before the cutover", unrunnable)
+		}
 	}
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
@@ -333,9 +372,13 @@ type plan struct {
 	gate func(ctx context.Context) error
 	// probe proves the runtime's worker image once the runtime is built and before the boot is
 	// recorded; nil under tmux, and for a replaced runtime without one.
-	probe       func(ctx context.Context, rt runtime.Runtime) error
-	clock       supervise.Clock
-	orphanSweep time.Duration
+	probe func(ctx context.Context, rt runtime.Runtime) error
+	// clusterCheck is the Kubernetes runtime's refusals before the store opens: Agent Sandbox's
+	// install check, then the census of per-claim Sandboxes (sandbox.CensusLegacyIssueSandboxes).
+	// Nil under tmux, and for a replaced runtime.
+	clusterCheck func(ctx context.Context) error
+	clock        supervise.Clock
+	orphanSweep  time.Duration
 	// secretsEnroller is the daemon's agent-secrets machine login as the machines' Enroller
 	// (newSecretsLogin); nil when the deployment enrolls no pod.
 	secretsEnroller supervise.Enroller
@@ -540,6 +583,13 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
 	}
+	if cfg.Runtime.Name == "kubernetes" {
+		if err := st.EnsureIssuePodLayout(boot, p.project); err != nil {
+			cancel()
+			cancelStream()
+			return nil, fmt.Errorf("record the issue-pod runtime layout: %w", err)
+		}
+	}
 	repo := cfg.Projects[cfg.Project].Repo
 
 	sup.deps = supervise.Deps{
@@ -569,6 +619,9 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			Probe:                 cfg.ProbeInterval,
 			Stop:                  cfg.WorkerStopTimeout,
 		},
+	}
+	if setter, ok := rt.(interface{ SetIssueResourceStore(*store.Store) }); ok {
+		setter.SetIssueResourceStore(st)
 	}
 	return &supervision{
 		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,
@@ -762,6 +815,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
 		claimReady = workflow.claimReady
 	}
+	treeCleaner, _ := s.supervisor.deps.Runtime.(api.TreeResourceCleaner)
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{
 			store:        st,
@@ -789,6 +843,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Tokens:            tokens,
 		GitHubOwner:       githubOwner(cfg),
 		Grants:            grants,
+		TreeCleaner:       treeCleaner,
 		ClaimReady:        claimReady,
 	})
 

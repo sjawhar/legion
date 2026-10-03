@@ -186,6 +186,29 @@ func podOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec, affinity bool) core
 	return r.podTemplate(l, affinity).Spec
 }
 
+// workerContainer is the role container of workerSpec, the tester.
+const workerContainer = string(claim.RoleTester)
+
+// workerOf is the worker-shim process a launch of spec starts: its role container as the pod runs
+// it (mounts, kubelet-resolved environment), with the launcher start command's argv as Command and
+// its plain environment appended. That is the process's whole environment: the launcher passes its
+// own on, then the start command's.
+func workerOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec, affinity bool) corev1.Container {
+	t.Helper()
+	l, err := r.prepare(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := containerNamed(t, r.podTemplate(l, affinity).Spec, string(spec.Role))
+	start := launcherCommand(l, r)
+	c.Command = start.Argv
+	for _, entry := range start.Env {
+		name, value, _ := strings.Cut(entry, "=")
+		c.Env = append(c.Env, corev1.EnvVar{Name: name, Value: value})
+	}
+	return c
+}
+
 func envOf(container corev1.Container) map[string]string {
 	env := map[string]string{}
 	for _, v := range container.Env {
@@ -226,7 +249,7 @@ func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := envOf(podOf(t, r, workerSpec(t), false).Containers[0])
+	env := envOf(workerOf(t, r, workerSpec(t), false))
 	got := kubeExpand(env["PI_SHELL_PREFIX"], env)
 	want := shellprefix.For("/legion/worker-bin", "/opt/legion/bin")
 	if got != want {
@@ -272,7 +295,7 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	pod := podOf(t, r, workerSpec(t), false)
-	init, main := containerNamed(t, pod, initContainer), containerNamed(t, pod, mainContainer)
+	init, main := containerNamed(t, pod, initContainer), workerOf(t, r, workerSpec(t), false)
 	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
 		if envOf(init)[name] == "" || envOf(init)[name] != envOf(main)[name] {
 			t.Errorf("%s: init %q, main %q; the two containers must agree", name, envOf(init)[name], envOf(main)[name])
@@ -316,8 +339,7 @@ func TestBunCacheHomeIsMountedFromNoVolume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pod := podOf(t, r, workerSpec(t), false)
-	main := containerNamed(t, pod, mainContainer)
+	main := workerOf(t, r, workerSpec(t), false)
 	cacheHome := envOf(main)["XDG_CACHE_HOME"]
 	if cacheHome == "" {
 		t.Fatal("the main container carries no XDG_CACHE_HOME")
@@ -348,7 +370,7 @@ func TestUvKeepsItsPythonsAndCacheOnTheTreeVolume(t *testing.T) {
 	}
 	var envs []map[string]string
 	for _, spec := range []runtime.SpawnSpec{rootSpec(t), workerSpec(t), testSpec(t, child, claim.RoleImplementer, "LEGION-209")} {
-		main := containerNamed(t, podOf(t, r, spec, false), mainContainer)
+		main := workerOf(t, r, spec, false)
 		env := envOf(main)
 		for _, name := range []string{"UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"} {
 			dir := env[name]
@@ -386,7 +408,7 @@ func TestTheWorkerContainerNamesItsGrantFileInMemory(t *testing.T) {
 	}
 	spec := workerSpec(t)
 	pod := podOf(t, r, spec, false)
-	main := pod.Containers[0]
+	main := workerOf(t, r, spec, false)
 	want := StateDir + "/secrets/" + string(spec.Claim) + "-grant"
 	if got := envOf(main)["LEGION_GRANT_FILE"]; got != want {
 		t.Fatalf("the worker container's LEGION_GRANT_FILE = %q, want %q", got, want)
@@ -576,7 +598,7 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	spec := workerSpec(t)
 	spec.Env, spec.Secrets = nil, nil
 	told := map[string]bool{}
-	for name := range envOf(podOf(t, r, spec, false).Containers[0]) {
+	for name := range envOf(workerOf(t, r, spec, false)) {
 		told[name] = true
 	}
 	if !maps.Equal(told, runtimeOwned) {
@@ -606,13 +628,13 @@ func TestTheDispatchBearerIsARuntimeOption(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			pointer, pointed := envOf(r.podTemplate(l, false).Spec.Containers[0])["DISPATCH_TOKEN_FILE"]
+			pointer, pointed := envOf(workerOf(t, r, workerSpec(t), false))["DISPATCH_TOKEN_FILE"]
 			if got := l.secrets[dispatchTokenKey]; got != tc.bearer || pointed != (tc.bearer != "") {
 				t.Fatalf("the claim's Secret carries %q as %s and DISPATCH_TOKEN_FILE is %q (set: %t), want %q",
 					got, dispatchTokenKey, pointer, pointed, tc.bearer)
 			}
-			if pointed && pointer != BootDir+"/"+dispatchTokenKey {
-				t.Fatalf("DISPATCH_TOKEN_FILE = %q, want the boot projection's %s", pointer, BootDir+"/"+dispatchTokenKey)
+			if want := generationDir(workerSpec(t).Generation) + "/" + dispatchTokenKey; pointed && pointer != want {
+				t.Fatalf("DISPATCH_TOKEN_FILE = %q, want the generation's private %s", pointer, want)
 			}
 		})
 	}
@@ -641,7 +663,7 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 			if got != tc.want || set != (tc.want != "") {
 				t.Errorf("the init container's LEGION_WORKSPACE_RECOVERED_FROM = %q (set: %t), want %q", got, set, tc.want)
 			}
-			for _, name := range []string{fetchContainer, mainContainer} {
+			for _, name := range []string{fetchContainer, workerContainer} {
 				if _, set := envOf(containerNamed(t, pod, name))["LEGION_WORKSPACE_RECOVERED_FROM"]; set {
 					t.Errorf("%s carries LEGION_WORKSPACE_RECOVERED_FROM", name)
 				}
@@ -686,7 +708,9 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 					tokens = append(tokens, v)
 				}
 			}
-			worker := spec.Containers[0]
+			role := manifestCases(t)["root"].spec.Role
+			worker := workerOf(t, r, manifestCases(t)["root"].spec, false)
+			keyVolume := roleVolume(agentSecretsKeyVolume, role)
 			env := map[string]string{}
 			for _, e := range worker.Env {
 				env[e.Name] = e.Value
@@ -711,16 +735,16 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 			if m := mounts[agentSecretsTokenVolume]; m.MountPath != AgentSecretsTokenDir || !m.ReadOnly {
 				t.Fatalf("token mount %+v, want read-only at %s", m, AgentSecretsTokenDir)
 			}
-			if m := mounts[agentSecretsKeyVolume]; m.MountPath != AgentSecretsKeyDir || m.ReadOnly {
+			if m := mounts[keyVolume]; m.MountPath != AgentSecretsKeyDir || m.ReadOnly {
 				t.Fatalf("key mount %+v, want writable at %s", m, AgentSecretsKeyDir)
 			}
-			key := slices.IndexFunc(spec.Volumes, func(v corev1.Volume) bool { return v.Name == agentSecretsKeyVolume })
+			key := slices.IndexFunc(spec.Volumes, func(v corev1.Volume) bool { return v.Name == keyVolume })
 			if key < 0 || spec.Volumes[key].EmptyDir == nil || spec.Volumes[key].EmptyDir.Medium != corev1.StorageMediumMemory {
 				t.Fatalf("key volume %+v, want a memory-backed emptyDir", spec.Volumes[key])
 			}
 			for _, init := range spec.InitContainers {
 				for _, m := range init.VolumeMounts {
-					if m.Name == agentSecretsTokenVolume || m.Name == agentSecretsKeyVolume {
+					if m.Name == agentSecretsTokenVolume || strings.HasPrefix(m.Name, agentSecretsKeyVolume) {
 						t.Fatalf("init container %s mounts %s", init.Name, m.Name)
 					}
 				}
@@ -735,7 +759,7 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 			}
 			probe := r.probeManifest("legion-probe-test", ImageProbe{Contract: 7}, time.Now().Add(time.Hour)).Spec.PodTemplate.Spec
 			for _, v := range probe.Volumes {
-				if v.Name == agentSecretsTokenVolume || v.Name == agentSecretsKeyVolume {
+				if v.Name == agentSecretsTokenVolume || strings.HasPrefix(v.Name, agentSecretsKeyVolume) {
 					t.Fatalf("the probe pod carries %s", v.Name)
 				}
 			}
@@ -809,14 +833,15 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	probeSpec := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
 	for _, tc := range []struct {
 		name  string
 		pod   corev1.PodSpec
-		agent string
+		agent corev1.Container
 	}{
-		{"root", podOf(t, r, rootSpec(t), false), mainContainer},
-		{"worker", podOf(t, r, workerSpec(t), true), mainContainer},
-		{"probe", r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec, probeContainer},
+		{"root", podOf(t, r, rootSpec(t), false), workerOf(t, r, rootSpec(t), false)},
+		{"worker", podOf(t, r, workerSpec(t), true), workerOf(t, r, workerSpec(t), true)},
+		{"probe", probeSpec, containerNamed(t, probeSpec, probeContainer)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.pod.ServiceAccountName != opts.Pod.ServiceAccount {
@@ -833,14 +858,14 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 					t.Errorf("the pod's volumes named %s are %+v, want exactly %+v", want.Name, got, want)
 				}
 			}
-			agent := containerNamed(t, tc.pod, tc.agent)
+			agent := tc.agent
 			for _, want := range opts.Pod.VolumeMounts {
 				if !slices.ContainsFunc(agent.VolumeMounts, func(m corev1.VolumeMount) bool { return reflect.DeepEqual(m, want) }) {
-					t.Errorf("%s mounts %+v, want %+v among them", tc.agent, agent.VolumeMounts, want)
+					t.Errorf("%s mounts %+v, want %+v among them", agent.Name, agent.VolumeMounts, want)
 				}
 			}
 			if got := envOf(agent)["PI_CONFIG_FILES"]; got != opts.Pod.Env["PI_CONFIG_FILES"] {
-				t.Errorf("%s's PI_CONFIG_FILES = %q, want the operator's %q", tc.agent, got, opts.Pod.Env["PI_CONFIG_FILES"])
+				t.Errorf("%s's PI_CONFIG_FILES = %q, want the operator's %q", agent.Name, got, opts.Pod.Env["PI_CONFIG_FILES"])
 			}
 			for _, init := range tc.pod.InitContainers {
 				for _, mount := range init.VolumeMounts {
@@ -906,16 +931,18 @@ func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 			}
 			worker := r.podTemplate(l, false).Spec
 			probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
+			workerProcess := workerOf(t, r, spec, false)
 			for _, pod := range []struct {
 				spec      corev1.PodSpec
 				container string
-			}{{worker, mainContainer}, {probe, probeContainer}} {
+				agent     corev1.Container
+			}{{worker, workerContainer, workerProcess}, {probe, probeContainer, containerNamed(t, probe, probeContainer)}} {
 				var volumes []corev1.Volume
 				for _, volume := range pod.spec.Volumes {
 					if volume.Secret != nil && volume.Secret.SecretName == providersSecret {
 						volumes = append(volumes, volume)
 					}
-					if volume.Name == bootVolume {
+					if volume.Secret != nil && strings.HasPrefix(volume.Secret.SecretName, SandboxName(workerToken)) {
 						for _, item := range volume.Secret.Items {
 							if item.Key == "NATS_NKEY_SEED" {
 								t.Errorf("%s's boot projection carries NATS_NKEY_SEED", pod.container)
@@ -932,7 +959,7 @@ func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 					}
 					return mounts
 				}
-				agent := containerNamed(t, pod.spec, pod.container)
+				agent := pod.agent
 				for _, init := range pod.spec.InitContainers {
 					if got := mounted(init); len(got) != 0 {
 						t.Errorf("%s mounts the providers Secret: %+v", init.Name, got)
@@ -965,7 +992,7 @@ func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 					t.Errorf("%s sets NATS_NKEY_SEED", pod.container)
 				}
 			}
-			main := containerNamed(t, worker, mainContainer)
+			main := workerProcess
 			shim := main.Command[:slices.Index(main.Command, "--")]
 			at := slices.Index(shim, "--provider-env-dir")
 			switch {
@@ -1020,7 +1047,7 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 		spec := tc.spec
 		spec.Env, spec.Secrets = nil, nil
 		pod := podOf(t, r, spec, tc.colocate)
-		carry(pod, containerNamed(t, pod, mainContainer))
+		carry(pod, workerOf(t, r, spec, tc.colocate))
 	}
 	probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
 	carry(probe, containerNamed(t, probe, probeContainer))
@@ -1126,9 +1153,11 @@ func kubeExpand(input string, env map[string]string) string {
 	return out.String()
 }
 
-// Whatever text a launch carries reaches the process as written, although the kubelet expands
-// `$(NAME)` and `$$` in a container's command and env values: the inlined system prompt, an
-// operator's instructions, and a spec's env values mean what they say in a pod as in a pane.
+// Whatever text a launch carries reaches the process as written: the worker's argv and plain
+// environment travel in the launcher's start command, which no kubelet expands, so `$(NAME)` and
+// `$$` in the inlined system prompt, an operator's instructions, and a spec's env values mean
+// what they say in a pod as in a pane. The role container's own command and env, which the kubelet
+// does expand, still survive it.
 func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -1144,20 +1173,28 @@ func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	main := r.podTemplate(l, false).Spec.Containers[0]
-	env := envOf(main)
+	start := launcherCommand(l, r)
 	argv := l.agentArgv(r.agent)
-	for i, arg := range main.Command[len(main.Command)-len(argv):] {
-		if got := kubeExpand(arg, env); got != argv[i] {
-			t.Errorf("the agent's argument #%d reaches it as %q, want %q", i, got, argv[i])
-		}
+	if got := start.Argv[len(start.Argv)-len(argv):]; !slices.Equal(got, argv) {
+		t.Errorf("the agent's argv reaches the launcher as %q, want %q", got, argv)
+	}
+	env := map[string]string{}
+	for _, entry := range start.Env {
+		name, value, _ := strings.Cut(entry, "=")
+		env[name] = value
 	}
 	for name, want := range map[string]string{
 		"LEGION_E2E_NOTE": literal,
 		"PI_SHELL_PREFIX": shellprefix.For(workerBin, filepath.Dir(r.tools.Legion)),
 	} {
-		if got := kubeExpand(env[name], env); got != want {
+		if got := env[name]; got != want {
 			t.Errorf("%s reaches the agent as %q, want %q", name, got, want)
+		}
+	}
+	role := containerNamed(t, r.podTemplate(l, false).Spec, string(spec.Role))
+	for _, arg := range role.Command {
+		if expanded := kubeExpand(arg, envOf(role)); strings.ReplaceAll(arg, "$$", "$") != expanded {
+			t.Errorf("the launcher's argument %q reaches it as %q", arg, expanded)
 		}
 	}
 	if !strings.Contains(l.prompt, literal) {

@@ -21,7 +21,9 @@ const (
 	TriggerChecksRed           TriggerKind = "checks_red"
 )
 
-// EffectKind identifies the durable outbox consequences selected by a row.
+// EffectKind identifies the durable outbox consequences selected by a row. EffectSuspend is the
+// issue's close alone (Engine.leave): a phase worker stays live from its role's first assignment
+// until its issue closes, so no row that only moves the issue between phases suspends anyone.
 type EffectKind string
 
 const (
@@ -55,16 +57,16 @@ func allow(Snapshot) bool { return true }
 // phase change. Backward rows exist for every allowed target so coverage detects a deleted edge.
 var Table = append([]Row{
 	{From: phase.Admitted, Trigger: TriggerGateOpened, Guard: allow, To: phase.Planning, Effects: []EffectKind{EffectStart, EffectNotice}},
-	{From: phase.Planning, Trigger: TriggerPlannerCompleted, Guard: allow, To: phase.Implementing, Effects: []EffectKind{EffectSuspend, EffectStart, EffectNotice}},
-	{From: phase.Implementing, Trigger: TriggerImplementationReady, Guard: func(s Snapshot) bool { return s.HasPR }, To: phase.Testing, Status: "testing", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}},
-	{From: phase.Testing, Trigger: TriggerTesterPassed, Guard: allow, To: phase.Reviewing, Status: "needs_review", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}},
-	{From: phase.Testing, Trigger: TriggerTesterFailed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}},
-	{From: phase.Reviewing, Trigger: TriggerReviewApproved, Guard: allow, To: phase.Retro, Status: "retro", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}},
-	{From: phase.Reviewing, Trigger: TriggerReviewRejected, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}},
-	{From: phase.Testing, Trigger: TriggerChecksRed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}},
-	{From: phase.Reviewing, Trigger: TriggerChecksRed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}},
-	{From: phase.Retro, Trigger: TriggerRetroCompleted, Guard: allow, To: phase.Merging, Effects: []EffectKind{EffectSuspend, EffectStart, EffectNotice}},
-	{From: phase.Merging, Trigger: TriggerReady, Guard: allow, To: phase.AwaitingMerge, Effects: []EffectKind{EffectSuspend, EffectNotice}},
+	{From: phase.Planning, Trigger: TriggerPlannerCompleted, Guard: allow, To: phase.Implementing, Effects: []EffectKind{EffectStart, EffectNotice}},
+	{From: phase.Implementing, Trigger: TriggerImplementationReady, Guard: func(s Snapshot) bool { return s.HasPR }, To: phase.Testing, Status: "testing", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
+	{From: phase.Testing, Trigger: TriggerTesterPassed, Guard: allow, To: phase.Reviewing, Status: "needs_review", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
+	{From: phase.Testing, Trigger: TriggerTesterFailed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
+	{From: phase.Reviewing, Trigger: TriggerReviewApproved, Guard: allow, To: phase.Retro, Status: "retro", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
+	{From: phase.Reviewing, Trigger: TriggerReviewRejected, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
+	{From: phase.Testing, Trigger: TriggerChecksRed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
+	{From: phase.Reviewing, Trigger: TriggerChecksRed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
+	{From: phase.Retro, Trigger: TriggerRetroCompleted, Guard: allow, To: phase.Merging, Effects: []EffectKind{EffectStart, EffectNotice}},
+	{From: phase.Merging, Trigger: TriggerReady, Guard: allow, To: phase.AwaitingMerge, Effects: []EffectKind{EffectNotice}},
 	{From: phase.AwaitingMerge, Trigger: TriggerPullRequestMerged, Guard: allow, To: phase.ProductionCheck, Effects: []EffectKind{EffectStart, EffectNotice}},
 	{From: phase.ProductionCheck, Trigger: TriggerSignOff, Guard: allow, To: phase.Done, Status: "done", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectNotice, EffectLinger}},
 }, backwardRows()...)
@@ -74,12 +76,8 @@ func backwardRows() []Row {
 	rows := make([]Row, 0, len(ordered)*(len(ordered)-1)/2)
 	for fromIndex, from := range ordered {
 		for _, to := range ordered[:fromIndex] {
-			effects := []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}
-			if RoleFor(from) == RoleFor(to) {
-				// A move between two phases of one role suspends nothing (Engine.transition).
-				effects = []EffectKind{EffectStatus, EffectStart, EffectNotice}
-			}
-			rows = append(rows, Row{From: from, Trigger: TriggerBackward, Guard: allow, To: to, Status: statusForBackward(to), Effects: effects})
+			rows = append(rows, Row{From: from, Trigger: TriggerBackward, Guard: allow, To: to, Status: statusForBackward(to),
+				Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}})
 		}
 	}
 	return rows

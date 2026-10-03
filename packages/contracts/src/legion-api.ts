@@ -80,8 +80,9 @@ export type LegionClaimState = (typeof LEGION_CLAIM_STATES)[number];
  * `runtime.Locator` — where a claim's process is: the runtime word, the claim token, the process
  * incarnation, and exactly one backend member, the one the runtime word names. Nested, marshalled
  * by the standard library: `tmux` (the pane on the daemon's private server; the incarnation is
- * `<pane pid>:<start ticks>`) or `sandbox` (the Agent Sandbox object; the incarnation is its pod's
- * uid).
+ * `<pane pid>:<start ticks>`) or `sandbox` (one role process in its issue's shared Agent Sandbox
+ * pod: the Sandbox's name, the pod's uid, the role container and the process generation; the
+ * incarnation is `<pod uid>/<generation>`).
  */
 const legionLocator = z.discriminatedUnion("runtime", [
   z.strictObject({
@@ -94,7 +95,13 @@ const legionLocator = z.discriminatedUnion("runtime", [
     runtime: z.literal("sandbox"),
     claim: nonEmptyString,
     incarnation: nonEmptyString,
-    sandbox: z.strictObject({ namespace: nonEmptyString, name: nonEmptyString }),
+    sandbox: z.strictObject({
+      namespace: nonEmptyString,
+      name: nonEmptyString,
+      podUid: nonEmptyString,
+      container: nonEmptyString,
+      generation: z.number().int().positive(),
+    }),
   }),
 ]);
 

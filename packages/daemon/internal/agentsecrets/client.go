@@ -78,8 +78,10 @@ type LoginState struct {
 // agent's session id — "" before the agent registered, which the broker records as null. Per
 // the shared broker contract (dispatch://AGENTC-393/artifact/plan-overview-md), the broker picks
 // a request's approver at request time; the enrollment carries no issue.
+// Slot names one of several pod enrollments when an issue pod holds role processes side by side
+// (`<role>-g<generation>`); empty is the pod's one identity.
 type PodEnrollment struct {
-	PodUID, Thumbprint, PodToken, Session string
+	PodUID, Slot, Thumbprint, PodToken, Session string
 }
 
 // Enrollment is what the broker answered: the id every later call names, and the lease the pod's
@@ -221,6 +223,7 @@ func (c *Client) readLauncherCredential(ctx context.Context, pendingID string) (
 type enrollmentBody struct {
 	Kind       string  `json:"kind"`
 	RuntimeID  string  `json:"runtime_id"`
+	Slot       string  `json:"slot,omitempty"`
 	Operator   *string `json:"operator"`
 	Thumbprint string  `json:"thumbprint"`
 	SessionID  *string `json:"session_id"`
@@ -240,7 +243,7 @@ type enrollmentAnswer struct {
 // broker answer is an *APIError, a transport failure a plain error.
 func (c *Client) Enroll(ctx context.Context, e PodEnrollment) (Enrollment, error) {
 	body := enrollmentBody{
-		Kind: "pod", RuntimeID: e.PodUID, Operator: nil,
+		Kind: "pod", RuntimeID: e.PodUID, Slot: e.Slot, Operator: nil,
 		Thumbprint: e.Thumbprint, PodToken: e.PodToken,
 	}
 	if e.Session != "" {

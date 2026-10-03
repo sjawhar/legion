@@ -93,9 +93,9 @@ Reach any live role on this issue the same way you reach the architect: `envoy_p
 `notifications.role.` followed by that role's encoded token. Use it when you need context an
 earlier phase has that its handoff doesn't cover — ask the planner why a constraint was
 scoped that way, ask the implementer what a commit actually did. A role that finished its
-phase stays idle in its pane for the daemon's idle-retire window and answers; once retired (no
-live holder, a publish is rejected 404), read its committed handoff or ask the architect to
-`spawn_worker` it.
+phase stays live and answers: under the Go daemon until its issue leaves the workflow, under the
+TypeScript daemon for its idle-retire window. Once a role has no live holder (a publish is rejected
+404), read its committed handoff, or under the TypeScript daemon ask the architect to `spawn_worker` it.
 
 ## Workspace and handoff precedence
 
@@ -111,10 +111,14 @@ Never rely on the inherited cwd. Every later repository shell command **MUST** b
 native filesystem tool paths **MUST** be absolute under that workspace. Do not create an
 isolated worktree, change the workspace topology, or mix another issue's work into it.
 Concurrent issues have disjoint workspaces; only the currently active phase mutates this
-one. After you complete and go idle, treat `$LEGION_WORKSPACE` as read-only: you are kept
-alive to answer questions, not to keep editing. Do not create new commits, run
-`jj -R "$LEGION_WORKSPACE" new`, or touch tracked files once your own handoff is committed
-(and, for the implementer, pushed) — a code change belongs to whichever phase is active now.
+one. After you complete and go idle, treat `$LEGION_WORKSPACE` as read-only in every later
+turn, including one an Envoy question starts: you are kept alive to answer questions, not to keep
+editing. Do not create new commits, run `jj -R "$LEGION_WORKSPACE" new`, or touch tracked files
+once your own handoff is committed (and, for the implementer, pushed) — a code change belongs to
+whichever phase is active now. The same holds once the Go daemon has taken your phase back without
+your completion: CI settling red while you tested, or reviewed a round you had not completed,
+moves the issue to `implementing` and interrupts your turn, and the implementer starts only once
+that turn has ended. Do not resume the interrupted work afterward.
 
 On every start, and especially after revival or re-creation, read the issue and then the
 committed predecessor handoffs in lifecycle order from `$LEGION_WORKSPACE/.legion/`:
@@ -472,10 +476,16 @@ do:
 Quote the answer verbatim in what you tell the architect: with the run and phase it names, the
 difference between "my work is lost" and "my work belongs to the previous run" is visible.
 
-**Stay in this session afterward.** Your process does not exit when your phase completes;
-it goes idle in its pane, and after `worker_idle_retire_seconds` (default 600 s) idle with no
-active phase the daemon retires it — your next assignment resumes this same session from its
-session file, so it is still you. Other roles on this issue may reach you through Envoy with
+**Stay in this session afterward.** Your process does not exit when your phase completes; it
+goes idle in its pane. Under the Go daemon it stays live until your issue leaves the workflow: no
+move between phases stops it, and only an explicit stop does — the issue closing, the issue moved
+to `backlog`, `icebox` or `triage` (a child by a person or its architect's `park_child`, or the
+tree's root, which stops the whole tree), a child set back to `todo` (which stops the worker of the
+phase it interrupted, while the earlier phases' roles stay live), or an operator. A stop keeps
+your session, and a crash relaunches it. Under the TypeScript daemon, after
+`worker_idle_retire_seconds` (default 600 s) idle with no active phase the daemon retires it.
+Either way your next assignment arrives in this same session, so it is still you. Other roles on
+this issue may reach you through Envoy with
 questions about the work you did — answer them, reading `$LEGION_WORKSPACE` and your own
 committed handoff as needed, without mutating anything (see Workspace and handoff
 precedence above). You will also be the one resumed, with a new prompt in this same

@@ -29,6 +29,7 @@ const (
 	TypeAgentStart             = "agent_start"
 	TypeAgentEnd               = "agent_end"
 	TypeShutdown               = "shutdown"
+	TypeAbort                  = "abort"
 	TypeAdoptWorkingCopy       = "adopt-working-copy"
 	TypeAdoptWorkingCopyResult = "adopt-working-copy-result"
 	TypeRPCChunk               = "rpc_chunk"
@@ -39,6 +40,13 @@ const (
 	TypeHello2                       = "hello2"
 	TypeAgentSecretsEnrollment       = "agent-secrets-enrollment"
 	TypeAgentSecretsEnrollmentResult = "agent-secrets-enrollment-result"
+	TypeLauncherHello                = "launcher_hello"
+	TypeLauncherHelloAck             = "launcher_hello_ack"
+	TypeLauncherState                = "launcher_state"
+	TypeLauncherStart                = "launcher_start"
+	TypeLauncherStartResult          = "launcher_start_result"
+	TypeLauncherStop                 = "launcher_stop"
+	TypeLauncherStopResult           = "launcher_stop_result"
 )
 
 // The protocol's sizes, verified against the shipped files: the largest plain line including its
@@ -106,6 +114,80 @@ type AgentSecretsEnrollmentResult struct {
 	Error string `json:"error,omitempty"`
 }
 
+// LauncherHello authenticates a role launcher independently from its child shim. The daemon
+// minted Token belongs to exactly this pod UID, role and Secret epoch; LauncherID changes each
+// time Kubernetes restarts the launcher container.
+type LauncherHello struct {
+	Token      string `json:"token"`
+	Sandbox    string `json:"sandbox"`
+	Role       string `json:"role"`
+	PodUID     string `json:"podUid"`
+	LauncherID string `json:"launcherId"`
+}
+
+// LauncherHelloAck admits a launcher to receive child process commands.
+type LauncherHelloAck struct{}
+
+// LauncherChild is the actual worker-shim child the launcher has running, if any.
+type LauncherChild struct {
+	Generation uint64 `json:"generation"`
+	PID        int    `json:"pid"`
+}
+
+// LauncherExit is the last child exit the launcher observed. A launcher reports it after a
+// reconnect before it accepts another start, so the daemon never invents Gone from a lost reply.
+type LauncherExit struct {
+	Generation    uint64 `json:"generation"`
+	Code          int    `json:"code"`
+	Signal        string `json:"signal,omitempty"`
+	WorkspaceLost bool   `json:"workspaceLost,omitempty"`
+}
+
+// LauncherState is the launcher's actual child state at hello and after every child transition.
+type LauncherState struct {
+	Child    *LauncherChild `json:"child,omitempty"`
+	LastExit *LauncherExit  `json:"lastExit,omitempty"`
+}
+
+// LauncherStart starts one worker-shim child. The daemon owns the generation and request ID; a
+// repeated request is idempotent only when its payload, Files included, is unchanged. Files are
+// the generation's credentials, the boot token among them: the launcher writes each, owner-only
+// and exclusively, into a fresh directory for this generation in its own memory-backed storage
+// before the child starts, and removes the directory when the child ends — so a role started in a
+// running pod never waits on the kubelet to propagate a Secret. Argv and Env name those files by
+// path; no credential is ever in Argv, Env, or an error.
+type LauncherStart struct {
+	ID         string            `json:"id"`
+	Generation uint64            `json:"generation"`
+	Argv       []string          `json:"argv"`
+	Env        []string          `json:"env"`
+	Files      map[string]string `json:"files,omitempty"`
+	ResumeFile string            `json:"resumeFile,omitempty"`
+}
+
+// LauncherStartResult is the launcher's answer to LauncherStart.
+type LauncherStartResult struct {
+	ID                string `json:"id"`
+	OK                bool   `json:"ok"`
+	RunningGeneration uint64 `json:"runningGeneration,omitempty"`
+	Error             string `json:"error,omitempty"`
+}
+
+// LauncherStop stops only the child of Generation. The launcher refuses an older generation
+// rather than risking a newer role process.
+type LauncherStop struct {
+	ID         string `json:"id"`
+	Generation uint64 `json:"generation"`
+	GraceMs    int    `json:"graceMs"`
+}
+
+// LauncherStopResult is the launcher's answer to LauncherStop.
+type LauncherStopResult struct {
+	ID    string `json:"id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
 // HelloAck accepts the hello. The shim spawns OMP only after it (worker-stream-listener.ts:14).
 type HelloAck struct{}
 
@@ -142,6 +224,14 @@ type StateData struct {
 
 // GetState asks the worker whether a turn is running.
 type GetState struct {
+	ID string `json:"id"`
+}
+
+// Abort asks OMP to end the turn it is running: it cancels the turn's tool children and the model
+// call, and answers once the agent is idle, keeping the process and its session. Its answer can
+// come before the agent_end that ends the turn on the wire, so that agent_end, not the answer, is
+// the turn's end.
+type Abort struct {
 	ID string `json:"id"`
 }
 
@@ -199,6 +289,7 @@ func (NegotiateProtocol) FrameType() string            { return TypeNegotiatePro
 func (Prompt) FrameType() string                       { return TypePrompt }
 func (Response) FrameType() string                     { return TypeResponse }
 func (GetState) FrameType() string                     { return TypeGetState }
+func (Abort) FrameType() string                        { return TypeAbort }
 func (AgentStart) FrameType() string                   { return TypeAgentStart }
 func (AgentEnd) FrameType() string                     { return TypeAgentEnd }
 func (Shutdown) FrameType() string                     { return TypeShutdown }
@@ -209,6 +300,13 @@ func (r Raw) FrameType() string                        { return r.Type }
 func (Hello2) FrameType() string                       { return TypeHello2 }
 func (AgentSecretsEnrollment) FrameType() string       { return TypeAgentSecretsEnrollment }
 func (AgentSecretsEnrollmentResult) FrameType() string { return TypeAgentSecretsEnrollmentResult }
+func (LauncherHello) FrameType() string                { return TypeLauncherHello }
+func (LauncherHelloAck) FrameType() string             { return TypeLauncherHelloAck }
+func (LauncherState) FrameType() string                { return TypeLauncherState }
+func (LauncherStart) FrameType() string                { return TypeLauncherStart }
+func (LauncherStartResult) FrameType() string          { return TypeLauncherStartResult }
+func (LauncherStop) FrameType() string                 { return TypeLauncherStop }
+func (LauncherStopResult) FrameType() string           { return TypeLauncherStopResult }
 
 func (f Hello) MarshalJSON() ([]byte, error) {
 	type plain Hello
@@ -235,6 +333,11 @@ func (f Response) MarshalJSON() ([]byte, error) {
 func (f GetState) MarshalJSON() ([]byte, error) {
 	type plain GetState
 	return marshalFrame(TypeGetState, plain(f))
+}
+
+func (f Abort) MarshalJSON() ([]byte, error) {
+	type plain Abort
+	return marshalFrame(TypeAbort, plain(f))
 }
 
 func (f AgentStart) MarshalJSON() ([]byte, error) {
@@ -276,6 +379,40 @@ func (f AgentSecretsEnrollment) MarshalJSON() ([]byte, error) {
 func (f AgentSecretsEnrollmentResult) MarshalJSON() ([]byte, error) {
 	type plain AgentSecretsEnrollmentResult
 	return marshalFrame(TypeAgentSecretsEnrollmentResult, plain(f))
+}
+
+func (f LauncherHello) MarshalJSON() ([]byte, error) {
+	type plain LauncherHello
+	return marshalFrame(TypeLauncherHello, plain(f))
+}
+
+func (LauncherHelloAck) MarshalJSON() ([]byte, error) {
+	return marshalFrame(TypeLauncherHelloAck, struct{}{})
+}
+
+func (f LauncherState) MarshalJSON() ([]byte, error) {
+	type plain LauncherState
+	return marshalFrame(TypeLauncherState, plain(f))
+}
+
+func (f LauncherStart) MarshalJSON() ([]byte, error) {
+	type plain LauncherStart
+	return marshalFrame(TypeLauncherStart, plain(f))
+}
+
+func (f LauncherStartResult) MarshalJSON() ([]byte, error) {
+	type plain LauncherStartResult
+	return marshalFrame(TypeLauncherStartResult, plain(f))
+}
+
+func (f LauncherStop) MarshalJSON() ([]byte, error) {
+	type plain LauncherStop
+	return marshalFrame(TypeLauncherStop, plain(f))
+}
+
+func (f LauncherStopResult) MarshalJSON() ([]byte, error) {
+	type plain LauncherStopResult
+	return marshalFrame(TypeLauncherStopResult, plain(f))
 }
 
 // Validate refuses a hello the listener would refuse (worker-stream-listener.ts:140-148).
@@ -326,6 +463,52 @@ func (f Hello2) Validate() error {
 	return nil
 }
 
+// Validate refuses an unactionable launcher hello before the listener hands it to the runtime.
+func (f LauncherHello) Validate() error {
+	switch {
+	case f.Token == "":
+		return fmt.Errorf("%w: launcher_hello carries no token", ErrMalformedFrame)
+	case f.Sandbox == "":
+		return fmt.Errorf("%w: launcher_hello carries no sandbox", ErrMalformedFrame)
+	case f.Role == "":
+		return fmt.Errorf("%w: launcher_hello carries no role", ErrMalformedFrame)
+	case f.PodUID == "":
+		return fmt.Errorf("%w: launcher_hello carries no podUid", ErrMalformedFrame)
+	case f.LauncherID == "":
+		return fmt.Errorf("%w: launcher_hello carries no launcherId", ErrMalformedFrame)
+	}
+	return nil
+}
+
+func (f LauncherStart) Validate() error {
+	switch {
+	case f.ID == "":
+		return fmt.Errorf("%w: launcher_start carries no id", ErrMalformedFrame)
+	case f.Generation == 0:
+		return fmt.Errorf("%w: launcher_start carries no generation", ErrMalformedFrame)
+	case len(f.Argv) == 0:
+		return fmt.Errorf("%w: launcher_start carries no argv", ErrMalformedFrame)
+	}
+	for name := range f.Files {
+		if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\x00") {
+			return fmt.Errorf("%w: launcher_start file name %q is not a plain file name", ErrMalformedFrame, name)
+		}
+	}
+	return nil
+}
+
+func (f LauncherStop) Validate() error {
+	switch {
+	case f.ID == "":
+		return fmt.Errorf("%w: launcher_stop carries no id", ErrMalformedFrame)
+	case f.Generation == 0:
+		return fmt.Errorf("%w: launcher_stop carries no generation", ErrMalformedFrame)
+	case f.GraceMs <= 0:
+		return fmt.Errorf("%w: launcher_stop graceMs is %d", ErrMalformedFrame, f.GraceMs)
+	}
+	return nil
+}
+
 // Validate refuses an enrollment frame with no request id or no enrollment id: the daemon is its
 // only sender, so either is a bug to name.
 func (f AgentSecretsEnrollment) Validate() error {
@@ -368,6 +551,8 @@ func Decode(line []byte) (Frame, error) {
 		return decodeInto[Response](trimmed)
 	case TypeGetState:
 		return decodeInto[GetState](trimmed)
+	case TypeAbort:
+		return decodeInto[Abort](trimmed)
 	case TypeAgentStart:
 		return decodeInto[AgentStart](trimmed)
 	case TypeAgentEnd:
@@ -386,6 +571,20 @@ func Decode(line []byte) (Frame, error) {
 		return decodeInto[AgentSecretsEnrollment](trimmed)
 	case TypeAgentSecretsEnrollmentResult:
 		return decodeInto[AgentSecretsEnrollmentResult](trimmed)
+	case TypeLauncherHello:
+		return decodeInto[LauncherHello](trimmed)
+	case TypeLauncherHelloAck:
+		return LauncherHelloAck{}, nil
+	case TypeLauncherState:
+		return decodeInto[LauncherState](trimmed)
+	case TypeLauncherStart:
+		return decodeInto[LauncherStart](trimmed)
+	case TypeLauncherStartResult:
+		return decodeInto[LauncherStartResult](trimmed)
+	case TypeLauncherStop:
+		return decodeInto[LauncherStop](trimmed)
+	case TypeLauncherStopResult:
+		return decodeInto[LauncherStopResult](trimmed)
 	default:
 		return Raw{Type: head.Type, JSON: bytes.Clone(trimmed)}, nil
 	}

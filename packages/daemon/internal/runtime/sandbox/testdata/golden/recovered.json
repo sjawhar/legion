@@ -5,10 +5,9 @@
     "labels": {
       "legion.dev/issue": "LEGION-208",
       "legion.dev/project": "legion",
-      "legion.dev/role": "tester",
       "legion.dev/tree": "LEGION-208"
     },
-    "name": "legion-legion-legion-208-tester",
+    "name": "legion-legion-legion-208",
     "namespace": "legion"
   },
   "spec": {
@@ -21,7 +20,6 @@
         "labels": {
           "legion.dev/issue": "LEGION-208",
           "legion.dev/project": "legion",
-          "legion.dev/role": "tester",
           "legion.dev/tree": "LEGION-208"
         }
       },
@@ -68,123 +66,19 @@
           {
             "command": [
               "/opt/legion/bin/legion",
-              "worker-shim",
+              "launcher",
               "--connect",
               "tcp://192.0.2.250:13371",
-              "--boot-token-file",
-              "/var/run/legion/boot/LEGION_BOOT_TOKEN",
-              "--pod-safety",
-              "--",
-              "/opt/omp/bin/omp",
-              "--no-extensions",
-              "--extension",
-              "/opt/legion/pi-legion-envoy",
-              "--mode",
-              "rpc",
-              "--append-system-prompt",
-              "You are the tester.\n\nLegion addressing: your role topic is `notifications.role.legion-legion-legion-208-tester`.\n\nDeployment instructions."
+              "--token-file",
+              "/var/run/legion/launcher/LAUNCHER_TOKEN",
+              "--sandbox",
+              "legion-legion-legion-208",
+              "--role",
+              "architect",
+              "--private-dir",
+              "/var/run/legion/private"
             ],
             "env": [
-              {
-                "name": "LEGION_TREE",
-                "value": "LEGION-208"
-              },
-              {
-                "name": "LEGION_ISSUE",
-                "value": "LEGION-208"
-              },
-              {
-                "name": "LEGION_ROLE",
-                "value": "tester"
-              },
-              {
-                "name": "LEGION_GENERATION",
-                "value": "1"
-              },
-              {
-                "name": "LEGION_PROJECT",
-                "value": "legion"
-              },
-              {
-                "name": "LEGION_DAEMON_URL",
-                "value": "http://192.0.2.250:13370"
-              },
-              {
-                "name": "LEGION_STATE_DIR",
-                "value": "/var/run/legion/state"
-              },
-              {
-                "name": "LEGION_WORKSPACE",
-                "value": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
-              },
-              {
-                "name": "ENVOY_NATS_URL",
-                "value": "nats://192.0.2.250:4222"
-              },
-              {
-                "name": "ENVOY_URL",
-                "value": "http://192.0.2.250:9020"
-              },
-              {
-                "name": "LEGION_GH_PATH",
-                "value": "/usr/local/bin/gh"
-              },
-              {
-                "name": "LEGION_GIT_PATH",
-                "value": "/usr/bin/git"
-              },
-              {
-                "name": "LEGION_JJ_PATH",
-                "value": "/usr/local/bin/jj"
-              },
-              {
-                "name": "LEGION_CREDENTIAL_HELPER",
-                "value": "!/opt/legion/bin/legion credential"
-              },
-              {
-                "name": "PATH",
-                "value": "/legion/worker-bin:/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
-              },
-              {
-                "name": "PI_SHELL_PREFIX",
-                "value": "__legion_path=:$${PATH//:/::}: && __legion_path=$${__legion_path//:'/legion/worker-bin':/} && __legion_path=$${__legion_path//:'/opt/legion/bin':/} && __legion_path=$${__legion_path//::/:} && __legion_path=$${__legion_path#:} && PATH='/legion/worker-bin:/opt/legion/bin'$${__legion_path:+:$${__legion_path%:}} && unset __legion_path && hash -r &&"
-              },
-              {
-                "name": "GIT_TERMINAL_PROMPT",
-                "value": "0"
-              },
-              {
-                "name": "LEGION_GRANT_FILE",
-                "value": "/var/run/legion/state/secrets/legion-legion-legion-208-tester-grant"
-              },
-              {
-                "name": "XDG_CONFIG_HOME",
-                "value": "/home/legion/.config"
-              },
-              {
-                "name": "XDG_CACHE_HOME",
-                "value": "/home/legion/.cache"
-              },
-              {
-                "name": "XDG_DATA_HOME",
-                "value": "/home/legion/.local/share"
-              },
-              {
-                "name": "XDG_STATE_HOME",
-                "value": "/home/legion/.local/state"
-              },
-              {
-                "name": "UV_PYTHON_INSTALL_DIR",
-                "value": "/legion/uv/python/legion-208"
-              },
-              {
-                "name": "UV_CACHE_DIR",
-                "value": "/legion/uv/cache"
-              },
-              {
-                "name": "UV_LINK_MODE",
-                "value": "copy"
-              },
               {
                 "name": "POD_UID",
                 "valueFrom": {
@@ -192,26 +86,217 @@
                     "fieldPath": "metadata.uid"
                   }
                 }
-              },
-              {
-                "name": "JJ_EMAIL",
-                "value": "1+legion-implement[bot]@users.noreply.github.com"
-              },
-              {
-                "name": "JJ_USER",
-                "value": "legion-implement[bot]"
-              },
-              {
-                "name": "ENVOY_TOKEN_FILE",
-                "value": "/var/run/legion/boot/ENVOY_TOKEN"
-              },
-              {
-                "name": "LEGION_BOOT_TOKEN_FILE",
-                "value": "/var/run/legion/boot/LEGION_BOOT_TOKEN"
               }
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
-            "name": "worker",
+            "name": "architect",
+            "resources": {},
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/legion",
+                "name": "tree"
+              },
+              {
+                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
+                "name": "tree",
+                "subPath": "sessions"
+              },
+              {
+                "mountPath": "/var/run/legion/launcher",
+                "name": "launcher-architect",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/var/run/legion/private",
+                "name": "private-architect"
+              },
+              {
+                "mountPath": "/var/run/legion/state",
+                "name": "state-architect"
+              },
+              {
+                "mountPath": "/home/legion/.config",
+                "name": "config"
+              }
+            ],
+            "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
+          },
+          {
+            "command": [
+              "/opt/legion/bin/legion",
+              "launcher",
+              "--connect",
+              "tcp://192.0.2.250:13371",
+              "--token-file",
+              "/var/run/legion/launcher/LAUNCHER_TOKEN",
+              "--sandbox",
+              "legion-legion-legion-208",
+              "--role",
+              "planner",
+              "--private-dir",
+              "/var/run/legion/private"
+            ],
+            "env": [
+              {
+                "name": "POD_UID",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.uid"
+                  }
+                }
+              }
+            ],
+            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
+            "name": "planner",
+            "resources": {},
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/legion",
+                "name": "tree"
+              },
+              {
+                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
+                "name": "tree",
+                "subPath": "sessions"
+              },
+              {
+                "mountPath": "/var/run/legion/launcher",
+                "name": "launcher-planner",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/var/run/legion/private",
+                "name": "private-planner"
+              },
+              {
+                "mountPath": "/var/run/legion/state",
+                "name": "state-planner"
+              },
+              {
+                "mountPath": "/home/legion/.config",
+                "name": "config"
+              }
+            ],
+            "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
+          },
+          {
+            "command": [
+              "/opt/legion/bin/legion",
+              "launcher",
+              "--connect",
+              "tcp://192.0.2.250:13371",
+              "--token-file",
+              "/var/run/legion/launcher/LAUNCHER_TOKEN",
+              "--sandbox",
+              "legion-legion-legion-208",
+              "--role",
+              "implementer",
+              "--private-dir",
+              "/var/run/legion/private"
+            ],
+            "env": [
+              {
+                "name": "POD_UID",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.uid"
+                  }
+                }
+              }
+            ],
+            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
+            "name": "implementer",
+            "resources": {},
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/legion",
+                "name": "tree"
+              },
+              {
+                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
+                "name": "tree",
+                "subPath": "sessions"
+              },
+              {
+                "mountPath": "/var/run/legion/launcher",
+                "name": "launcher-implementer",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/var/run/legion/private",
+                "name": "private-implementer"
+              },
+              {
+                "mountPath": "/var/run/legion/state",
+                "name": "state-implementer"
+              },
+              {
+                "mountPath": "/home/legion/.config",
+                "name": "config"
+              }
+            ],
+            "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
+          },
+          {
+            "command": [
+              "/opt/legion/bin/legion",
+              "launcher",
+              "--connect",
+              "tcp://192.0.2.250:13371",
+              "--token-file",
+              "/var/run/legion/launcher/LAUNCHER_TOKEN",
+              "--sandbox",
+              "legion-legion-legion-208",
+              "--role",
+              "tester",
+              "--private-dir",
+              "/var/run/legion/private"
+            ],
+            "env": [
+              {
+                "name": "POD_UID",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.uid"
+                  }
+                }
+              }
+            ],
+            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
+            "name": "tester",
             "resources": {
               "limits": {
                 "memory": "4Gi"
@@ -243,13 +328,155 @@
                 "subPath": "sessions"
               },
               {
-                "mountPath": "/var/run/legion/boot",
-                "name": "boot",
+                "mountPath": "/var/run/legion/launcher",
+                "name": "launcher-tester",
                 "readOnly": true
               },
               {
+                "mountPath": "/var/run/legion/private",
+                "name": "private-tester"
+              },
+              {
                 "mountPath": "/var/run/legion/state",
-                "name": "state"
+                "name": "state-tester"
+              },
+              {
+                "mountPath": "/home/legion/.config",
+                "name": "config"
+              }
+            ],
+            "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
+          },
+          {
+            "command": [
+              "/opt/legion/bin/legion",
+              "launcher",
+              "--connect",
+              "tcp://192.0.2.250:13371",
+              "--token-file",
+              "/var/run/legion/launcher/LAUNCHER_TOKEN",
+              "--sandbox",
+              "legion-legion-legion-208",
+              "--role",
+              "reviewer",
+              "--private-dir",
+              "/var/run/legion/private"
+            ],
+            "env": [
+              {
+                "name": "POD_UID",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.uid"
+                  }
+                }
+              }
+            ],
+            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
+            "name": "reviewer",
+            "resources": {},
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/legion",
+                "name": "tree"
+              },
+              {
+                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
+                "name": "tree",
+                "subPath": "sessions"
+              },
+              {
+                "mountPath": "/var/run/legion/launcher",
+                "name": "launcher-reviewer",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/var/run/legion/private",
+                "name": "private-reviewer"
+              },
+              {
+                "mountPath": "/var/run/legion/state",
+                "name": "state-reviewer"
+              },
+              {
+                "mountPath": "/home/legion/.config",
+                "name": "config"
+              }
+            ],
+            "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
+          },
+          {
+            "command": [
+              "/opt/legion/bin/legion",
+              "launcher",
+              "--connect",
+              "tcp://192.0.2.250:13371",
+              "--token-file",
+              "/var/run/legion/launcher/LAUNCHER_TOKEN",
+              "--sandbox",
+              "legion-legion-legion-208",
+              "--role",
+              "merger",
+              "--private-dir",
+              "/var/run/legion/private"
+            ],
+            "env": [
+              {
+                "name": "POD_UID",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.uid"
+                  }
+                }
+              }
+            ],
+            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
+            "name": "merger",
+            "resources": {},
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/legion",
+                "name": "tree"
+              },
+              {
+                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
+                "name": "tree",
+                "subPath": "sessions"
+              },
+              {
+                "mountPath": "/var/run/legion/launcher",
+                "name": "launcher-merger",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/var/run/legion/private",
+                "name": "private-merger"
+              },
+              {
+                "mountPath": "/var/run/legion/state",
+                "name": "state-merger"
               },
               {
                 "mountPath": "/home/legion/.config",
@@ -414,7 +641,7 @@
           "legion.dev/pool": "legion"
         },
         "priorityClassName": "legion",
-        "restartPolicy": "Never",
+        "restartPolicy": "Always",
         "runtimeClassName": "gvisor",
         "securityContext": {
           "fsGroup": 1000,
@@ -435,24 +662,7 @@
           {
             "name": "tree",
             "persistentVolumeClaim": {
-              "claimName": "tree-legion-legion-legion-208-architect"
-            }
-          },
-          {
-            "name": "boot",
-            "secret": {
-              "defaultMode": 288,
-              "items": [
-                {
-                  "key": "ENVOY_TOKEN",
-                  "path": "ENVOY_TOKEN"
-                },
-                {
-                  "key": "LEGION_BOOT_TOKEN",
-                  "path": "LEGION_BOOT_TOKEN"
-                }
-              ],
-              "secretName": "legion-legion-legion-208-tester-boot"
+              "claimName": "tree-legion-legion-legion-208"
             }
           },
           {
@@ -465,18 +675,12 @@
                   "path": "LEGION_PROVISION_TOKEN"
                 }
               ],
-              "secretName": "legion-legion-legion-208-tester-boot"
+              "secretName": "legion-legion-legion-208-boot"
             }
           },
           {
             "emptyDir": {},
             "name": "feed"
-          },
-          {
-            "emptyDir": {
-              "medium": "Memory"
-            },
-            "name": "state"
           },
           {
             "emptyDir": {
@@ -489,6 +693,156 @@
               "medium": "Memory"
             },
             "name": "config"
+          },
+          {
+            "name": "launcher-architect",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "LAUNCHER_TOKEN",
+                  "path": "LAUNCHER_TOKEN"
+                }
+              ],
+              "secretName": "legion-legion-legion-208-architect-boot"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "private-architect"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "state-architect"
+          },
+          {
+            "name": "launcher-planner",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "LAUNCHER_TOKEN",
+                  "path": "LAUNCHER_TOKEN"
+                }
+              ],
+              "secretName": "legion-legion-legion-208-planner-boot"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "private-planner"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "state-planner"
+          },
+          {
+            "name": "launcher-implementer",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "LAUNCHER_TOKEN",
+                  "path": "LAUNCHER_TOKEN"
+                }
+              ],
+              "secretName": "legion-legion-legion-208-implementer-boot"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "private-implementer"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "state-implementer"
+          },
+          {
+            "name": "launcher-tester",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "LAUNCHER_TOKEN",
+                  "path": "LAUNCHER_TOKEN"
+                }
+              ],
+              "secretName": "legion-legion-legion-208-tester-boot"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "private-tester"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "state-tester"
+          },
+          {
+            "name": "launcher-reviewer",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "LAUNCHER_TOKEN",
+                  "path": "LAUNCHER_TOKEN"
+                }
+              ],
+              "secretName": "legion-legion-legion-208-reviewer-boot"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "private-reviewer"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "state-reviewer"
+          },
+          {
+            "name": "launcher-merger",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "LAUNCHER_TOKEN",
+                  "path": "LAUNCHER_TOKEN"
+                }
+              ],
+              "secretName": "legion-legion-legion-208-merger-boot"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "private-merger"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "state-merger"
           }
         ]
       }

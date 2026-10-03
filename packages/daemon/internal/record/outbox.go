@@ -25,6 +25,7 @@ const (
 	OutboxKindSupervise         OutboxKind = "supervise"
 	OutboxKindGateSeed          OutboxKind = "gate_seed"
 	OutboxKindLingerClose       OutboxKind = "linger_close"
+	OutboxKindIssueSuspend      OutboxKind = "issue_suspend"
 	OutboxKindWorkspaceRemove   OutboxKind = "workspace_remove"
 	OutboxKindMergeQueuePublish OutboxKind = "merge_queue_publish"
 )
@@ -204,15 +205,16 @@ type SuperviseRequest struct {
 	// finishes without acting. It is empty for the architect, which serves every phase, and for a
 	// suspend or a tree's close, which must still act after the issue moves on.
 	Phase phase.Phase `json:"phase,omitempty"`
-	// Leaves is the phase a transition's suspend ends. Such a suspend finishes without acting once
-	// the issue is back in a phase its role works (workflow.SuspendApplies). It is empty for the
-	// suspends a linger or a child's leave queues, which stop every claim whatever phase its issue
-	// holds, and for every other operation.
-	Leaves phase.Phase `json:"leaves,omitempty"`
 	// ResumeTask marks Task as the phase's resume task (workflow.ResumePhaseTask), the one a
 	// re-admitted tree's promotion gives a mid-phase child: a claim that already holds a task for
 	// the same generation and phase is given it once it is ready, so the start delivers none.
 	ResumeTask bool `json:"resumeTask,omitempty"`
+	// Quiesce is the role whose phase a start takes over without that role's completion: CI settled
+	// red while it tested, or reviewed a round it had not completed (workflow's TriggerChecksRed). The
+	// start acts only once that role's claim is out of its turn (supervise.Machine.Quiesce), so the
+	// two never write the shared workspace together. It is empty for every other start, which a
+	// completion or a person's move hands the phase, and for every other operation.
+	Quiesce claim.Role `json:"quiesce,omitempty"`
 	// Linger is the root generation whose linger a tree close expires. A member keeps its
 	// generation across re-admission, so the close acts only while its tree lingers at that root
 	// generation: never in the tree's next run, nor in a later linger of it.
@@ -240,6 +242,16 @@ type LingerClose struct {
 }
 
 func (LingerClose) OutboxKind() OutboxKind { return OutboxKindLingerClose }
+
+// IssueSuspend retains an issue's shared resources after its close stops every role. Both
+// workflow generations and this row's ID fence a later re-admission or start.
+type IssueSuspend struct {
+	Tree           string `json:"tree"`
+	Generation     uint64 `json:"generation"`
+	TreeGeneration uint64 `json:"treeGeneration"`
+}
+
+func (IssueSuspend) OutboxKind() OutboxKind { return OutboxKindIssueSuspend }
 
 // WorkspaceRemove removes the workspace named by the row's issue.
 type WorkspaceRemove struct {
@@ -334,6 +346,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindIssueSuspend:
+		value := IssueSuspend{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	case OutboxKindWorkspaceRemove:
 		value := WorkspaceRemove{}
 		if err := decoder.Decode(&value); err != nil {
@@ -380,6 +398,10 @@ func validateOutboxPayload(payload OutboxPayload) error {
 			return fmt.Errorf("a status write's reason is %d characters, over the %d a message holds", length, MessagePostLimit)
 		}
 	case MessagePost, GateSeed, LingerClose:
+	case IssueSuspend:
+		if value.Tree == "" || value.Generation == 0 || value.TreeGeneration == 0 {
+			return fmt.Errorf("issue suspension requires its tree and both workflow generations")
+		}
 	case WorkspaceRemove:
 		if value.Linger == 0 {
 			return fmt.Errorf("workspace removal requires the root generation of its linger")
@@ -410,6 +432,9 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.ResumeTask && (value.Op != "start" || value.Task == "" || value.Phase == "") {
 			return fmt.Errorf("a supervise resume task requires a start with a task and a phase")
+		}
+		if value.Quiesce != "" && (value.Op != "start" || value.Quiesce == value.Role) {
+			return fmt.Errorf("a supervise quiesce names another role than its start's, and only a start carries one")
 		}
 	case MergeQueuePublish:
 		if value.Role == "" {

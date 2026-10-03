@@ -327,14 +327,91 @@ checkout, an image that prints the token also carries the plugin's storage-indep
 
 ## Kubernetes runtime: the Go daemon on Agent Sandbox
 
-Under the Go coordinator, `runtime: kubernetes` runs every claim as one Agent Sandbox: each root
-architect, sub-architect and phase worker gets a `agents.x-k8s.io` `Sandbox` (kubernetes-sigs/agent-sandbox,
-LEGION-206), and its pod runs under gVisor on the Legion pool. The Sandbox is named by the claim token,
-`legion-<project>-<issue>-<role>`, and keeps that name across generations: a new generation rotates
-the boot token and takes the Sandbox `Suspended` and then `Running` again
-(`packages/daemon/internal/runtime/sandbox`). The daemon runs on a host its pods can reach and
-serves the worker stream they dial. The controller is `legion controller start` on the operator's
-machine ([Operator-launched controller](#operator-launched-controller)).
+Under the Go coordinator, `runtime: kubernetes` runs every issue as one Agent Sandbox: an
+`agents.x-k8s.io` `Sandbox` (kubernetes-sigs/agent-sandbox, LEGION-206) named for the issue,
+`legion-<project>-<issue>`, whose one pod runs under gVisor on the Legion pool. The pod holds the
+two init containers and six role containers — `architect`, `planner`, `implementer`, `tester`,
+`reviewer`, `merger` — each of which runs `legion launcher`, a supervisor with no workflow policy
+that authenticates to the daemon's worker stream with its role's own token and starts or stops
+that role's `legion worker-shim` and Oh My Pi when the daemon tells it to. Every role of the issue
+shares the issue's checkout, the tree volume, the sessions directory and the pod's network; each
+role keeps its own state directory, agent-secrets key and launch credentials. A role's Secret holds
+only its launcher token, projected into that role's container alone and bound to the pod's uid; the
+daemon accepts a launcher only for that role, that pod and that token. Each generation's boot token
+and launch credentials (the Envoy and Dispatch bearers, a spec's secrets) travel in the authenticated
+start command, and the launcher writes them owner-only and exclusively into a fresh `g<generation>`
+directory of its role's memory-backed private directory, removing anything already there without
+following it, and removes that directory when the generation ends: a role started in a running pod
+never waits on the kubelet to refresh a Secret, and no credential is in an argv, an environment
+value, a log or an error. The role's own agent runs as the same user in the same container, so it
+can read its own generation's credentials, as a pane can; it cannot read another role's. A role
+process is addressed by the pod's uid, its
+container and its generation (the incarnation `<pod uid>/<generation>`): in a healthy running pod,
+starting, suspending or recovering one role never restarts the pod or touches another role. A new generation of a role
+in a running pod is a new child of its launcher. A pod is replaced after it dies, when it was not
+made by this runtime, or when a closed issue is re-admitted after suspension
+(`packages/daemon/internal/runtime/sandbox`).
+
+Releasing a role ends only its process. The issue owns its Sandbox, its role Secrets and, for a
+root, the tree PVC, recorded in the daemon's store (`issue_resources`) before any role of it starts.
+Each tree also has one durable lifecycle record (`tree_lifecycles`, keyed by the normalized project
+token and the tree): an epoch that is open, cleanup-reserved, or cleanup-confirmed, and the
+authority that opened it. Workflow admission opens a root's epoch in the fact that gives it its
+slot; the authenticated operator spawn of a root architect opens an operator tree's. Every claim
+binds the open epoch in the same short transaction that first writes it, and every spawn, resume or
+retry binds again before it launches, all under the fact path's one global serializer. A reserved
+epoch refuses those writes with a named wait that keeps the start's outbox row and charges no
+launch failure; a confirmed epoch admits nothing until a fresh root admission opens the next one.
+
+A workflow close or withdrawal queues a separate `issue_suspend` effect for each affected issue,
+after its per-role stops. The effect checks both workflow generations, later starts, unfinished
+stop effects and every stored role, including a launch not yet present in the runtime's watch.
+A held turn, unfinished or uncertain launch, or Kubernetes error keeps the effect pending;
+a superseded close finishes without acting. Once the roles have stopped, the daemon sets that
+issue's Sandbox to `Suspended` and waits for its pod to disappear. The Sandbox, tree volume and
+recorded sessions remain until linger cleanup. A daemon restart retries the stored effect.
+Re-admission during linger reuses those resources and resumes the recorded sessions; the issue's
+launch lock orders a concurrent resume after any suspension already in flight.
+
+Linger expiry reserves its tree only while the root still lingers at the close's generation, so
+a re-admission that committed first fences it; an operator close reserves after it authenticated
+the root close. Either reservation comes before the census, which then reads every stored claim of
+the tree, including one that persisted before the reservation but has not admitted resources yet,
+and deletes nothing until all of them retired. A reservation that is not confirmed resumes on the
+next attempt, even after a re-admission, and stays the new start's wait until API confirmation:
+every close row of the tree, however stale its generation or the linger it closed, still retires
+its claim and drives that cleanup before the checks that finish a stale close apply. A launch whose
+resource recheck meets a reservation committed after its own check is refused at once, with the
+same uncharged wait, rather than held toward the boot deadline. Every lifecycle step takes the
+global serializer before any lifecycle or resource row.
+
+A child issue's Sandbox is deleted and its absence confirmed through the API. A root is cleaned
+last: its cleanup begins only when every child record is confirmed, then refuses new children and
+requires the API to list no child Sandbox of the tree. The root Sandbox delete carries its UID and
+resourceVersion plus `foreground` propagation. Agent Sandbox v1.0.3 creates the root tree PVC with
+that Sandbox as its controller owner and `blockOwnerDeletion: true`; foreground deletion keeps the
+owner visible until Kubernetes garbage collection deletes that blocking dependent. The restricted
+daemon has no PVC API verb, so it confirms the root Sandbox is NotFound before confirming the
+durable cleanup; it does not read or delete a PVC. The live runtime proof must observe the actual
+PVC owner reference and its absence after foreground deletion, rather than infer that result from
+labels or a generic garbage-collection rule.
+
+An operator-created tree has no workflow record: its stored operator authority, not a zero or
+sentinel generation, selects the operator cleanup entry point, which then applies the same
+child-first/root-last cleanup without manufacturing a workflow issue. A tree closed before its
+first resource record confirms its reservation without deleting anything.
+
+Before the daemon opens its store, so before any schema write, image probe or reconcile, it checks
+that Agent Sandbox is installed and refuses a namespace that still holds a per-claim Sandbox of the
+layout before issue pods, naming it; once the store opens and before it migrates, it refuses a
+claim that still records such a Sandbox. After it migrates and before it installs the issue-pod
+layout marker, it refuses an outbox tree close of its project that could never run, naming each
+row: one the outbox's strict decode refuses, or whose linger (the root generation the close
+expires) is beyond the store's largest generation. No daemon writes one, and such a row would fail
+on every attempt. Migrate or remove those first. The daemon runs on a host
+its pods can reach and serves the worker stream they dial. The controller is
+`legion controller start` on the operator's machine
+([Operator-launched controller](#operator-launched-controller)).
 
 ### Configuration
 
@@ -610,9 +687,10 @@ gives that configuration nothing to take. Run no command in it that holds a toke
 
 ### Tree sizing: one tree per node
 
-The pool's floor, not the pod, decides node size. Legion pods carry no
-`karpenter.k8s.aws/instance-cpu` selector and no resource requests. The `legion` NodePool's
-`karpenter.k8s.aws/instance-cpu Gt 3` requirement makes Karpenter launch the cheapest 4-vCPU type.
+The pool's floor, not the pod, decides node size. Legion pods carry no instance-size selector and
+no resource requests. The `legion` NodePool's `karpenter.k8s.aws/instance-cpu Gt 3` and
+`karpenter.k8s.aws/instance-memory Gt 65535` requirements make Karpenter launch the cheapest type
+with at least 4 vCPU and 64 GiB.
 
 Every tree pod carries two rules:
 - a required pod affinity to the pods of its own tree, since the volume attaches to one node;
@@ -622,10 +700,15 @@ Every tree pod carries two rules:
 So concurrent trees never share a node. Requests stay unset because under required colocation the
 first pod placed decides the node, and a request on a later pod would strand it.
 
-**The bound.** The pool's `limits.cpu: 64`, with one tree per 4-vCPU node, caps concurrently running
-trees at **16**. The TypeScript production configuration runs `admission_cap: 29`. Stage 7's cutover
-raises the `legion` NodePool's `limits.cpu` to at least `4 × admission_cap`; until
-then an `admission_cap` above 16 admits trees whose pods cannot schedule.
+**The bound.** A tree pod's anti-affinity names no project, since a second tree of any project
+would overrun a node sized for one. It has no `namespaceSelector` either, so it applies only within
+the pod's own namespace. One tree per node therefore holds across every project whose daemon shares
+the `legion` pool only while all of them run their trees in the same namespace (`legion` today);
+a daemon in another namespace could place a tree on a node another namespace's tree holds. Under
+that condition, the pool's limits divided by the node size its floor sets cap the trees running at
+once across all projects together. With the floor at `instance-memory Gt 65535` (64 GiB) and
+`limits.memory: 256Gi`, that is four. An `admission_cap` (summed over the daemons sharing the pool)
+above that admits trees whose pods stay Pending until a node frees.
 
 ### Trust model: the provisioning token
 
@@ -877,11 +960,14 @@ claim's pod and the image probe's.
   refused at load.
 - **Settings order.** Oh My Pi reads `PI_CONFIG_FILES` in order, each overlay outranking the ones
   before it and all of them outranking a repository's `.omp/config.yml`. Legion writes the pod
-  baseline's overlay (remote compaction, memory backends, image URLs and dev auto-QA off) and names
-  it first, ahead of the operator's, so the operator's overlay outranks it. The baseline also sets
-  `OTEL_SDK_DISABLED=true` and `PI_AUTO_QA=0` unless the pod sets them, and keeps the operator's value
-  when it does. It sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file`, which an operator's pod
-  may not set, since they decide where Oh My Pi keeps the session a resume reads.
+  baseline's overlay (remote compaction, memory backends, image URLs and dev auto-QA off; Python
+  eval off) and names it first, ahead of the operator's, so the operator's overlay outranks it.
+  The worker image supplies no Oh My Pi Python kernel: JavaScript eval stays enabled by OMP's
+  default, while an operator whose image supplies a compatible kernel may set `eval.py: true`.
+  The baseline also sets `OTEL_SDK_DISABLED=true` and `PI_AUTO_QA=0` unless the pod sets them, and
+  keeps the operator's value when it does. It sets `PI_CONFIG_DIR=.omp` and
+  `OMP_SESSION_STORAGE=file`, which an operator's pod may not set, since they decide where Oh My
+  Pi keeps the session a resume reads.
 - **Model roles.** Legion's shipped agents dispatch by role alias: `oracle` and the planner's
   `plan-gap-analyst` as `@oracle`; both review agents and the planner's `plan-reviewer` as
   `@review`; and `deep-worker`, which writes the implementer's code, as `@deep`. The boot gate

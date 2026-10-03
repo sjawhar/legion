@@ -7,25 +7,101 @@ import { join } from "node:path";
 // taken from the script by name and run after the controller checkpoint ends (blocked, failed, or
 // passed as a STAGE4B_UNTIL run's last checkpoint), with the teardown's cluster, NATS and GitHub
 // helpers stubbed and production_audit's Dispatch read replaced by its result: a write outside
-// LEGSMOKE, or none.
+// LEGSMOKE, or none. A timed-out wait runs the script's own capacity hook and limit_pending
+// against a kubectl that answers pods (filtered by the -l selector, as the API server does) and
+// FailedScheduling events from the test's fixture.
 const script = readFileSync(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"), "utf8");
-const fn = (name: string) => {
-  const found = new RegExp(`^${name}\\(\\) \\{(?:.*\\}$|[\\s\\S]*?\\n\\}$)`, "m").exec(script);
-  if (found === null) throw new Error(`stage4b-sandbox-tree.sh defines no ${name}()`);
+const rig = readFileSync(join(import.meta.dir, "rig.sh"), "utf8");
+const fnOf = (source: string, file: string, name: string) => {
+  const found = new RegExp(`^${name}\\(\\) \\{(?:.*\\}$|[\\s\\S]*?\\n\\}$)`, "m").exec(source);
+  if (found === null) throw new Error(`${file} defines no ${name}()`);
   return found[0];
 };
+const fn = (name: string) => fnOf(script, "stage4b-sandbox-tree.sh", name);
 const dir = mkdtempSync(join(tmpdir(), "stage4b-verdict-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const bin = join(dir, "bin");
 mkdirSync(bin);
 writeFileSync(join(bin, "docker"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+writeFileSync(
+  join(bin, "kubectl"),
+  `#!/bin/bash
+selector=
+args=("$@")
+for ((i = 0; i < \${#args[@]}; i++)); do [ "\${args[i]}" = -l ] && selector=\${args[i + 1]}; done
+case " $* " in
+  *" get pods "*) jq -c --arg sel "$selector" '{items: [.items[] | select(.metadata.labels as $l | $sel | split(",") | map(split("=")) | all(.[]; $l[.[0]] == .[1]))]}' <<<"$PODS_JSON" ;;
+  *" get events "*) printf '%s\\n' "$EVENTS_JSON" ;;
+  *) exit 1 ;;
+esac
+`,
+  { mode: 0o755 }
+);
+
+// pendingPod is a pod of tree TREE (run label x) Pending and Unschedulable since SINCE.
+const pendingPod = (name: string, uid: string, tree: string, since: string) => ({
+  metadata: { name, uid, labels: { "legion.dev/project": "x", "legion.dev/tree": tree } },
+  status: {
+    phase: "Pending",
+    conditions: [
+      {
+        type: "PodScheduled",
+        status: "False",
+        reason: "Unschedulable",
+        message: "0/16 nodes are available: 16 node(s) didn't match Pod's node affinity/selector.",
+        lastTransitionTime: since,
+      },
+    ],
+  },
+});
+// podEvent is an event REASON from COMPONENT for pod NAME with UID, last seen AT.
+const podEvent =
+  (component: string, reason: string, message: string) =>
+  (name: string, uid: string, at: string) => ({
+    involvedObject: { kind: "Pod", name, uid },
+    source: { component },
+    reason,
+    lastTimestamp: at,
+    message,
+  });
+const limitMessage =
+  'Failed to schedule pod, incompatible with nodepool "other"; all available instance types exceed limits for nodepool (NodePool=legion)';
+// limitEvent is Karpenter's verdict that every instance type exceeds the legion pool's limits.
+const limitEvent = podEvent("karpenter", "FailedScheduling", limitMessage);
+// affinityEvent is Karpenter's verdict for a genuine scheduling reason, the tree's affinity.
+const affinityEvent = podEvent(
+  "karpenter",
+  "FailedScheduling",
+  "Failed to schedule pod, unsatisfiable topology constraint for pod affinity, key=kubernetes.io/hostname"
+);
+// nominatedEvent is Karpenter's word once room frees: it expects the pod to schedule.
+const nominatedEvent = podEvent(
+  "karpenter",
+  "Nominated",
+  "Pod should schedule on: nodeclaim/legion-abcde"
+);
+// schedulerEvent is the default scheduler's FailedScheduling, which every Pending pod gets.
+const schedulerMessage =
+  "0/17 nodes are available: 17 node(s) didn't match Pod's node affinity/selector.";
+const schedulerEvent = podEvent("default-scheduler", "FailedScheduling", schedulerMessage);
+interface Capacity {
+  subject?: string;
+  pods?: object[];
+  events?: object[];
+}
 
 let runs = 0;
 const outsideWrite =
   '[{"issue":"OTHER-12","seq":3,"type":"comment.created","actor":"legion-daemon:LEGSMOKE"}]';
-// controllerRun ends the controller checkpoint in blocked, in fail (the case the notes are for), or
-// in pass as the last checkpoint of a run with STAGE4B_UNTIL=controller.
-function controllerRun(outside: string, ending: "blocked" | "fail" | "pass" = "blocked") {
+// controllerRun ends the controller checkpoint in blocked, in fail (the case the notes are for), in
+// pass as the last checkpoint of a run with STAGE4B_UNTIL=controller, or in a wait that times out
+// under the run's capacity hook, on_tree's subject the capacity's (none: a plain until_true), with
+// the cluster answering the capacity's pods and events.
+function controllerRun(
+  outside: string,
+  ending: "blocked" | "fail" | "pass" | "timeout" = "blocked",
+  capacity: Capacity = {}
+) {
   const run = join(dir, `run-${++runs}`);
   const evidence = join(run, "evidence");
   mkdirSync(evidence, { recursive: true });
@@ -39,6 +115,7 @@ work=${JSON.stringify(join(run, "work"))} evidence=${JSON.stringify(evidence)}
 check=controller check_started=2026-09-30T12:00:00Z
 ok= was_blocked= until=controller locked=1 compared= snapshotted= audited= prod_baseline=2026-09-30T11:00:00.000000000Z
 tree1= tree2= tree3= tree4= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none run_label=x
+operator=production namespace=legion capacity_subject=
 mkdir -p "$work" "$evidence/model-gateway"
 # The controller starved during the checkpoint: a blocked checkpoint's notes, which must not print,
 # would list it, and a failed checkpoint's do.
@@ -59,12 +136,24 @@ ${fn("blocked")}
 ${fn("fail")}
 ${fn("until_reached")}
 ${fn("pass")}
+${fn("limit_pending")}
+${fn("on_subject")}
+${fn("on_tree")}
+${fn("limit_pending_blocked")}
+${fnOf(rig, "rig.sh", "until_true")}
 ${fn("cleanup")}
 trap cleanup EXIT
-${ending} "the controller's model route could not be installed"
+${ending !== "timeout" ? `${ending} "the controller's model route could not be installed"` : `timeout_hook=limit_pending_blocked; ${capacity.subject === undefined ? "" : `on_tree ${capacity.subject} `}until_true 1 "the controller to take its first turn" false`}
 `,
     ],
-    { env: { PATH: `${bin}:${process.env.PATH}`, OUTSIDE: outside } }
+    {
+      env: {
+        PATH: `${bin}:${process.env.PATH}`,
+        OUTSIDE: outside,
+        PODS_JSON: JSON.stringify({ items: capacity.pods ?? [] }),
+        EVENTS_JSON: JSON.stringify({ items: capacity.events ?? [] }),
+      },
+    }
   );
   const stdout = result.stdout.toString();
   // cleanup's ERR trap reports every teardown command that fails, a helper this harness neither
@@ -123,4 +212,100 @@ describe("stage 4b's verdict line", () => {
     );
     expect(until.stdout).not.toContain("model-gateway-unserved:");
   });
+
+  const starvedPod = pendingPod("legion-x-t1", "uid-now", "T1", "2026-10-02T10:00:00Z");
+  for (const [name, events, scheduler] of [
+    [
+      "Karpenter's limit verdict",
+      [limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z")],
+      "none",
+    ],
+    [
+      "Karpenter's limit verdict, with the default scheduler's own event newer",
+      [
+        limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z"),
+        schedulerEvent("legion-x-t1", "uid-now", "2026-10-02T10:05:00Z"),
+      ],
+      JSON.stringify(schedulerMessage),
+    ],
+  ] as [string, object[], string][]) {
+    test(`says BLOCKED on capacity for a wait its own tree's pod starved, on ${name}, with its evidence`, () => {
+      const starved = controllerRun("[]", "timeout", { subject: "T1", pods: [starvedPod], events });
+      expect(starved.code).toBe(1);
+      // The line carries the limit event's time and message, the pod's PodScheduled condition and
+      // the default scheduler's newest word, so a misclassification can be read off it.
+      expect(starved.stdout).toContain(
+        `CHECK controller: BLOCKED: capacity: the legion pool is at its limits, so the scheduler cannot place pod legion-x-t1 (uid uid-now): Karpenter at 2026-10-02T10:00:05Z: ${JSON.stringify(limitMessage)}; PodScheduled Unschedulable since 2026-10-02T10:00:00Z: ${JSON.stringify("0/16 nodes are available: 16 node(s) didn't match Pod's node affinity/selector.")}; default scheduler: ${scheduler}`
+      );
+      expect(starved.stdout).toContain("stage 4b e2e: BLOCKED (check controller)");
+      expect(starved.stdout).not.toContain("CHECK controller: FAIL");
+    });
+  }
+
+  // Each of these timed out with a limit event in the cluster that is no evidence about the wait's
+  // own pod: it must fail as any timeout does.
+  for (const [name, capacity] of [
+    [
+      "an event for an earlier pod of the same name (another uid)",
+      {
+        subject: "T1",
+        pods: [starvedPod],
+        events: [limitEvent("legion-x-t1", "uid-before", "2026-10-02T10:00:05Z")],
+      },
+    ],
+    [
+      "an event older than the pod's Unschedulable transition",
+      {
+        subject: "T1",
+        pods: [starvedPod],
+        events: [limitEvent("legion-x-t1", "uid-now", "2026-10-02T09:59:59Z")],
+      },
+    ],
+    [
+      "a limit-Pending pod of another tree than the wait's",
+      {
+        subject: "T1",
+        pods: [pendingPod("legion-x-t2", "uid-t2", "T2", "2026-10-02T10:00:00Z")],
+        events: [limitEvent("legion-x-t2", "uid-t2", "2026-10-02T10:00:05Z")],
+      },
+    ],
+    [
+      "a wait with no subject",
+      {
+        pods: [starvedPod],
+        events: [limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z")],
+      },
+    ],
+    [
+      "a limit verdict Karpenter has since replaced with a genuine reason",
+      {
+        subject: "T1",
+        pods: [starvedPod],
+        events: [
+          limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z"),
+          affinityEvent("legion-x-t1", "uid-now", "2026-10-02T10:05:00Z"),
+        ],
+      },
+    ],
+    [
+      "a limit verdict Karpenter has since replaced with a nomination",
+      {
+        subject: "T1",
+        pods: [starvedPod],
+        events: [
+          limitEvent("legion-x-t1", "uid-now", "2026-10-02T10:00:05Z"),
+          nominatedEvent("legion-x-t1", "uid-now", "2026-10-02T10:05:00Z"),
+        ],
+      },
+    ],
+    ["no pod Pending on the pool's limits", { subject: "T1" }],
+  ] as [string, Capacity][]) {
+    test(`still fails a wait that timed out with ${name}`, () => {
+      const timedOut = controllerRun("[]", "timeout", capacity);
+      expect(timedOut.code).toBe(1);
+      expect(timedOut.stdout).toContain("CHECK controller: FAIL: timed out after 1s");
+      expect(timedOut.stdout).toContain("stage 4b e2e: FAIL (check controller)");
+      expect(timedOut.stdout).not.toContain("BLOCKED");
+    });
+  }
 });

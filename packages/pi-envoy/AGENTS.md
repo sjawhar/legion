@@ -80,7 +80,7 @@ The plugin speaks to the Legion daemon (`packages/daemon`) through
 `@legion/contracts/legion-api`, and boots every Legion session through the claim session
 (`src/legion/claim-session.ts`) or, for the controller, the controller session
 (`src/legion/controller-session.ts`). `package.json` declares the contract it was built against as
-`legion.daemonApiVersion` (currently 12): the claim, credential, workflow, controller, and state
+`legion.daemonApiVersion` (currently 13): the claim, credential, workflow, controller, and state
 shapes that client parses, and the pane's environment — the identity variables
 `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_CONTROLLER`/`LEGION_PROJECT` (read by
 `src/legion/classify.ts`, `extensions/legion.ts` and the two session modules), `LEGION_STATE_DIR`

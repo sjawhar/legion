@@ -798,7 +798,7 @@ func TestStartCheckConfigReadsTheDaemonNATSSeedAsBootDoes(t *testing.T) {
 }
 
 // Under runtime: kubernetes, --check-config also makes boot's refusals of the runtime: an operator
-// pod that collides with Legion's own (a mount at Legion's boot projection, refused naming both
+// pod that collides with Legion's own (a mount at Legion's launcher token projection, refused naming both
 // paths), and a kubeconfig that cannot be read — with no App key command run.
 func TestStartCheckConfigRefusesWhatTheSandboxRuntimeRefuses(t *testing.T) {
 	legionState(t)
@@ -808,9 +808,9 @@ func TestStartCheckConfigRefusesWhatTheSandboxRuntimeRefuses(t *testing.T) {
 	}{
 		{"an operator pod colliding with Legion's", `    pod:
       volumes: [{name: creds, secret: {name: legion-creds}}]
-      volume_mounts: [{volume: creds, mount_path: /var/run/legion/boot}]
+      volume_mounts: [{volume: creds, mount_path: /var/run/legion/launcher}]
 `, func(string) string {
-			return "legion start: runtime.kubernetes.pod.volume_mounts[0].mount_path /var/run/legion/boot overlaps /var/run/legion/boot, which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's\n"
+			return "legion start: runtime.kubernetes.pod.volume_mounts[0].mount_path /var/run/legion/launcher overlaps /var/run/legion/launcher, which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's\n"
 		}},
 		{"a kubeconfig that cannot be read", "    kubeconfig: ./kubeconfig\n", func(dir string) string {
 			return "legion start: read runtime.kubernetes.kubeconfig " + filepath.Join(dir, "kubeconfig") + ": "

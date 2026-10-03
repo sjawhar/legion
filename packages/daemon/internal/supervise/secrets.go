@@ -3,7 +3,10 @@ package supervise
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // Enrollment is one pod generation's enrollment with the secrets broker.
@@ -12,13 +15,11 @@ type Enrollment struct {
 	Incarnation string
 }
 
-// PodEnrollment is what the machine hands the broker for one pod generation: the pod UID the
-// runtime recorded as the locator's incarnation, the identity the shim's hello carried, and the
-// agent's session id. It carries no issue: per the shared broker contract
-// (dispatch://AGENTC-393/artifact/plan-overview-md), the broker's rules pick a request's approver
-// at request time, never at enrollment.
+// PodEnrollment is what the machine hands the broker for one process generation: the real pod
+// UID stays the verified runtime identity, while Slot is a daemon-derived role/generation label
+// for multiple private enrollments in one pod. Tmux leaves Slot empty.
 type PodEnrollment struct {
-	PodUID, Thumbprint, PodToken, Session string
+	PodUID, Slot, Thumbprint, PodToken, Session string
 }
 
 // AgentSecretsIdentity is the pod identity a shim's hello2 carried (stream.AgentSecretsIdentity).
@@ -62,13 +63,18 @@ func (m *Machine) ensureEnrolled(ctx context.Context) error {
 		return nil
 	}
 	incarnation := m.claim.Locator.Incarnation
+	podUID, slot := incarnation, ""
+	if loc := m.claim.Locator; loc.Runtime == runtime.RuntimeSandbox && loc.Sandbox != nil {
+		podUID = loc.Sandbox.PodUID
+		slot = fmt.Sprintf("%s-g%d", m.claim.Role, loc.Sandbox.Generation)
+	}
 	if m.claim.Enrollment == nil || m.claim.Enrollment.Incarnation != incarnation {
 		if m.identity == nil || m.identity.incarnation != incarnation || m.claim.Session == "" {
 			return nil
 		}
 		enrolling, cancel := context.WithTimeout(ctx, m.deps.Timeouts.RPC)
 		id, err := m.deps.Secrets.Enroll(enrolling, PodEnrollment{
-			PodUID: incarnation, Thumbprint: m.identity.Thumbprint, PodToken: m.identity.PodToken, Session: m.claim.Session,
+			PodUID: podUID, Slot: slot, Thumbprint: m.identity.Thumbprint, PodToken: m.identity.PodToken, Session: m.claim.Session,
 		})
 		cancel()
 		if err != nil {

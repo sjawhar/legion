@@ -196,7 +196,7 @@ func TestGitHubTokenRefusesClaimReplacedDuringTokenAwait(t *testing.T) {
 }
 
 // A claim's capability belongs to its registered, running agent. When the process dies (before the
-// relaunch registers), is suspended at the end of its phase, or is stopped, the old secret mints no
+// relaunch registers), is suspended (its issue's close, or an operator), or is stopped, the old secret mints no
 // grant and a grant it already minted redeems nothing, as the shipped daemon revokes a session's
 // capability and grants on death, retirement, and teardown.
 func TestAClaimLeavingItsRunningStatesRevokesItsSecretAndGrants(t *testing.T) {

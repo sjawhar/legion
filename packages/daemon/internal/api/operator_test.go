@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"slices"
@@ -18,6 +19,34 @@ const architectToken = claim.Token("legion-legion-legion-208-architect")
 
 func spawnBody() SpawnRequest {
 	return SpawnRequest{Tree: "LEGION-208", Issue: "LEGION-208", Role: claim.RoleArchitect, Prompt: "Reply ready and wait."}
+}
+
+type recordedTreeCleanup struct {
+	project, tree                   string
+	epoch                           uint64
+	cleaned                         bool
+	confirmed                       bool
+	openErr, reserveErr, cleanupErr error
+	// reserving runs inside the reservation, as a start that commits just before it would.
+	reserving func()
+}
+
+func (c *recordedTreeCleanup) ReserveOperatorTreeCleanup(_ context.Context, project, tree string) (uint64, bool, error) {
+	c.project, c.tree = project, tree
+	if c.reserving != nil {
+		c.reserving()
+	}
+	return 7, !c.confirmed, c.reserveErr
+}
+
+func (c *recordedTreeCleanup) OpenOperatorTree(_ context.Context, project, tree string) (uint64, error) {
+	c.project, c.tree = project, tree
+	return 7, c.openErr
+}
+
+func (c *recordedTreeCleanup) CleanupTree(_ context.Context, project, tree string, epoch uint64) error {
+	c.project, c.tree, c.epoch, c.cleaned = project, tree, epoch, true
+	return c.cleanupErr
 }
 
 // Every operator route compares the bearer in constant time and answers 403 to anything else —
@@ -368,6 +397,89 @@ func TestTheOperatorClosesATreeNoWorkflowIssueBacks(t *testing.T) {
 				t.Fatalf("releases = %+v, want the root released once", releases)
 			}
 		})
+	}
+}
+
+// A tree without a workflow issue has no outbox row. Once every claim stopped, the operator route
+// invokes the explicit durable tree-resource capability with the configured runtime project and
+// tree; it never invents a workflow record merely to get cleanup.
+func TestOperatorCloseInvokesDurableTreeCleanupWithoutAWorkflowRecord(t *testing.T) {
+	h := newHarness(t)
+	cleaner := &recordedTreeCleanup{}
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, TreeCleaner: cleaner,
+	}).Handler
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("close = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	if cleaner.project != testProject || cleaner.tree != "LEGION-208" {
+		t.Fatalf("tree cleanup = project %q tree %q, want %q %q", cleaner.project, cleaner.tree, testProject, "LEGION-208")
+	}
+}
+
+// A failed explicit cleanup is not a successful close: the route tells the operator its durable
+// cleanup is pending so retrying the same close resumes the marker instead of hiding the volume.
+func TestOperatorCloseSurfacesDurableTreeCleanupFailure(t *testing.T) {
+	h := newHarness(t)
+	cleaner := &recordedTreeCleanup{cleanupErr: errors.New("foreground Sandbox delete conflicted")}
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, TreeCleaner: cleaner,
+	}).Handler
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+	if recorder.Code != http.StatusInternalServerError || !strings.Contains(recorder.Body.String(), "durable resource cleanup is pending") {
+		t.Fatalf("close after cleanup failure = %d %s, want 500 naming durable cleanup pending", recorder.Code, recorder.Body)
+	}
+}
+
+// The operator's reservation comes before its claim snapshot. A child start that commits just
+// before the reservation (here, inside it) is in the population the close stops, so no claim of
+// the tree outlives the snapshot into its cleanup; a snapshot taken first would miss it.
+func TestOperatorCloseStopsAStartThatCommittedBeforeItsReservation(t *testing.T) {
+	h := newHarness(t)
+	child := claim.Token("legion-legion-legion-209-implementer")
+	cleaner := &recordedTreeCleanup{}
+	cleaner.reserving = func() {
+		if _, _, err := h.supervisor.Create(context.Background(), supervise.Claim{
+			Token: child, Project: testProject, Tree: "LEGION-208", Issue: "LEGION-209", Role: claim.RoleImplementer, State: supervise.StateQueued,
+		}, ""); err != nil {
+			t.Errorf("create the racing child: %v", err)
+		}
+	}
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, TreeCleaner: cleaner,
+	}).Handler
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("close = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	if state := h.stored(child).State; state != supervise.StateRetired {
+		t.Fatalf("the child that committed before the reservation is %s, want retired before cleanup", state)
+	}
+	if !cleaner.cleaned || cleaner.epoch != 7 {
+		t.Fatalf("cleanup ran %t at epoch %d, want the reserved epoch 7", cleaner.cleaned, cleaner.epoch)
+	}
+}
+
+// A close asked again after its tree's cleanup confirmed reserves nothing and deletes nothing: it
+// answers as the finished close it is.
+func TestOperatorCloseAfterConfirmedCleanupAnswersWithoutCleaning(t *testing.T) {
+	h := newHarness(t)
+	cleaner := &recordedTreeCleanup{confirmed: true}
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, TreeCleaner: cleaner,
+	}).Handler
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+	if recorder.Code != http.StatusOK || cleaner.cleaned {
+		t.Fatalf("close after confirmed cleanup = %d, cleaned %t; want 200 with no cleanup", recorder.Code, cleaner.cleaned)
 	}
 }
 

@@ -100,7 +100,13 @@ func (s *supervisor) Create(ctx context.Context, c supervise.Claim, rolePrompt s
 			return nil, false, fmt.Errorf("keep the role prompt of %s: %w", c.Token, err)
 		}
 	}
-	if err := s.deps.Store.PutClaim(ctx, c); err != nil {
+	if _, lifecycle := s.deps.Runtime.(runtime.TreeLifecycleCleaner); lifecycle {
+		bound, err := s.deps.Store.AdmitClaim(ctx, c)
+		if err != nil {
+			return nil, false, err
+		}
+		c = bound
+	} else if err := s.deps.Store.PutClaim(ctx, c); err != nil {
 		return nil, false, err
 	}
 	m, err := supervise.NewMachine(s.ctx, s.deps, c)

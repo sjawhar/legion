@@ -289,8 +289,6 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 		confirmedPending func(generation uint64, p phase.Phase)
 		// otherClaim records a claim on the same issue and role under another daemon's project token.
 		otherClaim func(state string, lastStart int64)
-		// suspendLeaving queues a transition's suspend, which ends phase leaves.
-		suspendLeaving func(leaves phase.Phase)
 	}
 	for _, tc := range []struct {
 		name  string
@@ -367,10 +365,6 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 			s.otherClaim("working", 0)
 			s.enqueue("suspend", 1)
 		}, want: 1},
-		{name: "a live claim with only a suspend of the phase the child is back in queued", setup: func(s seed) {
-			s.claim("working", 1, 0)
-			s.suspendLeaving(phase.Testing)
-		}, want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -452,9 +446,6 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 						t.Fatal(err)
 					}
 					putClaim(other, "otherlegion", state, 1, lastStart)
-				},
-				suspendLeaving: func(leaves phase.Phase) {
-					enqueueRequest(record.SuperviseRequest{Op: "suspend", Tree: root.Key, Role: claim.RoleTester, Generation: child.Generation, Leaves: leaves})
 				},
 			})
 			// resumes counts the starts that carry the phase's task marked as its resume task.

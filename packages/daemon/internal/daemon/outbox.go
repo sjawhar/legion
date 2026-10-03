@@ -20,8 +20,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -146,6 +148,18 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 				if row.Attempts == 0 {
 					r.log.Info("outbox suspend is held for its agent's turn to end", "row", row.ID, "issue", row.Issue, "error", err)
 				}
+			} else if errors.Is(err, supervise.ErrQuiesceHeld) {
+				// A start held for the turn of the role it takes the phase from (supervise's Quiesce)
+				// is a wait: the row is asked again on its backoff and goes on once that turn is over.
+				if row.Attempts == 0 {
+					r.log.Info("outbox start is held for the turn of the role it takes the phase from", "row", row.ID, "issue", row.Issue, "error", err)
+				}
+			} else if errors.Is(err, store.ErrIssueCleanupInProgress) {
+				// A start or cleanup meeting its tree's durable cleanup reservation is a wait: the
+				// row keeps its work and runs again on its backoff, charging no launch failure.
+				if row.Attempts == 0 {
+					r.log.Info("outbox row waits for its tree's durable cleanup", "row", row.ID, "kind", row.Kind, "issue", row.Issue, "error", err)
+				}
 			} else if errors.Is(err, supervise.ErrDeliveryPending) {
 				// A task meeting the claim's own pending delivery is a wait, not a failure: the row
 				// runs again on the same backoff once that delivery's turn is over.
@@ -240,6 +254,17 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.seedGate(ctx, row, value)
 	case record.LingerClose:
 		return r.linger(ctx, row, value)
+	case record.IssueSuspend:
+		if r.supervisor == nil {
+			return errors.New("issue suspension executor has no claim supervisor")
+		}
+		if suspender, ok := r.supervisor.deps.Runtime.(runtime.IssueSuspender); ok {
+			return suspender.SuspendIssue(ctx, runtime.IssueResourceKey{
+				Issue: row.Issue, Tree: value.Tree, IssueGeneration: value.Generation,
+				TreeGeneration: value.TreeGeneration, StopRow: row.ID,
+			})
+		}
+		return nil
 	case record.WorkspaceRemove:
 		return r.removeWorkspace(ctx, row, value)
 	case record.MergeQueuePublish:
@@ -417,6 +442,12 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	if err != nil {
 		return err
 	}
+	// A close row naming a tree other than its issue's never reserves it; the checks below decide it.
+	if payload.Op == "tree_close" && payload.Tree == issue.Tree {
+		if handled, err := r.reservedTreeClose(ctx, row, payload); handled || err != nil {
+			return err
+		}
+	}
 	if payload.Generation != issue.Generation {
 		r.log.Info("outbox supervise row serves an earlier generation; finished without acting", "row", row.ID, "issue", issue.Key,
 			"generation", payload.Generation, "current", issue.Generation, "op", payload.Op, "role", payload.Role)
@@ -449,6 +480,16 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			r.log.Info("outbox start of a member of a lingering tree; finished without acting", "row", row.ID, "issue", issue.Key,
 				"tree", issue.Tree, "role", payload.Role)
 			return nil
+		}
+		// A start that takes the phase over from a role still at work in it (CI settled red before
+		// that role completed) does nothing — no claim, no working-copy adoption, no task — until
+		// that role's turn is over (supervise.Machine.Quiesce), so the two never write the shared
+		// workspace together. A retry of a start that has already run against its claim (the claim's
+		// newest start, which StartedBy persists) is past that wait.
+		if payload.Quiesce != "" && (!found || machine.Claim().LastStartRow < row.ID) {
+			if err := r.quiesce(ctx, row, issue.Key, payload.Quiesce); err != nil {
+				return err
+			}
 		}
 		if !found {
 			if err := r.provisionWorkspace(ctx, issue); err != nil {
@@ -534,6 +575,18 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		return nil
 	case "suspend":
 		if !found {
+			// Creation persists before publishing the machine in memory. Do not consume a close
+			// in that interval: the later machine still needs this durable stop.
+			var pending bool
+			if err := r.pool.QueryRow(ctx, `select exists (select 1 from claims where token = $1
+				and ($2 <= 0 or last_start_row <= $2)
+				and (state not in ('suspended', 'failed', 'retired') or locator is not null))`,
+				string(token), row.ID).Scan(&pending); err != nil {
+				return fmt.Errorf("read stored claim for suspension %s: %w", token, err)
+			}
+			if pending {
+				return fmt.Errorf("suspend claim %s: waiting for its stored claim's supervising machine", token)
+			}
 			return nil
 		}
 		switch machine.Claim().State {
@@ -541,12 +594,10 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			// The claim runs nothing, so there is nothing to suspend.
 			return nil
 		}
-		// Whether the suspend still acts is workflow.StopActs's rule, which promotion reads too. The
-		// phase is read before the suspend acts, not in one transaction with it: a transition
-		// committing in between costs one suspend, which that transition's own start then resumes.
-		if last := machine.Claim().LastStartRow; !workflow.StopActs(row.ID, payload, issue.Phase, last, nil) {
-			r.log.Info("outbox suspend no longer acts: its role's phase is back, or a newer start superseded it; finished without acting",
-				"row", row.ID, "issue", issue.Key, "role", payload.Role, "leaves", payload.Leaves, "phase", issue.Phase, "start-row", last)
+		// Whether the suspend still acts is workflow.StopActs's rule, which promotion reads too.
+		if last := machine.Claim().LastStartRow; !workflow.StopActs(row.ID, payload, last, nil) {
+			r.log.Info("outbox suspend superseded by a newer start; finished without acting",
+				"row", row.ID, "issue", issue.Key, "role", payload.Role, "phase", issue.Phase, "start-row", last)
 			return nil
 		}
 		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token, Reason: payload.Reason}); err != nil {
@@ -565,11 +616,13 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if err != nil {
 			return err
 		}
-		if !workflow.StopActs(row.ID, payload, issue.Phase, machine.Claim().LastStartRow, root) {
+		if !workflow.StopActs(row.ID, payload, machine.Claim().LastStartRow, root) {
 			r.log.Info("outbox tree close of a linger that has ended; finished without acting", "row", row.ID, "issue", issue.Key,
 				"tree", issue.Tree, "role", payload.Role, "linger", payload.Linger)
 			return nil
 		}
+		// A runtime with shared tree resources ran this close through reservedTreeClose already
+		// when it reserved, or resumed, the tree's cleanup; reaching here, it holds none to drive.
 		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
 			return fmt.Errorf("close the tree of claim %s: %w", token, err)
 		}
@@ -577,6 +630,55 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	default:
 		return fmt.Errorf("outbox row %d has unknown supervise operation %q", row.ID, payload.Op)
 	}
+}
+
+// reservedTreeClose runs a workflow tree close through its tree's durable cleanup reservation, and
+// does so before any stale-close fence. A close reserves only while the root still lingers at the
+// close's generation. Once it has, a re-admission that ends that linger cannot open the tree's next
+// epoch until the cleanup confirms, so every close row of the tree, however stale its own or its
+// root's generation has become, still retires its claim and drives the cleanup; were the fences to
+// finish those rows without acting, the reservation would never confirm and the re-admitted tree
+// would wait forever. It reports false, acting on nothing, when the runtime has no shared tree
+// resources, or when the tree holds no unconfirmed reservation and this close could not take one;
+// the ordinary fences then decide.
+func (r *outbox) reservedTreeClose(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest) (bool, error) {
+	cleaner, ok := r.supervisor.deps.Runtime.(runtime.TreeLifecycleCleaner)
+	if !ok {
+		return false, nil
+	}
+	treeEpoch, reserved, err := cleaner.ReserveWorkflowTreeCleanup(ctx, r.project, payload.Tree, payload.Linger)
+	if err != nil {
+		return true, fmt.Errorf("reserve cleanup of workflow tree %s: %w", payload.Tree, err)
+	}
+	if !reserved {
+		return false, nil
+	}
+	token, err := claim.NewToken(r.project, row.Issue, payload.Role)
+	if err != nil {
+		return true, fmt.Errorf("derive claim for outbox row %d: %w", row.ID, err)
+	}
+	if machine, found := r.supervisor.Machine(token); found {
+		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
+			return true, fmt.Errorf("close the tree of claim %s: %w", token, err)
+		}
+	}
+	return true, r.cleanupTreeResources(ctx, payload.Tree, treeEpoch)
+}
+
+// cleanupTreeResources runs only after a durable tree reservation. The runtime's cleanup censuses
+// the complete stored claim population, not the runtime watch: a launching child whose resource
+// admission has not yet run is a named wait, so this row retries until every claim of the tree
+// retired before anything is deleted. The reservation gates later claim persistence without
+// consuming their launch budgets.
+func (r *outbox) cleanupTreeResources(ctx context.Context, tree string, treeEpoch uint64) error {
+	cleaner, ok := r.supervisor.deps.Runtime.(runtime.TreeLifecycleCleaner)
+	if !ok {
+		return nil
+	}
+	if err := cleaner.CleanupTree(ctx, r.project, tree, treeEpoch); err != nil {
+		return fmt.Errorf("cleanup resources of closed tree %s: %w", tree, err)
+	}
+	return nil
 }
 
 // root is issue's tree root as recorded, nil when it is not, read in a transaction of its own
@@ -591,6 +693,27 @@ func (r *outbox) root(ctx context.Context, issue record.Issue) (*record.Issue, e
 		return nil, fmt.Errorf("read the tree root of %s: %w", issue.Key, err)
 	}
 	return root, nil
+}
+
+// quiesce asks the claim of role on issue, whose phase the start row takes over, to be out of its
+// turn (supervise.Machine.Quiesce): nil once it is, supervise.ErrQuiesceHeld while it is not, which
+// the runner retries on its backoff. A role with no claim runs nothing.
+func (r *outbox) quiesce(ctx context.Context, row record.OutboxRow, issue string, role claim.Role) error {
+	token, err := claim.NewToken(r.project, issue, role)
+	if err != nil {
+		return fmt.Errorf("derive the claim outbox row %d takes over from: %w", row.ID, err)
+	}
+	outgoing, found := r.supervisor.Machine(token)
+	if !found {
+		return nil
+	}
+	if err := outgoing.Quiesce(ctx, row.ID); err != nil {
+		return err
+	}
+	if row.Attempts > 0 {
+		r.log.Info("outbox start goes on: the claim it takes the phase from is out of its turn", "row", row.ID, "issue", issue, "role", role)
+	}
+	return nil
 }
 
 // podsProvision is whether the runtime provisions each claim's workspace in the claim's own pod

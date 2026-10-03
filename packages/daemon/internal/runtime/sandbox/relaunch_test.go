@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 // steps names each write as the relaunch sequence reads: "create sandbox", "suspend", "run",
@@ -53,9 +55,10 @@ func expectSteps(t *testing.T, got []string, want ...string) {
 	}
 }
 
-// A first launch creates the Sandbox Suspended, writes its Secret, and only then sets it Running;
-// the incarnation it returns is the pod the Sandbox then owns.
-func TestSpawnCreatesTheSandboxSuspendedAndRunsItAfterItsSecret(t *testing.T) {
+// A first launch creates the issue Sandbox Suspended, writes the init-only and every role-private
+// Secret, then sets it Running. The returned locator addresses only the requested role process in
+// the shared pod.
+func TestSpawnCreatesTheIssueSandboxAndRoleLocator(t *testing.T) {
 	g := newRig(t, nil)
 	spec := workerSpec(t)
 	loc := g.spawn(spec)
@@ -69,17 +72,53 @@ func TestSpawnCreatesTheSandboxSuspendedAndRunsItAfterItsSecret(t *testing.T) {
 		}
 	}
 	pod := g.pod(name)
-	if err := loc.Validate(); err != nil || loc.Incarnation != string(pod.UID) || loc.Runtime != runtime.RuntimeSandbox ||
-		loc.Sandbox.Name != name || loc.Claim != workerToken {
-		t.Fatalf("locator %+v (%v), want the claim's sandbox at pod uid %s", loc, err, pod.UID)
+	if err := loc.Validate(); err != nil || loc.Sandbox.PodUID != string(pod.UID) || loc.Runtime != runtime.RuntimeSandbox ||
+		loc.Sandbox.Name != name || loc.Sandbox.Container != string(spec.Role) || loc.Sandbox.Generation != spec.Generation ||
+		loc.Incarnation != runtime.SandboxIncarnation(string(pod.UID), spec.Generation) || loc.Claim != workerToken {
+		t.Fatalf("locator %+v (%v), want the tester process in issue pod uid %s", loc, err, pod.UID)
 	}
-	secret := g.secret(secretName(name))
-	if string(secret.Data[bootTokenKey]) != spec.BootToken || string(secret.Data[provisionTokenKey]) != "ghs_provision_sjawhar" ||
-		string(secret.Data["ENVOY_TOKEN"]) != "envoy-bearer" {
-		t.Fatalf("secret data %v", secret.Data)
+	provision := g.secret(secretName(name))
+	if string(provision.Data[provisionTokenKey]) != "ghs_provision_sjawhar" {
+		t.Fatalf("provision secret data %v", provision.Data)
+	}
+	secret := g.secret(roleSecretName(name, spec.Role))
+	if len(secret.Data) != 1 || len(secret.Data[LauncherTokenFile]) == 0 {
+		t.Fatalf("role secret keys %v, want the launcher token alone", slices.Sorted(maps.Keys(secret.Data)))
+	}
+	var start shimwire.LauncherStart
+	for _, frame := range g.sent(workerToken) {
+		if s, ok := frame.(shimwire.LauncherStart); ok {
+			start = s
+		}
+	}
+	if start.Files["ENVOY_TOKEN"] != "envoy-bearer" || start.Files[bootTokenKey] != spec.BootToken {
+		t.Fatalf("the tester's start command carries files %v", slices.Sorted(maps.Keys(start.Files)))
 	}
 	if owner := secret.OwnerReferences; len(owner) != 1 || owner[0].UID != g.sandbox(name).UID || owner[0].Kind != "Sandbox" {
-		t.Fatalf("secret owners %+v, want the sandbox", owner)
+		t.Fatalf("secret owners %+v, want the issue sandbox", owner)
+	}
+}
+
+func TestRoleStartsShareOneIssuePodAndDoNotReinitializeIt(t *testing.T) {
+	g := newRig(t, nil)
+	root := g.spawn(rootSpec(t))
+	writes := len(g.writes())
+	worker := g.spawn(workerSpec(t))
+	if root.Sandbox.Name != worker.Sandbox.Name || root.Sandbox.PodUID != worker.Sandbox.PodUID {
+		t.Fatalf("role locators root=%+v worker=%+v, want one issue pod", root.Sandbox, worker.Sandbox)
+	}
+	if root.Sandbox.Container != string(claim.RoleArchitect) || worker.Sandbox.Container != string(claim.RoleTester) {
+		t.Fatalf("containers root=%q worker=%q", root.Sandbox.Container, worker.Sandbox.Container)
+	}
+	for _, write := range g.writes()[writes:] {
+		if write.resource == "sandboxes" || write.name == secretName(root.Sandbox.Name) {
+			t.Fatalf("worker start rewrote issue pod initialization: %+v", write)
+		}
+	}
+	rootSecret := g.secret(roleSecretName(root.Sandbox.Name, claim.RoleArchitect))
+	workerSecret := g.secret(roleSecretName(worker.Sandbox.Name, claim.RoleTester))
+	if string(rootSecret.Data[LauncherTokenFile]) == string(workerSecret.Data[LauncherTokenFile]) {
+		t.Fatal("role-private launcher Secrets reuse one token")
 	}
 }
 
@@ -92,11 +131,11 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-kept", modeSuspended, labels)})
 		loc := g.spawn(workerSpec(t))
 		expectSteps(t, steps(t, g.writes(), name), "create secret", "run")
-		if g.sandbox(name).UID != "uid-sandbox-kept" || loc.Incarnation != string(g.pod(name).UID) {
+		if g.sandbox(name).UID != "uid-sandbox-kept" || loc.Sandbox.PodUID != string(g.pod(name).UID) {
 			t.Fatalf("locator %+v over sandbox %s", loc, g.sandbox(name).UID)
 		}
 	})
-	t.Run("running", func(t *testing.T) {
+	t.Run("running a pod no launcher of this runtime is bound to", func(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{
 			sandboxObject(t, name, "uid-sandbox-kept", modeRunning, labels),
 			podObject(name, "uid-pod-old", "uid-sandbox-kept", labels, runningStatus()),
@@ -104,8 +143,8 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 		g.suspendDelay = 50 * time.Millisecond
 		loc := g.spawn(workerSpec(t))
 		expectSteps(t, steps(t, g.writes(), name), "suspend", "create secret", "run")
-		if loc.Incarnation == "uid-pod-old" || loc.Incarnation != string(g.pod(name).UID) {
-			t.Fatalf("returned %s; the old pod was uid-pod-old, the pod now is %s", loc.Incarnation, g.pod(name).UID)
+		if loc.Sandbox.PodUID == "uid-pod-old" || loc.Sandbox.PodUID != string(g.pod(name).UID) {
+			t.Fatalf("returned %s; the old pod was uid-pod-old, the pod now is %s", loc.Sandbox.PodUID, g.pod(name).UID)
 		}
 	})
 	t.Run("being deleted", func(t *testing.T) {
@@ -125,15 +164,16 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 		if s := g.sandbox(name); s.UID == "uid-sandbox-going" || deletedAt.IsZero() {
 			t.Fatalf("spawned into sandbox %s, before the old one was deleted", s.UID)
 		}
-		if loc.Incarnation != string(g.pod(name).UID) {
+		if loc.Sandbox.PodUID != string(g.pod(name).UID) {
 			t.Fatalf("locator %+v", loc)
 		}
 	})
 }
 
-// The death path's Resume over a Failed pod, which the controller keeps under Running: suspend,
-// wait the pod out, rewrite the Secret, run (B1). The relaunched pod resumes the recorded session
-// and its init container is told where that session is on the tree volume.
+// The death path's Resume over a Failed issue pod, which the controller keeps under Running:
+// suspend, wait the pod out, rewrite the Secrets, run (B1). The role's launcher in the new pod is
+// told the new generation's boot token and resumes the recorded session, and the init container is
+// told where that session is on the tree volume.
 func TestResumeAfterAFailedPod(t *testing.T) {
 	name := SandboxName(workerToken)
 	labels := claimLabels(claim.RoleTester)
@@ -141,16 +181,17 @@ func TestResumeAfterAFailedPod(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: secretName(name), Namespace: testNamespace, OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: "agents.x-k8s.io/v1beta1", Kind: "Sandbox", Name: name, UID: "uid-sandbox-kept",
 		}}},
-		Data: map[string][]byte{bootTokenKey: []byte("boot-g1")},
+		Data: map[string][]byte{provisionTokenKey: []byte("ghs_old")},
 	}
 	g := newRig(t, []k8sruntime.Object{
 		sandboxObject(t, name, "uid-sandbox-kept", modeRunning, labels),
 		podObject(name, "uid-pod-dead", "uid-sandbox-kept", labels, corev1.PodStatus{
-			Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{terminated(mainContainer, 137, "Error")},
+			Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{terminated(workerContainer, 137, "Error")},
 		}),
 		oldSecret,
 	})
 	g.suspendDelay = 50 * time.Millisecond
+	g.launcher(workerToken)
 	spec := workerSpec(t)
 	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", resumeSession
 	dead := sandboxLocator(workerToken, "uid-pod-dead")
@@ -159,36 +200,46 @@ func TestResumeAfterAFailedPod(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectSteps(t, steps(t, g.writes(), name), "suspend", "update secret", "run")
-	if loc.Incarnation == "uid-pod-dead" || loc.Incarnation != string(g.pod(name).UID) {
-		t.Fatalf("resumed at %s; the pod now is %s", loc.Incarnation, g.pod(name).UID)
+	if loc.Sandbox.PodUID == "uid-pod-dead" || loc.Sandbox.PodUID != string(g.pod(name).UID) || loc.Sandbox.Generation != 2 {
+		t.Fatalf("resumed at %+v; the pod now is %s", loc.Sandbox, g.pod(name).UID)
 	}
-	if token := string(g.secret(secretName(name)).Data[bootTokenKey]); token != "boot-g2" {
-		t.Fatalf("the secret holds %q, want the new generation's token", token)
+	var start shimwire.LauncherStart
+	for _, frame := range g.sent(workerToken) {
+		if s, ok := frame.(shimwire.LauncherStart); ok {
+			start = s
+		}
+	}
+	if start.Generation != 2 || start.Files[bootTokenKey] != "boot-g2" || start.ResumeFile != resumeSession ||
+		!slices.Contains(start.Argv, "--resume="+resumeSession) {
+		t.Fatalf("the relaunched role's start is generation %d resuming %q with argv %q, want generation 2 resuming the session", start.Generation, start.ResumeFile, start.Argv)
 	}
 	pod := g.pod(name)
-	if !strings.Contains(strings.Join(pod.Spec.Containers[0].Command, " "), "--resume="+resumeSession) {
-		t.Fatalf("the relaunched agent does not resume the session: %v", pod.Spec.Containers[0].Command)
-	}
 	if got := envOf(containerNamed(t, pod.Spec, initContainer))["LEGION_RESUME_SESSION_FILE"]; got != TreeRoot+"/sessions/"+strings.TrimPrefix(resumeSession, ompSessionsDir+"/") {
 		t.Fatalf("the init container checks %q", got)
 	}
 }
 
-// The Secret holds this launch's tokens at the moment the Sandbox is set Running, so the pod never
-// starts on a missing Secret or on the previous generation's token (decision 6).
-func TestTheSecretHoldsTheLaunchsTokensWhenRunningIsPatched(t *testing.T) {
+// The Secrets hold a launch's credentials when the issue Sandbox is set Running, so no launcher
+// starts on a missing Secret, and the one-generation boot token travels only in the launcher's
+// start command, never in a Secret. A later generation of the role in the same pod sets nothing
+// Running again (decision 6).
+func TestTheSecretsHoldTheLaunchsCredentialsWhenRunningIsPatched(t *testing.T) {
 	g := newRig(t, nil)
 	var mu sync.Mutex
 	var atRunning []string
+	name := SandboxName(workerToken)
 	g.dyn.PrependReactor("patch", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
 		if modePatched(t, string(a.(k8stesting.PatchAction).GetPatch()), modeRunning) {
 			mu.Lock()
 			defer mu.Unlock()
-			secret := g.secret(secretName(SandboxName(workerToken)))
-			if secret == nil {
-				atRunning = append(atRunning, "no secret")
-			} else {
-				atRunning = append(atRunning, string(secret.Data[bootTokenKey]))
+			provision, role := g.secret(secretName(name)), g.secret(roleSecretName(name, claim.RoleTester))
+			switch {
+			case provision == nil || role == nil:
+				atRunning = append(atRunning, "missing secret")
+			case len(provision.Data[provisionTokenKey]) == 0 || len(role.Data[LauncherTokenFile]) == 0:
+				atRunning = append(atRunning, "incomplete secrets")
+			default:
+				atRunning = append(atRunning, "ok")
 			}
 		}
 		return false, nil, nil
@@ -203,11 +254,27 @@ func TestTheSecretHoldsTheLaunchsTokensWhenRunningIsPatched(t *testing.T) {
 	second := g.spawn(spec)
 	mu.Lock()
 	defer mu.Unlock()
-	if strings.Join(atRunning, ", ") != firstToken+", boot-g2" {
-		t.Fatalf("the secret held %v as each Running patch was sent", atRunning)
+	if strings.Join(atRunning, ", ") != "ok" {
+		t.Fatalf("the secrets at each Running patch: %v, want one complete patch", atRunning)
 	}
-	if first.Incarnation == second.Incarnation {
-		t.Fatal("the respawn returned the first incarnation")
+	if first.Sandbox.PodUID != second.Sandbox.PodUID || first.Incarnation == second.Incarnation {
+		t.Fatalf("the second generation ran at %s after %s, want a new generation in the same pod", second.Incarnation, first.Incarnation)
+	}
+	var tokens []string
+	for _, frame := range g.sent(workerToken) {
+		if s, ok := frame.(shimwire.LauncherStart); ok {
+			tokens = append(tokens, s.Files[bootTokenKey])
+		}
+	}
+	if strings.Join(tokens, ", ") != firstToken+", boot-g2" {
+		t.Fatalf("the launcher was started with %v", tokens)
+	}
+	for _, secret := range []string{secretName(name), roleSecretName(name, claim.RoleTester)} {
+		for key, value := range g.secret(secret).Data {
+			if string(value) == firstToken || string(value) == "boot-g2" {
+				t.Fatalf("Secret %s carries a boot token as %s", secret, key)
+			}
+		}
 	}
 }
 
@@ -227,24 +294,25 @@ func TestASecretOwnedByAnEarlierSandboxIsReplaced(t *testing.T) {
 	}
 }
 
-// Under gVisor workspace-init's flock stays inside its own pod, so two pods of a tree could
-// provision the shared clone at once. A relaunch sets a tree pod Running only once no other pod of
-// its tree is still in workspace-init (#1258 deep review, finding 2).
+// Under gVisor workspace-init's flock stays inside its own pod, so two issue pods of a tree could
+// provision the shared clone at once. A relaunch sets an issue pod Running only once no other pod
+// of its tree is still in workspace-init (#1258 deep review, finding 2).
 func TestAPodOfATreeRunsOnlyOnceNoOtherIsInitializing(t *testing.T) {
 	g := newRig(t, nil)
 	g.autoStart.Store(false)
 	g.spawn(rootSpec(t))
 	root := SandboxName(rootToken)
+	g.launcher(childToken)
 	done := make(chan error, 1)
 	go func() {
-		_, err := g.r.Spawn(g.ctx, workerSpec(t))
+		_, err := g.r.Spawn(g.ctx, childSpec(t))
 		done <- err
 	}()
-	worker := SandboxName(workerToken)
-	g.eventually("the worker's sandbox", func() bool { return g.sandbox(worker) != nil })
+	child := SandboxName(childToken)
+	g.eventually("the child issue's sandbox", func() bool { return g.sandbox(child) != nil })
 	time.Sleep(200 * time.Millisecond)
-	if got := steps(t, g.writes(), worker); slices.Contains(got, "run") {
-		t.Fatalf("the worker was set Running while the root was still in workspace-init: %v", got)
+	if got := steps(t, g.writes(), child); slices.Contains(got, "run") {
+		t.Fatalf("the child issue's pod was set Running while the root's was still in workspace-init: %v", got)
 	}
 	g.update(g.pod(root), func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "ip-192-0-2-7", runningStatus() })
 	select {
@@ -253,12 +321,12 @@ func TestAPodOfATreeRunsOnlyOnceNoOtherIsInitializing(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("the worker never launched after the root's workspace-init finished")
+		t.Fatal("the child issue never launched after the root's workspace-init finished")
 	}
 }
 
-// Every pod of a tree, the root included, gets the tree's pod affinity exactly when another pod of
-// the tree is scheduled at its launch: the tree volume attaches to one node (P2, R1).
+// Every issue pod of a tree, the root's included, gets the tree's pod affinity exactly when
+// another pod of the tree is scheduled at its launch: the tree volume attaches to one node (P2, R1).
 func TestTheTreeAffinityFollowsTheTreesScheduledPods(t *testing.T) {
 	g := newRig(t, nil)
 	hasAffinity := func(token claim.Token) bool {
@@ -269,27 +337,35 @@ func TestTheTreeAffinityFollowsTheTreesScheduledPods(t *testing.T) {
 		term := pod.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
 		return len(term) == 1 && term[0].TopologyKey == corev1.LabelHostname && term[0].LabelSelector.MatchLabels[labelTree] == testTree
 	}
-	root := g.spawn(rootSpec(t))
+	g.spawn(rootSpec(t))
 	if hasAffinity(rootToken) {
 		t.Fatal("the first pod of a tree carries an affinity")
 	}
-	worker := g.spawn(workerSpec(t))
-	if !hasAffinity(workerToken) {
-		t.Fatal("a worker spawned beside the scheduled root carries no affinity")
+	g.spawn(childSpec(t))
+	if !hasAffinity(childToken) {
+		t.Fatal("a child issue's pod launched beside the scheduled root carries no affinity")
 	}
-	for _, loc := range []runtime.Locator{worker, root} {
-		if err := g.r.Suspend(g.ctx, loc); err != nil {
+	// Neither pod scheduled any longer: both issue Sandboxes suspended and their pods gone.
+	for _, token := range []claim.Token{rootToken, childToken} {
+		s, err := g.r.storedSandbox(SandboxName(token))
+		if err != nil || s == nil {
+			t.Fatalf("%s's sandbox: %v", token, err)
+		}
+		if err := g.r.setMode(g.ctx, s, modeSuspended); err != nil {
 			t.Fatal(err)
 		}
-		g.eventually("the pod to leave the store treePodScheduled reads", func() bool { return g.r.storedPod(loc.Sandbox.Name) == nil })
+		g.eventually("the pod to leave the store treePodScheduled reads", func() bool { return g.r.storedPod(SandboxName(token)) == nil })
 	}
-	g.spawn(testSpec(t, otherToken, claim.RoleReviewer, testTree))
-	if hasAffinity(otherToken) {
+	third := claim.Token("legion-legion-legion-210-reviewer")
+	g.spawn(testSpec(t, third, claim.RoleReviewer, "LEGION-210"))
+	if hasAffinity(third) {
 		t.Fatal("a pod spawned with no other tree pod scheduled carries an affinity")
 	}
-	g.spawn(rootSpec(t))
+	spec := rootSpec(t)
+	spec.Generation = 2
+	g.spawn(spec)
 	if !hasAffinity(rootToken) {
-		t.Fatal("the root relaunched beside a scheduled worker carries no affinity")
+		t.Fatal("the root relaunched beside a scheduled issue pod carries no affinity")
 	}
 }
 
@@ -331,8 +407,17 @@ func TestALaunchReturnsOnlyOnceTheSandboxStoreHoldsItsRunningPatch(t *testing.T)
 			g := newRig(t, nil, withLaggingSandboxInformer(300*time.Millisecond))
 			name := SandboxName(workerToken)
 			var loc runtime.Locator
-			for range launches {
-				loc = g.spawn(workerSpec(t))
+			for launch := range launches {
+				spec := workerSpec(t)
+				if launch > 0 {
+					// A relaunch over a Sandbox already Running: its pod died.
+					g.update(g.pod(name), func(p *corev1.Pod) {
+						p.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{terminated(workerContainer, 137, "Error")}}
+					})
+					g.eventually("the store to see the pod fail", func() bool { return terminal(g.r.storedPod(name)) })
+					spec.Generation = uint64(launch + 1)
+				}
+				loc = g.spawn(spec)
 			}
 			stored, err := g.r.storedSandbox(name)
 			if err != nil || stored == nil {

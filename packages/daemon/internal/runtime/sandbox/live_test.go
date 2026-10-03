@@ -76,24 +76,24 @@ var liveChecks = []liveCheck{
 	{"provider-key", (*liveRig).checkProviderKey, nil},
 	{"adopt-working-copy", (*liveRig).checkAdoptWorkingCopy, nil},
 	{"worker-colocated", (*liveRig).checkWorkerColocated, nil},
-	{"secrets-two-pods-enrolled", (*liveRig).checkSecretsTwoPodsEnrolled, secretsBlocked},
+	{"secrets-two-roles-enrolled", (*liveRig).checkSecretsTwoRolesEnrolled, secretsBlocked},
 	{"secrets-automatic-grant", (*liveRig).checkSecretsAutomaticGrant, secretsBlocked},
 	{"secrets-cross-pod-negative", (*liveRig).checkSecretsCrossPodNegative, secretsBlocked},
 	{"secrets-copied-token-negative", (*liveRig).checkSecretsCopiedTokenNegative, secretsBlocked},
 	{"secrets-self-enroll-negative", (*liveRig).checkSecretsSelfEnrollNegative, secretsBlocked},
 	{"secrets-approval-ask", (*liveRig).checkSecretsApprovalAsk, secretsBlocked},
 	{"suspend", (*liveRig).checkSuspend, nil},
-	{"no-affinity", (*liveRig).checkNoAffinity, nil},
+	{"role-container-isolation", (*liveRig).checkRoleContainerIsolation, nil},
 	{"resume", (*liveRig).checkResume, nil},
 	{"same-agent-negative", (*liveRig).checkSameAgentNegative, nil},
-	{"kill-pod", (*liveRig).checkKillPod, nil},
+	{"kill-launcher", (*liveRig).checkKillLauncher, nil},
 	{"stale-incarnation", (*liveRig).checkStaleIncarnation, nil},
 	{"secrets-old-uid-and-revocation", (*liveRig).checkSecretsOldUIDAndRevocation, secretsBlocked},
 	{"respawn-before-register", (*liveRig).checkRespawnBeforeRegister, nil},
 	{"concurrent-provision", (*liveRig).checkConcurrentProvision, nil},
 	{"re-adopt", (*liveRig).checkReAdopt, nil},
 	{"orphan-sweep", (*liveRig).checkOrphanSweep, nil},
-	{"release-tree", (*liveRig).checkReleaseTree, nil},
+	{"release-preserves-issue", (*liveRig).checkReleasePreservesIssue, nil},
 }
 
 // The runtime's settings for the run: the boot timeout covers a Karpenter node coming up and the
@@ -131,9 +131,9 @@ const (
 // namespace and a common name would let one run delete another's route.
 const fixtureConfigMap = "legion-operator-route"
 
-// The stub agent (decision 7): the shim runs it after its hello is acknowledged, with the Oh My Pi
-// arguments the runtime appends as the shell's positional parameters, which it ignores.
-var stubAgent = []string{"/bin/sh", "-c", `printf '%s\n' "$POD_UID" >>"$LEGION_E2E_MARKER" && exec sleep infinity`, "stage4a-stub"}
+// The marker is the runtime locator's process incarnation: an unchanged pod UID plus the launch
+// generation. A role restart keeps the pod UID but must append a new incarnation.
+var stubAgent = []string{"/bin/sh", "-c", `printf '%s/%s\n' "$POD_UID" "$LEGION_GENERATION" >>"$LEGION_E2E_MARKER" && exec sleep infinity`, "stage4a-stub"}
 
 // liveEnv is what the script hands the harness.
 type liveEnv struct {
@@ -657,7 +657,9 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		{"worker", "S4A-1", "S4A-1", claim.RoleImplementer},
 		{"second", "S4A-1", "S4A-1", claim.RoleTester},
 		{"fresh", "S4A-1", "S4A-1", claim.RoleReviewer},
-		{"orphan", "S4A-1", "S4A-1", claim.RoleMerger},
+		// orphan is a separate issue pod: its unrecorded Sandbox can be swept or deleted without
+		// taking the root issue's resident roles with it.
+		{"orphan", "S4A-4", "S4A-4", claim.RoleMerger},
 		{"root2", "S4A-2", "S4A-2", claim.RoleArchitect},
 		{"child2", "S4A-2", "S4A-3", claim.RolePlanner},
 	} {
@@ -712,9 +714,11 @@ func (r *liveRig) startRuntime() error {
 			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/bin/legion",
 			AgentSecrets: "/opt/legion/bin/agent-secrets",
 		},
-		Pod:          r.pod,
-		ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
-		Agent:        stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
+		// Stage4a drives Runtime directly to prove Kubernetes mechanics. The daemon-only durable
+		// resource store is deliberately absent here; Stage4b drives it through the real outbox.
+		SkipIssueResourceStoreForTest: true,
+		Pod:                           r.pod, ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
+		Agent: stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, Conns: ln, Log: r.log,
 	}
@@ -799,7 +803,7 @@ func (r *liveRig) kubectl(args ...string) (string, error) {
 
 // exec runs a command in a claim's main container, through the admin context.
 func (r *liveRig) exec(c *liveClaim, command ...string) (string, error) {
-	out, err := r.kubectl(append([]string{"exec", SandboxName(c.token), "-c", mainContainer, "--"}, command...)...)
+	out, err := r.kubectl(append([]string{"exec", SandboxName(c.token), "-c", string(c.role), "--"}, command...)...)
 	return strings.TrimSpace(out), err
 }
 
@@ -910,8 +914,8 @@ func (r *liveRig) awaitRunning(c *liveClaim, since time.Time) (registration, err
 		if err != nil {
 			return false, err
 		}
-		if string(p.UID) != c.loc.Incarnation {
-			return false, fmt.Errorf("pod %s is uid %s, not the incarnation %s the launch returned", name, p.UID, c.loc.Incarnation)
+		if string(p.UID) != c.loc.Sandbox.PodUID {
+			return false, fmt.Errorf("pod %s is uid %s, not the pod uid %s the launch returned in process %s", name, p.UID, c.loc.Sandbox.PodUID, c.loc.Incarnation)
 		}
 		if terminal(p) {
 			log, _ := r.initLog(name)
@@ -962,27 +966,14 @@ func (r *liveRig) networkPathFailure(pod *corev1.Pod) error {
 		pod.Name, pod.UID, pod.Spec.NodeName, r.env.streamHost, r.env.streamPort, liveBootTimeout, groups, r.env.streamPort)
 }
 
-// suspend is a Suspend of the claim's running process, then the wait for its pod to be gone.
+// suspend is a role-process stop. It leaves the issue pod in place; its launcher reports the
+// child exit, so Runtime.Suspend returns only after that role's process is gone.
 func (r *liveRig) suspend(c *liveClaim) error {
 	if err := r.rt.Suspend(r.ctx, *c.loc); err != nil {
 		return err
 	}
-	if err := r.awaitPodGone(c); err != nil {
-		return err
-	}
 	c.loc, c.state = nil, stateSuspended
 	return nil
-}
-
-func (r *liveRig) awaitPodGone(c *liveClaim) error {
-	name := SandboxName(c.token)
-	return r.poll(liveGoneLimit, "pod "+name+" to be gone", func() (bool, error) {
-		_, err := r.getPod(name)
-		if apierrors.IsNotFound(err) {
-			return true, nil
-		}
-		return false, err
-	})
 }
 
 // ensureRunning and ensureSuspended put a claim where a check starts from: nothing to do in a full

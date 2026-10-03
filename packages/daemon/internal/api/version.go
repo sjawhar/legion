@@ -30,4 +30,8 @@ package api
 // pane or pod carries the variable that chose between two daemons' clients. `POST
 // /legion/v1/controller/secret` takes the contract `legion controller start` held the controller's
 // plugin to (`pluginContract`) and refuses another before it mints.
-const DaemonAPIVersion = 12
+//
+// 13: LEGION-462 -- a Sandbox locator on GET /legion/v1/state addresses one role process in its
+// issue's shared pod: the issue Sandbox's name, the pod's uid, the role container and the process
+// generation, with the incarnation `<pod uid>/<generation>`.
+const DaemonAPIVersion = 13

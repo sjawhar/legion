@@ -108,6 +108,12 @@ func (s *memoryClaims) PutClaim(_ context.Context, c supervise.Claim) error {
 	return nil
 }
 
+func (s *memoryClaims) AdmitClaim(ctx context.Context, c supervise.Claim) (supervise.Claim, error) {
+	return c, s.PutClaim(ctx, c)
+}
+
+func (s *memoryClaims) CheckLaunch(context.Context, supervise.Claim) error { return nil }
+
 func (s *memoryClaims) PutDelivery(context.Context, legionclaim.Token, supervise.Delivery) error {
 	return nil
 }

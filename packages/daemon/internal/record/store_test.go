@@ -701,3 +701,64 @@ func TestCheckedHeadMigrationKeepsARecordedVerdictStandingForItsHead(t *testing.
 		}
 	})
 }
+
+// Migration 0028 ends phase-end suspension. A transition's suspend queued before it named the phase
+// it ended ("leaves"); the field is gone, and the outbox decodes rows strictly, so each such row is
+// deleted rather than left to fail on every attempt or, read without the field, stop a role its
+// issue still needs. Every other supervise row stays queued and decodes: a close's suspend, a start
+// and a tree close.
+func TestResidentRolesMigrationDropsOnlyTheQueuedPhaseEndSuspends(t *testing.T) {
+	ctx := context.Background()
+	st := emptyStore(t)
+	all, err := migrations.All()
+	must(t, err)
+	for _, migration := range all {
+		if migration.Version >= 28 {
+			break
+		}
+		inTx(t, st, func(tx pgx.Tx) {
+			must(t, func() error {
+				if _, err := tx.Exec(ctx, migration.SQL); err != nil {
+					return err
+				}
+				_, err := tx.Exec(ctx, "insert into schema_version (version) values ($1)", migration.Version)
+				return err
+			}())
+		})
+	}
+	queued := map[string]string{
+		"phase-end suspend": `{"op": "suspend", "tree": "LEGION-208", "role": "planner", "generation": 1, "leaves": "planning", "reason": "LEGION-208 left planning"}`,
+		"close suspend":     `{"op": "suspend", "tree": "LEGION-208", "role": "implementer", "generation": 1, "reason": "the tree of LEGION-208 lingers"}`,
+		"start":             `{"op": "start", "tree": "LEGION-208", "role": "implementer", "generation": 1, "phase": "implementing", "task": "Continue Workflow."}`,
+		"tree close":        `{"op": "tree_close", "tree": "LEGION-208", "role": "tester", "generation": 1, "linger": 1}`,
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		for name, payload := range queued {
+			_, err := tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ('supervise', 'LEGION-208', $1, 1, now(), $2)`, payload, name)
+			must(t, err)
+		}
+	})
+
+	_, err = st.Migrate(ctx)
+	must(t, err)
+	inTx(t, st, func(tx pgx.Tx) {
+		rows, err := NewStore().ClaimDue(ctx, tx, "LEGION", time.Now().Add(time.Hour), 10, time.Minute)
+		must(t, err)
+		kept := map[string]SuperviseRequest{}
+		for _, row := range rows {
+			payload, err := DecodeOutboxPayload(row)
+			if err != nil {
+				t.Fatalf("the %s row after 0028 does not decode: %v", row.LastError, err)
+			}
+			kept[row.LastError] = payload.(SuperviseRequest)
+		}
+		want := map[string]SuperviseRequest{
+			"close suspend": {Op: "suspend", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 1, Reason: "the tree of LEGION-208 lingers"},
+			"start":         {Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 1, Phase: phase.Implementing, Task: "Continue Workflow."},
+			"tree close":    {Op: "tree_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 1, Linger: 1},
+		}
+		if !reflect.DeepEqual(kept, want) {
+			t.Fatalf("supervise rows after 0028 = %+v, want %+v: the phase-end suspend deleted and every other row kept", kept, want)
+		}
+	})
+}

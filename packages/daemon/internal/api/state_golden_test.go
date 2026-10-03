@@ -66,8 +66,11 @@ func populatedState() State {
 							Locator: &runtime.Locator{
 								Runtime:     runtime.RuntimeSandbox,
 								Claim:       "legion-legion-legion-208-planner",
-								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-								Sandbox:     &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-legion-208-planner"},
+								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/2",
+								Sandbox: &runtime.SandboxLocator{
+									Namespace: "legion", Name: "legion-legion-legion-208", PodUID: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+									Container: "planner", Generation: 2,
+								},
 							},
 						},
 						HandoffCommit: "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
@@ -80,8 +83,11 @@ func populatedState() State {
 							Locator: &runtime.Locator{
 								Runtime:     runtime.RuntimeSandbox,
 								Claim:       "legion-legion-legion-208-implementer",
-								Incarnation: "c41a8d3e-5b62-4f18-9d07-1e3a6c94b2f5",
-								Sandbox:     &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-legion-208-implementer"},
+								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
+								Sandbox: &runtime.SandboxLocator{
+									Namespace: "legion", Name: "legion-legion-legion-208", PodUID: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+									Container: "implementer", Generation: 5,
+								},
 							},
 						},
 						HandoffCommit: "",

@@ -13,83 +13,104 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
-// Suspend of the claim's current process asks the agent to end itself over its connection, then
-// sets the Sandbox Suspended; the Sandbox, its Secret, and its session stay for a Resume.
-func TestSuspendStopsTheRecordedProcessGracefully(t *testing.T) {
+// Suspend of a role's current process stops that child through its launcher and nothing else: the
+// issue Sandbox stays Running, so every sibling role in the pod keeps running, and the role's
+// Secret and session stay for a Resume.
+func TestSuspendStopsOnlyTheRecordedRoleProcess(t *testing.T) {
 	g := newRig(t, nil)
-	conn := fake.NewConn()
-	g.conns.Register(workerToken, conn)
+	root := g.spawn(rootSpec(t))
 	loc := g.spawn(workerSpec(t))
 	g.clearActions()
 	if err := g.r.Suspend(g.ctx, loc); err != nil {
 		t.Fatal(err)
 	}
 	name := SandboxName(workerToken)
-	if conn.Shutdowns() != 1 {
-		t.Fatalf("%d shutdown frames, want 1", conn.Shutdowns())
+	stops := 0
+	for _, frame := range g.sent(workerToken) {
+		if stop, ok := frame.(shimwire.LauncherStop); ok {
+			stops++
+			if stop.Generation != loc.Sandbox.Generation {
+				t.Fatalf("stop of generation %d, want the recorded %d", stop.Generation, loc.Sandbox.Generation)
+			}
+		}
 	}
-	expectSteps(t, steps(t, g.writes(), name), "suspend")
-	if g.sandbox(name) == nil || g.secret(secretName(name)) == nil {
-		t.Fatal("suspend removed what a resume needs")
+	if stops != 1 {
+		t.Fatalf("%d stops sent to the tester's launcher, want 1", stops)
+	}
+	for _, frame := range g.sent(rootToken) {
+		if _, ok := frame.(shimwire.LauncherStop); ok {
+			t.Fatal("the architect's launcher was sent a stop for the tester's suspension")
+		}
+	}
+	expectSteps(t, steps(t, g.writes(), name))
+	if g.sandbox(name).mode() != modeRunning || g.secret(roleSecretName(name, claim.RoleTester)) == nil {
+		t.Fatal("suspend changed the issue pod or removed what a resume needs")
+	}
+	if obs, err := g.r.Probe(g.ctx, root); err != nil || obs.Kind != runtime.Alive {
+		t.Fatalf("the architect after the tester's suspension: %s, %v", obs.Kind, err)
 	}
 }
 
-// A locator that is no longer the claim's current process is already stopped (decision 3d), with
-// one exception that keeps a valid token from running on: a pod recorded by no locator.
+// A locator that is no longer the role's current process is already stopped (decision 3d): a
+// newer generation of the same role in the same pod, a pod the controller replaced, or no pod.
+// Nothing is written and no stop is sent.
 func TestSuspendWithAStaleLocator(t *testing.T) {
 	name := SandboxName(workerToken)
-	t.Run("a newer relaunch by the daemon is left alone", func(t *testing.T) {
+	stopsOf := func(g *rig) int {
+		n := 0
+		for _, frame := range g.sent(workerToken) {
+			if _, ok := frame.(shimwire.LauncherStop); ok {
+				n++
+			}
+		}
+		return n
+	}
+	t.Run("a newer generation of the role is left alone", func(t *testing.T) {
 		g := newRig(t, nil)
-		conn := fake.NewConn()
-		g.conns.Register(workerToken, conn)
 		old := g.spawn(workerSpec(t))
 		if err := g.r.Suspend(g.ctx, old); err != nil {
 			t.Fatal(err)
 		}
-		newer := g.spawn(workerSpec(t))
+		spec := workerSpec(t)
+		spec.Generation = old.Sandbox.Generation + 1
+		newer := g.spawn(spec)
 		g.clearActions()
-		shutdowns := conn.Shutdowns()
+		stops := stopsOf(g)
 		if err := g.r.Suspend(g.ctx, old); err != nil {
 			t.Fatalf("a stale locator is stopped, not an error: %v", err)
 		}
-		if writes := g.writes(); len(writes) > 0 || conn.Shutdowns() != shutdowns {
-			t.Fatalf("a stale Suspend wrote %v and sent %d shutdown frames", writes, conn.Shutdowns()-shutdowns)
+		if writes := g.writes(); len(writes) > 0 || stopsOf(g) != stops {
+			t.Fatalf("a stale Suspend wrote %v and sent %d stops", writes, stopsOf(g)-stops)
 		}
-		if g.sandbox(name).mode() != modeRunning || string(g.pod(name).UID) != newer.Incarnation {
-			t.Fatal("the newer incarnation was touched")
+		if newer.Sandbox.PodUID != old.Sandbox.PodUID {
+			t.Fatalf("the newer generation ran in pod %s, want the same issue pod %s", newer.Sandbox.PodUID, old.Sandbox.PodUID)
 		}
 		if obs, err := g.r.Probe(g.ctx, newer); err != nil || obs.Kind != runtime.Alive {
-			t.Fatalf("the newer incarnation after the stale Suspend: %s, %v", obs.Kind, err)
+			t.Fatalf("the newer generation after the stale Suspend: %s, %v", obs.Kind, err)
 		}
 	})
-	t.Run("a pod the controller recreated unrecorded is suspended", func(t *testing.T) {
+	t.Run("a pod the controller recreated is not the recorded process", func(t *testing.T) {
 		g := newRig(t, nil)
-		conn := fake.NewConn()
-		g.conns.Register(workerToken, conn)
 		loc := g.spawn(workerSpec(t))
 		if err := g.kube.Tracker().Delete(podsGVR, testNamespace, name); err != nil {
 			t.Fatal(err)
 		}
-		g.eventually("the controller to recreate the pod", func() bool {
-			pod := g.pod(name)
-			return pod != nil && string(pod.UID) != loc.Incarnation
-		})
-		g.eventually("the store to see it", func() bool {
+		g.eventually("the store to see the recreated pod", func() bool {
 			pod := g.r.storedPod(name)
-			return pod != nil && string(pod.UID) != loc.Incarnation
+			return pod != nil && string(pod.UID) != loc.Sandbox.PodUID
 		})
 		g.clearActions()
 		if err := g.r.Suspend(g.ctx, loc); err != nil {
 			t.Fatal(err)
 		}
-		expectSteps(t, steps(t, g.writes(), name), "suspend")
-		if conn.Shutdowns() != 0 {
-			t.Fatal("a shutdown frame went to a process the locator does not name")
+		if writes := g.writes(); len(writes) > 0 || stopsOf(g) != 0 {
+			t.Fatalf("Suspend of the replaced pod's process wrote %v and sent %d stops", writes, stopsOf(g))
 		}
 	})
-	t.Run("no pod and no newer relaunch: the sandbox is suspended before one is recreated", func(t *testing.T) {
+	t.Run("no pod", func(t *testing.T) {
 		g := newRig(t, nil)
 		loc := g.spawn(workerSpec(t))
 		g.hold.Store(true)
@@ -101,44 +122,48 @@ func TestSuspendWithAStaleLocator(t *testing.T) {
 		if err := g.r.Suspend(g.ctx, loc); err != nil {
 			t.Fatal(err)
 		}
-		expectSteps(t, steps(t, g.writes(), name), "suspend")
+		if writes := g.writes(); len(writes) > 0 || stopsOf(g) != 0 {
+			t.Fatalf("Suspend with no pod wrote %v and sent %d stops", writes, stopsOf(g))
+		}
 	})
 }
 
-// Release ends the claim whatever its locator says: the Sandbox is deleted by name. The shutdown
-// frame goes to the process the locator records, and only while it is still the claim's running
-// pod (decision 3c/3d): a stale or absent locator's process is not acted on, and deleting the
-// Sandbox ends whatever pod it holds. A Sandbox already gone is released.
-func TestReleaseDeletesTheClaimsSandbox(t *testing.T) {
+// Release is claim-scoped. It stops at most the role process and MUST NOT delete, suspend or
+// otherwise change its issue Sandbox, even when this runtime sees no sibling role: durable
+// IssueResources owns issue cleanup after a complete store fence and the close/start ordering.
+func TestReleaseNeverDeletesTheIssueSandbox(t *testing.T) {
 	name := SandboxName(workerToken)
-	for label, tc := range map[string]struct {
-		locate    func(runtime.Locator) *runtime.Locator
-		shutdowns int
-	}{
-		"current": {func(loc runtime.Locator) *runtime.Locator { return &loc }, 1},
-		"stale": {func(loc runtime.Locator) *runtime.Locator {
+	for label, locate := range map[string]func(runtime.Locator) *runtime.Locator{
+		"current": func(loc runtime.Locator) *runtime.Locator { return &loc },
+		"stale": func(runtime.Locator) *runtime.Locator {
 			stale := sandboxLocator(workerToken, "uid-pod-long-gone")
 			return &stale
-		}, 0},
-		"no locator": {func(runtime.Locator) *runtime.Locator { return nil }, 0},
+		},
+		"no locator": func(runtime.Locator) *runtime.Locator { return nil },
 	} {
 		t.Run(label, func(t *testing.T) {
 			g := newRig(t, nil)
-			conn := fake.NewConn()
-			g.conns.Register(workerToken, conn)
+			g.issueLaunchers(workerToken)
 			loc := g.spawn(workerSpec(t))
+			if label != "current" {
+				if err := g.r.Suspend(g.ctx, loc); err != nil {
+					t.Fatal(err)
+				}
+			}
 			g.clearActions()
-			if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken, Locator: tc.locate(loc)}); err != nil {
+			if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken, Locator: locate(loc)}); err != nil {
 				t.Fatal(err)
 			}
-			if g.sandbox(name) != nil {
-				t.Fatal("the sandbox survived its release")
+			if g.sandbox(name) == nil || g.pod(name) == nil || g.sandbox(name).mode() != modeRunning {
+				t.Fatal("claim release changed the issue pod; only the durable issue-resource cleanup may do that")
 			}
-			if conn.Shutdowns() != tc.shutdowns {
-				t.Fatalf("%d shutdown frames, want %d", conn.Shutdowns(), tc.shutdowns)
+			for _, write := range g.writes() {
+				if write.resource == "sandboxes" {
+					t.Fatalf("claim release wrote the issue Sandbox: %+v", write)
+				}
 			}
 			if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken}); err != nil {
-				t.Fatalf("releasing a released claim: %v", err)
+				t.Fatalf("releasing an already released claim: %v", err)
 			}
 		})
 	}
@@ -148,56 +173,46 @@ func TestReleaseDeletesTheClaimsSandbox(t *testing.T) {
 // anything is sent or deleted: releasing one claim never ends another's Sandbox or process.
 func TestReleaseRefusesALocatorOfAnotherClaim(t *testing.T) {
 	g := newRig(t, nil)
-	conn := fake.NewConn()
-	g.conns.Register(workerToken, conn)
 	g.spawn(workerSpec(t))
 	other := g.spawn(testSpec(t, otherToken, claim.RoleReviewer, testTree))
 	g.clearActions()
 	if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken, Locator: &other}); err == nil || !strings.Contains(err.Error(), string(otherToken)) {
 		t.Fatalf("Release = %v, want a refusal naming the locator's claim", err)
 	}
-	if writes := g.writes(); len(writes) > 0 || conn.Shutdowns() != 0 {
-		t.Fatalf("the refused release wrote %v and sent %d shutdown frames", writes, conn.Shutdowns())
+	for _, token := range []claim.Token{workerToken, otherToken} {
+		for _, frame := range g.sent(token) {
+			if _, ok := frame.(shimwire.LauncherStop); ok {
+				t.Fatalf("the refused release sent %s's launcher a stop", token)
+			}
+		}
 	}
-	if g.sandbox(SandboxName(workerToken)) == nil || g.sandbox(SandboxName(otherToken)) == nil {
-		t.Fatal("a refused release deleted a sandbox")
+	if writes := g.writes(); len(writes) > 0 {
+		t.Fatalf("the refused release wrote %v", writes)
+	}
+	if g.sandbox(SandboxName(workerToken)) == nil {
+		t.Fatal("a refused release deleted the issue sandbox")
 	}
 }
 
-// A Release whose delete failed keeps the claim in the watch, so its Sandbox is still observed,
-// and leaves the Sandbox to the orphan sweep once the daemon has retired the claim: the sweep
-// protects the daemon's known claims and the launches this runtime has not released, never the
-// watch, and a release, failed or not, has released the launch, so nothing a failed release leaves
-// is left unowned. While the claim is still known the Sandbox stays.
-func TestAFailedReleaseLeavesTheSandboxToTheSweep(t *testing.T) {
+// Claim release has no issue-Sandbox delete path. A durable IssueResources cleanup effect owns
+// that delete after a complete persisted sibling-claim and close/start fence; the runtime release
+// must succeed even when deleting a Sandbox would fail.
+func TestReleaseNeverAttemptsIssueSandboxCleanup(t *testing.T) {
 	g := newRig(t, nil)
 	loc := g.spawn(workerSpec(t))
-	name := SandboxName(workerToken)
-	failing := true
+	deletes := 0
 	g.dyn.PrependReactor("delete", "sandboxes", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
-		if failing {
-			return true, nil, errors.New("etcdserver: request timed out")
-		}
-		return false, nil, nil
+		deletes++
+		return true, nil, errors.New("claim release must not delete an issue Sandbox")
 	})
-	if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}); err == nil || !strings.Contains(err.Error(), "request timed out") {
-		t.Fatalf("Release: %v, want the delete's failure", err)
-	}
-	if recorded, ok := g.r.recorded(workerToken); !ok || recorded != loc {
-		t.Fatalf("the watch holds %+v after the failed release, want %+v", recorded, loc)
-	}
-	failing = false
-	if err := g.r.ReconcileOrphans(g.ctx, []runtime.Known{{Claim: workerToken}}, 0); err != nil {
+	if err := g.r.Release(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}); err != nil {
 		t.Fatal(err)
 	}
-	if g.sandbox(name) == nil {
-		t.Fatal("the sweep deleted the sandbox of a claim still known")
+	if deletes != 0 {
+		t.Fatalf("claim release attempted %d issue Sandbox deletes", deletes)
 	}
-	if err := g.r.ReconcileOrphans(g.ctx, nil, 0); err != nil {
-		t.Fatal(err)
-	}
-	if g.sandbox(name) != nil {
-		t.Fatal("the retired claim's sandbox outlived the sweep")
+	if g.sandbox(SandboxName(workerToken)) == nil {
+		t.Fatal("claim release removed its issue Sandbox")
 	}
 }
 
@@ -210,13 +225,14 @@ func TestTheOrphanSweepKeepsWhatThisRuntimeLaunchedSinceTheClaimsWereRead(t *tes
 	var known []runtime.Known // read before either launch
 	g.spawn(workerSpec(t))
 	g.hold.Store(true)
+	g.launcher(childToken)
 	launching := make(chan error, 1)
 	go func() {
-		_, err := g.r.Spawn(g.ctx, rootSpec(t))
+		_, err := g.r.Spawn(g.ctx, childSpec(t))
 		launching <- err
 	}()
-	g.eventually("the launching root's sandbox in the runtime's store", func() bool {
-		_, ok, _ := g.r.sandboxes.GetStore().GetByKey(testNamespace + "/" + SandboxName(rootToken))
+	g.eventually("the launching child issue's sandbox in the runtime's store", func() bool {
+		_, ok, _ := g.r.sandboxes.GetStore().GetByKey(testNamespace + "/" + SandboxName(childToken))
 		return ok
 	})
 	if err := g.r.ReconcileOrphans(g.ctx, known, 0); err != nil {
@@ -225,12 +241,12 @@ func TestTheOrphanSweepKeepsWhatThisRuntimeLaunchedSinceTheClaimsWereRead(t *tes
 	if g.sandbox(SandboxName(workerToken)) == nil {
 		t.Fatal("a sandbox launched after the claims were read was swept as an orphan")
 	}
-	if g.sandbox(SandboxName(rootToken)) == nil {
-		t.Fatal("a sandbox still launching was swept as an orphan, and the tree volume with it")
+	if g.sandbox(SandboxName(childToken)) == nil {
+		t.Fatal("a sandbox still launching was swept as an orphan")
 	}
 	g.hold.Store(false)
 	if err := <-launching; err != nil {
-		t.Fatalf("the root's launch: %v", err)
+		t.Fatalf("the child issue's launch: %v", err)
 	}
 }
 
@@ -271,6 +287,7 @@ func TestALaunchBegunDuringAnOrphansDeleteWaitsForIt(t *testing.T) {
 	g = newRig(t, []k8sruntime.Object{
 		sandboxObject(t, leftover, "uid-sandbox-leftover", modeSuspended, claimLabels(claim.RoleTester)),
 	}, withSandboxHooks(hooks))
+	g.launcher(workerToken)
 	armed.Store(true)
 	if err := g.r.ReconcileOrphans(g.ctx, nil, 0); err != nil {
 		t.Fatal(err)

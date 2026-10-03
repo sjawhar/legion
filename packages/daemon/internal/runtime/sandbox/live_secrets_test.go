@@ -1,12 +1,12 @@
 //go:build e2e
 
 // The Stage 4a harness's agent-secrets checks (AGENTC-393, spec Testing 10(b); red-team condition
-// 2): two pods on one ServiceAccount are each enrolled with the production broker as its own session
-// and cannot cross-use grants; a copied projected token alone, an old pod UID, and a self-enrollment
-// from inside a pod all fail; the daemon's revocation ends a pod's access when the pod is gone. The
-// harness plays the daemon's part exactly as supervise.Machine does: enroll on the hello's identity
-// with the pod UID the runtime recorded, hand the id to the shim over the stream, revoke on Gone.
-// The rig is live_test.go.
+// 2): two role processes of one verified pod each enroll at a distinct role-generation slot and
+// cannot cross-use grants; a copied projected token for another pod, an old pod UID, and a
+// self-enrollment from inside a pod all fail; the daemon's revocation ends an old pod's access when
+// the pod is gone. The harness plays the daemon's part exactly as supervise.Machine does: enroll
+// on the hello's identity with its recorded PodUID and role-generation slot, hand the id to the shim
+// over the stream, revoke on Gone. The rig is live_test.go.
 //
 // secretsBlocked and shellJoin's real logic live in live_secrets_pure_test.go, which carries no
 // e2e build tag so ordinary `go test ./...` exercises it directly (live_secrets_unit_test.go);
@@ -39,10 +39,10 @@ func secretsBlocked(r *liveRig) string {
 	return agentSecretsBlockReason(r.env.agentSecretsURL, r.env.agentSecretsOperator, r.env.agentSecretsAutoSHA, r.env.agentSecretsBin)
 }
 
-// ensureEnrolled enrolls c's running pod unless the harness already did for this incarnation —
-// what the daemon's machine does on the pod's hello. Every check that needs an enrolled pod starts
-// here, so the suspend, resume and kill checks between them, which relaunch pods the harness does
-// not enroll, leave nothing stale behind.
+// ensureEnrolled enrolls c's running role process unless the harness already did for this
+// incarnation — what the daemon's machine does on the role's hello. Every check that needs an
+// enrollment starts here, so the suspend, resume and kill checks between them, which relaunch
+// processes the harness does not enroll, leave nothing stale behind.
 func (r *liveRig) ensureEnrolled(c *liveClaim) (string, error) {
 	if e, ok := r.enrollments[c.token]; ok && e.incarnation == c.loc.Incarnation {
 		return e.id, nil
@@ -54,12 +54,16 @@ func (r *liveRig) ensureEnrolled(c *liveClaim) (string, error) {
 	return r.enroll(c, regs[len(regs)-1])
 }
 
-// enroll is the daemon's enrollment of c's running pod: the identity its hello carried, the pod
-// UID the runtime returned as the incarnation, and a session id the harness mints (the stub agent
-// registers none). It carries no issue: the broker's rules pick a request's approver at request
-// time, never at enrollment. The id goes to the shim over the claim's connection. An enrollment
-// the harness holds for an earlier incarnation of the claim is revoked first, as letGo would have
-// when that pod went.
+func agentSecretsSlot(c *liveClaim) string {
+	return fmt.Sprintf("%s-g%d", c.role, c.loc.Sandbox.Generation)
+}
+
+// enroll is the daemon's enrollment of c's role process: the identity its hello carried, the
+// actual pod UID separate from its composed process incarnation, the role-generation slot and a
+// session id the harness mints (the stub agent registers none). It carries no issue: the broker's
+// rules pick a request's approver at request time, never at enrollment. The id goes to the shim
+// over the claim's connection. An enrollment the harness holds for an earlier incarnation of the
+// claim is revoked first, as letGo would have when that process went.
 func (r *liveRig) enroll(c *liveClaim, reg registration) (string, error) {
 	if reg.identity == nil {
 		return "", fmt.Errorf("the hello of %s at generation %d carried no agent-secrets identity", c.token, reg.gen)
@@ -70,13 +74,13 @@ func (r *liveRig) enroll(c *liveClaim, reg registration) (string, error) {
 	ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
 	defer cancel()
 	enrolled, err := r.secrets.Enroll(ctx, agentsecrets.PodEnrollment{
-		PodUID: c.loc.Incarnation, Thumbprint: reg.identity.Thumbprint, PodToken: reg.identity.PodToken,
+		PodUID: c.loc.Sandbox.PodUID, Slot: agentSecretsSlot(c), Thumbprint: reg.identity.Thumbprint, PodToken: reg.identity.PodToken,
 		Session: "s4a-" + string(c.token),
 	})
 	if err != nil {
-		return "", fmt.Errorf("enroll %s (pod %s): %w", c.token, short(c.loc.Incarnation), err)
+		return "", fmt.Errorf("enroll %s (pod %s, slot %s): %w", c.token, short(c.loc.Sandbox.PodUID), agentSecretsSlot(c), err)
 	}
-	note("harness", "enrolled %s pod %s as %s (thumbprint %s)", c.token, short(c.loc.Incarnation), enrolled.ID, reg.identity.Thumbprint)
+	note("harness", "enrolled %s pod %s slot %s as %s (thumbprint %s)", c.token, short(c.loc.Sandbox.PodUID), agentSecretsSlot(c), enrolled.ID, reg.identity.Thumbprint)
 	conn, ok := r.ln.Conn(c.token)
 	if !ok {
 		return "", fmt.Errorf("%s has no connection to hand the enrollment to", c.token)
@@ -119,12 +123,11 @@ func (r *liveRig) agentSecrets(c *liveClaim, args ...string) (stdout string, cod
 	return strings.TrimSpace(head), code, strings.TrimSpace(rest), nil
 }
 
-// secrets-two-pods-enrolled: the root and the colocated worker — two pods on the operator's one
-// ServiceAccount — are each enrolled on their hello with the pod UID the runtime recorded, hold
-// key.pem (0600) and their own enrollment id in the key directory, and `agent-secrets self`
-// answers each with its own id. The pods' projected token for the broker's audience is alone in
-// its volume, and the middleman token is untouched beside it.
-func (r *liveRig) checkSecretsTwoPodsEnrolled() error {
+// secrets-two-roles-enrolled: the root and the worker share one pod and ServiceAccount, yet each
+// is enrolled from its own hello under a distinct role-generation slot, holds a private key (0600)
+// and enrollment id, and `agent-secrets self` answers each own id. The pod's projected token for
+// the broker's audience is alone in its volume, and the middleman token is untouched beside it.
+func (r *liveRig) checkSecretsTwoRolesEnrolled() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	for _, c := range []*liveClaim{root, worker} {
 		if err := r.ensureRunning(c); err != nil {
@@ -181,7 +184,10 @@ func (r *liveRig) checkSecretsTwoPodsEnrolled() error {
 		note("runtime", "%s: agent-secrets self → %s (pod)", c.token, answer.EnrollmentID)
 	}
 	if ids[root.token] == ids[worker.token] {
-		return fmt.Errorf("both pods enrolled as %s", ids[root.token])
+		return fmt.Errorf("both role slots enrolled as %s", ids[root.token])
+	}
+	if root.loc.Sandbox.PodUID != worker.loc.Sandbox.PodUID {
+		return fmt.Errorf("root and worker enrolled on different pod UIDs %s and %s, want one issue pod", root.loc.Sandbox.PodUID, worker.loc.Sandbox.PodUID)
 	}
 	return nil
 }
@@ -257,8 +263,8 @@ func (r *liveRig) checkSecretsCrossPodNegative() error {
 	return nil
 }
 
-// secrets-copied-token-negative: an enrollment naming the worker's pod UID and key with the root's
-// projected token is refused 403 POD_IDENTITY_MISMATCH — a copied token alone binds nothing.
+// secrets-copied-token-negative: a projected token copied from the shared issue pod does not prove
+// another pod. The broker refuses an enrollment whose requested pod UID is not that token's pod.
 func (r *liveRig) checkSecretsCopiedTokenNegative() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	rootRegs, workerRegs := r.reg.registrations(root.token), r.reg.registrations(worker.token)
@@ -266,34 +272,34 @@ func (r *liveRig) checkSecretsCopiedTokenNegative() error {
 	ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
 	defer cancel()
 	_, err := r.secrets.Enroll(ctx, agentsecrets.PodEnrollment{
-		PodUID: worker.loc.Incarnation, Thumbprint: workerID.Thumbprint, PodToken: rootID.PodToken, Session: "s4a-copied",
+		PodUID: "another-pod-uid", Slot: agentSecretsSlot(worker), Thumbprint: workerID.Thumbprint, PodToken: rootID.PodToken, Session: "s4a-copied",
 	})
 	var api *agentsecrets.APIError
 	if !errors.As(err, &api) || api.Status != 403 || api.Code != "POD_IDENTITY_MISMATCH" {
-		return fmt.Errorf("enrolling the worker's uid with the root's token: %v, want 403 POD_IDENTITY_MISMATCH", err)
+		return fmt.Errorf("enrolling another pod uid with the root's token: %v, want 403 POD_IDENTITY_MISMATCH", err)
 	}
-	note("harness", "POST /v1/enrollments (worker uid, root token) → 403 POD_IDENTITY_MISMATCH")
+	note("harness", "POST /v1/enrollments (another pod uid, root token) → 403 POD_IDENTITY_MISMATCH")
 	return nil
 }
 
-// secrets-self-enroll-negative: inside a pod there is no launcher credential; an enroll attempt with
-// a fresh key and the pod's own token, bearing the pod's boot token as if it were one, is 401.
+// secrets-self-enroll-negative: a pod cannot mint another enrollment through the agent-secrets
+// CLI. The only CLI enrollment route is a helper-backed box enrollment; pod enrollment is the
+// daemon's launcher-proof path, so the CLI refuses before it could present a credential.
 func (r *liveRig) checkSecretsSelfEnrollNegative() error {
 	root := r.claim("root")
-	script := fmt.Sprintf(`mkdir -p /tmp/second && tp=$(/opt/legion/bin/agent-secrets keygen --out /tmp/second) && /opt/legion/bin/agent-secrets enroll --launcher-token-file %s/%s --kind pod --runtime-id "$POD_UID" --thumbprint "$tp" --approver-issue %s --pod-token-file %s/%s 2>&1; echo "---exit $?---"`,
-		BootDir, bootTokenKey, root.issue, AgentSecretsTokenDir, AgentSecretsTokenFile)
+	script := `mkdir -p /tmp/second && tp=$(/opt/legion/bin/agent-secrets keygen --out /tmp/second) && /opt/legion/bin/agent-secrets enroll --kind pod --runtime-id "$POD_UID" --thumbprint "$tp" 2>&1; echo "---exit $?---"`
 	out, err := r.exec(root, "sh", "-c", script)
 	if err != nil && !strings.Contains(out, "---exit ") {
 		return err
 	}
-	if strings.Contains(out, "---exit 0---") || !strings.Contains(out, "401") {
-		return fmt.Errorf("a self-enrollment from inside the pod was not refused 401: %s", out)
+	if strings.Contains(out, "---exit 0---") || !strings.Contains(out, "--helper is required") {
+		return fmt.Errorf("a self-enrollment from inside the pod was not refused by the CLI boundary: %s", out)
 	}
 	self, code, _, err := r.agentSecrets(root, "self", "--json")
 	if err != nil || code != 0 || !strings.Contains(self, r.enrollments[root.token].id) {
 		return fmt.Errorf("after the attempt, agent-secrets self answered %q (exit %d): the pod's own enrollment must be unchanged", self, code)
 	}
-	note("runtime", "root: enroll with the pod's boot token as bearer → 401; the pod's enrollment is unchanged (a second session in the pod shares it, by the spec's pod-generation rule, and cannot become a second identity)")
+	note("runtime", "root: direct agent-secrets enroll refused before broker access; the pod's enrollment is unchanged")
 	return nil
 }
 
@@ -352,19 +358,15 @@ func (r *liveRig) checkSecretsApprovalAsk() error {
 	}
 }
 
-// secrets-old-uid-negative and secrets-revoke-on-death: the worker's pod is killed in place and
-// the claim resumed (a new pod UID). The dead pod's enrollment, revoked as the daemon's letGo
-// would, no longer proves anything — shown from the devbox with a copy of the dead pod's key
-// directory, which worked before the kill (the accepted boundary: whoever holds the key is the
-// pod, and the copy is the harness's instrument) and is refused after. An enrollment for the new
-// pod naming the OLD uid is 403 POD_IDENTITY_MISMATCH; the new pod, enrolled on its own hello,
-// gets its own grant.
+// secrets-old-uid-negative and secrets-revoke-on-death: a separate issue pod is deleted and its
+// claim resumed with a new pod UID. The old pod's enrollment is revoked; a key copied before its
+// deletion then fails, and a new pod's identity cannot enroll under the old UID.
 func (r *liveRig) checkSecretsOldUIDAndRevocation() error {
-	worker := r.claim("worker")
+	worker := r.claim("orphan")
 	if err := r.ensureRunning(worker); err != nil {
 		return err
 	}
-	current, err := r.ensureEnrolled(worker) // kill-pod relaunched the worker; its pod is enrolled here
+	current, err := r.ensureEnrolled(worker)
 	if err != nil {
 		return err
 	}
@@ -386,21 +388,21 @@ func (r *liveRig) checkSecretsOldUIDAndRevocation() error {
 		return out, code
 	}
 	if out, code := devbox(); code != 0 || !strings.Contains(out, current) {
-		return fmt.Errorf("the copied key directory did not work from the devbox before the kill (exit %d: %s); the check cannot show the revocation", code, out)
+		return fmt.Errorf("the copied key directory did not work from the devbox before the pod delete (exit %d: %s); the check cannot show the revocation", code, out)
 	}
-	note("harness", "devbox: agent-secrets self with the worker's copied key → its enrollment (the accepted boundary: the key is the pod)")
-	oldUID := worker.loc.Incarnation
+	note("harness", "devbox: agent-secrets self with the orphan's copied key → its enrollment (the accepted boundary: the key is the pod)")
+	oldUID, oldIncarnation := worker.loc.Sandbox.PodUID, worker.loc.Incarnation
 	mark := r.obs.mark()
-	if _, err := r.exec(worker, "sh", "-c", "kill 1"); err != nil && !strings.Contains(err.Error(), "exit") {
+	if _, err := r.kubectl("delete", "pod", SandboxName(worker.token), "--wait=false"); err != nil {
 		return err
 	}
 	gone, ok := r.obs.await(mark, liveGoneLimit, func(o runtime.Observation) bool {
-		return o.Locator.Claim == worker.token && o.Locator.Incarnation == oldUID && (o.Kind == runtime.Gone || o.Kind == runtime.NotRecordedProcess)
+		return o.Locator.Claim == worker.token && o.Locator.Incarnation == oldIncarnation && (o.Kind == runtime.Gone || o.Kind == runtime.NotRecordedProcess)
 	})
 	if !ok {
-		return fmt.Errorf("no gone observation for %s (uid %s) within %s", worker.token, short(oldUID), liveGoneLimit)
+		return fmt.Errorf("no gone observation for %s (pod uid %s) within %s", worker.token, short(oldUID), liveGoneLimit)
 	}
-	note("runtime", "observed %s uid %s: %s", worker.token, short(oldUID), gone.Kind)
+	note("runtime", "observed %s process %s in pod uid %s: %s", worker.token, short(oldIncarnation), short(oldUID), gone.Kind)
 	if err := r.revoke(worker); err != nil {
 		return err
 	}
@@ -422,21 +424,21 @@ func (r *liveRig) checkSecretsOldUIDAndRevocation() error {
 	ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
 	defer cancel()
 	_, err = r.secrets.Enroll(ctx, agentsecrets.PodEnrollment{
-		PodUID: oldUID, Thumbprint: reg.identity.Thumbprint, PodToken: reg.identity.PodToken, Session: "s4a-old-uid",
+		PodUID: oldUID, Slot: agentSecretsSlot(worker), Thumbprint: reg.identity.Thumbprint, PodToken: reg.identity.PodToken, Session: "s4a-old-uid",
 	})
 	var api *agentsecrets.APIError
 	if !errors.As(err, &api) || api.Status != 403 || api.Code != "POD_IDENTITY_MISMATCH" {
-		return fmt.Errorf("enrolling the new pod's key under the old uid %s: %v, want 403 POD_IDENTITY_MISMATCH", short(oldUID), err)
+		return fmt.Errorf("enrolling the replacement pod's key under the old uid %s: %v, want 403 POD_IDENTITY_MISMATCH", short(oldUID), err)
 	}
-	note("harness", "POST /v1/enrollments (old uid %s, new pod's token) → 403 POD_IDENTITY_MISMATCH", short(oldUID))
+	note("harness", "POST /v1/enrollments (old pod uid %s, replacement pod token) → 403 POD_IDENTITY_MISMATCH", short(oldUID))
 	if _, err := r.enroll(worker, reg); err != nil {
 		return err
 	}
 	out, code, stderr, err := r.agentSecrets(worker, "LEGION_E2E_AUTO", "--", "sh", "-c", `printf %s "$LEGION_E2E_AUTO" | sha256sum | cut -d' ' -f1`)
 	if err != nil || code != 0 || out != r.env.agentSecretsAutoSHA {
-		return fmt.Errorf("the resumed worker (uid %s) could not use its new enrollment: exit %d %s %s (%v)", short(loc.Incarnation), code, out, stderr, err)
+		return fmt.Errorf("the resumed worker (pod uid %s) could not use its new enrollment: exit %d %s %s (%v)", short(loc.Sandbox.PodUID), code, out, stderr, err)
 	}
-	note("runtime", "the resumed worker (uid %s) is enrolled anew and gets the automatic secret", short(loc.Incarnation))
+	note("runtime", "the resumed worker (pod uid %s) is enrolled anew and gets the automatic secret", short(loc.Sandbox.PodUID))
 	return nil
 }
 

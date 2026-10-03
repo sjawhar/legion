@@ -194,8 +194,9 @@ legion({
 The daemon spawns that sub-architect as its own process with the child's context already
 in its environment; a resume of an existing role continues the same process instead of
 starting a fresh one. Keep the returned session identifiers; retro and adjustment resume
-those same sessions through `spawn_worker` (a finished worker is retired after
-`worker_idle_retire_seconds` and comes back from its session file). Park while children are
+those same sessions through `spawn_worker` (under the TypeScript daemon a finished worker is
+retired after `worker_idle_retire_seconds` and comes back from its session file; the Go daemon
+keeps every role live until its issue closes). Park while children are
 in flight. On each child closure, re-scope open work, close obsolete work with a reason, and
 release the next wave only when it now makes sense. There is no inter-child dependency
 mechanism to encode.
@@ -237,10 +238,10 @@ review and the merge-gate sequence.
 Retro is mandatory for every issue that passed review, before merge. Send the implementer
 back in through the daemon — `spawn_worker` on the implementer carrying the retro task. This
 resumes the same agent whether its pane is still live or the daemon has already retired it
-idle (a finished worker is retired after `worker_idle_retire_seconds`, default 600 s, and
-resumed from its session file on its next assignment). Never `envoy_publish` to a finished
-worker's role topic for this: a retired role has no live holder and the publish is rejected
-with 404.
+idle (under the TypeScript daemon a finished worker is retired after `worker_idle_retire_seconds`,
+default 600 s, and resumed from its session file on its next assignment). Never `envoy_publish`
+to a finished worker's role topic for this: a retired role has no live holder and the publish is
+rejected with 404.
 
 ```text
 legion({

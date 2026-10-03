@@ -279,7 +279,7 @@ func TestImplementationReachesTestingWhenHandoffAndPullRequestArriveInEitherOrde
 			if gotPhase != string(phase.Testing) {
 				t.Fatalf("issue phase = %q, want testing", gotPhase)
 			}
-			assertOutboxKinds(t, pool, []string{"dispatch_status", "supervise", "supervise", "notice"})
+			assertOutboxKinds(t, pool, []string{"dispatch_status", "supervise", "notice"})
 		})
 	}
 }
@@ -328,7 +328,7 @@ func TestCapturedApprovedReviewFlowsThroughConsumeToRetro(t *testing.T) {
 		}
 		return gotPhase == string(phase.Retro) && status == "retro"
 	})
-	assertOutboxKinds(t, pool, []string{"dispatch_status", "supervise", "supervise", "notice"})
+	assertOutboxKinds(t, pool, []string{"dispatch_status", "supervise", "notice"})
 }
 
 func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
@@ -343,7 +343,7 @@ func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
 	if _, err := intake.ApplyFact(ctx, pool, "github", "changes-requested", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head"}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact review: %v", err)
 	}
-	assertOutboxKinds(t, pool, []string{"dispatch_message", "notice", "dispatch_status", "supervise", "supervise", "notice"})
+	assertOutboxKinds(t, pool, []string{"dispatch_message", "notice", "dispatch_status", "supervise", "notice"})
 	var rounds int
 	if err := pool.QueryRow(ctx, "select rounds from phases where issue = $1 and role = $2", "LEGION-208", "implementer").Scan(&rounds); err != nil {
 		t.Fatalf("read implementer rounds: %v", err)
@@ -448,9 +448,9 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 			everyClaim[issue+"/"+string(role)]++
 		}
 	}
-	// The sign-off's own transition suspends the implementer it moves off, before linger does.
+	// The close suspends every claim once, the implementer the sign-off moves off among them: no
+	// transition suspends a worker of its own.
 	suspended := superviseRequests(t, pool, "suspend")
-	suspended["LEGION-208/implementer"]--
 	if !sameCounts(suspended, everyClaim) {
 		t.Fatalf("linger suspended %v, want each tree claim once: %v", suspended, everyClaim)
 	}
@@ -521,6 +521,8 @@ func assertOutboxCount(t *testing.T, pool *pgxpool.Pool, kind string, want int) 
 	}
 }
 
+// Every forward row applies through intake with its status, start and notice, and none suspends the
+// worker whose phase it ends: a role stays live from its first assignment until its issue closes.
 func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -537,21 +539,21 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 			fact: func() intake.Fact {
 				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RolePlanner, Claim: "claim", Commit: "plan"}
 			},
-			wantPhase: phase.Implementing, wantStatus: "in_progress", wantOutbox: []string{"supervise", "supervise", "notice"},
+			wantPhase: phase.Implementing, wantStatus: "in_progress", wantOutbox: []string{"supervise", "notice"},
 		},
 		{
 			name: "tester pass", current: phase.Testing, role: claim.RoleTester,
 			fact: func() intake.Fact {
 				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "claim", Verdict: "pass", Commit: "test"}
 			},
-			wantPhase: phase.Reviewing, wantStatus: "needs_review", wantOutbox: []string{"dispatch_status", "supervise", "supervise", "notice"},
+			wantPhase: phase.Reviewing, wantStatus: "needs_review", wantOutbox: []string{"dispatch_status", "supervise", "notice"},
 		},
 		{
 			name: "tester fail", current: phase.Testing, role: claim.RoleTester,
 			fact: func() intake.Fact {
 				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "claim", Verdict: "fail", Commit: "test"}
 			},
-			wantPhase: phase.Implementing, wantStatus: "in_progress", wantOutbox: []string{"dispatch_status", "supervise", "supervise", "notice"},
+			wantPhase: phase.Implementing, wantStatus: "in_progress", wantOutbox: []string{"dispatch_status", "supervise", "notice"},
 		},
 		{
 			name: "approved review", current: phase.Reviewing, role: claim.RoleReviewer,
@@ -564,14 +566,14 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 			fact: func() intake.Fact {
 				return intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head"}
 			},
-			wantPhase: phase.Retro, wantStatus: "retro", wantOutbox: []string{"dispatch_status", "supervise", "supervise", "notice"},
+			wantPhase: phase.Retro, wantStatus: "retro", wantOutbox: []string{"dispatch_status", "supervise", "notice"},
 		},
 		{
 			name: "retro completion", current: phase.Retro, role: claim.RoleImplementer,
 			fact: func() intake.Fact {
 				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "claim", Commit: "retro"}
 			},
-			wantPhase: phase.Merging, wantStatus: "retro", wantOutbox: []string{"supervise", "supervise", "notice"},
+			wantPhase: phase.Merging, wantStatus: "retro", wantOutbox: []string{"supervise", "notice"},
 		},
 		{
 			name: "approved merger ready", current: phase.Merging, role: claim.RoleMerger,
@@ -581,7 +583,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 			fact: func() intake.Fact {
 				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "claim", Ready: true, Summary: "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"}
 			},
-			wantPhase: phase.AwaitingMerge, wantStatus: "retro", wantOutbox: []string{"supervise", "notice", "dispatch_message"},
+			wantPhase: phase.AwaitingMerge, wantStatus: "retro", wantOutbox: []string{"notice", "dispatch_message"},
 		},
 		{
 			name: "merged pull request", current: phase.AwaitingMerge,
@@ -615,6 +617,9 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 				t.Fatalf("phase/status = %q/%q, want %q/%q", gotPhase, gotStatus, tc.wantPhase, tc.wantStatus)
 			}
 			assertOutboxKinds(t, pool, tc.wantOutbox)
+			if suspended := superviseRequests(t, pool, "suspend"); len(suspended) != 0 {
+				t.Fatalf("the %s suspended %v, want no worker stopped by a phase change", tc.name, suspended)
+			}
 			assertStartTasksNamePhase(t, pool, tc.wantPhase)
 		})
 	}
@@ -657,6 +662,8 @@ func fixtureStatus(current phase.Phase) string {
 	}
 }
 
+// Every backward edge applies through intake, and the worker that asked for it is not stopped: its
+// assignment ends with the move, and the start of the phase it moved to delivers the next one.
 func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 	for _, from := range []phase.Phase{phase.Implementing, phase.Testing, phase.Reviewing, phase.Retro, phase.Merging, phase.ProductionCheck} {
 		for _, to := range requiredBackwardTargets(from) {
@@ -674,6 +681,12 @@ func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 				}
 				if got != string(to) {
 					t.Fatalf("phase = %q, want %q", got, to)
+				}
+				if suspended := superviseRequests(t, pool, "suspend"); len(suspended) != 0 {
+					t.Fatalf("the move back from %s to %s suspended %v, want the requesting %s left running", from, to, suspended, role)
+				}
+				if started := superviseRequests(t, pool, "start"); started["LEGION-208/"+string(RoleFor(to))] != 1 {
+					t.Fatalf("the move back to %s started %v, want its %s started once", to, started, RoleFor(to))
 				}
 			})
 		}
