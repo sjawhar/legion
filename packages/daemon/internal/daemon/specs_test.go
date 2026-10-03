@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -18,7 +17,7 @@ import (
 // that policy asks of it under this daemon: register_gate under either policy, with approval first
 // only when the gate is armed. No other claim is told the policy: a child's spec is never gated.
 func TestARootArchitectIsToldTheDesignGatePolicyAndWhatItAsks(t *testing.T) {
-	composer, err := prompts.New(filepath.Join("..", "..", "..", "pi-envoy", "roles"), t.TempDir())
+	composer, err := prompts.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("compose the shipped prompts: %v", err)
 	}

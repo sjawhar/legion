@@ -236,10 +236,10 @@ func TestHandoffWriteWritesWhatItsPhasesRulesAllow(t *testing.T) {
 }
 
 // The planner's role prompt shows each shape of its two plan checks as JSON
-// (packages/pi-envoy/roles/planner.md, "Plan handoff"); a planner that records them as shown is
+// (internal/prompts/roles/planner.md, "Plan handoff"); a planner that records them as shown is
 // not refused.
 func TestHandoffWriteAcceptsEveryPlanCheckShapeThePlannerPromptShows(t *testing.T) {
-	prompt, err := os.ReadFile(filepath.Join(testRolePromptsDir(t), "planner.md"))
+	prompt, err := os.ReadFile(filepath.Join("..", "..", "internal", "prompts", "roles", "planner.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +438,7 @@ func TestHandoffCompleteResolvesTheCommitWithTheJJBootResolved(t *testing.T) {
 	}
 }
 
-// The merger verifies and publishes READY and writes no handoff (packages/pi-envoy/roles/merger.md:
+// The merger verifies and publishes READY and writes no handoff (internal/prompts/roles/merger.md:
 // "merger is not a file-backed phase"), so its completion needs no .legion file and reports the
 // commit its workspace sits on.
 func TestHandoffCompleteReadyForTheMergerNeedsNoHandoffFile(t *testing.T) {
@@ -516,7 +516,7 @@ func writeHandoffFile(t *testing.T, workspace, name, content string) {
 }
 
 // Every file-backed role prompt tells its pane to write its handoff under the phase word
-// (packages/pi-envoy/roles/*.md: the legion tool's handoff_write with phase plan|implement|test|review), while
+// (internal/prompts/roles/*.md: the legion tool's handoff_write with phase plan|implement|test|review), while
 // the pane's LEGION_ROLE is the claim word (planner, implementer, tester, reviewer). A pane that
 // follows its prompt from its workspace and commits the handoff must be able to complete its
 // phase, reporting the commit that carries that handoff.
@@ -751,7 +751,7 @@ func TestHandoffTakesPhaseWordsForPhasesAndRolesForRoles(t *testing.T) {
 // completion without recreating it (skills/legion-worker/SKILL.md's completion gate: once .legion/ is gone, "a
 // later rebase, bare-gate re-check, confirmation, retro, or the post-merge production check writes
 // no .legion/<phase>.json, commits no handoff, and reports with `handoff_complete` alone";
-// packages/pi-envoy/roles/implementer.md and tester.md say the same). The commit that deleted the
+// internal/prompts/roles/implementer.md and tester.md say the same). The commit that deleted the
 // handoff is the last commit on the branch that changed it, and the completion reports it.
 func TestHandoffCompleteAfterTheLegionDeletionRecreatesNothing(t *testing.T) {
 	for _, tc := range []struct {
