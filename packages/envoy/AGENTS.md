@@ -1641,7 +1641,7 @@ the synchronous listener call records the sent or failed attempt instead of blin
 
 ## Secrets broker
 
-AGENTC-393's secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
+The secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
 and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/agent-secrets` is its
 client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
@@ -1670,7 +1670,7 @@ ALREADY_ENROLLED`, and the rules never see the slot: every slot of a pod matches
 service account alone. Migration 0007 is forward-only: an older broker binary's conflict lookup
 reads one live row per runtime id, unsafe once a pod holds two slots, so the binary is never rolled
 back past it once a slotted enrollment exists. `internal/broker/rules` evaluates
-`agent-secret-rules.yaml` policy per request (the AGENTC-393 overview document is its contract; a
+`agent-secret-rules.yaml` policy per request (the broker's design overview is its contract; a
 file that still has an `approvers:` section is refused, naming the removal); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
 credential; `internal/broker/machine` decides typed-code machine logins and mints the launcher
@@ -1827,7 +1827,7 @@ binaries' own `--help`, so every form must answer `-h` with exit 0.
 
 `internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
-contract for every row is the AGENTC-393 overview document. Each row's handler is
+contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
 which fixes both the credential `server.authenticate` checks and the caller the handler receives (a
 launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route — the UI bearer
@@ -1889,7 +1889,7 @@ still-live grant covering the exact same name set (`reuseLiveGrant`: no new requ
 as long as the current rules still allow it and the grant's whole chain still verifies), then
 evaluates the rules per name: any `deny` denies the whole request with no record written at all; a
 name no rule mentions at all aborts the whole call with `rules.ErrUnknownSecret` (`400
-UNKNOWN_SECRET`, per the AGENTC-393 overview document) instead of being folded into an ordinary
+UNKNOWN_SECRET`, per the broker's design overview) instead of being folded into an ordinary
 `deny` decision — no request row is written either, matching the "at record time" wording; a name
 needing approval that names a *different* approver than an already-approval-needing name in the
 same request is refused `400 MIXED_APPROVERS`; when every name is decided (`granted`/`denied`) with
@@ -2008,7 +2008,7 @@ the operator file, and `DEV_BROKER_DIR`, the workdir itself). Each `dev-broker.s
 and drops its own isolated database, on the shared `dispatch-pg` container or, with
 `DEV_BROKER_POSTGRES_URL` set, through `psql` on the server that URL names (no Docker), so
 concurrent instances never see each other's enrollments, requests or grants, and listens on the
-port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`; AGENTC-833), so
+port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`), so
 concurrent instances can never collide on a shared port either.
 `dev-broker.test.sh` proves both kinds of isolation with fakes (no real Postgres or network) and
 runs in CI's `envoy-go` job.
@@ -2021,7 +2021,7 @@ smoke-tests and pushes `ghcr.io/sjawhar/legion/envoy:<commit sha>`, labelled
 dispatch publishes one immutable image, for a dev slot to pin before merge, and moves no tag.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
-`cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper` (AGENTC-393): each of
+`cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper`: each of
 `agent-secrets-amd64.tar.gz` and `agent-secrets-arm64.tar.gz` wraps `bin/agent-secrets` and
 `bin/agent-secrets-helper` in one top-level `agent-secrets/` directory — mise's `github:`
 backend auto-strips exactly one leading directory, so the installed tree still ends up
@@ -2031,5 +2031,5 @@ it has decided the tag, so it can stamp that tag into both, and attests the two 
 build job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone, with its
 `THIRD_PARTY_NOTICES`). Each `agent-secrets` tarball also holds `agent-secrets/THIRD_PARTY_NOTICES`,
 the licenses of the Go modules both binaries compile in. This is the release a host installs both
-binaries from (AGENTC-834's dotfiles Plan B).
+binaries from (through the operator's dotfiles, under the broker design's devbox-enrollment plan).
 

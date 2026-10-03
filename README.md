@@ -107,13 +107,13 @@ bun run docs:dev
 
 | Path | What it holds |
 | --- | --- |
-| `packages/daemon/` | The Legion daemon and the `legion` CLI, in Go, and the worker image's Dockerfile. |
+| `packages/daemon/` | The Legion daemon and the `legion` CLI, in Go, with the role prompts the binary embeds, and the worker image's Dockerfile. |
 | `packages/envoy/` | Go: the Envoy listener, Dispatch's server (`cmd/dispatch`), the Secrets Broker (`cmd/broker`) and its `agent-secrets` clients. |
 | `packages/dispatch/` | Dispatch's web app, in React, which Dispatch's server serves. |
 | `packages/proof-editor/` | Dispatch's document editor, copied from [proof-sdk](https://github.com/EveryInc/proof-sdk). |
 | `packages/contracts/` | The event contracts and Dispatch tool specifications the packages share, and the Go code generated from them. |
 | `packages/envoy-client/` | The HTTP client, tool contract and message renderer the three Envoy clients share. |
-| `packages/pi-envoy/` | The Oh My Pi extension: the Envoy, Dispatch and Legion tools, and the role prompts and agents Legion's workers run with. |
+| `packages/pi-envoy/` | The Oh My Pi extension: the Envoy, Dispatch and Legion tools, and the agents Legion's workers run with. |
 | `packages/claude-envoy/` | The Claude Code plugin: Envoy events in a Claude Code session, and the Dispatch tools. |
 | `packages/envoy-plugin/` | The OpenCode plugin: the Envoy and Dispatch tools. |
 | `skills/` | The skills Legion's agents load: the architect, the controller, the phase workers, Dispatch, Envoy and the review rubrics. |
