@@ -2,12 +2,9 @@
 // Writes <content dir>/dispatch/reference/api.md from Dispatch's route table
 // (packages/envoy/internal/dispatch/api/routes_table.go), read through `envoy-dispatch routes`,
 // which prints the body GET /api/v1 serves without a database or a listener. Contract:
-// scripts/generate.ts, which puts the envoy-dispatch scripts/build-binaries.sh built from this
-// commit first on PATH. To run it alone, build the binaries into a directory and put that first
-// on PATH: `docs/site/scripts/build-binaries.sh <dir> && PATH=<dir>:$PATH bun <this file> <out>`.
+// scripts/generate.ts; lib/envoy-dispatch.ts runs the binary.
+import { readEnvoyDispatch } from "./lib/envoy-dispatch.ts";
 import { inline, writePage } from "./lib/markdown.ts";
-
-const COMMAND = ["envoy-dispatch", "routes"];
 
 /** Who may call a route, by the table's auth value (`routeAuth` in the source). */
 const CALLERS: Record<string, { label: string; meaning: string }> = {
@@ -34,30 +31,14 @@ interface Route {
 }
 
 function readRoutes(): Route[] {
-  if (Bun.which("envoy-dispatch") === null) {
-    throw new Error(
-      "envoy-dispatch is not on PATH: docs/site/scripts/build-binaries.sh builds it, and scripts/generate.ts puts it there"
-    );
-  }
-  const run = Bun.spawnSync(COMMAND, { stdout: "pipe", stderr: "pipe" });
-  if (run.exitCode !== 0) {
-    throw new Error(`${COMMAND.join(" ")} exited ${run.exitCode}:\n${run.stderr.toString()}`);
-  }
-  const body = JSON.parse(run.stdout.toString()) as { routes?: unknown };
-  if (!Array.isArray(body.routes) || body.routes.length === 0) {
-    throw new Error(`${COMMAND.join(" ")} printed no routes`);
-  }
-  return body.routes.map((route: Record<string, unknown>) => {
-    for (const field of ["method", "path", "auth", "description"]) {
-      if (typeof route[field] !== "string" || route[field] === "") {
-        throw new Error(`route ${JSON.stringify(route)} has no ${field}`);
+  return readEnvoyDispatch("routes", "routes", ["method", "path", "auth", "description"]).map(
+    (route) => {
+      if (!Object.hasOwn(CALLERS, route.auth as string)) {
+        throw new Error(`route ${route.method} ${route.path} has unknown auth ${route.auth}`);
       }
+      return route as unknown as Route;
     }
-    if (!Object.hasOwn(CALLERS, route.auth as string)) {
-      throw new Error(`route ${route.method} ${route.path} has unknown auth ${route.auth}`);
-    }
-    return route as unknown as Route;
-  });
+  );
 }
 
 function render(routes: Route[]): string {
