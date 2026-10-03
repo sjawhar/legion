@@ -412,6 +412,46 @@ func TestStaticHandlerServesIndexAtRoot(t *testing.T) {
 	}
 }
 
+func TestStaticHandlerServesDistDirectorySpelledThroughDotDot(t *testing.T) {
+	parent := t.TempDir()
+	webDist := filepath.Join(parent, "web", "dist")
+	for _, dir := range []string{webDist, filepath.Join(parent, "web", "build")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("make %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	// Files beside the dist directory, where a request climbing out of it would land.
+	for _, dir := range []string{parent, filepath.Join(parent, "web")} {
+		if err := os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("secret"), 0o600); err != nil {
+			t.Fatalf("write secret: %v", err)
+		}
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	// The directory as an operator can spell it from a sibling package, never cleaned:
+	// DISPATCH_WEB_DIST="$PWD/../dispatch/web/dist" run from packages/envoy.
+	sep := string(filepath.Separator)
+	context.WebDistDir = filepath.Join(parent, "web", "build") + sep + ".." + sep + "dist"
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusOK || response.Body.String() != "<!doctype html>" {
+		t.Fatalf("root through %q: got %d %q, want 200 and the dashboard shell", context.WebDistDir, response.Code, response.Body.String())
+	}
+
+	for _, path := range []string{"/../secret.txt", "/../../secret.txt", "/%2e%2e/secret.txt", "/..%2fsecret.txt", "/%2e%2e%2f%2e%2e%2fsecret.txt"} {
+		t.Run(path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+			if response.Code == http.StatusOK || response.Body.String() == "secret" {
+				t.Fatalf("%s escaped the dist directory: got %d %q", path, response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestStaticHandlerServesSpaShellForBrowserDeepLink(t *testing.T) {
 	webDist := t.TempDir()
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {

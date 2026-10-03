@@ -431,11 +431,15 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusNotFound, "dashboard build not found")
 		return
 	}
+	// Every path below is joined, and so cleaned, under the dist directory, so the directory is
+	// compared in its cleaned form too: one configured as `…/envoy/../dispatch/web/dist` is a
+	// prefix of none of its own files.
+	root := filepath.Clean(r.ctx.WebDistDir)
 	if normalized == "/" {
 		normalized = "/index.html"
 	}
 	if normalized == "/favicon.ico" {
-		faviconPath := filepath.Join(r.ctx.WebDistDir, "favicon.svg")
+		faviconPath := filepath.Join(root, "favicon.svg")
 		if info, err := os.Stat(faviconPath); err == nil && !info.IsDir() {
 			serveFile(w, req, faviconPath)
 			return
@@ -443,8 +447,8 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	candidate := filepath.Join(r.ctx.WebDistDir, normalized)
-	if !strings.HasPrefix(candidate, r.ctx.WebDistDir) {
+	candidate := filepath.Join(root, normalized)
+	if !strings.HasPrefix(candidate, root) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
@@ -461,7 +465,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	indexPath := filepath.Join(r.ctx.WebDistDir, "index.html")
+	indexPath := filepath.Join(root, "index.html")
 	if _, err := os.Stat(indexPath); err != nil {
 		writeError(w, http.StatusNotFound, "dashboard build not found")
 		return
