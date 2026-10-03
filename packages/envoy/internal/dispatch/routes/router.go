@@ -418,6 +418,7 @@ var serverRoots = []string{"/api", "/v1", "/auth", "/ws", "/healthz"}
 
 func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	requestedPath := req.URL.Path
+	// A rooted clean holds no `..`, so every path joined under the dist directory below stays in it.
 	normalized := filepath.Clean("/" + requestedPath)
 	if isReservedPath(normalized, serverRoots) {
 		api.WriteJSON(w, http.StatusNotFound, map[string]string{
@@ -431,15 +432,11 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusNotFound, "dashboard build not found")
 		return
 	}
-	// Every path below is joined, and so cleaned, under the dist directory, so the directory is
-	// compared in its cleaned form too: one configured as `…/envoy/../dispatch/web/dist` is a
-	// prefix of none of its own files.
-	root := filepath.Clean(r.ctx.WebDistDir)
 	if normalized == "/" {
 		normalized = "/index.html"
 	}
 	if normalized == "/favicon.ico" {
-		faviconPath := filepath.Join(root, "favicon.svg")
+		faviconPath := filepath.Join(r.ctx.WebDistDir, "favicon.svg")
 		if info, err := os.Stat(faviconPath); err == nil && !info.IsDir() {
 			serveFile(w, req, faviconPath)
 			return
@@ -447,11 +444,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	candidate := filepath.Join(root, normalized)
-	if !strings.HasPrefix(candidate, root) {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
+	candidate := filepath.Join(r.ctx.WebDistDir, normalized)
 	info, err := os.Stat(candidate)
 	if err == nil && !info.IsDir() {
 		serveFile(w, req, candidate)
@@ -465,7 +458,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	indexPath := filepath.Join(root, "index.html")
+	indexPath := filepath.Join(r.ctx.WebDistDir, "index.html")
 	if _, err := os.Stat(indexPath); err != nil {
 		writeError(w, http.StatusNotFound, "dashboard build not found")
 		return
