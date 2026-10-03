@@ -66,10 +66,10 @@ type classifiedUpdateStore interface {
 }
 
 // creditedUpdateStore atomically records an observed update's settlement credit with the durable
-// row that leaves its settlement owed. PgVersioned implements it; test-only persistence wrappers
-// can keep the ordinary classified path when their test does not exercise settlement attribution.
+// row that leaves its settlement owed. The wire value keeps test-only stores in other packages
+// able to wrap the method without exposing roomState's private credit representation.
 type creditedUpdateStore interface {
-	AppendUpdateWithSettlementCredit(context.Context, string, []byte, bool, settlementCredit) (persistence.Version, error)
+	AppendUpdateWithSettlementCredit(context.Context, string, []byte, bool, []byte) (persistence.Version, error)
 }
 
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
@@ -101,7 +101,11 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 	var err error
 	creditStored := credit.empty()
 	if store, ok := a.store.(creditedUpdateStore); ok {
-		_, err = store.AppendUpdateWithSettlementCredit(context.Background(), room, update, contentChanged, credit)
+		encodedCredit, encodeErr := json.Marshal(credit)
+		if encodeErr != nil {
+			return fmt.Errorf("encode document settlement authors: %w", encodeErr)
+		}
+		_, err = store.AppendUpdateWithSettlementCredit(context.Background(), room, update, contentChanged, encodedCredit)
 		creditStored = true
 	} else if store, ok := a.store.(classifiedUpdateStore); ok {
 		_, err = store.AppendUpdateWithClass(context.Background(), room, update, contentChanged)
@@ -135,7 +139,11 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	var err error
 	creditStored := credit.empty()
 	if store, ok := a.store.(creditedUpdateStore); ok {
-		_, err = store.AppendUpdateWithSettlementCredit(ctx, room, update, contentChanged, credit)
+		encodedCredit, encodeErr := json.Marshal(credit)
+		if encodeErr != nil {
+			return fmt.Errorf("encode document settlement authors: %w", encodeErr)
+		}
+		_, err = store.AppendUpdateWithSettlementCredit(ctx, room, update, contentChanged, encodedCredit)
 		creditStored = true
 	} else if store, ok := a.store.(classifiedUpdateStore); ok {
 		_, err = store.AppendUpdateWithClass(ctx, room, update, contentChanged)
