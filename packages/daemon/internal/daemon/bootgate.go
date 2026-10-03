@@ -108,7 +108,7 @@ type pluginGate struct {
 	// through discovery.
 	pluginRoot string
 	// roleReferences are the task agents and skills the role prompts the probed Oh My Pi is handed
-	// name (promptrefs.Roles), resolved beside the plugin's own. The zero Names resolves the
+	// name (prompts.RoleReferences), resolved beside the plugin's own. The zero Names resolves the
 	// plugin's alone.
 	roleReferences promptrefs.Names
 	// skipAgentModels leaves the prompt-named task agents' models unresolved (ImageProbe's
@@ -753,8 +753,8 @@ type ImageProbe struct {
 	// uses. A relative root is resolved against this process's working directory.
 	PluginRoot string
 	// RoleReferences are the task agents and skills the role prompts a pod is handed name
-	// (promptrefs.Roles), and are required: the daemon's own, which it inlines into every Sandbox pod,
-	// or the image's when the command is given none.
+	// (prompts.RoleReferences), and are required: the daemon's own, which it inlines into every
+	// Sandbox pod, or the image's when the command is given none.
 	RoleReferences promptrefs.Names
 	// SkipAgentModels leaves the task agents' models unresolved: the image build's probe, which runs
 	// with none of the operator's model configuration.
