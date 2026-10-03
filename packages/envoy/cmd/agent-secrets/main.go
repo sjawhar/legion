@@ -71,8 +71,8 @@ const (
 	exitUsageError = 2   // a usage error: an unknown flag or argument, or a required one or AGENT_SECRETS_URL missing
 	exitPending    = 75  // the request is still waiting for a person to approve it; nothing was run
 	exitDenied     = 77  // the request was denied; nothing was run
-	exitCannotRun  = 126 // the command register --exec was given exists but could not be run
-	exitNotFound   = 127 // the command register --exec was given was not found
+	exitCannotRun  = 126 // the command `register --exec` was given exists but could not be run
+	exitNotFound   = 127 // the command `register --exec` was given was not found
 )
 
 // command is one form of agent-secrets, as usage lists it and its own -h describes it.
