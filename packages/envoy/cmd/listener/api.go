@@ -396,20 +396,35 @@ func releaseExpiredRoleClaim(registry roleClaimResolver, role, sessionID string,
 }
 
 // roleHolderSession is a role holder's session entry for a decision that can take the role from it:
-// a lookup that releases a lapsed claim, a soft claim that supersedes a gone holder, the role reaper.
-// The cache answers when it holds the session. A miss is read again from the session bucket
+// a lookup or role delivery that releases a lapsed claim, a soft claim that supersedes a gone holder,
+// the role reaper. live is the caller's test of an entry. The cache answers when it holds an entry
+// live accepts; otherwise the holder is read again from the session bucket
 // (session.SessionRegistry.Refresh), because the cache trails the bucket while a claim is read from
 // the role bucket itself: a holder another listener registered and gave the role a moment ago is in
 // both buckets before it is in this cache, and during a rolling deploy the old task resolves the
-// claims the replacement accepts. nats.ErrKeyNotFound is the bucket's word that the session is gone;
-// any other error is a read that did not answer, on which nothing is taken from the holder.
-func roleHolderSession(sessions *session.SessionRegistry, sessionID string) (session.SessionEntry, error) {
-	entry, err := sessions.Get(sessionID)
-	if errors.Is(err, nats.ErrKeyNotFound) {
-		return sessions.Refresh(sessionID)
+// claims the replacement accepts. nats.ErrKeyNotFound is the bucket's word that the holder is gone
+// or fails live; any other error is a read that did not answer, on which nothing is taken from it.
+// The bucket read gets roleHolderReadTimeout, so a lookup that cannot read the bucket answers its
+// 500, and a soft claim its 503, inside the listener's 10 s HTTP write timeout.
+func roleHolderSession(sessions *session.SessionRegistry, sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
+	if entry, err := sessions.Get(sessionID); err == nil && live(entry) {
+		return entry, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), roleHolderReadTimeout)
+	defer cancel()
+	entry, err := sessions.Refresh(ctx, sessionID)
+	if err == nil && !live(entry) {
+		return session.SessionEntry{}, nats.ErrKeyNotFound
 	}
 	return entry, err
 }
+
+// registered is the liveness a lookup, a soft claim and the reaper ask of a role holder: any entry.
+func registered(session.SessionEntry) bool { return true }
+
+// roleHolderReadTimeout bounds roleHolderSession's bucket read, well inside the listener's 10 s HTTP
+// write timeout (main.go) and the 10 s JetStream MaxWait the read would otherwise wait out.
+const roleHolderReadTimeout = 2 * time.Second
 
 func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
 	for range roleHolderResolutionAttempts {
@@ -420,7 +435,7 @@ func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.Session
 		if claim.HolderSessionID == "" {
 			return roleHolderResult{state: roleHolderUnclaimed}, nil
 		}
-		entry, err := roleHolderSession(sessions, claim.HolderSessionID)
+		entry, err := roleHolderSession(sessions, claim.HolderSessionID, registered)
 		if errors.Is(err, nats.ErrKeyNotFound) {
 			lastSeen := sessions.LastSeen(claim.HolderSessionID)
 			release, superseded, err := releaseExpiredRoleClaim(registry, role, claim.HolderSessionID, sessions.TTL())
@@ -795,7 +810,7 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			if holder != "" && holder != body.SessionID {
 				if previous != "" && holder == previous {
 					supersedable = append(supersedable, holder)
-				} else if _, liveErr := roleHolderSession(d.sessions, holder); errors.Is(liveErr, nats.ErrKeyNotFound) {
+				} else if _, liveErr := roleHolderSession(d.sessions, holder, registered); errors.Is(liveErr, nats.ErrKeyNotFound) {
 					supersedable = append(supersedable, holder)
 				} else if liveErr != nil {
 					writeJSONError(w, http.StatusServiceUnavailable, "read role holder liveness: "+liveErr.Error())

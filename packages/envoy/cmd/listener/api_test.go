@@ -9,15 +9,18 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
+	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
@@ -832,7 +835,7 @@ func claimRole(t *testing.T, d *listenerDeps, sessionID, role string) {
 	}
 	recorder := httptest.NewRecorder()
 	roleSetHandler(d, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
-		strings.NewReader(`{"session_id":"`+sessionID+`","role":"`+role+`"}`)))
+		strings.NewReader(fmt.Sprintf(`{"session_id":%q,"role":%q}`, sessionID, role))))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("%s claims %s: status %d %s", sessionID, role, recorder.Code, recorder.Body.String())
 	}
@@ -842,7 +845,9 @@ func claimRole(t *testing.T, d *listenerDeps, sessionID, role string) {
 // gave a role a moment ago can be in the bucket and not yet in this listener's cache. A lookup there
 // answers that holder. Releasing the claim as lapsed on the cache's word deletes the claim the other
 // listener just wrote, and every later lookup and role message finds the role unclaimed until its
-// holder claims it again. Once the holder has left the bucket, the same lookup still releases it.
+// holder claims it again. Once the holder has left the bucket, the same lookup still releases it, and
+// so it does for a holder no session can register as: an id outside nats.go's key alphabet, which an
+// earlier build or a direct bucket write can leave in a claim.
 func TestARoleLookupWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testing.T) {
 	claimant, observer := trailingListeners(t)
 	lookup := func(role string) *httptest.ResponseRecorder {
@@ -868,6 +873,24 @@ func TestARoleLookupWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testing.
 	}
 	if holder, err := claimant.registry.RoleHolder("lapsed-claim"); err != nil || holder != "" {
 		t.Fatalf("the lapsed claim after the lookup = %q, %v; want it released", holder, err)
+	}
+
+	roles, err := claimant.client.JS().KeyValue(store.RoleBucket)
+	if err != nil {
+		t.Fatalf("open the role bucket: %v", err)
+	}
+	stored, err := json.Marshal(store.RoleClaim{HolderSessionID: "ses:bad", ClaimedAt: time.Now().UnixMilli()})
+	if err != nil {
+		t.Fatalf("encode the ses:bad claim: %v", err)
+	}
+	if _, err := roles.Put("invalid-holder", stored); err != nil {
+		t.Fatalf("store the ses:bad claim: %v", err)
+	}
+	if answer := lookup("invalid-holder"); answer.Code != http.StatusNotFound || !strings.Contains(answer.Body.String(), "claim released") {
+		t.Fatalf("GET /v1/roles/invalid-holder for holder ses:bad, which no session can register as: status %d %s, want 404 releasing the claim", answer.Code, answer.Body.String())
+	}
+	if holder, err := claimant.registry.RoleHolder("invalid-holder"); err != nil || holder != "" {
+		t.Fatalf("the ses:bad claim after the lookup = %q, %v; want it released", holder, err)
 	}
 }
 
@@ -912,6 +935,133 @@ func TestTheRoleReaperWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testin
 			t.Fatalf("%s after the reaper = %q, %v; want %q", role, holder, err, want)
 		}
 	}
+}
+
+// stalledReadKV is a session bucket whose writes land and whose reads never answer, like a bucket
+// the listener can write through but whose direct get has stopped answering.
+type stalledReadKV struct {
+	nats.KeyValue
+	released <-chan struct{}
+}
+
+func (kv stalledReadKV) Get(string) (nats.KeyValueEntry, error) {
+	<-kv.released
+	return nil, errors.New("the session bucket's read never answered")
+}
+
+// stallSessionReads makes every bucket read of sessions stall until the test ends, keeping its
+// writes, by swapping the handle its (stopped) watcher hands out. A read that does not answer must
+// take nothing from a role holder.
+func stallSessionReads(t *testing.T, sessions *session.SessionRegistry) {
+	t.Helper()
+	released := make(chan struct{})
+	t.Cleanup(func() { close(released) })
+	field := reflect.ValueOf(sessions).Elem().FieldByName("watcher")
+	watcher := reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem()
+	stalled := bus.KeyValue{KeyValue: stalledReadKV{KeyValue: watcher.Interface().(*kvwatch.Watcher).KV().KeyValue, released: released}}
+	watcher.Set(reflect.ValueOf(kvwatch.New("session registry", stalled, func(nats.KeyValueEntry) {}, func() {})))
+}
+
+// When the session bucket cannot be read, every path that could take a role from its holder takes
+// nothing, and answers inside its bound (roleHolderReadTimeout, well under the 10 s HTTP write
+// timeout): a lookup answers 500, a soft claim 503, a role delivery reports delivery_failed, and the
+// reaper keeps the claim.
+func TestARoleHolderWhoseSessionCannotBeReadKeepsItsClaim(t *testing.T) {
+	const bound = 5 * time.Second
+	holderOf := func(t *testing.T, d *listenerDeps, role string) string {
+		t.Helper()
+		holder, err := d.registry.RoleHolder(role)
+		if err != nil {
+			t.Fatalf("read the %s claim: %v", role, err)
+		}
+		return holder
+	}
+	t.Run("lookup", func(t *testing.T) {
+		claimant, observer := trailingListeners(t)
+		claimRole(t, claimant, "ses_holder", "unread")
+		stallSessionReads(t, observer.sessions)
+		started := time.Now()
+		recorder := httptest.NewRecorder()
+		roleGetHandler(observer).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/unread", nil))
+		if elapsed := time.Since(started); recorder.Code != http.StatusInternalServerError || elapsed > bound {
+			t.Fatalf("GET /v1/roles/unread while the session bucket cannot be read: status %d %s after %s, want 500 within %s", recorder.Code, recorder.Body.String(), elapsed, bound)
+		}
+		if holder := holderOf(t, claimant, "unread"); holder != "ses_holder" {
+			t.Fatalf("the claim after the lookup is held by %q, want ses_holder", holder)
+		}
+	})
+	t.Run("soft claim", func(t *testing.T) {
+		claimant, observer := trailingListeners(t)
+		claimRole(t, claimant, "ses_holder", "unread")
+		if err := observer.sessions.Put("ses_resumer", session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+			t.Fatalf("register ses_resumer: %v", err)
+		}
+		stallSessionReads(t, observer.sessions)
+		started := time.Now()
+		recorder := httptest.NewRecorder()
+		roleSetHandler(observer, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+			strings.NewReader(`{"session_id":"ses_resumer","role":"unread","soft":true}`)))
+		if elapsed := time.Since(started); recorder.Code != http.StatusServiceUnavailable || elapsed > bound {
+			t.Fatalf("soft claim while the session bucket cannot be read: status %d %s after %s, want 503 within %s", recorder.Code, recorder.Body.String(), elapsed, bound)
+		}
+		if holder := holderOf(t, claimant, "unread"); holder != "ses_holder" {
+			t.Fatalf("the claim after the soft claim is held by %q, want ses_holder", holder)
+		}
+	})
+	t.Run("role delivery", func(t *testing.T) {
+		harness := newListenerDeliveryHarness(t, nil)
+		claimant := &listenerDeps{client: harness.client, registry: harness.registry}
+		var err error
+		if claimant.sessions, err = session.OpenSessionRegistry(harness.client.Conn, session.WithSessionReplicas(1)); err != nil {
+			t.Fatalf("open the claimant's session registry: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := harness.sessions.WaitForCacheReady(ctx); err != nil {
+			t.Fatalf("warm the session cache: %v", err)
+		}
+		harness.sessions.StopWatch()
+		claimRole(t, claimant, "ses_holder", "unread")
+		stallSessionReads(t, harness.sessions)
+		var forwards atomic.Int32
+		cfg := harness.config
+		cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+			forwards.Add(1)
+			return nil
+		}
+		item := listenerTestEnvelope(contracts.RoleTopicPrefix+"unread", "unread-holder-delivery")
+		probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+		if err != nil {
+			t.Fatalf("subscribe exception probe: %v", err)
+		}
+		t.Cleanup(func() { _ = probe.Unsubscribe() })
+		if err := harness.client.Conn.Flush(); err != nil {
+			t.Fatalf("flush exception probe: %v", err)
+		}
+		started := time.Now()
+		coreNATSDeliveryHandler(cfg)(&nats.Msg{Data: marshalListenerEnvelope(t, item)})
+		if elapsed := time.Since(started); elapsed > bound || forwards.Load() != 0 {
+			t.Fatalf("role delivery while the session bucket cannot be read took %s and forwarded %d times, want none within %s", elapsed, forwards.Load(), bound)
+		}
+		assertDeliveryException(t, probe, item, "delivery_failed")
+		if holder := holderOf(t, claimant, "unread"); holder != "ses_holder" {
+			t.Fatalf("the claim after the delivery is held by %q, want ses_holder", holder)
+		}
+	})
+	t.Run("reaper", func(t *testing.T) {
+		claimant, observer := trailingListeners(t)
+		claimRole(t, claimant, "ses_holder", "unread")
+		stallSessionReads(t, observer.sessions)
+		live := func(sessionID string) bool {
+			return roleHolderMayBeLive(logging.New("test"), observer.sessions, sessionID)
+		}
+		if reaped, err := observer.registry.ReapRoleClaims(live, observer.sessions.TTL()); err != nil || reaped != 0 {
+			t.Fatalf("reap role claims while the session bucket cannot be read = %d, %v; want none", reaped, err)
+		}
+		if holder := holderOf(t, claimant, "unread"); holder != "ses_holder" {
+			t.Fatalf("the claim after the reaper is held by %q, want ses_holder", holder)
+		}
+	})
 }
 
 func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {

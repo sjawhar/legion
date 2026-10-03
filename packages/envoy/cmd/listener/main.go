@@ -84,7 +84,7 @@ func isSessionLive(sessions *session.SessionRegistry, sessionID string) bool {
 // session bucket itself says so (roleHolderSession), so the reaper never ends a claim another listener
 // accepted a moment ago. A read that did not answer keeps the claim for the next cycle.
 func roleHolderMayBeLive(logger *logging.Logger, sessions *session.SessionRegistry, sessionID string) bool {
-	_, err := roleHolderSession(sessions, sessionID)
+	_, err := roleHolderSession(sessions, sessionID, registered)
 	if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 		logger.Warn("role claim reaper kept a claim whose holder's session it could not read", slog.String("session_id", sessionID), slog.String("error", err.Error()))
 	}

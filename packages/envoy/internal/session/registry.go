@@ -283,35 +283,42 @@ func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
 	return cs.entry, nil
 }
 
-// Refresh reads sessionID's entry from the session bucket itself rather than the cache, applies it
-// to the cache as the watcher would, and returns it. The cache follows the bucket through a watcher
-// and so trails it: a session another listener registered a moment ago can be in the bucket and not
-// yet here. Get is the read for a caller that refuses or retries when a session is missing; a caller
-// about to take something away from a session because it looks gone (its role claim) asks the bucket
-// here first. It returns nats.ErrKeyNotFound when the bucket holds no live entry: none, a delete
-// marker, one past the bucket's TTL that the server has not yet removed, one the watcher would evict
-// as malformed, or a key no read may name (bus.ErrRefused), which no session of this build can
-// register under. Any other error is a read that did not answer.
-func (r *SessionRegistry) Refresh(sessionID string) (SessionEntry, error) {
-	entry, err := r.watcher.KV().Get(sessionID)
-	if errors.Is(err, bus.ErrRefused) {
-		return SessionEntry{}, fmt.Errorf("%w: %w", nats.ErrKeyNotFound, err)
+// Refresh reads sessionID's entry from the session bucket itself, applies it to the cache through
+// the watcher's own path (applyWatched), and then answers as Get does. The cache follows the bucket
+// through a watcher and so trails it: a session another listener registered a moment ago can be in
+// the bucket and not yet here. Get is the read for a caller that refuses or retries when a session
+// is missing; a caller about to take something away from a session because it looks gone asks here
+// first. A key no read may name is nats.ErrKeyNotFound, since no session can register under it:
+// one bus.KeyValue refuses (bus.ErrRefused), or one outside nats.go's key alphabet
+// (nats.ErrInvalidKey, such as `ses:bad`, which an earlier build or a direct bucket write could
+// leave as a role holder). Any other error is a read that did not answer, ctx's end among them:
+// nats.go's KV read takes no context and waits out the JetStream MaxWait (10 s), so Refresh stops
+// waiting when ctx ends and lets that read finish on its own.
+func (r *SessionRegistry) Refresh(ctx context.Context, sessionID string) (SessionEntry, error) {
+	type read struct {
+		entry nats.KeyValueEntry
+		err   error
 	}
-	if err != nil {
-		return SessionEntry{}, err
+	answered := make(chan read, 1)
+	kv := r.watcher.KV()
+	go func() {
+		entry, err := kv.Get(sessionID)
+		answered <- read{entry: entry, err: err}
+	}()
+	var got read
+	select {
+	case got = <-answered:
+	case <-ctx.Done():
+		return SessionEntry{}, fmt.Errorf("read session %s from the bucket: %w", sessionID, ctx.Err())
 	}
-	var item SessionEntry
-	if err := json.Unmarshal(entry.Value(), &item); err != nil {
-		return SessionEntry{}, fmt.Errorf("%w: malformed session entry: %w", nats.ErrKeyNotFound, err)
+	if errors.Is(got.err, bus.ErrRefused) || errors.Is(got.err, nats.ErrInvalidKey) {
+		return SessionEntry{}, fmt.Errorf("%w: %w", nats.ErrKeyNotFound, got.err)
 	}
-	expiresAt := r.expiryFor(entry.Created(), item.UpdatedAt)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !expiresAt.IsZero() && time.Now().After(expiresAt) {
-		return SessionEntry{}, nats.ErrKeyNotFound
+	if got.err != nil {
+		return SessionEntry{}, got.err
 	}
-	r.cacheSessionLocked(sessionID, item, expiresAt, entry.Revision())
-	return item, nil
+	r.applyWatched(got.entry)
+	return r.Get(sessionID)
 }
 
 // LastSeen returns a recently expired or explicitly removed session's final
