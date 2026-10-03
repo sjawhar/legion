@@ -33,12 +33,12 @@ var agentSandbox = sandbox.InstallRef{
 	CRD: "sandboxes.agents.x-k8s.io", ControllerNamespace: "agent-sandbox-system", ControllerName: "agent-sandbox-controller",
 }
 
-// workerImageTools are the worker image's own gh, git, jj, and Go legion
+// workerImageTools are the worker image's own gh, git, jj, legion and agent-secrets
 // (packages/daemon/docker/worker.Dockerfile: git from the distribution, gh and jj copied to
-// /usr/local/bin, the Go coordinator's legion under /opt/legion/go/bin).
+// /usr/local/bin, legion and agent-secrets under /opt/legion/bin).
 var workerImageTools = sandbox.Tools{
-	GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion",
-	AgentSecrets: "/opt/legion/go/bin/agent-secrets",
+	GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/bin/legion",
+	AgentSecrets: "/opt/legion/bin/agent-secrets",
 }
 
 // imageProbeRetry is how often the daemon tries its worker image again after an attempt that said

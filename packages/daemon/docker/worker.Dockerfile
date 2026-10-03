@@ -5,24 +5,24 @@
 # it builds from, or dispatched post-merge). Never build it on a workstation — no `docker build`,
 # `docker buildx`, or `docker compose build` (Sami, 2026-09-12); the CI runner is not a workstation.
 #
-# Contents: pinned Bun; the TypeScript `legion` CLI compiled from this checkout (one binary: legion,
-# worker-shim, credential, gh, handoff, workspace-init, probe-image) at /opt/legion/bin/legion, the one
-# PATH and the ENTRYPOINT name; the Go coordinator's `legion` (packages/daemon-go) compiled from the same
-# checkout at /opt/legion/go/bin/legion, off PATH, until the Go daemon replaces the TypeScript one; the
-# pinned OMP fork build the daemon's default `omp_invocation` names, resolved with mise's github backend
-# exactly as the daemon resolves it; @sjawhar/pi-legion-envoy packed from this checkout's packages/pi-envoy
-# and @bopstack/pi-codegraph (from npm, pinned) linked into the isolated OMP profile `legion`, backed by
-# the CodeGraph CLI (@colbymchenry/codegraph, pinned) at /opt/codegraph/bin; the role prompts
-# (packages/pi-envoy/roles) at /opt/legion/roles for the in-cluster daemon; jj; git at /usr/bin/git (>= 2.42, from the
+# Contents: pinned Bun; the Go `legion` (packages/daemon-go) compiled from this checkout at go.work's
+# Go version, static, at /opt/legion/bin/legion (one binary: worker-shim, workspace-init, credential,
+# gh, handoff, push, probe-image and the daemon's own commands), the first PATH entry and the
+# ENTRYPOINT name, with the `agent-secrets` client beside it; the pinned OMP fork build, resolved with
+# mise's github backend exactly as a tmux host resolves an `omp_invocation` naming it;
+# @sjawhar/pi-legion-envoy packed from this checkout's packages/pi-envoy and @bopstack/pi-codegraph
+# (from npm, pinned) linked into the isolated OMP profile `legion`, backed by the CodeGraph CLI
+# (@colbymchenry/codegraph, pinned) at /opt/codegraph/bin; the role prompts (packages/pi-envoy/roles)
+# at /opt/legion/roles for the in-cluster daemon; jj; git at /usr/bin/git (>= 2.42, from the
 # debian:trixie-slim runtime base — jj's git backend requires it); gh; and a generic toolchain for the
 # repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and corepack's
 # pnpm and yarn, and the AWS CLI v2, each on PATH at /usr/local/bin. The last three RUNs gate the
 # publish, as the runtime user: the first checks every binary runs on the base, proves jj accepts the
-# image's git with a network-free `jj git clone` of a scratch repository, and executes the three launch
-# probes (the daemon's two plus the session-storage probe) through `legion probe-image`; the second runs
-# every toolchain command; the last runs the Go `legion version` and the Go `legion probe-image`, which
-# runs the same three probes, holds the plugin to the daemon API contract, and prints the OK line the
-# Go daemon's probe Sandbox reads. A broken image never publishes.
+# image's git with a network-free `jj git clone` of a scratch repository, and links the plugins into
+# the profile, which fetches Oh My Pi's natives; the second runs every toolchain command; the last
+# runs `legion version` and `legion probe-image`, which runs the three launch probes (the daemon's two
+# plus the session-storage probe), holds the plugin to the daemon API contract, and prints the OK line
+# the daemon's probe Sandbox reads. A broken image never publishes.
 #
 # The `legion` profile carries no model route, and neither does Legion: an operator's pod supplies it
 # (runtime.kubernetes.pod, docs/kubernetes.md). In a pod, the Go `legion` starts Oh My Pi on Legion's
@@ -60,8 +60,8 @@ ARG CODEGRAPH_VERSION=1.5.0
 ARG PI_CODEGRAPH_VERSION=0.1.1
 
 # ------------------------------------------------------------------------------------------------
-# cli: workspace install, the compiled legion CLI, the OMP pin, and the packed plugin.
-FROM oven/bun:${BUN_VERSION}-slim AS cli
+# plugin: workspace install, the OMP pin, the CodeGraph CLI, and the packed plugin.
+FROM oven/bun:${BUN_VERSION}-slim AS plugin
 WORKDIR /repo
 # jq: the same omp.extensions rewrite release.yaml's pi_envoy job runs. python3/make/g++: native
 # devDependencies in the workspace lockfile (mirrors packages/envoy/docker/Dockerfile).
@@ -103,7 +103,6 @@ COPY packages/daemon packages/daemon
 COPY packages/pi-envoy packages/pi-envoy
 COPY skills skills
 RUN mkdir -p /out \
-    && bun build --compile --target=bun-linux-x64 packages/daemon/src/cli/index.ts --outfile /out/legion \
     && bun packages/daemon/src/daemon/omp-pin.ts > /out/omp-pin \
     && test -s /out/omp-pin
 
@@ -130,7 +129,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 RUN curl -fsSL https://mise.run -o /tmp/mise-install.sh \
     && MISE_VERSION="${MISE_VERSION}" MISE_INSTALL_PATH=/usr/local/bin/mise sh /tmp/mise-install.sh \
     && rm /tmp/mise-install.sh
-COPY --from=cli /out/omp-pin /omp-pin
+COPY --from=plugin /out/omp-pin /omp-pin
 # github_token (optional BuildKit secret): mise's github backend reads MISE_GITHUB_TOKEN; a shared
 # builder IP without it can hit GitHub's unauthenticated API limit (403). CI passes secrets.GITHUB_TOKEN;
 # a build without the secret still runs, unauthenticated.
@@ -221,25 +220,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 legion \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash legion
-# Pinned Bun: the binary the cli stage built with (oven/bun:${BUN_VERSION}-slim).
-COPY --from=cli /usr/local/bin/bun /usr/local/bin/bun
+# Pinned Bun: the binary the plugin stage packed with (oven/bun:${BUN_VERSION}-slim).
+COPY --from=plugin /usr/local/bin/bun /usr/local/bin/bun
 RUN ln -s bun /usr/local/bin/bunx
 COPY --from=tools /opt/omp /opt/omp
 COPY --from=tools /opt/tools/jj /usr/local/bin/jj
 COPY --from=tools /opt/tools/gh /usr/local/bin/gh
-COPY --from=cli /out/legion /opt/legion/bin/legion
-COPY --from=cli --chown=legion:legion /out/pi-legion-envoy /opt/legion/pi-legion-envoy
+COPY --from=plugin --chown=legion:legion /out/pi-legion-envoy /opt/legion/pi-legion-envoy
 # CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
-# Node runtime + app), never the npm package's own launcher shim — see the cli stage's comment.
-COPY --from=cli /out/codegraph /opt/codegraph
+# Node runtime + app), never the npm package's own launcher shim — see the plugin stage's comment.
+COPY --from=plugin /out/codegraph /opt/codegraph
 # The role prompt parts (`packages/pi-envoy/roles/core/*.md`, `mechanics/*.md`, and per-role
 # residues — not part of the packed plugin, whose `files` is `dist`): the in-cluster daemon reads the
-# configured parts for each process and concatenates them into its pod command. A daemon run from source
-# finds them beside its own sources; the compiled binary's `import.meta.dir` is Bun's virtual
-# /$bunfs/root (its relative path lands on a nonexistent /pi-envoy/roles), so
-# LEGION_ROLE_PROMPTS_DIR names this copy instead (`resolveRolePromptsDir`, environment.ts — boot
+# configured parts for each process and concatenates them into its pod command. A standalone `legion`
+# reads them from `role-prompts` beside its own executable unless LEGION_ROLE_PROMPTS_DIR names a
+# bundle, so it names this copy (packages/daemon-go/internal/prompts, ResolveRolePromptsDir — boot
 # refuses if any prompt part is missing here).
-COPY --from=cli /repo/packages/pi-envoy/roles /opt/legion/roles
+COPY --from=plugin /repo/packages/pi-envoy/roles /opt/legion/roles
 # OMP_PROFILE=legion: the isolated profile the plugin is linked into (plugins resolve to
 # /home/legion/.omp/profiles/legion/plugins/node_modules). LEGION_OMP_PATH: how `legion probe-image`
 # — and a daemon pointed at this image — names the OMP executable without mise. HOME is explicit
@@ -267,12 +264,8 @@ WORKDIR /home/legion
 # 3. Link the packed plugin, and the CodeGraph plugin from npm, into the legion profile
 #    (omp-plugins.lock.json records both enabled). This is OMP's first run in the image, so it
 #    also downloads OMP's native modules (~345 MB) into /home/legion/.omp/natives/<version>/;
-#    this layer ships them and a pod never fetches them.
-# 4. Run the three launch probes: the daemon's two (pi.agents, the plugin load) plus the session-storage
-#    setting probe, which only the image runs — so no image ships an OMP that would silently keep a `sql`
-#    deployment's sessions on files. The order is load-bearing: `defaultRunner` (state/fetch.ts) kills any
-#    single omp invocation after 30 s, so a natives download inside the first probe would read as a
-#    definitive "does not expose pi.agents" failure. Step 3 must have already fetched them.
+#    this layer ships them, a pod never fetches them, and the probes in the final step never wait on
+#    the download.
 # Any failure fails the build: a broken image never publishes.
 RUN set -eu; \
     bun --version; omp --version; jj --version; gh --version; git --version; codegraph --version; \
@@ -282,10 +275,9 @@ RUN set -eu; \
     rm -rf "$scratch"; \
     omp plugin install /opt/legion/pi-legion-envoy; \
     omp plugin install "@bopstack/pi-codegraph@${PI_CODEGRAPH_VERSION}"; \
-    legion probe-image; \
     rm -rf /home/legion/.omp/profiles/legion/logs
 # The toolchain goes in after the probe layer, so a new toolchain pin never rebuilds that layer and its
-# natives, and before the Go `legion`, which changes on every commit. It lands outside HOME, in /opt and
+# natives, and before `legion`, which changes on every commit. It lands outside HOME, in /opt and
 # /usr/local/bin, so no volume a pod mounts under HOME shadows it, and /usr/local/bin is on the image
 # PATH and on every pod's (imagePath, packages/daemon-go/internal/runtime/sandbox/names.go).
 COPY --from=toolchain /opt/node /opt/node
@@ -298,8 +290,8 @@ ENV COREPACK_DEFAULT_TO_LATEST=0
 # The toolchain step: every toolchain command runs as the runtime user from the image PATH, the
 # corepack shims fetching their shipped default pnpm and yarn, with TMPDIR and COREPACK_HOME in a
 # scratch directory the step removes, so the layer keeps nothing. No Python is checked: uv installs
-# each project's own at run time. Being its own layer above the Go `legion`, it reruns only when the
-# toolchain or a layer before it changes, so a commit that only rebuilds the Go `legion` fetches
+# each project's own at run time. Being its own layer above `legion`, it reruns only when the
+# toolchain or a layer before it changes, so a commit that only rebuilds `legion` fetches
 # nothing from a registry. pnpx is `pnpm dlx`, which takes no --version; its --help, whose first line
 # names the pnpm version, is the check.
 RUN set -eu; \
@@ -309,42 +301,44 @@ RUN set -eu; \
     for shim in pnpm yarn yarnpkg; do "$shim" --version; done; \
     pnpx --help > "$scratch/pnpx-help"; sed -n 1p "$scratch/pnpx-help"; \
     rm -rf "$scratch"
-# The Go `legion` goes in after the probe layer and the toolchain: its binary differs on every commit (it
+# `legion` goes in after the probe layer and the toolchain: its binary differs on every commit (it
 # links the commit), so a new commit rebuilds only the layers from here down, never the probe layer and
 # its natives.
-COPY --from=go /out/legion /opt/legion/go/bin/legion
+COPY --from=go /out/legion /opt/legion/bin/legion
 # agent-secrets (packages/envoy/cmd/agent-secrets, AGENTC-393): the pod's secrets client — the shim
 # runs `keygen` before its hello and `renew` after its enrollment, and the agent's tools call it
-# from PATH, which /opt/legion/go/bin leads in every worker container (the PATH mainEnvironment sets in
-# packages/daemon-go/internal/runtime/sandbox/manifest.go). The daemon's Tools.AgentSecrets names this
-# path.
-COPY --from=go /out/agent-secrets /opt/legion/go/bin/agent-secrets
-# The final step: the Go `legion` runs on this base and names the commit the workflow built. git resolves
-# to /usr/bin/git on the image PATH and the step refuses any other path, so git's absolute path is as fixed
-# as gh's and jj's (/usr/local/bin, copied above) and a pod environment can name all three. Then the Go
-# `legion probe-image` runs the three launch probes through the Go daemon's own code, loading the plugin
-# the way a Sandbox pod does (--plugin-root: the one explicit extension, discovery off), holds the
-# plugin to the daemon API contract this binary speaks, and resolves by name every task agent and
-# skill Legion's prompts name (shipped in its agents/ and dist/skills directories). It leaves those
-# agents' models unresolved (--skip-agent-models): the build has none of the operator's model
-# configuration, which the pod brings. It prints `probe-image: OK (/opt/omp/bin/omp)
-# session-storage=probed agent-models=skipped daemon-api-version=<N>`; the Go daemon's probe
-# Sandbox runs it again with its own contract, on the pod baseline and under the operator's pod,
+# from PATH, which /opt/legion/bin leads in the image and in every worker container (the PATH
+# mainEnvironment sets in packages/daemon-go/internal/runtime/sandbox/manifest.go). The daemon's
+# Tools.AgentSecrets names this path.
+COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
+# The final step: the `legion` on the image PATH is this one, it runs on this base, and it names the
+# commit the workflow built. git resolves to /usr/bin/git on the image PATH and the step refuses any
+# other path, so git's absolute path is as fixed as gh's and jj's (/usr/local/bin, copied above) and a
+# pod environment can name all three. Then `legion probe-image` runs the three launch probes through
+# the daemon's own code, loading the plugin the way a Sandbox pod does (--plugin-root: the one
+# explicit extension, discovery off), holds the plugin to the daemon API contract this binary speaks,
+# and resolves by name every task agent and skill Legion's prompts name (shipped in its agents/ and
+# dist/skills directories). It leaves those agents' models unresolved (--skip-agent-models): the build
+# has none of the operator's model configuration, which the pod brings. It prints `probe-image: OK
+# (/opt/omp/bin/omp) session-storage=probed agent-models=skipped daemon-api-version=<N>`; the daemon's
+# probe Sandbox runs it again with its own contract, on the pod baseline and under the operator's pod,
 # resolving every agent's model, and refuses a skipped result, before any claim runs on the image
 # (packages/daemon-go/internal/runtime/sandbox/probe.go). It needs the natives step 3 fetched, which
 # the cached probe layer above carries.
 ARG LEGION_REVISION
 RUN set -eu; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
-    version="$(/opt/legion/go/bin/legion version)"; echo "$version"; \
+    legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
+    agent_secrets="$(command -v agent-secrets)"; test "$agent_secrets" = /opt/legion/bin/agent-secrets; \
+    version="$(legion version)"; echo "$version"; \
     test "$version" = "legion (devel) commit ${LEGION_REVISION}"; \
-    /opt/legion/go/bin/legion probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models; \
-    /opt/legion/go/bin/agent-secrets --help >/dev/null; \
+    legion probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models; \
+    agent-secrets --help >/dev/null; \
     rm -rf /home/legion/.omp/profiles/legion/logs
-# The Kubernetes runtime (packages/daemon/src/daemon/runtime-kubernetes.ts) sets every container's
-# command explicitly: the init container runs `legion workspace-init …` and the main container runs
-# `legion worker-shim --connect tcp://<daemon>:<worker_stream_port> --boot-token-file … --provider-env-dir
-# /var/run/legion/providers -- omp --mode rpc …` (k8s-manifests.ts). This ENTRYPOINT therefore only
-# makes `docker run <image> probe-image` and `docker run <image> --help` work; the Go
-# `legion` runs with `--entrypoint /opt/legion/go/bin/legion`.
+# The Kubernetes runtime sets every container's command explicitly
+# (packages/daemon-go/internal/runtime/sandbox/manifest.go): the init containers run `legion
+# workspace-init fetch …` and `legion workspace-init provision …`, and the main container runs `legion
+# worker-shim --connect tcp://<daemon>:<worker_stream_port> --boot-token-file … -- omp --mode rpc …`.
+# This ENTRYPOINT therefore only makes `docker run <image> version` and `docker run <image>
+# probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models` work.
 ENTRYPOINT ["legion"]

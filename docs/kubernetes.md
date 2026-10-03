@@ -12,13 +12,10 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 - the pinned OMP fork build the daemon's default `omp_invocation` names — resolved at build time with the
   same `mise x github:sjawhar/oh-my-pi@<pin>` mechanism a tmux host uses, from the single pin source
   `packages/daemon/src/daemon/omp-pin.ts`; installed at `/opt/omp/bin/omp` (`LEGION_OMP_PATH`);
-- the TypeScript `legion` CLI compiled from the same commit (`legion`, `worker-shim`, `credential`, `gh`,
-  `handoff`, `workspace-init`, and the hidden `probe-image`), at `/opt/legion/bin/legion` — the `legion`
-  on `PATH` and the image's `ENTRYPOINT`;
-- the Go coordinator's `legion` (`packages/daemon-go`), compiled from the same commit at `go.work`'s Go
-  version, static, at `/opt/legion/go/bin/legion` and off `PATH`, until the Go daemon replaces the
-  TypeScript one. It links the commit it was built from: `docker run --rm --entrypoint
-  /opt/legion/go/bin/legion ghcr.io/sjawhar/legion-worker@sha256:… version` prints
+- `legion` (`packages/daemon-go`), compiled from the same commit at `go.work`'s Go version, static, at
+  `/opt/legion/bin/legion` — the `legion` on `PATH` and the image's `ENTRYPOINT` — with the
+  `agent-secrets` client beside it at `/opt/legion/bin/agent-secrets`. It links the commit it was built
+  from: `docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… version` prints
   `legion (devel) commit <sha>`;
 - `@sjawhar/pi-legion-envoy` packed from that commit's `packages/pi-envoy` (the exact `bun pm pack` steps
   `release.yaml`'s `pi_envoy` job runs) and linked into the isolated OMP profile `legion`
@@ -60,31 +57,28 @@ version.
 ### The image is probed before it publishes
 
 The daemon refuses to serve unless its OMP exposes `pi.agents` and actually loads `pi-legion-envoy`
-(`packages/daemon/src/daemon/boot-probes.ts`). The image build runs the same two probes through
-`legion probe-image`, plus a third only the image runs — the session-storage probe, which prints
-`session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — so a build whose OMP or
-plugin is broken fails instead of publishing. Its final step runs the Go `legion version`, requiring the
-commit the workflow built, then the Go `legion probe-image`: the same three probes, run by the Go
-daemon's own code (`packages/daemon-go/internal/daemon/bootgate.go`), with the plugin held to the
-daemon API contract (`legion.daemonApiVersion`) and every task agent and skill Legion's prompts
+(`packages/daemon-go/internal/daemon/bootgate.go`). The image build's final step runs `legion version`,
+requiring the commit the workflow built, then `legion probe-image`: the same two probes, run by the
+daemon's own code, plus a third only the image runs — the session-storage probe, which prints
+`session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — with the plugin held to
+the daemon API contract (`legion.daemonApiVersion`) and every task agent and skill Legion's prompts
 name (`task(agent="…")`, `skill://…`) resolved by name through the same launch (the plugin ships
 `oracle`, `deep-worker`, `thermonuclear-deep-review` and `thermonuclear-code-quality`, and the
 planner's `plan-gap-analyst` and `plan-reviewer`, in `agents/`, and the pair's rubrics and
-`ce-simplify-code` with Legion's other skills in `dist/skills`). The build has none of
-the operator's model configuration, so it leaves those agents' models unresolved
-(`--skip-agent-models`), printing
-`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped daemon-api-version=<N>`. The Go daemon's Agent Sandbox runtime runs the Go command in a probe
+`ce-simplify-code` with Legion's other skills in `dist/skills`), so a build whose OMP or plugin is
+broken fails instead of publishing. The build has none of the operator's model configuration, so it
+leaves those agents' models unresolved (`--skip-agent-models`), printing
+`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped daemon-api-version=<N>`. The daemon's Agent Sandbox runtime runs the same command in a probe
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
 boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
-tool resolves a subagent's (`packages/daemon-go/internal/runtime/sandbox/probe.go`). To run them yourself:
-`docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`, and
-`docker run --rm --entrypoint /opt/legion/go/bin/legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models`
-(`--plugin-root` is required: the plugin root a Sandbox pod loads the plugin from, so the Go probe loads it the same way; without
+tool resolves a subagent's (`packages/daemon-go/internal/runtime/sandbox/probe.go`). To run it yourself:
+`docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models`
+(`--plugin-root` is required: the plugin root a Sandbox pod loads the plugin from, so the probe loads it the same way; without
 `--skip-agent-models` it also resolves each agent's model, which needs the operator's model roles).
 A step of its own, before that final one, runs every toolchain command listed above as `legion`, from
 the image `PATH`, the corepack shims fetching their shipped default pnpm and yarn into a scratch
 directory the step removes. It reruns only when the toolchain or an earlier layer changes, so a commit
-that only rebuilds the Go `legion` needs no package registry.
+that only rebuilds `legion` needs no package registry.
 To check a published image's toolchain end to end, Python install included:
 `docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
@@ -168,9 +162,10 @@ release schedule, and the deployment's repo owns its reproducibility.
 
 ### Entrypoint
 
-The image's `ENTRYPOINT` is `["legion"]`: the CLI, so `docker run --rm <image> probe-image` and
-`docker run --rm <image> --help` work. A pod never relies on it — the Kubernetes runtime sets every
-container's `command` explicitly (see *Anatomy of a pod* below). To run anything else in the image,
+The image's `ENTRYPOINT` is `["legion"]`, so `docker run --rm <image> version` and
+`docker run --rm <image> probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models`
+work. A pod never relies on it — the Kubernetes runtime sets every container's `command` explicitly (see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod) below). To run anything else in the image,
 override it: `docker run --rm --entrypoint sh <image> -c '…'`.
 
 ## Session store

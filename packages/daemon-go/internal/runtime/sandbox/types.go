@@ -25,9 +25,9 @@ type Scheduling struct {
 }
 
 // Tools are absolute paths inside the worker image. GH, Git, and JJ reach the agent as
-// LEGION_GH_PATH, LEGION_GIT_PATH, and LEGION_JJ_PATH; Legion is the Go `legion` every container
-// runs (/opt/legion/go/bin/legion), whose directory also leads the pod's PATH. AgentSecrets is
-// the `agent-secrets` client (/opt/legion/go/bin/agent-secrets), which the shim runs only for a
+// LEGION_GH_PATH, LEGION_GIT_PATH, and LEGION_JJ_PATH; Legion is the `legion` every container
+// runs (/opt/legion/bin/legion), whose directory also leads the pod's PATH. AgentSecrets is
+// the `agent-secrets` client (/opt/legion/bin/agent-secrets), which the shim runs only for a
 // pod the runtime enrolls with the secrets broker (Options.AgentSecrets).
 type Tools struct{ GH, Git, JJ, Legion, AgentSecrets string }
 

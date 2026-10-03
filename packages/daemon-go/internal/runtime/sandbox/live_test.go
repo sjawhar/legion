@@ -709,8 +709,8 @@ func (r *liveRig) startRuntime() error {
 		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", TreeVolume: liveTreeVolume,
 		StreamURL: address,
 		Tools: Tools{
-			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion",
-			AgentSecrets: "/opt/legion/go/bin/agent-secrets",
+			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/bin/legion",
+			AgentSecrets: "/opt/legion/bin/agent-secrets",
 		},
 		Pod:          r.pod,
 		ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},

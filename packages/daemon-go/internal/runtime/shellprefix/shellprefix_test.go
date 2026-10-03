@@ -11,8 +11,8 @@ import (
 // The exact bytes: Oh My Pi runs the prefix verbatim before every command, so a change in quoting
 // or in the trailing `&&` is a change in what every agent's shell does.
 func TestForIsTheAssignmentThatPutsTheDirectoriesFirst(t *testing.T) {
-	got := For("/legion/worker-bin", "/opt/legion/go/bin")
-	want := `PATH='/legion/worker-bin:/opt/legion/go/bin:'${PATH#'/legion/worker-bin:/opt/legion/go/bin:'} &&`
+	got := For("/legion/worker-bin", "/opt/legion/bin")
+	want := `PATH='/legion/worker-bin:/opt/legion/bin:'${PATH#'/legion/worker-bin:/opt/legion/bin:'} &&`
 	if got != want {
 		t.Fatalf("For = %q\nwant  %q", got, want)
 	}

@@ -54,7 +54,7 @@
         "containers": [
           {
             "command": [
-              "/opt/legion/go/bin/legion",
+              "/opt/legion/bin/legion",
               "worker-shim",
               "--connect",
               "tcp://192.0.2.250:13371",
@@ -126,15 +126,15 @@
               },
               {
                 "name": "LEGION_CREDENTIAL_HELPER",
-                "value": "!/opt/legion/go/bin/legion credential"
+                "value": "!/opt/legion/bin/legion credential"
               },
               {
                 "name": "PATH",
-                "value": "/legion/worker-bin:/opt/legion/go/bin:/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
+                "value": "/legion/worker-bin:/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
               },
               {
                 "name": "PI_SHELL_PREFIX",
-                "value": "PATH='/legion/worker-bin:/opt/legion/go/bin:'$${PATH#'/legion/worker-bin:/opt/legion/go/bin:'} &&"
+                "value": "PATH='/legion/worker-bin:/opt/legion/bin:'$${PATH#'/legion/worker-bin:/opt/legion/bin:'} &&"
               },
               {
                 "name": "GIT_TERMINAL_PROMPT",
@@ -250,7 +250,7 @@
         "initContainers": [
           {
             "command": [
-              "/opt/legion/go/bin/legion",
+              "/opt/legion/bin/legion",
               "workspace-init",
               "fetch",
               "--repo",
@@ -313,7 +313,7 @@
           },
           {
             "command": [
-              "/opt/legion/go/bin/legion",
+              "/opt/legion/bin/legion",
               "workspace-init",
               "provision",
               "--issue",
@@ -323,7 +323,7 @@
               "--root",
               "/legion",
               "--credential-helper",
-              "!/opt/legion/go/bin/legion credential",
+              "!/opt/legion/bin/legion credential",
               "--feed",
               "/var/run/legion/feed"
             ],

@@ -108,7 +108,7 @@ func (r *liveRig) revoke(c *liveClaim) error {
 // pod's own AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR, and returns stdout, the exit code, and
 // stderr. kubectl exec answers exit 1 for any non-zero code, so the command's own code is echoed.
 func (r *liveRig) agentSecrets(c *liveClaim, args ...string) (stdout string, code int, stderr string, err error) {
-	script := "/opt/legion/go/bin/agent-secrets " + shellJoin(args) + " 2>/tmp/agent-secrets.err; code=$?; printf '\\n---exit %d---\\n' $code; cat /tmp/agent-secrets.err"
+	script := "/opt/legion/bin/agent-secrets " + shellJoin(args) + " 2>/tmp/agent-secrets.err; code=$?; printf '\\n---exit %d---\\n' $code; cat /tmp/agent-secrets.err"
 	out, err := r.exec(c, "sh", "-c", script)
 	if err != nil && !strings.Contains(out, "---exit ") {
 		return "", -1, "", err
@@ -245,7 +245,7 @@ func (r *liveRig) checkSecretsCrossPodNegative() error {
 	}
 	note("runtime", "root: its grant still works after the worker's attempts")
 	rootID := r.enrollments[root.token].id
-	script := fmt.Sprintf("mkdir -p /tmp/swapped && cp %s/key.pem /tmp/swapped/ && printf '%%s\\n' %s >/tmp/swapped/enrollment && AGENT_SECRETS_KEY_DIR=/tmp/swapped /opt/legion/go/bin/agent-secrets self 2>&1; echo \"---exit $?---\"", AgentSecretsKeyDir, rootID)
+	script := fmt.Sprintf("mkdir -p /tmp/swapped && cp %s/key.pem /tmp/swapped/ && printf '%%s\\n' %s >/tmp/swapped/enrollment && AGENT_SECRETS_KEY_DIR=/tmp/swapped /opt/legion/bin/agent-secrets self 2>&1; echo \"---exit $?---\"", AgentSecretsKeyDir, rootID)
 	out, err := r.exec(worker, "sh", "-c", script)
 	if err != nil && !strings.Contains(out, "---exit ") {
 		return err
@@ -280,7 +280,7 @@ func (r *liveRig) checkSecretsCopiedTokenNegative() error {
 // a fresh key and the pod's own token, bearing the pod's boot token as if it were one, is 401.
 func (r *liveRig) checkSecretsSelfEnrollNegative() error {
 	root := r.claim("root")
-	script := fmt.Sprintf(`mkdir -p /tmp/second && tp=$(/opt/legion/go/bin/agent-secrets keygen --out /tmp/second) && /opt/legion/go/bin/agent-secrets enroll --launcher-token-file %s/%s --kind pod --runtime-id "$POD_UID" --thumbprint "$tp" --approver-issue %s --pod-token-file %s/%s 2>&1; echo "---exit $?---"`,
+	script := fmt.Sprintf(`mkdir -p /tmp/second && tp=$(/opt/legion/bin/agent-secrets keygen --out /tmp/second) && /opt/legion/bin/agent-secrets enroll --launcher-token-file %s/%s --kind pod --runtime-id "$POD_UID" --thumbprint "$tp" --approver-issue %s --pod-token-file %s/%s 2>&1; echo "---exit $?---"`,
 		BootDir, bootTokenKey, root.issue, AgentSecretsTokenDir, AgentSecretsTokenFile)
 	out, err := r.exec(root, "sh", "-c", script)
 	if err != nil && !strings.Contains(out, "---exit ") {

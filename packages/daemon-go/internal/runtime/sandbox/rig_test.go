@@ -59,8 +59,8 @@ func testOptions() Options {
 		EnvoyURL:     "http://192.0.2.250:9020",
 		NATSURLs:     []string{"nats://192.0.2.250:4222"},
 		Tools: Tools{
-			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion",
-			AgentSecrets: "/opt/legion/go/bin/agent-secrets",
+			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/bin/legion",
+			AgentSecrets: "/opt/legion/bin/agent-secrets",
 		},
 		BootTimeout:      2 * time.Second,
 		BootIntervals:    3,

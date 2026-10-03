@@ -219,7 +219,7 @@ func mountHolding(c corev1.Container, path string) *corev1.VolumeMount {
 }
 
 // PI_SHELL_PREFIX is a shell command Oh My Pi's bash tool runs before each command, in tmux's form
-// over the pod's own directories — worker-bin on the tree volume, then the Go legion's — never a
+// over the pod's own directories — worker-bin on the tree volume, then legion's — never a
 // path list (P3).
 func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	r, err := configure(goldenOptions())
@@ -228,7 +228,7 @@ func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	}
 	env := envOf(podOf(t, r, workerSpec(t), false).Containers[0])
 	got := kubeExpand(env["PI_SHELL_PREFIX"], env)
-	want := `PATH='/legion/worker-bin:/opt/legion/go/bin:'${PATH#'/legion/worker-bin:/opt/legion/go/bin:'} &&`
+	want := `PATH='/legion/worker-bin:/opt/legion/bin:'${PATH#'/legion/worker-bin:/opt/legion/bin:'} &&`
 	if got != want {
 		t.Fatalf("PI_SHELL_PREFIX\n got: %s\nwant: %s", got, want)
 	}

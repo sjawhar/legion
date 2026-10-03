@@ -641,7 +641,7 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	add("LEGION_JJ_PATH", r.tools.JJ)
 	add("LEGION_CREDENTIAL_HELPER", credentialHelper)
 	legionDir := filepath.Dir(r.tools.Legion)
-	add("PATH", workerBin+":"+legionDir+":"+imagePath)
+	add("PATH", podPath(legionDir))
 	add("PI_SHELL_PREFIX", shellprefix.For(workerBin, legionDir))
 	add("GIT_TERMINAL_PROMPT", "0")
 	add("LEGION_GRANT_FILE", runtime.GrantFile(StateDir, spec.Claim))
@@ -664,6 +664,19 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 		add(name+"_FILE", BootDir+"/"+name)
 	}
 	return append(env, r.providersPointers()...)
+}
+
+// podPath is a main container's PATH: worker-bin, then the directory of the `legion` every
+// container runs, then the image's PATH, which a container's env PATH replaces, with that directory
+// once — in the worker image it is the image PATH's first entry.
+func podPath(legionDir string) string {
+	entries := []string{workerBin, legionDir}
+	for _, entry := range strings.Split(imagePath, ":") {
+		if entry != legionDir {
+			entries = append(entries, entry)
+		}
+	}
+	return strings.Join(entries, ":")
 }
 
 // nodeSelector is the Legion pool's label and the configured selector, which configure keeps off

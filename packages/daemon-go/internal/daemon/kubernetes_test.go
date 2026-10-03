@@ -483,7 +483,7 @@ func TestSandboxOptionsCarryTheAgentSecretsBlock(t *testing.T) {
 	if opts.AgentSecrets == nil || *opts.AgentSecrets != *want {
 		t.Fatalf("AgentSecrets = %+v, want %+v", opts.AgentSecrets, want)
 	}
-	if opts.Tools.AgentSecrets != "/opt/legion/go/bin/agent-secrets" {
+	if opts.Tools.AgentSecrets != "/opt/legion/bin/agent-secrets" {
 		t.Fatalf("Tools.AgentSecrets = %q", opts.Tools.AgentSecrets)
 	}
 	cfg.Runtime.Kubernetes.AgentSecrets = nil
