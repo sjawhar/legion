@@ -95,8 +95,7 @@ a new version that keeps the human's own text, never a second "spec" artifact be
   section for what it discusses.
 - **A changed point is rewritten, not appended to.** When an answer or a new fact changes the
   design, rewrite the text it changes and fold the answered decision into it; the document's
-  versions keep the history. In an approved Legion root spec, a design change that leaves what
-  the tree delivers and every decision a human settled intact goes in the plan instead.
+  versions keep the history.
 - **No placeholders.** No TBD, TODO, or hedging ("might", "could consider"): an open item is a
   decision block, a technical decision your lane makes where the work happens, outside the spec,
   or, for a contract between two lanes, a question you settle with the other lane over Envoy (see
@@ -388,7 +387,7 @@ decision block writes a new version, so request approval only when all three hol
 block is settled, which means answered and folded into the text, or waived as the next paragraph
 says; the human has agreed to every point in the spec; and the current version has not been
 approved. A Legion root spec under an armed design gate always goes to approval once all three
-hold, and changes after approval only as `skill://legion-architect` says.
+hold (`skill://legion-architect`).
 
 When all three hold, request it in the pass that finishes the spec: a design waiting with nothing in
 the human's Inbox waits on nobody. When a human asks for approval while a block is open, do not

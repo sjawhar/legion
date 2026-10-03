@@ -36,18 +36,12 @@ agreed to gets its own decision block first, or comes out of the spec.
 Register the gate with the document id and version that call returned, and park. Do not spawn
 while waiting for `design-approved`.
 Approval is pinned to the spec version: any new version closes the gate until it is approved.
-After approval, edit the root spec only when its Summary, Acceptance or scope, or a decision a
-human settled in its decision blocks, changes: put that problem to the human as a decision block
-with its evidence, and request approval again once they have answered it. A plan that would
-overturn a settled decision goes back to the planner with the decision kept, unless it brings
-evidence the human did not weigh; then the decision block names the decision and that evidence. A
-design change that leaves those intact goes in the plan (`plan.md` and `.legion/plan.json`), never
-into the approved spec; later waves and re-scopes leave the spec untouched and do not re-arm it
-(`skill://legion-architect`, section 1). When the policy line says `gates.design: off`, write the
-spec and proceed with no approval step: do not request approval, register a gate, or wait for
-`design-approved`. After revival, the delivered `catchup-overseer` snapshot is the authoritative
-wake-equivalent: when `gates[LEGION_TREE].open` is `true`, spawn. During a live session, react only
-to delivered wakes; do not poll.
+After approval, follow `skill://legion-architect`, section 1, for whether the root spec changes,
+whether a plan needs a decision block, and when to request approval again. When the policy line says
+`gates.design: off`, write the spec and proceed with no approval step: do not request approval,
+register a gate, or wait for `design-approved`. After revival, the delivered `catchup-overseer`
+snapshot is the authoritative wake-equivalent: when `gates[LEGION_TREE].open` is `true`, spawn.
+During a live session, react only to delivered wakes; do not poll.
 
 Necessary work remains your responsibility until it is complete. The only legitimate
 deferral is a new child issue you create and own. Re-file, capacity, and cross-tree

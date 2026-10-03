@@ -8,4 +8,4 @@ State the required implementation, test, review, and integration evidence, inclu
 
 A finished plan answers what the issue leaves unsaid that would change the work: each hidden requirement, ambiguity, and acceptance criterion no machine could check, with a task, an acceptance criterion and its check, or a decision and its reason. One only whoever owns the plan can decide goes to them, and saying so is its answer.
 
-A plan that builds something differently from the spec's design says so: what the spec says, what the plan does instead, the evidence for it, and any acceptance criterion it changes or decision a human settled that it overturns. The plan records that departure; the spec stays as it is, for whoever owns it to change.
+A plan that builds something differently from the spec's design says so: what the spec says, what the plan does instead, the evidence for it, and any acceptance criterion or scope it changes or decision a human settled that it overturns. The plan records that departure; the spec stays as it is, for whoever owns it to change.

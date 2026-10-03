@@ -34,7 +34,7 @@ const verifiedProof = `{"verdict":"verified","how":"re-ran its command at its he
 var writableHandoffs = map[string]string{
 	"architect": `{"scope":"small","subIssues":[]}`,
 	"plan": `{"requiredSkills":{"implement":["legion-worker"],"test":["legion-worker"],"review":["none: no skill covers a one-line change"]},` +
-		`"gapAnalysis":{"findings":[]},"planReview":{"verdict":"approved","rounds":1}}`,
+		`"gapAnalysis":{"findings":[]},"planReview":{"verdict":"approved","rounds":1},"specDepartures":[]}`,
 	"implement": `{"filesChanged":["x.go"],"proof":[` + handoffProof + `]}`,
 	"test":      `{"passed":3,"failed":0,"implementerProof":` + verifiedProof + `,"proof":[` + handoffProof + `]}`,
 	"review":    `{"verdict":"approved","critical":0}`,
@@ -118,8 +118,8 @@ func TestHandoffWriteRefusesTheFieldsItWritesNamingEach(t *testing.T) {
 
 // The write refuses a handoff its phase's rules refuse, naming every field at fault so the next
 // write can fix it, and writes nothing. The implementer's proof, the tester's verdict on it and its
-// own proof, and the plan's skills and two checks are the records the next role reads; a declared
-// field of the wrong type would have that role read a value that is not there.
+// own proof, and the plan's skills, two checks and departures are the records the next role reads;
+// a declared field of the wrong type would have that role read a value that is not there.
 func TestHandoffWriteRefusesWhatItsPhasesRulesRefuseNamingEachField(t *testing.T) {
 	blankProof := strings.Replace(strings.Replace(handoffProof, `"exit 1 naming proof"`, `"  "`, 1), `,"negativeControl":"the same payload with its proof: exit 0"`, "", 1)
 	plan := func(field, value string) string {
@@ -134,6 +134,21 @@ func TestHandoffWriteRefusesWhatItsPhasesRulesRefuseNamingEachField(t *testing.T
 		}
 		return string(encoded)
 	}
+	planWithout := func(field string) string {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(writableHandoffs["plan"]), &fields); err != nil {
+			t.Fatal(err)
+		}
+		delete(fields, field)
+		encoded, err := json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(encoded)
+	}
+	departure := `{"spec":"the plan polls the uploader","plan":"the plan reads its event channel","evidence":"the measurement covers every required event","outcome":{"kind":"unchanged"}}`
+	tooManyDepartures := `[` + strings.TrimSuffix(strings.Repeat(departure+",", maxSpecDepartures+1), ",") + `]`
+	tooLongDeparture := `{"spec":"` + strings.Repeat("x", maxSpecDepartureTextBytes+1) + `","plan":"the plan reads its event channel","evidence":"the measurement covers every required event","outcome":{"kind":"unchanged"}}`
 	for _, tc := range []struct {
 		name, phase, data string
 		// fields are the fields the refusal names, in its order.
@@ -148,7 +163,7 @@ func TestHandoffWriteRefusesWhatItsPhasesRulesRefuseNamingEachField(t *testing.T
 		{"a passing test handoff without a proof of the tester's own", "test", `{"passed":3,"implementerProof":` + verifiedProof + `}`, []string{"proof"}},
 		{"failed > 0 without a recorded failure", "test", `{"failed":1,"implementerProof":` + verifiedProof + `,"proof":[` + handoffProof + `]}`, []string{"failures"}},
 		{"a rejected implementer proof without a recorded failure", "test", `{"implementerProof":{"verdict":"rejected","how":"its command exits 2"},"proof":[` + handoffProof + `]}`, []string{"failures"}},
-		{"a plan with none of its three records", "plan", `{"taskCount":3}`, []string{"requiredSkills", "gapAnalysis", "planReview"}},
+		{"a plan with none of its four records", "plan", `{"taskCount":3}`, []string{"requiredSkills", "gapAnalysis", "planReview", "specDepartures"}},
 		{"a role's empty skill list and another's blank entry", "plan", plan("requiredSkills", `{"implement":[],"test":[" "],"review":["legion-worker"]}`), []string{"requiredSkills.implement", "requiredSkills.test.0"}},
 		{"a skill list left out", "plan", plan("requiredSkills", `{"implement":["legion-worker"]}`), []string{"requiredSkills.test", "requiredSkills.review"}},
 		{"a gap analysis with both findings and an error", "plan", plan("gapAnalysis", `{"findings":[],"error":"timed out"}`), []string{"gapAnalysis"}},
@@ -160,6 +175,13 @@ func TestHandoffWriteRefusesWhatItsPhasesRulesRefuseNamingEachField(t *testing.T
 		{"an approval carrying an error", "plan", plan("planReview", `{"verdict":"approved","rounds":1,"error":"timed out"}`), []string{"planReview.error"}},
 		{"more rounds than a planner runs", "plan", plan("planReview", `{"verdict":"approved","rounds":4}`), []string{"planReview.rounds"}},
 		{"a fractional round count", "plan", plan("planReview", `{"verdict":"rejected","rounds":2.5,"remainingIssues":[{"issue":"i","evidence":"e"}]}`), []string{"planReview.rounds"}},
+		{"a plan without its departures from the spec", "plan", planWithout("specDepartures"), []string{"specDepartures"}},
+		{"a plan whose departures are a scalar", "plan", plan("specDepartures", `"none"`), []string{"specDepartures"}},
+		{"a plan whose departures are an object", "plan", plan("specDepartures", `{"spec":"the plan polls"}`), []string{"specDepartures"}},
+		{"a plan with a malformed departure", "plan", plan("specDepartures", `[{"spec":"","plan":"the plan reads its event channel","evidence":"the measurement covers every required event","outcome":{"kind":"changed"}}]`), []string{"specDepartures.0.spec", "specDepartures.0.outcome"}},
+		{"a plan that marks a changed scope unchanged", "plan", plan("specDepartures", `[{"spec":"the plan changes a child boundary","plan":"the plan moves work to a new child","evidence":"the measured boundary excludes the work","outcome":{"kind":"unchanged","scope":"the child now owns the work"}}]`), []string{"specDepartures.0.outcome.scope"}},
+		{"a plan with too many departures", "plan", plan("specDepartures", tooManyDepartures), []string{"specDepartures"}},
+		{"a plan with a departure that is too long", "plan", plan("specDepartures", `[`+tooLongDeparture+`]`), []string{"specDepartures.0.spec"}},
 		{"a plan's declared field of the wrong type, before its three rules", "plan", `{"taskCount":"3"}`, []string{"taskCount"}},
 		{"a review's declared fields of the wrong type", "review", `{"critical":"1","verdict":"lgtm","keyFindings":[{"severity":"minor"}]}`, []string{"critical", "verdict", "keyFindings.0.file", "keyFindings.0.description"}},
 		{"an architect's scope and routing hints outside their options", "architect", `{"scope":"huge","routingHints":{"skipArchitect":"no"}}`, []string{"scope", "routingHints.skipArchitect"}},
@@ -201,9 +223,11 @@ func TestHandoffWriteWritesWhatItsPhasesRulesAllow(t *testing.T) {
 	cases["a test reporting a failure"] = [2]string{"test", `{"failed":1,` + failure + `,"implementerProof":` + verifiedProof + `}`}
 	cases["a test rejecting the implementer's proof"] = [2]string{"test", `{` + failure + `,"implementerProof":{"verdict":"rejected","how":"its command exits 2"}}`}
 	cases["a plan whose checks failed"] = [2]string{"plan", `{"requiredSkills":{"implement":["none: x"],"test":["none: x"],"review":["none: x"]},` +
-		`"gapAnalysis":{"error":"the analyst timed out"},"planReview":{"verdict":"failed","rounds":2,"error":"the review timed out"}}`}
+		`"gapAnalysis":{"error":"the analyst timed out"},"planReview":{"verdict":"failed","rounds":2,"error":"the review timed out"},"specDepartures":[]}`}
 	cases["a plan rejected after the last round"] = [2]string{"plan", `{"requiredSkills":{"implement":["a"],"test":["b"],"review":["c"]},` +
-		`"gapAnalysis":{"findings":[{"finding":"no error path","answer":"task 3"}]},"planReview":{"verdict":"rejected","rounds":3,"remainingIssues":[{"issue":"i","evidence":"e"}]}}`}
+		`"gapAnalysis":{"findings":[{"finding":"no error path","answer":"task 3"}]},"planReview":{"verdict":"rejected","rounds":3,"remainingIssues":[{"issue":"i","evidence":"e"}]},"specDepartures":[]}`}
+	cases["a plan with a changed scope"] = [2]string{"plan", `{"requiredSkills":{"implement":["a"],"test":["b"],"review":["c"]},` +
+		`"gapAnalysis":{"findings":[]},"planReview":{"verdict":"approved","rounds":1},"specDepartures":[{"spec":"the plan keeps one child","plan":"the plan adds a child","evidence":"the measured boundary needs a separate surface","outcome":{"kind":"changed","scope":"the new child owns the separate surface"}}]}`}
 	cases["an implement handoff with fields it does not declare"] = [2]string{"implement", `{"proof":[` + handoffProof + `],"rebase2":{"onto":"main"},"summary":"done"}`}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -271,7 +295,17 @@ func TestHandoffWriteAcceptsEveryPlanHandoffShapeThePlannerPromptShows(t *testin
 			t.Fatalf("planner.md records a rejection at round %v, want the last, %d", shown.Rounds, planReviewMaxRounds)
 		}
 	}
-	specDepartures := shapes("specDepartures")
+	rawSpecDepartures := shapes("specDepartures")
+	var specDepartures []string
+	for _, departure := range rawSpecDepartures {
+		var shown map[string]any
+		if err := json.Unmarshal([]byte(departure), &shown); err != nil {
+			t.Fatalf("planner.md's specDepartures %s: %v", departure, err)
+		}
+		if _, isDeparture := shown["spec"]; isDeparture {
+			specDepartures = append(specDepartures, departure)
+		}
+	}
 	if len(gapAnalyses) != 2 || !slices.Equal(verdicts, []string{"approved", "rejected", "failed"}) || len(specDepartures) != 1 {
 		t.Fatalf("planner.md shows gapAnalysis %v, planReview verdicts %v and specDepartures %v, want two shapes, approved, rejected, failed, and one departure", gapAnalyses, verdicts, specDepartures)
 	}

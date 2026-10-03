@@ -4,15 +4,13 @@
 
 ### Changed
 
-- A root architect edits an approved root spec only when its Summary, Acceptance or scope, or a
-  decision a human settled in it, changes (LEGION-476). Such a change goes to the human as a
-  decision block with its evidence before approval is requested again, and a plan that would
-  overturn a settled decision goes back to the planner unless it brings evidence the human did not
-  weigh. A design change that leaves all of them intact goes in the plan, never into the approved
-  spec: the planner records it in the issue's `plan.md` document and in `.legion/plan.json`'s
-  `specDepartures`, never edits the spec, and names it in its completion summary, and the reviewer
-  reads the plan beside the spec. The `legion-architect`, `legion-worker` and `dispatch` skills say
-  so, as do the daemon's root architect, planner and reviewer role prompts.
+- The root architect's post-approval spec-edit rule is canonical in
+  `skill://legion-architect`, section 1 (LEGION-476). The root prompt and the worker skill point
+  there. A planner records every design departure in the issue's `plan.md` document and in the
+  required, bounded `specDepartures` field in `.legion/plan.json`: `[]` means no departure; every
+  nonempty record names the spec, plan, evidence and whether the Summary, Acceptance, scope or a
+  settled decision changes. `legion handoff write` refuses an omitted, malformed or oversized
+  record. The reviewer reads the plan beside the spec.
 - The role prompts (`roles/`) move into the daemon module, `packages/daemon/internal/prompts/roles`,
   which the `legion` binary embeds (LEGION-223). The package never shipped them (its `files` is
   `dist` and `agents`), so a commit that changes only a role prompt no longer cuts a plugin release.

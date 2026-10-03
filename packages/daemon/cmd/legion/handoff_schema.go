@@ -12,6 +12,12 @@ import (
 // plan: a review still rejecting before the last is revised and reviewed again, never recorded.
 const planReviewMaxRounds = 3
 
+const (
+	maxSpecDepartures            = 16
+	maxSpecDepartureTextBytes    = 1024
+	maxSpecDepartureOutcomeItems = 8
+)
+
 // requiredSkillsProblem is every refusal of a plan's skill lists, wherever in them it falls.
 const requiredSkillsProblem = "missing or empty — name the skills this role must load, or state `none: <what you looked through and why nothing fits>`"
 
@@ -19,11 +25,11 @@ const requiredSkillsProblem = "missing or empty — name the skills this role mu
 // each `<field path>: <reason>` so the worker's next write can fix it, and none for a handoff it
 // writes. Each field the phase declares is held to its shape (handoffPhases), and every other field
 // passes untouched, since the next worker may need it. A plan whose shape holds is then held to
-// three rules of its own: every downstream role's skill list is present and non-empty (a project
+// four rules of its own: every downstream role's skill list is present and non-empty (a project
 // with no skill that fits says so as the single entry `none: <what was looked through and why
-// nothing fits>`), and the gap analysis before the draft and the plan review after it are both
-// recorded, a failed call as its error. That record is the planner's own report: the write checks
-// its shape, not that the checks ran.
+// nothing fits>`), the gap analysis before the draft and the plan review after it are both
+// recorded, a failed call as its error, and departures from the approved spec are a bounded
+// record. The write checks the record's shape, not that the checks ran.
 func handoffWriteProblems(phase string, fields map[string]any) []string {
 	c := &checker{}
 	handoffPhases[phase](c, "", fields, true)
@@ -33,6 +39,8 @@ func handoffWriteProblems(phase string, fields map[string]any) []string {
 		gapAnalysisWritten(c, "gapAnalysis", analysis, present)
 		review, present := fields["planReview"]
 		planReviewWritten(c, "planReview", review, present)
+		departures, present := fields["specDepartures"]
+		specDeparturesWritten(c, "specDepartures", departures, present)
 	}
 	return c.problems
 }
@@ -154,6 +162,45 @@ func array(element rule, minimum int) rule {
 	}
 }
 
+// boundedArray is a list of minimum through maximum elements, each held to element. It refuses a
+// too-large list before walking it, so a malformed handoff cannot make validation unbounded.
+func boundedArray(element rule, minimum, maximum int) rule {
+	return func(c *checker, path string, value any, present bool) {
+		list, ok := value.([]any)
+		if !ok {
+			c.wrongType(path, "array", value, present)
+			return
+		}
+		if len(list) < minimum {
+			c.add(path, fmt.Sprintf("Too small: expected array to have >=%d items", minimum))
+		}
+		if len(list) > maximum {
+			c.add(path, fmt.Sprintf("Too big: expected array to have <=%d items", maximum))
+			return
+		}
+		for i, item := range list {
+			element(c, join(path, strconv.Itoa(i)), item, true)
+		}
+	}
+}
+
+// boundedNonEmpty is a non-blank string whose UTF-8 representation fits in maximum bytes.
+func boundedNonEmpty(maximum int) rule {
+	return func(c *checker, path string, value any, present bool) {
+		s, ok := value.(string)
+		if !ok {
+			c.wrongType(path, "string", value, present)
+			return
+		}
+		if strings.TrimSpace(s) == "" {
+			c.add(path, "Too small: expected string to have >=1 characters")
+		}
+		if len(s) > maximum {
+			c.add(path, fmt.Sprintf("Too big: expected string to have <=%d bytes", maximum))
+		}
+	}
+}
+
 type field struct {
 	key  string
 	rule rule
@@ -211,6 +258,36 @@ var (
 		field{"criterion", nonEmpty}, field{"surface", nonEmpty}, field{"command", nonEmpty},
 		field{"observed", nonEmpty}, field{"headSha", nonEmpty}, field{"negativeControl", nonEmpty},
 	)
+	specDepartureText    = boundedNonEmpty(maxSpecDepartureTextBytes)
+	specDepartureOutcome = refined(object(
+		field{"kind", oneOf("unchanged", "changed")},
+		field{"summary", optional(boundedArray(specDepartureText, 1, maxSpecDepartureOutcomeItems))},
+		field{"acceptance", optional(boundedArray(specDepartureText, 1, maxSpecDepartureOutcomeItems))},
+		field{"scope", optional(specDepartureText)},
+		field{"settledDecisions", optional(boundedArray(object(
+			field{"decision", specDepartureText}, field{"detail", specDepartureText},
+		), 1, maxSpecDepartureOutcomeItems))},
+	), func(c *checker, path string, fields map[string]any) {
+		kind, _ := fields["kind"].(string)
+		changed := 0
+		for _, field := range []string{"summary", "acceptance", "scope", "settledDecisions"} {
+			if _, present := fields[field]; present {
+				changed++
+				if kind == "unchanged" {
+					c.add(join(path, field), "an unchanged outcome records no changed requirement")
+				}
+			}
+		}
+		if kind == "changed" && changed == 0 {
+			c.add(path, "a changed outcome names the changed Summary, Acceptance, scope or settled decision")
+		}
+	})
+	specDeparture = object(
+		field{"spec", specDepartureText},
+		field{"plan", specDepartureText},
+		field{"evidence", specDepartureText},
+		field{"outcome", specDepartureOutcome},
+	)
 )
 
 func phaseShape(fields ...field) rule { return object(append(slices.Clone(baseShape), fields...)...) }
@@ -246,6 +323,7 @@ var handoffPhases = map[string]rule{
 			field{"remainingIssues", optional(array(object(field{"issue", text}, field{"evidence", text}), 0))},
 			field{"error", optional(text)},
 		))},
+		field{"specDepartures", optional(boundedArray(specDeparture, 0, maxSpecDepartures))},
 	),
 	"implement": phaseShape(
 		field{"filesChanged", words},
@@ -359,6 +437,13 @@ var planReviewWritten = recorded(
 			c.add(join(path, "error"), "a failed review records its call's error, and only a failed review does")
 		}
 	}),
+)
+
+// specDeparturesWritten is the planner's bounded record of every design departure: [] says the
+// plan follows the spec; a changed outcome names which human-approved requirement it changes.
+var specDeparturesWritten = recorded(
+	"the plan's `specDepartures` (`[]` when it follows the spec)",
+	boundedArray(specDeparture, 0, maxSpecDepartures),
 )
 
 // reviewRounds is the count of reviews run, a failed one included: a whole number from one to the
