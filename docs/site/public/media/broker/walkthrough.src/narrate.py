@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Generates narration/<id>.mp3 for the narration parts edl.py names, through ElevenLabs.
 
-  secrets ELEVENLABS_API_KEY -- python3 narrate.py [ID...]
+  secrets ELEVENLABS_API_KEY -- uv run --no-project --with elevenlabs python3 narrate.py [ID...]
 
 Regenerates the parts named, or every part when none is; each part is sent with the text of the
-parts around it, so the voice carries from one to the next. Needs the `elevenlabs` package. The
-voice and its settings are the product-demos recipe's.
+parts around it, so the voice carries from one to the next. The voice and its settings are the
+constants below, and nowhere else.
 """
 
 from __future__ import annotations
@@ -20,15 +20,16 @@ from edl import NARRATION
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "narration"
-VOICE_ID = "onwK4e9ZLuTAKqWW03F9"
+VOICE_ID = "onwK4e9ZLuTAKqWW03F9"  # Daniel
 MODEL_ID = "eleven_turbo_v2_5"
+OUTPUT_FORMAT = "mp3_44100_192"
 SETTINGS = VoiceSettings(stability=0.75, similarity_boost=0.85, style=0.0, speed=0.92, use_speaker_boost=True)
 
 
 def main() -> int:
     key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
     if key == "":
-        print("narrate.py: ELEVENLABS_API_KEY is unset; run it as: secrets ELEVENLABS_API_KEY -- python3 narrate.py", file=sys.stderr)
+        print("narrate.py: ELEVENLABS_API_KEY is unset; run it as: secrets ELEVENLABS_API_KEY -- uv run --no-project --with elevenlabs python3 narrate.py", file=sys.stderr)
         return 1
     ids = list(NARRATION)
     wanted = sys.argv[1:] or ids
@@ -45,7 +46,7 @@ def main() -> int:
                 voice_id=VOICE_ID,
                 text=NARRATION[part],
                 model_id=MODEL_ID,
-                output_format="mp3_44100_192",
+                output_format=OUTPUT_FORMAT,
                 voice_settings=SETTINGS,
                 previous_text=" ".join(NARRATION[p] for p in ids[max(0, i - 2):i])[-300:] or None,
                 next_text=" ".join(NARRATION[p] for p in ids[i + 1:i + 3])[:300] or None,

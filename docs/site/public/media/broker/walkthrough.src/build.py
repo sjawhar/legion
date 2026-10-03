@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds ../broker-walkthrough.mp4 from the raw footage and narration beside this file.
+"""Builds ../walkthrough.mp4 from the raw footage and narration beside this file.
 
   raw/*.cast, raw/*.webm   footage, one file per section (docs/site/media/broker/walkthrough.record.ts)
   narration/<id>.mp3       one file per narration part (narrate.py)
@@ -7,10 +7,12 @@
                            narration parts laid at offsets inside it
 
 Every cast is rendered through agg with idle time kept, so a cast's seconds are the video's
-seconds. Every source is normalized to 1920x1080 at 30 fps; each clip is cut hard to its window,
-with no speed change and no held frame; its audio is silence the clip's length with its narration
-parts laid at their offsets, and the build fails when a part runs past the end of its clip or
-overlaps the next part. The clips are concatenated into ../broker-walkthrough.mp4.
+seconds. Every source is normalized to 1280x720 at 30 fps (the browser recordings are that size
+already); each clip is cut hard to its window, with no speed change and no held frame; its audio
+is silence the clip's length with its narration parts laid at their offsets, and the build fails
+when a part runs past the end of its clip or overlaps the next part, or when a browser
+recording's file duration is off its wall-clock length (raw/sections.json) by more than 5%. The
+clips are concatenated into ../walkthrough.mp4.
 
   python3 build.py            # rebuild (renders casts once, into build/)
   python3 build.py --check    # verify the EDL against the footage and narration, write nothing
@@ -30,10 +32,11 @@ HERE = Path(__file__).resolve().parent
 RAW = HERE / "raw"
 NARRATION = HERE / "narration"
 BUILD = HERE / "build"
-OUT = HERE.parent / "broker-walkthrough.mp4"
-W, H, FPS = 1920, 1080, 30
-BACKGROUND = "0x1e1e2e"
+OUT = HERE.parent / "walkthrough.mp4"
+W, H, FPS = 1280, 720, 30
+BACKGROUND = "0x272822"  # agg's monokai background, so a terminal's padding is invisible
 AGG = ["agg", "--font-size", "30", "--theme", "monokai", "--idle-time-limit", "3600", "--last-frame-duration", "0"]
+CAPTURE_TOLERANCE = 0.05  # how far a browser recording may fall outside its wall-clock bounds
 
 
 def run(*argv: str) -> str:
@@ -54,7 +57,7 @@ def cast_duration(path: Path) -> float:
 
 
 def normalized(source: str) -> Path:
-    """The source as a 1920x1080, 30 fps, silent H.264 file, rendered once into build/."""
+    """The source as a 1280x720, 30 fps, silent H.264 file, rendered once into build/."""
     src = RAW / source
     out = BUILD / f"{Path(source).stem}.norm.mp4"
     if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
@@ -67,14 +70,28 @@ def normalized(source: str) -> Path:
         video = gif
     run(
         "ffmpeg", "-y", "-v", "error", "-i", str(video),
-        "-vf", f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color={BACKGROUND},fps={FPS},format=yuv420p",
+        "-vf", f"scale={W}:{H}:force_original_aspect_ratio=decrease:flags=lanczos,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color={BACKGROUND},fps={FPS},format=yuv420p",
         "-an", "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-tune", "stillimage", str(out),
     )
     return out
 
 
+def capture_rates() -> list[tuple[str, float, float, float]]:
+    """Each browser recording's (file, act seconds, page-life seconds, file seconds), from
+    raw/sections.json, which the recorder writes. A screen capture under load can drop frames
+    into a time-compressed file, shorter than the actions it shows; Playwright records a page from
+    its first frame to its close, so an honest file lies between the two wall clocks. asciinema
+    casts are timing-accurate by construction and are not listed."""
+    sections = json.loads((RAW / "sections.json").read_text())
+    return [(s["file"], s["actSeconds"], s["wallSeconds"], duration(RAW / s["file"]))
+            for s in sections if not s["file"].endswith(".cast")]
+
+
 def check(clips: list[Clip]) -> list[str]:
     problems = []
+    for file, act, wall, length in capture_rates():
+        if not act * (1 - CAPTURE_TOLERANCE) <= length <= wall * (1 + CAPTURE_TOLERANCE):
+            problems.append(f"{file}: {length:.2f}s of footage for {act:.2f}s of actions in a page that lived {wall:.2f}s; re-record it")
     for clip in clips:
         src = RAW / clip.source
         if not src.exists():
@@ -130,13 +147,18 @@ def main() -> int:
     if problems:
         print("build.py: the EDL does not fit the footage and narration:", *problems, sep="\n  ", file=sys.stderr)
         return 1
+    for file, act, wall, length in capture_rates():
+        print(f"build.py: {file}: {length:.2f}s of footage; actions {act:.2f}s (x{length / act:.3f}), page life {wall:.2f}s (x{length / wall:.3f})")
     if "--check" in sys.argv[1:]:
         print(f"build.py: {len(CLIPS)} clips, {sum(c.end - c.start for c in CLIPS):.1f}s, all narration inside its clip")
         return 0
     rendered = [render(clip, i) for i, clip in enumerate(CLIPS)]
     listing = BUILD / "concat.txt"
     listing.write_text("".join(f"file '{path}'\n" for path in rendered))
-    run("ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy", "-movflags", "+faststart", str(OUT))
+    # The video is copied; the audio is decoded and encoded once more, so no clip's encoder
+    # priming accumulates into drift across the joins.
+    run("ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(listing), "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-movflags", "+faststart", str(OUT))
     print(f"build.py: wrote {OUT} ({duration(OUT):.1f}s)")
     return 0
 
