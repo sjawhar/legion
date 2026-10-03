@@ -234,7 +234,10 @@ describe("DispatchClient", () => {
     await client.projectArtifact("CORE", { name: "runbook.md", content: "# Runbook", actor });
     await client.getProjectArtifact("CORE", "runbook-md");
     await client.getArtifactAsks("artifact-1");
-    await client.artifactAsk("artifact-1", { question: "Publish?", actor });
+    await client.artifactAsk("artifact-1", {
+      question: "The runbook is ready for readers. How should we publish it?",
+      actor,
+    });
     await client.getArtifactComments("artifact-1");
     await client.artifactComment("artifact-1", { body: "Looks good.", actor });
     await client.artifactSuggest("artifact-1", {

@@ -40,14 +40,15 @@ var (
 )
 
 // Client speaks the broker's machine-login and enrollment routes. URL is the broker's base URL
-// with no path (also the request object's audience); Operator is the login this machine's logins
-// are approved by (the request object's login_hint); HTTP is the client every call goes through,
-// nil for http.DefaultClient. cred is the launcher credential a login has won, if any; login is
-// the most recent login's status. Both are set only by Login and its poll goroutine, and cleared
-// only when the broker refuses cred as invalid. loginMu serializes Login's own check-then-start
-// sequence: atomic.Pointer alone lets two concurrent callers both observe "not pending" and both
-// mint a key and POST, silently discarding one credential's poll goroutine — loginMu makes "start
-// at most one pending login" atomic, so every concurrent caller observes the same winner.
+// with no path (also the request object's audience); Operator is the email of the person who
+// approves this machine's logins (the request object's login_hint); HTTP is the client every call
+// goes through, nil for http.DefaultClient. cred is the launcher credential a login has won, if
+// any; login is the most recent login's status. Both are set only by Login and its poll goroutine,
+// and cleared only when the broker refuses cred as invalid. loginMu serializes Login's own
+// check-then-start sequence: atomic.Pointer alone lets two concurrent callers both observe "not
+// pending" and both mint a key and POST, silently discarding one credential's poll goroutine —
+// loginMu makes "start at most one pending login" atomic, so every concurrent caller observes the
+// same winner.
 type Client struct {
 	URL      string
 	Operator string
@@ -115,12 +116,12 @@ func IsPermanent(err error) bool {
 }
 
 // Login mints a fresh key, signs a machine-login request object naming os.Hostname() and
-// "legion-daemon" as the launcher_credential it asks to hold and c.Operator as the approving
-// login, POSTs it to /v1/launcher-credentials, spawns the poll goroutine, and returns the
-// confirmation code. Idempotent while a login is pending: a second call returns the same code
-// without starting another one — loginMu holds this true even under real concurrency, so callers
-// racing Login (doProof's automatic re-login-on-401, from concurrent Enroll/Revoke calls sharing
-// one Client) never start more than one pending login.
+// "legion-daemon" as the launcher_credential it asks to hold and c.Operator, the approving
+// person's email, as its login_hint, POSTs it to /v1/launcher-credentials, spawns the poll
+// goroutine, and returns the confirmation code. Idempotent while a login is pending: a second
+// call returns the same code without starting another one — loginMu holds this true even under
+// real concurrency, so callers racing Login (doProof's automatic re-login-on-401, from concurrent
+// Enroll/Revoke calls sharing one Client) never start more than one pending login.
 func (c *Client) Login(ctx context.Context) (string, error) {
 	c.loginMu.Lock()
 	defer c.loginMu.Unlock()

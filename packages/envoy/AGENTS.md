@@ -1532,19 +1532,22 @@ state (`self`, `status --json`) or `syscall.Exec`s a command with the granted va
 its environment. The broker holds no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
 revoking a grant — reaches the broker's UI routes from Dispatch's server, carrying the UI bearer
-and the deciding human's Dispatch login in the body's `approver` field. The bearer vouches for
-that login: Dispatch fills it from its own signed-in session, never from the browser, and the
-broker checks it against the record's approver and records it on the decision event. The UI
-bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
+and the deciding person's Dispatch login, their email, in the body's `approver` field. The bearer
+vouches for that login: Dispatch fills it from its own signed-in session, never from the browser,
+and the broker checks it against the record's approver and records it on the decision event. The
+UI bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
 agents is the deployment's job. `internal/broker/enroll` turns a launcher credential into a leased
 enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected
-service-account token). A live enrollment is unique per launcher credential, runtime id and slot:
-`POST /v1/enrollments` takes an optional pod-only `slot` (`^[a-z][a-z0-9-]{0,62}$`, else `400
-INVALID_SLOT`, and a slot on a box or host is refused the same way) naming one of several
-independent identities in one pod. The launcher whose proof authenticates the enrollment chooses
-the slot; a session's proof cannot enroll anything (`401 LAUNCHER_INVALID`). So each slot of a pod
-holds its own key, lease, requests and grants, while a pod's `runtime_id` stays the pod UID its
-token proves. Omitted or `""` is the runtime's one enrollment, every box's and host's. The same key
+service-account token). An operator credential's enrollment is its operator's, the email of the
+person who approved its machine login: a launcher may leave `operator` out of the enrollment, and
+one naming anyone else is `403 OPERATOR_MISMATCH`. A live enrollment is unique per launcher
+credential, runtime id and slot: `POST /v1/enrollments` takes an optional pod-only `slot`
+(`^[a-z][a-z0-9-]{0,62}$`, else `400 INVALID_SLOT`, and a slot on a box or host is refused the
+same way) naming one of several independent identities in one pod. The launcher whose proof
+authenticates the enrollment chooses the slot; a session's proof cannot enroll anything
+(`401 LAUNCHER_INVALID`). So each slot of a pod holds its own key, lease, requests and grants,
+while a pod's `runtime_id` stays the pod UID its token proves. Omitted or `""` is the runtime's
+one enrollment, every box's and host's. The same key
 in the same slot gets its live enrollment back (200), a different key in a live slot is `409
 ALREADY_ENROLLED`, and the rules never see the slot: every slot of a pod matches on its verified
 service account alone. Migration 0007 is forward-only: an older broker binary's conflict lookup
@@ -1761,7 +1764,7 @@ a no-op, writing no second audit row. Audit rows never carry secret values: `aud
 
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
 machine login. `Login` verifies a machine's signed request object (`login_hint` required — the
-approving operator's login — and exactly one `launcher_credential` authorization detail), mints an
+approving operator's email — and exactly one `launcher_credential` authorization detail), mints an
 eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
 `pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a

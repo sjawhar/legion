@@ -178,18 +178,22 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 	return cred, nil
 }
 
-// Create enrolls in under cred. A live enrollment is unique per launcher credential, runtime id and
-// slot: the same key in the same slot gets its live enrollment back (Existing), a different key in
-// a live slot is ErrAlreadyEnrolled, and another slot of the same pod is an enrollment of its own.
-// A slot is valid only on a pod enrollment (ErrInvalidSlot); a pod's runtime id is always the pod
-// UID its projected token proves, whichever slot it enrolls.
+// Create enrolls in under cred. An enrollment's operator is its credential's: the email of the
+// person who approved the machine login that minted it (machine.Service.ApplyDecision), recorded
+// whether or not the launcher states one. A stated operator that names anyone else, or any operator
+// stated under a service credential, is ErrOperatorMismatch. A live enrollment is unique per
+// launcher credential, runtime id and slot: the same key in the same slot gets its live enrollment
+// back (Existing), a different key in a live slot is ErrAlreadyEnrolled, and another slot of the
+// same pod is an enrollment of its own. A slot is valid only on a pod enrollment (ErrInvalidSlot);
+// a pod's runtime id is always the pod UID its projected token proves, whichever slot it enrolls.
 func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (Enrollment, error) {
 	if in.Slot != "" && (in.Kind != "pod" || !record.ValidSlot(in.Slot)) {
 		return Enrollment{}, ErrInvalidSlot
 	}
-	if in.Operator != nil {
-		in.Operator = new(record.CanonicalLogin(*in.Operator))
+	if in.Operator != nil && (cred.Operator == nil || record.CanonicalLogin(*in.Operator) != *cred.Operator) {
+		return Enrollment{}, ErrOperatorMismatch
 	}
+	in.Operator = cred.Operator
 	if !authorized(cred, in.Kind, in.Operator) {
 		return Enrollment{}, ErrOperatorMismatch
 	}

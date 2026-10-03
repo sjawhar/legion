@@ -36,8 +36,21 @@
   lanes is settled by those two lanes over Envoy, and nobody audits or retracts another session's
   asks.
 
+### Fixed
+
+- A controller now displays its project token in canonical uppercase
+  (`Legion controller · AGENTC`), rather than the lowercase token the Go daemon carries in
+  `LEGION_PROJECT` (LEGION-480).
+
 ### Added
 
+- Every Legion session names itself when it starts, so Dispatch and Envoy show who wrote what
+  instead of a bare session id (LEGION-480): `Legion <role> · <ISSUE>` for a root architect or a
+  phase worker (`Legion implementer · LEGION-370`) and `Legion controller · <PROJECT>` for a
+  controller, under either daemon, in a tmux pane or a pod. Each Dispatch write stamps it as
+  `origin.session_title`, and the Envoy registration sent with the role claim carries it. A
+  resumed session keeps its title, a person's rename is never replaced, and a title Oh My Pi
+  generated from a first message gives way to the Legion one.
 - `dispatch_read` of a comment or ask anchored in a document says where its quote sits, as a
   `Position:` line after the quote: in a table, the row (0 is the header), the cells before the
   anchored one and the column's header, so a reader can name the row and column a comment on a
