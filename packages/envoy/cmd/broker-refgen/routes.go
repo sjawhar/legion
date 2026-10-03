@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -196,7 +197,79 @@ type site struct {
 	bodyType  string   // readJSON's: the request body's type
 	respType  string   // writeJSON's: the response body's type, "" when refgen cannot name it
 	query     string   // r.URL.Query().Get's: the query parameter
+	guards    []guard  // the boolean conditions it runs under
 	at        string
+}
+
+// guard is a condition a site runs under: the boolean variable name holds want.
+type guard struct {
+	name string
+	want bool
+}
+
+// boolGuard reads cond as x or !x for a variable x: the variable, and the value it holds when cond
+// is true.
+func boolGuard(cond ast.Expr) (guard, bool) {
+	switch c := cond.(type) {
+	case *ast.Ident:
+		return guard{c.Name, true}, true
+	case *ast.ParenExpr:
+		return boolGuard(c.X)
+	case *ast.UnaryExpr:
+		if id, ok := c.X.(*ast.Ident); ok && c.Op == token.NOT {
+			return guard{id.Name, false}, true
+		}
+	}
+	return guard{}, false
+}
+
+// siteGuards is every boolean guard the innermost node of stack runs under: the condition of each
+// if around it (as written in its body, negated in its else), and the negated condition of each
+// earlier if, in a block around it, whose body ends in a return, since running past that if means
+// its body did not run.
+func siteGuards(stack []ast.Node) []guard {
+	var out []guard
+	for i := 0; i+1 < len(stack); i++ {
+		switch x := stack[i].(type) {
+		case *ast.IfStmt:
+			if g, ok := boolGuard(x.Cond); ok {
+				switch stack[i+1] {
+				case x.Body:
+					out = append(out, g)
+				case x.Else:
+					out = append(out, guard{g.name, !g.want})
+				}
+			}
+		case *ast.BlockStmt:
+			for _, stmt := range x.List {
+				if stmt == stack[i+1] {
+					break
+				}
+				ifStmt, ok := stmt.(*ast.IfStmt)
+				if !ok || ifStmt.Else != nil || len(ifStmt.Body.List) == 0 {
+					continue
+				}
+				if _, returns := ifStmt.Body.List[len(ifStmt.Body.List)-1].(*ast.ReturnStmt); !returns {
+					continue
+				}
+				if g, ok := boolGuard(ifStmt.Cond); ok {
+					out = append(out, guard{g.name, !g.want})
+				}
+			}
+		}
+	}
+	return out
+}
+
+// live reports whether a site can run under env: false when one of its guards' variables holds
+// exactly one boolean, and not the one the guard needs.
+func live(guards []guard, env map[string][]string) bool {
+	for _, g := range guards {
+		if v := env[g.name]; len(v) == 1 && (v[0] == "true" || v[0] == "false") && (v[0] == "true") != g.want {
+			return false
+		}
+	}
+	return true
 }
 
 type funcInfo struct {
@@ -290,6 +363,7 @@ func (g *graph) collect(file *ast.File, body ast.Node, params *ast.FieldList) fu
 			return true
 		}
 		s.sentinels = g.caseSentinels(file, stack)
+		s.guards = siteGuards(stack)
 		info.sites = append(info.sites, s)
 		return true
 	})
@@ -434,6 +508,9 @@ func (g *graph) resolve(info funcInfo, params map[string][]string, visiting map[
 	}
 	var out []outcome
 	for _, s := range info.sites {
+		if !live(s.guards, env) {
+			continue // a branch the caller's boolean argument never takes
+		}
 		switch s.kind {
 		case siteError:
 			if len(s.call.Args) != 4 {
@@ -473,6 +550,13 @@ func (g *graph) resolve(info funcInfo, params map[string][]string, visiting map[
 			}
 			if fun, ok := s.call.Fun.(*ast.Ident); ok && fun.Name == "writeJSON" && s.respType == "" {
 				return nil, fmt.Errorf("%s: cannot name this answer's body type; answer with one of the package's named response types", s.at)
+			}
+			if sel, ok := s.call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "WriteHeader" {
+				for _, status := range statuses {
+					if status != http.StatusNoContent {
+						return nil, fmt.Errorf("%s: answers %d through WriteHeader, which the page would document as having no body; answer a body with writeJSON, and no body with 204", s.at, status)
+					}
+				}
 			}
 			for _, status := range statuses {
 				out = append(out, outcome{Status: status, RespType: s.respType, At: s.at})
@@ -534,9 +618,9 @@ func paramIndex(params []string, e ast.Expr) (int, bool) {
 	return 0, false
 }
 
-// eval is every string e can be: a literal, a parameter's candidates, an http.Status constant's
-// code, a concatenation of those, err.Error() (the case clause's sentinel messages, or varies),
-// or an fmt.Sprintf with its verbs shown as "…". Nil means e cannot be read.
+// eval is every string e can be: a literal, true or false, a parameter's candidates, an
+// http.Status constant's code, a concatenation of those, err.Error() (the case clause's sentinel
+// messages, or varies), or an fmt.Sprintf with its verbs shown as "…". Nil means e cannot be read.
 func (g *graph) eval(e ast.Expr, env map[string][]string, sentinels []string) []string {
 	switch x := e.(type) {
 	case *ast.BasicLit:
@@ -547,7 +631,12 @@ func (g *graph) eval(e ast.Expr, env map[string][]string, sentinels []string) []
 			return []string{x.Value}
 		}
 	case *ast.Ident:
-		return env[x.Name]
+		if values, ok := env[x.Name]; ok {
+			return values
+		}
+		if x.Name == "true" || x.Name == "false" {
+			return []string{x.Name}
+		}
 	case *ast.ParenExpr:
 		return g.eval(x.X, env, sentinels)
 	case *ast.SelectorExpr:

@@ -1722,9 +1722,12 @@ The docs site's broker reference pages are generated at site build from this sou
 `cmd/broker-refgen` (through `docs/site/generators/broker-reference.sh`), which fails the build on
 an undocumented item: every `routes()` row needs a comment above it saying what the route does,
 every adapter a reader label in refgen's `credentialLabels`, every handler's success answer a named
-response struct of `internal/broker/api` (never a map literal), every JSON field of a request or
-response body (and of an object it holds) a doc comment saying what it is, a response type that is
-one of several answers of a route a doc comment saying when, every `Config` field a doc comment
+response struct of `internal/broker/api` passed to `writeJSON` (never a map literal; the one success
+without a body is `w.WriteHeader(http.StatusNoContent)`, and any other `WriteHeader` status is
+refused), every JSON field of a request or response body (and of an object it holds) a doc comment
+saying what it is, a response type that is one of several answers of a route a doc comment saying
+when (a branch on a boolean the route passes as `true` or `false` counts only where it is taken,
+so approve and deny each document their own answer), every `Config` field a doc comment
 opening with the `BROKER_*` variables it reads and a colon (`BROKER_FAKE_SECRETS_FILE`'s is in
 `cmd/broker/main.go`; any `BROKER_*` name `config` or `cmd/broker` spells out as a string counts as
 read), every `removedVars` row a reason, and every helper `Code*` constant and `agent-secrets`
