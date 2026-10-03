@@ -405,10 +405,16 @@ turn owes one, running it spends it whatever came back, the agent opening the as
 too (`dispatch_ask`, `dispatch_request_approval`, a `dispatch_issue` or `dispatch_artifact` whose
 result counts a decision block in the stored document (`advice.decision_blocks`), or a
 `dispatch_doc_edit` that inserts an ask block, its opener alone on a line, or retypes a block into
-one: `opensAsk`), and the agent's next real work — a successful
-`tool_result` whose tool is not a `dispatch_*` one — owes another. A settled turn that
-only replies calls no tool, so the nudge's continuation cannot re-arm itself; work is bounded by
-`ASK_CHECKS_PER_PERIOD` (5).
+one: `opensAsk` in `src/opens-ask.ts`), and the agent's next real work — a successful
+`tool_result` whose tool is not a `dispatch_*` one — owes another. The server counts answered
+blocks too, so re-uploading a document whose blocks are all answered spends the check with nothing
+new in the Inbox: that stop goes without a reminder. A tool-device call (a `write` to
+`xd://<tool>`, named by its result's `details.xdev.tool`: `deviceTool`) is reported twice, the tool
+Oh My Pi ran under its own name, input and details and then the `write`, so the tool's report alone
+spends or owes the check: the `write` never opens an ask, and one to a `dispatch_*` device is no
+work. A help write (`?`, `help` or empty content) runs nothing and has only the `write`. A settled
+turn that only replies calls no tool, so the nudge's continuation cannot re-arm itself; work is
+bounded by `ASK_CHECKS_PER_PERIOD` (5).
 
 Each completed check carries `baseline_as_of` to its snapshot's `as_of`, keeping the next open-asks
 read current. One stop-time check runs at a time: `agent_end` handlers are not awaited by the host,

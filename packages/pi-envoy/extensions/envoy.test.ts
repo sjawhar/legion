@@ -2146,7 +2146,7 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
-  test("a tool-device write is read as the Dispatch call it carries, so it re-arms no check", async () => {
+  test("a tool-device write to a Dispatch device owes no check after the call it ran", async () => {
     // Oh My Pi reports a tool-device call (a `write` to `xd://<tool>` carrying the tool's JSON
     // arguments) twice: as the tool, then as the `write` (measured on 18.4.9).
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-tool-device");
@@ -2181,6 +2181,78 @@ describe("envoy OMP extension", () => {
     await session.stop();
 
     expect(session.asked).toEqual([]);
+  });
+
+  // Oh My Pi answers empty, `?` or `help` content written to `xd://<tool>` with the tool's docs
+  // (`details.xdev.mode` "help"): the tool never runs, so only the write is reported. That write
+  // opens no ask, so it must not spend the check the turn owes.
+  test("a tool-device help write to dispatch_ask or dispatch_request_approval spends no check", async () => {
+    for (const tool of ["dispatch_ask", "dispatch_request_approval"]) {
+      const { default: envoyExtension } = await import(`./envoy.ts?ask-nudge-device-help-${tool}`);
+      const session = await bootAskNudge(
+        envoyExtension,
+        `ses_nudge_device_help_${tool}`,
+        () => ({})
+      );
+      await session.userTurn();
+      await session.toolResult({
+        toolName: "write",
+        toolCallId: `call-help-${tool}`,
+        input: { path: `xd://${tool}`, content: "?" },
+        details: { xdev: { tool, mode: "help" } },
+        isError: false,
+      });
+      await session.stop();
+      expect(session.fixture.deliveries).toEqual([
+        expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
+      ]);
+    }
+  });
+
+  test("a tool-device write after the dispatch_ask it ran neither owes a check nor counts the ask again", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-device-after-ask");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_device_after_ask", () => ({}));
+    const ask = { issue: "DSP-1", question: "Rotate the token?" };
+    const asked = (toolCallId: string) =>
+      session.toolResult({
+        toolName: "dispatch_ask",
+        toolCallId,
+        input: ask,
+        details: { ask: "ask-1" },
+        isError: false,
+      });
+    const deviceWrite = (toolCallId: string) =>
+      session.toolResult({
+        toolName: "write",
+        toolCallId,
+        input: { path: "xd://dispatch_ask", content: JSON.stringify(ask) },
+        details: {
+          xdev: { tool: "dispatch_ask", mode: "execute", args: ask, inner: { ask: "ask-1" } },
+        },
+        isError: false,
+      });
+
+    // The ask spends the check the turn owed, and its `write` owes none back.
+    await session.userTurn();
+    await asked("call-ask-1");
+    await deviceWrite("call-ask-1");
+    await session.stop();
+    expect(session.asked).toEqual([]);
+
+    // A parallel call's result can land between the two reports. Its work owes a check, which the
+    // `write` does not spend by counting the same ask a second time.
+    await session.userTurn("next");
+    await asked("call-ask-2");
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-work",
+      input: { command: "ls" },
+      details: {},
+      isError: false,
+    });
+    await deviceWrite("call-ask-2");
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
   });
 
   test("a retype into an ask block spends the check, unlike a retype into another type", async () => {

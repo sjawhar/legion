@@ -49,6 +49,9 @@
 
 ### Added
 
+- `dispatch-execute` exports `asObject`, which reads an unknown value as a JSON object or null; the
+  Oh My Pi extension's run-end nudge reads a tool result's details with it (LEGION-470).
+
 - `dispatch_read` of an anchored comment or ask prints `Position:` after the quote, where the
   quote's block stands: `table[3] › row 5 (Red-teamer loop), column Due` for a table cell (the
   row's index, 0 the header, labelled by its cells before the anchored one, and the column's

@@ -80,15 +80,17 @@
 - The run-end nudge offers a decision block in the document a question concerns, or `dispatch_ask`
   for a to-do. A `dispatch_doc_edit` that inserts an ask block or retypes a block into one spends
   the nudge's check, as `dispatch_ask` does, and so does a `dispatch_issue` or `dispatch_artifact`
-  whose stored document the server counted a decision block in. An inserted opener is read on its
-  own line, so a long run of blank lines no longer stalls the session for seconds.
+  whose stored document the server counted a decision block in (answered blocks too, so a
+  re-upload of a document whose blocks are all answered spends it). An inserted opener is read on
+  its own line, so a long run of blank lines no longer stalls the session for seconds.
 
 ### Fixed
 
-- The run-end nudge reads a tool-device call (a `write` to `xd://<tool>`, which Oh My Pi reports
-  after the tool's own result) as the Dispatch call it carries. Before, that `write` counted as
-  work, so a `dispatch_ask` or a decision block made through a device re-armed the check it had
-  just spent, and every Dispatch call made that way owed a new one (LEGION-470).
+- The run-end nudge no longer counts a tool-device `write` to a Dispatch device (`xd://dispatch_*`)
+  as work. Oh My Pi reports the tool such a `write` ran first, and that report alone spends or owes
+  the check; before, the `write` counted as work, so a `dispatch_ask` or a decision block made
+  through a device re-armed the check it had just spent, and every Dispatch call made that way owed
+  a new one. A help write (`?`) to a Dispatch device runs nothing and spends nothing (LEGION-470).
 - A controller now displays its project token in canonical uppercase
   (`Legion controller · AGENTC`), rather than the lowercase token the Go daemon carries in
   `LEGION_PROJECT` (LEGION-480).

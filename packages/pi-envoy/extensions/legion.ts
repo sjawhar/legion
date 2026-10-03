@@ -35,7 +35,6 @@ import type {
   ToolCallEventResult,
 } from "../src/pi-types";
 import { subagentSessionCheck } from "../src/subagent-session";
-import { toolDeviceName } from "../src/tool-device";
 
 // Fatal bootstrap failures call this instead of `process.exit` directly, so a
 // test can substitute a throwing stand-in without killing the test runner.
@@ -347,11 +346,23 @@ const LEGION_LOADED_MARKER = Symbol.for("legion.pi-envoy.legion-loaded");
 
 /** Code-mutation tools blocked for an architect session (root or sub-architect) and a reviewer
  * (whose only sanctioned mutation is the final `.legion/` cleanup commit, made via `bash`).
- * `write` here means a real filesystem write; an `xd://` tool-device `write` (`toolDeviceName`) is
- * a tool invocation and carved out below. */
+ * `write` here means a real filesystem write; see `isToolDeviceInvocation` for the `xd://`
+ * tool-device carve-out. */
 const CODE_MUTATION_TOOLS = ["edit", "write", "apply_patch"];
 /** The merger verifies and reports only: no code mutation, and no further Legion spawns. */
 const MERGER_BLOCKED_TOOLS = [...CODE_MUTATION_TOOLS, "task"];
+
+/** OMP's "tool device" convention invokes extension-registered tools (e.g. the Dispatch tools) as
+ * a `write` whose `path` is an `xd://<tool>` URI carrying the tool's JSON args as
+ * `content`. That `write` is a tool invocation, not a file mutation -- it must never trip the
+ * `CODE_MUTATION_TOOLS` gate below for any role. */
+function isToolDeviceInvocation(toolCall: ToolCallEvent): boolean {
+  return (
+    toolCall.toolName === "write" &&
+    typeof toolCall.input.path === "string" &&
+    toolCall.input.path.startsWith("xd://")
+  );
+}
 
 export default function legionExtension(pi: PiApi): void {
   // One instance per session (a `task` subagent gets its own). The id ties every hook log line
@@ -476,9 +487,9 @@ export default function legionExtension(pi: PiApi): void {
     const sessionID = context.sessionManager.getSessionId();
     const active = claimSession.capability(sessionID);
     // A `write` to an `xd://<tool>` path is OMP's tool-device invocation convention (e.g. the
-    // nine Dispatch tools), not a file mutation. Short-circuit it out of every mutation gate
+    // Dispatch tools), not a file mutation. Short-circuit it out of every mutation gate
     // below so the architect/reviewer/merger role checks apply only to real file writes.
-    const isToolDevice = toolDeviceName(toolCall) !== undefined;
+    const isToolDevice = isToolDeviceInvocation(toolCall);
     // `role === "architect"` covers a root architect and a sub-architect alike: both delegate all
     // code work to phase workers.
     if (
