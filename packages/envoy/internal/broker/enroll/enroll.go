@@ -298,8 +298,9 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 
 // endEnrollment ends enrollment id inside tx: it is marked revoked, every live grant under it is
 // revoked, and every request still pending under it is cancelled — an approval must never land
-// on a session that has ended — with one audit row per cancelled request and one kind row for
-// the enrollment. The caller holds the enrollment row's lock.
+// on a session that has ended — with one audit row per cancelled request, a cancelled event on
+// each one's credential-request record (so no approver's pending list keeps showing it), and one
+// kind row for the enrollment. The caller holds the enrollment row's lock.
 func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason string) error {
 	if _, err := tx.Exec(ctx, `update enrollments set revoked_at=now() where id=$1`, id); err != nil {
 		return err
@@ -309,27 +310,37 @@ func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason strin
 	}
 	detail := "the requesting enrollment ended: " + reason
 	rows, err := tx.Query(ctx, `update requests set state='cancelled', decided_at=now(), decided_by=$2, decision_detail=$3
-		where enrollment_id=$1 and state='pending' returning id`, id, actor, detail)
+		where enrollment_id=$1 and state='pending' returning id, record_id`, id, actor, detail)
 	if err != nil {
 		return err
 	}
-	var cancelled []string
+	type cancelledRequest struct {
+		id       string
+		recordID *string
+	}
+	var cancelled []cancelledRequest
 	for rows.Next() {
-		var requestID string
-		if err := rows.Scan(&requestID); err != nil {
+		var c cancelledRequest
+		if err := rows.Scan(&c.id, &c.recordID); err != nil {
 			rows.Close()
 			return err
 		}
-		cancelled = append(cancelled, requestID)
+		cancelled = append(cancelled, c)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	for _, requestID := range cancelled {
+	for _, c := range cancelled {
 		if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, actor, detail) values ('request.cancelled',$1,$2,$3, jsonb_build_object('reason',$4::text))`,
-			id, requestID, actor, detail); err != nil {
+			id, c.id, actor, detail); err != nil {
 			return err
+		}
+		if c.recordID != nil {
+			if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, actor, detail) values ($1,'cancelled',$2,$3)`,
+				*c.recordID, actor, detail); err != nil {
+				return err
+			}
 		}
 	}
 	_, err = tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ($1,$2,$3, jsonb_build_object('reason',$4::text))`, kind, id, actor, reason)

@@ -603,6 +603,38 @@ func TestRevokeCancelsPendingRequests(t *testing.T) {
 	}
 }
 
+// TestRevokeClosesPendingRecords pins that a pending request's credential-request record is closed
+// with a cancelled event when its enrollment ends, so the approver's pending list (which lists
+// records with no terminal event) stops offering a request nobody can approve any more.
+func TestRevokeClosesPendingRecords(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	enr, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-record", Operator: str("ada@example.com"), Thumbprint: "tp-record"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	recordID := strings.Repeat("ab", 32)
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, enrollment_id, expires_at)
+		values ($1,'body','agent_secret','ada@example.com',$2, now() + interval '1 hour')`, recordID, enr.ID); err != nil {
+		t.Fatalf("insert record: %v", err)
+	}
+	requestID := insertPendingRequest(t, svc, enr.ID)
+	if _, err := svc.Store.Pool.Exec(ctx, `update requests set record_id=$2 where id=$1`, requestID, recordID); err != nil {
+		t.Fatalf("link record: %v", err)
+	}
+	if err := svc.Revoke(ctx, cred, enr.ID.String(), "launcher:test"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	var event, actor string
+	if err := svc.Store.Pool.QueryRow(ctx, `select event, actor from credential_request_events where record_id=$1`, recordID).Scan(&event, &actor); err != nil {
+		t.Fatalf("read the record's event: %v", err)
+	}
+	if event != "cancelled" || actor != "launcher:test" {
+		t.Fatalf("record event = %s by %s, want cancelled by launcher:test", event, actor)
+	}
+}
+
 // TestLapsedLeaseReleasesTheRuntimeID pins that an enrollment whose lease lapsed without a revoke
 // is dead to Create: re-enrolling the same key mints a fresh enrollment (never the dead one back
 // as Existing), re-enrolling a different key is not refused as already enrolled, and the lapsed
