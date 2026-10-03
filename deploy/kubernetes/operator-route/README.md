@@ -64,16 +64,16 @@ A gateway that admits Cognito user tokens takes a token from `legion model-token
 image carries at `/opt/legion/go/bin/legion`. Oh My Pi runs it as the model `apiKey` and runs it
 again after a 401. It signs in with Cognito's custom authentication (`InitiateAuth` with
 `CUSTOM_AUTH`, then `RespondToAuthChallenge`), answering the challenge with the pod's projected
-service-account token. It prints the access token and caches it, owner-only, on the pod's
-memory-backed state volume until five minutes before it expires, then signs in again. It never
-stores or uses the refresh token Cognito also returns. A refused sign-in exits non-zero with the
-reason on stderr and prints no token. A token it cannot cache is still printed, with the cache
-failure on stderr: the image probe's pod has no state volume.
+service-account token, and prints the access token. It signs in on every run and keeps no token,
+which suits Oh My Pi: Oh My Pi holds the token for the life of its process, so the run after a 401
+brings a token never used, the one a gateway that refuses a spent token accepts. It never keeps or
+uses the refresh or ID token Cognito also returns. A refused sign-in exits non-zero with the reason
+on stderr and prints no token.
 
 Every value is the operator's, passed as flags in their own `models.yml`:
 
 ```yaml
-    apiKey: "!/opt/legion/go/bin/legion model-token --region <pool region> --client-id <app client id> --username <machine user> --service-account-token-file /var/run/operator/token --cache-file /var/run/legion/state/model-token"
+    apiKey: "!/opt/legion/go/bin/legion model-token --region <pool region> --client-id <app client id> --username <machine user> --service-account-token-file /var/run/operator/token"
 ```
 
 The service-account token is the projected token `pod.yml` already mounts at

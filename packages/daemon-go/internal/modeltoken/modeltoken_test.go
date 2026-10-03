@@ -3,7 +3,6 @@ package modeltoken
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 // fakeCognito answers the two calls of Cognito's custom authentication: InitiateAuth with
@@ -74,133 +72,68 @@ func (f *fakeCognito) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (f *fakeCognito) callCount() int {
+func (f *fakeCognito) signIns() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.calls)
+	return f.signIn
 }
 
-func testConfig(t *testing.T, endpoint string, now *time.Time) Config {
+func testConfig(t *testing.T, endpoint string) Config {
 	t.Helper()
-	dir := t.TempDir()
-	serviceAccountToken := filepath.Join(dir, "token")
+	serviceAccountToken := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(serviceAccountToken, []byte("pod-service-account-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return Config{
 		Region: "example-region-1", ClientID: "client-id", Username: "machine-user",
 		ServiceAccountTokenFile: serviceAccountToken,
-		CacheFile:               filepath.Join(dir, "state", "model-token"),
 		Endpoint:                endpoint,
-		Now:                     func() time.Time { return *now },
 	}
 }
 
-func TestTokenSignsInWithThePodsTokenAndCachesOnlyTheAccessToken(t *testing.T) {
-	cognito := &fakeCognito{t: t}
-	server := httptest.NewServer(cognito)
+// The fake checks that the custom challenge's ANSWER is the pod's service-account token; Token
+// returns the access token alone, never the refresh or ID token Cognito also returns.
+func TestTokenAnswersTheChallengeWithThePodsTokenAndReturnsOnlyTheAccessToken(t *testing.T) {
+	server := httptest.NewServer(&fakeCognito{t: t})
 	defer server.Close()
-	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-	cfg := testConfig(t, server.URL, &now)
-	if err := os.MkdirAll(filepath.Dir(cfg.CacheFile), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	token, err := Token(context.Background(), cfg)
+	token, err := Token(context.Background(), testConfig(t, server.URL))
 	if err != nil || token != "access-1" {
 		t.Fatalf("Token = %q, %v; want access-1", token, err)
 	}
-	info, err := os.Stat(cfg.CacheFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("cache mode = %o, want 600", info.Mode().Perm())
-	}
-	cached, err := os.ReadFile(cfg.CacheFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, kept := range []string{"refresh-never-kept", "id-never-kept", "pod-service-account-token"} {
-		if strings.Contains(string(cached), kept) {
-			t.Fatalf("cache %s holds %q; only the access token may be kept", cached, kept)
-		}
-	}
-	if entries, _ := os.ReadDir(filepath.Dir(cfg.CacheFile)); len(entries) != 1 {
-		t.Fatalf("state directory holds %d entries, want the cache alone (no temporary file left)", len(entries))
-	}
 }
 
-func TestTokenUsesTheCacheUntilShortlyBeforeExpiryThenSignsInAgain(t *testing.T) {
+// Oh My Pi re-runs the command only after a 401, so every run must sign in afresh rather than hand
+// back a token a gateway just refused.
+func TestTokenSignsInOnEveryRun(t *testing.T) {
 	cognito := &fakeCognito{t: t}
 	server := httptest.NewServer(cognito)
 	defer server.Close()
-	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-	cfg := testConfig(t, server.URL, &now)
-	if err := os.MkdirAll(filepath.Dir(cfg.CacheFile), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	cfg := testConfig(t, server.URL)
 
-	if token, err := Token(context.Background(), cfg); err != nil || token != "access-1" {
-		t.Fatalf("first Token = %q, %v", token, err)
+	for _, want := range []string{"access-1", "access-2"} {
+		if token, err := Token(context.Background(), cfg); err != nil || token != want {
+			t.Fatalf("Token = %q, %v; want %s", token, err, want)
+		}
 	}
-	calls := cognito.callCount()
-	now = now.Add(30 * time.Minute)
-	if token, err := Token(context.Background(), cfg); err != nil || token != "access-1" {
-		t.Fatalf("cached Token = %q, %v; want access-1", token, err)
-	}
-	if cognito.callCount() != calls {
-		t.Fatalf("a cached unexpired token called Cognito %d more times", cognito.callCount()-calls)
-	}
-	now = now.Add(26 * time.Minute) // 4 minutes before expiry
-	if token, err := Token(context.Background(), cfg); err != nil || token != "access-2" {
-		t.Fatalf("near-expiry Token = %q, %v; want a fresh sign-in's access-2", token, err)
+	if cognito.signIns() != 2 {
+		t.Fatalf("two runs made %d sign-ins, want 2", cognito.signIns())
 	}
 }
 
-func TestTokenRefusesAFailedSignInWithoutATokenAndKeepsTheCache(t *testing.T) {
-	cognito := &fakeCognito{t: t, refuse: true}
-	server := httptest.NewServer(cognito)
+func TestTokenRefusesAFailedSignInWithoutAToken(t *testing.T) {
+	server := httptest.NewServer(&fakeCognito{t: t, refuse: true})
 	defer server.Close()
-	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-	cfg := testConfig(t, server.URL, &now)
-	if err := os.MkdirAll(filepath.Dir(cfg.CacheFile), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	stale := `{"accessToken":"expired","expiresAt":"2026-10-03T11:00:00Z"}`
-	if err := os.WriteFile(cfg.CacheFile, []byte(stale), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
-	token, err := Token(context.Background(), cfg)
+	token, err := Token(context.Background(), testConfig(t, server.URL))
 	if err == nil || token != "" || !strings.Contains(err.Error(), "NotAuthorizedException") {
 		t.Fatalf("Token = %q, %v; want no token and Cognito's refusal", token, err)
-	}
-	if body, _ := os.ReadFile(cfg.CacheFile); string(body) != stale {
-		t.Fatalf("a refused sign-in rewrote the cache: %s", body)
 	}
 }
 
 func TestConfigRefusesAMissingSetting(t *testing.T) {
-	now := time.Now()
-	cfg := testConfig(t, "", &now)
+	cfg := testConfig(t, "")
 	cfg.Username = ""
 	if _, err := Token(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "username") {
 		t.Fatalf("Token = %v, want the missing username named", err)
-	}
-}
-
-// The image probe's pod has no state volume: a token that cannot be cached is still returned,
-// with the cache failure named, so the probe can prove the route.
-func TestTokenReturnsAnUncachableTokenWithItsCacheError(t *testing.T) {
-	server := httptest.NewServer(&fakeCognito{t: t})
-	defer server.Close()
-	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-	cfg := testConfig(t, server.URL, &now) // the cache's directory is never created
-
-	token, err := Token(context.Background(), cfg)
-	var cacheErr *CacheError
-	if token != "access-1" || !errors.As(err, &cacheErr) {
-		t.Fatalf("Token = %q, %v; want access-1 with a *CacheError", token, err)
 	}
 }

@@ -53,8 +53,7 @@ func TestModelTokenPrintsTheAccessTokenOrExitsWithTheReason(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run(context.Background(), []string{"legion", "model-token",
 				"--region", "example-region-1", "--client-id", "client-id", "--username", "machine-user",
-				"--service-account-token-file", serviceAccountToken, "--cache-file", filepath.Join(dir, "model-token"),
-				"--endpoint", server.URL}, &stdout, &stderr)
+				"--service-account-token-file", serviceAccountToken, "--endpoint", server.URL}, &stdout, &stderr)
 			if code != tc.code || stdout.String() != tc.stdout || !strings.Contains(stderr.String(), tc.stderr) {
 				t.Fatalf("exit %d stdout %q stderr %q; want %d, %q, and %q", code, stdout.String(), stderr.String(), tc.code, tc.stdout, tc.stderr)
 			}
