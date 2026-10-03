@@ -775,7 +775,6 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		"XDG_CACHE_HOME":         filepath.Join(r.stateDir, "home", ".cache"),
 		"XDG_DATA_HOME":          filepath.Join(r.stateDir, "home", ".local", "share"),
 		"XDG_STATE_HOME":         filepath.Join(r.stateDir, "home", ".local", "state"),
-		"LEGION_DAEMON_API":      "go",
 		"LEGION_TREE":            "LEGION-1",
 		"LEGION_ISSUE":           "LEGION-1",
 		"LEGION_ROLE":            "architect",

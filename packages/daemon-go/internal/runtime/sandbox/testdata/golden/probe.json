@@ -28,7 +28,7 @@
             "command": [
               "/opt/legion/go/bin/legion",
               "probe-image",
-              "--go-daemon-api-version",
+              "--daemon-api-version",
               "3",
               "--plugin-root",
               "/opt/legion/pi-legion-envoy",

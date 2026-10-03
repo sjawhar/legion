@@ -453,7 +453,9 @@ the Postgres `postgres` database for a non-default local port.
 
 `GET /api/v1` (no credential) is the authoritative list: every mounted `/api/v1` route with its
 `method`, `path`, `auth` (`public`, `any`, `human`, or `bearer`), and `description`, sorted by path
-then method. The table below is a summary. An unknown path under `/api`, `/v1`, `/auth`, `/ws`,
+then method. `envoy-dispatch routes` prints the same body from the table alone, with no database
+or listener and never a test hook; the docs site's HTTP API reference is generated from it. The
+table below is a summary. An unknown path under `/api`, `/v1`, `/auth`, `/ws`,
 or `/healthz` is a JSON 404 `{"code":"NOT_FOUND","error":"no route for GET
 /v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell; a missing file
 under `/assets` stays `404 {"error":"not found"}`.
@@ -569,8 +571,8 @@ table's width is rejected as `TABLE_WIDTH`; blank cells there are dropped.
 | `409 ANCHOR_MISSING` | A browser submitted a `mark_id` that the server did not observe in the live tree. |
 | `409 ANCHOR_ORPHANED` | An operation needs a mark whose anchored text has been deleted. |
 | `400 INVALID_ANCHOR` | An anchor must provide exactly one of a nonempty `quote` or nonempty `mark_id`, with its document artifact. |
-| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding text in a cell past its delimiter row's width, which a pipe inside code or a link that is not backslash-escaped makes. Malformed edit replacements report `INVALID_OP`. |
-| `500 DOC_SCHEMA` | The live tree contains a node or mark outside the Proof schema and cannot be rendered safely. |
+| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding text in a cell past its delimiter row's width, which a pipe inside code or a link that is not backslash-escaped makes. A Markdown document nests at most 100 blocks (quotes, lists and their items, typed blocks, and footnote definitions), and one textblock's inline markdown at most 100 marks (emphasis, strong, strikethrough, links, images, and code); deeper content is refused naming the line. An accepted suggestion whose blocks nest within that bound but land deep enough that the document would nest past it is `INVALID_OP` on `replace_with`, naming how many blocks the result nests. Malformed edit replacements report `INVALID_OP`. |
+| `500 DOC_SCHEMA` | The live tree contains a node or mark outside the Proof schema and cannot be rendered safely, such as a node more than 1,000 levels below the document or an attribute value nesting more than 100 arrays and objects. Settlement writes no version of such a tree, and its reads answer this code. The document's room stays live only while a peer holds it: once the last peer leaves, the room is evicted and every later load refuses the tree, so the document websocket's upgrade answers `500`, and edits and uploads to the document answer `DOC_SCHEMA` too. No route repairs such a document (LEGION-469). |
 
 ## Comment errors
 

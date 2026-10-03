@@ -832,8 +832,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		// Which operations the live document did not hold once this write reached it: a
 		// concurrent change that landed after the version was rendered and before the publish is
 		// past undoing, so the edit reports it rather than refusing (LEGION-269). null means the
-		// check reached no verdict - the publish failed and the room is reloading - which is not
-		// the same statement as the empty list.
+		// check reached no verdict - the publish failed and the room is reloading, or the room
+		// holds a tree too deep to read - which is not the same statement as the empty list.
 		"lost_ops": lostOps(ledger, artifact.ID),
 		"token":    edit.Token,
 	}, advice))

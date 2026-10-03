@@ -41237,7 +41237,7 @@ ${followsAsk(askOwner)}`,
       const unchangedOps = edited.unchanged_ops ?? [];
       const unchangedText = unchangedOps.length === 0 ? "" : `; ${unchangedOps.length === 1 ? "operation" : "operations"} ${unchangedOps.join(", ")} changed nothing`;
       const lostOps = edited.lost_ops;
-      const lostText = lostOps === undefined || lostOps !== null && lostOps.length === 0 ? "" : lostOps === null ? "; could not confirm this edit survived, because the live document is being reloaded \u2014 re-read it" : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote \u2014 re-read the document`;
+      const lostText = lostOps === undefined || lostOps !== null && lostOps.length === 0 ? "" : lostOps === null ? "; could not confirm this edit survived, because the live document is being reloaded or holds a tree too deep to read \u2014 re-read it" : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote \u2014 re-read the document`;
       const applied = `${head}${unchangedText}${lostText}`;
       const adviceLines = renderAdvice(input.tool, resolvedTopic(resolved).label, edited.advice, {});
       const tokenTrailer = edited.token === undefined ? [] : [`Document token: ${edited.token}`];

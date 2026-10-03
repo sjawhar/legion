@@ -12,11 +12,18 @@ import (
 
 func (h *harness) controllerSecret(bearer string) *httptest.ResponseRecorder {
 	h.t.Helper()
+	return h.controllerSecretFor(bearer, DaemonAPIVersion)
+}
+
+// controllerSecretFor is the secret request of a `legion controller start` that held its plugin
+// to contract.
+func (h *harness) controllerSecretFor(bearer string, contract int) *httptest.ResponseRecorder {
+	h.t.Helper()
 	header := http.Header{}
 	if bearer != "" {
 		header.Set("Authorization", "Bearer "+bearer)
 	}
-	return h.request(http.MethodPost, "/legion/v1/controller/secret", "{}", header)
+	return h.request(http.MethodPost, "/legion/v1/controller/secret", ControllerSecretRequest{PluginContract: contract}, header)
 }
 
 // mintedSecret is what `legion controller start` fetches with the operator's bearer.
@@ -64,6 +71,41 @@ func TestControllerSecretRefusesWithoutTheOperatorBearer(t *testing.T) {
 	}
 }
 
+// A `legion controller start` whose plugin contract is not this daemon's — a binary replaced
+// before its daemon restarted, or the other way round — is refused naming both, before anything is
+// minted: the mint would revoke the running controller for a controller the registration then
+// refuses. The incumbent's capability, registration and grants are left as they were, and a request
+// that names no contract at all (a `legion` from before the field) is refused the same way.
+func TestAControllerSecretForAnotherContractLeavesTheIncumbentControllerAsItWas(t *testing.T) {
+	h := newCredentialHarness(t, &tokenSource{})
+	capability := h.mintedSecret()
+	registration := h.registeredController(capability, "ses_incumbent")
+	before, _, err := h.store.Controller(context.Background(), testProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantRefusal(t, h.controllerSecretFor(testOperatorToken, DaemonAPIVersion+1), http.StatusConflict, fmt.Sprintf(
+		"legion controller start holds the controller's pi-legion-envoy to daemon API contract %d; this daemon requires %d: run the legion built with this daemon",
+		DaemonAPIVersion+1, DaemonAPIVersion))
+	wantRefusal(t, h.request(http.MethodPost, "/legion/v1/controller/secret", "{}", http.Header{"Authorization": {"Bearer " + testOperatorToken}}),
+		http.StatusConflict, fmt.Sprintf(
+			"legion controller start names no daemon API contract; this daemon requires %d: run the legion built with this daemon", DaemonAPIVersion))
+
+	after, _, err := h.store.Controller(context.Background(), testProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Generation != before.Generation || after.Session != "ses_incumbent" {
+		t.Fatalf("controller record after the refusals = %+v, want generation %d still registered to ses_incumbent", after, before.Generation)
+	}
+	if recorder := h.controllerSessionGrant("ses_incumbent", registration.Secret); recorder.Code != http.StatusOK {
+		t.Fatalf("the incumbent's grant after the refusals = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	// Its capability still registers: a reclaim of the incumbent session is not refused.
+	h.registeredController(capability, "ses_incumbent")
+}
+
 // The capability `legion controller start` fetches is what its Oh My Pi registers with, through
 // the claim registration route: the answer names the project's controller role token, the role
 // `controller`, the capability's generation, and a secret of the registration's own — no tree
@@ -98,10 +140,10 @@ func TestAControllerSpeakingAnotherContractIsRefusedNamingBoth(t *testing.T) {
 	capability := h.mintedSecret()
 	recorder := h.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: capability, SessionID: "ses_controller", OmpSessionFile: "/sessions/ses_controller.jsonl",
-		AgentID: "agent-ses_controller", PluginContract: GoDaemonAPIVersion + 1,
+		AgentID: "agent-ses_controller", PluginContract: DaemonAPIVersion + 1,
 	}, nil)
 	wantRefusal(t, recorder, http.StatusConflict, fmt.Sprintf(
-		"pi-legion-envoy speaks Go daemon API contract %d; this daemon requires %d", GoDaemonAPIVersion+1, GoDaemonAPIVersion))
+		"pi-legion-envoy speaks daemon API contract %d; this daemon requires %d", DaemonAPIVersion+1, DaemonAPIVersion))
 	record, found, err := h.store.Controller(context.Background(), testProject)
 	if err != nil || !found || record.Registered() {
 		t.Fatalf("controller record = %+v, %v, %v, want the capability minted and no session registered", record, found, err)

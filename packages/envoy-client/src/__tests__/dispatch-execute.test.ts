@@ -4677,9 +4677,9 @@ describe("executeDispatchTool", () => {
       unchanged_ops: [],
       lost_ops: null,
     });
-    expect(undetermined.text).toContain(
-      "; could not confirm this edit survived, because the live document is being reloaded — re-read it"
-    );
+    expect(undetermined.text).toContain("could not confirm this edit survived");
+    expect(undetermined.text).not.toContain("no longer has");
+    expect(undetermined.details).toMatchObject({ lost_ops: null });
   });
 
   // A Dispatch server predating the edit token returns none, and the result reads as it always

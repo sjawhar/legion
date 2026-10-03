@@ -81,10 +81,7 @@ func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 	}
 	tree, err := pmdoc.Read(doc.GetXmlFragment(fragmentName))
 	if err != nil {
-		if errors.Is(err, pmdoc.ErrSchema) {
-			return nil, fmt.Errorf("%w: %v", ErrDocSchema, err)
-		}
-		return nil, err
+		return nil, docSchema(err)
 	}
 	return tree, nil
 }
@@ -109,10 +106,7 @@ func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmd
 	}
 	tree, err := pmdoc.ReadInTransaction(txn, fragment)
 	if err != nil {
-		if errors.Is(err, pmdoc.ErrSchema) {
-			return nil, fmt.Errorf("%w: %v", ErrDocSchema, err)
-		}
-		return nil, err
+		return nil, docSchema(err)
 	}
 	return tree, nil
 }
@@ -145,12 +139,21 @@ func rewriteLive(doc *crdt.Doc, origin any, edit func(live *pmdoc.Node) bool) (*
 func renderTree(tree *pmdoc.Node) (string, error) {
 	markdown, err := pmdoc.Render(tree)
 	if err != nil {
-		if errors.Is(err, pmdoc.ErrSchema) {
-			return "", fmt.Errorf("%w: %v", ErrDocSchema, err)
-		}
-		return "", err
+		return "", docSchema(err)
 	}
 	return markdown, nil
+}
+
+// docSchema is err with pmdoc's refusal of what a live document holds (pmdoc.ErrSchema) told as
+// that document outside the schema (ErrDocSchema), which the API serves as DOC_SCHEMA: neither the
+// caller's input nor an internal fault. Every read and walk of a live tree through pmdoc tells its
+// refusal this way, including a walk inside a write's transaction, which a peer can have deepened
+// past the schema's depth bound since the write read the tree.
+func docSchema(err error) error {
+	if errors.Is(err, pmdoc.ErrSchema) {
+		return fmt.Errorf("%w: %v", ErrDocSchema, err)
+	}
+	return err
 }
 
 // closureChangedMarkdown reports whether a document closure that produced after changed the

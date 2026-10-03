@@ -961,6 +961,9 @@ func (s *Service) serviceTransact(transact func(func(*crdt.Transaction)), actor 
 				origin = txn.Origin
 				s.serviceOrigins.Store(origin, actor)
 			}
+			if s.inServiceTransaction != nil {
+				s.inServiceTransaction(txn)
+			}
 			inner(txn)
 		})
 	}

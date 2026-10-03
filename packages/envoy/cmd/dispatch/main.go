@@ -785,6 +785,13 @@ var subcommands = []subcommand{
 	{"census", func(ctx context.Context, _ []string, getenv func(string) string, stdout, stderr io.Writer) int {
 		return census(ctx, getenv("DATABASE_URL"), stdout, stderr)
 	}},
+	{"routes", func(_ context.Context, _ []string, _ func(string) string, stdout, stderr io.Writer) int {
+		if err := api.WriteRouteIndex(stdout); err != nil {
+			fmt.Fprintf(stderr, "routes: %v\n", err)
+			return 1
+		}
+		return 0
+	}},
 }
 
 // runSubcommand runs the subcommand args name and returns its exit code. A name it does not know

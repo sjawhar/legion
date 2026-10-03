@@ -423,17 +423,18 @@ room's other connected participants; the transaction rolls back, so no version, 
 room update or broadcast survives, and the caller re-reads and decides again. After the committed
 write reaches the room, `recordPublishedLoss` reads it again: nothing can be undone there, so the
 response is `200` with `lost_ops` naming the operations whose text the live document does not
-carry, `[]` when everything survived, and `null` when the publish failed and no verdict was
-reached. An operation's text counts as surviving while it is live inside an element carrying the
-block id it was written into - any such element, since a browser move can leave an id on two until
-`EnsureBlockIDs` repairs it - so a concurrent range delete around the agent's own insertion, or a
-keystroke in the same paragraph, is an ordinary success, while a deleted paragraph, a deleted
-ancestor and a browser move that strands the run in another block are all losses. Accepting a
-suggestion carries the same check under the comment's id instead of an operation index: a loss in
-the first window is the same `409` and leaves the suggestion open, and one in the second answers
-`200` with `lost: true`. That path stamps no block ids, because `EnsureBlockIDs` would also repair
-a repeat the live document carries, which is settlement's to repair and a write's to leave as it
-found it.
+carry, `[]` when everything survived, and `null` when no verdict was reached: the publish failed
+and the room is reloading, or the room holds a tree past the schema's depth bound, which a re-read
+answers with `500 DOC_SCHEMA`. An operation's text counts as surviving while it is live inside an
+element carrying the block id it was written into - any such element, since a browser move can
+leave an id on two until `EnsureBlockIDs` repairs it - so a concurrent range delete around the
+agent's own insertion, or a keystroke in the same paragraph, is an ordinary success, while a
+deleted paragraph, a deleted ancestor and a browser move that strands the run in another block are
+all losses. Accepting a suggestion carries the same check under the comment's id instead of an
+operation index: a loss in the first window is the same `409` and leaves the suggestion open, and
+one in the second answers `200` with `lost: true` (`null` when no verdict was reached, as above).
+That path stamps no block ids, because `EnsureBlockIDs` would also repair a repeat the live
+document carries, which is settlement's to repair and a write's to leave as it found it.
 
 Accepting a suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`)
 splices its `replace_with`, which unlike an edit's `with` may be blocks, with ProseMirror's range

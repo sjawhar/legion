@@ -18,7 +18,7 @@ func testPlugin(t *testing.T, dir string, files map[string]string) string {
 	t.Helper()
 	root := filepath.Join(dir, "pi-legion-envoy")
 	all := map[string]string{
-		"package.json": `{"name":"@sjawhar/pi-legion-envoy","version":"0.0.0-test","legion":{"goDaemonApiVersion":3},` +
+		"package.json": `{"name":"@sjawhar/pi-legion-envoy","version":"0.0.0-test","legion":{"daemonApiVersion":3},` +
 			`"omp":{"extensions":["dist/legion.js"],"skills":["dist/skills"]}}`,
 		filepath.Join("dist", "legion.js"): "globalThis[Symbol.for(\"legion.pi-envoy.legion-loaded\")] = import.meta.url;\n" +
 			"export default function () {}\n",
@@ -133,7 +133,7 @@ func TestReadPluginManifestRefusesSkillsItCannotRead(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			manifest := filepath.Join(t.TempDir(), "package.json")
-			if err := os.WriteFile(manifest, []byte(`{"version":"1.0.0","legion":{"goDaemonApiVersion":3}`+testCase.omp+`}`), 0o644); err != nil {
+			if err := os.WriteFile(manifest, []byte(`{"version":"1.0.0","legion":{"daemonApiVersion":3}`+testCase.omp+`}`), 0o644); err != nil {
 				t.Fatal(err)
 			}
 

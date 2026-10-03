@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
 import { z } from "zod";
 import type { PiApi, SessionContext } from "../pi-types";
-import { createGoLegionTool } from "./go-tools";
-
+import { createLegionTool } from "./tools";
 
 function context(sessionId = "ses_208"): SessionContext {
   return {
@@ -37,7 +36,7 @@ const noDocumentLookup = async (_issue: string, reference: string): Promise<stri
   throw new Error(`no document lookup expected for "${reference}"`);
 };
 
-test("the Go Legion tool exposes only the workflow operations each role owns", async () => {
+test("the legion tool exposes only the workflow operations each role owns", async () => {
   const calls: Array<readonly [string, object | undefined]> = [];
   const daemon = () =>
     Object.fromEntries(
@@ -66,11 +65,8 @@ test("the Go Legion tool exposes only the workflow operations each role owns", a
     issues: { "LEGION-208": { key: "LEGION-208", phase: "held" } },
   };
   const daemonWithState = () => ({ ...daemon(), state: async () => state });
-  const run = async (
-    kind: "architect" | "phase-worker",
-    parameters: Record<string, unknown>
-  ) =>
-    createGoLegionTool({
+  const run = async (kind: "architect" | "phase-worker", parameters: Record<string, unknown>) =>
+    createLegionTool({
       pi,
       daemon: daemonWithState as never,
       onPhaseCompleted: () => undefined,
@@ -115,10 +111,7 @@ test("the Go Legion tool exposes only the workflow operations each role owns", a
   await expect(
     run("architect", { op: "release_children", issues: ["LEGION-209"] })
   ).resolves.toMatchObject({ details: {} });
-  expect(calls.at(-1)).toEqual([
-    "waveRelease",
-    { grantId: "grant-208", issues: ["LEGION-209"] },
-  ]);
+  expect(calls.at(-1)).toEqual(["waveRelease", { grantId: "grant-208", issues: ["LEGION-209"] }]);
   await expect(
     run("architect", { op: "retry_or_escalate", issue: "LEGION-208", decision: "retry" })
   ).resolves.toMatchObject({ details: {} });
@@ -137,36 +130,44 @@ test("the Go Legion tool exposes only the workflow operations each role owns", a
     "rootClose",
     { grantId: "grant-208", issue: "LEGION-208", reason: "no change" },
   ]);
-  await expect(run("architect", { op: "close_root", issue: "LEGION-208" })).resolves.toMatchObject(
-    { isError: true }
-  );
+  await expect(run("architect", { op: "close_root", issue: "LEGION-208" })).resolves.toMatchObject({
+    isError: true,
+  });
   await expect(run("architect", { op: "park_child", issue: "LEGION-209" })).resolves.toMatchObject({
     details: {},
   });
   expect(calls.at(-1)).toEqual(["childPark", { grantId: "grant-208", issue: "LEGION-209" }]);
-  await expect(run("architect", { op: "rerun_child", issue: "LEGION-209" })).resolves.toMatchObject({
-    details: {},
-  });
+  await expect(run("architect", { op: "rerun_child", issue: "LEGION-209" })).resolves.toMatchObject(
+    {
+      details: {},
+    }
+  );
   expect(calls.at(-1)).toEqual(["childRerun", { grantId: "grant-208", issue: "LEGION-209" }]);
-  await expect(run("architect", { op: "read_record", issue: "LEGION-208" })).resolves.toMatchObject({
-    details: { record: state.issues["LEGION-208"] },
-  });
+  await expect(run("architect", { op: "read_record", issue: "LEGION-208" })).resolves.toMatchObject(
+    {
+      details: { record: state.issues["LEGION-208"] },
+    }
+  );
   for (const op of ["sign_off", "close_root", "park_child", "rerun_child"]) {
     await expect(run("phase-worker", { op, issue: "LEGION-208" })).resolves.toMatchObject({
       isError: true,
     });
   }
-  await expect(run("architect", { op: "spawn_worker", issue: "LEGION-208" })).resolves.toMatchObject({
+  await expect(
+    run("architect", { op: "spawn_worker", issue: "LEGION-208" })
+  ).resolves.toMatchObject({
     isError: true,
   });
 });
 
-test("a Go Legion workflow refusal tells the agent both its code and message", async () => {
+test("a workflow refusal tells the agent both its code and message", async () => {
   const refusal = Object.assign(
-    new Error("POST /legion/v1/signoff failed with 409 SIGNOFF_EARLY: production check is incomplete"),
+    new Error(
+      "POST /legion/v1/signoff failed with 409 SIGNOFF_EARLY: production check is incomplete"
+    ),
     { code: "SIGNOFF_EARLY", detail: "production check is incomplete" }
   );
-  const tool = createGoLegionTool({
+  const tool = createLegionTool({
     pi,
     daemon: (() => ({
       grant: async () => ({ grantId: "grant-208" }),
@@ -205,7 +206,7 @@ test("register_gate takes the document reference the Dispatch tools take, and re
       },
     }) as never;
   const run = (artifactId: string, issue = "LEGION-208", sessionIssue = "LEGION-208") =>
-    createGoLegionTool({
+    createLegionTool({
       pi,
       daemon,
       onPhaseCompleted: () => undefined,

@@ -73,10 +73,6 @@
             ],
             "env": [
               {
-                "name": "LEGION_DAEMON_API",
-                "value": "go"
-              },
-              {
                 "name": "LEGION_TREE",
                 "value": "LEGION-208"
               },
