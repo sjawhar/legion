@@ -62,12 +62,12 @@ func TestPromptReferencesReadTheSkillsTheAgentsAndTheRolePrompts(t *testing.T) {
 	dir := t.TempDir()
 	root := referencePlugin(t, dir, false, false)
 	agents := filepath.Join(dir, "agents")
+	mkdir(t, agents)
 	for name, content := range map[string]string{
 		"thermonuclear-deep-review.md": "---\nname: thermonuclear-deep-review\ndescription: test\n---\n" +
 			"Load `skill://thermonuclear-deep-review` and use its rubric.\n",
 		"notes.txt": "task(agent=\"not-a-prompt\") skill://not-a-prompt\n",
 	} {
-		mkdir(t, agents)
 		if err := os.WriteFile(filepath.Join(agents, name), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}

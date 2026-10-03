@@ -20,6 +20,7 @@ var (
 	cores              = []string{"planner", "implementer", "tester", "reviewer", "oracle"}
 	composedWithCommon = []string{"planner", "implementer", "tester", "reviewer"}
 	modeNeutral        = append(append([]string{"core/common.md"}, coreFiles()...), "mechanics/interactive.md")
+	reusableParts      = append(slices.Clone(modeNeutral), "mechanics/headless.md")
 	headlessOnly       = []string{
 		"LEGION_", "legion gh", "legion handoff", "handoff_", "legion threads", "envoy_publish", ".legion/",
 		"roleToken", "spawn_worker", "legion-worker",
@@ -61,7 +62,7 @@ func TestCoresAndTheInteractiveFragmentCarryNoHeadlessMechanics(t *testing.T) {
 }
 
 func TestNoReusablePartNamesARepositoryOrLibrary(t *testing.T) {
-	for _, file := range append(slices.Clone(modeNeutral), "mechanics/headless.md") {
+	for _, file := range reusableParts {
 		text := rolePart(t, file)
 		for _, needle := range repoSpecific {
 			if strings.Contains(text, needle) {
@@ -79,7 +80,7 @@ func TestEveryRoleHasItsPartAndTheMergerHasNoCore(t *testing.T) {
 			t.Errorf("roles/%s.md is blank", role)
 		}
 	}
-	for _, file := range append(slices.Clone(modeNeutral), "mechanics/headless.md") {
+	for _, file := range reusableParts {
 		rolePart(t, file)
 	}
 	if _, err := fs.Stat(roleParts, "roles/core/merger.md"); err == nil {
@@ -180,7 +181,7 @@ func TestEachResidueNamesItsRoleAndOnlyTheSkilledRolesReadRequiredSkills(t *test
 // The runtimes join the parts byte for byte, so each starts with a heading and ends with one
 // newline.
 func TestEveryPartStartsWithAHeadingAndEndsWithOneNewline(t *testing.T) {
-	parts := append(slices.Clone(modeNeutral), "mechanics/headless.md")
+	parts := slices.Clone(reusableParts)
 	for _, role := range phaseRoles {
 		parts = append(parts, role+".md")
 	}

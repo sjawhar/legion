@@ -145,7 +145,7 @@ func pane() error {
 }
 
 // systemPromptArgument composes the pane's role prompt as the daemon does (specs.SpawnSpec): the
-// bundle snapshotted under the state directory, the role's parts, then its addressing.
+// role prompts snapshotted under the state directory, the role's parts, then its addressing.
 func systemPromptArgument(req paneRequest, token claim.Token) (string, error) {
 	role := claim.Role(req.Role)
 	if claim.IsTreeArchitect(role, req.Issue, req.Issue) {

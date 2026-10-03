@@ -39,7 +39,7 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // probe Sandbox runs it as a worker runs: with --pod-safety, on the pod's baseline as a worker's
 // shim starts Oh My Pi (podsafety.Apply), its overlay written to a fresh temporary directory since
 // the probe pod mounts no state volume; with --provider-env-dir, each provider key exported after
-// the shim exports them (shim.ReadProviderEnv); and with --role-references, the references
+// it as the shim exports them (shim.ReadProviderEnv); and with --role-references, the references
 // of the role prompts the daemon inlines into its pods (promptrefs.Encode's encoding, decoded as
 // the flags are read). Without it, the probe resolves the references of the role prompts this
 // binary embeds (prompts.RoleReferences). When its environment names a NATS nkey seed (a probe
@@ -69,8 +69,10 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	// The role prompts a pod is handed: the daemon's, when it passes their references, else the
 	// ones this binary embeds.
-	references := prompts.RoleReferences()
-	if *roleReferences != "" {
+	var references promptrefs.Names
+	if *roleReferences == "" {
+		references = prompts.RoleReferences()
+	} else {
 		decoded, err := promptrefs.Decode(*roleReferences)
 		if err != nil {
 			fmt.Fprintf(stderr, "legion probe-image: --role-references: %v\n", err)
