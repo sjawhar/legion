@@ -829,17 +829,60 @@ func hardBreaksAsSpaces(nodes []*Node) []*Node {
 }
 
 // asWritten is doc as its markdown writes it: without the marks the rendering does not write
-// (StripAnchorMarks), and with each line break its textblocks hold in the one form markdown
-// carries. The browser editor holds two more. A soft line break it keeps from a paste (a hard break
-// with isInline) it draws as a space, and one is written: both parsers read a soft break as one too.
-// A line feed in text outside code it draws as a line break (white-space: break-spaces), and a
-// hard break is written, which both parsers read back as the editor draws it, except where nothing
-// but whitespace follows it in its textblock: a hard break there reads back as a backslash, and a
-// line feed as nothing, as trailing whitespace does.
+// (StripAnchorMarks), with each line break its textblocks hold in the one form markdown
+// carries, and with each U+0000 as U+FFFD (writeNulsAsReplacement). The browser editor holds two
+// more line breaks. A soft line break it keeps from a paste (a hard break with isInline) it draws
+// as a space, and one is written: both parsers read a soft break as one too. A line feed in text
+// outside code it draws as a line break (white-space: break-spaces), and a hard break is written,
+// which both parsers read back as the editor draws it, except where nothing but whitespace follows
+// it in its textblock: a hard break there reads back as a backslash, and a line feed as nothing,
+// as trailing whitespace does.
 func asWritten(doc *Node) *Node {
 	out := StripAnchorMarks(doc)
 	writeLineBreaksIn(out)
+	writeNulsAsReplacement(out)
 	return out
+}
+
+// NulAsReplacement is text with each U+0000 written as U+FFFD, which is what CommonMark reads the
+// character as (§2.3 Insecure characters), so no markdown carries one back; PostgreSQL's text and
+// jsonb cannot store one either. A browser's edit can still put one in a live document, past every
+// check a route makes, so text Dispatch takes from a document's tree to store passes through this:
+// its rendering (asWritten), an anchor's quote (FindMark) and an ask block's question and options.
+// A document's settlement and every write that versions it store that text, so one U+0000 left in
+// it as it is would fail all of them.
+func NulAsReplacement(text string) string {
+	if strings.IndexByte(text, 0) < 0 {
+		return text
+	}
+	return strings.ReplaceAll(text, "\x00", "\uFFFD")
+}
+
+// writeNulsAsReplacement writes each U+0000 under node that the rendering would write as it is -
+// in a node's text, or in a string attribute a node or mark writes (a link's href, an image's alt,
+// a code block's language) - as U+FFFD (NulAsReplacement). node is the rendering's own copy
+// (StripAnchorMarks clones each node's and mark's attributes). A typed block's attributes are
+// written quoted (renderTypedAttributes), U+0000 as the escape \x00 that its parser unquotes back,
+// so they keep it.
+func writeNulsAsReplacement(node *Node) {
+	node.Text = NulAsReplacement(node.Text)
+	if !IsTypedBlock(node.Type) {
+		writeNulsInAttrs(node.Attrs)
+	}
+	for _, mark := range node.Marks {
+		writeNulsInAttrs(mark.Attrs)
+	}
+	for _, child := range node.Children {
+		writeNulsAsReplacement(child)
+	}
+}
+
+func writeNulsInAttrs(attrs Attrs) {
+	for name, value := range attrs {
+		if text, ok := value.(string); ok && strings.IndexByte(text, 0) >= 0 {
+			attrs[name] = NulAsReplacement(text)
+		}
+	}
 }
 
 // writeLineBreaksIn gives every textblock under node its line breaks as asWritten writes them.

@@ -686,7 +686,9 @@ func MarkSpans(doc *Node, markType, id string) []Range {
 }
 
 // FindMark finds the first document-contiguous range covered by a mark identity, the first of
-// its MarkSpans, and its text, the runs joined with a space where a block boundary lies between.
+// its MarkSpans, and its text, the runs joined with a space where a block boundary lies between,
+// each U+0000 written as U+FFFD (NulAsReplacement): the text is what an anchor row stores as its
+// quote.
 func FindMark(doc *Node, markType, id string) (Range, string, bool) {
 	spans := MarkSpans(doc, markType, id)
 	if len(spans) == 0 {
@@ -709,7 +711,7 @@ func FindMark(doc *Node, markType, id string) (Range, string, bool) {
 		last = end
 		return true
 	})
-	return marked, quote.String(), true
+	return marked, NulAsReplacement(quote.String()), true
 }
 
 // anchorMarkTypes are the marks an ask or comment row anchors to: its quote is the text they

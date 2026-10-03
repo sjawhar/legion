@@ -999,9 +999,15 @@ markdown whether it becomes blocks or table rows, a retype's attributes); in a s
 typed block (`SetBlockAttributes`, `pmdoc.LineFeedAttrs`), and in an answer's text, which its
 ask block carries; and in a block ask's edited question and options. The browser editor's own
 updates cannot carry a carriage return. No stored document holds one, and `pmdoc` handles line
-feeds alone. Marks are read as that parser reads them, as a set, where goldmark nests them: a mark
-opened where the same mark is already open adds nothing, and its close ends the mark for the rest
-of the text around it, up to the node that opened it (`parseInlineMarks`), so `*x *y* z*` is
+feeds alone. Caller text never holds a U+0000, which the API refuses (`NUL_CHARACTER`, below); a
+browser's update can put one in the live document, and text Dispatch takes from the tree to store
+carries it as U+FFFD, which is what CommonMark reads one as (`pmdoc.NulAsReplacement`): the
+rendering a version stores, an anchor's quote (`FindMark`) and an ask block's question and options
+(`docs` `nodeText`). A typed block's attribute is written quoted, U+0000 as the escape `\x00` that
+its parser unquotes back. Marks are read as that parser reads them, as a set, where goldmark nests
+them: a mark opened where the same mark is already open adds nothing, and its close ends the mark
+for the rest of the text around it, up to the node that opened it (`parseInlineMarks`), so
+`*x *y* z*` is
 `x y` in emphasis and ` z` without, and `****a****` is strong once. An image is read without the
 marks around it, a link among them, as the browser editor's store (y-prosemirror, which keeps a
 mark on text alone) holds it, so a linked image is stored without its link (LEGION-365) rather than
@@ -1319,6 +1325,7 @@ canonical markdown.
 - A reply joins its thread the same way on both write paths. `threadHeadOf` (`api/comment_create.go`) climbs `reply_to` from an already-locked comment to the head of its thread and, when that head is an ask, the reply stores the ask's `ask_id` with `reply_to` null and the reply's `turn`; `POST .../comments` reaches it through `normalizeCommentThreadTarget`, which validates the request's `reply_to` first, and `POST /api/v1/comments/{id}/reply` calls it directly with the comment it already holds locked, so a session answering a mention inside an ask's thread lands in that thread instead of in a `reply_to` chain no ask read selects (`store/migrations/0043_comment_reply_ask_id.up.sql` moves the rows written before that, and gives each the turn 0028 gave every other ask reply). `comment.delivery` payloads carry the `ask_id` of the comment they report on, so a receipt names the thread it changed. Neither event is published to the ask's followers: `publishFollowerRoutes` routes `ask.answered`, `ask.edited`, `ask.handed_back`, `ask.resolved` and `comment.created`/`resolved`/`reopened`/`edited` with an `ask_id`, and no other type.
 - Keep Envoy API-level with OpenCode. Do not add DB introspection or OpenCode-specific hidden coupling unless there is no API path.
 - Dispatch caps (`CAP_EXCEEDED` 400) read `<field> is N characters over the M-character limit (L/M)` (`capExceededError`, UTF-16 units) or `<field> is N over the M-item limit (C/M)` for counts; `GET /asks/{id}`, `/comments/{id}`, and `/issues/{key}/messages/{id}` answer a non-uuid id with 400 `<KIND>_ID_INPUT` (`requireUUIDPath`); a document-edit quote miss (`TARGET_NOT_FOUND`) names the three nearest blocks and a `# Title` quote selects a heading. The outbox `payload_summary` of `ask.answered` is the answer rendering (`<selected> - <text>`), not the question.
+- Caller text holding U+0000, which PostgreSQL's text and jsonb cannot store, is `400 NUL_CHARACTER` reading `<field> holds a NUL character (U+0000) at character N, which Dispatch cannot store` (`api/nul_input.go`, N in UTF-16 units from 1) before anything is written. The input layer checks it once, not each route: `decodeJSON` walks every string and member name of the body it decoded (`nulInJSON`, naming `title`, `options[1].label`, `ops[0].attributes.title`), and so do the two readers that read a JSON body themselves (an artifact upload's, a credential relay's); a multipart upload checks every field and its markdown file (`file`); and `Register` wraps every route, the document websocket's too, so a path or query parameter is refused before its handler runs (`refuseNulParameters`: `path parameter session_id`, `query parameter label`). A new reader of caller text goes through one of these.
 - Listener message APIs preserve the human `message` as a one-line `payload_summary` of at most 160 characters; when it differs, the complete message is `payload`. A supplied `payload` for `/v1/messages/publish` wins over the derived value.
 - Ghost Wispr only publishes `session_started`, `session_ended`, and `summary_ready`; other verified events should return 200, log the skip, and not publish.
 - `ENVOY_GHOSTWISPR_SIGNING_SECRET` is optional for trusted Ghost Wispr deployments; when unset, skip signature verification explicitly rather than half-verifying missing headers.

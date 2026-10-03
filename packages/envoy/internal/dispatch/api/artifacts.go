@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -123,12 +124,20 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "a markdown document is at most 1 MiB; a larger file is stored as a binary artifact under another content type")
 		return
 	}
+	// A markdown document is stored as text. Its inline content was read for U+0000 as a JSON
+	// string, so only a multipart file reaches here holding one.
+	if kind == "doc" && bytes.IndexByte(input.content, 0) >= 0 {
+		refusal := nulCharacter("file", string(input.content))
+		writeError(w, refusal.code, refusal.status, refusal.message)
+		return
+	}
 	s.storeArtifact(w, r, input, actor, kind, target)
 }
 
 func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (artifactUploadInput, bool) {
 	var body jsonArtifactUpload
-	decoder := json.NewDecoder(r.Body)
+	var read bytes.Buffer
+	decoder := json.NewDecoder(io.TeeReader(r.Body, &read))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&body); err != nil {
 		var maxBytesError *http.MaxBytesError
@@ -141,6 +150,10 @@ func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (art
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		writeError(w, "INVALID_JSON", http.StatusBadRequest, "request body must contain one JSON value")
+		return artifactUploadInput{}, false
+	}
+	if refusal := nulInJSON("", read.Bytes()); refusal != nil {
+		writeError(w, refusal.code, refusal.status, refusal.message)
 		return artifactUploadInput{}, false
 	}
 	if body.Primary != nil {
@@ -168,11 +181,19 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
 		return artifactUploadInput{}, false
 	}
+	if refusal := nulInForm(r.MultipartForm.Value); refusal != nil {
+		writeError(w, refusal.code, refusal.status, refusal.message)
+		return artifactUploadInput{}, false
+	}
 	var supplied *model.Actor
 	if raw := r.FormValue("actor"); raw != "" {
 		var actor model.Actor
 		if err := json.Unmarshal([]byte(raw), &actor); err != nil {
 			writeError(w, "INVALID_JSON", http.StatusBadRequest, "invalid multipart actor")
+			return artifactUploadInput{}, false
+		}
+		if refusal := nulInJSON("actor", []byte(raw)); refusal != nil {
+			writeError(w, refusal.code, refusal.status, refusal.message)
 			return artifactUploadInput{}, false
 		}
 		supplied = &actor

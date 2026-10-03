@@ -487,9 +487,11 @@ func parseAskBlock(node *pmdoc.Node) (askBlock, error) {
 	return askBlock{node: node, id: blockID, question: question, options: options, multiple: multiple, urgency: urgency}, nil
 }
 
+// nodeText is node's text as an ask row stores it: hard breaks as line feeds, and each U+0000 a
+// browser edit left as U+FFFD (pmdoc.NulAsReplacement), since the row's columns cannot hold one.
 func nodeText(node *pmdoc.Node) string {
 	if node.Type == "text" {
-		return node.Text
+		return pmdoc.NulAsReplacement(node.Text)
 	}
 	if node.Type == "hardbreak" {
 		return "\n"

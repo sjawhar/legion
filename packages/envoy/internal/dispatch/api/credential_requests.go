@@ -60,11 +60,18 @@ func resolveApproverMe(w http.ResponseWriter, r *http.Request, actor model.Actor
 }
 
 // readRelayBody reads a mutation's body verbatim, capped like every other JSON mutation, and
-// hands it to the broker unparsed: Dispatch relays, it does not model these shapes.
+// hands it to the broker unparsed: Dispatch relays, it does not model these shapes. A string the
+// body holds that carries U+0000 is refused as decodeJSON refuses one: the broker reads these
+// strings against PostgreSQL too (a machine login's typed code is a query's parameter there), and
+// Dispatch is these routes' only caller.
 func readRelayBody(w http.ResponseWriter, r *http.Request) (json.RawMessage, bool) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxJSONRequestBytes))
 	if err != nil {
 		writeError(w, "REQUEST_TOO_LARGE", http.StatusRequestEntityTooLarge, "request body exceeds the size limit")
+		return nil, false
+	}
+	if refusal := nulInJSON("", body); refusal != nil {
+		writeError(w, refusal.code, refusal.status, refusal.message)
 		return nil, false
 	}
 	return json.RawMessage(body), true
