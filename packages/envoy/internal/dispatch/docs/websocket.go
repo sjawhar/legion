@@ -129,7 +129,7 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 }
 
 func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) error {
-	_, err := a.store.Compact(ctx, room, 500)
+	_, err := a.store.Compact(ctx, room, compactKeep)
 	return err
 }
 

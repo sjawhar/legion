@@ -104,6 +104,22 @@ any other error, a panic (`pmdoc.ErrPanic`) among them, is `pmdoc`'s own and ans
 a browser edit makes is not checked, so its rendering can still fail to read back when it is
 uploaded again.
 
+A document's `doc_updates` rows are its Yjs updates in the order they were stored, and nothing
+reads one back alone: `PgVersioned.Load` and `MaterializeAt` apply them one at a time, oldest
+first, to one document that collects garbage and return that document's encoding (`stateThrough`),
+so a deleted item keeps its id and length and none of its content, and a load holds the live
+document and the one update it is applying, however much the stored updates inserted and later
+deleted (LEGION-496). Nothing reads deleted content back from the store: every document built from
+it is a `crdt.New`, which drops an item's content in the transaction that deletes it, the one that
+applies a load included; a version stores its own markdown in `artifact_versions`; and no route
+reads an update or a state before the head. What a load's document parks - an update whose
+dependency no stored update supplies, a delete of an item none holds - is merged back into the
+state, since the room that loads it parks it again until a peer sends what it waits on.
+Compaction (`Compact`, which ygo runs as a room closes and as the server shuts down, and the outbox
+runs over every document every 24 hours, `CompactAll`) folds the whole log into one row holding
+that state (`compactKeep`), whose `content_changed` says whether any row it folded past the latest
+version's cursor changed content.
+
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
 after; the one measure the room's update observer, `updateChangesMarkdown`, a transactional live

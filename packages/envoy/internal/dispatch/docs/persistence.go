@@ -26,7 +26,7 @@ func NewPgVersioned(database *store.Store) *PgVersioned {
 	return &PgVersioned{store: database}
 }
 
-// Load returns the room's materialized head, constrained by a pending prune
+// Load returns the room's state at its head (stateThrough), constrained by a pending prune
 // checkpoint when one exists.
 func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	if err := ctx.Err(); err != nil {
@@ -48,7 +48,7 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	if head == 0 {
 		return persistence.LoadResult{}, tx.Commit(ctx)
 	}
-	update, err := p.mergeUpTo(ctx, tx, room, head)
+	update, err := stateThrough(ctx, tx, room, head)
 	if err != nil {
 		return persistence.LoadResult{}, err
 	}
@@ -280,8 +280,8 @@ func (p *PgVersioned) GetUpdate(ctx context.Context, room string, version persis
 	return update, persistence.VersionMeta{Version: version, UpdatedAt: updatedAt}, true, nil
 }
 
-// MaterializeAt rebuilds the V1 state at version, or the latest state before
-// it when a requested version is newer than the room head.
+// MaterializeAt rebuilds the V1 state at version (stateThrough), or the latest state before it
+// when a requested version is newer than the room head.
 func (p *PgVersioned) MaterializeAt(ctx context.Context, room string, version persistence.Version) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -307,7 +307,7 @@ func (p *PgVersioned) MaterializeAt(ctx context.Context, room string, version pe
 	if version > head {
 		version = head
 	}
-	update, err := p.mergeUpTo(ctx, tx, room, version)
+	update, err := stateThrough(ctx, tx, room, version)
 	if err != nil {
 		return nil, err
 	}
@@ -418,8 +418,10 @@ func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persis
 	})
 }
 
-// Compact folds older updates into the oldest retained record without changing
-// the room's materialized state.
+// Compact folds a room's oldest updates into the oldest record it keeps, which then holds their
+// state (stateThrough): what the document still holds of them, and none of the content they
+// inserted that a later update deleted. The room's state is unchanged, and so is every retained
+// version's.
 func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -448,25 +450,23 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		`, room).Scan(&coveredCursor); err != nil {
 			return fmt.Errorf("read compactable document version cursor: %w", err)
 		}
+		// The list holds versions alone: stateThrough reads the updates it folds one at a time.
 		rows, err := tx.Query(ctx, `
-			select version, update, content_changed from doc_updates where artifact_id = $1 order by version asc
+			select version, content_changed from doc_updates where artifact_id = $1 order by version asc
 		`, room)
 		if err != nil {
 			return fmt.Errorf("list compactable document updates: %w", err)
 		}
 		var versions []int64
-		var updates [][]byte
 		var contentClasses []bool
 		for rows.Next() {
 			var version int64
-			var update []byte
 			var contentChanged bool
-			if err := rows.Scan(&version, &update, &contentChanged); err != nil {
+			if err := rows.Scan(&version, &contentChanged); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan compactable document update: %w", err)
 			}
 			versions = append(versions, version)
-			updates = append(updates, update)
 			contentClasses = append(contentClasses, contentChanged)
 		}
 		if err := rows.Err(); err != nil {
@@ -478,9 +478,9 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 			return tx.Commit(ctx)
 		}
 		deleted = len(versions) - keep
-		merged, err := crdt.MergeUpdatesV1(updates[:deleted+1]...)
+		folded, err := stateThrough(ctx, tx, room, persistence.Version(versions[deleted]))
 		if err != nil {
-			return fmt.Errorf("merge compacted document updates: %w", err)
+			return fmt.Errorf("fold compacted document updates: %w", err)
 		}
 		contentChanged := false
 		for index, class := range contentClasses[:deleted+1] {
@@ -488,7 +488,7 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		}
 		if _, err := tx.Exec(ctx, `
 			update doc_updates set update = $3, content_changed = $4 where artifact_id = $1 and version = $2
-		`, room, versions[deleted], merged, contentChanged); err != nil {
+		`, room, versions[deleted], folded, contentChanged); err != nil {
 			return fmt.Errorf("fold compacted document updates: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
@@ -545,35 +545,103 @@ func (p *PgVersioned) head(ctx context.Context, q Queryer, room string) (persist
 	return persistence.Version(version), nil
 }
 
-func (p *PgVersioned) mergeUpTo(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) ([]byte, error) {
+// stateThrough returns the state the room's stored updates through version make, as one V1
+// update. It applies them one at a time, oldest first, to one document that collects garbage, and
+// encodes that document, so a deleted item keeps its id and length but none of its content, and
+// what it holds at once is that document and the one update being applied, however much the
+// stored updates inserted and later deleted. Nothing reads deleted content back from the store:
+// every document built from it - a room ygo's server loads, a read, a fork, a validation - is a
+// crdt.New, which collects an item's content in the transaction that deletes it, the transaction
+// that applies a load included.
+//
+// A document parks an update whose dependencies have not arrived, and a delete of an item it does
+// not hold, and its encoding carries neither. A room that loads the state parks them again until a
+// peer sends what they wait on, so stateThrough keeps them: when the document parked anything, it
+// merges the encoding with each stored update's structs past the document's state vector and with
+// every stored update's deletes.
+//
+// A log of one update is returned as stored: compaction leaves the state as one update, and a
+// document's first update deletes nothing an earlier one inserted.
+func stateThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) ([]byte, error) {
+	doc := crdt.New()
+	apply := func(update []byte) error {
+		if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
+			return fmt.Errorf("apply document update: %w", err)
+		}
+		return nil
+	}
+	var first []byte
+	seen := 0
+	read, err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
+		seen++
+		switch seen {
+		case 1:
+			first = update
+			return nil
+		case 2:
+			if err := apply(first); err != nil {
+				return err
+			}
+			first = nil
+		}
+		return apply(update)
+	})
+	if err != nil || read == 0 {
+		return nil, err
+	}
+	if read == 1 {
+		return first, nil
+	}
+	state := crdt.EncodeStateAsUpdateV1(doc, nil)
+	if parked := doc.PendingStats(); parked.Items == 0 && parked.DeleteRanges == 0 {
+		return state, nil
+	}
+	integrated := doc.StateVector()
+	parts := [][]byte{state}
+	if _, err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
+		rest, err := crdt.DiffUpdateV1(update, integrated)
+		if err != nil {
+			return fmt.Errorf("read parked document update: %w", err)
+		}
+		parts = append(parts, rest)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	kept, err := crdt.MergeUpdatesV1(parts...)
+	if err != nil {
+		return nil, fmt.Errorf("keep parked document updates: %w", err)
+	}
+	return kept, nil
+}
+
+// eachUpdateThrough calls use with each of the room's stored updates through version, oldest first,
+// reading one row at a time, and reports how many it read.
+func eachUpdateThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version, use func([]byte) error) (int, error) {
 	rows, err := tx.Query(ctx, `
 		select update from doc_updates
 		where artifact_id = $1 and version <= $2
 		order by version asc
 	`, room, int64(version))
 	if err != nil {
-		return nil, fmt.Errorf("read document updates: %w", err)
+		return 0, fmt.Errorf("read document updates: %w", err)
 	}
 	defer rows.Close()
-	var updates [][]byte
+	read := 0
 	for rows.Next() {
 		var update []byte
 		if err := rows.Scan(&update); err != nil {
-			return nil, fmt.Errorf("scan document update: %w", err)
+			return read, fmt.Errorf("scan document update: %w", err)
 		}
-		updates = append(updates, update)
+		if err := use(update); err != nil {
+			return read, err
+		}
+		read++
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read document updates: %w", err)
+		return read, fmt.Errorf("read document updates: %w", err)
 	}
-	if len(updates) == 0 {
-		return nil, nil
-	}
-	update, err := crdt.MergeUpdatesV1(updates...)
-	if err != nil {
-		return nil, fmt.Errorf("merge document updates: %w", err)
-	}
-	return update, nil
+	return read, nil
 }
 
 func (p *PgVersioned) recoverPruneTx(ctx context.Context, tx pgx.Tx, room string) error {
@@ -623,14 +691,21 @@ func (p *PgVersioned) pool() *store.Pool {
 	return p.store.Pool
 }
 
-func (s *Service) CompactAll(ctx context.Context, keep int) error {
+// compactKeep is how many stored updates a room's compaction leaves: one, the room's state. Nothing
+// reads a stored update back but through stateThrough at the head - a version keeps its own
+// markdown, and no route reads an update or a state before the head - so an update kept past the
+// fold would hold only bytes every load applies.
+const compactKeep = 1
+
+// CompactAll folds every document's stored updates into its state.
+func (s *Service) CompactAll(ctx context.Context) error {
 	ctx = store.WithTransactionTracking(ctx)
 	rooms, err := s.documentRooms(ctx, "document rooms", `select id::text from artifacts where kind = 'doc'`)
 	if err != nil {
 		return err
 	}
 	for _, artifactID := range rooms {
-		if _, err := s.persistence.Compact(ctx, artifactID, keep); err != nil {
+		if _, err := s.persistence.Compact(ctx, artifactID, compactKeep); err != nil {
 			return fmt.Errorf("compact document %s: %w", artifactID, err)
 		}
 	}
