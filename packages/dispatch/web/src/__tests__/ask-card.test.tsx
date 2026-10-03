@@ -1516,31 +1516,80 @@ test("a resolved ask keeps its question and options and carries a resolution bad
   }
 });
 
-test("a collapsed thread shows the reply count and expands to the thread on demand", async () => {
-  const input = ask();
-  const thread = async () => ({
-    ask: input,
-    edits: [],
-    followers: [],
-    replies: [reply({ body: "Any update?" }), reply({ body: "Soon.", id: "c2" })],
-  });
-  const { view } = renderCard(<AskCard ask={input} getAskThread={thread} thread="collapsed" />);
+test("AskCard shows the newest two replies, expands older replies, and puts a fresh reply first", async () => {
+  const input = answered(ask(), ["Ship"]);
+  let replies = [
+    reply({ body: "Oldest reply", created_at: "2026-09-09T00:01:00Z", id: "comment-1" }),
+    reply({ body: "Older reply", created_at: "2026-09-09T00:02:00Z", id: "comment-2" }),
+    reply({ body: "Middle reply", created_at: "2026-09-09T00:03:00Z", id: "comment-3" }),
+    reply({ body: "Newer reply", created_at: "2026-09-09T00:04:00Z", id: "comment-4" }),
+    reply({ body: "Newest reply", created_at: "2026-09-09T00:05:00Z", id: "comment-5" }),
+  ];
+  const thread = async () => ({ ask: input, edits: [], followers: [], replies });
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      createReply={async () => {
+        const fresh = reply({
+          body: "Fresh reply",
+          created_at: "2026-09-09T00:06:00Z",
+          id: "comment-6",
+        });
+        replies = [...replies, fresh];
+        return fresh;
+      }}
+      getAskThread={thread}
+      thread="collapsed"
+    />
+  );
+
+  const shownReplyBodies = (container: HTMLElement) =>
+    Array.from(
+      container.querySelectorAll("li"),
+      (item) => item.querySelector(".dispatch-markdown")?.textContent
+    );
 
   try {
-    const trigger = await view.findByRole("button", { name: "2 replies" });
-    expect(trigger.getAttribute("aria-expanded")).toBe("false");
-    expect(view.queryByText("Any update?")).toBeNull();
+    const threadElement = await view.findByTestId("thread-ask-1");
+    await waitFor(() =>
+      expect(shownReplyBodies(threadElement)).toEqual(["Newest reply", "Newer reply"])
+    );
+    expect(view.queryByText("Middle reply")).toBeNull();
 
-    fireEvent.click(trigger);
-    await waitFor(() => expect(view.getByText("Any update?")).toBeTruthy());
-    expect(trigger.getAttribute("aria-expanded")).toBe("true");
-    expect(view.queryByLabelText("Reply")).toBeNull();
+    const showMore = view.getByRole("button", { name: "Show 3 more replies" });
+    expect(showMore.getAttribute("aria-expanded")).toBe("false");
+    showMore.focus();
+    fireEvent.click(showMore);
+    await waitFor(() =>
+      expect(shownReplyBodies(threadElement)).toEqual([
+        "Newest reply",
+        "Newer reply",
+        "Middle reply",
+        "Older reply",
+        "Oldest reply",
+      ])
+    );
+    const showFewer = view.getByRole("button", { name: "Show fewer replies" });
+    expect(document.activeElement).toBe(showFewer);
+    expect(showFewer.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(showFewer);
+    await waitFor(() =>
+      expect(shownReplyBodies(threadElement)).toEqual(["Newest reply", "Newer reply"])
+    );
+
+    fireEvent.click(view.getByRole("button", { name: "Reply" }));
+    const replyField = view.getByLabelText("Reply");
+    fireEvent.change(replyField, { target: { value: "Fresh reply" } });
+    fireEvent.submit(replyField.closest("form") as HTMLFormElement);
+    await waitFor(() =>
+      expect(shownReplyBodies(threadElement)).toEqual(["Fresh reply", "Newest reply"])
+    );
   } finally {
     view.unmount();
   }
 });
 
-test("a collapsed thread with no replies offers Reply only on an answered ask, and a failed thread fetch offers a retry", async () => {
+test("AskCard with no replies offers Reply only after an answer, and retries a failed thread fetch", async () => {
   const openInput = ask();
   const { view: open } = renderCard(
     <AskCard ask={openInput} getAskThread={emptyThread(openInput)} thread="collapsed" />

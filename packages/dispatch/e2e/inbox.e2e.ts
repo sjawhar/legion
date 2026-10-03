@@ -17,7 +17,7 @@ import {
 } from "./api";
 import { recordClipboard } from "./clipboard";
 import { setPendingCredentialRequests } from "./fake-broker-helpers";
-import { resetDatabase } from "./seed";
+import { resetDatabase, setCreatedAt } from "./seed";
 import { asUser } from "./users";
 
 const session = {
@@ -100,6 +100,72 @@ test("ask cards show urgency accents and copy their session ID, title, and tmux 
     } else {
       await page.screenshot({ fullPage: true, path: testInfo.outputPath("askcard-1280.png") });
     }
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an ask thread shows its newest two replies, expands older replies, and puts a fresh reply first", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Newest replies" });
+  const ask = await createAsk(issue.key, { question: "Which reply should lead?" }, session);
+  const replies = await Promise.all(
+    ["Oldest reply", "Older reply", "Middle reply", "Newer reply", "Newest reply"].map((body) =>
+      createComment(issue.key, { ask_id: ask.id, body }, session)
+    )
+  );
+  await Promise.all(
+    replies.map((reply, index) =>
+      setCreatedAt("comments", reply.id, `2026-10-03T00:00:0${index + 1}Z`)
+    )
+  );
+  expect((await getAsk(ask.id)).replies.map((reply) => reply.body)).toEqual([
+    "Oldest reply",
+    "Older reply",
+    "Middle reply",
+    "Newer reply",
+    "Newest reply",
+  ]);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${ask.id}`);
+    const thread = card.getByRole("region", { name: "Replies" });
+    const replyBodies = () => thread.locator("li > div > .dispatch-markdown").allTextContents();
+
+    await expect.poll(replyBodies).toEqual(["Newest reply", "Newer reply"]);
+    await expect(card.getByText("Middle reply", { exact: true })).toHaveCount(0);
+    const showMore = card.getByRole("button", { name: "Show 3 more replies" });
+    await expect(showMore).toHaveAttribute("aria-expanded", "false");
+    const before = testInfo.outputPath(`ask-thread-before-${testInfo.project.name}.png`);
+    await page.screenshot({ path: before, fullPage: true });
+    await testInfo.attach(`ask thread before (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: before,
+    });
+
+    await showMore.click();
+    await expect
+      .poll(replyBodies)
+      .toEqual(["Newest reply", "Newer reply", "Middle reply", "Older reply", "Oldest reply"]);
+    const showFewer = card.getByRole("button", { name: "Show fewer replies" });
+    await expect(showFewer).toHaveAttribute("aria-expanded", "true");
+    await showFewer.click();
+    await expect.poll(replyBodies).toEqual(["Newest reply", "Newer reply"]);
+
+    await card.getByLabel("Your answer").fill("Fresh reply");
+    await card.getByRole("button", { name: "Ask back" }).click();
+    await expect.poll(replyBodies).toEqual(["Fresh reply", "Newest reply"]);
+    const after = testInfo.outputPath(`ask-thread-after-${testInfo.project.name}.png`);
+    await page.screenshot({ path: after, fullPage: true });
+    await testInfo.attach(`ask thread after (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: after,
+    });
   } finally {
     await alice.close();
   }

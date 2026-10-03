@@ -1351,7 +1351,7 @@ export function ConversationTab({
                       two-row composer here is the question, its options and its answer
                       controls twice on one screen. The timeline is the record: it carries the
                       compact density, whose options answer in one click and whose note field
-                      is one disclosure away. */}
+                      stays behind its own disclosure. */}
                   <AskCard ask={item.ask} thread="collapsed" variant="compact" />
                 </div>
                 <TurnPin disabled={hasFailedOps} onPin={onPin} pinned={pinned} />

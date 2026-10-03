@@ -17,7 +17,7 @@ export function AskThreadDisclosure({
   createReply,
   embedded = false,
 }: AskThreadDisclosureProps): ReactNode {
-  const [open, setOpen] = useState(false);
+  const [composerOpen, setComposerOpen] = useState(false);
 
   if (thread.isError) {
     const message =
@@ -37,34 +37,29 @@ export function AskThreadDisclosure({
     );
   }
 
-  const count = thread.data?.replies.length ?? 0;
-  // With no replies there is nothing to disclose; the only reason to open the thread is the
-  // answered-ask Reply composer. An open ask's composer lives in the card, a resolved ask has
-  // none, so neither gets a trigger here.
-  if (count === 0 && ask.state !== "answered") return null;
+  const replyCount = thread.data?.replies.length ?? 0;
+  if (replyCount === 0 && ask.state !== "answered") return null;
+
   return (
     <>
-      <button
-        aria-controls={`thread-${ask.id}`}
-        aria-expanded={open}
-        className={`mt-3 min-h-11 text-sm font-medium ${linkText} ${linkHoverText}`}
-        onClick={() => {
-          setOpen((current) => !current);
-        }}
-        type="button"
-      >
-        {count === 0 ? "Reply" : count === 1 ? "1 reply" : `${count} replies`}
-      </button>
-      {open ? (
-        <div id={`thread-${ask.id}`}>
-          <AskThread
-            ask={ask}
-            createReply={createReply}
-            embedded={embedded}
-            showResolution={false}
-            thread={thread}
-          />
-        </div>
+      {replyCount > 0 || composerOpen ? (
+        <AskThread
+          ask={ask}
+          createReply={createReply}
+          embedded={embedded}
+          showComposer={composerOpen}
+          thread={thread}
+        />
+      ) : null}
+      {ask.state === "answered" ? (
+        <button
+          aria-expanded={composerOpen}
+          className={`mt-3 min-h-11 text-sm font-medium ${linkText} ${linkHoverText}`}
+          onClick={() => setComposerOpen((open) => !open)}
+          type="button"
+        >
+          Reply
+        </button>
       ) : null}
     </>
   );

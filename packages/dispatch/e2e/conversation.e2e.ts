@@ -446,8 +446,6 @@ test("Conversation coalesces answered asks and toggles activity without remounti
     const refreshedTurn = page
       .getByRole("region", { name: "Conversation" })
       .locator(`[data-turn="ask:${ask.id}"]`);
-    await expect(refreshedTurn.getByRole("button", { name: "1 reply" })).toBeVisible();
-    await refreshedTurn.getByRole("button", { name: "1 reply" }).click();
     await expect(refreshedTurn).toContainText("Thanks");
 
     const screenshot = testInfo.outputPath("conversation-ask-and-activity.png");

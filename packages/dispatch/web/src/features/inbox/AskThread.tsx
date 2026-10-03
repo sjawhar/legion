@@ -3,7 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
 
 import { api } from "../../api/client";
-import type { Ask, AskRead, AskResolution, Comment, CreateCommentInput } from "../../api/types";
+import type { Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import {
@@ -11,28 +11,35 @@ import {
   borderStrong,
   enabledCardHoverBorder,
   inputClasses,
+  linkHoverText,
+  linkText,
   surfaceMutedBg,
   textMutedOnSurfaceMuted,
   textPrimaryOnSurfaceMuted,
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
-  textSecondaryOnSurfaceMuted,
 } from "../../theme/classes";
-import { actorLabel, describeAskResolutionActor } from "../refs/actor";
+import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 
 const createReply = (issueKey: string, input: CreateCommentInput): Promise<Comment> =>
   api.createComment(issueKey, input);
 
-function resolvedInfo(ask: Ask): AskResolution | null {
-  if (ask.state !== "resolved") return null;
-  if (ask.resolution === undefined) throw new Error("resolved ask is missing its resolution");
-  return ask.resolution;
+function AskReply({ comment }: { comment: Comment }): ReactNode {
+  return (
+    <li className={`rounded-lg p-2 text-sm ${surfaceMutedBg}`}>
+      <div className={textPrimaryOnSurfaceMuted}>
+        <MarkdownBody markdown={comment.body} />
+      </div>
+      <p className={`mt-1 text-xs ${textMutedOnSurfaceMuted}`}>
+        {actorLabel(comment.author)} · <Timestamp at={comment.created_at} />
+      </p>
+    </li>
+  );
 }
-
 /** AskCard owns the `["ask-thread", ask.id]` query, initializing it from an Inbox row when
- *  available; its inline and collapsed thread views share that query without a duplicate read. */
+ *  available; every card renders the shared thread without a duplicate read. */
 export type AskThreadQuery = UseQueryResult<AskRead, Error>;
 
 interface UseAskThreadResult {
@@ -99,22 +106,24 @@ export interface AskThreadProps {
   /** The shared ask-thread query AskCard owns; this component never requests thread data itself. */
   thread: AskThreadQuery;
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
-  showResolution?: boolean;
+  /** Compact cards keep their answered-ask composer behind their Reply control. */
+  showComposer?: boolean;
   /** A thread inside an open ask card inherits the card's compact flow. */
   embedded?: boolean;
 }
 
 /**
  * The reply thread under a question: every comment that replies directly to
- * the ask (Comment.ask_id) plus their own reply chains, oldest first. Answered asks keep a
- * plain reply composer; open asks reserve their single composer for answering or asking back.
- * A resolved ask keeps its history and recorded resolution without a composer.
+ * the ask (Comment.ask_id) plus their own reply chains, newest first. The newest two replies stay
+ * visible; a card-local control reveals the remaining older replies. Answered asks keep a plain
+ * reply composer; open asks reserve their single composer for answering or asking back. A resolved
+ * ask keeps its history and recorded resolution without a composer.
  */
 export function AskThread({
   ask,
   thread,
   createReply: reply = createReply,
-  showResolution = true,
+  showComposer = true,
   embedded = false,
 }: AskThreadProps): ReactNode {
   // Each AskThread instance owns its reply field label so transient duplicate
@@ -125,7 +134,11 @@ export function AskThread({
     reply,
     thread
   );
-  const resolution = resolvedInfo(ask);
+  const [showAllReplies, setShowAllReplies] = useState(false);
+  const hiddenReplyCount = Math.max(replies.length - 2, 0);
+  const recentReplies = replies.slice(-2).reverse();
+  const olderReplies = showAllReplies ? replies.slice(0, -2).reverse() : [];
+  const isResolved = ask.state === "resolved";
 
   return (
     <section
@@ -133,29 +146,33 @@ export function AskThread({
       className={embedded ? "space-y-3" : `mt-4 space-y-3 border-t pt-4 ${borderDefault}`}
       data-testid={`thread-${ask.id}`}
     >
-      {showResolution && resolution !== null ? (
-        <p
-          className={`rounded-lg px-3 py-2 text-sm ${surfaceMutedBg} ${textSecondaryOnSurfaceMuted}`}
-        >
-          {describeAskResolutionActor(resolution)} -{" "}
-          <MarkdownBody markdown={resolution.reason} variant="inline" />
-        </p>
-      ) : null}
-      {replies.length === 0 ? null : (
+      {recentReplies.length === 0 ? null : (
         <ul className="space-y-2">
-          {replies.map((comment) => (
-            <li className={`rounded-lg p-2 text-sm ${surfaceMutedBg}`} key={comment.id}>
-              <div className={textPrimaryOnSurfaceMuted}>
-                <MarkdownBody markdown={comment.body} />
-              </div>
-              <p className={`mt-1 text-xs ${textMutedOnSurfaceMuted}`}>
-                {actorLabel(comment.author)} · <Timestamp at={comment.created_at} />
-              </p>
-            </li>
+          {recentReplies.map((comment) => (
+            <AskReply comment={comment} key={comment.id} />
           ))}
         </ul>
       )}
-      {resolution === null && ask.state === "answered" ? (
+      {hiddenReplyCount === 0 ? null : (
+        <button
+          aria-expanded={showAllReplies}
+          className={`min-h-11 text-sm font-medium ${linkText} ${linkHoverText}`}
+          onClick={() => setShowAllReplies((showing) => !showing)}
+          type="button"
+        >
+          {showAllReplies
+            ? "Show fewer replies"
+            : `Show ${hiddenReplyCount} more ${hiddenReplyCount === 1 ? "reply" : "replies"}`}
+        </button>
+      )}
+      {olderReplies.length === 0 ? null : (
+        <ul className="space-y-2">
+          {olderReplies.map((comment) => (
+            <AskReply comment={comment} key={comment.id} />
+          ))}
+        </ul>
+      )}
+      {showComposer && !isResolved && ask.state === "answered" ? (
         <form className="flex flex-col gap-2" onSubmit={submitReply}>
           <label
             className={`block text-sm font-medium ${textSecondaryOnCanvas}`}
