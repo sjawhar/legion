@@ -31,6 +31,7 @@ function readSettings(): Setting[] {
 }
 
 function render(settings: Setting[]): string {
+  const capitalized = (text: string) => inline(text.replace(/^./, (first) => first.toUpperCase()));
   const lines = [
     `Dispatch's server, \`envoy-dispatch\`, takes the ${settings.length} settings below from its environment. \`envoy-dispatch settings\` prints the same table from the binary you run.`,
     "",
@@ -39,13 +40,9 @@ function render(settings: Setting[]): string {
   ];
   for (const setting of settings) {
     lines.push(`## \`${setting.name}\``, "", inline(setting.description), "");
-    lines.push(
-      `- **Required:** ${inline(setting.required.replace(/^./, (first) => first.toUpperCase()))}`
-    );
+    lines.push(`- **Required:** ${capitalized(setting.required)}`);
     if (setting.default !== null) {
-      lines.push(
-        `- **When unset:** ${inline(setting.default.replace(/^./, (first) => first.toUpperCase()))}`
-      );
+      lines.push(`- **When unset:** ${capitalized(setting.default)}`);
     }
     if (setting.file !== null) {
       lines.push(`- **File form:** \`${setting.file}\``);
