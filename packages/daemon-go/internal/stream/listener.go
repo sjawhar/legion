@@ -309,7 +309,7 @@ func (l *Listener) hello(nc net.Conn, src *bufio.Reader) (*Conn, string) {
 	case shimwire.Hello2:
 		hello = f
 	case shimwire.Hello:
-		// The shim that sent it predates GoDaemonAPIVersion 8 (hello2): the worker image or the pane's
+		// The shim that sent it predates DaemonAPIVersion 8 (hello2): the worker image or the pane's
 		// legion binary is older than this daemon. The image probe refuses such an image at boot; a
 		// pane's shim is this daemon's own binary. Either way the fix is the newer build, named here.
 		return nil, "hello v1: the shim predates hello2 (daemon API contract 8); rebuild the worker image or the pane's legion binary from this daemon's commit"

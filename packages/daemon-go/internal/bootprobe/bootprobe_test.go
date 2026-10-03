@@ -141,7 +141,7 @@ func TestRunReportsTheStopOverAnInterruptedAttempt(t *testing.T) {
 // The OK line is the wire between the image's `legion probe-image` and the daemon's probe
 // Sandbox: the session-storage mark, the agent-models mark, then the contract last.
 func TestOKLineCarriesTheMarksAndTheContract(t *testing.T) {
-	if got, want := OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved), "probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved go-daemon-api-version=3"; got != want {
+	if got, want := OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved), "probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved daemon-api-version=3"; got != want {
 		t.Errorf("OKLine = %q, want %q", got, want)
 	}
 }
@@ -154,8 +154,8 @@ func TestAgentModelsReadsTheMarkOnAnOKLine(t *testing.T) {
 	}{
 		{"resolved, among other output", "[legion] probe retried\n" + OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved) + "\n", AgentModelsResolved},
 		{"skipped", OKLine("/opt/omp/bin/omp", 5, AgentModelsSkipped), AgentModelsSkipped},
-		{"a CLI that predates the check", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=5", ""},
-		{"the mark on a line that is not the OK line", "[legion] agent-models=resolved go-daemon-api-version=5", ""},
+		{"a CLI that predates the check", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=5", ""},
+		{"the mark on a line that is not the OK line", "[legion] agent-models=resolved daemon-api-version=5", ""},
 		{"nothing", "", ""},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -167,24 +167,22 @@ func TestAgentModelsReadsTheMarkOnAnOKLine(t *testing.T) {
 }
 
 // The daemon reads the contract an image confirmed from the probe pod's log. Only an OK line that
-// ends with the Go token confirms one: the TypeScript CLI's line ends with its own
-// `daemon-api-version=`, and a CLI that predates the Go check prints none.
-func TestConfirmedContractReadsOnlyTheGoTokenOnAnOKLine(t *testing.T) {
+// ends with the contract token confirms one; a CLI that predates the contract check prints none.
+func TestConfirmedContractReadsOnlyTheContractTokenOnAnOKLine(t *testing.T) {
 	for _, testCase := range []struct {
 		name     string
 		output   string
 		contract int
 		ok       bool
 	}{
-		{"the Go line among other output", "[legion] OMP pi.agents probe failed transiently\n" + OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved) + "\n", 3, true},
+		{"the line among other output", "[legion] OMP pi.agents probe failed transiently\n" + OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved) + "\n", 3, true},
 		{"another number", OKLine("/opt/omp/bin/omp", 12, AgentModelsSkipped), 12, true},
-		{"the TypeScript CLI's line", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=8", 0, false},
 		{"a CLI that predates the contract check", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed", 0, false},
 		{"a CLI that predates the session-storage probe", "probe-image: OK (/opt/omp/bin/omp)", 0, false},
-		{"the token before the line's end", "probe-image: OK (/opt/omp/bin/omp) go-daemon-api-version=3 session-storage=probed", 0, false},
-		{"the token on a line that is not the OK line", "[legion] go-daemon-api-version=3", 0, false},
-		{"no digits", "probe-image: OK (/opt/omp/bin/omp) go-daemon-api-version=", 0, false},
-		{"a number no int holds", "probe-image: OK (/opt/omp/bin/omp) go-daemon-api-version=99999999999999999999", 0, false},
+		{"the token before the line's end", "probe-image: OK (/opt/omp/bin/omp) daemon-api-version=3 session-storage=probed", 0, false},
+		{"the token on a line that is not the OK line", "[legion] daemon-api-version=3", 0, false},
+		{"no digits", "probe-image: OK (/opt/omp/bin/omp) daemon-api-version=", 0, false},
+		{"a number no int holds", "probe-image: OK (/opt/omp/bin/omp) daemon-api-version=99999999999999999999", 0, false},
 		{"nothing", "", 0, false},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

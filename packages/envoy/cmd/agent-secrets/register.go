@@ -41,9 +41,12 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 
-	sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK")
-	if sock == "" {
-		fmt.Fprintln(stderr, "agent-secrets register: AGENT_SECRETS_HELPER_SOCK is unset (host sessions only; an agent box has a key dir instead)")
+	// The helper's socket as every other helper-mode form finds it (identity.go): the variable when
+	// set, else the default socket when it is there. An agent box has neither: its key dir sits
+	// where the default socket's directory would be, and no helper listens in it.
+	sock, named := helperSocket()
+	if !named && !exists(sock) {
+		fmt.Fprintf(stderr, "agent-secrets register: AGENT_SECRETS_HELPER_SOCK is unset and no helper socket is at %s (host sessions only; an agent box has a key dir instead)\n", sock)
 		return exitUsageError
 	}
 

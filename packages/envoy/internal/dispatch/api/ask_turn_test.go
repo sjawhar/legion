@@ -1,18 +1,24 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 type turnAskRow struct {
 	ID        string              `json:"id"`
 	Question  string              `json:"question"`
 	WaitingOn string              `json:"waiting_on"`
+	EditedAt  *string             `json:"edited_at"`
 	LastReply *model.AskLastReply `json:"last_reply"`
 }
 
@@ -308,5 +314,229 @@ func TestReplyUnderAnAnsweredAskRecordsNoTurn(t *testing.T) {
 	}
 	if detail := readAskDetail(t, handler, askID); detail.WaitingOn != "" {
 		t.Fatalf("answered ask detail waiting_on = %q, want none", detail.WaitingOn)
+	}
+}
+
+// A comment's created_at is when its insert ran (migration 0065's default), after the reply took
+// the owner row, so the thread's newest reply is the one that committed last. Here the agent's
+// reply begins first and waits for the owner row while a human's reply, begun after it, commits;
+// the agent's reply is the newer one, and the ask's turn, its Inbox row and its place in the Inbox
+// follow it. The test holds the owner row and writes the human's reply directly, in a transaction
+// that begins after the agent's: a reply that took the owner row itself would commit at that
+// moment or later, with a created_at no later than its commit. Stamped at its transaction's start,
+// the agent's reply would sort before the human's, and the ask would wait on the agent that had
+// already answered.
+func TestAReplyThatWaitedForTheOwnerRowIsTheNewest(t *testing.T) {
+	for _, path := range []struct {
+		name   string
+		author string
+		// open readies the agent's reply in askID's thread and returns the call that sends it.
+		open func(t *testing.T, handler http.Handler, issueKey, askID string) func() *httptest.ResponseRecorder
+	}{
+		{
+			name:   "a comment posted to the ask",
+			author: sessionActor()["id"].(string),
+			open: func(t *testing.T, handler http.Handler, issueKey, askID string) func() *httptest.ResponseRecorder {
+				return func() *httptest.ResponseRecorder {
+					return sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/comments", map[string]any{
+						"body": "The second approach.", "ask_id": askID, "actor": sessionActor(),
+					})
+				}
+			},
+		},
+		{
+			name:   "a mention's callback reply",
+			author: "s1",
+			open: func(t *testing.T, handler http.Handler, issueKey, askID string) func() *httptest.ResponseRecorder {
+				clarification := decodeMentionedComment(t, postMentionedComment(t, handler, issueKey, map[string]any{
+					"body": "Say more, @session:s1.", "ask_id": askID,
+					"mentions": []map[string]any{{"target": "session:s1"}},
+				}))
+				return func() *httptest.ResponseRecorder {
+					return bearerRequest(t, handler, http.MethodPost, "/api/v1/comments/"+clarification.ID+"/reply", map[string]any{
+						"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "The second approach.",
+					})
+				}
+			},
+		},
+	} {
+		t.Run(path.name, func(t *testing.T) {
+			ctx := context.Background()
+			live := true
+			sent := []map[string]any{}
+			listener := sessionListener(t, &live, &sent)
+			defer listener.Close()
+			handler, database := newTargetedMessageHandler(t, listener.URL)
+			issue := createInteractionIssue(t, handler, "TEST", "Racing replies", "spec")
+			askID := openTurnAsk(t, handler, issue.Key, "Which approach?")
+			other := createInteractionIssue(t, handler, "OTHER", "Another thread", "spec")
+			otherAskID := openTurnAsk(t, handler, other.Key, "Which region?")
+			agentReply := path.open(t, handler, issue.Key, askID)
+
+			hold, err := database.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin the owner row hold: %v", err)
+			}
+			defer hold.Rollback(ctx)
+			if _, err := hold.Exec(ctx, `select 1 from issues where key = $1 for no key update`, issue.Key); err != nil {
+				t.Fatalf("hold the owner row: %v", err)
+			}
+			replied := make(chan *httptest.ResponseRecorder, 1)
+			go func() { replied <- agentReply() }()
+			waitForDatabaseLocks(t, hold, 1)
+			var humanReplyID string
+			if err := database.Pool.QueryRow(ctx, `
+				insert into comments (issue_key, author, body, ask_id, turn)
+				values ($1, '{"kind":"user","id":"alice"}', 'Can it ship today?', $2, 'agent')
+				returning id::text
+			`, issue.Key, askID).Scan(&humanReplyID); err != nil {
+				t.Fatalf("commit the human's reply: %v", err)
+			}
+			// The other ask's newest reply commits after the human's and before the agent's.
+			if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+other.Key+"/comments", map[string]any{
+				"body": "Frankfurt.", "ask_id": otherAskID, "actor": sessionActor(),
+			}); response.Code != http.StatusCreated {
+				t.Fatalf("reply on the other ask: status=%d body=%s", response.Code, response.Body.String())
+			}
+			if err := hold.Rollback(ctx); err != nil {
+				t.Fatalf("release the owner row: %v", err)
+			}
+			response := awaitResponse(t, replied)
+			if response.Code != http.StatusCreated {
+				t.Fatalf("agent's reply: status=%d body=%s", response.Code, response.Body.String())
+			}
+			reply := decodeBody[struct {
+				model.Comment
+				AskWaitingOn string `json:"ask_waiting_on"`
+			}](t, response)
+			if reply.AskWaitingOn != "human" {
+				t.Fatalf("agent's reply ask_waiting_on = %q, want human", reply.AskWaitingOn)
+			}
+			events := decodeBody[[]struct {
+				Type    string         `json:"type"`
+				Payload map[string]any `json:"payload"`
+			}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice"))
+			recorded := false
+			for _, event := range events {
+				if event.Payload["id"] != reply.ID {
+					continue
+				}
+				recorded = true
+				if event.Payload["ask_waiting_on"] != "human" {
+					t.Fatalf("%s ask_waiting_on = %#v, want human", event.Type, event.Payload["ask_waiting_on"])
+				}
+			}
+			if !recorded {
+				t.Fatalf("no event records the agent's reply %s", reply.ID)
+			}
+
+			detail := sessionRequest(t, handler, http.MethodGet, "/api/v1/asks/"+askID, nil)
+			if detail.Code != http.StatusOK {
+				t.Fatalf("read ask: status=%d body=%s", detail.Code, detail.Body.String())
+			}
+			thread := decodeBody[struct {
+				Ask     turnAskRow      `json:"ask"`
+				Replies []model.Comment `json:"replies"`
+			}](t, detail)
+			if thread.Ask.WaitingOn != "human" {
+				t.Fatalf("ask detail waiting_on = %q, want human", thread.Ask.WaitingOn)
+			}
+			if count := len(thread.Replies); count < 2 || thread.Replies[count-2].ID != humanReplyID || thread.Replies[count-1].ID != reply.ID {
+				t.Fatalf("ask replies = %#v, want the human's reply %s then the agent's %s", thread.Replies, humanReplyID, reply.ID)
+			}
+
+			inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
+			if inbox.Code != http.StatusOK {
+				t.Fatalf("read inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+			}
+			rows := decodeBody[[]turnAskRow](t, inbox)
+			if len(rows) != 2 || rows[0].ID != askID || rows[0].WaitingOn != "human" || rows[0].LastReply == nil ||
+				rows[0].LastReply.Author.ID != path.author || rows[1].ID != otherAskID || rows[1].WaitingOn != "human" {
+				t.Fatalf("inbox rows = %#v, want %s (waiting on human after %s's reply) above %s", rows, askID, path.author, otherAskID)
+			}
+		})
+	}
+}
+
+func TestCommentOnMovedApprovalAskReportsItsDerivedWaitingOn(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Moved approval comment", "A spec")
+	requested := sessionRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
+		map[string]any{"actor": sessionActor(), "summary": "Names the initial proposal."})
+	if requested.Code != http.StatusCreated {
+		t.Fatalf("request approval: status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	askID := decodeBody[struct {
+		Ask struct {
+			ID string `json:"id"`
+		} `json:"ask"`
+	}](t, requested).Ask.ID
+	if _, err := documentService.ReplaceText(
+		context.Background(), issue.PrimaryArtifactID, "A revised spec",
+		model.Actor{Kind: "session", ID: sessionActor()["id"].(string)},
+	); err != nil {
+		t.Fatalf("revise document: %v", err)
+	}
+	if named := dispatchRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
+		map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
+		t.Fatalf("name revised version: status=%d body=%s", named.Code, named.Body.String())
+	}
+	comment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
+		map[string]any{"actor": sessionActor(), "ask_id": askID, "body": "The revision is ready."})
+	if comment.Code != http.StatusCreated {
+		t.Fatalf("comment on moved approval: status=%d body=%s", comment.Code, comment.Body.String())
+	}
+	// The derived turn is on the wire once, as ask_waiting_on: the comment row itself carries none.
+	response := decodeBody[map[string]any](t, comment)
+	event := latestCommentCreatedPayload(t, handler, issue.Key)
+	if response["ask_waiting_on"] != "agent" || event["ask_waiting_on"] != "agent" {
+		t.Fatalf("comment ask_waiting_on = %#v, comment.created ask_waiting_on = %#v, want agent on both", response["ask_waiting_on"], event["ask_waiting_on"])
+	}
+	if _, ok := response["waiting_on"]; ok {
+		t.Fatalf("comment response carries waiting_on beside ask_waiting_on: %#v", response)
+	}
+	if _, ok := event["waiting_on"]; ok {
+		t.Fatalf("comment.created carries waiting_on beside ask_waiting_on: %#v", event)
+	}
+	if detail := readAskDetail(t, handler, askID); detail.WaitingOn != "agent" {
+		t.Fatalf("ask detail waiting_on = %q, want agent", detail.WaitingOn)
+	}
+	if inbox := readInboxRow(t, handler, askID); inbox.WaitingOn != "agent" {
+		t.Fatalf("Inbox waiting_on = %q, want agent", inbox.WaitingOn)
+	}
+}
+
+func TestApprovalWaitingOnSupportsTheMigrationMaximumVersion(t *testing.T) {
+	handler, database := newInteractionHandler(t, nil)
+	issue := createInteractionIssue(t, handler, "TEST", "Large approval version", "A spec")
+	requested := sessionRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
+		map[string]any{"actor": sessionActor(), "summary": "Names the large version."})
+	if requested.Code != http.StatusCreated {
+		t.Fatalf("request approval: status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	askID := decodeBody[struct {
+		Ask struct {
+			ID string `json:"id"`
+		} `json:"ask"`
+	}](t, requested).Ask.ID
+	if _, err := database.Pool.Exec(context.Background(), `
+		update asks
+		set approval = $2::jsonb
+		where id = $1
+	`, askID,
+		`{"artifact_id":"`+issue.PrimaryArtifactID+`","name":"spec.md","version":3000000000,"requested_version":3000000000}`,
+	); err != nil {
+		t.Fatalf("set maximum approval version: %v", err)
+	}
+	if inbox := readInboxRow(t, handler, askID); inbox.WaitingOn != "human" {
+		t.Fatalf("Inbox waiting_on = %q, want human", inbox.WaitingOn)
 	}
 }

@@ -68,8 +68,8 @@ type Config struct {
 	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login's credential lasts once
 	// approved; past it the machine logs in again, with a new key, a new code and a new approval.
 	LauncherCredentialSeconds int
-	// BROKER_SWEEP_SECONDS: how often the broker expires the pending requests and machine logins
-	// nobody decided in time.
+	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
+	// the pending requests and machine logins nobody decided in time.
 	SweepSeconds int
 	// BROKER_TRUSTED_PROXY_HEADER: the request header (e.g. X-Forwarded-For) whose last entry the
 	// machine-login rate limiter takes as the caller's address. Unset, it uses the connection's

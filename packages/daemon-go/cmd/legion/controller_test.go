@@ -236,11 +236,9 @@ exit %[2]d
 	t.Setenv("PATH", "/usr/bin:/bin:/opt/x/worker-bin")
 	t.Setenv("LEGION_OMP_PATH", omp)
 	t.Setenv("LEGION_ROLE_PROMPTS_DIR", testRolePromptsDir(t))
-	c.installPlugin(api.GoDaemonAPIVersion)
+	c.installPlugin(api.DaemonAPIVersion)
 	return c
 }
-
-
 
 // installPlugin installs, in the operator's default Oh My Pi profile, a pi-legion-envoy manifest
 // declaring contract, and has the recording Oh My Pi load it.
@@ -280,7 +278,7 @@ func (c *operatorMachine) installPluginAt(root string, contract int) string {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		c.t.Fatal(err)
 	}
-	manifest := fmt.Sprintf(`{"name":"@sjawhar/pi-legion-envoy","version":"9.9.9","legion":{"goDaemonApiVersion":%d}}`, contract)
+	manifest := fmt.Sprintf(`{"name":"@sjawhar/pi-legion-envoy","version":"9.9.9","legion":{"daemonApiVersion":%d}}`, contract)
 	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o600); err != nil {
 		c.t.Fatal(err)
 	}
@@ -382,8 +380,8 @@ func modeOf(t *testing.T, path string) os.FileMode {
 	return info.Mode().Perm()
 }
 
-// The one daemon call: POST /legion/v1/controller/secret, the operator token as a bearer, an
-// empty JSON object as the body.
+// The one daemon call: POST /legion/v1/controller/secret, the operator token as a bearer, and the
+// contract the probe held the plugin to as the body.
 func TestControllerStartFetchesTheSecretWithTheOperatorBearer(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{})
@@ -397,7 +395,7 @@ func TestControllerStartFetchesTheSecretWithTheOperatorBearer(t *testing.T) {
 	got := requests[0]
 	if got.method != http.MethodPost || got.path != "/legion/v1/controller/secret" ||
 		got.authorization != "Bearer "+controllerOperatorToken || got.contentType != "application/json" ||
-		string(got.body) != "{}" || got.status != http.StatusOK {
+		string(got.body) != fmt.Sprintf(`{"pluginContract":%d}`, api.DaemonAPIVersion) || got.status != http.StatusOK {
 		t.Fatalf("secret request = %s %s auth %q type %q body %q → %d", got.method, got.path, got.authorization, got.contentType, got.body, got.status)
 	}
 }
@@ -493,7 +491,6 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 		"LEGION_TEST_PREFIX_RAN":        "1",
 		"LEGION_CONTROLLER":             "1",
 		"LEGION_ROLE":                   "controller",
-		"LEGION_DAEMON_API":             "go",
 		"LEGION_DAEMON_URL":             d.url,
 		"LEGION_PROJECT":                "demo",
 		"LEGION_STATE_DIR":              c.defaultDir,
@@ -572,7 +569,7 @@ func TestControllerSecretWithoutADesignGatePolicyIsRefused(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(body))
 		}))
-		_, _, err := fetchControllerSecret(context.Background(), server.URL, controllerOperatorToken)
+		_, _, err := fetchControllerSecret(context.Background(), server.URL, controllerOperatorToken, api.DaemonAPIVersion)
 		server.Close()
 		if err == nil || !strings.Contains(err.Error(), "not 'root-issues' or 'off'; upgrade the daemon") {
 			t.Fatalf("fetchControllerSecret(%s) error = %v; want the policy refusal", body, err)
@@ -761,16 +758,16 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 		c.wantNoSecretRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
 	})
-	// The mint revokes the incumbent controller, so an Oh My Pi whose plugin would refuse the Go
+	// The mint revokes the incumbent controller, so an Oh My Pi whose plugin would refuse the
 	// controller at session start is found before it: a second start from a profile nobody
 	// updated leaves the working controller alone.
 	t.Run("a plugin in the operator's Oh My Pi profile that speaks another contract, naming both", func(t *testing.T) {
 		d := newControllerDaemon(t)
 		c := newControllerStart(t, d, controllerOptions{})
-		c.installPlugin(api.GoDaemonAPIVersion - 1)
+		c.installPlugin(api.DaemonAPIVersion - 1)
 		manifest := filepath.Join(c.home, ".omp", "plugins", "node_modules", "@sjawhar", "pi-legion-envoy", "package.json")
-		c.refused(fmt.Sprintf("pi-legion-envoy at %s (package 9.9.9) speaks Go daemon API contract %d; this daemon requires %d.",
-			manifest, api.GoDaemonAPIVersion-1, api.GoDaemonAPIVersion))
+		c.refused(fmt.Sprintf("pi-legion-envoy at %s (package 9.9.9) speaks daemon API contract %d; this daemon requires %d.",
+			manifest, api.DaemonAPIVersion-1, api.DaemonAPIVersion))
 		c.wantNoSecretRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
 	})
@@ -806,8 +803,8 @@ func TestControllerStartHoldsTheCopyOhMyPiLoadsToTheContract(t *testing.T) {
 	t.Run("the loaded copy speaks the contract; the profile's own does not", func(t *testing.T) {
 		d := newControllerDaemon(t)
 		c := newControllerStart(t, d, controllerOptions{})
-		c.installPluginAt(filepath.Join(c.home, ".omp"), api.GoDaemonAPIVersion-1)
-		c.loads(c.installPluginAt(filepath.Join(c.home, "project", ".omp"), api.GoDaemonAPIVersion))
+		c.installPluginAt(filepath.Join(c.home, ".omp"), api.DaemonAPIVersion-1)
+		c.loads(c.installPluginAt(filepath.Join(c.home, "project", ".omp"), api.DaemonAPIVersion))
 		if code, _, errb := c.run(); code != 0 || !c.launched() {
 			t.Fatalf("legion controller start = %d (launched %t), stderr %q; want the controller started", code, c.launched(), errb)
 		}
@@ -815,10 +812,10 @@ func TestControllerStartHoldsTheCopyOhMyPiLoadsToTheContract(t *testing.T) {
 	t.Run("the loaded copy speaks another contract; the profile's own speaks this one", func(t *testing.T) {
 		d := newControllerDaemon(t)
 		c := newControllerStart(t, d, controllerOptions{})
-		loaded := c.installPluginAt(filepath.Join(c.home, "project", ".omp"), api.GoDaemonAPIVersion-1)
+		loaded := c.installPluginAt(filepath.Join(c.home, "project", ".omp"), api.DaemonAPIVersion-1)
 		c.loads(loaded)
-		c.refused(fmt.Sprintf("pi-legion-envoy at %s (package 9.9.9) speaks Go daemon API contract %d; this daemon requires %d.",
-			filepath.Join(loaded, "package.json"), api.GoDaemonAPIVersion-1, api.GoDaemonAPIVersion))
+		c.refused(fmt.Sprintf("pi-legion-envoy at %s (package 9.9.9) speaks daemon API contract %d; this daemon requires %d.",
+			filepath.Join(loaded, "package.json"), api.DaemonAPIVersion-1, api.DaemonAPIVersion))
 		c.wantNoSecretRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
 	})
@@ -966,14 +963,17 @@ func TestControllerStartStateDirectory(t *testing.T) {
 }
 
 func TestControllerStartUsage(t *testing.T) {
-	for _, argv := range [][]string{
-		{"legion", "controller"},
-		{"legion", "controller", "stop"},
-		{"legion", "controller", "start"},
+	for _, tc := range []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"legion", "controller"}, subcommandUsage("controller", controllerCommands)},
+		{[]string{"legion", "controller", "stop"}, `legion controller: unknown subcommand "stop"`},
+		{[]string{"legion", "controller", "start"}, "usage: legion controller start --config <controller.yaml> [--daemon-url <url>]"},
 	} {
 		var out, errb bytes.Buffer
-		if code := run(context.Background(), argv, &out, &errb); code != 2 || !strings.Contains(errb.String(), "usage: legion controller start --config <controller.yaml> [--daemon-url <url>]") {
-			t.Errorf("%v = %d, stderr %q; want the usage and exit 2", argv, code, errb.String())
+		if code := run(context.Background(), tc.argv, &out, &errb); code != 2 || !strings.Contains(errb.String(), tc.want) {
+			t.Errorf("%v = %d, stderr %q; want exit 2 and %q", tc.argv, code, errb.String(), tc.want)
 		}
 	}
 }

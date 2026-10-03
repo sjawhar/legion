@@ -17,12 +17,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// claimsUsage names every subcommand of `legion claims`.
-const claimsUsage = "usage: legion claims spawn|deliver|suspend|resume|stop|close|list [flags]"
-
 // claimsCommands is the operator's hand on the daemon's claims, one subcommand per operator route
-// (internal/api/operator.go). close is the tree's close, through its root claim, for a tree no
-// workflow issue backs: the root, then every other claim of the tree.
+// and the one list of them `legion claims --help` names (internal/api/operator.go). close is the
+// tree's close, through its root claim, for a tree no workflow issue backs: the root, then every
+// other claim of the tree.
 var claimsCommands = map[string]command{
 	"spawn":   runClaimsSpawn,
 	"deliver": runClaimsDeliver,
@@ -34,16 +32,7 @@ var claimsCommands = map[string]command{
 }
 
 func runClaims(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprintln(stderr, claimsUsage)
-		return 2
-	}
-	sub, ok := claimsCommands[args[0]]
-	if !ok {
-		fmt.Fprintf(stderr, "legion claims: unknown subcommand %q\n%s\n", args[0], claimsUsage)
-		return 2
-	}
-	return sub(ctx, args[1:], stdout, stderr)
+	return runSubcommand(ctx, "claims", claimsCommands, args, stdout, stderr)
 }
 
 // claimsRoute is the root of the daemon's operator claim routes.
@@ -57,12 +46,12 @@ type claimsCall struct {
 }
 
 func newClaimsCall(sub string, stdout, stderr io.Writer) *claimsCall {
-	c := newOperatorCall("claims "+sub, "file holding the operator bearer the daemon's operator_token_file names (required)", stdout, stderr)
+	c := newOperatorCall("claims "+sub, "usage: legion claims "+sub+" [flags]", "file holding the operator bearer the daemon's operator_token_file names (required)", stdout, stderr)
 	return &claimsCall{operatorCall: c, asJSON: c.flags.Bool("json", false, "print the daemon's answer as it served it")}
 }
 
 // parse is operatorCall.parse with --operator-token-file among the required flags.
-func (c *claimsCall) parse(args []string, required ...string) bool {
+func (c *claimsCall) parse(args []string, required ...string) (code int, ok bool) {
 	return c.operatorCall.parse(args, append([]string{"operator-token-file"}, required...)...)
 }
 
@@ -128,8 +117,8 @@ func runClaimsSpawn(ctx context.Context, args []string, stdout, stderr io.Writer
 	role := c.flags.String("role", "", "role the claim holds on the issue (required)")
 	promptFile := c.flags.String("prompt-file", "", "file holding an operator role-prompt override")
 	task := c.flags.String("task", "", "the claim's first task, sent once its agent is ready")
-	if !c.parse(args, "tree", "issue", "role") {
-		return 2
+	if code, ok := c.parse(args, "tree", "issue", "role"); !ok {
+		return code
 	}
 	op, ok := c.connect()
 	if !ok {
@@ -154,8 +143,8 @@ func runClaimsDeliver(ctx context.Context, args []string, stdout, stderr io.Writ
 	c := newClaimsCall("deliver", stdout, stderr)
 	token := c.flags.String("claim", "", "the claim's token (required)")
 	task := c.flags.String("task", "", "the task (required)")
-	if !c.parse(args, "claim", "task") {
-		return 2
+	if code, ok := c.parse(args, "claim", "task"); !ok {
+		return code
 	}
 	op, ok := c.connect()
 	if !ok {
@@ -169,8 +158,8 @@ func claimRequest(request string) command {
 	return func(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		c := newClaimsCall(request, stdout, stderr)
 		token := c.flags.String("claim", "", "the claim's token (required)")
-		if !c.parse(args, "claim") {
-			return 2
+		if code, ok := c.parse(args, "claim"); !ok {
+			return code
 		}
 		op, ok := c.connect()
 		if !ok {
@@ -190,8 +179,8 @@ func runClaimsSuspend(ctx context.Context, args []string, stdout, stderr io.Writ
 	c := newClaimsCall("suspend", stdout, stderr)
 	token := c.flags.String("claim", "", "the claim's token (required)")
 	wait := c.flags.Duration("wait", time.Minute, "how long to wait for a suspension the daemon holds for the agent's turn to land")
-	if !c.parse(args, "claim") {
-		return 2
+	if code, ok := c.parse(args, "claim"); !ok {
+		return code
 	}
 	op, ok := c.connect()
 	if !ok {
@@ -268,8 +257,8 @@ func (c *claimsCall) awaitSuspended(ctx context.Context, op operator, token legi
 // runClaimsList prints every claim the daemon supervises, one line each, in token order.
 func runClaimsList(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	c := newClaimsCall("list", stdout, stderr)
-	if !c.parse(args) {
-		return 2
+	if code, ok := c.parse(args); !ok {
+		return code
 	}
 	op, ok := c.connect()
 	if !ok {

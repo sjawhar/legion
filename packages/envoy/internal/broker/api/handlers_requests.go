@@ -66,8 +66,8 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 		return
 	case errors.Is(err, pgx.ErrNoRows):
 		// The proof was verified moments ago against a live enrollment, but it was revoked (or
-		// its lease lapsed) before this Create's own read of it — the same race enroll.Renew
-		// guards against. The caller's proof is no longer good for anything.
+		// its lease lapsed) before Create read it or locked it to write — the same race
+		// enroll.Renew guards against. The caller's proof is no longer good for anything.
 		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "enrollment is not live")
 		return
 	case err != nil:

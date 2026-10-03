@@ -271,7 +271,7 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: tc.at, Hold: tc.hold, Generation: 1, Status: "in_progress", Rank: "V"})
 			pr := tc.pr
 			pr.State, pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA = record.PullRequestOpen, "LEGION-209", "sjawhar/legion", 42, "legion/LEGION-209", "head"
-			pr.Failing, pr.FailingStatuses = []string{}, []string{}
+			pr.Failing = []string{}
 			seedPR(t, pool, pr)
 			// The implementer is one round short of the review round cap, so a counted round would
 			// post the cap message and notify the architect. A review ends when both of its halves
