@@ -37,17 +37,24 @@ type rig struct {
 // is newRig plus that login, for every test that doesn't care about the pre-login state itself.
 func newRig(t *testing.T, statePath string) *rig {
 	t.Helper()
+	return newLoggedRig(t, statePath, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+}
+
+// newLoggedRig is newRig with log as both the Server's and the Broker's logger, as
+// cmd/agent-secrets-helper wires them, so a test can read every line the helper writes.
+func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
+	t.Helper()
 	f := newFakeBroker(t)
-	of := operatorFile(t, "sjawhar")
+	of := operatorFile(t, "ada@example.com")
 	r := &rig{fake: f}
 	if statePath == "" {
 		statePath = filepath.Join(t.TempDir(), "sessions.json")
 	}
 	r.srv = &Server{
 		Registry: NewRegistry(statePath),
-		Broker:   &Broker{URL: f.srv.URL, OperatorFile: of, HTTP: f.srv.Client()},
+		Broker:   &Broker{URL: f.srv.URL, OperatorFile: of, HTTP: f.srv.Client(), Log: log},
 		Hostname: "testhost",
-		Log:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Log:      log,
 		MinRenew: 50 * time.Millisecond,
 	}
 	r.srv.PeerOf = func(conn *net.UnixConn) (*Peer, error) {
@@ -132,7 +139,7 @@ func (r *rig) call(t *testing.T, req Request) Response {
 func TestRegisterPinsCallerEnrollsAndSigns(t *testing.T) {
 	r := startRig(t, "")
 	resp := r.call(t, Request{Op: "register", WaitSeconds: 5})
-	if !resp.OK || resp.State != "enrolled" || resp.EnrollmentID == "" || resp.Operator != "sjawhar" {
+	if !resp.OK || resp.State != "enrolled" || resp.EnrollmentID == "" || resp.Operator != "ada@example.com" {
 		t.Fatalf("register: %+v", resp)
 	}
 	want := "testhost:" + strconv.Itoa(os.Getpid()) + ":"
@@ -415,7 +422,7 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	r.cancel() // the helper dies; keys are gone with it
 	time.Sleep(100 * time.Millisecond)
 	// A second helper on the same state and the same fake broker.
-	of := operatorFile(t, "sjawhar")
+	of := operatorFile(t, "ada@example.com")
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
@@ -535,7 +542,7 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	r.fake.mu.Lock()
 	r.fake.revokeFirstDelay = 300 * time.Millisecond
 	r.fake.mu.Unlock()
-	of := operatorFile(t, "sjawhar")
+	of := operatorFile(t, "ada@example.com")
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
@@ -638,7 +645,7 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 	r.fake.mu.Lock()
 	r.fake.revokeFailFirst = failAlways
 	r.fake.mu.Unlock()
-	of := operatorFile(t, "sjawhar")
+	of := operatorFile(t, "ada@example.com")
 	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {

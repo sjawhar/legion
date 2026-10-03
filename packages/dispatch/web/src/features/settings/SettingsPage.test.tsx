@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-import { ApiError, api } from "../../api/client";
+import { api } from "../../api/client";
 import { SettingsPage } from "./SettingsPage";
 
 function renderPage() {
@@ -28,11 +28,9 @@ function stubUnrelatedQueries() {
   };
 }
 
-test("hides the Live grants section when the broker answers 404 FEATURE_OFF", async () => {
+test("hides the Live grants section on a Dispatch with no secrets broker", async () => {
   const unrelated = stubUnrelatedQueries();
-  const getCredentialPending = spyOn(api, "getCredentialPending").mockRejectedValue(
-    new ApiError(404, { code: "FEATURE_OFF" })
-  );
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
 
   try {
     renderPage();

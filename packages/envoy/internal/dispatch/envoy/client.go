@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
-	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -89,11 +88,16 @@ func WithTimeout(timeout time.Duration) Option {
 	return func(c *Client) { c.httpClient.Timeout = timeout }
 }
 
+// WithToken sets the bearer every listener call sends (cmd/dispatch: ENVOY_TOKEN). Without it, or
+// with an empty token, a call sends no Authorization header.
+func WithToken(token string) Option {
+	return func(c *Client) { c.apiToken = token }
+}
+
 // New returns a client for an Envoy listener's HTTP control API.
 func New(baseURL string, options ...Option) *Client {
 	client := &Client{
-		baseURL:  strings.TrimSuffix(baseURL, "/"),
-		apiToken: os.Getenv("ENVOY_TOKEN"),
+		baseURL: strings.TrimSuffix(baseURL, "/"),
 		httpClient: &http.Client{
 			Timeout: defaultTimeout,
 		},
@@ -177,8 +181,12 @@ func (c *Client) ListInterests(ctx context.Context) ([]Interest, error) {
 	return interests, nil
 }
 
-// Interest returns one session's persisted topic subscriptions, or ErrNotFound
-// if the listener holds no interest record for it.
+// Interest returns one session's persisted topic subscriptions, or ErrNotFound if the listener
+// holds no interest record for it: a 404, or a session id the listener refuses as a KV key (a 400
+// for one outside nats.go's key alphabet or holding an empty token, a 413 for one too long), under
+// which no read finds a record. A subscriber removal names whatever id the dashboard listed, and
+// the listener lists an interest a direct bucket write stored under such a key until an operator
+// purges it, so a removal left pending on one completes once the interest is gone.
 func (c *Client) Interest(ctx context.Context, sessionID string) (Interest, error) {
 	request, err := http.NewRequestWithContext(
 		ctx, http.MethodGet, c.baseURL+"/v1/interests/"+url.PathEscape(sessionID), nil,
@@ -192,7 +200,8 @@ func (c *Client) Interest(ctx context.Context, sessionID string) (Interest, erro
 		return Interest{}, fmt.Errorf("%w: GET /v1/interests/%s: %v", ErrUnavailable, sessionID, err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode == http.StatusNotFound {
+	switch response.StatusCode {
+	case http.StatusNotFound, http.StatusBadRequest, http.StatusRequestEntityTooLarge:
 		return Interest{}, ErrNotFound
 	}
 	if response.StatusCode != http.StatusOK {

@@ -11,19 +11,15 @@ import {
 // 50 KiB) spills to an artifact that keeps only 20 KB at each end, so a longer skill arrives with
 // its middle cut out. A `skill://` read is otherwise whole (no line limit, no line-length cap), so
 // the file's own byte count is the measure. Reads by filesystem path stop at 300 lines, which is
-// why every reference is linked as `skill://<name>/<path>`, why each such link must resolve (the Go
+// why every reference is linked as `skill://<name>/<path>`, why each such link must resolve (the
 // daemon's boot gate checks only the name before the first `/`), and why each legion-worker
 // reference must be linked from somewhere a worker reads.
 const repoRoot = path.resolve(import.meta.dir, "../../..");
 const skillsRoot = path.join(repoRoot, "skills");
 const workerRoot = path.join(skillsRoot, "legion-worker");
-// Everything an agent reads that can link into a skill: the skills themselves, the TypeScript
-// daemon's role prompts, and the Go daemon's prompt overlays.
-const linkingRoots = [
-  skillsRoot,
-  path.join(repoRoot, "packages/pi-envoy/roles"),
-  path.join(repoRoot, "packages/daemon-go/internal/prompts"),
-];
+// Everything an agent reads that can link into a skill: the skills themselves and the daemon's
+// prompts (its role prompts in roles/ and its overlays in go/).
+const linkingRoots = [skillsRoot, path.join(repoRoot, "packages/daemon/internal/prompts")];
 const SPILL_THRESHOLD_BYTES = 50 * 1024;
 // A link's path stops at whitespace, a closing bracket or quote, a code span, or Markdown emphasis
 // (`**skill://…/pr-body.md**`); `#anchor` is kept so it can be checked against the target's headings.

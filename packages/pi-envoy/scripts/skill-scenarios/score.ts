@@ -11,9 +11,9 @@
 //     is. Each scenario's rule is on the function that scores it: askOnMessage,
 //     measureBeforeAsk, testerProof. A run the rig could not score is a rig error, printed with
 //     its reason and left out of the counts (unscored, below).
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { describePhaseHandoffWriteProblems } from "@legion/contracts";
 import { z } from "zod";
 
 /** An Oh My Pi session transcript line, as far as the score reads one: a message, whose assistant
@@ -81,7 +81,7 @@ const World = z.object({
   head: z.string(),
   code: z.string(),
 });
-/** The tester's handoff, past the CLI's write rules, as far as the score reads it. */
+/** The tester's handoff, once `legion handoff write` accepts it, as far as the score reads it. */
 const TestHandoff = z.looseObject({
   phase: z.literal("test"),
   implementerProof: z.looseObject({ verdict: z.string() }),
@@ -308,6 +308,36 @@ function namesOwnCommit(text: string, commits: string[]): boolean {
   );
 }
 
+/** What the Go `legion handoff write --phase test` refuses in a test handoff, each problem naming
+ * its field: the rules every pane's write meets, run by the binary rig.sh builds beside the runs
+ * directory (<work>/bin/legion) into a scratch workspace. The data leaves out the fields the CLI
+ * writes itself, as a pane's write does. */
+function testHandoffWriteProblems(runDir: string, handoff: unknown): string[] {
+  const legion = path.join(path.dirname(path.dirname(runDir)), "bin", "legion");
+  if (!existsSync(legion)) throw new Error(`no ${legion}: rig.sh builds it before any run`);
+  if (typeof handoff !== "object" || handoff === null || Array.isArray(handoff))
+    return [".legion/test.json is not a JSON object"];
+  const {
+    schemaVersion: _version,
+    phase: _phase,
+    completed: _completed,
+    ...fields
+  } = handoff as Record<string, unknown>;
+  const workspace = mkdtempSync(path.join(tmpdir(), "skill-scenarios-handoff-"));
+  try {
+    const write = Bun.spawnSync([legion, "handoff", "write", "--phase", "test"], {
+      cwd: workspace,
+      stdin: new TextEncoder().encode(JSON.stringify(fields)),
+    });
+    if (write.exitCode === 0) return [];
+    const refusal = write.stderr.toString().trim();
+    const problems = refusal.split("legion handoff write: Invalid test handoff: ")[1];
+    return problems === undefined ? [refusal] : problems.split("; ");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+}
+
 /** tester-proof: the legion-worker skill's rule for a tester whose predecessor's proof holds.
  * worker_fixture writes the implement handoff through the handoff CLI, so it is valid, its proof
  * reproduces, and its CLI meets all three acceptance criteria, so the skill's answer is `verified`
@@ -372,7 +402,7 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
     const shown = git("show", `${tip.sha}:.legion/test.json`);
     const handoff: unknown = shown.exitCode === 0 ? JSON.parse(shown.stdout.toString()) : undefined;
     const written =
-      handoff === undefined ? ["no .legion/test.json"] : describePhaseHandoffWriteProblems(handoff);
+      handoff === undefined ? ["no .legion/test.json"] : testHandoffWriteProblems(runDir, handoff);
     problems.push(...written);
     const read = TestHandoff.safeParse(handoff);
     if (written.length === 0 && !read.success)

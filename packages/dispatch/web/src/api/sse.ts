@@ -1,6 +1,7 @@
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 
+import { reaskHeldCredentialList } from "../features/credentials/pending";
 import { markPendingAskThreadInvalidation } from "../features/inbox/ask-thread-freshness";
 
 import {
@@ -42,6 +43,7 @@ const knownEventTypes: Record<EventType, true> = {
   "ask.opened": true,
   "ask.anchor_refreshed": true,
   "ask.edited": true,
+  "ask.handed_back": true,
   "ask.answered": true,
   "ask.resolved": true,
   "ask.follower_added": true,
@@ -68,9 +70,12 @@ const knownEventTypes: Record<EventType, true> = {
   "subscription.removed": true,
 };
 
-// A dead connection reveals no client-visible signal until this much time passes with
-// no bytes at all (application events or heartbeat comments): the server sends a `:
-// heartbeat` comment every 15s, so 45s is three missed heartbeats.
+// One window bounds every stream attempt: armed when the attempt starts, re-armed when its
+// response headers arrive and on every chunk (application events or heartbeat comments), and
+// cleared when the attempt settles. An attempt that receives nothing for this long is aborted
+// and reconnects with the backoff, whether its request never got headers or its open connection
+// went silent. The server sends a `: heartbeat` comment every 15s, so 45s is three missed
+// heartbeats.
 const WATCHDOG_MS = 45_000;
 
 const inboxQueryKey = inboxQuery().queryKey;
@@ -93,6 +98,7 @@ function appendDocumentKey(keys: (readonly unknown[])[], event: Event): void {
   switch (event.type) {
     case "ask.opened":
     case "ask.edited":
+    case "ask.handed_back":
     case "ask.answered":
     case "ask.resolved":
     case "ask.anchor_refreshed":
@@ -153,6 +159,7 @@ function isAskEvent(event: Event): boolean {
     event.type === "ask.opened" ||
     event.type === "ask.anchor_refreshed" ||
     event.type === "ask.edited" ||
+    event.type === "ask.handed_back" ||
     event.type === "ask.answered" ||
     event.type === "ask.resolved" ||
     event.type === "ask.follower_added" ||
@@ -505,12 +512,17 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     event.type === "ask.answered" ||
     event.type === "ask.resolved" ||
     event.type === "ask.edited" ||
+    event.type === "ask.handed_back" ||
     event.type === "ask.anchor_refreshed"
   ) {
     keys.push(["asks", event.issue_key]);
-    // The sidebar's per-project open-ask counts come from GET /projects; an edit or an
-    // anchor refresh changes neither whether the ask is open nor which issue owns it.
-    if (event.type !== "ask.edited" && event.type !== "ask.anchor_refreshed") {
+    // The sidebar's per-project open-ask counts come from GET /projects; an edit, a hand-back or
+    // an anchor refresh changes neither whether the ask is open nor which issue owns it.
+    if (
+      event.type !== "ask.edited" &&
+      event.type !== "ask.handed_back" &&
+      event.type !== "ask.anchor_refreshed"
+    ) {
       keys.push(projectsQuery().queryKey);
     }
     appendDocumentKey(keys, event);
@@ -623,9 +635,10 @@ function markAskThreadsSeededByAnInFlightInbox(
 }
 
 /**
- * `watchdogMs` overrides the no-chunk watchdog window and `wholeCacheRefreshMs` the whole-cache
- * refresh throttle; the only callers that set either are tests that would otherwise have to wait
- * out the real 45 s and 5 s windows. Production calls this with no argument.
+ * `watchdogMs` overrides the attempt watchdog's window (`WATCHDOG_MS`) and `wholeCacheRefreshMs`
+ * the whole-cache refresh throttle; the only callers that set either are tests that would
+ * otherwise have to wait out the real 45 s and 5 s windows. Production calls this with no
+ * argument.
  */
 export function useEventStream({
   watchdogMs = WATCHDOG_MS,
@@ -641,7 +654,10 @@ export function useEventStream({
     let controller: AbortController | null = null;
     let forced = false;
     let attempt = 0;
-    let hasOpenedOnce = false;
+    // Whether any attempt has ended, by dropping after it opened or by failing before. Only the
+    // page's first attempt opens with nothing to refresh, since the page made its own reads
+    // alongside it; every later open follows a gap in which no stream carried what committed.
+    let anAttemptEnded = false;
     let lastEventId = 0;
     let watchdog: number | undefined;
     let reconnect: number | undefined;
@@ -666,16 +682,19 @@ export function useEventStream({
       }
       setConnectionState("connected");
       armWatchdog();
-      if (hasOpenedOnce) {
-        // A reconnect may have missed events the stream never saw, so every query the app holds
-        // refreshes; TanStack matches all of them when no filter is given. Nothing is excluded:
+      if (anAttemptEnded) {
+        // Events may have committed since the prior attempt ended - or, when the first attempt
+        // failed, since the page's own reads - so every query the app holds refreshes. TanStack
+        // matches all of them when no filter is given. Nothing is excluded:
         // the one query that looks expensive to refresh, `["block-schema"]` with an infinite
         // `staleTime`, resolves from a module-level per-session cache (`features/doc/schema.ts`),
         // so its refetch issues no request. A genuine reconnect after a gap refreshes on the
         // leading edge; `visibilitychange` reopening the stream repeatedly does not.
         refreshEverything();
+        // The one query that refresh skips: a credential list held at `null` (no broker), which
+        // a server restarted since with a broker configured would now answer with a list.
+        reaskHeldCredentialList(queryClient);
       }
-      hasOpenedOnce = true;
       attempt = 0;
     };
 
@@ -766,6 +785,7 @@ export function useEventStream({
       reconnect = undefined;
       const current = new AbortController();
       controller = current;
+      armWatchdog();
       const url = lastEventId > 0 ? `/api/v1/events?since=${lastEventId}` : "/api/v1/events";
       void readEventStream(url, { onChunk, onEvent, onOpen, signal: current.signal }).then(
         () => settle(current, undefined),
@@ -780,6 +800,7 @@ export function useEventStream({
       window.clearTimeout(watchdog);
       watchdog = undefined;
       controller = null;
+      anAttemptEnded = true;
       if (!current.signal.aborted && error instanceof EventStreamHttpError) {
         if (error.status === 401 || error.status === 403) {
           setConnectionState("signed-out");

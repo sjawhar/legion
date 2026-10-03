@@ -5,13 +5,10 @@ import (
 	"errors"
 
 	"net/http"
-	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
@@ -224,14 +221,7 @@ func writeBrowserDocument(t *testing.T, documentService *docs.Service, artifactI
 	if err != nil {
 		t.Fatalf("parse the browser's document: %v", err)
 	}
-	sockets := &servedSockets{finished: make(map[string]chan struct{})}
-	server := httptest.NewServer(sockets.serve(documentService.ServeHTTP))
-	t.Cleanup(server.Close)
-	peer := &syncedPeer{
-		wsURL: "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID, sockets: sockets,
-		headers: http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID: artifactID, doc: crdt.New(),
-	}
-	peer.connect(t)
+	peer := connectBrowserPeer(t, documentService, artifactID)
 	t.Cleanup(peer.close)
 	peer.edit(t, func(tree *pmdoc.Node) error {
 		tree.Children = written.Children

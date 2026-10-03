@@ -1,6 +1,7 @@
 {
   "name": "@legion/contracts",
   "version": "0.10.0",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": {
@@ -23,10 +24,10 @@
       "bun": "./src/dispatch-tools.ts",
       "default": "./dist/dispatch-tools.js"
     },
-    "./legion-go-api": {
-      "types": "./src/legion-go-api.ts",
-      "bun": "./src/legion-go-api.ts",
-      "default": "./dist/legion-go-api.js"
+    "./legion-api": {
+      "types": "./src/legion-api.ts",
+      "bun": "./src/legion-api.ts",
+      "default": "./dist/legion-api.js"
     }
   },
   "main": "dist/index.js",
@@ -34,7 +35,7 @@
   "scripts": {
     "gen:go": "bun run scripts/gen-go.ts",
     "check:go": "bun run scripts/gen-go.ts --check",
-    "build": "bun build src/index.ts src/repo.ts src/dispatch-snippet.ts src/dispatch-tools.ts src/legion-go-api.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/index.ts src/repo.ts src/dispatch-snippet.ts src/dispatch-tools.ts src/legion-api.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/ schemas/"

@@ -113,6 +113,70 @@ func TestApprovalAskFollowsItsRequestingSession(t *testing.T) {
 	}
 }
 
+func TestApprovalHandBackFollowsItsActorWithoutChangingTheRequester(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Approval hand-back followers", "A spec")
+	first := sessionRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
+		map[string]any{
+			"actor":   map[string]any{"kind": "session", "id": "s-architect"},
+			"summary": "Names the initial proposal.",
+		})
+	if first.Code != http.StatusCreated {
+		t.Fatalf("request approval: status=%d body=%s", first.Code, first.Body.String())
+	}
+	askID := decodeBody[struct {
+		Ask struct {
+			ID string `json:"id"`
+		} `json:"ask"`
+	}](t, first).Ask.ID
+	if _, err := documentService.ReplaceText(
+		context.Background(), issue.PrimaryArtifactID, "A revised spec",
+		model.Actor{Kind: "session", ID: "s-architect"},
+	); err != nil {
+		t.Fatalf("revise document: %v", err)
+	}
+	if named := dispatchRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
+		map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
+		t.Fatalf("name revised version: status=%d body=%s", named.Code, named.Body.String())
+	}
+	handedBack := sessionRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/approval-requests",
+		map[string]any{
+			"actor":   map[string]any{"kind": "session", "id": "s-successor"},
+			"summary": "Clarifies the rollout.",
+		})
+	if handedBack.Code != http.StatusCreated {
+		t.Fatalf("hand approval back: status=%d body=%s", handedBack.Code, handedBack.Body.String())
+	}
+	type approvalResponse struct {
+		Approval struct {
+			RequestedBy *model.Actor `json:"requested_by"`
+		} `json:"approval"`
+	}
+	if response := decodeBody[approvalResponse](t, handedBack); response.Approval.RequestedBy == nil ||
+		response.Approval.RequestedBy.ID != "s-architect" {
+		t.Fatalf("hand-back requested_by = %#v, want s-architect", response.Approval.RequestedBy)
+	}
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read artifact: status=%d body=%s", read.Code, read.Body.String())
+	}
+	if response := decodeBody[approvalResponse](t, read); response.Approval.RequestedBy == nil ||
+		response.Approval.RequestedBy.ID != "s-architect" {
+		t.Fatalf("later requested_by = %#v, want s-architect", response.Approval.RequestedBy)
+	}
+	if followers := readAskFollowers(t, handler, askID); strings.Join(followers, ",") != "s-architect,s-successor" {
+		t.Fatalf("hand-back followers = %v, want [s-architect s-successor]", followers)
+	}
+}
+
 func TestAskBlockWrittenBySessionFollowsThatSession(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {

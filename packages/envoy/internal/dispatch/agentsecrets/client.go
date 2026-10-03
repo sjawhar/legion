@@ -23,8 +23,8 @@ import (
 const defaultTimeout = 5 * time.Second
 
 // Client relays Dispatch's UI calls to the broker with the UI bearer. A nil *Client (the
-// broker URL is unconfigured) means the feature is off; every api handler answers 404
-// FEATURE_OFF then.
+// broker URL is unconfigured) means the feature is off; the api's pending list answers null then,
+// and every other api handler 404 FEATURE_OFF.
 type Client struct {
 	URL   string
 	Token string

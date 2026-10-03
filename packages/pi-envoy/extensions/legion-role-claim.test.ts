@@ -1,6 +1,17 @@
 import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { agentSubject, roleToken } from "@legion/contracts";
 import type { ZodNumberProperty } from "../src/pi-types";
+
+/** The daemon's golden registration answer (`packages/daemon/internal/api`), so a field the daemon
+ * adds to it reaches the stub below. */
+const registered: Record<string, unknown> = JSON.parse(
+  readFileSync(
+    path.resolve(import.meta.dir, "../../contracts/fixtures/daemon-api/register.json"),
+    "utf8"
+  )
+);
 
 // @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
 const { nkeyAuthenticator, nkeys } = await import("nats");
@@ -90,7 +101,6 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
   process.env.ENVOY_URL = "http://envoy.test";
   process.env.LEGION_DAEMON_URL = "http://daemon.test";
-  process.env.LEGION_GENERATION = "3";
   process.env.LEGION_BOOT_TOKEN = "claim-heartbeat";
   process.env.LEGION_STATE_DIR = "/tmp/legion-state";
   process.env.LEGION_TREE = tree;
@@ -98,13 +108,18 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
   process.env.LEGION_ISSUE = tree;
   globalThis.fetch = (async (input, init) => {
     const url = new URL(input.toString());
-    if (url.pathname === "/legion/v1/process/started") {
+    if (url.pathname === "/legion/v1/claims/register") {
       return Response.json({
-        roleTokens: { architect: role },
-        controlSubject: "legion.ctl.owner-repo-42.3",
+        ...registered,
+        claimToken: role,
+        tree,
+        issue: tree,
+        role: "architect",
+        generation: 3,
         secret: "root-secret",
       });
     }
+    if (url.pathname === "/legion/v1/claims/ready") return new Response(null, { status: 204 });
     if (url.pathname === "/v1/interests/subscribe") {
       const body = JSON.parse(init?.body?.toString() ?? "{}") as {
         readonly session_id: string;

@@ -17,23 +17,21 @@ on:
       - "patches/**"
       - "package.json"
       - "bun.lock"
-      - "packages/daemon-go/**"
-      - "packages/daemon/docker/worker.Dockerfile"
+      # The Go module: envoy-smoke compiles in workspace mode, pi-envoy's grant rig runs its code,
+      # and the worker image's Dockerfile pins the jj the pi-envoy tests drive. The Go daemon's own
+      # suite is the Tests workflow's (pr-and-main.yaml), on every pull request.
+      - "packages/daemon/**"
       - ".github/actions/install-jj/**"
-      - ".github/actions/install-uv/**"
       - "go.work"
       - "go.work.sum"
-      - "scripts/e2e/**"
-      - "deploy/kubernetes/operator-route/**"
-      - "packages/daemon/src/daemon/omp-pin.ts"
+      - ".omp-pin"
       - ".github/actions/install-omp/**"
       # The envoy-smoke job builds packages/envoy/docker/Dockerfile, so this list owes every
-      # file that build reads: the four below are the ones the entries above do not already
+      # file that build reads: the three below are the ones the entries above do not already
       # cover. .github/scripts/check-image-trigger-paths.sh fails the build when one is missing.
       - ".github/workflows/envoy-and-contracts.yaml"
       - ".dockerignore"
-      - "packages/daemon/package.json"
-      - "packages/workspace/package.json"
+      - "docs/site/package.json"
   pull_request:
     paths:
       - "packages/envoy/**"
@@ -49,21 +47,16 @@ on:
       - "patches/**"
       - "package.json"
       - "bun.lock"
-      - "packages/daemon-go/**"
-      - "packages/daemon/docker/worker.Dockerfile"
+      - "packages/daemon/**"
       - ".github/actions/install-jj/**"
-      - ".github/actions/install-uv/**"
       - "go.work"
       - "go.work.sum"
-      - "scripts/e2e/**"
-      - "deploy/kubernetes/operator-route/**"
-      - "packages/daemon/src/daemon/omp-pin.ts"
+      - ".omp-pin"
       - ".github/actions/install-omp/**"
-      # Same four the push list owes, for the same build.
+      # Same three the push list owes, for the same build.
       - ".github/workflows/envoy-and-contracts.yaml"
       - ".dockerignore"
-      - "packages/daemon/package.json"
-      - "packages/workspace/package.json"
+      - "docs/site/package.json"
   merge_group:
     types: [checks_requested]
 
@@ -81,7 +74,6 @@ jobs:
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
       dispatch: ${{ steps.filter.outputs.dispatch }}
-      daemon_go: ${{ steps.filter.outputs.daemon_go }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -125,20 +117,19 @@ jobs:
               - 'patches/**'
               - 'packages/envoy-client/package.json'
               - 'packages/pi-envoy/package.json'
-              - 'packages/daemon/package.json'
               - 'packages/envoy-plugin/package.json'
               - 'packages/claude-envoy/package.json'
-              - 'packages/workspace/package.json'
+              - 'docs/site/package.json'
               - '.dockerignore'
               - '.github/workflows/envoy-and-contracts.yaml'
               # The job also COMPILES TestSmoke, in workspace mode, so the workspace files and
               # every module in it belong here too — `envoy` carried go.work and go.work.sum and
-              # this filter must not be narrower. packages/daemon-go requires testcontainers-go,
+              # this filter must not be narrower. packages/daemon requires testcontainers-go,
               # so its manifests move the smoke's module graph.
               - 'go.work'
               - 'go.work.sum'
-              - 'packages/daemon-go/go.mod'
-              - 'packages/daemon-go/go.sum'
+              - 'packages/daemon/go.mod'
+              - 'packages/daemon/go.sum'
             # The local acceptance run drives the Go listener and renders every frame with the
             # shared TypeScript renderer, so a change to either side, or to the contracts both
             # read, must run it.
@@ -172,10 +163,14 @@ jobs:
               - 'skills/**'
               # The Oh My Pi pin the real-binary tests run (extensions/legion-phase-stall-omp.test.ts,
               # extensions/dispatch-first-omp.test.ts).
-              - 'packages/daemon/src/daemon/omp-pin.ts'
+              - '.omp-pin'
               - '.github/actions/install-omp/**'
-              # The jj its tests drive is the worker image's.
-              - 'packages/daemon/docker/worker.Dockerfile'
+              # The rigs' scripts/grant-rig/run.test.ts runs daemon-pane.go inside the daemon
+              # module, so a change to the daemon (or to the worker image's jj, whose version its
+              # Dockerfile there pins for the tests) runs it.
+              - 'packages/daemon/**'
+              - 'go.work'
+              - 'go.work.sum'
               - '.github/actions/install-jj/**'
             dispatch:
               - 'packages/dispatch/**'
@@ -188,33 +183,6 @@ jobs:
               - 'patches/**'
               - 'package.json'
               - 'bun.lock'
-            daemon_go:
-              - 'packages/daemon-go/**'
-              - 'packages/envoy/go.mod'
-              - 'packages/envoy/go.sum'
-              - 'go.work'
-              - 'go.work.sum'
-              - 'scripts/e2e/**'
-              # The operator route's pod.yml, which two daemon-go tests load (config, sandbox).
-              - 'deploy/kubernetes/operator-route/**'
-              # The jj and uv its tests drive are the worker image's.
-              - 'packages/daemon/docker/worker.Dockerfile'
-              - '.github/actions/install-jj/**'
-              - '.github/actions/install-uv/**'
-              # Stage 3's live proof consumes the Go wire fixtures and the native Dispatch
-              # server through the Go client. Any change on either side must run the Go lanes.
-              - 'packages/contracts/fixtures/**'
-              - 'packages/envoy/internal/dispatch/**'
-              - 'packages/envoy/cmd/dispatch/**'
-              # The plugin's Go client and the manifest field the boot gate holds it to.
-              - 'packages/pi-envoy/**'
-              # The skills the plugin ships, which internal/daemon's image-probe test resolves with
-              # the plugin's agents and role prompts (TestTheAgentModelCheckOnTheRealOhMyPi).
-              - 'skills/**'
-              # The Oh My Pi pin the real-binary tests run (internal/podsafety's baseline, the
-              # pod agent's argv in internal/runtime/sandbox).
-              - 'packages/daemon/src/daemon/omp-pin.ts'
-              - '.github/actions/install-omp/**'
 
   contracts:
     needs: changes
@@ -300,9 +268,14 @@ jobs:
       - uses: ./.github/actions/install-jj
       # extensions/legion-phase-stall-omp.test.ts and extensions/dispatch-first-omp.test.ts run the
       # pinned Oh My Pi against stand-ins (extensions/test-omp-harness.ts) and refuse on GitHub Actions
-      # without one. The pin is read from omp-pin.ts, the repository's one copy of it, installed
+      # without one. The pin is read from .omp-pin, the repository's one copy of it, installed
       # through the mise install-jj leaves at ~/.local/bin/mise (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
+      # scripts/grant-rig/run.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/daemon/go.mod
+          cache-dependency-path: packages/daemon/go.sum
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-envoy
         run: bun run build
@@ -619,57 +592,3 @@ jobs:
         with:
           name: envoy-e2e-local-evidence-${{ github.run_attempt }}
           path: packages/envoy/out/e2e
-
-  daemon-go:
-    needs: changes
-    if: needs.changes.outputs.daemon_go == 'true'
-    runs-on: ubuntu-24.04
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: ci
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      # One service for both: the unit lane's Postgres and the stage script's. Setting
-      # LEGION_E2E_PG_DSN is what tells the script not to start a container of its own — that
-      # path is the devbox's.
-      LEGION_TEST_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
-      LEGION_E2E_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: packages/daemon-go/go.mod
-      # With the e2e tag, vet also compiles the live proofs behind it (the Stage 4a harness,
-      # sandbox/live*_test.go), which run on the devbox against a real cluster.
-      - name: Vet the Go daemon, its e2e-tagged live proofs included
-        run: go vet -tags e2e ./...
-        working-directory: packages/daemon-go
-      # Before the tests: the tmux runtime's tests drive a real tmux server and skip without one,
-      # and the daemon supervises under tmux and refuses to start without it.
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
-      # The workspace and boundary tests drive a real jj, the one the worker image ships (its
-      # working-copy filters are among what they plant), and the daemon resolves jj at boot and
-      # refuses to start without it.
-      - uses: ./.github/actions/install-jj
-      # internal/podsafety's baseline test and the pod agent's argv test run the Oh My Pi the worker
-      # image ships, and refuse on GitHub Actions without one. The pin is read from
-      # omp-pin.ts, the repository's one copy of it, installed through the mise above
-      # (.github/actions/install-omp).
-      - uses: ./.github/actions/install-omp
-      # internal/runtime/sandbox's uv link-mode test installs a wheel with the uv the worker image
-      # ships (ARG UV_VERSION, checked against ARG UV_SHA256), and refuses on GitHub Actions
-      # without one (.github/actions/install-uv).
-      - uses: ./.github/actions/install-uv
-      - name: Test the Go daemon
-        run: go test -count=1 ./...
-        working-directory: packages/daemon-go
-      - name: Stage 1 live proof
-        run: bash scripts/e2e/stage1-skeleton.sh

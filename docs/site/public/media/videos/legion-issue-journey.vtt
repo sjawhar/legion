@@ -1,0 +1,49 @@
+WEBVTT
+
+00:00:00.300 --> 00:00:02.083
+Legion took this issue to done:
+
+00:00:03.299 --> 00:00:04.540
+checked in production,
+
+00:00:05.237 --> 00:00:06.223
+and signed off.
+
+00:00:07.380 --> 00:00:08.897
+To hand Legion an issue,
+
+00:00:09.593 --> 00:00:10.737
+add the legion label
+
+00:00:11.879 --> 00:00:13.672
+and set it to Todo.
+
+00:00:13.848 --> 00:00:16.194
+Legion admits it and claims it.
+
+00:00:16.900 --> 00:00:19.770
+The architect's questions come to your Inbox.
+
+00:00:21.069 --> 00:00:21.792
+Pick an answer,
+
+00:00:23.022 --> 00:00:24.614
+and once every one is answered,
+
+00:00:25.277 --> 00:00:28.035
+it asks you to approve the spec.
+
+00:00:29.497 --> 00:00:30.095
+Approve it,
+
+00:00:30.630 --> 00:00:31.391
+and it's clear.
+
+00:00:33.072 --> 00:00:37.400
+The status follows each phase, with no click from you.
+
+00:00:38.721 --> 00:00:40.630
+READY names the pull request,
+
+00:00:40.818 --> 00:00:43.245
+and what it changes, for your merge.

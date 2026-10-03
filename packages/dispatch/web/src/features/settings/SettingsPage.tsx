@@ -2,7 +2,7 @@ import { canonicalRepo } from "@legion/contracts/repo";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
-import { api, isCredentialFeatureOff } from "../../api/client";
+import { api } from "../../api/client";
 import { projectsQuery } from "../../api/queries";
 import type { RepoProject } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
@@ -46,6 +46,7 @@ export function SettingsPage(): ReactNode {
   const [failedAction, setFailedAction] = useState<FailedAction>();
   const mappings = useQuery({ queryKey: ["repo-projects"], queryFn: () => api.listRepoProjects() });
   const projects = useQuery(projectsQuery());
+  // `null` is a Dispatch with no secrets broker, where Live grants has nothing to list.
   const credentialsAvailable = useQuery(credentialPendingQuery());
   const putMapping = useMutation<
     RepoProject,
@@ -126,8 +127,7 @@ export function SettingsPage(): ReactNode {
       <div className={settingsSectionGap}>
         <ProjectsSection />
         <AgentTokensSection />
-        {credentialsAvailable.isPending ||
-        isCredentialFeatureOff(credentialsAvailable.error) ? null : (
+        {credentialsAvailable.isPending || credentialsAvailable.data === null ? null : (
           <GrantsSection />
         )}
         <section aria-labelledby="repository-projects-heading">

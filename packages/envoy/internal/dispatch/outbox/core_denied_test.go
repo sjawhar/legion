@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -36,7 +37,7 @@ func grantedNATS(t *testing.T, allow ...string) (*bus.Client, *natsgo.Conn, *tes
 	}
 	t.Cleanup(client.Close)
 
-	subscriber, err := bus.Dial("test-subscriber", []string{grant.URL})
+	subscriber, err := bus.Dial("test-subscriber", []string{grant.URL}, os.LookupEnv)
 	if err != nil {
 		t.Fatalf("connect the subscriber: %v", err)
 	}

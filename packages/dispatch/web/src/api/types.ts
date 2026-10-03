@@ -17,6 +17,7 @@ export type {
   Artifact,
   ArtifactApproval,
   ArtifactBlock,
+  ArtifactRebuildReport,
   ArtifactReview,
   ArtifactReviewEventPayload,
   ArtifactReviewState,
