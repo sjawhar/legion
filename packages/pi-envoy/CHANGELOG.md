@@ -4,6 +4,38 @@
 
 ### Changed
 
+- Brainstorming happens in the spec (LEGION-475). When a session has Dispatch, the `dispatch`
+  skill's "Design changes are brainstormed here" replaces the brainstorming skill's chat questions
+  and its spec file: the first version holds only what the conversation has established and every
+  question that is ready, each as a decision block at the end of the section that sets it up, and
+  each next version folds the answers in, in the human's words with the date. An approval request
+  carries nothing new: it goes out only once the human has agreed to every point in the spec, a
+  point they have not agreed to getting its own decision block first or leaving the spec, and its
+  `summary` says only what the human is approving, with no commentary. A lane's technical decisions
+  are made in the plan or the code, not the spec. The `legion-architect` skill, both root architect
+  role prompts and `dispatch_request_approval`'s description say the same, and `dispatch-first`
+  sends an agent to the `dispatch` skill before its first design question. A root architect's spec
+  adds only the evidence each decision needs and what the human decides, each as a decision block;
+  the architect's decomposition, its waves, how each outcome is proven and the integration test go
+  in the child issues and the planner's `.legion/plan.json`, so the design gate never asks the
+  human to approve the architect's own calls. The `dispatch` skill, its approval reference and
+  `legion-architect` describe the approval request as Dispatch keeps it: a new version moves the
+  open request and leaves it waiting on the agent, whose next request, once the human has agreed
+  to every point in the new version, hands the same request back; an answer closes it, so the
+  request after an answer opens a new one. A reply under an open ask whose next move is the
+  agent's, such as an approval request it must revise or hand back, goes with `reply_to_ask` and
+  `turn: "agent"`, since a default-turn reply hands the request back to the human unchanged.
+- The plugin speaks one daemon (LEGION-223): every Legion session boots through the Go daemon's
+  claim routes (`claims/register`, `claims/ready`) and mints its grants there, whatever its
+  environment holds. The TypeScript daemon's client, its `legion` tool (`spawn_worker`,
+  `release_wave`, `set_status`, `escalate`), its controller handshake (`/controller/ready`), its
+  secret recovery (`/worker-session`), the root's `/process/exit` report and the NATS control
+  directives are removed. The manifest declares one contract, `legion.daemonApiVersion` at 12, in
+  place of `legion.daemonApiVersion` 9 and `legion.goDaemonApiVersion` 11: a daemon at contract 11
+  or a TypeScript daemon refuses this release, and a daemon at 12 refuses an earlier one. Install
+  this release together with a Go `legion` built from the same commit and, under
+  `runtime: kubernetes`, pin the worker image built from that commit: a daemon at 12 refuses the
+  previous image at its image probe.
 - A spec is the design conversation (LEGION-387). The `dispatch` skill's "Writing a spec" drops
   the eight required headings: a spec starts as the problem and its evidence, puts each open
   question in a decision block at the end of the section that discusses it, records a settled
@@ -32,11 +64,30 @@
   `dispatch_request_approval` as a way to wait on a human.
 - The `dispatch` skill makes a halt condition (a change to IAM, deletion or exposure of production
   data, anything that reaches a customer) the lane's own `dispatch_ask` to Sami on its own issue,
-  never routed through the platform PO, in "Before you ask" gate 1, "Writing a spec" and "When you
-  need a human". A contract between two lanes still goes to the platform PO over Envoy.
+  in "Before you ask" gate 1, "Writing a spec" and "When you need a human". A contract between two
+  lanes is settled by those two lanes over Envoy, and nobody audits or retracts another session's
+  asks.
+
+### Fixed
+
+- A controller now displays its project token in canonical uppercase
+  (`Legion controller · AGENTC`), rather than the lowercase token the Go daemon carries in
+  `LEGION_PROJECT` (LEGION-480).
+- A `task` subagent whose first transcript publish loses Oh My Pi's session publish lock to
+  another writer no longer fails every tool call for the rest of its life (LEGION-491). The
+  subagent check asks the host's agent roster first, which needs no publish; where the roster
+  gives no opinion and the publish fails, it answers from the transcript on disk, logs a warning,
+  and asks again at the next check instead of keeping the failure.
 
 ### Added
 
+- Every Legion session names itself when it starts, so Dispatch and Envoy show who wrote what
+  instead of a bare session id (LEGION-480): `Legion <role> · <ISSUE>` for a root architect or a
+  phase worker (`Legion implementer · LEGION-370`) and `Legion controller · <PROJECT>` for a
+  controller, under either daemon, in a tmux pane or a pod. Each Dispatch write stamps it as
+  `origin.session_title`, and the Envoy registration sent with the role claim carries it. A
+  resumed session keeps its title, a person's rename is never replaced, and a title Oh My Pi
+  generated from a first message gives way to the Legion one.
 - `dispatch_read` of a comment or ask anchored in a document says where its quote sits, as a
   `Position:` line after the quote: in a table, the row (0 is the header), the cells before the
   anchored one and the column's header, so a reader can name the row and column a comment on a
@@ -141,7 +192,7 @@
   stale-generation, open-mid-check abort, and one-check-at-a-time guards are unchanged.
 - The package ships the task agents Legion's skills dispatch, in `agents/`: `oracle` (`legion-oracle`) and `thermonuclear-deep-review` and `thermonuclear-code-quality` (the reviewer's pair in `legion-worker`), copied from the operator's definitions. Oh My Pi finds an installed plugin's `agents/` in a pane and an explicit extension root's in a pod, so a worker's `task(agent="…")` no longer depends on agent files in the operator's profile. Before, a worker without them got `Unknown agent … Available: scout, reviewer, …` and carried on, usually by substituting `reviewer` (LEGION-200). Each declares an Oh My Pi model role the operator's `modelRoles` maps: `@review` for the pair, `@oracle` for `oracle`.
 - The skills those prompts load ship with the others under `dist/skills`: the pair's rubrics (`thermonuclear-deep-review`, `thermonuclear-code-quality`) and the implementer's simplify pass (`ce-simplify-code`, Legion's copy of the MIT-licensed Compound Engineering skill, dispatching its personas to the bundled `reviewer`). Before, the pair loaded a rubric only an operator profile carrying the dotfiles had, and reviewed from a five-step outline without it (LEGION-200).
-- Under the Go daemon (`LEGION_DAEMON_API=go`), the operator-launched controller (`legion controller start`) runs as a controller session instead of being refused: it registers on `/legion/v1/claims/register` with its controller capability, claims `legion-<project>-controller`, and mints each bash command's grant from the `/grants` controller-session form with the secret its registration was issued.
+- Under the Go daemon, the operator-launched controller (`legion controller start`) runs as a controller session instead of being refused: it registers on `/legion/v1/claims/register` with its controller capability, claims `legion-<project>-controller`, and mints each bash command's grant from the `/grants` controller-session form with the secret its registration was issued.
 - Under the Go daemon, the controller subscribes to its project's controller topic (`notifications.legion.<project>.controller`, `legionControllerNoticeSubject` in `@legion/contracts`, the project from `LEGION_PROJECT`) once it claims its role, for as long as it holds the role; what the daemon publishes there is listed at the Go daemon's `notify.ControllerTopic`. A controller that a later `legion controller start` replaces closes the subscription when its next heartbeat finds the role held by the new session, so it stops taking wakes within one heartbeat, and a dropped connection's retries do not reopen it once the role has ended; a `/new` or `/resume` keeps it open whichever extension handles the switch first; the subscription is never registered with the listener, so the replaced session resumed later does not get it back. Before registering, the controller reads the daemon's project from `GET /legion/v1/state` and refuses a `LEGION_PROJECT` that is unset or names another project's controller role, since a registration replaces the running controller. The subscription is a live wake: an Oh My Pi session subscribes over core NATS, so a notice published while no controller runs never reaches one, and the controller skill reads `legion state` at every start for held issues and failed tree architects, and Dispatch's triage listing for roots created while none ran. A controller on an earlier release never runs against this daemon: the daemon refuses its registration with 409 (contract 7).
 - Under the Go daemon, the architect's `legion` tool gains `park_child` and `rerun_child` (`POST /legion/v1/children/park` and `/rerun`). `park_child` takes a running child of the architect's tree out of the workflow by moving it to `backlog`; `rerun_child` runs a parked or signed-off child again from planning by moving it to `todo`. Each is the Dispatch move a human would make, and the daemon reacts to it as to the human's: the child's workers are suspended, or its next run starts under the tree. Neither takes the tree root.
 - Phase workers end their phase with the `legion` tool: `handoff_write`, `handoff_read`, and `handoff_complete` run the daemon's own `legion handoff` commands (the TypeScript-daemon tool is now registered for every worker), and the role prompts, the worker skills, and the Go daemon's per-role prompt parts say so. A phase worker whose run settles with its phase still open gets one follow-up in its own session (run `handoff_complete`, or reply WAITING), which names a tool call the model wrote as text (LEGION-208 4b.15).

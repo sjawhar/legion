@@ -11,19 +11,19 @@ import (
 )
 
 // migratePeople is `envoy-dispatch migrate-people`: it moves every person the database
-// DATABASE_URL names by GitHub login to the email DISPATCH_PEOPLE_MAP gives them
-// (peoplemigration.Run), writing each field's count of logins before and after to out. A
+// databaseURL (DATABASE_URL) names by GitHub login to the email peopleMap (DISPATCH_PEOPLE_MAP)
+// gives them (peoplemigration.Run), writing each field's count of logins before and after to out. A
 // deployment runs it once, as a one-off task of the Dispatch service's own task definition, with
 // the service scaled to 0 so no room holds a document it renames. Exit 0 when every person moved,
 // 1 when it refused (a login the map lacks, which changes nothing) or left something to move;
 // errOut says which.
-func migratePeople(ctx context.Context, getenv func(string) string, out, errOut io.Writer) int {
-	people, err := peoplemigration.ParseMap(getenv("DISPATCH_PEOPLE_MAP"))
+func migratePeople(ctx context.Context, peopleMap, databaseURL string, out, errOut io.Writer) int {
+	people, err := peoplemigration.ParseMap(peopleMap)
 	if err != nil {
 		fmt.Fprintf(errOut, "migrate-people: %v\n", err)
 		return 1
 	}
-	database, ok := openMigrated(ctx, "migrate-people", getenv("DATABASE_URL"), errOut)
+	database, ok := openMigrated(ctx, "migrate-people", databaseURL, errOut)
 	if !ok {
 		return 1
 	}

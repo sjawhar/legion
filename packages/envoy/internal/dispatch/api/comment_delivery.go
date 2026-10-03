@@ -672,6 +672,9 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "REPLY_FORBIDDEN", http.StatusForbidden, "session may reply only to its own delivery")
 		return
 	}
+	// A replay of a callback that already posted its reply writes nothing and answers the stored
+	// reply as it is, with no ask_waiting_on: that names whom the ask waits on once a reply is its
+	// newest, which a replayed reply need no longer be.
 	if attempt.ReplyID != nil {
 		reply, err := s.loadComment(r.Context(), tx, *attempt.ReplyID)
 		if err != nil {
@@ -746,6 +749,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	waitingOn := thread.waitingOnAfter(turn)
 	if thread.AskID != nil {
 		if err := asks.FollowAuthor(r.Context(), tx, *thread.AskID, actor); err != nil {
 			s.writeHandlerError(w, err)
@@ -770,7 +774,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload, err := s.commentEventPayload(
-		r.Context(), tx, reply, artifactName, thread.eventThread(turn), referenceChanges,
+		r.Context(), tx, reply, artifactName, thread.eventThread(waitingOn), referenceChanges,
 	)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -792,5 +796,5 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
-	WriteJSON(w, http.StatusCreated, reply)
+	WriteJSON(w, http.StatusCreated, commentWriteResponse{Comment: reply, AskWaitingOn: waitingOn})
 }

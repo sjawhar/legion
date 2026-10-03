@@ -4,6 +4,8 @@
 
 ### Added
 
+- `envoy-dispatch settings` prints every Dispatch setting the server and its subcommands read, one row each with its `_FILE` form, default, whether it is required and a one-line description, from one table (`cmd/dispatch/settings.go`) that is now the only place Dispatch's own code reads its environment; the docs site's Dispatch configuration reference is generated from it. The libraries Dispatch links still read their own variables (`HOME`, libpq's `PG*`, Go's proxy, certificate and runtime variables), which the table does not list. Every setting resolves as before, the `envoy.json` overrides and `_FILE` forms included; the readers that used to call `os.Getenv` themselves (the dashboard directory, the GitHub App credentials, the signing key and insecure-cookie flag, the `envoy.json` overrides, the Envoy listener token, and NATS's reach and nkey) are handed their value from the table.
+- `envoy-dispatch routes` prints the route table `GET /api/v1` serves, read without a database or a listener; the docs site's Dispatch HTTP API reference is generated from it.
 - `envoy-dispatch census`: the pre-deploy census of the migrations a database has not recorded (the runner's own rule), for a deployment to run before it rolls the service. It prints, for each pending migration, the tables it locks above ACCESS SHARE with size, row count and the sessions holding locks on them (pid, role, application, state and transaction age, "not visible" where Postgres hides one, or "autovacuum worker"; never query text), the transactions open longer than a minute or of an age it cannot see, and the count the migration's own `<version>_<name>.census.sql` answers. Those tables are the ones its statements name (an aliased `update` and a foreign key's referenced table among them; none in a comment, a string literal or the body of a function the migration defines), the table behind an index it drops or alters, and every table a foreign key reaches from rows it writes (a cascade, or a check that a row is still referenced), read from `pg_constraint` and from the keys earlier pending migrations add, inside a `DO` block too, and checked for holders and readability but not counted. It refuses (exit 1) a census that counts rows; a table a migration names above 1 GiB, which it does not count; a lock on a touched table held by a transaction older than a minute, or by one whose age Postgres hides from the census's role (granting that role `pg_read_all_stats` lets it read the age) or does not record (`track_activities` off), but not by an autovacuum, which Postgres cancels for the migration, unless it is anti-wraparound, or may be (its activity hidden or untracked, its table past its freeze age), or `deadlock_timeout` is not shorter than the lock timeout; a touched table it cannot read within the five-second lock timeout or the statement timeout; a census that fails, a name the database lacks included, even behind an earlier pending migration that may create it; and a database that records no version yet holds tables. A fresh database, one recording no version and holding no table, passes with `census: fresh database, nothing to check`. A failure names the file and the SQLSTATE, and Postgres's message only when it points into the census's own text, so no row value reaches a log. The census exits 2 when it cannot be taken (a connection whose `search_path` names no schema that exists among the causes), and writes nothing: one read-only transaction, the census statement sent through the extended protocol whatever the connection string asks. `pgmigrate.Load` refuses a census that is not one select, that holds a Unicode escape (`U&'…'`, `U&"…"`), or that names `pg_terminate_backend`, `pg_cancel_backend`, `pg_sleep`, an advisory-lock function (`pg_try_advisory_*` included) or a function that runs a query given as text (`query_to_xml` and its kin, `ts_stat`, `ts_rewrite`), bare or quoted and in any case, anywhere outside its comments and string literals, which it finds as Postgres 16's lexer does; the census runs with `standard_conforming_strings` on, so Postgres reads its literals the same way. Every migration from `censusRequiredFrom` (56, `internal/dispatch/store/store_test.go`) declares a census; 0053, 0054 and 0055 carry worked examples. Each store's tests hold the census's reading of every migration to the locks it really takes, run every shipped census at the schema just before its migration, and require a census that reads what a migration from `censusRequiredFrom` on creates, renames or gives a new type to name that migration, since a release carrying both refuses every deploy. An unknown `envoy-dispatch` subcommand now exits 2 instead of serving, which migrated the database (LEGION-459).
 - `envoy-dispatch migrate-people`: moves every record that names a person by GitHub login to the email `DISPATCH_PEOPLE_MAP` (a JSON object from each login, in any case, to its person's email) gives them, for a deployment to run once with the Dispatch service scaled to 0. It rewrites user actors' ids and session actors' owners in every JSON actor column and event, assignees, answers' users, the `login` of the per-person bookkeeping events, token owners and the per-person tables (merging the rows two casings of one login kept apart), deletes session generations keyed by a login, records the people the moved records name, and renames each document's answered asks by an update appended to its state, which versions nothing; document versions keep the name they were written with. A login the map lacks stops it before any write, naming the login and every field holding it; it prints each field's count of logins before and after, and a second run changes nothing.
 - `DISPATCH_DEV_SIGNIN=1` mounts `GET /auth/_dev/signin?login=<email>&next=<path>` on Dispatch, which signs the person it names in, lowercased, with the same session cookie a sign-in-pool sign-in issues, with no pool step, so a local instance can be driven signed-in. Boot refuses the flag unless identity is cookie, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, a set `DISPATCH_AGENT_SECRETS_URL` names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, since a signed-in session can have the App probe and import any repository it is installed on. A key in `app.json`, where a developer keeps the real App's key, is refused whatever the base, naming the file; the environment's key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, because every App call hands a signed App JWT to whatever listens at that base. These refusals come before NATS or Postgres is dialled. The signing key is then generated per process, so a minted cookie is worthless on any other server and dies with the process. What a signed-in session writes to the database (a `dsp_` token it mints, the session rows its sign-out changes) is honoured by every server on that database, so a dev-sign-in server needs a database of its own. While the flag is on, every request must carry the dashboard origin as its `Host` (`421 HOST_MISMATCH`), and the route serves only a loopback peer with no forwarding header (`403 DEV_SIGNIN_FORBIDDEN`) and logs every mint at WARN. `DISPATCH_LISTEN_HOST` may now be an IPv6 literal with or without brackets: `::1` listened on `::1:8766` and failed with "too many colons", and now listens on `[::1]:8766`. A bad `DISPATCH_PORT` now refuses the boot before NATS and Postgres connect.
@@ -61,6 +63,18 @@
   `INTERNAL`, the codes the API answers those errors with elsewhere), logged at WARN, and they do
   not wait for a failed document room's recovery; only a request that has itself gone away fails
   them (LEGION-460).
+- `PUT /api/v1/me/agents/{session_id}/state` accepts `read_replies`, the ids of messages that
+  session wrote, and marks those replies read and no other (`user_agent_reply_read`, migration
+  `0067`); `unread_replies` and the conversation window's unread flag leave them out. Opening a
+  broadcast page now clears the answers it shows from the New replies badge and each agent's row,
+  on every tab, while the session's older reply to another message, or one newer than the page
+  shows, still counts. An id may take any form `uuid.Parse` reads; one it cannot read, or one that
+  is not a message that session wrote, is `400 INVALID_STATE`. A request naming only replies
+  already read by id, or replies the session's read mark has passed, changes nothing and appends
+  no `user_agent_state.updated` event. A reply the viewer's Clear hides but the read mark has not
+  passed is neither, though the count leaves it out: a Clear can move back, so the first request
+  naming that reply writes its row and appends the event. A `read_through` deletes the viewer's
+  rows for that session whose replies it reaches (LEGION-485).
 
 ### Changed
 
@@ -75,11 +89,43 @@
   round-trips; a cookie of the earlier shape no longer verifies. Header identity is only for tests
   and local harnesses, requires `DISPATCH_IDENTITY_HEADER_TRUSTED=1`, and never shares a
   deployment with the sign-in pool. Everyone who has signed in is recorded in `people` (migration
-  `0064`), which is the assignee picker's list and the only names an issue may be assigned to. The
+  `0068`), which is the assignee picker's list and the only names an issue may be assigned to. The
   GitHub reads (`/api/github/rest/...`) go to GitHub as the GitHub App installation, GET only and
   only a pull request, an issue or a commit's check runs. `DISPATCH_ALLOWED_LOGINS` and
   `DISPATCH_APP_CLIENT_SECRET` are removed and refused at boot; GitHub OAuth sign-in, the per-user
-  GitHub token table (`users`, dropped by `0064`) and the GraphQL proxy are gone (AGENTC-1563).
+  GitHub token table (`users`, dropped by `0068`) and the GraphQL proxy are gone (AGENTC-1563).
+- A blank approval-request `summary` is refused (`400 SUMMARY_INPUT`) with text that asks for what
+  the human is approving, rather than for what the version proposes that the human has not agreed
+  to, and the advice in `409 APPROVAL_WAITS_ON_HUMAN` and in an approval ask's `409 ASK_KIND_FIXED`
+  says to hand the request back only once the human has agreed to every point in the document
+  (LEGION-475).
+- A Dispatch approval request follows its document's versions instead of being retracted and
+  reopened on every edit (LEGION-470). A version write moves the open request to the new version
+  (`ask.edited`), keeping its thread and summary, and leaves it Waiting on agents until its agent
+  calls `POST /api/v1/artifacts/{id}/approval-requests` again. Only the move that takes the request
+  from the human wakes its asker and followers; each later move while it already waits on its agent
+  is recorded quiet (`quiet: true` on its `ask.edited`, `notify: false`, no follower route), as a
+  human's unnamed version is, so a person typing in a document with a request open sends one
+  delivery, not one per settled version. While the request waits on its agent
+  (moved, or answered in its thread), that call hands it back to the human with the new event
+  `ask.handed_back`, rewording it first when the summary is new (`ask.edited`); a hand-back that
+  rewords nothing leaves the question and `edited_at` alone, so an answer the human had started is
+  still saved. While the request already waits on the human, the same summary is a repeat that
+  writes nothing and a different one is refused `409 APPROVAL_WAITS_ON_HUMAN`, since an approval
+  request carries nothing new. The route answers 201 when it wrote anything and 200 when the
+  request already stood as asked. A summary's limit is counted against a ten-digit version, so no
+  version move takes the question past the ask cap. `ask.approval` gains `requested_version`, the
+  version last handed to the human, and a document's `approval` gains `waiting_on` while it is
+  `awaiting`. Every route that writes a comment (both comment routes and the delivery callback
+  `POST /api/v1/comments/{id}/reply`) answers `ask_waiting_on`, the value the comment's event
+  already carries, beside the comment on a reply to an open ask; a replayed delivery callback,
+  which writes nothing, answers the stored reply alone. Migration `0064`
+  backfills `requested_version` and adds `asks.handed_back_reply_id`, `0065` makes
+  `comments.created_at` default to `clock_timestamp()` so an ask's newest reply is the one that
+  committed last, and `0066` adds the column's foreign key to `comments` under a 500 ms
+  `lock_timeout` of its own; each census answers `0`. The pre-deploy census judges a pending
+  migration's lock holders against the `lock_timeout` the migration itself sets, so an autovacuum
+  on `asks` or `comments` refuses `0066` where `deadlock_timeout` is not shorter than its 500 ms.
 - A markdown document uploaded as an artifact is at most 1 MiB, the bound an issue's spec and
   every edit already have; other artifacts keep the 25 MiB limit. The dashboard shows the
   server's message for a refused upload (LEGION-465).
@@ -165,8 +211,69 @@
   or Claude Code plugin built from the same executor) keeps that URL from being sent at all,
   because its `dispatch_search` refuses the same rules before any request.
 
-### Fixed
+- A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
+### Fixed
+- A listener whose session cache had not yet seen a role holder another listener registered a moment ago released the holder's fresh claim as lapsed: a lookup (`GET /v1/roles/<role>`, a role publish) or a role delivery read the claim from the role bucket and the holder from a cache that trails the session bucket, so during a rolling deploy the old task could delete the claim the replacement had just accepted, and the role reached nobody until its holder claimed it again. A soft claim could take such a holder's role, and the role reaper end its claim, the same way. Each now reads the holder from the session bucket itself before it takes anything from it (LEGION-456).
+- One MiB of `>` formed 1,048,576 nested quotes inside the document cap and eventually ended the process in a stack overflow while its tree was validated. Dispatch now refuses the document before building that tree (LEGION-465).
+- Reading a textblock's inline markdown took one stack frame per nested mark, so the stack and memory it needed grew with the nesting the caller wrote: one 1 MiB upload of 262,140 nested strong marks read with no error but peaked at about 0.9 GB of memory. The inline bound above is checked before any walk of those marks that recurses, and goldmark's own walk through a link's label, which enters every image the label holds, meets each image held to the bound as it is made (LEGION-465).
+- A table whose rows hold an escaped pipe in a code span parsed in time quadratic in its size: goldmark's table transformer checked every code span's text against every escaped pipe in the document, and 1 MiB of such rows took over two minutes. Dispatch takes the backslash out of those pipes itself, in one pass, and 1 MiB parses in about two seconds (LEGION-465).
+- Marking or unmarking a document's text, and checking whether a concurrent change removed the text a write inserted, walked the live tree one stack frame per level with no bound, where an authenticated peer can grow the tree through any number of small websocket updates. Each now refuses a node more than 1,000 levels deep, text included, as the document's reads do, and a peer's update that deepens the tree between a write's read and its transaction is answered `500 DOC_SCHEMA` rather than `500 INTERNAL` (LEGION-465).
+- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.49.6-sami.3` (commit `7cf8e9ff`), which walks the deleted children iteratively and carries the transactional GC fix; the change is open upstream (LEGION-465).
+
+- A document write whose issue closed, or whose server shut down with an editor connected, while
+  the committed write was being applied to its room no longer hangs. Closing the room retired its
+  persistence worker under the write, and ygo's fallback append, run on the write's own goroutine,
+  waited for the write to finish first: the request that made it got no answer, every later write
+  to the document waited on its writer slot, and the document's later rooms stopped persisting.
+  The room's own update observer now releases the write before that append runs (LEGION-469).
+- A write to a document in which a peer had deleted a chain of 200,000 nested blocks, or one whose
+  lower-numbered client had written 100,000 items after one ygo could not yet place, failed
+  with `fork live document: crdt: invalid update`, and so did every read of such a resident room
+  once reads went through a copy. Once its room was evicted or the server restarted, the
+  lower-numbered client's document could not be read or opened at all. Every decode of a
+  document's state, each copy of its room and its stored history alike, used ygo's default queue
+  of 100,000 items parked behind one whose parent it cannot place yet, which such a state
+  overruns; each, and the room's own load, now decodes with a queue as long as one update can
+  carry. The store's check of each update it appends decoded the update alone at the same
+  default, so a browser update of more than 100,000 items written against blocks the document
+  already held failed the room and lost the edit; that check now takes the same queue
+  (LEGION-469).
+- Document settlement no longer undoes an edit a browser or an agent makes while it settles
+  (LEGION-479). Settlement wrote its repairs (the block ids it stamps, an ask block's server-owned
+  attributes it restores) as the tree it had read before its database work, so an edit made in
+  between was reverted in the live document for every connected browser, and could reach the
+  stored document half applied. Each repair is now read and written in one transaction on the
+  document as it stands, and so is each stamp `envoy-dispatch backfill-block-ids` writes. The
+  version a repairing settlement writes is the document after its repairs, so it holds such an
+  edit and credits the edit's author, whose own settlement then writes no second version. A
+  repair settlement wrote into the room is committed even when the document moved after the
+  write; before, it was dropped from the store while the room and its browsers kept it. A
+  settlement whose room was closed and loaded again during its database work (its last browser
+  left) writes nothing into the reloaded room, whose own settlement makes the repair, and logs
+  `dispatch: document settlement wrote nothing into a replaced room` at INFO.
+- A settlement no longer leaves a suppression slot queued that nothing releases (LEGION-479). A
+  stamp that found the ids already repaired once it read the document kept its slot, and the
+  room's persistence worker waited on that slot at the room's next update, so the room stopped
+  storing updates. A settlement that both stamps ids and repairs an ask block held its two updates
+  with one slot that matched neither, so both were stored twice and the slot stayed queued. Each
+  update now has a slot of its own, and every path a repair takes releases its slot.
+- A document settlement whose room closed while its repair committed (its last browser left, or
+  the server shut down) no longer hangs for good (LEGION-479). Closing the document's issue never
+  closes the room under a repair: the settlement holds the issue's row until it commits, and the
+  close waits for that row. When the room closes under the repair, ygo stores the repair's update
+  on the settlement's own goroutine once the room's persistence worker has exited, and neither
+  wait there ended: the store waited for the settlement to release that update's suppression slot,
+  which it does only after the store returns, and the worker's exit compaction waited for the
+  room's lock, which the settlement held. Until the server restarted the document did not settle
+  and none of its later updates were stored, since every update a document stores takes that lock.
+  The store now discards the repair's own update without waiting once its room has left the
+  server, and the settlement fails the room so it reloads; the room worker's compaction skips a
+  room whose lock is held, except when it evicts a failed room. The same slot wait held
+  `envoy-dispatch backfill-block-ids` for good at a document whose room closed under its stamp.
+  Two cases still hang until the server restarts, tracked as LEGION-498: a room that fails while
+  the settlement commits into it, whose eviction waits for the room's lock on purpose, and a
+  second writer committing into the room while it retires under the repair's commit.
 - A GitHub App response over 1 MiB now fails whole instead of returning a truncated body. The
   dashboard proxy answers `502 GITHUB_UPSTREAM` and names the 1 MiB limit.
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters

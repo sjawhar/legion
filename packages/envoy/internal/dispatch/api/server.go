@@ -87,13 +87,15 @@ const defaultStreamHeartbeat = 15 * time.Second
 
 // DepsInput contains raw boot values used to construct API dependencies.
 type DepsInput struct {
-	Store           *store.Store
-	Identity        identity.Identity
-	AgentToken      string
-	RepoProjectsRaw string
-	DefaultProject  string
-	ServerURL       string
-	EnvoyURL        string
+	Store          *store.Store
+	Identity       identity.Identity
+	AgentToken     string
+	DefaultProject string
+	ServerURL      string
+	EnvoyURL       string
+	// EnvoyToken is the bearer the listener client sends (cmd/dispatch: ENVOY_TOKEN); empty sends
+	// none.
+	EnvoyToken string
 	// EnvoyTimeout replaces the listener client's window. Zero keeps the client's own default;
 	// a test exercising a receipt timeout sets a short one rather than waiting that out.
 	EnvoyTimeout time.Duration
@@ -120,9 +122,6 @@ type DepsInput struct {
 
 // NewDeps parses boot configuration once and returns API dependencies.
 func NewDeps(input DepsInput) (Deps, error) {
-	if _, err := ParseRepoProjects(input.RepoProjectsRaw); err != nil {
-		return Deps{}, err
-	}
 	defaultProject := strings.TrimSpace(input.DefaultProject)
 	if defaultProject != "" && !projectKeyPattern.MatchString(defaultProject) {
 		return Deps{}, fmt.Errorf("invalid DISPATCH_DEFAULT_PROJECT %q (expected project key)", defaultProject)
@@ -141,7 +140,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 	}
 	var envoyClient *envoy.Client
 	if envoyURL := strings.TrimSpace(input.EnvoyURL); envoyURL != "" {
-		var options []envoy.Option
+		options := []envoy.Option{envoy.WithToken(input.EnvoyToken)}
 		if input.EnvoyTimeout > 0 {
 			options = append(options, envoy.WithTimeout(input.EnvoyTimeout))
 		}
@@ -262,6 +261,7 @@ func errorf(status int, code, format string, args ...any) *apiError {
 const (
 	codeDocSchema             = "DOC_SCHEMA"
 	codeDocServiceUnavailable = "DOC_SERVICE_UNAVAILABLE"
+	codeDocumentUnloadable    = "DOCUMENT_UNLOADABLE"
 	codeInternal              = "INTERNAL"
 )
 
@@ -273,17 +273,20 @@ const (
 // so both take that code before any branch that reads the error's cause. A failed room carries the
 // error another operation failed it with - settlement's schema refusal, a settlement that failed
 // three times (its warm-up refused because the issue had closed, among others), a writer's commit
-// that failed or its client cancelled, a store write or load that failed - and that error says
-// nothing of this request: the caller retries once the room is evicted, and its retry meets the
-// document itself.
+// that failed or its client cancelled, a store write or load that failed, a history that did not
+// decode - and that error says nothing of this request: the caller retries once the room is
+// evicted, and its retry meets the document itself.
 //
-// A live tree outside the schema is DOC_SCHEMA, which both take only after the branches that name
-// the caller's own input or a block the document does not hold, so a refusal whose reason the
-// renderer gave (an ask block that cannot render) stays that refusal.
+// A stored history this request itself could not decode is DOCUMENT_UNLOADABLE, the state a
+// rebuild repairs. A tree outside the schema is DOC_SCHEMA, which both take only after the
+// branches that name the caller's own input or a block the document does not hold, so a refusal
+// whose reason the renderer gave (an ask block that cannot render) stays that refusal.
 func documentErrorCode(err error) string {
 	switch {
 	case errors.Is(err, docs.ErrServiceUnavailable):
 		return codeDocServiceUnavailable
+	case errors.Is(err, docs.ErrDocumentUnloadable):
+		return codeDocumentUnloadable
 	case errors.Is(err, docs.ErrDocSchema):
 		return codeDocSchema
 	}
@@ -301,8 +304,13 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		return
 	}
 	documentCode := documentErrorCode(err)
-	if documentCode == codeDocServiceUnavailable {
+	switch documentCode {
+	case codeDocServiceUnavailable:
 		writeError(w, documentCode, http.StatusServiceUnavailable, docs.ErrServiceUnavailable.Error())
+		return
+	case codeDocumentUnloadable:
+		writeError(w, documentCode, http.StatusConflict, docs.ErrDocumentUnloadable.Error())
+		slog.Warn("dispatch: API document history cannot load", "error", err)
 		return
 	}
 	// The edit route's own ambiguity error names the operation and the quote; the bare pmdoc one
@@ -407,7 +415,16 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		slog.Warn("dispatch: API refused a document over the update item cap", "error", err)
 		return
 	}
+	// A tree outside the schema that the document holds answers 409 with its one message, the same
+	// on every route whatever the route wrapped it in (docs.OutsideSchemaError). Any other schema
+	// refusal is a tree an operation produced, which is the server's fault.
 	if documentCode == codeDocSchema {
+		var outside *docs.OutsideSchemaError
+		if errors.As(err, &outside) {
+			writeError(w, documentCode, http.StatusConflict, outside.Error())
+			slog.Warn("dispatch: API document outside Proof schema", "error", err)
+			return
+		}
 		writeError(w, documentCode, http.StatusInternalServerError, err.Error())
 		slog.Error("dispatch: API document outside Proof schema", "error", err)
 		return

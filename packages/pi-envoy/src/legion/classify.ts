@@ -12,10 +12,10 @@ export function classifySession(env: NodeJS.ProcessEnv): LegionSessionKind {
     throw new Error("Legion session has both controller and tree launch markers");
   }
 
-  // The controller marker is LEGION_CONTROLLER alone. The daemon also sets
-  // LEGION_ROLE=controller on that process, but "controller" is not a
-  // LegionRole and this extension never reads LEGION_ROLE for it — one
-  // signal, checked once, so the two markers can never disagree in practice.
+  // The controller marker is LEGION_CONTROLLER alone. `legion controller start` also sets
+  // LEGION_ROLE=controller on that process, but "controller" is not a LegionRole and this
+  // extension never reads LEGION_ROLE for it — one signal, checked once, so the two markers can
+  // never disagree in practice.
   if (env.LEGION_CONTROLLER === "1") return { kind: "controller" };
 
   if (env.LEGION_ROLE === undefined) return { kind: "not-legion" };
@@ -27,8 +27,7 @@ export function classifySession(env: NodeJS.ProcessEnv): LegionSessionKind {
   const issue = requiredEnvironment(env, "LEGION_ISSUE");
   // The daemon roots an issue tree at itself: the root architect's own issue
   // key equals the tree's. A sub-architect on a child issue is a phase
-  // worker like any other role — bootstrapWorker already special-cases
-  // role === "architect" for tool registration.
+  // worker like any other role.
   if (env.LEGION_ROLE === "architect" && issue === tree) {
     return { kind: "root-architect", tree };
   }
@@ -64,10 +63,4 @@ export function requiredControllerCapability(env: NodeJS.ProcessEnv): string {
     );
   }
   return secret;
-}
-
-export function generation(env: NodeJS.ProcessEnv): number {
-  const value = Number(requiredEnvironment(env, "LEGION_GENERATION"));
-  if (!Number.isSafeInteger(value)) throw new Error("LEGION_GENERATION must be an integer");
-  return value;
 }

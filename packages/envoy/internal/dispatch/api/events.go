@@ -302,7 +302,7 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 	payloads := []map[string]any{}
 	for index := range events {
 		switch events[index].Type {
-		case "ask.opened", "ask.anchor_refreshed", "ask.answered", "ask.resolved", "ask.edited":
+		case "ask.opened", "ask.anchor_refreshed", "ask.answered", "ask.resolved", "ask.edited", "ask.handed_back":
 		default:
 			continue
 		}
@@ -338,7 +338,7 @@ func (s *server) attachAskAnchorArtifacts(ctx context.Context, events []model.Ev
 	payloads := map[string][]map[string]any{}
 	for index := range events {
 		switch events[index].Type {
-		case "ask.opened", "ask.anchor_refreshed", "ask.answered", "ask.resolved", "ask.edited":
+		case "ask.opened", "ask.anchor_refreshed", "ask.answered", "ask.resolved", "ask.edited", "ask.handed_back":
 		default:
 			continue
 		}

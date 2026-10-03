@@ -72,7 +72,7 @@ command -v tmux >/dev/null || {
 # below the kernel's ephemeral range, so no socket the run opens before the daemon binds can take
 # it (scripts/e2e/lib/free-port.sh). The restart reuses it.
 port=$(bash "$root/scripts/e2e/lib/free-port.sh")
-cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion
+cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion
 stage_role_prompts "$root" "$work"
 bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" | sed 's/^/   /'
 

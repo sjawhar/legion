@@ -78,26 +78,40 @@ func (s *Service) RenameAskAnswerers(ctx context.Context, artifactIDs []string, 
 	reports := make([]AnswererRename, 0, len(artifactIDs))
 	for _, artifactID := range artifactIDs {
 		_, skipped, err := s.repairDocument(ctx, artifactID, func(doc *crdt.Doc, origin any) (int, bool, error) {
-			_, renamed, err := rewriteTree(doc, origin, func(tree *pmdoc.Node) int {
-				renamed := 0
-				pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
-					by, ok := askAnsweredBy(node)
-					if !ok {
-						return true
-					}
-					if next := rename(by); next != by {
-						node.Attrs["answered_by"] = next
-						renamed++
-					}
-					return true
-				})
-				return renamed
+			// The locked read is a copy, so renaming it only counts what the live rename will do.
+			read, err := lockedTreeOf(doc)
+			if err != nil {
+				return 0, false, err
+			}
+			if renameAnswerers(read, rename) == 0 {
+				return 0, false, nil
+			}
+			renamed := 0
+			_, _, err = rewriteLive(doc, origin, func(live *pmdoc.Node) bool {
+				renamed = renameAnswerers(live, rename)
+				return renamed > 0
 			})
 			return renamed, false, err
 		})
 		reports = append(reports, AnswererRename{ArtifactID: artifactID, Skipped: skipped, Err: err})
 	}
 	return reports
+}
+
+// renameAnswerers sets the answered_by attribute of every answered ask block in tree to what
+// rename returns for it, and counts the attributes it changed.
+func renameAnswerers(tree *pmdoc.Node, rename func(string) string) int {
+	renamed := 0
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if by, ok := askAnsweredBy(node); ok {
+			if next := rename(by); next != by {
+				node.Attrs["answered_by"] = next
+				renamed++
+			}
+		}
+		return true
+	})
+	return renamed
 }
 
 // askAnsweredBy is the answered_by attribute node carries when it is an answered ask block.

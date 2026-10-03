@@ -32,8 +32,7 @@ func signedCookie(email string, generation, expiry int64, key string) string {
 }
 
 func TestIssueAndVerifySessionCookie(t *testing.T) {
-	t.Setenv("DISPATCH_INSECURE_COOKIE", "")
-	setCookie := IssueSessionCookie("sami@example.com", 7, "signing-key")
+	setCookie := IssueSessionCookie("sami@example.com", 7, "signing-key", true)
 	for _, frag := range []string{"dsession=", "HttpOnly", "Path=/", "SameSite=Strict", "Max-Age=2592000", "Secure"} {
 		if !strings.Contains(setCookie, frag) {
 			t.Errorf("set-cookie %q missing fragment %q", setCookie, frag)
@@ -48,9 +47,8 @@ func TestIssueAndVerifySessionCookie(t *testing.T) {
 // An email holds the characters the payload's separators and a cookie value cannot: dots, a plus,
 // an at sign. The cookie carries any of them back unchanged.
 func TestSessionCookieRoundTripsAnyEmail(t *testing.T) {
-	t.Setenv("DISPATCH_INSECURE_COOKIE", "1")
 	for _, email := range []string{"a.b+c@d.example", "first.last@sub.d.example", "o'neil=x;y@d.example"} {
-		session, ok := VerifySession(cookieValue(t, IssueSessionCookie(email, 3, "signing-key")), "signing-key")
+		session, ok := VerifySession(cookieValue(t, IssueSessionCookie(email, 3, "signing-key", false)), "signing-key")
 		if !ok || session.Login != email || session.Generation != 3 {
 			t.Errorf("round trip of %q: got %#v valid=%t", email, session, ok)
 		}
@@ -67,16 +65,14 @@ func TestVerifySessionRefusesTheLoginCookieShape(t *testing.T) {
 }
 
 func TestIssueSessionCookieInsecureFlag(t *testing.T) {
-	t.Setenv("DISPATCH_INSECURE_COOKIE", "1")
-	setCookie := IssueSessionCookie("sami@example.com", 0, "signing-key")
+	setCookie := IssueSessionCookie("sami@example.com", 0, "signing-key", false)
 	if strings.Contains(setCookie, "Secure") {
 		t.Errorf("insecure mode should omit Secure: %q", setCookie)
 	}
 }
 
 func TestVerifySessionRejectsTamperedCookie(t *testing.T) {
-	t.Setenv("DISPATCH_INSECURE_COOKIE", "1")
-	value := cookieValue(t, IssueSessionCookie("sami@example.com", 0, "signing-key"))
+	value := cookieValue(t, IssueSessionCookie("sami@example.com", 0, "signing-key", false))
 	tampered := value[:len(value)-1] + "a"
 	if value[len(value)-1] == 'a' {
 		tampered = value[:len(value)-1] + "b"

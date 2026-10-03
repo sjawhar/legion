@@ -51,7 +51,7 @@
 #   SKILL_SCENARIOS_TIMEOUT   seconds one run may take (default 1500)
 #
 # Each run:
-#   - Its agent is `omp -p` on the Oh My Pi both daemons pin (omp-pin.ts), in the label's profile
+#   - Its agent is `omp -p` on the Oh My Pi the daemon pins (.omp-pin), in the label's profile
 #     (make_omp_home, install-plugin-profile.sh, install-model-gateway.sh), under a HOME of its own
 #     copied from the label's, with `env -i` and only the variables its pane file names (base_env).
 #     An agent that writes to its HOME (`mise use -g`, say) changes nothing for another run.
@@ -154,7 +154,7 @@ cmd_profile() {
     fail "install-plugin-profile.sh failed; see $P/install.log"
   bash "$co/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$P/home" --dest "$P/key" --cache-dir "$P/cache" >>"$P/install.log" 2>&1 ||
     fail "install-model-gateway.sh failed; see $P/install.log"
-  bun "$co/packages/daemon/src/daemon/omp-pin.ts" >"$P/pin"
+  cp "$co/.omp-pin" "$P/pin"
   touch "$P/ready"
   cat "$P/built-from"
 }
@@ -497,9 +497,9 @@ EOF
   g add -A && g commit -qm "feat: greet(), a greeting helper for the widgets CLI ($worker_key)"
   C1=$(g rev-parse HEAD)
   mkdir -p "$src/.legion"
-  # The handoff CLI writes the implement handoff, so it is one the ledger reads, and the fixture
-  # fails here if a schema change makes it one the CLI refuses.
-  bun "$root/packages/daemon/src/cli/index.ts" handoff write --phase implement --workspace "$src" --data "$(
+  # The handoff CLI writes the implement handoff, so it is the file the ledger reads, in the shape
+  # the Go CLI gives every handoff (schemaVersion, phase, completed).
+  "$work/bin/legion" handoff write --phase implement --workspace "$src" --data "$(
     jq -cn --arg head "$C1" '{filesChanged:["greet.ts","greet.test.ts"],
       proof:[{criterion:"greet(name) greets by name, trimmed, and `bun greet.ts <name>` prints it; no name is a usage error",
         surface:"the CLI", command:"bun greet.ts Ada", observed:"prints Hello, Ada! and exits 0", headSha:$head,
@@ -559,6 +559,7 @@ Negative control: \`bun greet.ts\` (no name) → exit 2, \`usage: greet.ts <name
 
 run_tester_proof() {
   local name=$1 n=$2 index=$3 start=$4 state project port
+  [ -x "$work/bin/legion" ] || fail "no Go legion at $work/bin/legion: a run needs its batch's build"
   worker_fixture "$index" "$start" >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
   state=$R/state
   # Each run its own Legion project, so concurrent runs claim distinct role tokens on one listener.
@@ -576,19 +577,20 @@ run_tester_proof() {
   await_start daemon "$daemon_pid" 0 30 "the daemon stand-in to listen" grep -q '^listening on ' "$R/logs/daemon.log"
   port=$(sed -n 's|^listening on http://127\.0\.0\.1:||p' "$R/logs/daemon.log")
   base_env
-  # The pane the daemon would give the tester, over the base every agent gets: worker.env and
-  # system-args.
-  bun "$here/worker-pane.ts" "$R" "$R/pane.env" "$port" "$profile" "$project" "$worker_key" tester "$co/packages/pi-envoy/roles"
+  standins
+  # The pane the label's checkout's daemon would give the tester, over the base every agent gets:
+  # worker.env and system-args. The stand-ins come first, so the gh the pane names is the recording
+  # one.
+  bun "$here/worker-pane.ts" "$R" "$R/pane.env" "$port" "$profile" "$project" "$worker_key" tester "$co"
   {
     cat "$R/worker.env" "$services_env"
     echo "GIT_CONFIG_COUNT=0"
-    echo "GIT_TERMINAL_PROMPT=0"
     echo "JJ_USER=Rig Worker"
     echo "JJ_EMAIL=rig@example.invalid"
     echo "JJ_CONFIG=$R/jj.toml"
     echo "GH_REPO=$worker_repo"
+    echo "SKILL_SCENARIO_LEGION=$work/bin/legion"
   } >"$R/pane.env"
-  standins
   launch "$name"
 }
 
@@ -639,6 +641,9 @@ cmd_batch() {
   for label in "$@"; do load_label "$label"; done
   lock_services
   on_exit stop_batch
+  # The Go `legion` a tester-proof run's stand-in and fixture run, built from this checkout once
+  # for the whole batch.
+  (cd "$root/packages/daemon" && go build -o "$work/bin/legion" ./cmd/legion) || fail "building the Go legion failed"
   services_up
   start=$(date +%s)
   for label in "$@"; do
@@ -646,7 +651,7 @@ cmd_batch() {
       index=$((index + 1))
       printf '%s %s %s %s %s\n' "$batch_scenario" "$label" "$n" "$index" "$start"
     done
-  done | xargs -P "${SKILL_SCENARIOS_PARALLEL:-5}" -L 1 bash "$here/rig.sh" run &
+  done | xargs -r -P "${SKILL_SCENARIOS_PARALLEL:-5}" -L 1 bash "$here/rig.sh" run &
   runs_pid=$!
   wait "$runs_pid"
 }

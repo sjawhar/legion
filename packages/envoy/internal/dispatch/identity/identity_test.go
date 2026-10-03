@@ -110,7 +110,7 @@ func (s *testPeopleStore) get(email string) (auth.PersonMembership, bool) {
 
 func cookieRequest(t *testing.T, email string, generation int64) *http.Request {
 	t.Helper()
-	cookie := strings.SplitN(auth.IssueSessionCookie(email, generation, "signing-key"), ";", 2)[0]
+	cookie := strings.SplitN(auth.IssueSessionCookie(email, generation, "signing-key", true), ";", 2)[0]
 	name, value, ok := strings.Cut(cookie, "=")
 	if !ok {
 		t.Fatalf("invalid session cookie %q", cookie)

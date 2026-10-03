@@ -12,6 +12,7 @@ import (
 	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/peoplemigration"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -103,15 +104,18 @@ func TestAPeopleMigrationConvergesWithABrowserHoldingTheDocument(t *testing.T) {
 			t.Fatal(err)
 		}
 		fragment := peer.doc.GetXmlFragment("prosemirror")
-		if err := peer.doc.TransactE(func(transaction *crdt.Transaction) error {
+		var typeErr error
+		update := docstest.Transact(peer.doc, func(transaction *crdt.Transaction) {
 			tree, err := pmdoc.ReadInTransaction(transaction, fragment)
 			if err != nil {
-				return err
+				typeErr = err
+				return
 			}
 			tree.Children = append(tree.Children, typed.Children...)
-			return pmdoc.Update(transaction, fragment, tree)
-		}, &syncedPeerLocal{}); err != nil {
-			t.Fatalf("type into the kept document: %v", err)
+			typeErr = pmdoc.Update(transaction, fragment, tree)
+		})
+		if typeErr != nil || update == nil {
+			t.Fatalf("type into the kept document: update=%d bytes err=%v", len(update), typeErr)
 		}
 
 		migration := docs.New(docs.Deps{Store: database, Settle: time.Hour})

@@ -1,0 +1,171 @@
+// Package bootprobe is what Legion's boot probes share: the retry that waits out a probe's
+// transient failures, and the OK line `legion probe-image` prints inside the worker image, which
+// the daemon's probe Sandbox reads back from the pod's log (internal/runtime/sandbox/probe.go). The
+// daemon's plugin gate, the image's own probe, and the probe Sandbox all run through Run, so a
+// probe's verdict means the same thing wherever it ran.
+package bootprobe
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"regexp"
+	"strconv"
+	"time"
+)
+
+// Retry is the wait between attempts whose failure is transient: after the i-th such failure the
+// probe waits min(Initial·2^i, Max). Attempts bounds the number of attempts; zero leaves it
+// unbounded, so the probe runs until it passes or is refused.
+type Retry struct {
+	Initial, Max time.Duration
+	Attempts     int
+}
+
+// Daemon is a daemon's policy (DAEMON_PROBE_RETRY, boot-probes.ts:38-51): 10 s doubling to 5
+// min, unbounded. A transient failure is Oh My Pi dying under host load, or an attempt cut off
+// before it answered; neither says anything about what is probed, so the daemon waits the load
+// out inside its process rather than exiting into a supervisor that relaunches it into the same
+// load.
+var Daemon = Retry{Initial: 10 * time.Second, Max: 5 * time.Minute}
+
+// Image is `legion probe-image`'s (IMAGE_PROBE_RETRY, boot-probes.ts:53-55): the daemon's backoff
+// bounded to six attempts, about five minutes of waiting at worst, because an image build has no
+// supervisor and must finish.
+var Image = Retry{Initial: 10 * time.Second, Max: 5 * time.Minute, Attempts: 6}
+
+// Outcome is one attempt: passed; refused, an answer no retry changes; or neither — transient,
+// with the detail its retry is logged with.
+type Outcome struct {
+	Passed  bool
+	Refusal error
+	Detail  string
+}
+
+// Run runs attempt until it passes, is refused, or has failed transiently retry.Attempts times,
+// logging each transient failure with the wait before the next attempt. A refusal is returned as
+// it is. A ctx that ends — during an attempt, whatever the attempt then returned, or during a
+// wait — ends Run with an error wrapping ctx's, and starts no other attempt.
+func Run(ctx context.Context, name string, retry Retry, log *slog.Logger, attempt func(context.Context) Outcome) error {
+	for i := 0; ; i++ {
+		if err := ctx.Err(); err != nil {
+			return abandoned(name, err)
+		}
+		outcome := attempt(ctx)
+		if err := ctx.Err(); err != nil {
+			return abandoned(name, err)
+		}
+		switch {
+		case outcome.Passed:
+			return nil
+		case outcome.Refusal != nil:
+			return outcome.Refusal
+		case retry.Attempts > 0 && i+1 >= retry.Attempts:
+			message := fmt.Sprintf("the %s probe never completed within its retry budget (%d attempts)", name, retry.Attempts)
+			if outcome.Detail != "" {
+				message += ": " + outcome.Detail
+			}
+			return errors.New(message)
+		}
+		delay := retry.Initial
+		for n := 0; n < i && delay < retry.Max; n++ {
+			delay *= 2
+		}
+		delay = min(delay, retry.Max)
+		label := strconv.Itoa(i + 1)
+		if retry.Attempts > 0 {
+			label += "/" + strconv.Itoa(retry.Attempts)
+		}
+		log.Warn("boot probe failed transiently; waiting to run it again",
+			"probe", name, "attempt", label, "retryIn", delay.String(), "detail", outcome.Detail)
+		wait := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			wait.Stop()
+			return abandoned(name, ctx.Err())
+		case <-wait.C:
+		}
+	}
+}
+
+func abandoned(name string, err error) error {
+	return fmt.Errorf("the %s probe was abandoned: it was stopped while it ran or waited to run again: %w", name, err)
+}
+
+// sessionStorageMark is on the OK line once the session-storage probe has passed
+// (SESSION_STORAGE_PROBE_MARK, boot-probes.ts:398-403): a CLI that predates that probe prints no
+// such token, having checked nothing about the setting.
+const sessionStorageMark = "session-storage=probed"
+
+// OKPrefix begins the line `legion probe-image` prints when every probe passed.
+const OKPrefix = "probe-image: OK"
+
+// The agent-models mark's states: every task agent Legion's prompts dispatch ran on its own model
+// in the probe, or the probe skipped the check, as the image build's does.
+const (
+	AgentModelsResolved = "resolved"
+	AgentModelsSkipped  = "skipped"
+)
+
+// agentModelsMark carries one of those states on the OK line.
+const agentModelsMark = "agent-models="
+
+// OKLine is that line: the OMP invocation probed, the session-storage mark, the agent-models mark
+// (AgentModelsResolved or AgentModelsSkipped), and the daemon API contract the image's plugin
+// declared. The daemon's probe Sandbox passes the image only on a line that confirms the daemon's
+// own contract (ConfirmedContract) with the agents' models resolved (AgentModels).
+func OKLine(omp string, contract int, agentModels string) string {
+	return fmt.Sprintf("%s (%s) %s %s%s daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, agentModelsMark, agentModels, contract)
+}
+
+// agentModelsState is the agent-models mark on an OK line.
+var agentModelsState = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(OKPrefix) + ` .* ` + agentModelsMark + `(\S+) daemon-api-version=[0-9]+$`)
+
+// AgentModels is the agent-models state an OK line in output carries, and "" when output holds
+// none: no OK line, or one from a CLI that predates the agent-model check.
+func AgentModels(output string) string {
+	match := agentModelsState.FindStringSubmatch(output)
+	if match == nil {
+		return ""
+	}
+	return match[1]
+}
+
+// confirmation is an OK line ending with the contract token.
+var confirmation = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(OKPrefix) + ` .* daemon-api-version=([0-9]+)$`)
+
+// ConfirmedContract is the contract an OK line in output confirmed, and false when output holds
+// none: no OK line, or one from a CLI that predates the contract check.
+func ConfirmedContract(output string) (int, bool) {
+	match := confirmation.FindStringSubmatch(output)
+	if match == nil {
+		return 0, false
+	}
+	contract, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0, false
+	}
+	return contract, true
+}
+
+// natsUserPrefix begins the line `legion probe-image` prints, before its OK line, when its
+// environment names a NATS nkey seed (a pod's NATS_NKEY_SEED_FILE): the public key of the user
+// that seed is, never the seed.
+const natsUserPrefix = "probe-image: nats-nkey-user="
+
+// NATSUserLine is that line for the nkey user whose public key is public.
+func NATSUserLine(public string) string { return natsUserPrefix + public }
+
+// natsUser is a NATSUserLine.
+var natsUser = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(natsUserPrefix) + `(\S+)$`)
+
+// NATSUser is the nkey user's public key a NATSUserLine in output names, and "" when output holds
+// none: the probe's environment named no seed, or its CLI predates the line.
+func NATSUser(output string) string {
+	match := natsUser.FindStringSubmatch(output)
+	if match == nil {
+		return ""
+	}
+	return match[1]
+}

@@ -443,6 +443,20 @@ export interface ArtifactApproval {
   readonly reason?: string | null;
   readonly ask_id?: string | null;
   readonly requested_by?: Actor;
+  /** Whose move the open request waits on (`Ask.waiting_on`), on `awaiting` alone: `agent` once a
+   *  version moved it past the one its agent last handed to the human, or a reply left it with the
+   *  agent; `human` otherwise. */
+  readonly waiting_on?: AskTurn;
+}
+
+/** What `POST /api/v1/artifacts/{id}/approval-requests` answers: the document's open request (null
+ *  when its latest version is already approved), the version it names, and the document's approval
+ *  as the call left it. */
+export interface ApprovalRequestResponse {
+  readonly ask: Ask | null;
+  readonly artifact_id: string;
+  readonly version: number;
+  readonly approval: ArtifactApproval;
 }
 
 export interface ArtifactBlock {
@@ -501,7 +515,11 @@ export interface AnchorPosition {
   /** Why `anchor_block` is absent although the anchor names a block: the read could not read its
    *  document, named by the code the API answers that error with elsewhere. The read itself still
    *  answers. */
-  readonly anchor_block_error?: "DOC_SERVICE_UNAVAILABLE" | "DOC_SCHEMA" | "INTERNAL";
+  readonly anchor_block_error?:
+    | "DOC_SERVICE_UNAVAILABLE"
+    | "DOC_SCHEMA"
+    | "DOCUMENT_UNLOADABLE"
+    | "INTERNAL";
 }
 
 /** An opaque SHA-256 token for one stable block's full Proof state, including inline marks. */
@@ -541,6 +559,15 @@ export interface Version {
 
 export type AskKind = "question" | "approval";
 
+/** The document and version an approval ask names. `requested_version` is the version the agent
+ *  last handed to the human; a lower value means the agent is revising the moved request. */
+export interface AskApproval {
+  readonly artifact_id: string;
+  readonly name: string;
+  readonly version: number;
+  readonly requested_version: number;
+}
+
 export interface Ask extends AnchorPosition {
   readonly id: string;
   readonly issue_key: string | null;
@@ -573,11 +600,15 @@ export interface Ask extends AnchorPosition {
    *  null when nobody has replied. Who spoke last; whose turn it is comes from `waiting_on`.
    *  Absent on every other ask read. */
   readonly last_reply?: AskLastReply | null;
-  /** Whose reply an open ask needs next: the `turn` of its newest reply, `human` when nobody
-   *  has replied. Present on every open-ask read (inbox rows, ask lists, the ask detail, the
-   *  issue detail's `open_asks`); absent on closed asks and on `ask.*` event payloads. */
+  /** Whose reply an open ask needs next. A moved approval request stays with its agent while
+   *  `requested_version` is below `version`; a hand-back (`ask.handed_back`) returns it to the
+   *  human until a reply newer than the one it answered decides it by its `turn`. Present on every
+   *  open-ask read (inbox rows, ask lists, the ask detail, the issue detail's `open_asks`); absent on
+   *  closed asks and on `ask.*` event payloads. */
   readonly waiting_on?: AskTurn;
   readonly edited_at: string | null;
+  /** Present only on a server-created approval ask. */
+  readonly approval?: AskApproval;
 }
 
 /** Who holds the turn on an open ask after a reply: `human` when the human needs to act,
@@ -718,6 +749,11 @@ export type AskEventPayload = Ask & ReferenceChangesPayload;
 export type AskEditEventPayload = AskEventPayload & {
   readonly previous: AskEditPrevious;
   readonly edited_by: Actor;
+  /** A version move of an approval request that already waits on its agent: it changes only the
+   *  version the request names, so its event, like a human's unnamed `artifact.version`, carries
+   *  `notify: false` and reaches no follower. Absent on every other edit, the move that takes the
+   *  request from the human included. */
+  readonly quiet?: true;
 };
 
 /** One recorded rewording of an ask: what the question was before this edit, who edited, when. */
@@ -795,6 +831,17 @@ export interface Comment extends AnchorPosition {
   readonly created_at: string;
   readonly mentions: CommentMention[];
   readonly deliveries: CommentDelivery[];
+}
+
+/** What a route that writes a comment answers (`POST /api/v1/issues/{key}/comments`,
+ *  `POST /api/v1/artifacts/{id}/comments`, and the delivery callback
+ *  `POST /api/v1/comments/{id}/reply`): the comment row and, on a reply to an open ask, whom that
+ *  ask waits on now that the reply is its newest. It is the value the comment's event carries
+ *  under the same name, and may differ from `turn`: an agent's reply on a moved approval request
+ *  leaves that request waiting on the agent. A replayed delivery callback, which writes nothing,
+ *  answers the stored reply without it. */
+export interface CommentWriteResponse extends Comment {
+  readonly ask_waiting_on?: AskTurn;
 }
 
 export interface Suggestion {
@@ -1428,9 +1475,18 @@ export type DispatchEvent =
       readonly type: "ask.anchor_refreshed";
       readonly payload: AskEventPayload;
     })
+  /** Every rewording: a PATCH edit, a block ask's new text, and an approval request's move to a new
+   *  version or new summary. Each one stamps the ask's `edited_at`. */
   | (DispatchEventBase & {
       readonly type: "ask.edited";
       readonly payload: AskEditEventPayload;
+    })
+  /** An agent handed its approval request back to the human: `approval.requested_version` is the
+   *  version it handed back. It rewords nothing and leaves `edited_at` as it was; a hand-back
+   *  with a new summary is an `ask.edited` followed by this event. */
+  | (DispatchEventBase & {
+      readonly type: "ask.handed_back";
+      readonly payload: AskEventPayload;
     })
   | (DispatchEventBase & { readonly type: "ask.answered"; readonly payload: AskEventPayload })
   | (DispatchEventBase & {
@@ -1563,7 +1619,7 @@ export type UserState = Record<string, UserIssueState>;
 /** One viewer's state for one agent's conversation. Exchanges whose newest message is at or
  * before `cleared_before` (RFC3339, the viewer's Clear) are hidden for that viewer only;
  * `read_through` is how far the viewer has read; `unread_replies` counts the session's replies
- * to messages this viewer sent that are newer than both. */
+ * to messages this viewer sent that are newer than both and not read by id (`read_replies`). */
 export interface UserAgentState {
   readonly cleared_before?: string;
   readonly read_through?: string;
@@ -1572,11 +1628,14 @@ export interface UserAgentState {
   readonly unread_replies?: number;
 }
 
-/** `PUT /api/v1/me/agents/{session_id}/state`: a Clear, a read mark, or both. `read_through`
- * only moves forward; the response is the session's whole `UserAgentState`. */
+/** `PUT /api/v1/me/agents/{session_id}/state`: a Clear, a read mark, replies read by id, or any
+ * of them together. `read_through` only moves forward and covers every reply up to it;
+ * `read_replies` names the session's own messages and covers those alone, for a view that shows
+ * only some of a session's replies. The response is the session's whole `UserAgentState`. */
 export interface UserAgentStateInput {
   readonly cleared_before?: string;
   readonly read_through?: string;
+  readonly read_replies?: readonly string[];
 }
 
 /** `GET /api/v1/me/agents/state`: keyed by session ID. */
@@ -1869,6 +1928,32 @@ export interface ArtifactText {
   readonly version: number | null;
   /** Opaque SHA-256 token for the full Proof document state, including inline marks, when served by a precondition-aware Dispatch server. */
   readonly token?: string;
+}
+
+/**
+ * The close code the document websocket (`/ws/doc/{room}`) refuses a room with when the tree it
+ * holds is outside the Proof schema: it completes the upgrade and closes with this code, and
+ * `DOCUMENT_SCHEMA_CLOSE_REASON`, before any sync, so a browser editor never receives a tree it
+ * would normalize and write back. It is in the private 4000-4999 range beside Hocuspocus's own 4401
+ * and 4403, and the dashboard reads it as the document's repair state, never as a dropped
+ * connection to retry. Generated into Go as `contracts.DocumentSchemaCloseCode`.
+ */
+export const DOCUMENT_SCHEMA_CLOSE_CODE = 4409;
+
+/** The reason the document websocket closes with `DOCUMENT_SCHEMA_CLOSE_CODE`: the code reads of
+ *  that document answer (`409 DOC_SCHEMA`). Generated into Go as
+ *  `contracts.DocumentSchemaCloseReason`. */
+export const DOCUMENT_SCHEMA_CLOSE_REASON = "DOC_SCHEMA";
+
+export interface ArtifactRebuildReport {
+  readonly head: number;
+  readonly removed_checkpoints: number;
+  readonly removed_snapshots: number;
+  readonly removed_updates: number;
+  /** The version whose markdown the rebuilt document holds: its latest saved version, or the
+   *  version a rebuild from supplied markdown that changed the document wrote. */
+  readonly source_version: number;
+  readonly validation_error: string;
 }
 
 export interface ArtifactVersionText extends Version {

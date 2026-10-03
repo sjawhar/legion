@@ -72,6 +72,9 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// waiting_on is askReadColumns' alias for the turn rule, 'human' or 'agent' on an open ask, so
+	// sorting it descending puts the human's turn first. ORDER BY can name an output column only
+	// bare, never inside an expression such as `waiting_on = 'agent'`, so the rule runs once a row.
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
 		select `+askReadColumns+`,
 		       i.key, i.title, i.assignee, i.priority, ar.project_key, ar.slug, ar.name,
@@ -86,7 +89,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		  and ($2 = ''
 		       or ($2 = 'unassigned' and (i.key is null or i.assignee is null))
 		       or ($2 = 'login' and i.assignee = $3))
-		order by i.priority asc nulls last, coalesce(lr.turn, 'human') = 'agent' asc,
+		order by i.priority asc nulls last, waiting_on desc,
 		         coalesce(lr.created_at, a.created_at) desc, a.id desc
 	`, project, assigneeMode, assigneeLogin, canonicalLogin(caller.ID))
 	if err != nil {

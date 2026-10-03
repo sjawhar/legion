@@ -43,7 +43,8 @@ parent's children and the issue's `Components:` line show where the rest of that
 
 ## Load the full skill before you write
 
-- **Before you write or change a spec, read `skill://dispatch`,** including its "Writing a spec"
-  section.
+- **Before your first design question on a change, and before you write or change a spec, read
+  `skill://dispatch`,** including its "Writing a spec" section: a design change is brainstormed in
+  its issue's spec, not in chat, even when the brainstorming skill says otherwise.
 - Before any other write to Dispatch (an ask, a message, a comment, a document edit, a status
   change, a claim), load `skill://dispatch` unless you already have in this session.

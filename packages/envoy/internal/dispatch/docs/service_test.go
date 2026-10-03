@@ -2720,6 +2720,67 @@ func TestSettleSurvivesEvictionBetweenWarmAndTreeRead(t *testing.T) {
 	}
 }
 
+// A read that loads its room and then reads it takes what it reads from the room it holds: a
+// version's capture (POST /versions, captureLiveTextAndAuthors) and a mark's verification
+// (VerifyMark) read inside the Apply that holds the room, so an eviction once the room is warm
+// - the last peer leaving, a settlement's forced eviction - does not leave them a room that is no
+// longer there, which they answered `warm live document did not retain room`, a 500.
+func TestAWarmedReadSurvivesItsRoomsEviction(t *testing.T) {
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	for _, test := range []struct {
+		name string
+		read func(t *testing.T, service *Service, artifactID string)
+	}{
+		{"a version's capture", func(t *testing.T, service *Service, artifactID string) {
+			ctx := context.Background()
+			tx, err := service.store.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			joined, ledger := service.Join(ctx, tx)
+			defer ledger.Discard()
+			result, err := service.NamedVersion(joined, artifactID, "named", alice)
+			if err != nil {
+				t.Fatalf("name a version of a room evicted once warm: %v", err)
+			}
+			var markdown string
+			if err := tx.QueryRow(ctx, `select markdown from artifact_versions where artifact_id = $1 and number = $2`, artifactID, result.Version.Number).Scan(&markdown); err != nil {
+				t.Fatal(err)
+			}
+			if markdown != "The quick brown fox\n" {
+				t.Fatalf("named version markdown = %q, want the document's text", markdown)
+			}
+		}},
+		{"a mark's verification", func(t *testing.T, service *Service, artifactID string) {
+			anchored, err := service.VerifyMark(context.Background(), artifactID, MarkComment, "b1")
+			if err != nil || anchored.Quote != "brown" {
+				t.Fatalf("verify a mark in a room evicted once warm = %q, %v, want brown", anchored.Quote, err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "The quick brown fox")
+			browserMark(t, service, artifactID, "proofComment", "b1", "brown")
+			var evicted atomic.Int32
+			service.afterReadWarm = func(room string) {
+				if room != artifactID || !evicted.CompareAndSwap(0, 1) {
+					return
+				}
+				if err := service.Evict(context.Background(), room); err != nil {
+					t.Errorf("evict the warm room: %v", err)
+				}
+			}
+			test.read(t, service, artifactID)
+			if evicted.Load() == 0 {
+				t.Fatal("the read never reached the hook")
+			}
+		})
+	}
+}
+
 func TestEditedLegacyTableCellPipeDocumentSettlesOnce(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
