@@ -27,16 +27,9 @@ const headlessOnly = [
   // carries other arguments is caught too.
   'agent="',
 ];
-const repoSpecific = [
-  "Inspect",
-  "inspect_ai",
-  "inspect_",
-  "Hawk",
-  "middleman",
-  "Taiga",
-  "agent-c",
-  "trajectory",
-];
+// The private deployment repository's and the company's names are refused in every file of the
+// repository, role prompts included, by .github/scripts/check-private-names.sh.
+const repoSpecific = ["Inspect", "inspect_ai", "inspect_", "Hawk", "middleman", "Taiga"];
 
 const read = (...parts: string[]) => readFileSync(path.join(rolesDir, ...parts), "utf8");
 

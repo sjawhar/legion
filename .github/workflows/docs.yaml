@@ -89,6 +89,10 @@ jobs:
       # broken internal link.
       - name: Build the docs site
         run: bun run docs:build
+      # The built site, generated reference pages and copied media captions included, names neither
+      # the private deployment repository nor the company; pr-and-main.yaml checks the sources.
+      - name: Check the built site names no private repository or company
+        run: .github/scripts/check-private-names.sh docs/site/dist
       - if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v5
         with:
