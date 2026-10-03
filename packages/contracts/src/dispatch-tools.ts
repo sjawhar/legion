@@ -44,6 +44,8 @@ const ASK_OPTIONS_CONTRACT =
   "Options carry the genuinely different approaches. Each option has a label, and its description " +
   "says what that approach costs.";
 
+const HUMAN_AGREED_TO_DOCUMENT = "the human has agreed to every point in the document";
+
 function documentOwnerValidation(
   requireArtifact: boolean,
   alwaysRequireArtifact = false
@@ -882,16 +884,18 @@ export const dispatchToolSpecs = [
       "later version moves it to that version and leaves it waiting on you, as a human's reply in " +
       "its thread does. Only the first move since the request was opened or handed back sends an " +
       "event, and never to the session whose version made it; dispatch_doc_read shows whom it " +
-      "waits on. Once the revision is " +
-      "complete and the human has agreed to every point in it, call this again to hand that same " +
-      "Inbox row back. The request carries nothing new. A call while it already waits on the " +
-      "human hands nothing back: the same summary changes nothing, and a different one is " +
-      "refused, since it would rewrite the card the human is reading. Approve and Request changes " +
-      "each close the request, so the next call opens a new one. Call it once per revision, when " +
-      "the revision is complete, never after each edit. An approval goes stale when the document " +
-      "changes after it: request approval again once that revision is complete and the human has " +
-      "agreed to every point in it. A new version of a Legion root spec closes its armed design " +
-      "gate until a human approves it. " +
+      "waits on. Once the revision is complete and " +
+      HUMAN_AGREED_TO_DOCUMENT +
+      ", call this again to hand that same Inbox row back. The request carries nothing new. A " +
+      "call while it already waits on the human hands nothing back: the same summary changes " +
+      "nothing, and a different one is refused, since it would rewrite the card the human is " +
+      "reading. Approve and Request changes each close the request, so the next call opens a new " +
+      "one. Call it once per revision, when the revision is complete, never after each edit. An " +
+      "approval goes stale when the document changes after it: request approval again once that " +
+      "revision is complete and " +
+      HUMAN_AGREED_TO_DOCUMENT +
+      ". A new version of a Legion root spec closes its armed design gate until a human approves " +
+      "it. " +
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +
@@ -908,7 +912,7 @@ export const dispatchToolSpecs = [
       summary: z
         .string({ min: 1 })
         .describe(
-          "What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question. Request approval only once the human has agreed to every point in the document."
+          `What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`
         ),
     }),
     validation: documentOwnerValidation(true),
