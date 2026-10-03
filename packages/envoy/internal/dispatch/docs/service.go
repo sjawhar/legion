@@ -94,7 +94,9 @@ type Service struct {
 	// between the mutation's read of it and its write, where a peer's update can land: Apply runs
 	// the mutation outside the document's lock and takes the lock for each transaction alone.
 	inServiceTransaction func(txn *crdt.Transaction)
-	settleWG             sync.WaitGroup
+	// now is the clock the unrecorded-mark sweep ages marks by (sweepUnrecordedMarks).
+	now      func() time.Time
+	settleWG sync.WaitGroup
 	// evictWG counts the forced evictions failRoomLocked spawns. They flush the room through
 	// the store, so shutdown joins them before it closes.
 	evictWG sync.WaitGroup
@@ -392,6 +394,7 @@ func New(deps Deps) *Service {
 		serverURL:         strings.TrimSuffix(deps.ServerURL, "/"),
 		settle:            settle,
 		markWait:          markWait,
+		now:               time.Now,
 		timers:            make(map[uint64]*time.Timer),
 		unrecordedMarkTTL: unrecordedMarkTTL,
 	}

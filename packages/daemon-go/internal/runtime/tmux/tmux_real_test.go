@@ -1282,8 +1282,8 @@ func TestRealTmuxReconcileOrphans(t *testing.T) {
 	}
 }
 
-// The sweep reports a watched process alive, then gone once its pane is killed from outside — and
-// then never again, since a gone incarnation cannot come back.
+// The sweep reports a watched process alive, then — once its pane is killed from outside — one
+// final verdict, Gone or NotRecordedProcess, and then never again.
 func TestRealTmuxObserveReportsGoneOnce(t *testing.T) {
 	r := newRig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -1300,21 +1300,30 @@ func TestRealTmuxObserveReportsGoneOnce(t *testing.T) {
 		t.Fatalf("first sweep = %+v, want alive", obs)
 	}
 	r.mustTmux("kill-pane", "-t", loc.Tmux.Pane)
+	// The kill leaves states a single probe cannot call Gone (LEGION-274, LEGION-370): Alive, from a
+	// probe that read /proc before the process died; and Uncertain, a listing that failed without
+	// proving the pane gone — the server's last session destroyed while the server has not yet
+	// exited ("no current target"). The sweep keeps both on watch, so they converge on a final
+	// verdict: Gone once the pane or the server is provably gone, or NotRecordedProcess when the
+	// probe straddled the kill — the pane listed the recorded pid, and its /proc had emptied or
+	// vanished by the time it was read. The supervisor takes either for the same death
+	// (internal/supervise/machine.go:806), and the sweep untracks on either, so it reports either
+	// once (observe.go:58-60). The deadline names the last observation, since a classifier stuck on
+	// Uncertain or Alive and a sweep gone silent would otherwise fail alike.
 	deadline := time.After(10 * time.Second)
-	for gone := false; !gone; {
+	var last runtime.Observation
+	for final := false; !final; {
 		select {
 		case obs := <-observations:
-			gone = obs.Kind == runtime.Gone
-			if !gone && obs.Kind != runtime.Alive {
-				t.Fatalf("sweep reported %+v", obs)
-			}
+			last = obs
+			final = obs.Kind == runtime.Gone || obs.Kind == runtime.NotRecordedProcess
 		case <-deadline:
-			t.Fatal("the sweep never reported the killed pane gone")
+			t.Fatalf("the sweep never reported the killed pane gone; last = %+v", last)
 		}
 	}
 	select {
 	case obs := <-observations:
-		t.Errorf("the sweep reported a gone incarnation again: %+v", obs)
+		t.Errorf("the sweep reported a final verdict again: %+v", obs)
 	case <-time.After(time.Second):
 	}
 }

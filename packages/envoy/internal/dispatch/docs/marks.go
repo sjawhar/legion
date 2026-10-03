@@ -814,7 +814,7 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 		slog.Error("dispatch: list recorded marks for sweep", "room", room, "error", err)
 		return
 	}
-	now := time.Now()
+	now := s.now()
 	seen := make(map[pmdoc.MarkRef]struct{})
 	var expired []pmdoc.MarkRef
 	var next time.Duration

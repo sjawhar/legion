@@ -62,18 +62,18 @@ function dispatchSkillHeadings() {
   });
 }
 
+function specFor(name: string) {
+  const spec = dispatchToolSpecs.find((candidate) => candidate.name === name);
+  if (!spec) throw new Error(`missing ${name}`);
+  return spec;
+}
+
 const validCalls = {
   dispatch_issue: { project: "DSP", title: "Native workspace" },
   dispatch_issue_update: { issue: "DSP-1", status: "in_progress" },
   dispatch_claim: { issue: "DSP-1" },
-  dispatch_ask: { issue: "DSP-1", question: "Ship this?" },
-  dispatch_edit_ask: {
-    ask: "ask-1",
-    question: "Ship the revised plan?",
-    options: [{ label: "Ship", description: "Approve the revision." }],
-    multiple: false,
-    urgency: "high",
-  },
+  dispatch_ask: specFor("dispatch_ask").example,
+  dispatch_edit_ask: { ...specFor("dispatch_edit_ask").example, multiple: false, urgency: "high" },
   dispatch_resolve_ask: {
     ask: "ask-1",
     kind: "retracted",
@@ -109,9 +109,7 @@ const validCalls = {
 } as const;
 
 function schemaFor(name: keyof typeof validCalls) {
-  const spec = dispatchToolSpecs.find((candidate) => candidate.name === name);
-  if (!spec) throw new Error(`missing ${name}`);
-  return dispatchToolSchema(spec, schemaApi);
+  return dispatchToolSchema(specFor(name), schemaApi);
 }
 
 const ISSUE_UPDATE_RULES =
@@ -192,6 +190,23 @@ describe("dispatchToolSpecs", () => {
     expect(argumentsSchema.ref.unwrap().description).toBe(
       "Optional dispatch:// reference (issue, document, message, or ask); appended to the question and rendered as a link."
     );
+  });
+
+  test("keeps the question and options contracts on optional ask fields", () => {
+    for (const name of ["dispatch_ask", "dispatch_edit_ask"] as const) {
+      const tool = dispatchToolSpecs.find((candidate) => candidate.name === name);
+      if (tool === undefined) throw new Error(`${name} spec is missing`);
+      const argumentsSchema = tool.arguments(schemaApi) as unknown as {
+        question: z.ZodType;
+        options: z.ZodType;
+      };
+      expect(argumentsSchema.question.description, name).toContain(
+        "never enumerate choices in the question"
+      );
+      expect(argumentsSchema.options.description, name).toContain(
+        "description says what that approach costs"
+      );
+    }
   });
 
   test("dispatch_search rejects a one-character query and a limit above 50", () => {
@@ -529,9 +544,13 @@ describe("dispatchToolSpecs", () => {
     const schema = schemaFor("dispatch_edit_ask");
 
     expect(schema.safeParse({ ask: "ask-1" }).success).toBe(false);
-    expect(schema.safeParse({ ask: "ask-1", question: "Ship the revised plan?" }).success).toBe(
-      true
-    );
+    expect(
+      schema.safeParse({
+        ask: "ask-1",
+        question:
+          "The revised plan changes the release, but it has not been reviewed. How should we proceed?",
+      }).success
+    ).toBe(true);
   });
 
   test("accepts a comment turn only alongside reply_to_ask", () => {
@@ -699,7 +718,14 @@ describe("dispatchToolSpecs", () => {
 
   test("accepts exactly one issue or project owner", () => {
     const cases = [
-      ["dispatch_ask", { project: "CORE", artifact: "runbook-md", question: "Publish?" }],
+      [
+        "dispatch_ask",
+        {
+          project: "CORE",
+          artifact: "runbook-md",
+          question: "The runbook is ready for readers. How should we publish it?",
+        },
+      ],
       ["dispatch_comment", { project: "CORE", artifact: "runbook-md", body: "Looks good." }],
       [
         "dispatch_suggest",
@@ -734,7 +760,10 @@ describe("dispatchToolSpecs", () => {
 
   test("requires artifact with project on document tools but not dispatch_artifact", () => {
     const cases = [
-      ["dispatch_ask", { project: "CORE", question: "Publish?" }],
+      [
+        "dispatch_ask",
+        { project: "CORE", question: "The runbook is ready. How should we publish it?" },
+      ],
       ["dispatch_comment", { project: "CORE", body: "Looks good." }],
       ["dispatch_suggest", { project: "CORE", quote: "draft", replace_with: "final" }],
       [
@@ -771,7 +800,7 @@ describe("dispatchToolSpecs", () => {
     expect(
       schemaFor("dispatch_ask").safeParse({
         ref: "dispatch://CORE/artifact/runbook-md",
-        question: "Publish?",
+        question: "The runbook is ready for readers. How should we publish it?",
       }).success
     ).toBe(true);
     expect(

@@ -169,7 +169,7 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 	})
 	mux.HandleFunc("GET /v1/enrollments/self", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
-			"enrollment_id": testEnrollmentID, "kind": "box", "operator": "sjawhar",
+			"enrollment_id": testEnrollmentID, "kind": "box", "operator": "ada@example.com",
 			"lease_expires_at": time.Now().Add(time.Hour), "grants": []any{},
 		})
 	})
