@@ -215,7 +215,12 @@
   its own text. A spec or new document whose stored markdown is past either limit is refused the
   same way, as is a write that would leave a live document parking more than 90,000 of the 100,000
   items ygo waits on while it loads one (any write that would leave it unloadable at all is
-  refused). Browser edits over the websocket are applied before any check and are not bounded by
+  refused). ygo loads a document writer by writer in order of their client ids and parks what a
+  writer builds on a writer it has not read yet, so each transaction's writes now take the id after
+  every writer the document holds rather than a random one: the same write to the same document gets
+  the same answer, and a new version over a one-line first version, which a random id put ahead of
+  that line's writer about half the time (7 of 12 tries of 16,384 headings refused), parks nothing.
+  Browser edits over the websocket are applied before any check and are not bounded by
   this (LEGION-487). Nor is a document's stored history: every update a write appends is kept with
   the content later writes delete, and a cold load builds all of it, so repeated uploads of a
   version or replies to one comment, whose margin record each reply rewrites whole, still grow what

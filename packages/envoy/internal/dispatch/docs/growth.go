@@ -101,10 +101,11 @@ func elements(size pmdoc.DocumentSize) string {
 // document, items whose neighbour or parent belongs to a writer it has not read yet: ygo's
 // defaultMaxPendingItems, which it does not export. Every load of a live document - its room, a
 // transaction's fork, a read of a document no room holds - is such a load, and one that parks more
-// is refused as an invalid update: the document is then unreadable (503) and unwritable. A state
-// written by one writer parks nothing, but every edit is a writer of its own, and ygo reads writers
-// in order of their ids, which are random, so a document of several writers can park all but the
-// first one's items.
+// is refused as an invalid update: the document is then unreadable (503) and unwritable. ygo reads
+// writers in order of their ids, and a writer it reads before one it builds on has every item from
+// there on parked. A transaction's writes take an id past every writer the document holds
+// (writerAfter), so what parks is a browser's edits, whose ids are random, and a write that builds
+// on items that park themselves.
 const maxPendingItems = 100_000
 
 // loadableItems is how many items the state a growing write leaves may park when it is loaded: the

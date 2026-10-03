@@ -1,11 +1,16 @@
 package docs
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
+	"github.com/reearth/ygo/crdt"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
@@ -63,5 +68,56 @@ func TestAWriteMayNotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 				t.Fatalf("got %v, want ErrTooManyElements saying %q and what to do", err, want)
 			}
 		})
+	}
+}
+
+// The same write to the same document gets the same answer. ygo loads a document's state writer
+// by writer in order of their client ids, and a writer read before one whose items it builds on
+// has all of its items parked until that writer is read; a load that parks more than ygo's
+// pending-item cap fails. A transaction's writes take the id after every writer the document holds
+// (writerAfter), so a new version of 16,384 headings, what one upload may hold, is read after the
+// first version it replaces whichever id that version's writer drew - the lowest or the highest a
+// browser can - and parks nothing. Under a random id it was read first whenever it drew an id
+// below that writer's, about half the time, parked every item it wrote, and the load margin
+// refused it: the same upload taken on one try and refused on the next.
+func TestANewVersionIsTakenWhicheverIDItsFirstVersionsWriterDrew(t *testing.T) {
+	service, _ := newTestService(t)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	headings := strings.Repeat("# a\n", 16_384)
+	for _, first := range []crdt.ClientID{1, math.MaxUint32, 1, math.MaxUint32} {
+		artifactID := createDocument(t, service.store, "One line.\n")
+		seedByWriter(t, service, artifactID, first, "One line.\n")
+		if _, err := joinedReplaceText(service, artifactID, headings, alice); err != nil {
+			t.Fatalf("a new version of 16,384 headings over a first version written by client %d: %v", first, err)
+		}
+		loaded, err := service.persistence.Load(context.Background(), artifactID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := crdt.ApplyUpdateV1(crdt.New(), loaded.Update, nil); err != nil {
+			t.Fatalf("a cold load of the version over client %d's: %v", first, err)
+		}
+	}
+}
+
+// seedByWriter writes artifactID's first live state, markdown's tree, as the writer client.
+func seedByWriter(t *testing.T, service *Service, artifactID string, client crdt.ClientID, markdown string) {
+	t.Helper()
+	tree, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := crdt.New(crdt.WithClientID(client))
+	fragment := doc.GetXmlFragment(fragmentName)
+	doc.GetMap(marksMapName)
+	if err := doc.TransactE(func(txn *crdt.Transaction) error { return pmdoc.Update(txn, fragment, tree) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := joinedWrite(service, func(ctx context.Context) error {
+		tx, _ := txFromContext(ctx)
+		_, err := service.persistence.AppendUpdateTx(ctx, tx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil), true)
+		return err
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

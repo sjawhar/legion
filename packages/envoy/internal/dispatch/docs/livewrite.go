@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/provider/websocket"
@@ -51,7 +52,8 @@ type liveWrite struct {
 	artifactID string
 	state      *roomState
 	// clientID authors every item the transaction writes, on fork: the room's state with the
-	// transaction's updates applied, brought up to date before each operation (forkLive).
+	// transaction's updates applied, brought up to date before each operation (forkLive). It is
+	// chosen when the transaction first forks the room (writerAfter), and zero until then.
 	clientID crdt.ClientID
 	fork     *crdt.Doc
 	// forkedFrom is the room document fork was last brought up to date from.
@@ -112,7 +114,7 @@ func (s *Service) joinLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 // openLiveWrite takes artifactID's writer slot for the transaction, first waiting for the
 // transaction holding it, if one does.
 func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID string) (*liveWrite, error) {
-	write := &liveWrite{artifactID: artifactID, clientID: crdt.NewClientID(), done: make(chan struct{})}
+	write := &liveWrite{artifactID: artifactID, done: make(chan struct{})}
 	for {
 		state := s.room(artifactID)
 		state.mu.Lock()
@@ -172,6 +174,9 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		if incremental {
 			since = write.fork.StateVector()
 		}
+		if write.clientID == 0 {
+			write.clientID = writerAfter(doc.StateVector())
+		}
 		gained = crdt.EncodeStateAsUpdateV1(doc, since)
 	})
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
@@ -187,6 +192,24 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	}
 	write.fork, write.forkedFrom = fork, room
 	return fork, nil
+}
+
+// writerAfter is the client id a transaction's writes to a document take, where writers are the
+// document's: one past the highest of them. ygo loads a document's state writer by writer in order
+// of their ids and parks every item it reads before the writer that item builds on, so a write by
+// a writer read after every writer it builds on parks none of its own items, and the same write
+// to the same document leaves the same state (refuseUnloadable). A random id, ygo's default, put a
+// new version before the first version it replaced about half the time, and every item it wrote
+// was parked. Only a peer can hold the highest id there is, and a write then takes a random one.
+func writerAfter(writers crdt.StateVector) crdt.ClientID {
+	var highest crdt.ClientID
+	for writer := range writers {
+		highest = max(highest, writer)
+	}
+	if highest == math.MaxUint64 {
+		return crdt.NewClientID()
+	}
+	return highest + 1
 }
 
 // buildFork brings write's kept fork up to date with gained, what its room gained since the fork
