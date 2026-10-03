@@ -1,5 +1,5 @@
 // Takes every docs screenshot: Dispatch's set (`shots.config.ts`) and each section's own
-// `<section>/shots.config.ts`, all against one harness boot.
+// `<section>/shots.config.ts`, all against one harness boot and in one browser.
 //
 //   DATABASE_URL=<a database this may truncate> bun docs/site/media/shots.ts [--only id,id] [--set name]
 //
@@ -7,7 +7,9 @@
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
-import { withHarness } from "./harness";
+import { chromium } from "@playwright/test";
+
+import { HarnessHang, withHarness } from "./harness";
 import { runShotSet, type ShotSet } from "./shot-runner";
 
 const MEDIA = import.meta.dir;
@@ -41,8 +43,22 @@ if (only !== undefined) {
 }
 
 const failures = await withHarness(async (harness) => {
+  // One browser for every set. Under Bun 1.3, node:child_process closes the descriptor of a
+  // finished browser's DevTools pipe a second time when it garbage-collects that browser's process
+  // handle, and by then the kernel can have given the number to the next browser's pipe: that
+  // browser exits mid-run, and Playwright, which never sees its pipe close, waits on it for ever
+  // (oven-sh/bun#34785, fixed in Bun 1.4).
+  const browser = await chromium.launch();
   const failed: string[] = [];
-  for (const set of sets) failed.push(...(await runShotSet(harness, set, only)));
+  try {
+    for (const set of sets) failed.push(...(await runShotSet(harness, browser, set, only)));
+  } catch (error) {
+    // A hang ends the run, and the browser goes with the process: closing a browser whose page
+    // stopped answering can wait as long as the page.
+    if (!(error instanceof HarnessHang)) await browser.close();
+    throw error;
+  }
+  await browser.close();
   return failed;
 });
 if (failures.length > 0) {

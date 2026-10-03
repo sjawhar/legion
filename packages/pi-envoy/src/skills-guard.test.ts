@@ -17,13 +17,9 @@ import {
 const repoRoot = path.resolve(import.meta.dir, "../../..");
 const skillsRoot = path.join(repoRoot, "skills");
 const workerRoot = path.join(skillsRoot, "legion-worker");
-// Everything an agent reads that can link into a skill: the skills themselves, the role prompts,
-// and the daemon's prompt overlays.
-const linkingRoots = [
-  skillsRoot,
-  path.join(repoRoot, "packages/pi-envoy/roles"),
-  path.join(repoRoot, "packages/daemon-go/internal/prompts"),
-];
+// Everything an agent reads that can link into a skill: the skills themselves and the daemon's
+// prompts (its role prompts in roles/ and its overlays in go/).
+const linkingRoots = [skillsRoot, path.join(repoRoot, "packages/daemon/internal/prompts")];
 const SPILL_THRESHOLD_BYTES = 50 * 1024;
 // A link's path stops at whitespace, a closing bracket or quote, a code span, or Markdown emphasis
 // (`**skill://…/pr-body.md**`); `#anchor` is kept so it can be checked against the target's headings.

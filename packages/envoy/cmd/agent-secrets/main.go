@@ -30,7 +30,9 @@
 // to its launcher's default path, $XDG_RUNTIME_DIR/agent-secrets and the helper socket inside it,
 // and a default counts only when its file is there (identity.go). AGENT_SECRETS_ENROLL_WAIT (a
 // duration, default 20s) bounds how long a call waits while a box's launcher is still enrolling
-// it. The exec form's child keeps all three variables, since it is the same session
+// it. AGENT_SECRETS_APPROVE_URL (Dispatch's origin) makes `launcher login` and a pending exec form
+// print the Dispatch page where a person decides. The exec form's child keeps AGENT_SECRETS_URL,
+// AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, since it is the same session
 // (buildChildEnv). A host session enrolls (kind host) automatically through the helper's own
 // enroll loop, and a pod's own enrollment is its launcher's job — this CLI has no direct
 // enrollment path for either; only a box enrolls through it, and only via --helper (the shared
@@ -131,7 +133,8 @@ environment:
   AGENT_SECRETS_ENROLL_WAIT  how long a call waits while a box's launcher is still enrolling it
                              (default 20s)
   AGENT_SECRETS_APPROVE_URL  Dispatch's address; launcher login names the page under it where the
-                             operator types the code
+                             operator types the code, and the exec form the page where a person
+                             approves its waiting request
   OMP_SESSION_ID             the agent session the broker notifies if a pending request expires
 
 exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 77 denied;
@@ -878,6 +881,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 
 	state, grantID, requestID := result.State, result.GrantID, result.RequestID
 	if state == "pending" {
+		reportPending(stderr, requestID, *result.RecordID, *wait)
 		deadline := time.Now().Add(*wait)
 		backoff := 2 * time.Second
 		for state == "pending" {
@@ -941,6 +945,18 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0 // unreachable: syscall.Exec replaces this process on success
+}
+
+// reportPending says, once, before the exec form's wait, that a person must decide the request
+// and where: the Dispatch page of its credential record (the broker names one for every pending
+// request) under approveURL when that is set, else the Inbox's Credential requests section.
+func reportPending(stderr io.Writer, requestID, recordID string, wait time.Duration) {
+	fmt.Fprintf(stderr, "agent-secrets: request %s is waiting for approval; waiting up to %s\n", requestID, wait)
+	if base := approveURL(); base != "" {
+		fmt.Fprintf(stderr, "agent-secrets: approve or deny it at %s/credentials/%s\n", base, recordID)
+		return
+	}
+	fmt.Fprintln(stderr, "agent-secrets: approve or deny it under Credential requests in the Dispatch Inbox")
 }
 
 // sessionIdentityVars are the AGENT_SECRETS_* variables the exec form's child keeps: the broker's

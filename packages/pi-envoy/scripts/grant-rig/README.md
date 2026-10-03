@@ -17,7 +17,8 @@ listener (inherited `ENVOY_URL`), which collides with nothing.
 
 | file | what it is |
 | --- | --- |
-| `daemon-standin.ts` | Serves the worker's claim routes (`claims/register`, `claims/ready`) and the grant routes with the real request and response shapes (the plugin's grant request, `LegionGoGrantRequest`; the rig `legion` CLI's redemptions, `LegionDaemonApi`) and the real grant rule: a grant lives 60 seconds and redeems any number of times while it lives; an unknown or expired id answers 403 `Invalid or expired grant`. Appends one JSON line per request to its log. |
+| `daemon-standin.ts` | Serves the worker's claim routes (`claims/register`, `claims/ready`), the grant routes and a phase completion (`GET /legion/v1/state`, `handoff/complete`) with the Go daemon's request and response shapes (`@legion/contracts/legion-api`) and the real grant rule: a grant lives 60 seconds and redeems any number of times while it lives; an unknown or expired id answers 403 `Invalid or expired grant`. Appends one JSON line per request to its log. Its state document puts the issue in the phase the role works, as `daemon-pane.go` reads it from the daemon's workflow. |
+| `daemon-pane.go`, `daemon-pane.ts` | The rigs' one reading of the Legion daemon: a Go `main` that `daemon-pane.ts` runs with `go run -overlay` inside a checkout's `packages/daemon`, so it calls the daemon's own functions. It installs `worker-bin/gh` and `bin/legion` (`workerbin.Install`), names the phase a role works (`workflow.RoleFor`), and prints a pane's environment (`tmux.PaneVariables`, `daemon.PaneTools`, `workerbin.Path`) and its `--append-system-prompt` argument (`prompts.Compose`, `daemon.AddressingFragment`, `omplaunch.SystemPromptArgument`). Neither rig restates any of them, so a change to the daemon reaches both. Needs `go` on PATH. |
 | `setup.sh` | Creates the throwaway profile and the scratch state directory (below), in one of two plugin modes. |
 | `run.ts` | `prompt` prints the worker's instructions; `drive` runs the headless leg over Oh My Pi's RPC mode; `tui` runs the terminal leg in a private tmux server; `analyze` scores any transcript. Both legs end with the same table. |
 
@@ -40,7 +41,7 @@ The rest of the copied tree stays, `secretsd` and the other plugins included. Th
 needs none of it: its bundles inline every dependency except the `@oh-my-pi/*` packages Oh My Pi
 itself provides.
 
-Why: Sami's ruling (2026-09-13, AGENTC-79) after pi-envoy 1.17.1 shipped broken — proven on a rig
+Why: Sami's ruling (2026-09-13) after pi-envoy 1.17.1 shipped broken — proven on a rig
 that loaded the Legion extension alone, it failed on the first real worker because `secretsd`
 (`github:sjawhar/forward#v3.0.2`) replaces the bash tool with Oh My Pi's legacy `{command,
 timeout}` shim, which discards the tool call's `env`. Pre-merge proof runs against the production
@@ -60,15 +61,12 @@ otherwise `rm -rf` the very tree it copies from.
 
 ## Before runs
 
-The regression evidence is two runs of the same production-profile rig with a released Legion
-plugin, both against `main`'s `legion` command-line tool (export `main`'s tree read-only as below
-and point `setup.sh` at it — do not use the branch CLI for these, or 1.17.1 would not reproduce):
-
-- `RIG_LEGION_BUILD=1.17.1`: env delivery under `secretsd`. Every `legion …` probe fails
-  `LEGION_GRANT is missing`; D fails, B's mints still one per call, zero redemption lines.
-- `RIG_LEGION_BUILD=1.17.0`: text delivery. `T>=1` on every call and `T>1` on some (the model's
-  copies, classified in `X`), a 403 on a later `legion …` probe, F fails (the ids are in the
-  transcript).
+The regression evidence for LEGION-12 (1.17.0's text delivery) and LEGION-52 (1.17.1's `env`
+delivery under `secretsd`) was recorded against the TypeScript `legion` of its time, which read the
+plain `LEGION_GRANT`. The rig now builds the checkout's Go `legion`, which reads the pane's
+`LEGION_GRANT_FILE` first and never falls back to the variable while that pointer is set, so a
+released 1.17.x build (`RIG_LEGION_BUILD=1.17.1`) fails every `legion …` probe here (D) for that
+reason and does not reproduce those failures.
 
 ## Layout `setup.sh <checkout> [rig dir]` creates
 
@@ -87,45 +85,52 @@ Scratch directory `$RIG` (default `mktemp -d /tmp/l12rig.XXXX`), standing in for
 | --- | --- |
 | `state/secrets/boot` | The worker's boot token (`rig-boot`, mode 0600); the stand-in rejects any other. |
 | `state/secrets/legion-l12rig-rig-1-implementer-grant` | The worker's `LEGION_GRANT_FILE`, written by the extension before each bash command (mode 0600). Never read, printed, or copied by hand. |
-| `state/bin/legion` | The checkout's own `legion` command-line tool (`bun packages/daemon/src/cli/index.ts`), the way `<state_dir>/bin/legion` re-execs the daemon's runtime in production. |
+| `legion` | The checkout's Go `legion`, built by `setup.sh` from `packages/daemon/cmd/legion`: the daemon's own binary, which `state/bin/legion` execs. |
+| `state/bin/legion` | The launcher the daemon installs at boot (`workerbin.Install`, run by `setup.sh` through `daemon-pane.ts`): execs `$RIG/legion`. |
 | `state/bin/record-grant` | Appends `<grant file contents> <mode> <LEGION_GRANT or ->` to `$RIG/seen-grants.log`, so the prompt never names the credential; the third field is what a 1.17.0 (text-delivery) command ran under. |
-| `state/worker-bin/gh` | Installed by `setup.sh` through the daemon's `worker-bin.ts`, as the daemon does at startup: the `gh` shim that routes through `legion gh`. A `main` checkout without that module gets none here; its 1.17.x extensions wrote the shim themselves. |
-| `state/gh` | The pane's `GH_CONFIG_DIR`. |
+| `state/worker-bin/gh` | The `gh` shim the daemon installs at boot, installed with the launcher: drops its own directory from PATH and execs `legion gh`. |
+| `state/home` | The home under which the pane's four XDG base directories are made, as the daemon makes them for every pane. |
+| `state/prompts` | Empty here: only a pane given a system prompt (the skill scenarios' tester) gets the daemon's prompt snapshot. |
+| `state/gh` | The `GH_CONFIG_DIR` `legion gh` gives the gh it runs. |
 | `ws` | The worker's workspace, an empty jj repository (the boot handshake sets a jj identity on it). |
-| `rig-mode.json` | What `setup.sh` laid out: plugin mode, Legion build, checkout commit; copied into each run's `report.json`. |
+| `rig-mode.json` | What `setup.sh` laid out: plugin mode, Legion build, checkout commit, and the `worker-bin` directory verdict G expects first on the pane's PATH; copied into each run's `report.json`. |
 | `standin.log` | The stand-in daemon's request log. |
 | `seen-grants.log` | One line per `record-grant` call. |
 | `runs/<label>-<time>/` | Per run: `prompt.txt`, `events.jsonl` (headless) or `pane.txt` (terminal), `stderr.log`, `table.txt`, `report.json`. |
 
 ## Environment the worker gets
 
-`run.ts` builds it (`workerEnvironment`) from the current shell after removing `ANTHROPIC_API_KEY`,
-every `LEGION_*` and `DISPATCH_*` value, and every inherited `worker-bin` PATH entry (the daemon's
-own strip, `pathWithoutWorkerBin` from `packages/daemon/src/daemon/worker-bin.ts`, imported rather
-than re-implemented — a rig started from a Legion pane carries that pane's worker-bin first), then
-what the daemon sets for a phase-worker pane — the launch keys and the static credential
-environment (`ProcessManager.credentialProcessEnvironment`), which is the pane's for life, never
-per command:
+`run.ts` builds it (`workerPane`) from the current shell after removing `ANTHROPIC_API_KEY`, every
+`LEGION_*` and `DISPATCH_*` value, and `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` (no
+Legion pane carries them). It adds the profile's variables, then everything the daemon's tmux
+runtime tells a phase-worker pane, for life, never per command, as `daemon-pane.go` reads it from
+the daemon's own functions:
 
 | variable | value |
 | --- | --- |
 | `OMP_PROFILE`, `PI_PROFILE` | `l12rig` |
 | `PI_CODING_AGENT_DIR` | `~/.omp/profiles/l12rig/agent` |
 | `PI_NOTIFICATIONS`, `PI_NO_TITLE` | `off`, `1` |
-| `LEGION_ROLE`, `LEGION_TREE`, `LEGION_ISSUE` | `implementer`, `RIG-1`, `RIG-1` |
+| `LEGION_TREE`, `LEGION_ISSUE`, `LEGION_ROLE` | `RIG-1`, `RIG-1`, `implementer` |
 | `LEGION_GENERATION`, `LEGION_PROJECT` | `1`, `l12rig` |
-| `LEGION_BOOT_TOKEN_FILE` | `$RIG/state/secrets/boot` |
+| `LEGION_BOOT_TOKEN_FILE` | `$RIG/state/secrets/boot`, the rig's own file, which the stand-in checks |
 | `LEGION_DAEMON_URL` | `http://127.0.0.1:<port>` (the stand-in) |
 | `LEGION_STATE_DIR`, `LEGION_WORKSPACE` | `$RIG/state`, `$RIG/ws` |
+| `ENVOY_URL`, `ENVOY_NATS_URL` | what the pane's own extension reaches from the current shell: its `ENVOY_URL` (else the extension's default listener) and `ENVOY_NATS_URL` |
+| `LEGION_GH_PATH`, `LEGION_GIT_PATH`, `LEGION_JJ_PATH` | the first `gh`, `git` and `jj` on the current shell's PATH less every `worker-bin` entry (a rig started from a Legion pane carries that pane's), as the daemon resolves them at boot |
+| `PI_SHELL_PREFIX` | the daemon's prefix over `$RIG/state/worker-bin` and `$RIG/state/bin`: drops every PATH entry that is either directory, wherever the shell's rc left it, then puts both in front, each once |
+| `GIT_TERMINAL_PROMPT` | `0` |
 | `LEGION_GRANT_FILE` | `$RIG/state/secrets/legion-l12rig-rig-1-implementer-grant` |
-| `GH_CONFIG_DIR` | `$RIG/state/gh` |
-| `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST` | empty |
-| `PATH` | `$RIG/state/worker-bin`, then `$RIG/state/bin`, then the inherited PATH |
+| `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` | under `$RIG/state/home` |
+| `PATH` | `$RIG/state/worker-bin`, then `$RIG/state/bin`, then the current shell's PATH |
 
-The launch argv is the daemon's own prefix, `secrets GEMINI_API_KEY OPENAI_API_KEY -- <omp>`, plus
-`--mode rpc` for the headless leg (`--no-secrets` drops the prefix when the keys are already in the
-environment). No Anthropic key is injected: omp's anthropic provider gets its gateway token from
-`!hawk-token` in the profile's `models.yml`, and a set `ANTHROPIC_API_KEY` would bypass it.
+The launch argv is `secrets GEMINI_API_KEY OPENAI_API_KEY -- <omp>`, plus `--mode rpc` for the
+headless leg (`--no-secrets` drops the prefix when the keys are already in the environment).
+`secrets` runs without the pane's `XDG_CONFIG_HOME`, whose directory under `$RIG/state/home` holds
+no secretsd configuration, and Oh My Pi runs with it again (`env -u XDG_CONFIG_HOME secrets … --
+env XDG_CONFIG_HOME=… <omp>`). No
+Anthropic key is injected: omp's anthropic provider gets its gateway token from `!hawk-token` in
+the profile's `models.yml`, and a set `ANTHROPIC_API_KEY` would bypass it.
 
 ## Which Oh My Pi binary
 
@@ -134,45 +139,31 @@ live Legion daemon's panes run, because that is the host whose write-back behavi
 measuring. The daemon resolves that build from `omp_invocation` in its `legion.yaml`
 (`mise x github:sjawhar/oh-my-pi@<version> -- omp`), so read the version from there — on this
 box `~/.config/legion/sjawhar-legion/legion.yaml` — and resolve it with `mise where`. The
-repository's own pin (`OMP_FORK_PIN` in `packages/daemon/src/daemon/omp-pin.ts`, printed by
-`bun packages/daemon/src/daemon/omp-pin.ts`) is the default a daemon falls back to when
-`legion.yaml` sets no `omp_invocation`; use it only when that is the daemon you are comparing
-against. Do not hard-code a build in a run book; the one the rig proved against is recorded in
-each run's `report.json` (`omp`), beside the plugin mode and Legion build (`rigMode`).
+repository's own pin (the root `.omp-pin`, a mise tool spec) is the build the worker image and the
+live proofs install; use it only when that is the build you are comparing against. Do not
+hard-code a build in a run book; the one the rig proved against is recorded in each run's
+`report.json` (`omp`), beside the plugin mode and Legion build (`rigMode`).
 
 ## Running it
 
 ```sh
-SRC=/path/to/checkout           # bun install --frozen-lockfile must have run here
+SRC=/path/to/checkout           # bun install --frozen-lockfile must have run here; go on PATH
 # The build the live daemon runs: the `omp_invocation` line of its legion.yaml names it.
 OMP_TOOL=$(sed -n 's/^omp_invocation: *"mise x \([^ ]*\) -- omp".*/\1/p' ~/.config/legion/sjawhar-legion/legion.yaml)
 OMP=$(mise where "$OMP_TOOL")/bin/omp
 RIG=/tmp/l54rig; mkdir -p $RIG
 PORT=13399
 
-# main's tree, read-only, for the before runs (its CLI ignores LEGION_GRANT_FILE)
-mkdir -p $RIG/main
-git --git-dir="$(jj -R "$SRC" git root)" archive "$(jj -R "$SRC" log -r main@origin --no-graph -T commit_id)" | tar -x -C $RIG/main
-(cd $RIG/main && bun install --frozen-lockfile)
+# the branch's plugin, profile and Go legion
+RIG_PLUGINS=production RIG_LEGION_BUILD=branch sh $SRC/packages/pi-envoy/scripts/grant-rig/setup.sh $SRC $RIG
 
 # stand-in daemon (keep it running across the runs below)
 bun $SRC/packages/pi-envoy/scripts/grant-rig/daemon-standin.ts $PORT $RIG/standin.log $RIG/state/secrets/boot &
 
-# before run 1: released 1.17.1 (env delivery) — expect `LEGION_GRANT is missing` on every legion probe
-RIG_PLUGINS=production RIG_LEGION_BUILD=1.17.1 sh $SRC/packages/pi-envoy/scripts/grant-rig/setup.sh $RIG/main $RIG
-bun $SRC/packages/pi-envoy/scripts/grant-rig/run.ts drive --rig $RIG --port $PORT --omp $OMP --label before-1.17.1
-
-# before run 2: released 1.17.0 (text delivery) — expect imitation counts growing
-: > $RIG/standin.log; : > $RIG/seen-grants.log
-RIG_PLUGINS=production RIG_LEGION_BUILD=1.17.0 sh $SRC/packages/pi-envoy/scripts/grant-rig/setup.sh $RIG/main $RIG
-bun $SRC/packages/pi-envoy/scripts/grant-rig/run.ts drive --rig $RIG --port $PORT --omp $OMP --label before-1.17.0
-
-# the branch: headless leg, 34 bash calls, 3 task spawns (every legion probe on call 30 or later)
-: > $RIG/standin.log; : > $RIG/seen-grants.log
-RIG_PLUGINS=production RIG_LEGION_BUILD=branch sh $SRC/packages/pi-envoy/scripts/grant-rig/setup.sh $SRC $RIG
+# headless leg, 33 bash calls, 3 task spawns (every legion probe on call 30 or later)
 bun $SRC/packages/pi-envoy/scripts/grant-rig/run.ts drive --rig $RIG --port $PORT --omp $OMP --label fixed-rpc
 
-# the branch: terminal leg, 9 bash calls, 1 task spawn, driven through tmux -L l12rig
+# terminal leg, 8 bash calls, 1 task spawn, driven through tmux -L l12rig
 : > $RIG/standin.log; : > $RIG/seen-grants.log
 bun $SRC/packages/pi-envoy/scripts/grant-rig/run.ts tui --rig $RIG --port $PORT --omp $OMP --short --label fixed-tui
 
@@ -210,15 +201,14 @@ argument (every record-grant ran under the file's grant and no env carried the v
 mint from a 0600 file; **D** the `legion …` probes print `exit=0` and never `Unable to redeem`;
 **E** exactly one hook line per bash call, one parent instance (plus one instance per `task`
 spawn); **F** no minted id appears in the transcript or the OMP log (the stand-in log is the
-oracle and is exempt); **G** the `printenv` probe shows `GH_CONFIG_DIR=$RIG/state/gh`,
-`GH_TOKEN= GITHUB_TOKEN= GH_HOST=`, and a `PATH=` beginning with `$RIG/state/worker-bin` in which
-worker-bin occurs once.
+oracle and is exempt); **G** the environment probe shows
+`GH_CONFIG_DIR= GH_TOKEN= GITHUB_TOKEN= GH_HOST=` (none set on the pane) and a `PATH=` beginning
+with `$RIG/state/worker-bin` in which worker-bin occurs once.
 
-Expected on the fixed code: `H=1/1 G=1 T=0 file=own-mint` on every record-grant call, A–G all
-PASS, every redemption 200, `legion …` commands `exit=0`, one parent instance plus one per `task`
-spawn. Expected on 1.17.1: D FAIL (`LEGION_GRANT is missing`), C FAIL (`file=-`), no redemption
-lines. Expected on 1.17.0: `T>=1` on every call and `T>1` on some — the extras are model text —
-A and F FAIL, and a 403 on any `legion …` command whose imitated line came last.
+Expected: `H=1/1 G=1 T=0 file=own-mint` on every record-grant call, A–G all PASS, every
+redemption 200, `legion …` commands `exit=0`, one parent instance plus one per `task` spawn. The
+prompt never asks for `legion handoff complete`: the extension refuses it in a phase worker's
+shell, where the `legion` tool's `handoff_complete` ends the phase.
 
 ## Cleanup
 

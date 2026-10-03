@@ -7,7 +7,7 @@
 # LEGION_POSTGRES_DSN (or postgres_dsn below) names a Postgres.
 # 192.0.2.10 is a documentation address (RFC 5737) and every example.com host a documentation
 # domain (RFC 2606); the App ids are made up; the image digest is all zeros, where yours is the one
-# a Worker Image workflow run or a cli-v<version> release publishes.
+# a Worker Image workflow run or a legion-v<version> release publishes.
 
 project: WIDGETS                       # the Dispatch project key this daemon runs; also a key of projects
 state_dir: ./state                     # the daemon's local state

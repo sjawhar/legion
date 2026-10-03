@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -297,6 +298,48 @@ func TestAWriteInsideApplyOutlivesTheRoomsLastPeer(t *testing.T) {
 	}
 	if markdown, err := renderDocument(durable); err != nil || markdown != "second\n" {
 		t.Errorf("the stored document after both writes = %q (%v), want \"second\\n\"", markdown, err)
+	}
+}
+
+// A document only the API touches - an agent's edit, a read outside any transaction - has no
+// browser to leave its room. ygo stamps such a room idle when the Server.Apply that touched it
+// returns, so its idle sweep evicts the room within the idle timeout and a sweep of the API's last
+// touch, as it evicts a room its last browser left (roomIdleTimeout), and the document reads back
+// what the API wrote.
+func TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	// Production waits roomIdleTimeout; two seconds keeps the test short, and ygo then sweeps
+	// every second. No room is loaded yet, so ygo's sweeper has not read it.
+	service.srv.RoomIdleTimeout = 2 * time.Second
+	seedServiceText(t, service, artifactID, "before")
+	ctx := context.Background()
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+
+	resident := func() bool { return slices.Contains(service.srv.Rooms(), artifactID) }
+	leaves := func(touch string) {
+		t.Helper()
+		if !resident() {
+			t.Fatalf("the %s did not load the document's room", touch)
+		}
+		waitFor(t, 10*time.Second, fmt.Sprintf("ygo's idle sweep to evict the document's room after the %s, the API's last touch (idle timeout %v)", touch, service.srv.RoomIdleTimeout), func() bool {
+			return !resident()
+		})
+	}
+
+	written, err := service.ReplaceText(ctx, artifactID, "Edited by an agent.\n", agent)
+	if err != nil {
+		t.Fatalf("agent edit: %v", err)
+	}
+	leaves("agent's edit")
+
+	if _, err := service.currentToken(ctx, artifactID); err != nil {
+		t.Fatalf("read outside any transaction: %v", err)
+	}
+	leaves("read outside any transaction")
+
+	if text, err := service.Text(ctx, artifactID); err != nil || text != written {
+		t.Errorf("the document after its room was evicted twice = %q (%v), want the agent's edit, %q", text, err, written)
 	}
 }
 

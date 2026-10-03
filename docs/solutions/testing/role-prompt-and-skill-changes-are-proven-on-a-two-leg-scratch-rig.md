@@ -15,7 +15,7 @@ date: 2026-09-13
 status: active
 module: pi-envoy
 applies_when:
-  - A pull request changes `packages/pi-envoy/roles/*.md`, `skills/*/SKILL.md`, or anything else a pane receives through `--append-system-prompt` or resolves through `skill://`
+  - A pull request changes `packages/daemon/internal/prompts/roles/*.md`, `skills/*/SKILL.md`, or anything else a pane receives through `--append-system-prompt` or resolves through `skill://`
   - An acceptance criterion says "a daemon-spawned <role> pane receives a prompt stating …" or "a worker reads `skill://…` and quotes …"
   - The implementer's own proof is required before the phase completes (LEGION-53's rule), and a unit grep over the source files is not it
 related_issues:

@@ -1,5 +1,6 @@
 {
   "name": "@legion/docs-site",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "description": "The documentation site for Legion, Dispatch and the Secrets Broker",
