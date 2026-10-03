@@ -26,6 +26,9 @@ import (
 
 const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> --repo <owner>/<repo> [--root /legion] --credential-helper <git helper> --feed <dir>"
 
+// workspaceInitUsage names both subcommands of `legion workspace-init`.
+const workspaceInitUsage = "usage: " + workspaceFetchUsage + "\n       " + workspaceProvisionUsage
+
 const (
 	// workspaceLostExitCode is the status that tells the runtime the tree volume itself was lost —
 	// neither the shared clone nor the recorded OMP session is on it — rather than that one launch
@@ -60,7 +63,7 @@ func (e volumeLostError) Error() string { return string(e) }
 // volume.
 func runWorkspaceInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || helpRequested(args[0]) {
-		fmt.Fprintf(stderr, "usage: %s\n       %s\n", workspaceFetchUsage, workspaceProvisionUsage)
+		fmt.Fprintln(stderr, workspaceInitUsage)
 		return 2
 	}
 	var run func() error
@@ -85,7 +88,7 @@ func runWorkspaceInit(ctx context.Context, args []string, stdout, stderr io.Writ
 		}
 		run = func() error { return workspaceInit(ctx, *issue, *repo, *root, *credentialHelper, *feed, stdout) }
 	default:
-		fmt.Fprintf(stderr, "legion workspace-init: unknown subcommand %q\nusage: %s\n       %s\n", args[0], workspaceFetchUsage, workspaceProvisionUsage)
+		fmt.Fprintf(stderr, "legion workspace-init: unknown subcommand %q\n%s\n", args[0], workspaceInitUsage)
 		return 2
 	}
 	err := run()

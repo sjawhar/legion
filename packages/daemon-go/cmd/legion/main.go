@@ -426,15 +426,14 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return runIssueStatus(ctx, args[0], args[1], args[2:], stdout, stderr)
 	}
 	flags := newFlags("status", stderr)
-	statusUsage := func() {
+	flags.Usage = func() {
 		fmt.Fprintf(stderr, "usage: legion status <team>\n       %s\n", strings.TrimPrefix(issueStatusUsage, "usage: "))
 	}
-	flags.Usage = statusUsage
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	if flags.NArg() != 1 {
-		statusUsage()
+		flags.Usage()
 		return 2
 	}
 	team := flags.Arg(0)
