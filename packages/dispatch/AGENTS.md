@@ -67,7 +67,10 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   answers or the send's deadline passes. Nothing the reader did not do closes a composer under a
   send either. A comment whose thread the reader has open - inline, full-screen, or answered by
   the phone thread composer - stays in the list whoever resolves it, until they close the thread
-  (the tab owns which threads are open). The viewport widening past the phone layout while a send
+  (the tab owns which threads are open). Resolving a comment, or accepting or rejecting its
+  suggestion, closes its thread once the server takes the action - never before, so a refusal
+  leaves the thread and its reply as they were - and not at all while `Resolved` shows or the
+  thread's own reply is out. The viewport widening past the phone layout while a send
   from the thread view is out leaves the view open, full-screen at any width, until Back. And a
   closed issue keeps its composers mounted (`closed` on `MentionComposer`): one shows itself only
   for a send of its own still out or that send's refusal, with Send refused and `Discard draft` in

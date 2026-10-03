@@ -646,15 +646,6 @@ function CommentTurn({
     }
     setExpanded(!expanded);
   };
-  // Resolving the comment, or accepting or rejecting its suggestion, from inside its thread is the
-  // reader closing the thread with it: it leaves the list as any resolved comment does, since the
-  // tab keeps only a thread the reader has open (`shown`). One whose own reply is out stays.
-  const act = (id: string, kind: "accept" | "reject" | "resolve" | "reopen") => {
-    onAction(id, kind);
-    if (kind === "reopen" || id !== item.event.payload.id || replySendingNow()) return;
-    if (forceExpanded) onPhoneThreadToggle?.();
-    else setExpanded(false);
-  };
   return (
     <li
       aria-current={current ? "true" : undefined}
@@ -673,7 +664,7 @@ function CommentTurn({
         isClosed={isClosed}
         editingCommentId={editingCommentId}
         savingCommentEditId={savingCommentEditId}
-        onAction={act}
+        onAction={onAction}
         onEdit={editComment}
         onEditingChange={setEditingCommentId}
         onRetryAction={onRetryAction}
@@ -957,7 +948,18 @@ export function ConversationTab({
     open: phoneThread !== undefined,
   });
   const commentActions = useCommentActionQueue({
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["events", issueKey] }),
+    // Resolving a comment, or accepting or rejecting its suggestion, is the reader done with its
+    // thread: once the server takes it, the thread closes, and the comment leaves the list as any
+    // resolved one does (`shown`). A refusal leaves the thread as it was, with the reply the reader
+    // was writing. It stays open while Resolved shows, where the comment stays listed anyway, and
+    // while the thread's own reply is out, which closing would unmount.
+    onSuccess: ({ id, kind }) => {
+      void queryClient.invalidateQueries({ queryKey: ["events", issueKey] });
+      if (kind === "reopen" || showResolvedComments) return;
+      if (queryClient.isMutating({ mutationKey: threadReplySendKey(sendKey, id) }) > 0) return;
+      setThreadOpen(id, false);
+      if (phone.id === id) phone.close();
+    },
   });
   const [ownSendCount, setOwnSendCount] = useState(0);
   // The docked composer's reply. A message's Reply answers here at every width, and so does a

@@ -707,7 +707,9 @@ test("an orphaned suggestion stays non-actionable through resolve and reopen", a
   }
 });
 
-test("a failed queued Conversation comment action clears later clicks and retries explicitly", async ({
+// A Resolve closes its thread only once the server takes it: a refused one leaves the thread open,
+// with the reply the reader was writing in it.
+test("a failed queued Conversation comment action keeps its thread and reply, clears later clicks and retries explicitly", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -749,6 +751,8 @@ test("a failed queued Conversation comment action clears later clicks and retrie
     await page.goto(`/issues/${issue.key}/conversation`);
     const firstThread = await expandedThread(page, first.id);
     const secondThread = await expandedThread(page, second.id);
+    const firstReply = firstThread.getByRole("textbox", { name: "Reply" });
+    await firstReply.fill("Half a reply");
     await firstThread.getByRole("button", { name: "Resolve" }).click();
     await secondThread.getByRole("button", { name: "Resolve" }).click();
     resolveFirst?.();
@@ -756,6 +760,7 @@ test("a failed queued Conversation comment action clears later clicks and retrie
     // of it, as the header, settings and composer do.
     await expect(firstThread.getByText("Dispatch request failed (500)")).toBeVisible();
     await expect.poll(() => requests).toBe(1);
+    await expect(firstReply).toHaveValue("Half a reply");
     await firstThread.getByRole("button", { name: "Retry" }).click();
     await expect.poll(() => requests).toBe(2);
     await expect(threadCard(page, first.id)).toHaveCount(0);

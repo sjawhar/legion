@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import { prependEventToLog } from "../../api/sse";
 import type { Actor, Artifact, Comment, Event, UserIssueState, UserState } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -870,6 +870,100 @@ test("a comment resolved while its thread is open stays, with its reply, until t
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
     api.listAgents = originalListAgents;
+  }
+});
+
+// Resolve inside a thread closes it once the server takes it, never before: a refusal leaves the
+// thread open with the reply the reader was writing, and the Retry that lands closes it.
+test("a refused Resolve keeps the thread and its reply, and the one that lands closes it", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const originalResolveComment = api.resolveComment;
+  const queryClient = newQueryClient();
+  const root = commentEvent(1, "root-comment", "Root comment");
+  let refuse = true;
+  const resolves: string[] = [];
+  let unmount: (() => void) | undefined;
+
+  try {
+    api.getIssueEvents = async () => [root];
+    api.listAgents = async () => [];
+    api.resolveComment = async (id) => {
+      resolves.push(id);
+      if (refuse) throw new ApiError(503, { error: "the server is down" });
+      return { ...root.payload, deliveries: [], mentions: [], resolved: true };
+    };
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText("Root comment");
+    fireEvent.click(screen.getByRole("button", { name: "Expand thread" }));
+    const field = await screen.findByRole<HTMLTextAreaElement>("textbox", { name: "Reply" });
+    fireEvent.change(field, { target: { value: "Half a reply" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Resolve" }));
+    await screen.findByText("the server is down");
+    expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Reply" })).toBe(field);
+    expect(field.value).toBe("Half a reply");
+
+    refuse = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByRole("textbox", { name: "Reply" })).toBeNull());
+    expect(resolves).toEqual(["root-comment", "root-comment"]);
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+    api.resolveComment = originalResolveComment;
+  }
+});
+
+// With resolved comments shown, a resolved comment stays in the list, so its thread does too.
+test("with resolved comments shown, a Resolve that lands keeps its thread open", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const originalResolveComment = api.resolveComment;
+  const queryClient = newQueryClient();
+  const earlier = commentEvent(1, "earlier-comment", "Earlier comment");
+  const earlierResolved: Event = {
+    ...earlier,
+    id: 2,
+    payload: {
+      ...earlier.payload,
+      resolved: true,
+      resolved_at: "2026-09-20T00:01:00Z",
+      resolved_by: { id: "bob", kind: "user" },
+    },
+    seq: 2,
+    type: "comment.resolved",
+  };
+  const root = commentEvent(3, "root-comment", "Root comment");
+  const resolved = Promise.withResolvers<Comment>();
+  let unmount: (() => void) | undefined;
+
+  try {
+    api.getIssueEvents = async () => [earlier, earlierResolved, root];
+    api.listAgents = async () => [];
+    api.resolveComment = () => resolved.promise;
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    fireEvent.click(await screen.findByRole("button", { name: "Resolved (1)" }));
+    const turn = (await screen.findByText("Root comment")).closest("li");
+    if (turn === null) throw new Error("expected the root comment's turn");
+    fireEvent.click(within(turn).getByRole("button", { name: "Expand thread" }));
+    const field = await within(turn).findByRole<HTMLTextAreaElement>("textbox", { name: "Reply" });
+    fireEvent.change(field, { target: { value: "Half a reply" } });
+
+    fireEvent.click(within(turn).getByRole("button", { name: "Resolve" }));
+    await act(async () => {
+      resolved.resolve({ ...root.payload, deliveries: [], mentions: [], resolved: true });
+      await resolved.promise;
+    });
+    await waitFor(() => expect(within(turn).queryByText("Saving…")).toBeNull());
+    expect(within(turn).getByRole<HTMLTextAreaElement>("textbox", { name: "Reply" })).toBe(field);
+    expect(field.value).toBe("Half a reply");
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+    api.resolveComment = originalResolveComment;
   }
 });
 
