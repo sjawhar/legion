@@ -1,4 +1,4 @@
--- 0072_reference_excerpts.up.sql
+-- 0068_reference_excerpts.up.sql
 --
 -- The reference graph records a document mention's first containing block when that document is
 -- indexed. Backlink reads can then use the stored block id and markdown excerpt without loading

@@ -510,19 +510,13 @@ func (s *Service) Blocks(ctx context.Context, artifactID string) ([]model.Artifa
 // TextWithBlocks renders the document the caller sees (readDocument) once and returns its
 // canonical markdown beside the blocks whose byte ranges index into it.
 func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string, []model.ArtifactBlock, error) {
-	var tree *pmdoc.Node
-	var treeErr error
-	err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
-		tree, treeErr = treeOf(doc)
-	})
-	if err != nil {
+	doc, err := s.readDocument(ctx, artifactID)
+	if err != nil || doc == nil {
 		return "", nil, err
 	}
-	if treeErr != nil {
-		return "", nil, treeErr
-	}
-	if tree == nil {
-		return "", nil, nil
+	tree, err := treeOf(doc)
+	if err != nil {
+		return "", nil, err
 	}
 	tableDescendants, err := pmdoc.TableDescendantIDs(tree)
 	if err != nil {
