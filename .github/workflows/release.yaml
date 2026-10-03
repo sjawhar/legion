@@ -42,6 +42,11 @@ concurrency:
 jobs:
   changes:
     runs-on: ubuntu-24.04
+    # Job-level permissions replace the workflow's: the checkout, and the run list the base step
+    # reads.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       legion: ${{ steps.filter.outputs.legion }}
       envoy_plugin: ${{ steps.filter.outputs.envoy_plugin }}
@@ -49,9 +54,28 @@ jobs:
       worker_image: ${{ steps.filter.outputs.worker_image }}
     steps:
       - uses: actions/checkout@v5
+      # The filters compare against the commit the last successful run of this workflow on main
+      # checked out, not against the push's own before-sha. GitHub keeps one pending run per
+      # concurrency group and cancels it when a newer push queues behind it, and a failed run
+      # releases nothing; comparing against the push alone would leave those runs' commits to no
+      # run at all. A workflow_dispatch run on main counts, since it runs every job.
+      - name: Find the last commit a release run finished
+        id: base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yaml/runs?branch=main&status=success&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // empty')
+          if [ -z "$sha" ]; then
+            echo "::error::No successful run of this workflow on main to compare against"
+            exit 1
+          fi
+          echo "Changes since $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@v3
         id: filter
         with:
+          base: ${{ steps.base.outputs.sha }}
           filters: |
             # The Go `legion` the legion job releases and worker.Dockerfile's go stage compiles: its
             # module, the modules go.work binds it to (packages/envoy is also copied whole into the
