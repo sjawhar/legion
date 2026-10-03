@@ -7,11 +7,11 @@ description: >-
   configuration under it ("No version is set for shim: jj"). mise stays at ~/.local/bin/mise, on
   PATH for later steps. Needs the repository checked out.
 
-  mise itself installs from its GitHub release tarball, checked against the sha256 this file pins
-  (from mise's own published SHASUMS256.txt for that release) before anything extracts or runs it —
-  not mise.run's `curl | sh`, which runs the installer unverified. That step reads no token.
-  Bumping `ARG MISE_VERSION` in the Dockerfile means bumping `pinned_sha256` below to match, or
-  this step refuses, naming both versions.
+  mise itself installs from its GitHub release tarball, checked against the `ARG MISE_SHA256` the
+  Dockerfile pins next to `ARG MISE_VERSION` before anything extracts or runs it — not mise.run's
+  `curl | sh`, which runs the installer unverified. That step reads no token. Bumping mise is one
+  edit, in the Dockerfile: both this action and the worker image's own `tools` stage read the same
+  pair.
 runs:
   using: composite
   steps:
@@ -21,16 +21,9 @@ runs:
         set -euo pipefail
         dockerfile=packages/daemon/docker/worker.Dockerfile
         mise_version=$(sed -n 's/^ARG MISE_VERSION=//p' "$dockerfile")
-        if [ -z "$mise_version" ]; then
-          echo "$dockerfile names no ARG MISE_VERSION" >&2
-          exit 1
-        fi
-        # linux-x64 tar.gz from mise's own SHASUMS256.txt for this release:
-        # curl -fsSL "https://github.com/jdx/mise/releases/download/${pinned_version}/SHASUMS256.txt"
-        pinned_version="v2026.8.12"
-        pinned_sha256="0c782233b97745fd3ed317ba3acbfd7d256e6268470373757f0cc48d57bb87e6"
-        if [ "$mise_version" != "$pinned_version" ]; then
-          echo "::error::$dockerfile names ARG MISE_VERSION=$mise_version, but this action's sha256 is pinned to $pinned_version; update pinned_version and pinned_sha256 in $0 to match" >&2
+        mise_sha256=$(sed -n 's/^ARG MISE_SHA256=//p' "$dockerfile")
+        if [ -z "$mise_version" ] || [ -z "$mise_sha256" ]; then
+          echo "$dockerfile names no ARG MISE_VERSION or ARG MISE_SHA256" >&2
           exit 1
         fi
         dir="$RUNNER_TEMP/mise-install"
@@ -38,7 +31,7 @@ runs:
         archive="mise-${mise_version}-linux-x64.tar.gz"
         curl -fsSLo "$dir/$archive" \
           "https://github.com/jdx/mise/releases/download/${mise_version}/${archive}"
-        printf '%s  %s\n' "$pinned_sha256" "$dir/$archive" > "$dir/SHA256SUMS"
+        printf '%s  %s\n' "$mise_sha256" "$dir/$archive" > "$dir/SHA256SUMS"
         sha256sum --check --strict "$dir/SHA256SUMS"
         tar -xzf "$dir/$archive" -C "$dir"
         mkdir -p "$HOME/.local/bin"

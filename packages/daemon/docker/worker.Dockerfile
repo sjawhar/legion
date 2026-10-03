@@ -32,6 +32,13 @@
 # the repository's .omp-pin, its only home, which the tools stage copies.
 ARG BUN_VERSION=1.3.14
 ARG MISE_VERSION=v2026.8.12
+# SHA-256 of the tools stage's linux-x64 archive (the image builds linux/amd64 only; `install-jj`'s
+# mise step reads this pair from here too). Taken from mise's GPG-signed SHASUMS256.asc, not the
+# unsigned SHASUMS256.txt: `gpg --verify SHASUMS256.asc` against release key
+# 24853EC9F655CE80B48E6C3A8B81C9D17413A06D (published at https://mise.jdx.dev/gpg-key.pub, and at
+# keys.openpgp.org by the same fingerprint) must report a good signature before this hash is taken
+# from the verified file.
+ARG MISE_SHA256=0c782233b97745fd3ed317ba3acbfd7d256e6268470373757f0cc48d57bb87e6
 # Sami's jj fork: what the dogfood daemon runs on the devbox; same 0.45 line as the jj-lib inside OMP.
 ARG JJ_TOOL=github:sjawhar/jj@0.45.1-sami.20260910-043938
 ARG GH_TOOL=gh@2.98.0
@@ -110,17 +117,27 @@ RUN jq '.omp.extensions = ["dist/envoy.js","dist/legion.js"]' package.json > tmp
 
 # ------------------------------------------------------------------------------------------------
 # tools: mise resolves the pinned OMP fork build, jj, and gh — the same backend and pin string the
-# daemon hands to `mise where` on a tmux host.
+# daemon hands to `mise where` on a tmux host. mise itself is checked against MISE_SHA256 before
+# anything extracts or runs it, the same shape the toolchain stage below uses for uv, Node and the AWS
+# CLI; .github/actions/install-jj reads the same pair for the CI runner's own mise.
 FROM debian:bookworm-slim AS tools
 ARG MISE_VERSION
+ARG MISE_SHA256
 ARG JJ_TOOL
 ARG GH_TOOL
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://mise.run -o /tmp/mise-install.sh \
-    && MISE_VERSION="${MISE_VERSION}" MISE_INSTALL_PATH=/usr/local/bin/mise sh /tmp/mise-install.sh \
-    && rm /tmp/mise-install.sh
+RUN set -eu; \
+    t=/tmp/mise; mkdir -p "$t"; \
+    curl -fsSLo "$t/mise.tar.gz" \
+      "https://github.com/jdx/mise/releases/download/${MISE_VERSION}/mise-${MISE_VERSION}-linux-x64.tar.gz"; \
+    printf '%s  %s\n' "$MISE_SHA256" "$t/mise.tar.gz" > "$t/SHA256SUMS"; \
+    sha256sum --check --strict "$t/SHA256SUMS"; \
+    tar -xzf "$t/mise.tar.gz" -C "$t" --no-same-owner; \
+    install -m 0755 "$t/mise/bin/mise" /usr/local/bin/mise; \
+    mise --version; \
+    rm -rf "$t"
 COPY .omp-pin /omp-pin
 # github_token (optional BuildKit secret): mise's github backend reads MISE_GITHUB_TOKEN; a shared
 # builder IP without it can hit GitHub's unauthenticated API limit (403). CI passes secrets.GITHUB_TOKEN;
