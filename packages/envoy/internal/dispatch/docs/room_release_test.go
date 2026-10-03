@@ -70,7 +70,6 @@ func TestDocumentsOpenAfterMoreThanTheRoomCapWereTouched(t *testing.T) {
 // are evicted on the idle schedule too, so touching more documents than the cap through the API
 // alone leaves a new document openable and the service's per-document maps empty once they idle.
 func TestRoomsTheAPIOpenedReleaseTheCapOnceIdle(t *testing.T) {
-	t.Skip("LEGION-484: ygo never idle-stamps a room an Apply opened with no peer until the ygo release #1723 pins; whichever of #1723 and the PR adding this test merges second deletes this skip")
 	service, database := newRoomReleaseService(t)
 	ids := createDocuments(t, database, maxLiveRooms+51)
 	touched, untouched := ids[:len(ids)-1], ids[len(ids)-1]
