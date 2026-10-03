@@ -327,7 +327,7 @@ func TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout(t *testing.T) {
 		})
 	}
 
-	written, err := service.ReplaceText(ctx, artifactID, "Edited by an agent.\n", agent)
+	written, err := joinedReplaceText(service, artifactID, "Edited by an agent.\n", agent)
 	if err != nil {
 		t.Fatalf("agent edit: %v", err)
 	}

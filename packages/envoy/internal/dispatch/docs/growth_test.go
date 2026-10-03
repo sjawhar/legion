@@ -177,21 +177,16 @@ func seedByWriter(t *testing.T, service *Service, artifactID string, client crdt
 	}
 }
 
-// A write may not leave a live document that would not load again with room to spare. ygo parks
-// the items of a writer it reads before one they build on, and refuses a load that parks more than
-// 100,000: the document is then unreadable and unwritable. A transaction's writes take the id after
-// every writer the document holds, so what parks is a browser's writes - here client 1's version
-// of headings over a first version by client 2^32-1, which a load reads first and parks whole. On
-// a document parking 98,316 items, a write that grows it is refused, and one that leaves its
-// rendering as it was is taken, so it can still be trimmed; one that changes only an ask's state
-// is taken too, however its rendering's length moves. On one parking 102,012, which would not load,
-// every write is refused, its rendering unchanged or not.
-func TestAWriteMayNotLeaveADocumentThatWouldNotLoad(t *testing.T) {
-	parks := parkingDocument(t, 16_384)
-	fails := parkingDocument(t, 17_000)
+// A write is refused only for a state the server's own load cannot hold. ygo v1.50.1-sami.2 fills
+// the clock gap client 1's headings previously left ahead of client 2^32-1's version, so this
+// history no longer parks its 98,316 or 102,012 items when the server copies it. Each write passes:
+// the server must not reject a state it can reload merely because the old decoder parked it.
+func TestGapFillingWritesDoNotLookUnloadable(t *testing.T) {
+	parks := gapFillingDocument(t, 16_384)
+	fails := gapFillingDocument(t, 17_000)
 	write := func(fork *crdt.Doc, before, after string, serverState bool) growth {
 		empty := &pmdoc.Node{Type: "doc"}
-		return growth{fork: fork, before: before, after: after, margin: &marginWatch{}, anchors: anchorWatch{before: empty, after: empty},
+		return growth{fork: fork, before: before, after: after, unchanged: before == after, margin: &marginWatch{}, anchors: anchorWatch{before: empty, after: empty},
 			serverState: func() bool { return serverState }}
 	}
 	for _, test := range []struct {
@@ -199,23 +194,22 @@ func TestAWriteMayNotLeaveADocumentThatWouldNotLoad(t *testing.T) {
 		write   growth
 		refused bool
 	}{
-		{"a write that grows a document parking 98,316 items", write(parks, "a\n", "a\n\nb\n", false), true},
-		{"a write that leaves the rendering of a document parking 98,316 items as it was", write(parks, "a\n", "a\n", false), false},
-		{"a change of an ask's state that lengthens a document parking 98,316 items", write(parks, "a\n", "a b\n", true), false},
-		{"a write that leaves the rendering of a document parking 102,012 items as it was", write(fails, "a\n", "a\n", false), true},
-		{"a change of an ask's state on a document parking 102,012 items", write(fails, "a\n", "a b\n", true), true},
+		{"a write that grows a document whose old decoder parked 98,316 items", write(parks, "a\n", "a\n\nb\n", false), false},
+		{"a write that leaves the rendering of that document as it was", write(parks, "a\n", "a\n", false), false},
+		{"a change of an ask's state that lengthens that document", write(parks, "a\n", "a b\n", true), false},
+		{"a write that leaves the old 102,012-item case unchanged", write(fails, "a\n", "a\n", false), false},
+		{"a change of an ask's state on the old 102,012-item case", write(fails, "a\n", "a b\n", true), false},
 	} {
 		err := refuseGrowth(test.write)
 		if refused := errors.Is(err, ErrDocumentTooLarge) && strings.Contains(err.Error(), "load again"); refused != test.refused || (err != nil && !refused) {
-			t.Errorf("%s: %v, want refused %t for what a load would park", test.name, err, test.refused)
+			t.Errorf("%s: %v, want refused %t", test.name, err, test.refused)
 		}
 	}
 }
 
-// parkingDocument is a live document a load parks the headings of: a first version written by
-// client 2^32-1, the highest id a browser can draw, and a version of headings headings over it
-// written by client 1, which a load reads first and so parks whole, six items a heading.
-func parkingDocument(t *testing.T, headings int) *crdt.Doc {
+// gapFillingDocument is the client order that ygo v1.50.1-sami.2 fills while it copies: a first
+// version by client 2^32-1 and headings by client 1. Earlier ygo versions parked the headings.
+func gapFillingDocument(t *testing.T, headings int) *crdt.Doc {
 	t.Helper()
 	write := func(doc *crdt.Doc, tree *pmdoc.Node) {
 		fragment := doc.GetXmlFragment(fragmentName)
