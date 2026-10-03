@@ -10,7 +10,8 @@ production service is involved.
 | --- | --- |
 | `rig.sh` | Starts the whole stack and stays in the foreground, or runs a command against it (`rig.sh -- <command>`) and then stops it. |
 | `seed.ts` | Seeds the Dispatch e2e workspace, the same one the e2e suite builds. |
-| `agent.ts` | Drives the agent machine from a script: a machine login, a secret request. |
+| `flow.ts` | The flow both specs show, written once: what the rig hands its command, the demo's names and reason, what the agent machine prints, and the Dispatch controls a person uses. |
+| `agent.ts` | Drives the agent machine from a script, for the screenshots: a machine login, a secret request. |
 | `agent/` | What the agent machine mounts: its shell prompt and the demo command, `check-demo-key.sh`. |
 | `screenshots.sh`, `screenshots.spec.ts` | Retake the screenshots into `docs/site/public/media/broker/`. |
 | `walkthrough.sh`, `walkthrough.record.ts` | Record the walkthrough's raw footage into `walkthrough/raw/`. |

@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { type Browser, expect, type Locator, type Page, test } from "@playwright/test";
 
 import { signIn } from "../../../../packages/dispatch/e2e/users";
-import { rigState } from "./agent";
+import { agentHost, dispatch, machineLoginPath, operator, printed, reason, rigState } from "./flow";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const rawDir = process.env.WALKTHROUGH_RAW_DIR ?? join(here, "walkthrough/raw");
@@ -45,7 +45,6 @@ const takeFiles = [
   "sections.json",
   ".video",
 ];
-const reason = "Publish the docs preview for PR 42 with the demo API";
 const cols = 80;
 const rows = 20;
 const tmuxSocket = "legion-docs-broker-walkthrough";
@@ -361,7 +360,7 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
     "bash"
   );
   tmux("set-option", "-g", "status", "off");
-  await waitForScreen(/example-host-build:~\/demo[#$] $/m, "its prompt");
+  await waitForScreen(new RegExp(`${agentHost}:~/demo[#$] $`, "m"), "its prompt");
   tmux("send-keys", "-t", shell, "clear", "Enter");
   await sleep(500);
 
@@ -371,9 +370,7 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
     await terminalSection("t1-login.cast", async () => {
       await type("agent-secrets launcher login");
       await enter();
-      code = (
-        await waitForScreen(/machine login code: ([A-Z0-9]{4}-[A-Z0-9]{4})/, "a login code")
-      )[1];
+      code = (await waitForScreen(printed.loginCode, "a login code"))[1];
       await waitForScreen(
         /approve only if the code matches this terminal/,
         "where to enter the code"
@@ -385,29 +382,30 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
     await browserSection(
       browser,
       "b1-machine.webm",
-      rig.operator,
+      operator,
       rig.dispatchUrl,
       async (page, hold) => {
-        await page.goto("/credentials/machine");
-        await expect(page.getByRole("heading", { name: "Enter machine login code" })).toBeVisible();
+        await page.goto(machineLoginPath);
+        await expect(dispatch.machineLoginHeading(page)).toBeVisible();
         await sleep(1_200);
-        const field = page.getByLabel("Code shown on the machine");
+        const field = dispatch.codeField(page);
         await clickVisibly(page, field);
         await field.pressSequentially(code, { delay: 140 });
         await sleep(500);
-        await clickVisibly(page, page.getByRole("button", { name: "Look up" }));
-        await expect(
-          page.getByText("Approving lets example-host-build start agent sessions as you.")
-        ).toBeVisible();
+        await clickVisibly(page, dispatch.lookUp(page));
+        await expect(dispatch.machineLoginRecord(page)).toBeVisible();
         await sleep(3_500);
-        await clickVisibly(page, page.getByRole("button", { name: "Approve" }));
-        await hold(page.getByText("Approved. example-host-build can start agent sessions as you."));
+        await clickVisibly(page, dispatch.approve(page));
+        await hold(dispatch.machineLoginApproved(page));
       }
     );
 
     // T2: the login returned; a session registers with the helper and reads its enrollment.
     await waitForScreen(
-      /approve only if the code matches this terminal\n(?:.*\n)*?example-host-build:~\/demo[#$] $/m,
+      new RegExp(
+        `approve only if the code matches this terminal\\n(?:.*\\n)*?${agentHost}:~/demo[#$] $`,
+        "m"
+      ),
       "the login returning"
     );
     await terminalSection("t2-session.cast", async () => {
@@ -420,7 +418,7 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
       await sleep(1_500);
       await type("agent-secrets self");
       await enter();
-      await waitForScreen(/operator: alice/, "the session's operator");
+      await waitForScreen(new RegExp(`operator: ${operator}`), "the session's operator");
       await sleep(3_000);
     });
 
@@ -432,10 +430,8 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
     await terminalSection("t3-request.cast", async () => {
       await type(`agent-secrets DEMO_API_KEY --reason "${reason}" -- ./check-demo-key.sh`);
       await enter();
-      requestId = (
-        await waitForScreen(/request (\S+) is waiting for approval/, "the pending request")
-      )[1];
-      recordId = (await waitForScreen(/\/credentials\/([0-9a-f]{64})/, "the record link"))[1];
+      requestId = (await waitForScreen(printed.requestWaiting, "the pending request"))[1];
+      recordId = (await waitForScreen(printed.recordLink, "the record link"))[1];
       await sleep(3_000);
     });
 
@@ -443,29 +439,29 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
     await browserSection(
       browser,
       "b2-approve.webm",
-      rig.operator,
+      operator,
       rig.dispatchUrl,
       async (page, hold) => {
         await page.goto("/");
-        const row = page.getByRole("link", { name: /Secret request.*DEMO_API_KEY/s });
+        const row = dispatch.inboxRequest(page);
         await expect(row).toBeVisible();
         await sleep(2_500);
         await clickVisibly(page, row);
-        await expect(page.getByText(reason)).toBeVisible();
+        await expect(dispatch.requestReason(page)).toBeVisible();
         await sleep(4_500);
-        await clickVisibly(page, page.getByRole("button", { name: "Approve" }));
-        await hold(page.getByText(/^approved/i));
+        await clickVisibly(page, dispatch.approve(page));
+        await hold(dispatch.requestApproved(page));
       }
     );
 
     // T4: the command ran with the key; the request names who decided it.
-    await waitForScreen(/DEMO_API_KEY reached this command/, "the command's output");
+    await waitForScreen(printed.keyReached, "the command's output");
     await terminalSection("t4-ran.cast", async () => {
       // The command's output alone on screen long enough for the video to open on it.
       await sleep(4_500);
       await type(`agent-secrets status ${requestId}`);
       await enter();
-      await waitForScreen(/decided_by: alice/, "who decided");
+      await waitForScreen(new RegExp(`decided_by: ${operator}`), "who decided");
       await sleep(3_500);
     });
 
@@ -473,21 +469,21 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
     await browserSection(
       browser,
       "b3-grants.webm",
-      rig.operator,
+      operator,
       rig.dispatchUrl,
       async (page, hold) => {
         await page.goto(`/credentials/${recordId}`);
-        await expect(page.getByText(/^approved/i)).toBeVisible();
+        await expect(dispatch.requestApproved(page)).toBeVisible();
         await sleep(1_500);
-        await clickVisibly(page, page.getByRole("link", { name: "Settings" }));
-        const grants = page.locator("section[aria-labelledby='credential-grants-heading']");
+        await clickVisibly(page, dispatch.settings(page));
+        const grants = dispatch.liveGrants(page);
         await expect(grants.getByText("DEMO_API_KEY")).toBeVisible();
         await sleep(1_000);
         await grants.evaluate((section) =>
           section.scrollIntoView({ behavior: "smooth", block: "start" })
         );
         await sleep(1_500);
-        await pointAt(page, grants.getByRole("cell", { name: "alice", exact: true }));
+        await pointAt(page, grants.getByRole("cell", { name: operator, exact: true }));
         await sleep(2_000);
         await pointAt(page, grants.getByRole("button", { name: "Revoke" }));
         await sleep(3_000);

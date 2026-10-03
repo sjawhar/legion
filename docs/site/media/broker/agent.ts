@@ -1,35 +1,13 @@
 // docs/site/media/broker/agent.ts
 //
-// Drives the rig's agent machine (docs/site/media/broker/rig.sh) from a script: reads the two
-// values the rig hands its command, starts a machine login and a secret request on the agent
-// machine, and hands back what each prints that a person acts on (the machine login's code, the
+// Drives the rig's agent machine (docs/site/media/broker/rig.sh) from a script, for the
+// screenshots: starts a machine login and a secret request on the agent machine, and hands back
+// what each prints that a person acts on (flow.ts's `printed`: the machine login's code, the
 // request's Dispatch record), so the browser side can approve it.
 import { type ChildProcess, spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 
-export interface RigState {
-  /** rig.sh's agent-exec: runs its arguments on the agent machine, in its demo directory. */
-  agentExec: string;
-  dispatchUrl: string;
-  /** The e2e workspace's human, the agent machine's operator and every request's approver. */
-  operator: string;
-}
-
-/** What `rig.sh -- <command>` hands its command: BROKER_RIG_AGENT_EXEC and BROKER_RIG_DISPATCH_URL. */
-export function rigState(): RigState {
-  const value = (name: string): string => {
-    const found = process.env[name];
-    if (found === undefined || found === "") {
-      throw new Error(`${name} is unset: run this under docs/site/media/broker/rig.sh -- <command>`);
-    }
-    return found;
-  };
-  return {
-    agentExec: value("BROKER_RIG_AGENT_EXEC"),
-    dispatchUrl: value("BROKER_RIG_DISPATCH_URL"),
-    operator: "alice",
-  };
-}
+import { printed, reason } from "./flow";
 
 export interface Running {
   /** Resolves with the command's exit code and everything it printed, once it exits. */
@@ -80,11 +58,7 @@ export async function waitForOutput(
 /** `agent-secrets launcher login` on the agent machine: resolves once it prints its code. */
 export async function startMachineLogin(agentExec: string): Promise<Running & { code: string }> {
   const running = run(agentExec, ["agent-secrets", "launcher", "login"]);
-  const match = await waitForOutput(
-    running,
-    /machine login code: ([A-Z0-9]{4}-[A-Z0-9]{4})/,
-    "machine login code"
-  );
+  const match = await waitForOutput(running, printed.loginCode, "machine login code");
   return { ...running, code: match[1] };
 }
 
@@ -94,8 +68,7 @@ export async function startMachineLogin(agentExec: string): Promise<Running & { 
  *  live (the helper ends a session's enrollment, and with it the grant, when its process exits);
  *  `end()` closes it. */
 export async function startSecretRequest(
-  agentExec: string,
-  reason: string
+  agentExec: string
 ): Promise<Running & { recordId: string; requestId: string; end: () => void }> {
   const running = run(
     agentExec,
@@ -114,16 +87,8 @@ export async function startSecretRequest(
     ],
     "pipe"
   );
-  const request = await waitForOutput(
-    running,
-    /request (\S+) is waiting for approval/,
-    "pending request"
-  );
-  const record = await waitForOutput(
-    running,
-    /\/credentials\/([0-9a-f]{64})/,
-    "credential record link"
-  );
+  const request = await waitForOutput(running, printed.requestWaiting, "pending request");
+  const record = await waitForOutput(running, printed.recordLink, "credential record link");
   return {
     ...running,
     end: () => running.child.stdin?.end(),
