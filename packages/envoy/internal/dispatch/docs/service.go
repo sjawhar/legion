@@ -173,8 +173,11 @@ type roomState struct {
 	pendingUpdates  int
 	settle          *time.Timer
 	unrecorded      map[pmdoc.MarkRef]time.Time
-	durableAppends  atomic.Int64
-	gen             uint64
+	// durableQueued counts the updates the room's observer has queued to append, and durableStored
+	// those whose append has finished; an append is outstanding while stored trails queued.
+	durableQueued atomic.Uint64
+	durableStored atomic.Uint64
+	gen           uint64
 	// liveWriter is the open transaction writing this document (see liveWrite), or nil. While
 	// it is set no settlement is armed; settleDeferred records one that was stopped or asked for
 	// meanwhile, which finishing the write arms.
@@ -579,11 +582,11 @@ func New(deps Deps) *Service {
 	return service
 }
 
-// shutdownDrainBudget bounds the part of Shutdown that waits on document work - queued durable
-// appends landing and the settlements owed - inside whatever deadline its caller passes. A
-// settlement it cuts short, and the close of its room's editors that follows it, get what is left
-// of that deadline.
-const shutdownDrainBudget = 5 * time.Second
+// ShutdownDrainBudget bounds the part of Shutdown that waits on document work - the durable appends
+// queued before it began landing, and the settlements owed - inside whatever deadline its caller
+// passes. A settlement it cuts short, and the close of its room's editors that follows it, get what
+// is left of that deadline, so a caller's deadline has to exceed it.
+const ShutdownDrainBudget = 5 * time.Second
 
 // Shutdown stops queued settlements, runs the settlement of each loaded room whose document owes
 // one inside the drain budget, closes the editors connected to each room once its settlement has
@@ -593,7 +596,8 @@ const shutdownDrainBudget = 5 * time.Second
 // A room with an editor connected is settled while it is still loaded and only then closed: ygo's
 // CloseRoom evicts the room as it closes its peers, and a settlement does not load a room during
 // shutdown, so a room closed first would leave its settlement to the next process. An edit made
-// while its room settles is left to that process too.
+// while its room settles is left to that process too, and so is the settlement of a room whose
+// editor keeps sending updates until it is closed.
 //
 // A settlement the budget cuts short is not lost. Its database work is cancelled and its
 // transaction rolls back, and the pending-settlement row the document's updates wrote
@@ -602,35 +606,42 @@ const shutdownDrainBudget = 5 * time.Second
 // whether it settled or was left to resume; once the caller's deadline has passed it cannot read
 // that back, and its error names those documents.
 func (s *Service) Shutdown(ctx context.Context) error {
-	type pendingSettlement struct {
-		room       string
+	// loadedRoom is a room as Shutdown found it: the generation its settlement runs at, how many
+	// durable appends it had queued, and whether an editor was connected.
+	type loadedRoom struct {
+		name       string
+		state      *roomState
 		generation uint64
+		appends    uint64
+		connected  bool
 	}
-	var pending []pendingSettlement
-	var connectedRooms []string
+	var loaded []loadedRoom
 	s.rooms.Range(func(key, value any) bool {
 		name := key.(string)
-		room := value.(*roomState)
+		state := value.(*roomState)
 		s.shutdownRooms.Store(name, struct{}{})
-		room.mu.Lock()
-		if len(room.connected) > 0 {
-			connectedRooms = append(connectedRooms, name)
-		}
-		pending = append(pending, pendingSettlement{room: name, generation: room.gen})
-		room.mu.Unlock()
+		state.mu.Lock()
+		loaded = append(loaded, loadedRoom{
+			name: name, state: state, generation: state.gen,
+			appends: state.durableQueued.Load(), connected: len(state.connected) > 0,
+		})
+		state.mu.Unlock()
 		return true
 	})
 	s.stopAllSettleTimers()
-	drainCtx, cancelDrain := context.WithTimeout(ctx, shutdownDrainBudget)
+	drainCtx, cancelDrain := context.WithTimeout(ctx, ShutdownDrainBudget)
 	defer cancelDrain()
 	// drainErr is a durable append the budget did not see through, which Shutdown cannot leave to
 	// a later load; a settlement it cuts short it can.
 	var drainErr error
-	rooms := make([]string, 0, len(pending))
-	for _, settlement := range pending {
-		rooms = append(rooms, settlement.room)
-		if err := s.waitForDurableAppends(drainCtx, settlement.room); err != nil {
-			slog.Warn("dispatch: stop document settlement before durable append drain", "room", settlement.room, "error", err)
+	rooms := make([]string, 0, len(loaded))
+	for _, room := range loaded {
+		rooms = append(rooms, room.name)
+		// Only the appends queued before Shutdown began: an editor still connected keeps queueing
+		// more, and one that never stops would hold this wait, and every room's settlement behind
+		// it, for the whole budget.
+		if err := s.waitForDurableAppendsQueued(drainCtx, room.name, room.state, room.appends); err != nil {
+			slog.Warn("dispatch: stop document settlement before durable append drain", "room", room.name, "error", err)
 			drainErr = err
 		}
 	}
@@ -642,64 +653,40 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	if err != nil {
 		slog.Warn("dispatch: read the documents owing a settlement before shutdown", "error", err)
 	}
-	connected := make(map[string]bool, len(connectedRooms))
-	for _, room := range connectedRooms {
-		connected[room] = true
-	}
-	finished := make(chan string, len(pending))
-	running := make(map[string]bool, len(pending))
-	peersClosed := make(chan string, len(connectedRooms))
-	closing := make(map[string]bool, len(connectedRooms))
-	// closePeers closes the editors connected to room, which evicts it. It runs only once room's
-	// settlement has returned, if it had one: CloseRoom does not wait for a settlement committing
-	// into the room it retires.
-	closePeers := func(room string) {
-		closing[room] = true
-		go func() {
-			if err := s.srv.CloseRoom(room, true); err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
-				slog.Warn("dispatch: close document peers before shutdown", "room", room, "error", err)
-			}
-			peersClosed <- room
-		}()
-	}
-	for _, settlement := range pending {
-		if owed != nil && !owed[settlement.room] {
-			if connected[settlement.room] {
-				closePeers(settlement.room)
-			}
+	finished := make(chan struct{}, len(loaded))
+	running := 0
+	for _, room := range loaded {
+		settles := owed == nil || owed[room.name]
+		if !settles && !room.connected {
 			continue
 		}
-		running[settlement.room] = true
-		go func(room string, generation uint64) {
-			s.settleRoomWithin(drainCtx, room, generation)
-			finished <- room
-		}(settlement.room, settlement.generation)
+		running++
+		go func() {
+			defer func() { finished <- struct{}{} }()
+			if settles {
+				s.settleRoomWithin(drainCtx, room.name, room.generation)
+			}
+			if room.connected {
+				if err := s.srv.CloseRoom(room.name, true); err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
+					slog.Warn("dispatch: close document peers before shutdown", "room", room.name, "error", err)
+				}
+			}
+		}()
 	}
-	budget := drainCtx.Done()
-	for len(running) > 0 || len(closing) > 0 {
+	// The budget ending does not end this wait: a cancelled settlement may still be rendering,
+	// which no context interrupts, and the store has to outlast it, and its room's editors are
+	// closed once it has returned, so their updates reach the store.
+	for ; running > 0; running-- {
 		select {
-		case room := <-finished:
-			delete(running, room)
-			if connected[room] {
-				closePeers(room)
-			}
-		case room := <-peersClosed:
-			delete(closing, room)
-		case <-budget:
-			// The cancelled settlements still have to return: one may be rendering, which
-			// no context interrupts, and the store has to outlast it. A room's editors are
-			// still closed once its settlement has, so their updates reach the store.
-			budget = nil
-			for room := range closing {
-				slog.Warn("dispatch: peer close exceeded shutdown budget", "room", room, "error", drainCtx.Err())
-			}
+		case <-finished:
 		case <-ctx.Done():
 			s.stopAccepting()
 			return settlementsUnconfirmed(ctx.Err(), owed, rooms)
 		}
 	}
-	// A settlement a timer started before the timers stopped runs under no budget of its own; it
-	// gets what is left of this one before the gate closes and abandons it.
+	// A settlement that a timer, or a room's last browser leaving, started before the timers
+	// stopped runs under no budget of its own; it gets what is left of this one before the gate
+	// closes and abandons it.
 	waitGroup(drainCtx, &s.settleWG)
 	s.stopAccepting()
 	s.waitSettles(ctx)
@@ -881,7 +868,19 @@ func (s *Service) unregisterSettleTimer(timerID uint64) {
 	s.timerMu.Unlock()
 }
 
+// stopSettleTimer stops an armed settlement timer and releases the settleWG count it held.
 func (s *Service) stopSettleTimer(timer *time.Timer) bool {
+	if !s.takeSettleTimer(timer) {
+		return false
+	}
+	s.settleWG.Done()
+	return true
+}
+
+// takeSettleTimer stops an armed settlement timer and hands its caller the settleWG count the timer
+// held, for a settlement the caller runs in the timer's place, so Shutdown joins it as it would the
+// timer's own. The caller releases the count once that settlement has returned.
+func (s *Service) takeSettleTimer(timer *time.Timer) bool {
 	if timer == nil {
 		return false
 	}
@@ -895,7 +894,6 @@ func (s *Service) stopSettleTimer(timer *time.Timer) bool {
 			return false
 		}
 		delete(s.timers, timerID)
-		s.settleWG.Done()
 		return true
 	}
 	return false
@@ -1032,10 +1030,16 @@ func (s *Service) settleRoom(room string, generation uint64) {
 // Shutdown runs gets its drain budget. When parent ends first the settlement's database work is
 // cancelled and its transaction rolls back, and nothing retries it or counts it as a failure: the
 // document's pending-settlement row leaves it to resume (onLoadDocument, RunSettlementResumption).
+// So does a settlement that has to write into a room Shutdown has begun closing, which refuses the
+// write (allowInject).
 func (s *Service) settleRoomWithin(parent context.Context, room string, generation uint64) {
 	retry := func(err error) {
 		if parent.Err() != nil {
 			slog.Warn("dispatch: document settlement stopped at the shutdown budget", "room", room, "error", err)
+			return
+		}
+		if s.shuttingDown(room) && errors.Is(err, ErrServiceUnavailable) {
+			slog.Warn("dispatch: skip shutdown document settlement that has to write into its room", "room", room, "error", err)
 			return
 		}
 		s.retrySettle(room, generation, err)
@@ -1926,7 +1930,7 @@ func (s *Service) recordUpdateClass(room string, update []byte, contentChanged, 
 	})
 	state.pendingUpdates++
 	if durable {
-		state.durableAppends.Add(1)
+		state.durableQueued.Add(1)
 	}
 }
 
@@ -1953,12 +1957,17 @@ func (s *Service) hasPendingUpdates(room string) bool {
 }
 
 func (s *Service) finishDurableAppend(room string) {
-	s.room(room).durableAppends.Add(-1)
+	s.room(room).durableStored.Add(1)
 }
 
 func (s *Service) hasDurableAppend(room string) bool {
-	return s.room(room).durableAppends.Load() > 0
+	state := s.room(room)
+	// Stored is read first: an append that finishes between the two reads still counts as
+	// outstanding, and none that is outstanding counts as finished.
+	stored := state.durableStored.Load()
+	return stored < state.durableQueued.Load()
 }
+
 func (s *Service) waitForPendingUpdates(ctx context.Context, room string) error {
 	for s.hasPendingUpdates(room) {
 		select {
@@ -1972,6 +1981,23 @@ func (s *Service) waitForPendingUpdates(ctx context.Context, room string) error 
 
 func (s *Service) waitForDurableAppends(ctx context.Context, room string) error {
 	for s.hasDurableAppend(room) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Millisecond):
+		}
+	}
+	return nil
+}
+
+// waitForDurableAppendsQueued waits until state has stored as many durable appends as it had
+// queued when queued was read, however many it has queued since, or until room no longer holds
+// state: a room that failed drops the appends it had queued, and its replacement queues its own.
+func (s *Service) waitForDurableAppendsQueued(ctx context.Context, room string, state *roomState, queued uint64) error {
+	for state.durableStored.Load() < queued {
+		if current, _ := s.rooms.Load(room); current != state {
+			return nil
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

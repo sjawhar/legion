@@ -811,11 +811,11 @@ func loadAnchor(t *testing.T, service *Service, table, id string) storedAnchor {
 
 // waitForPersistedUpdates waits for every update the live document has queued to reach
 // doc_updates, then checks that at least want rows landed. The service counts its own queue
-// (durableAppends, decremented after each append commits), so this waits on that signal rather
-// than polling the row count against a stopwatch: the drain takes as long as the machine needs -
-// it runs at roughly a hundred appends a second, so five hundred marks is seconds of work on an
-// idle box and longer on a loaded one - while a drain that never finishes still fails, on the
-// context deadline rather than on how busy the box was.
+// (durableQueued and durableStored, the latter counting each append once it commits), so this waits
+// on that signal rather than polling the row count against a stopwatch: the drain takes as long as
+// the machine needs - it runs at roughly a hundred appends a second, so five hundred marks is
+// seconds of work on an idle box and longer on a loaded one - while a drain that never finishes
+// still fails, on the context deadline rather than on how busy the box was.
 func waitForPersistedUpdates(t *testing.T, service *Service, artifactID string, want int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)

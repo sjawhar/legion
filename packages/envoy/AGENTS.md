@@ -82,22 +82,28 @@ arms the settlement of each document whose row is a minute old and whose issue i
 (`resumeOwedSettlements`), so a document nobody opens settles too. It runs on an interval because a
 rolling deploy stops the old task after the new one has started. A closed issue's rooms arm none
 until it reopens. `docs.Service.Shutdown` runs the settlement of each loaded room whose document has
-that row, and no other, inside its 5 s drain budget (`shutdownDrainBudget`, within the caller's
-deadline: `cmd/dispatch` gives document shutdown a 10 s context of its own,
+that row, and no other, inside its 5 s drain budget (`docs.ShutdownDrainBudget`, within the
+caller's deadline: `cmd/dispatch/shutdown.go` gives document shutdown twice that budget,
 `documentShutdownTimeout`, started once HTTP shutdown has returned within its 5 s,
 `httpShutdownTimeout`; every open event stream ends at the signal through `api.Deps.Lifetime`, so
 HTTP shutdown waits only for the requests in flight); a settled document's repeat would spend the
-budget for nothing. A room with an editor connected (a spec tab holds the document's websocket) is
-settled while it is still loaded, and its editors are closed only once that settlement has returned:
-ygo's `CloseRoom` evicts the room as it closes them, and a settlement does not load a room during
-shutdown, so closing the room first would leave its settlement to the next process. An edit an
-editor makes while its room settles is left to the next process the same way. Shutdown cancels the
-database work of any settlement the budget cuts short so its transaction rolls back, and logs for
-each document that owed one whether it settled or was left to resume (`dispatch: document settled
-before shutdown`, `dispatch: document settlement left to resume after shutdown` with
-`shutdown_budget_ended`). A settlement cut short is not an error; a caller's deadline
-that passes before Shutdown can read that back is, and its error names the documents that owed
-one. A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on the development
+budget for nothing. Before it reads which documents owe a settlement, it waits for the durable
+appends each room had queued when it began, and not for later ones, so an editor that keeps sending
+updates leaves only its own room to resume. A room with an editor connected (a spec tab holds the
+document's websocket) is settled while it is still loaded, and its editors are closed only once that
+settlement has returned: ygo's `CloseRoom` evicts the room as it closes them, and a settlement does
+not load a room during shutdown, so closing the room first would leave its settlement to the next
+process. An edit an editor makes while its room settles is left to the next process the same way,
+and so is a settlement that has to write into its room (stamping block ids, or restoring an ask
+block's server-owned attributes): Shutdown refuses every write into the rooms it is closing, and
+such a settlement logs `dispatch: skip shutdown document settlement that has to write into its
+room` at WARN. A settlement the last browser's leaving started (`settleLastPeer`) is joined like a
+timer's. Shutdown cancels the database work of any settlement the budget cuts short so its
+transaction rolls back, and logs for each document that owed one whether it settled or was left to
+resume (`dispatch: document settled before shutdown`, `dispatch: document settlement left to resume
+after shutdown` with `shutdown_budget_ended`). A settlement cut short is not an error; a caller's
+deadline that passes before Shutdown can read that back is, and its error names the documents that
+owed one. A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on the development
 machine, past that budget.
 
 A write never puts one block id on two blocks. `EnsureBlockIDs` keeps a repeated id for the first
