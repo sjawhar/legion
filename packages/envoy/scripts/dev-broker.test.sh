@@ -64,7 +64,7 @@ EOF
 chmod +x "${fake_bin_dir}/docker"
 
 # --- Fake go: "go build -o <path> ./cmd/<pkg>" installs a stub executable at <path> instead of
-# compiling. The devrelay stub is never run by dev-broker.sh (it only prints the binary's path); the
+# compiling. The client stubs are never run by dev-broker.sh (it only prints their directory); the
 # broker stub logs a "broker listening addr=..." line exactly like the real cmd/broker does once
 # it binds (AGENTC-833) — using its own PID as a stand-in for the kernel-assigned port a real
 # Listen would report, since two concurrently running stub processes always have distinct PIDs —
@@ -83,7 +83,7 @@ for arg in "$@"; do
   prev="$arg"
 done
 case "$pkg" in
-  */agent-secrets-devrelay)
+  */agent-secrets|*/agent-secrets-helper|*/agent-secrets-devrelay)
     cat >"$out" <<'DEVRELAY'
 #!/usr/bin/env bash
 exit 0
