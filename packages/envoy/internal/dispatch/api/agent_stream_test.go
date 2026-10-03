@@ -8,13 +8,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // openAgentStream connects a viewer to session and returns the response plus a reader over its
@@ -63,46 +61,6 @@ func readStreamEvent(t *testing.T, reader *bufio.Reader) (string, string) {
 			data = strings.TrimPrefix(line, "data: ")
 		}
 	}
-}
-
-// tableCounts is every row in the Dispatch schema, by table. The relay's promise is that a
-// session's conversation reaches a viewer and is never written down, so the proof is that not
-// one row appears anywhere while frames flow.
-func tableCounts(t *testing.T, database *store.Store) map[string]int {
-	t.Helper()
-	ctx := context.Background()
-	rows, err := database.Pool.Query(ctx, `
-		select table_name from information_schema.tables
-		where table_schema = 'public' and table_type = 'BASE TABLE'
-	`)
-	if err != nil {
-		t.Fatalf("list tables: %v", err)
-	}
-	names := []string{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("scan table name: %v", err)
-		}
-		names = append(names, name)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate tables: %v", err)
-	}
-	if len(names) == 0 {
-		t.Fatal("the schema has no tables; the count proof would be vacuous")
-	}
-	sort.Strings(names)
-	counts := make(map[string]int, len(names))
-	for _, name := range names {
-		var count int
-		if err := database.Pool.QueryRow(ctx, fmt.Sprintf(`select count(*) from %q`, name)).Scan(&count); err != nil {
-			t.Fatalf("count %s: %v", name, err)
-		}
-		counts[name] = count
-	}
-	return counts
 }
 
 func TestAgentStreamRelaysTheSessionsOwnReplayThenItsLiveFrames(t *testing.T) {
@@ -177,7 +135,9 @@ func TestAgentStreamWritesNothingToPostgres(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	before := tableCounts(t, database)
+	// The relay's promise is that a session's conversation reaches a viewer and is never written
+	// down, so the proof is that not one row changes anywhere while frames flow.
+	before := databaseFingerprint(t, database)
 
 	response, reader := openAgentStream(t, server, plannerSessionID, "cookie")
 	if response.StatusCode != http.StatusOK {
@@ -199,10 +159,10 @@ func TestAgentStreamWritesNothingToPostgres(t *testing.T) {
 	}
 	response.Body.Close()
 
-	after := tableCounts(t, database)
-	for name, count := range after {
-		if count != before[name] {
-			t.Fatalf("relaying a session's conversation wrote to %s: %d rows before, %d after", name, before[name], count)
+	after := databaseFingerprint(t, database)
+	for name, digest := range after {
+		if digest != before[name] {
+			t.Fatalf("relaying a session's conversation wrote to %s", name)
 		}
 	}
 }

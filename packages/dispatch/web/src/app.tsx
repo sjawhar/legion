@@ -4,11 +4,11 @@ import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom"
 
 import { api, isUnauthorized } from "./api/client";
 import { useConnectionState } from "./api/live";
-import { inboxQuery, userAgentStateQuery, whoAmIQuery } from "./api/queries";
+import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import { useEventStream } from "./api/sse";
 import type { AuthenticatedUser } from "./api/types";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
-import { waitingOnYou } from "./features/inbox/BlockedOnYou";
+import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
@@ -364,8 +364,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   // on-screen keyboard while its composer has focus.
   const fillsViewport = routeFillsViewport(location.pathname);
   const connection = useConnectionState();
-  const inbox = useQuery(inboxQuery());
-  const needsYouCount = inbox.data === undefined ? 0 : waitingOnYou(inbox.data).length;
+  const needsYouCount = useNeedsYouCount();
   const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
 
   const mainRef = useRef<HTMLElement | null>(null);

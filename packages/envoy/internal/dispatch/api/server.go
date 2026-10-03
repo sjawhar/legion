@@ -2,10 +2,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -68,8 +70,8 @@ type Deps struct {
 	// deployment with no NATS, where the viewer route answers 503 rather than hanging.
 	AgentStream agentstream.Source
 	// AgentSecrets relays the credential-request UI to the secrets broker; nil (the broker URL
-	// is unconfigured) means the feature is off, and every handler that needs it answers
-	// 404 FEATURE_OFF.
+	// is unconfigured) means the feature is off: the pending list answers null, and every other
+	// handler that needs it answers 404 FEATURE_OFF.
 	AgentSecrets *agentsecrets.Client
 	// Lifetime bounds work a handler starts and does not wait for: it is the process's own
 	// context, cancelled when the server is shutting down, so a deploy stops a broadcast's
@@ -78,7 +80,8 @@ type Deps struct {
 	Lifetime         context.Context
 	TestHooksEnabled bool
 	// StreamHeartbeat is how often a server-sent event stream writes a heartbeat and resolves
-	// its caller again, closing once the caller no longer resolves.
+	// its caller again, and a document socket resolves its caller again (whileCallerResolves),
+	// each closing once the caller no longer resolves.
 	StreamHeartbeat time.Duration
 }
 
@@ -115,8 +118,9 @@ type DepsInput struct {
 	AgentSecretsURL   string
 	AgentSecretsToken string
 	TestHooksEnabled  bool
-	// StreamHeartbeat replaces the event streams' heartbeat (Deps.StreamHeartbeat). Zero keeps
-	// fifteen seconds; a test proving a stream closes sets a short one.
+	// StreamHeartbeat replaces the heartbeat of the event streams and the document socket
+	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
+	// sets a short one.
 	StreamHeartbeat time.Duration
 }
 
@@ -223,23 +227,58 @@ type queryer interface {
 // already holds one of its transactions (store.ErrNestedAcquire): one caller, one connection is
 // what keeps the pool from deadlocking, and a handler that breaks it fails here instead of in
 // production.
+//
+// Every route refuses a path or query parameter holding U+0000 or a byte that is not UTF-8 before
+// its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body, and the
+// document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
 func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{deps: deps}
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
 	for _, route := range routes {
-		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(route.Handler))
+		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(s.refuseUnstorableParameters(route.Pattern, route.Handler)))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {
-		mux.Handle("GET /ws/doc/{room}", trackTransactions(websocket.ServeHTTP))
+		const pattern = "/ws/doc/{room}"
+		mux.Handle("GET "+pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP)))))
 	}
 }
 
 func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		handler(w, r.WithContext(store.WithTransactionTracking(r.Context())))
+	}
+}
+
+// whileCallerResolves serves a connection that outlives its request, the document websocket, only
+// while its caller resolves: on every StreamHeartbeat it resolves the caller again, as the event
+// streams do, and once the caller no longer resolves (a logout, a membership the sign-in pool no
+// longer confirms) it cancels the connection's context, on which the document server closes the
+// socket. The check runs beside the handler, which holds pooled connections of its own while it
+// admits the socket, so it marks a context of its own for the pool (store.ErrNestedAcquire).
+func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, closeConnection := context.WithCancel(r.Context())
+		defer closeConnection()
+		check := r.WithContext(store.WithTransactionTracking(ctx))
+		go func() {
+			heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
+			defer heartbeat.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-heartbeat.C:
+					if _, _, err := s.optionalActor(check); err != nil {
+						closeConnection()
+						return
+					}
+				}
+			}
+		}()
+		handler(w, r.WithContext(ctx))
 	}
 }
 
@@ -618,13 +657,17 @@ func (maxBytesDiscarder) Header() http.Header             { return nil }
 func (maxBytesDiscarder) Write(value []byte) (int, error) { return len(value), nil }
 func (maxBytesDiscarder) WriteHeader(int)                 {}
 
+// decodeJSON decodes r's body, one JSON value of at most maxJSONRequestBytes, into value, which
+// declares every member the body may carry. A string the body holds anywhere that carries U+0000
+// is refused, naming where it stands (unstorableJSON).
 func decodeJSON(r *http.Request, value any) error {
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || (contentType != "application/json" && !strings.HasSuffix(contentType, "+json")) {
 		return errorf(http.StatusUnsupportedMediaType, "JSON_CONTENT_TYPE", "JSON mutations require Content-Type application/json")
 	}
 	r.Body = http.MaxBytesReader(maxBytesDiscarder{}, r.Body, maxJSONRequestBytes)
-	decoder := json.NewDecoder(r.Body)
+	var read bytes.Buffer
+	decoder := json.NewDecoder(io.TeeReader(r.Body, &read))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
 		var maxBytes *http.MaxBytesError
@@ -635,6 +678,9 @@ func decodeJSON(r *http.Request, value any) error {
 	}
 	if decoder.More() {
 		return errorf(http.StatusBadRequest, "INVALID_JSON", "request body must contain one JSON value")
+	}
+	if refusal := unstorableJSON("", read.Bytes()); refusal != nil {
+		return refusal
 	}
 	return nil
 }

@@ -708,6 +708,107 @@ func TestStaticHandlerServesBuiltAssets(t *testing.T) {
 	}
 }
 
+// A page's HTML names the hashed assets of the build that wrote it. A browser that keeps an
+// index.html by heuristic freshness (it carries Last-Modified) runs an older build's page after a
+// deploy and asks for assets the server no longer has, so every HTML answer, the SPA fallback
+// included, makes the browser revalidate. Vite's hashed output never changes under its name, so
+// it may be kept for a year without asking. A missing asset's 404 must never carry that, or the
+// browser would keep the failure. Every other file keeps net/http's own answer.
+func TestStaticHandlerCacheControl(t *testing.T) {
+	webDist := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(webDist, "assets"), 0o700); err != nil {
+		t.Fatalf("make assets dir: %v", err)
+	}
+	for name, body := range map[string]string{
+		"index.html":              "<!doctype html>",
+		"favicon.svg":             "<svg/>",
+		"assets/index-abc123.js":  "console.log(1)",
+		"assets/index-abc123.css": "body{}",
+	} {
+		if err := os.WriteFile(filepath.Join(webDist, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	handler, context := newTestRouter(t)
+	context.WebDistDir = webDist
+
+	for _, tc := range []struct {
+		path         string
+		status       int
+		cacheControl string
+	}{
+		{path: "/", status: http.StatusOK, cacheControl: pageCacheControl},
+		{path: "/issues/CORE-1", status: http.StatusOK, cacheControl: pageCacheControl},
+		{path: "/agents/broadcasts/5f0c", status: http.StatusOK, cacheControl: pageCacheControl},
+		{path: "/assets/index-abc123.js", status: http.StatusOK, cacheControl: assetCacheControl},
+		{path: "/assets/index-abc123.css", status: http.StatusOK, cacheControl: assetCacheControl},
+		{path: "/assets/index-missing.js", status: http.StatusNotFound, cacheControl: ""},
+		{path: "/favicon.svg", status: http.StatusOK, cacheControl: ""},
+		{path: "/favicon.ico", status: http.StatusOK, cacheControl: ""},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			if response.Code != tc.status {
+				t.Fatalf("%s: status %d, want %d; body=%s", tc.path, response.Code, tc.status, response.Body.String())
+			}
+			if got := response.Header().Values("Cache-Control"); strings.Join(got, ", ") != tc.cacheControl {
+				t.Fatalf("%s: Cache-Control %q, want %q", tc.path, got, tc.cacheControl)
+			}
+		})
+	}
+}
+
+// The servers behind one load balancer can hold different builds, and a page's file time says
+// nothing about which build wrote it: a rollback serves an older file. So a page revalidates by
+// its bytes. The browser's own page is answered 304, still to be revalidated next time; any other
+// page it holds - another build's, or one cached with only a Last-Modified, whatever that time -
+// is answered with this server's page.
+func TestStaticHandlerRevalidatesPagesByContent(t *testing.T) {
+	webDist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+	handler, context := newTestRouter(t)
+	context.WebDistDir = webDist
+	get := func(path string, header http.Header) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		for name, values := range header {
+			request.Header[name] = values
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	first := get("/", nil)
+	etag := first.Header().Get("ETag")
+	if first.Code != http.StatusOK || etag == "" || first.Header().Get("Last-Modified") != "" {
+		t.Fatalf("page: status %d ETag %q Last-Modified %q, want 200 with an ETag and no Last-Modified", first.Code, etag, first.Header().Get("Last-Modified"))
+	}
+	if shell := get("/issues/CORE-1", nil).Header().Get("ETag"); shell != etag {
+		t.Fatalf("SPA shell ETag %q, want the page's %q", shell, etag)
+	}
+
+	same := get("/issues/CORE-1", http.Header{"If-None-Match": {etag}})
+	if same.Code != http.StatusNotModified || same.Header().Get("Cache-Control") != pageCacheControl {
+		t.Fatalf("revalidating this build's page: status %d Cache-Control %q, want 304 and %q", same.Code, same.Header().Get("Cache-Control"), pageCacheControl)
+	}
+
+	later := time.Now().Add(24 * time.Hour).UTC().Format(http.TimeFormat)
+	for name, header := range map[string]http.Header{
+		"another build's page":            {"If-None-Match": {`"another-build"`}, "If-Modified-Since": {later}},
+		"a page cached by its time alone": {"If-Modified-Since": {later}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := get("/", header)
+			if response.Code != http.StatusOK || response.Body.String() != "<!doctype html>" {
+				t.Fatalf("%s: status %d body %q, want 200 and this server's page", name, response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 // An unknown path under a reserved root is a JSON 404 that names itself and points at the
 // route index, whether or not the dashboard is built. A missing static asset outside the
 // reserved roots stays a plain not-found.

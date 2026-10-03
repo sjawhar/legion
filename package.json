@@ -6,6 +6,7 @@
     ]
   },
   "version": "0.16.1",
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Autonomous development swarm using Oh My Pi agents",
   "private": true,
@@ -31,7 +32,9 @@
     "zod": "4.3.6"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.3.14"
+    "@biomejs/biome": "^2.3.14",
+    "@types/bun": "latest",
+    "typescript": "^5.3.0"
   },
   "patchedDependencies": {
     "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch",

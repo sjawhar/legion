@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // setting is one row of envoy-dispatch's settings table: a Dispatch setting, an environment
@@ -117,6 +118,17 @@ var removedSettings = []struct{ Name, Replacement string }{
 	{"DISPATCH_APP_CLIENT_SECRET", "nobody signs in through the GitHub App; its JWT needs only DISPATCH_APP_CLIENT_ID and DISPATCH_APP_PEM_B64"},
 }
 
+// refuseRemovedSettings names the first removed setting env still sets, and what replaced it.
+// resolveBootConfig runs it before it reads anything else.
+func refuseRemovedSettings(env settingValues) error {
+	for _, removed := range removedSettings {
+		if env.get(removed.Name) != "" {
+			return fmt.Errorf("%s is no longer read and must be unset: %s", removed.Name, removed.Replacement)
+		}
+	}
+	return nil
+}
+
 // fileVariable is the _FILE form of a setting that has one.
 func (s setting) fileVariable() string {
 	return s.Name + "_FILE"
@@ -171,6 +183,25 @@ func (values settingValues) lookup(name string) (string, bool) {
 func (values settingValues) get(name string) string {
 	value, _ := values.lookup(name)
 	return value
+}
+
+// agentSecretsToken resolves the secrets broker's UI bearer, reading
+// DISPATCH_AGENT_SECRETS_TOKEN_FILE (trimmed contents) ahead of
+// DISPATCH_AGENT_SECRETS_TOKEN; a set-but-unreadable or blank file is an error naming both,
+// never a silent fallback to the bare variable.
+func agentSecretsToken(env settingValues) (string, error) {
+	if path := strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_TOKEN_FILE")); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("DISPATCH_AGENT_SECRETS_TOKEN_FILE names %s, which could not be read: %w", path, err)
+		}
+		value := strings.TrimSpace(string(data))
+		if value == "" {
+			return "", fmt.Errorf("DISPATCH_AGENT_SECRETS_TOKEN_FILE names %s, which is empty", path)
+		}
+		return value, nil
+	}
+	return strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_TOKEN")), nil
 }
 
 // settingEntry is a row as `envoy-dispatch settings` prints it. Default and File are null when the

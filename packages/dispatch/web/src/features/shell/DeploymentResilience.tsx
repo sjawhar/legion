@@ -11,11 +11,31 @@ import {
 } from "../../theme/classes";
 import * as MarkdownBody from "../refs/MarkdownBody";
 
+// The session's one reload for a chunk that failed to download. `web/index.html`'s inline script
+// spends the same key for an entry chunk that failed before any of this bundle ran, so a page
+// reloads once per session whichever of the two failed first.
 const CHUNK_RELOAD_STORAGE_KEY = "dispatch.reloaded-for-chunk";
 const VERSION_CHECK_INTERVAL_MS = 60_000;
 const INDEX_ASSET_PATH = /^\/assets\/index-[^/]+\.js$/;
 
 declare const __DISPATCH_BUILD__: string;
+
+// The Navigation API, as much of it as this module uses: TypeScript's DOM library does not declare
+// it yet, and a browser without it leaves `window.navigation` undefined.
+interface NavigateEvent extends Event {
+  readonly destination: { readonly sameDocument: boolean; readonly url: string };
+  readonly downloadRequest: string | null;
+}
+
+interface Navigation {
+  addEventListener(type: "navigate", listener: (event: NavigateEvent) => void): void;
+}
+
+declare global {
+  interface Window {
+    readonly navigation?: Navigation;
+  }
+}
 
 function indexAssetPath(source: string): string | undefined {
   const pathname = source.startsWith("/") ? source.split(/[?#]/, 1)[0] : new URL(source).pathname;
@@ -61,8 +81,63 @@ async function deploymentChanged(): Promise<boolean> {
   return latest !== undefined && latest !== runningIndexAsset();
 }
 
+// Set from the start of a navigation away from this page (`beforeunload`, or the Navigation API's
+// `navigate` to another document, since iOS Safari never fires `beforeunload`) until the page is
+// plainly still the reader's: shown again (`pageshow`, which a back/forward-cache restore fires,
+// or the tab becoming visible again), or pressed (a pointer or a key on it). WebKit and Firefox
+// cancel the chunk downloads still in flight when a navigation starts, WebKit also refuses the ones
+// the page starts after it, and Vite reports each as a failed chunk. Those are not a replaced
+// deployment, and a reload then would replace the reader's navigation with a reload of the page
+// they are leaving. A navigation can also not happen after all - cancelled at another page's leave
+// prompt, stopped, or answered by the server with a download - and no event says so; the press or
+// the return that follows is what ends the state, never a timer, since a refusal can arrive any
+// number of tasks after the navigation started.
+let leavingPage = false;
+
+function markPageLeaving(): void {
+  leavingPage = true;
+}
+
+// A route change inside the app is a navigation within this document. A link with `download`
+// (Dispatch's Download version links) fires `navigate` to another document too, with
+// `downloadRequest` set, and then downloads the file and leaves the page where it is. Firefox
+// (Playwright's build, at least) then fires a second `navigate` for the same click, to the same
+// URL with no `downloadRequest`, so the next navigation to another document after a download is
+// skipped when it goes to the download's URL. Any other navigation to another document leaves the
+// page. iOS Safari fires `navigate` from 26.2, for a link followed or a form submitted but not for
+// an address the reader types.
+let lastDownloadUrl: string | undefined;
+
+function markPageLeavingForAnotherDocument(event: NavigateEvent): void {
+  if (event.destination.sameDocument) {
+    return;
+  }
+  const download = lastDownloadUrl;
+  lastDownloadUrl = undefined;
+  if (event.downloadRequest !== null) {
+    lastDownloadUrl = event.destination.url;
+    return;
+  }
+  if (event.destination.url !== download) {
+    leavingPage = true;
+  }
+}
+
+function markPageStaying(): void {
+  leavingPage = false;
+}
+
+function markPageStayingWhenVisible(): void {
+  if (document.visibilityState === "visible") {
+    leavingPage = false;
+  }
+}
+
 // Reloads the page once per session for a chunk that failed to download while online.
 function reloadForChunkFailure(): void {
+  if (leavingPage) {
+    return;
+  }
   // A chunk that fails to download while the browser is offline is a network outage, not a
   // replaced deployment: reloading now would swap the app for the browser's offline page.
   if (!navigator.onLine) {
@@ -81,8 +156,15 @@ function reloadForChunkFailure(): void {
 // reads as a module and fails on with a TypeError that says nothing about the download; a
 // prevented stylesheet failure loads the module without its styles. So the handler never
 // prevents it: the importer always sees the failure itself, and the page also reloads at most
-// once per session.
+// once per session, never while it is being left.
 export function installChunkFailureRecovery(): void {
+  window.addEventListener("beforeunload", markPageLeaving);
+  window.navigation?.addEventListener("navigate", markPageLeavingForAnotherDocument);
+  window.addEventListener("pageshow", markPageStaying);
+  // Captured on the window, so a handler that stops a press from propagating cannot hide it.
+  window.addEventListener("pointerdown", markPageStaying, { capture: true });
+  window.addEventListener("keydown", markPageStaying, { capture: true });
+  document.addEventListener("visibilitychange", markPageStayingWhenVisible);
   window.addEventListener("vite:preloadError", reloadForChunkFailure);
 }
 
