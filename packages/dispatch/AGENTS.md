@@ -125,7 +125,18 @@ Every margin — issue and standalone project document — owns anchored comment
 document (Proof's model): cards with document-relative placement, document-mark highlighting,
 suggestions, replies, resolved-thread disclosure, and the phone thread dialog. Clicking a
 highlighted mark opens its thread in the margin (the compact sheet on small viewports) and never
-navigates away from the document. Issue margins additionally show Pinned and their Ask section;
+navigates away from the document. Two readers' comments, suggestions or asks may cover the same
+text: the record marks declare `excludes: ''` (the pinned fork's schema for comments and
+suggestions, `packages/proof-editor/src/dispatch-marks.ts` for asks), so their spans nest. Which
+span nests inside the other follows the order the marks were made in, so a click on text two marks
+cover opens the narrowest mark's thread - the mark whose range is the smallest, and of two the same
+size the innermost span's (`packages/proof-editor/src/record-mark-target.ts`) - and hovering there
+marks that same thread; a narrower comment inside a wider one is always reachable from its text.
+Removing a mark removes that mark's instance, never
+the type over its range. A selected margin item, its orphaned block, and the brief focus pulse are
+editor decorations (`ProofEditorHandle.setActiveMarks`, `setActiveBlocks`, `focusMark` and
+`focusBlock`), never classes Dispatch writes into editor DOM: ProseMirror reads such a write back
+as a document edit. Issue margins additionally show Pinned and their Ask section;
 pinned events retain their original event body and have an `Unpin` action, so a pin made before a
 comment lifecycle event began folding into its comment turn remains removable.
 
@@ -133,14 +144,13 @@ The composer a selection-bar action opens is anchored to the provisional mark th
 the margin owns that mark from then on (`margin-context.tsx`): its Comment / Suggest / Ask switch
 retypes the mark through `ProofEditorHandle.retypeMark` so the server verifies a mark of the kind
 being sent, and the mark is removed when the composer ends unsaved — cancelled, or replaced by a
-newer composer. The margin also names the mark the open composer holds to the editor
-(`ProofEditorHandle.setComposerMark`). The composer's own mark writes are never undo steps
-(`@legion/proof-editor`'s `recordMarkHistoryPlugin`), in prosemirror-history or y-prosemirror's
-UndoManager: neither undo nor redo writes one back, beside a recorded suggestion or after the
-reader refines the selection under an open composer. A bar Comment that cut into someone else's
-comment (LEGION-458) stays undoable. A switch the editor refuses (the mark is gone,
-a suggestion over text upstream will not mark, or another reader's mark of that kind already
-covers part of the text) is said under the switch in the reader's words, and the kind stays.
+newer composer. A switch over text another reader's mark of the new kind covers goes through and
+leaves that mark whole, as any record mark over another does. The composer's own mark writes are
+never undo steps (`@legion/proof-editor`'s `recordMarkHistoryPlugin`), in prosemirror-history or
+y-prosemirror's UndoManager: neither undo nor redo writes one back, beside a recorded suggestion,
+after the reader refines the selection under an open composer, or over someone else's comment. A
+switch the editor refuses (the mark is gone, or a suggestion over text upstream will not mark) is
+said under the switch in the reader's words, and the kind stays.
 
 Issue Conversation stays the chronological record of the same comments: collapsed comment turns
 provide a reply summary, a comment deep link focuses its turn there, and on phones opening one uses
@@ -174,7 +184,7 @@ names its count. The full vocabulary, with the reason each call beat its alterna
 
 ## Credential requests
 
-`features/credentials/` renders the whole AGENTC-393 credential-request approval surface —
+`features/credentials/` renders the whole secrets-broker credential-request approval surface —
 directed, signature-verified, immutable-record requests the broker owns and decides; Dispatch
 relays, renders, and names the deciding human. The feature is off — the inbox section and the
 Settings grants section hidden — whenever `DISPATCH_AGENT_SECRETS_URL` is unset on the server, and
@@ -306,6 +316,23 @@ document tab mounts. `loadDocumentTransport` resolves to a synchronous `connect`
 browser is offline is retried once the network returns (Chromium caches a failed module fetch,
 so the retry can reject too); a failure while online, or a retry that rejects, reaches
 `DeploymentResilience`, which treats it as a replaced deployment and reloads once per session.
+The one exception is a page being left: from `beforeunload` no failure reloads it, because WebKit
+and Firefox cancel the chunk downloads in flight when a navigation starts (WebKit also refuses new
+ones), and a reload then would replace the reader's navigation with a reload of the page they are
+leaving (`deep-links.e2e.ts`, which the `webkit` and `firefox` projects run for that
+reason). `beforeunload` covers desktop Safari, not iOS Safari, which never fires it; there the
+Navigation API's `navigate` event to another document marks the page as left instead (iOS Safari
+26.2 and later, for a link followed or a form submitted, not an address typed), and older iOS
+Safari still reloads the page being left. Playwright drives no iOS Safari, so no e2e row covers it.
+A link with `download` (the Download version links) fires that `navigate` to another document too,
+with `downloadRequest` set, and then leaves the reader on the page, so it does not count: in
+Chromium, `shell.e2e.ts` follows one and then fails a chunk, and the page reloads. Playwright's
+Firefox follows it with a second `navigate` to the same URL and no `downloadRequest`, so the first
+navigation to another document after a download does not count either when it goes to the
+download's URL (`DeploymentResilience.test.tsx` has the sequence; no e2e row runs it in Firefox).
+The page counts as staying again once it is shown (`pageshow`, or the tab turning
+visible) or pressed (a pointer or a key), since a navigation cancelled at a leave prompt, stopped,
+or answered by the server with a download fires no event of its own.
 It never default-prevents Vite's `vite:preloadError` (`installChunkFailureRecovery` says why), so
 every importer sees the load failure itself: a route's error box names the failed download, and
 the first editor a page mounts after its stylesheet failed shows the document's failed state. A
@@ -672,7 +699,7 @@ file, which derives the target's `ENVOY_URL` from that same value; the README's 
 wires the pair. A listing run starts no web server, so it skips the probe. The port validation above
 is not gated on that mode, so a malformed or duplicated port is refused in every invocation.
 
-The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`. Where a caret lands beside
+The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
 while Firefox is unaffected, so that spec is the one that needs a second engine. The picker spec guards the Agents
 issue picker's keyboard-step rule (`markKeyStep` in `AgentsPage.tsx`), which holds only because every engine
@@ -681,17 +708,33 @@ its arrows and type-ahead rows, each committed by Enter and driven through `page
 step commit at once in an engine that moved to the queued task, so it runs here and in `firefox` as well as in
 Chromium. Its rows that step and then leave the select by Tab, Shift+Tab or a click run in the same engines,
 since each engine takes focus out of a select its own way, and they assert that the select, the toggle and the
-send still name one issue. The project selects both specs by file name, not title, so renaming a row cannot drop it. CI installs
-WebKit beside Chromium for them (`bun run e2e:install` does the same locally).
+send still name one issue. The project selects all three specs by file name, not title, so renaming a row cannot drop it. CI
+installs WebKit beside Chromium for them (`bun run e2e:install` does the same locally).
+
+The `webkit` and `firefox` projects run the whole of `e2e/deep-links.e2e.ts` for two
+reasons. Both engines cancel the chunk downloads in flight when a navigation starts: a deep link followed while the page
+before it is still loading its document has to open the link rather than reload that page
+(`installChunkFailureRecovery`); the row that holds the first page's `yjs` chunk makes that case deterministic in
+WebKit and Firefox alike. And
+the margin's hold on a linked card (`features/margin/useCardHold.ts`) meets each engine's own order of frames, scroll
+events and Suspense reveals. It reads a press in the document as the reader only once the document whose cards the
+margin shows has reported a visible layout: the previous route's editor stays mounted, hidden behind the next page's
+loading view, with its own layout reported, until that page's code arrives; and an issue's Spec editor or live editor
+stays registered while Conversation or a historical version hides it, but withdraws its report until it is shown
+again. The cross-document row runs once with `IssuePage`'s chunk held and once with the issue page shown while the
+document transport is held, so each state is pinned rather than raced. The hold tells a relayout's own scroll from the
+reader's by counting rendering frames, not milliseconds, since a busy page can deliver a clamp's scroll after a long
+task (CI's WebKit did), and a text change in the margin opens that window too: a `dispatch://` reference resolving to
+its title can resize an ask card and make Firefox or WebKit anchor the margin's scroll.
 
 The `webkit-iphone` project runs the live view's two phone-layout rows in `e2e/agent-view.e2e.ts` (its project `grep` selects them by title, so renaming either test silently drops its WebKit run with no failure; rename the `grep` with it) in WebKit with the iPhone 13 profile, since iOS Safari is the engine the keyboard cap exists for and the `iphone` project is Chromium. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so those rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
 
-No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (2 tests become 1, with no error), then restore it. Repeat the check whenever the `grep` or the titles change.
+No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (2 tests become 1, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
-The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`: Firefox's native
+The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts` and `e2e/keyboard-agents-picker.e2e.ts`: Firefox's native
 editing puts text typed over a code block's last line before that line's newline, and deletes a
 paragraph's hard break along with the text after it, which Chromium and WebKit never do, so that
-spec is the one that needs a second engine; the picker spec runs for the reason given under `webkit` above. CI installs Firefox
+spec is the one that needs a second engine; the picker and deep-links specs run for the reasons given under `webkit` above. CI installs Firefox
 beside Chromium for them (`bun run e2e:install` does the same locally).
 
 The `chromium-plain-http` project runs `e2e/plain-http-origin.e2e.ts` and

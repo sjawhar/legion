@@ -318,7 +318,7 @@ line), the full definition of a proof, what the tester verifies, and the simplif
 ## Completion gate: handoff write, verification, and persistence
 
 The merger writes no handoff and pushes nothing, so this gate does not apply to it
-(`packages/pi-envoy/roles/merger.md`).
+(`packages/daemon/internal/prompts/roles/merger.md`).
 
 Write the phase-specific handoff: call the `legion` tool with `op: "handoff_write"`, `phase: "<p>"`,
 and `data`: a JSON object of the phase-specific fields only. It runs `legion handoff write` in

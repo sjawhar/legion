@@ -36,14 +36,19 @@ export function scrollMarginTo(
 const marginGestures = ["keydown", "touchstart", "wheel"] as const;
 
 /**
- * How long after the margin changes shape its own scrolls are still the layout's, not a reader's.
- * A frame or two would cover the mechanics - anchoring while the content changes, clamping as it
- * settles - and the window is an order of magnitude longer than that on purpose: `keepCardInView`
- * recognises a real reader by their gestures, which end the hold unconditionally and never
- * consult this, so the only thing a generous window can absorb is a scroll with no gesture at
- * all. What that costs is written there.
+ * How many rendering frames after the margin changes shape its own scrolls are still the layout's,
+ * not a reader's. A relayout moves the scroll - anchoring while the content changes, clamping as
+ * it settles - at the layout that follows the change, which runs by the next rendering update at
+ * the latest, and the browser dispatches that scroll's event at the rendering update after the
+ * layout: two frames, and one more to spare. The window is counted in frames because that is the
+ * unit the event arrives in. A page busy mounting its editor can go hundreds of milliseconds
+ * between frames, longer than any window on the wall clock that still means "just now", and the
+ * layout's own scroll would land after such a window closed and read as the reader's.
+ * `keepCardInView` recognises a real reader by their gestures, which end the hold unconditionally
+ * and never consult this, so the window only decides about a scroll with no gesture at all. What
+ * that costs is written there.
  */
-export const RELAYOUT_SETTLES_MS = 250;
+export const RELAYOUT_SETTLES_FRAMES = 3;
 
 /**
  * Holds `id`'s card in the margin's scrollport the way a browser holds a fragment target while
@@ -56,22 +61,24 @@ export const RELAYOUT_SETTLES_MS = 250;
  *
  * The reader wins from the moment they take part: a wheel, a touch, a key, a pointer press, or a
  * scroll this did not perform inside the margin - except one that lands within
- * `RELAYOUT_SETTLES_MS` of the margin changing shape, which the layout is taken to have done -
- * and, once the open document has reported where its blocks and marks sit, a pointer press in
- * the document, since pressing into the text is how a reader starts a selection and someone
- * working the passage is no longer being landed. A press before those offsets land is the reader
- * arriving, not leaving: every anchored card is still stacked at the top of the margin, and
- * dropping the hold there leaves the card below the fold once its real placement arrives, which
- * is the defect the hold exists to fix. Scrolling the document is never taking part: that is when
- * holding the linked card matters most. Returns the teardown a new link or an unmount uses.
+ * `RELAYOUT_SETTLES_FRAMES` of the margin changing shape, which the layout is taken to have done -
+ * and, once the document whose cards the margin shows has reported where its blocks and marks
+ * sit, a pointer press in the document, since pressing into the text is how a reader starts a
+ * selection and someone working the passage is no longer being landed. A press before those
+ * offsets land is the reader arriving, not leaving: every anchored card is still stacked at the
+ * top of the margin, and dropping the hold there leaves the card below the fold once its real
+ * placement arrives, which is the defect the hold exists to fix. Scrolling the document is never
+ * taking part: that is when holding the linked card matters most. Returns the teardown a new link
+ * or an unmount uses.
  *
  * What the relayout window absorbs, measured in Chromium: a scrollbar press, middle-click
  * autoscroll and a wheel all end the hold through their gestures. Find-in-page, `scrollIntoView`,
  * an assistive-tech focus move and Tab from the document into the margin do not carry one, so a
  * scroll of theirs that lands while the window is open is read as the layout's. The window is
- * opened by any class or style change in the margin's subtree and by any card arriving or
- * leaving it (the observer watches `childList` too) - hovering a card re-arms it, harmlessly,
- * since every reader path that matters takes over without consulting it; an arriving card is
+ * opened by any class, style or text change in the margin's subtree and by any card arriving or
+ * leaving it (the observer watches `characterData` and `childList` too) - hovering a card re-arms
+ * it, harmlessly, since every reader path that matters takes over without consulting it; a text
+ * change can resize a card, and an arriving card is
  * how the margin's own relayouts open it, which is what `placementAfterArrival` exercises in
  * `deep-links.e2e.ts`; and a remote collaborator typing in the open document keeps it open
  * while they type, because each republished placement rewrites the cards' `style.top`. The cost
@@ -97,14 +104,22 @@ function keepCardInView(
   }
   let frame: number | undefined;
   let appliedTop = container.scrollTop;
-  // When the margin last changed shape. A relayout can move the scroll more than once - scroll
-  // anchoring during the change, then clamping as the content settles - so this is a window, not
-  // a flag one scroll consumes.
-  let relaidOutAt = Number.NEGATIVE_INFINITY;
-  const observer = new MutationObserver(() => {
-    relaidOutAt = performance.now();
+  // Rendering frames since the margin last changed shape, counted only until the window closes. A
+  // relayout can move the scroll more than once - scroll anchoring during the change, then
+  // clamping as the content settles - so this is a window, not a flag one scroll consumes.
+  let framesSinceRelayout = RELAYOUT_SETTLES_FRAMES;
+  let countingFrame: number | undefined;
+  const countFrame = () => {
+    framesSinceRelayout += 1;
+    countingFrame =
+      framesSinceRelayout < RELAYOUT_SETTLES_FRAMES ? requestAnimationFrame(countFrame) : undefined;
+  };
+  const relaidOut = () => {
+    framesSinceRelayout = 0;
+    countingFrame ??= requestAnimationFrame(countFrame);
     schedule();
-  });
+  };
+  const observer = new MutationObserver(relaidOut);
   const stop = () => {
     observer.disconnect();
     container.removeEventListener("scroll", scrolled);
@@ -112,10 +127,13 @@ function keepCardInView(
     for (const gesture of marginGestures) {
       container.removeEventListener(gesture, readerTookOver);
     }
-    if (frame !== undefined) {
-      cancelAnimationFrame(frame);
-      frame = undefined;
+    for (const pending of [frame, countingFrame]) {
+      if (pending !== undefined) {
+        cancelAnimationFrame(pending);
+      }
     }
+    frame = undefined;
+    countingFrame = undefined;
   };
   const readerTookOver = () => {
     stop();
@@ -130,13 +148,11 @@ function keepCardInView(
   // inside an open one does not extend it, or a stream of them would slide it along indefinitely.
   const scrolled = () => {
     // Draining the records also suppresses the observer's callback for them, so this branch owes
-    // the re-check the callback would have scheduled.
-    const relaidOut = observer.takeRecords().length > 0;
-    if (relaidOut) {
-      relaidOutAt = performance.now();
-      schedule();
+    // the window and the re-check the callback would have opened.
+    if (observer.takeRecords().length > 0) {
+      relaidOut();
     }
-    if (relaidOut || performance.now() - relaidOutAt < RELAYOUT_SETTLES_MS) {
+    if (framesSinceRelayout < RELAYOUT_SETTLES_FRAMES) {
       appliedTop = container.scrollTop;
       return;
     }
@@ -180,6 +196,7 @@ function keepCardInView(
   observer.observe(container, {
     attributeFilter: ["class", "style"],
     attributes: true,
+    characterData: true,
     childList: true,
     subtree: true,
   });

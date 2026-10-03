@@ -27,7 +27,7 @@ LEGION-12's release (pi-envoy 1.17.1) was proven on a rig that loaded the Legion
 and failed on the first real worker: the `secretsd` plugin replaces the bash tool and drops the
 `env` field the fix relied on (the mechanism is in
 [omp-tool-call-hook-rewrites-are-model-visible](../envoy/omp-tool-call-hook-rewrites-are-model-visible.md),
-lesson 2). Sami's ruling on 2026-09-13 (AGENTC-79) followed: the agent that builds a change proves
+lesson 2). Sami's ruling on 2026-09-13 followed: the agent that builds a change proves
 it before merge on a production-like surface. LEGION-54 turned that into a rig mode and the mode
 caught two more defects the extension-only rig never would have. This note is the pattern, so the
 next rig author starts from it rather than from the README's default.
