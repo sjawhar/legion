@@ -30,8 +30,7 @@ type nestingGuard struct {
 	withChild bool
 }
 
-// nestingRefusalKey holds the nestingError for the first block nestingGuard refused, or, where none
-// was, for the first textblock whose image imageNesting refused.
+// nestingRefusalKey holds the nestingError for the first block nestingGuard refused.
 var nestingRefusalKey = parser.NewContextKey()
 
 // Open asks the parser first, so only a block it opens is held to the bound: goldmark offers a line
@@ -77,44 +76,32 @@ func opensPastBound(parent ast.Node, opens int) bool {
 const maxInlineNesting = 100
 
 // inlineNesting is the refusal of the first textblock in root whose inline markdown nests past
-// maxInlineNesting, and true, or false when none does. It walks the parsed tree without recursing,
-// and parseSource runs it before any walk that recurses through inline nodes - the conversion's
-// parseInlineMarks, footnoteLabels, unescapeTablePipes - so each of those meets at most that many.
-// The one walk goldmark itself recurses through inline nodes with, its link parser's, meets each
-// image imageNesting measured.
-func inlineNesting(root ast.Node, source []byte) (nestingError, bool) {
-	depth := 0 // how many inline nodes currently enclose node
-	for node := root; node != nil; {
-		if child := node.FirstChild(); child != nil {
-			if node.Type() == ast.TypeInline {
-				if depth++; depth > maxInlineNesting {
-					return nestingError{line: textblockLine(node, source), inline: true}, true
-				}
-			}
-			node = child
-			continue
+// maxInlineNesting, and true, or false when none does. It measures each run of inline nodes a block
+// holds with markNesting, which walks without recursing, and parseSource runs it before any walk
+// that recurses through inline nodes - the conversion's parseInlineMarks, footnoteLabels,
+// unescapeTablePipes - so each of those meets at most that many. An image imageNesting measured
+// past the bound, its children dropped, counts at that measure.
+func inlineNesting(root ast.Node, source []byte, measured map[*ast.Image]int) (refusal nestingError, found bool) {
+	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering || node.Type() != ast.TypeInline {
+			return ast.WalkContinue, nil
 		}
-		for node != root && node.NextSibling() == nil {
-			node = node.Parent()
-			if node.Type() == ast.TypeInline {
-				depth--
-			}
+		if markNesting(node, measured) > maxInlineNesting {
+			refusal, found = nestingError{line: textblockLine(node, source), inline: true}, true
+			return ast.WalkStop, nil
 		}
-		if node == root {
-			return nestingError{}, false
-		}
-		node = node.NextSibling()
-	}
-	return nestingError{}, false
+		return ast.WalkSkipChildren, nil
+	})
+	return refusal, found
 }
 
 // imageNesting is goldmark's link parser measuring every image it makes. Goldmark checks the label
 // of each link it closes for a link inside it by recursing through the label's nodes
 // (containsLink, parser/link.go:218-231 at v1.8.6), and an image closed inside that label already
 // holds its marks nested, so that walk takes a frame per level of them while goldmark parses,
-// before parseSource checks either bound. An image whose marks nest past maxInlineNesting refuses
-// its textblock as soon as it is made: the refusal is recorded (nestingRefusalKey) and the image's
-// children dropped, so no later walk enters them, since the parse is refused anyway.
+// before parseSource checks either bound. An image whose marks nest past maxInlineNesting has its
+// children dropped as soon as it is made, so no later walk enters them, and its measure refuses its
+// textblock (inlineNesting).
 type imageNesting struct{ goldmarkLinkParser }
 
 // goldmarkLinkParser is goldmark's link parser: an inline parser that also closes the labels a
@@ -142,22 +129,21 @@ func (p imageNesting) Parse(parent ast.Node, block gmtext.Reader, pc parser.Cont
 	nesting := markNesting(image, measured)
 	if nesting > maxInlineNesting {
 		image.RemoveChildren(image)
-		refuseImage(pc, nestingError{line: textblockLine(parent, block.Source()), inline: true})
 	}
 	measured[image] = nesting
 	return node
 }
 
-// markNesting is how many inline marks image's markdown opens one inside another, image among
-// them, as inlineNesting counts them, or a count past maxInlineNesting once it passes that. It
-// walks without recursing and takes an image inside image at the nesting measured when that image
-// was made, so images nested one inside another have each node walked once.
-func markNesting(image *ast.Image, measured map[*ast.Image]int) int {
-	root := ast.Node(image)
-	deepest, depth := 0, 0 // depth: how many nodes with children enclose node, image among them
+// markNesting is how many inline marks root's markdown opens one inside another, root among them,
+// or a count past maxInlineNesting once it passes that. It walks without recursing and takes an
+// image already measured at the nesting measured when it was made, so images nested one inside
+// another have each node walked once.
+func markNesting(root ast.Node, measured map[*ast.Image]int) int {
+	deepest, depth := 0, 0 // depth: how many nodes with children enclose node, root among them
 	for node := root; ; {
-		if inner, ok := node.(*ast.Image); ok && node != root {
-			deepest = max(deepest, depth+measured[inner])
+		image, isImage := node.(*ast.Image)
+		if nesting, seen := measured[image]; isImage && seen {
+			deepest = max(deepest, depth+nesting)
 		} else if child := node.FirstChild(); child != nil {
 			if depth++; depth > maxInlineNesting {
 				return depth
@@ -177,31 +163,17 @@ func markNesting(image *ast.Image, measured map[*ast.Image]int) int {
 	}
 }
 
-// refuseImage records refusal, a textblock whose image nests its marks past maxInlineNesting,
-// unless a block's refusal, or a textblock's on the same line or an earlier one, is recorded
-// already: goldmark reads inline markdown block by block, every footnote definition's first, since
-// the list it gathers them in stands ahead of the rest while it parses (footnoteDefinitionParser).
-func refuseImage(pc parser.Context, refusal nestingError) {
-	if recorded, ok := pc.Get(nestingRefusalKey).(nestingError); ok && (!recorded.inline || recorded.line <= refusal.line) {
-		return
-	}
-	pc.Set(nestingRefusalKey, refusal)
-}
-
 // nestingRefusal is the refusal of root, parsed from source with pc, for markdown nested past a
 // bound, or nil: the block nestingGuard refused, since goldmark opens every block before it reads
 // any inline markdown, and otherwise the first textblock whose inline marks nest past
-// maxInlineNesting, which either inlineNesting finds or imageNesting refused while goldmark parsed.
+// maxInlineNesting, an image imageNesting measured past it among them.
 func nestingRefusal(root ast.Node, source []byte, pc parser.Context) error {
-	recorded, refused := pc.Get(nestingRefusalKey).(nestingError)
-	if refused && !recorded.inline {
-		return recorded
+	if refused, ok := pc.Get(nestingRefusalKey).(nestingError); ok {
+		return refused
 	}
-	if found, ok := inlineNesting(root, source); ok && (!refused || found.line < recorded.line) {
+	measured, _ := pc.Get(imageNestingKey).(map[*ast.Image]int)
+	if found, ok := inlineNesting(root, source, measured); ok {
 		return found
-	}
-	if refused {
-		return recorded
 	}
 	return nil
 }
