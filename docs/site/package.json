@@ -1,0 +1,28 @@
+{
+  "name": "@legion/docs-site",
+  "private": true,
+  "type": "module",
+  "description": "The documentation site for Legion, Dispatch and the Secrets Broker",
+  "scripts": {
+    "dev": "bun run generate && astro dev",
+    "generate": "bun scripts/generate.ts",
+    "build": "bun run generate && astro build",
+    "preview": "astro preview",
+    "lint": "biome check --error-on-warnings .",
+    "typecheck": "tsc --noEmit -p tsconfig.tools.json"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.42.5",
+    "astro": "^7.3.5",
+    "astro-mermaid": "^2.1.0",
+    "mermaid": "^11.17.2",
+    "starlight-auto-sidebar": "^0.4.1",
+    "starlight-links-validator": "^0.26.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "@playwright/test": "^1.63.0",
+    "@types/bun": "latest",
+    "typescript": "^5.3.0"
+  }
+}

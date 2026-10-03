@@ -559,10 +559,13 @@ def classify_run_step(step: dict) -> list[tuple[str, bool]]:
 NON_BUILDING_ACTIONS = {
     "actions/attest-build-provenance",
     "actions/checkout",
+    "actions/configure-pages",
+    "actions/deploy-pages",
     "actions/download-artifact",
     "actions/setup-go",
     "actions/setup-node",
     "actions/upload-artifact",
+    "actions/upload-pages-artifact",
     "docker/login-action",
     "docker/metadata-action",
     "docker/setup-buildx-action",

@@ -111,6 +111,7 @@ projects:
 | Dispatch's document editor | `packages/proof-editor/` | The editor entry, typed blocks and block ids, source-only. Copied from the `sjawhar/proof-sdk` fork at the commit a git dependency pins; the upstream editor modules stay there. See `packages/proof-editor/AGENTS.md` |
 | Go coordinator (in progress) | `packages/daemon-go/` | LEGION-208's Go rewrite: a separate module bound by the root `go.work`, sharing no file with `packages/daemon`, which stays the shipped daemon until Stage 7. `cmd/legion` is its CLI, `internal/api/state.go` owns its wire shape, `packages/contracts/src/legion-go-api.ts` mirrors it, `scripts/e2e/` holds each stage's live proof. It resolves role prompts at boot from `LEGION_ROLE_PROMPTS_DIR` or `role-prompts` beside the running `legion` executable, validates every shared part, and snapshots the bundle below its state directory before any pane or controller starts. |
 | Secrets broker | `packages/envoy/cmd/broker`, `packages/envoy/internal/broker` | See `packages/envoy/AGENTS.md` |
+| Documentation site | `docs/site/` | Astro Starlight, published to GitHub Pages by `.github/workflows/docs.yaml`. See `docs/site/README.md`; generated reference pages come from `docs/site/generators/` |
 
 ## Conventions
 

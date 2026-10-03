@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { createElement } from "react";
+import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
@@ -242,6 +242,100 @@ test("useMarginItems groups replies flat under their root and separates resolved
     view.unmount();
   }
 });
+
+/** A standalone document's margin over `comments`, none of them placed. */
+function renderDocumentMargin(comments: Comment[]) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  queryClient.setQueryData(["artifact", artifact.id, "comments"], comments);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["user-state"], {});
+  return renderHook(
+    () =>
+      useMarginItems(
+        { artifactId: artifact.id, kind: "document", project: "CORE", slug: "design-notes" },
+        "comments",
+        { ...artifact, issue_key: null, primary: false, slug: "design-notes" },
+        new Map(),
+        new Map(),
+        undefined
+      ),
+    {
+      wrapper: ({ children }: { children: ReactNode }) =>
+        createElement(
+          MemoryRouter,
+          { initialEntries: ["/projects/CORE/documents/design-notes"] },
+          createElement(QueryClientProvider, { client: queryClient }, children)
+        ),
+    }
+  );
+}
+
+// The server writes RFC 3339 and drops trailing fractional zeros, so two times in one second are
+// strings of different widths: as text `…01.12Z` sorts after `…01.123456Z`, the later time.
+const sameSecondEarlier = "2026-10-02T00:00:01.12Z";
+const sameSecondLater = "2026-10-02T00:00:01.123456Z";
+
+test("replies written in the same second follow their times, not their timestamp strings", () => {
+  const root = comment("root", "mark-root", "2026-10-02T00:00:00Z");
+  const early = { ...comment("early", null, sameSecondEarlier), reply_to: root.id };
+  const late = { ...comment("late", null, sameSecondLater), reply_to: root.id };
+  const margin = renderDocumentMargin([root, late, early]);
+
+  try {
+    expect(
+      margin.result.current.threads.map((thread) => [
+        thread.key,
+        thread.replies.map((reply) => reply.id),
+        thread.lastReplyAt,
+      ])
+    ).toEqual([["root", ["early", "late"], sameSecondLater]]);
+  } finally {
+    margin.unmount();
+  }
+});
+
+test("unplaced threads written in the same second list newest first by time", () => {
+  const margin = renderDocumentMargin([
+    comment("older", "m-older", sameSecondEarlier),
+    comment("newer", "m-newer", sameSecondLater),
+  ]);
+
+  try {
+    expect(margin.result.current.items.map(marginItemId)).toEqual(["newer", "older"]);
+    expect(margin.result.current.threads.map((thread) => thread.key)).toEqual(["newer", "older"]);
+  } finally {
+    margin.unmount();
+  }
+});
+
+test("comments written at the same instant are ordered by id", () => {
+  const at = "2026-10-02T00:00:00.5Z";
+  const rootA = comment("a", "m-a", at);
+  const margin = renderDocumentMargin([
+    comment("b", "m-b", at),
+    rootA,
+    { ...comment("y", null, at), reply_to: rootA.id },
+    { ...comment("x", null, at), reply_to: rootA.id },
+  ]);
+
+  try {
+    expect(margin.result.current.items.map(marginItemId)).toEqual(["a", "b"]);
+    expect(
+      margin.result.current.threads.map((thread) => [
+        thread.key,
+        thread.replies.map((reply) => reply.id),
+      ])
+    ).toEqual([
+      ["a", ["x", "y"]],
+      ["b", []],
+    ]);
+  } finally {
+    margin.unmount();
+  }
+});
+
 function DocumentItems() {
   const items = useMarginItems(
     {
