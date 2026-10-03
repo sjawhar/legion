@@ -95,7 +95,7 @@ if [ "@NAME@" = jj ]; then
 		esac
 	done
 fi
-exec @REAL@ "$@"
+PATH=@PATH@ exec @REAL@ "$@"
 `
 
 // anyHostAskpass answers every host's prompts with the one-shot credential's token.
@@ -161,7 +161,10 @@ func newInitRig(t *testing.T, legion string) *initRig {
 		if err != nil {
 			t.Fatalf("provisioning's boundary tests drive a real %s: %v", name, err)
 		}
-		script := strings.NewReplacer("@NAME@", name, "@REAL@", shellprefix.Literal(real), "@ASKPASS@", shellprefix.Literal(askpass)).Replace(defeatedTool)
+		// Drop this fixture's PATH prefix before handing off: a host wrapper that searches for
+		// its real tool must not rediscover this defeated-tool wrapper and recurse into it.
+		script := strings.NewReplacer("@NAME@", name, "@REAL@", shellprefix.Literal(real),
+			"@ASKPASS@", shellprefix.Literal(askpass), "@PATH@", shellprefix.Literal(os.Getenv("PATH"))).Replace(defeatedTool)
 		if err := os.WriteFile(filepath.Join(rig.bin, name), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
