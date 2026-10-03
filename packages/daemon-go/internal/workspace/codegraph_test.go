@@ -353,6 +353,66 @@ esac
 	}
 }
 
+// TestWarmCodegraphIndexJudgesAnEmptyLockByItsAge: CodeGraph creates `.codegraph/codegraph.lock`
+// before it writes the builder's PID into it, so a build that has only just started shows an
+// empty lock. A fresh empty lock is held, and warming skips the repair rather than start a second
+// writer beside that build. One older than codegraphEmptyLockGrace is what a builder that died
+// between the create and the write leaves behind: stale, so the repair runs.
+func TestWarmCodegraphIndexJudgesAnEmptyLockByItsAge(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// fresh: the stub's own `status` creates the empty lock, as a build taking it while
+		// warming runs would, so the lock is as young as it can be when warming reads it.
+		// Otherwise the test creates it and backdates it past codegraphEmptyLockGrace.
+		fresh bool
+		want  []string
+	}{
+		{"fresh empty lock: a build about to write its PID holds it, no repair", true, []string{"status"}},
+		{"empty lock older than the grace: a dead builder's, repaired", false, []string{"status", "index"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			callLog := filepath.Join(t.TempDir(), "calls.log")
+			dir := t.TempDir()
+			lock := filepath.Join(dir, ".codegraph", "codegraph.lock")
+			if err := os.Mkdir(filepath.Dir(lock), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			takeLock := ""
+			if tc.fresh {
+				takeLock = " : > .codegraph/codegraph.lock;"
+			} else {
+				if err := os.WriteFile(lock, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				old := time.Now().Add(-codegraphEmptyLockGrace - time.Minute)
+				if err := os.Chtimes(lock, old, old); err != nil {
+					t.Fatal(err)
+				}
+			}
+			binDir := t.TempDir()
+			script := `#!/bin/sh
+printf '%s\n' "$1" >> '` + callLog + `'
+case "$1" in
+status)` + takeLock + ` echo '{"initialized":true,"index":{"state":"indexing"}}' ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(binDir, "codegraph"), []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			warmCodegraphIndex(context.Background(), dir)
+			calls, err := os.ReadFile(callLog)
+			if err != nil {
+				t.Fatalf("read codegraph call log: %v", err)
+			}
+			if lines := strings.Split(strings.TrimSpace(string(calls)), "\n"); !slices.Equal(lines, tc.want) {
+				t.Fatalf("codegraph calls = %v, want %v", lines, tc.want)
+			}
+		})
+	}
+}
+
 // TestWarmCodegraphIndexRepairsOncePerWorkspace: a workspace whose index never reaches
 // `"complete"` gets re-indexed at most once per process, not on every call.
 func TestWarmCodegraphIndexRepairsOncePerWorkspace(t *testing.T) {

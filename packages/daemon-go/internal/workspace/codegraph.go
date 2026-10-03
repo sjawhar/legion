@@ -21,6 +21,16 @@ import (
 // files) takes longer than Provision's own command budget.
 const codegraphTimeout = 30 * time.Minute
 
+// codegraphEmptyLockGrace is how long an empty `.codegraph/codegraph.lock` still counts as held.
+// CodeGraph's FileLock takes the lock with one `fs.writeFileSync(lockPath, String(process.pid),
+// { flag: 'wx' })`: an exclusive create, then the PID write, two syscalls back to back. For a
+// moment the file exists and is empty. The two calls take microseconds, and a scheduling or I/O
+// stall on a loaded host stretches that to tens of milliseconds. Five seconds is two orders of
+// magnitude past such a stall, and short enough that the empty lock a builder leaves when it dies
+// between the two calls, or when its write fails (ENOSPC), stops blocking a repair a few seconds
+// later.
+const codegraphEmptyLockGrace = 5 * time.Second
+
 // warming holds the workspace directories with a background warm-up in flight in this process.
 var warming sync.Map
 
@@ -45,26 +55,25 @@ func WarmCodegraphIndexInBackground(dir string) {
 	}()
 }
 
-// warmCodegraphIndex mirrors the TypeScript daemon's ensureCodegraphIndex (research report
-// AGENTC-1305 §7): the tester's `affected` and the reviewer's `impact`/`callers` queries need an
-// index already built, not one built on first use. Callers run it through
-// WarmCodegraphIndexInBackground, outside any provisioning serialization: indexing reads only the
-// issue's own workspace directory. codegraph is deliberately not one of the tools Runner
-// requires — the daemon must still boot where it is absent (the tmux runtime's host provisioning
-// never installs it) — so this resolves it from PATH on its own, directly with os/exec, and never
-// fails provisioning: a missing CLI, a non-zero exit, or a timeout is logged loudly to stderr,
-// exactly as the TypeScript daemon's console.error does. Warming simply does not happen when the
-// CLI is missing or fails; the worker falls back to grep, per its role prompt. An index an
-// earlier warm-up left partial (`initialized` true but `index.state` not `"complete"`) is
-// repaired with `codegraph index` rather than accepted as built — `codegraph init` on an
-// already-initialized directory only prints "Already initialized" and exits 0, so it cannot do
-// this repair itself — unless the build that left it that way is still running: nextCodegraphStep
-// skips the repair entirely while `.codegraph/codegraph.lock` names a live process. A second
-// `codegraph index` started against a live build damages the shared SQLite database even when
-// CodeGraph's own lock refuses it the write (observed: the second process exits on "Could not
-// acquire file lock", and the live build still fails with "database disk image is malformed") —
-// so this never lets a second process even attempt it, and never relies on CodeGraph's own
-// mtime-based (2-minute) staleness check, which can hand the lock to a second writer regardless.
+// warmCodegraphIndex builds a workspace's codegraph index before any worker needs it: the tester's
+// `affected` and the reviewer's `impact`/`callers` queries need an index already built, not one
+// built on first use. Callers run it through WarmCodegraphIndexInBackground, outside any
+// provisioning serialization: indexing reads only the issue's own workspace directory. codegraph
+// is deliberately not one of the tools Runner requires — the daemon must still boot where it is
+// absent (the tmux runtime's host provisioning never installs it) — so this resolves it from PATH
+// on its own, directly with os/exec, and never fails provisioning: a missing CLI, a non-zero exit,
+// or a timeout is logged loudly to stderr. Warming simply does not happen when the CLI is missing
+// or fails; the worker falls back to grep, per its role prompt. An index an earlier warm-up left
+// partial (`initialized` true but `index.state` not `"complete"`) is repaired with `codegraph
+// index` rather than accepted as built — `codegraph init` on an already-initialized directory only
+// prints "Already initialized" and exits 0, so it cannot do this repair itself — unless the build
+// that left it that way is still running: nextCodegraphStep skips the repair entirely while a
+// build holds `.codegraph/codegraph.lock`. A second `codegraph index` started against a live build
+// damages the shared SQLite database even when CodeGraph's own lock refuses it the write
+// (observed: the second process exits on "Could not acquire file lock", and the live build still
+// fails with "database disk image is malformed") — so this never lets a second process even
+// attempt it, and never relies on CodeGraph's own mtime-based (2-minute) staleness check, which
+// can hand the lock to a second writer regardless.
 // Every codegraph invocation gets a minimal, explicit environment — PATH, HOME, TMPDIR when set,
 // and DO_NOT_TRACK=1 — never the process's full environment: a provisioning caller may hold a
 // one-shot GitHub token or other secrets in its own environment, and codegraph gets none of them.
@@ -100,7 +109,7 @@ func warmCodegraphIndex(ctx context.Context, dir string) {
 	step := nextCodegraphStep(dirExists, lockLive, status.exitCode, status.stdout)
 	if step == codegraphStepNone {
 		if lockLive {
-			fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up for %s skipped: the index lock still names a live process\n", dir)
+			fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up for %s skipped: a build in progress holds the index lock\n", dir)
 		}
 		return
 	}
@@ -140,11 +149,11 @@ const (
 // exists on disk — is consulted only as a fallback, when `status` failed to run or returned
 // something that is not even JSON (a corrupted database mid-build, an old CLI): there, an
 // existing directory still means `index` over `init`, since `init` on one only prints "Already
-// initialized" and exits 0, repairing nothing. lockLive — whether `.codegraph/codegraph.lock`
-// names a process that is still alive — always wins over an index repair: a build that is still
-// running also reports `index.state: "indexing"`, indistinguishable from one left partial by a
-// dead process, so this never relies on CodeGraph's own mtime-based staleness check to tell the
-// two apart.
+// initialized" and exits 0, repairing nothing. lockLive — whether a build holds
+// `.codegraph/codegraph.lock` (codegraphLockHeldByLiveProcess) — always wins over an index
+// repair: a build that is still running also reports `index.state: "indexing"`,
+// indistinguishable from one left partial by a dead process, so this never relies on CodeGraph's
+// own mtime-based staleness check to tell the two apart.
 func nextCodegraphStep(dirExists, lockLive bool, statusExitCode int, statusStdout string) codegraphStep {
 	if statusExitCode == 0 && json.Valid([]byte(statusStdout)) {
 		initialized, complete := codegraphStatus(statusStdout)
@@ -168,12 +177,12 @@ func nextCodegraphStep(dirExists, lockLive bool, statusExitCode int, statusStdou
 	return codegraphStepIndex
 }
 
-// codegraphStatus reads `codegraph status --json`'s `initialized` and `index.state` fields
-// exactly as the TypeScript daemon's parseCodegraphStatus does: `codegraph status` exits 0
-// whether or not the project has ever been indexed, so only the parsed body tells the cases
-// apart, and anything that fails to parse as that shape is treated as not initialized.
-// `index.state` is `"complete"` only once a build has finished; a build still running, or one an
-// earlier warm-up left partial, reports it `"indexing"` with `initialized` already true.
+// codegraphStatus reads `codegraph status --json`'s `initialized` and `index.state` fields.
+// `codegraph status` exits 0 whether or not the project has ever been indexed, so only the parsed
+// body tells the cases apart, and anything that fails to parse as that shape is treated as not
+// initialized. `index.state` is `"complete"` only once a build has finished; a build still
+// running, or one an earlier warm-up left partial, reports it `"indexing"` with `initialized`
+// already true.
 func codegraphStatus(stdout string) (initialized, complete bool) {
 	var parsed struct {
 		Initialized bool `json:"initialized"`
@@ -187,23 +196,32 @@ func codegraphStatus(stdout string) (initialized, complete bool) {
 	return parsed.Initialized, parsed.Index.State == "complete"
 }
 
-// codegraphLockHeldByLiveProcess reports whether dir's .codegraph/codegraph.lock names a process
-// that is still alive. CodeGraph 1.5.0's FileLock (its installed dist's utils.js) writes the
-// lock's entire content as the builder's decimal PID with no other metadata, and its own
-// staleness check compares the lock file's mtime against a fixed 2-minute timeout rather than
+// codegraphLockHeldByLiveProcess reports whether dir's .codegraph/codegraph.lock is held by a
+// build: it names a process that is still alive, or it is empty and younger than
+// codegraphEmptyLockGrace. CodeGraph 1.5.0's FileLock (its installed dist's utils.js) writes the
+// lock's entire content as the builder's decimal PID with no other metadata, but it creates the
+// file before it writes that PID. An empty lock is therefore a build that has just taken it, until
+// the grace runs out; after that it is a builder that died between the two, and stale. CodeGraph's
+// own staleness check compares the lock file's mtime against a fixed 2-minute timeout rather than
 // checking the PID, so a lock can still name a live, actively-writing process past that window.
-// A lock this cannot read, or whose content isn't a PID, is treated as not live — this never
+// Any other lock this cannot read, or whose content isn't a PID, is treated as not live: this never
 // blocks a repair on a lock it cannot make sense of. Liveness alone is not enough on a host where
 // PIDs recycle: a dead builder's PID reused by an unrelated process would read as live forever,
 // so where `/proc/<pid>/cmdline` exists, the process also has to look like codegraph — a dead
 // builder whose PID is unused, or whose slot now holds something else, is correctly stale.
 // `/proc` absent (non-Linux) falls back to the liveness check alone.
 func codegraphLockHeldByLiveProcess(dir string) bool {
-	content, err := os.ReadFile(filepath.Join(dir, ".codegraph", "codegraph.lock"))
+	lockPath := filepath.Join(dir, ".codegraph", "codegraph.lock")
+	content, err := os.ReadFile(lockPath)
 	if err != nil {
 		return false
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(content)))
+	text := strings.TrimSpace(string(content))
+	if text == "" {
+		info, err := os.Stat(lockPath)
+		return err == nil && time.Since(info.ModTime()) < codegraphEmptyLockGrace
+	}
+	pid, err := strconv.Atoi(text)
 	if err != nil || pid <= 0 {
 		return false
 	}
