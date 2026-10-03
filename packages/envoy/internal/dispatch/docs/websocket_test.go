@@ -316,7 +316,7 @@ func TestDocumentSocketRefusesARoomOutsideTheSchema(t *testing.T) {
 	}
 }
 
-func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {
+func TestShutdownClosesDocumentPeers(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{

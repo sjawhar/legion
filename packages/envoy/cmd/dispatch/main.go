@@ -49,9 +49,9 @@ const (
 	httpShutdownTimeout = 5 * time.Second
 	// documentShutdownTimeout is the document service's own budget, counted from when HTTP shutdown
 	// returns: up to docs' five-second drain budget settling the documents that owe it, then joining
-	// the settlements that budget cut short and reading back which committed, which
-	// docs.Service.Shutdown cannot do once this deadline has passed. A runtime's stop grace period
-	// must allow both budgets.
+	// the settlements that budget cut short, closing the editors connected to the rooms they
+	// settled, and reading back which committed, which docs.Service.Shutdown cannot do once this
+	// deadline has passed. A runtime's stop grace period must allow both budgets.
 	documentShutdownTimeout = 10 * time.Second
 	readHeaderTimeout       = 10 * time.Second
 	idleTimeout             = 2 * time.Minute
