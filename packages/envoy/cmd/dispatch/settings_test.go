@@ -276,22 +276,70 @@ func envoyJSONHome(t *testing.T) string {
 	return filepath.Dir(filepath.Dir(filepath.Dir(path)))
 }
 
-// routerFor is the router main serves for boot, built through appContextOptions as main builds it,
-// with app as the loaded GitHub App and database as the store: nil where the requests a case sends
-// never reach one.
-func routerFor(t *testing.T, boot bootConfig, app *auth.AppConfig, database *store.Store) http.Handler {
+// routerFor is the router main serves for boot, built through appContextOptions as main builds it.
+// built is what main makes from the rest of the configuration, holding what a case's requests reach
+// (the GitHub App, the store, the dashboard origin) and nil elsewhere.
+func routerFor(t *testing.T, boot bootConfig, built routes.AppContextOptions) http.Handler {
 	t.Helper()
-	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
-		SigningKey: "signing-key",
-		Users:      store.NewPgUserStore(nil),
-		Identity:   identity.CookieIdentity{SigningKey: "signing-key", AllowedLogins: boot.AllowedLogins},
-		App:        app,
-		Store:      database,
-	}))
+	appCtx, err := appContextFor(boot, built)
 	if err != nil {
 		t.Fatalf("build the router: %v", err)
 	}
 	return routes.New(appCtx)
+}
+
+// appContextFor is routes.BuildAppContext as main calls it, with the signing key, the user and
+// session stores and the cookie identity filled in, so a request carrying signedIn's cookie is
+// that login's.
+func appContextFor(boot bootConfig, built routes.AppContextOptions) (*routes.AppContext, error) {
+	built.SigningKey = "signing-key"
+	built.Users = store.NewPgUserStore(nil)
+	built.Sessions = currentSessions{}
+	built.Identity = identity.CookieIdentity{SigningKey: "signing-key", AllowedLogins: boot.AllowedLogins, Sessions: built.Sessions}
+	return routes.BuildAppContext(appContextOptions(boot, built))
+}
+
+// currentSessions is a session store holding every login's session at generation 0, as a fresh
+// database holds it after the login's first sign-in.
+type currentSessions struct{}
+
+func (currentSessions) EnsureSession(context.Context, string) (int64, error) { return 0, nil }
+
+func (currentSessions) CurrentSessionGeneration(context.Context, string) (int64, bool, error) {
+	return 0, true, nil
+}
+
+func (currentSessions) RevokeSessions(context.Context, string) error { return nil }
+
+// signedIn adds to request the session cookie a sign-in as login sets.
+func signedIn(t *testing.T, request *http.Request, login string) *http.Request {
+	t.Helper()
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie(login, 0, "signing-key", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(cookie)
+	return request
+}
+
+// devSignIn answers GET /auth/_dev/signin?login=<login> as a browser on this machine sends it to
+// the dashboard origin, from the router main serves for boot.
+func devSignIn(t *testing.T, boot bootConfig, login string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, devSignInOrigin+"/auth/_dev/signin?login="+login, nil)
+	request.RemoteAddr = "127.0.0.1:40000"
+	response := httptest.NewRecorder()
+	routerFor(t, boot, routes.AppContextOptions{ServerURL: devSignInOrigin}).ServeHTTP(response, request)
+	return response
+}
+
+// errorCode is the code of a JSON error response.
+func errorCode(response *httptest.ResponseRecorder) string {
+	var body struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(response.Body.Bytes(), &body)
+	return body.Code
 }
 
 // Every setting reaches its reader through the table, as it resolved before the table existed:
@@ -322,6 +370,33 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 	}
 	// A URL nothing listens on: every case below fails before it dials, on the setting it names.
 	const localNATS = "nats://127.0.0.1:1"
+
+	// brokerReceived is the call the secrets broker DISPATCH_AGENT_SECRETS_URL names receives, as
+	// "<method> <request URI> <Authorization>", when a signed-in human lists the credential
+	// requests awaiting them, with token as DISPATCH_AGENT_SECRETS_TOKEN.
+	brokerReceived := func(t *testing.T, token string) string {
+		t.Helper()
+		received := make(chan string, 1)
+		broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			received <- r.Method + " " + r.URL.RequestURI() + " " + r.Header.Get("Authorization")
+			_, _ = w.Write([]byte(`{"requests":[]}`))
+		}))
+		defer broker.Close()
+		boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": broker.URL, "DISPATCH_AGENT_SECRETS_TOKEN": token})
+		request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests?approver=me", nil), "alice")
+		response := httptest.NewRecorder()
+		routerFor(t, boot, routes.AppContextOptions{}).ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET /api/v1/credential-requests: %d %s", response.Code, response.Body.String())
+		}
+		select {
+		case got := <-received:
+			return got
+		default:
+			t.Fatal("GET /api/v1/credential-requests answered without calling the broker")
+			return ""
+		}
+	}
 
 	cases := map[string]func(t *testing.T){
 		"DATABASE_URL": func(t *testing.T) {
@@ -357,6 +432,20 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_ALLOWED_LOGINS": ""}, "DISPATCH_ALLOWED_LOGINS")
 			resolveWith(t, map[string]string{"DISPATCH_ALLOWED_LOGINS": "", "DISPATCH_IDENTITY": "header:X-Dispatch-User"})
+			// The logins the router's sign-in takes: dev sign-in checks the list as the GitHub
+			// callback does.
+			t.Run("router", func(t *testing.T) {
+				boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_ALLOWED_LOGINS": "Alice,bob"}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if response := devSignIn(t, boot, "bob"); response.Code != http.StatusFound {
+					t.Errorf("dev sign-in as bob, whom DISPATCH_ALLOWED_LOGINS lists: %d %s, want 302", response.Code, response.Body.String())
+				}
+				if response := devSignIn(t, boot, "carol"); response.Code != http.StatusForbidden || errorCode(response) != "LOGIN_NOT_ALLOWED" {
+					t.Errorf("dev sign-in as carol, whom it does not: %d %s, want 403 LOGIN_NOT_ALLOWED", response.Code, response.Body.String())
+				}
+			})
 		},
 		"DISPATCH_IDENTITY_HEADER_TRUSTED": func(t *testing.T) {
 			header := map[string]string{"DISPATCH_IDENTITY": "header:X-Dispatch-User", "DISPATCH_APP_CLIENT_ID": "Iv1.app"}
@@ -456,7 +545,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				request := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
 				request.Header.Set("Authorization", "Bearer agent-token")
 				response := httptest.NewRecorder()
-				routerFor(t, resolveWith(t, overrides), nil, nil).ServeHTTP(response, request)
+				routerFor(t, resolveWith(t, overrides), routes.AppContextOptions{}).ServeHTTP(response, request)
 				if response.Code != http.StatusOK {
 					t.Fatalf("GET /api/v1/agents: %d %s", response.Code, response.Body.String())
 				}
@@ -479,11 +568,40 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_REPO_PROJECTS": " acme/widgets=WID "}); boot.RepoProjects != "acme/widgets=WID" {
 				t.Errorf("RepoProjects = %q", boot.RepoProjects)
 			}
+			// The router reads the mapping only to check it as it is built (main seeds the store
+			// with it before), so a malformed one is refused there, naming the variable.
+			t.Run("router", func(t *testing.T) {
+				if _, err := appContextFor(resolveWith(t, map[string]string{"DISPATCH_REPO_PROJECTS": "acme/widgets"}), routes.AppContextOptions{}); err == nil || !strings.Contains(err.Error(), "DISPATCH_REPO_PROJECTS") {
+					t.Errorf("DISPATCH_REPO_PROJECTS=acme/widgets: building the router: err = %v, want a refusal naming DISPATCH_REPO_PROJECTS", err)
+				}
+				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_REPO_PROJECTS": "acme/widgets=WID"}), routes.AppContextOptions{})
+			})
 		},
 		"DISPATCH_DEFAULT_PROJECT": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_DEFAULT_PROJECT": " WID "}); boot.DefaultProject != "WID" {
 				t.Errorf("DefaultProject = %q", boot.DefaultProject)
 			}
+			// The project the router files an external issue in when no mapping names its
+			// repository: a create naming another project is refused naming that one, and with
+			// no default the repository is unmapped.
+			t.Run("router", func(t *testing.T) {
+				database := storetest.Open(t)
+				create := func(overrides map[string]string) *httptest.ResponseRecorder {
+					t.Helper()
+					request := httptest.NewRequest(http.MethodPost, "/api/v1/issues", strings.NewReader(`{"external":"acme/unmapped#7","project":"OTHER","actor":{"kind":"session","id":"settings-test"}}`))
+					request.Header.Set("Authorization", "Bearer agent-token")
+					request.Header.Set("Content-Type", "application/json")
+					response := httptest.NewRecorder()
+					routerFor(t, resolveWith(t, overrides), routes.AppContextOptions{Store: database}).ServeHTTP(response, request)
+					return response
+				}
+				if response := create(map[string]string{"DISPATCH_DEFAULT_PROJECT": "WID"}); errorCode(response) != "EXTERNAL_PROJECT_MISMATCH" || !strings.Contains(response.Body.String(), "project WID") {
+					t.Errorf("DISPATCH_DEFAULT_PROJECT=WID: POST /api/v1/issues answered %d %s, want the unmapped repository's project to be WID", response.Code, response.Body.String())
+				}
+				if response := create(nil); errorCode(response) != "PROJECT_UNMAPPED" {
+					t.Errorf("unset: POST /api/v1/issues answered %d %s, want PROJECT_UNMAPPED", response.Code, response.Body.String())
+				}
+			})
 		},
 		"DISPATCH_APP_CLIENT_ID": func(t *testing.T) {
 			if clientID, source, err := loadApp(t, map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_CLIENT_SECRET": "secret"}); err != nil || clientID != "Iv1.env" || source != "env" {
@@ -564,7 +682,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/ARCH/architecture-source/sync", nil)
 				request.Header.Set("Authorization", "Bearer agent-token")
 				response := httptest.NewRecorder()
-				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_GITHUB_API_BASE": github.URL}), app, database).ServeHTTP(response, request)
+				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_GITHUB_API_BASE": github.URL}), routes.AppContextOptions{App: app, Store: database}).ServeHTTP(response, request)
 				select {
 				case got := <-called:
 					if got != "GET /repos/acme/arch/installation" {
@@ -599,7 +717,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			app := &auth.AppConfig{ClientID: "Iv1.env", ClientSecret: "secret"}
 			for value, insecure := range map[string]bool{"": false, "1": true, "false": true} {
 				response := httptest.NewRecorder()
-				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_INSECURE_COOKIE": value}), app, nil).
+				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_INSECURE_COOKIE": value}), routes.AppContextOptions{App: app}).
 					ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
 				cookies := response.Result().Cookies()
 				if response.Code != http.StatusFound || len(cookies) != 1 || cookies[0].Secure == insecure {
@@ -626,6 +744,18 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("AgentSecretsURL = %q", boot.AgentSecretsURL)
 			}
 			refusedWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example/v1", "DISPATCH_AGENT_SECRETS_TOKEN": "t"}, "DISPATCH_AGENT_SECRETS_URL")
+			// The broker the router relays credential requests to; without one it has none.
+			t.Run("router", func(t *testing.T) {
+				if got := brokerReceived(t, "ui-token"); !strings.HasPrefix(got, "GET /v1/pending?approver=alice ") {
+					t.Errorf("the broker DISPATCH_AGENT_SECRETS_URL names received %q, want alice's pending list", got)
+				}
+				request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests?approver=me", nil), "alice")
+				response := httptest.NewRecorder()
+				routerFor(t, resolveWith(t, nil), routes.AppContextOptions{}).ServeHTTP(response, request)
+				if response.Code != http.StatusNotFound || errorCode(response) != "FEATURE_OFF" {
+					t.Errorf("unset: GET /api/v1/credential-requests answered %d %s, want 404 FEATURE_OFF", response.Code, response.Body.String())
+				}
+			})
 		},
 		"DISPATCH_AGENT_SECRETS_TOKEN": func(t *testing.T) {
 			broker := map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example"}
@@ -645,6 +775,12 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_TOKEN_FILE": missing}); boot.AgentSecretsToken != "" {
 				t.Errorf("no broker: AgentSecretsToken = %q", boot.AgentSecretsToken)
 			}
+			// The bearer the broker receives on the router's relay.
+			t.Run("router", func(t *testing.T) {
+				if got := brokerReceived(t, " ui-token "); !strings.HasSuffix(got, " Bearer ui-token") {
+					t.Errorf("the broker received %q, want Authorization Bearer ui-token", got)
+				}
+			})
 		},
 		"DISPATCH_WEB_DIST": func(t *testing.T) {
 			if dir, err := defaultWebDistDir(resolveWith(t, map[string]string{"DISPATCH_WEB_DIST": "/srv/dispatch/dist"}).WebDist); err != nil || dir != "/srv/dispatch/dist" {
@@ -656,6 +792,21 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("DISPATCH_DEV_SIGNIN=1: DevSignIn %t, %v", boot.DevSignIn, err)
 			}
 			refusedWith(t, map[string]string{"DISPATCH_DEV_SIGNIN": "yes"}, "DISPATCH_DEV_SIGNIN")
+			// The route the flag mounts: a sign-in as an allowlisted login sets its session
+			// cookie, and without the flag the route is not there.
+			t.Run("router", func(t *testing.T) {
+				for value, want := range map[string]int{"1": http.StatusFound, "": http.StatusNotFound} {
+					boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN": value}))
+					if err != nil {
+						t.Fatal(err)
+					}
+					response := devSignIn(t, boot, "alice")
+					cookieSet := slices.ContainsFunc(response.Result().Cookies(), func(cookie *http.Cookie) bool { return cookie.Name == "dsession" })
+					if response.Code != want || cookieSet != (want == http.StatusFound) {
+						t.Errorf("DISPATCH_DEV_SIGNIN=%q: dev sign-in answered %d %s (session cookie set: %t), want %d", value, response.Code, response.Body.String(), cookieSet, want)
+					}
+				}
+			})
 		},
 		"DISPATCH_TEST_HOOKS": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1"}); !boot.TestHooksEnabled {
@@ -664,6 +815,18 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "true"}); boot.TestHooksEnabled {
 				t.Error("DISPATCH_TEST_HOOKS=true: hooks on, want only 1 to mount them")
 			}
+			// The routes the flag mounts: the e2e harness's hook that drops every open event stream.
+			t.Run("router", func(t *testing.T) {
+				for value, want := range map[string]int{"1": http.StatusOK, "": http.StatusNotFound} {
+					request := httptest.NewRequest(http.MethodPost, "/api/v1/events/_test/disconnect", nil)
+					request.Header.Set("Authorization", "Bearer agent-token")
+					response := httptest.NewRecorder()
+					routerFor(t, resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": value}), routes.AppContextOptions{}).ServeHTTP(response, request)
+					if response.Code != want {
+						t.Errorf("DISPATCH_TEST_HOOKS=%q: POST /api/v1/events/_test/disconnect answered %d %s, want %d", value, response.Code, response.Body.String(), want)
+					}
+				}
+			})
 		},
 	}
 	for _, row := range settings {
