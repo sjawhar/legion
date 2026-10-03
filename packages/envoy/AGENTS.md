@@ -1928,10 +1928,11 @@ statement moves the request rows and writes each one's audit row and its record'
 `ApplyDecision` decides a pending record on the deciding human's login — approve
 mints the grant while the requesting enrollment is still live, deny denies it — re-deriving the
 record's id, refusing any login but the record's approver whatever the record's state
-(`record.ErrNotApprover`, `403 NOT_APPROVER`), and any login the current policy would not have
-approve one of the request's names (`currentPolicyAdmits`, the same error: once a shared
-human-tier secret is a person's, a request waiting on `anyone` is that person's alone, and one
-waiting on a person for a secret now another's is no one's), re-verifying its embedded request
+(`record.ErrNotApprover`, `403 NOT_APPROVER`), and an approval by any login the current policy
+would not have approve one of the request's names (`currentPolicyAdmits`, the same error: once a
+shared human-tier secret is a person's, a request waiting on `anyone` is that person's alone to
+approve, and one waiting on a person for a secret now another's is no one's; a denial releases
+nothing, so the record's approver may still deny either), re-verifying its embedded request
 object, and writing the decision event (which records the deciding login), the request transition
 and the audit row in one transaction; a non-pending record, and one past its expiry that the
 sweeper has not yet expired, is `409 RECORD_TERMINAL` for its approver (a duplicate or late

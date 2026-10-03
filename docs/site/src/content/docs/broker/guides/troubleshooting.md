@@ -42,7 +42,7 @@ generated from the code, lists every code.
 
 | Message | Cause | Fix |
 | --- | --- | --- |
-| `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver the request names, or the secret's owner changed while it waited ([what an owner change does](/legion/broker/concepts/#approvals)). | The named approver decides it; after an owner change, the new owner, if the request waited on anyone. |
+| `only the record's approver may decide it` (`NOT_APPROVER`) | You are not the approver the request names, or you approved it after the secret's owner changed while it waited ([what an owner change does](/legion/broker/concepts/#approvals)). | The named approver decides it. After an owner change, the new owner approves it if the request waited on anyone, and the approver it names can still deny it. |
 | `request is already decided` or `this machine login has already been decided` (`RECORD_TERMINAL`) | It was decided already, or the session that asked has ended. | Nothing to do. |
 | `… expired before its approver acted on it` (`RECORD_TERMINAL`) | It waited past its expiry: [a request's](/legion/broker/concepts/#approvals) or [a machine login's](/legion/broker/concepts/#machine-login). | The agent or the machine asks again. |
 | `no pending machine login has this code` (`NO_SUCH_CODE`) | The code is mistyped, already decided, or expired. | Check the code on the machine's terminal; start a new login if it expired. |

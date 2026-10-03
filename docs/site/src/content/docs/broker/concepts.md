@@ -171,11 +171,12 @@ approved before it:
   the secret holds by then, and the session's next request is decided under the new tags. A grant
   its owner approved keeps working when the secret becomes shared, since anyone may approve a
   shared human-tier secret.
-- A pending request is decided by whoever the tags name now. One waiting on anyone for a secret
-  that has become a person's is that person's alone to decide; anyone else is refused
+- A pending request is approved by whoever the tags name now. One waiting on anyone for a secret
+  that has become a person's is that person's alone to approve; anyone else's approval is refused
   `NOT_APPROVER`, the requester's own operator included. One waiting on a person for a secret that
-  has become someone else's can be decided by no one: it expires, or its session cancels it
-  (`agent-secrets cancel`) and asks again.
+  has become someone else's can be approved by no one. A denial releases nothing, so the approver
+  a request waits on can still deny it, which takes it off the pending list; otherwise it expires,
+  or its session cancels it (`agent-secrets cancel`) and asks again.
 
 A record is decided once. A second click, a concurrent one, or one after the record expired gets
 `RECORD_TERMINAL`. A pending request nobody decides expires after 12 hours, a fixed time rather than

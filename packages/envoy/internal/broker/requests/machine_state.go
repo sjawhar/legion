@@ -401,15 +401,16 @@ func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]store.End
 // ApplyDecision decides a pending agent_secret record by login, the Dispatch login of the human
 // deciding it. approve=true mints the grant while the requesting enrollment is still live;
 // otherwise the request is denied. It re-reads the record body, recomputes its id, refuses any
-// login but the record's own approver (record.ErrNotApprover) whatever the record's state, and
-// any login the current policy would not have approve one of the request's names
-// (currentPolicyAdmits), re-verifies the embedded request object, and writes the event (naming
-// that login), the request transition and the audit row in one transaction. For its approver, a
-// record that expired undecided — expired by the sweeper, or past its pending_expires_at before
-// the sweeper got to it — is ErrExpired, and any other non-pending record ErrTerminal: a duplicate
-// or late decision changes nothing. The enrollment row is locked before the request row — the
-// same order every other enrollment-then-request writer in this package takes them in, so none of
-// them deadlock.
+// login but the record's own approver (record.ErrNotApprover) whatever the record's state, and an
+// approval by any login the current policy would not have approve one of the request's names
+// (currentPolicyAdmits). A denial releases nothing, so the record's approver may still deny a
+// request an owner change left them unable to approve. It re-verifies the embedded request
+// object, and writes the event (naming that login), the request transition and the audit row in
+// one transaction. For its approver, a record that expired undecided — expired by the sweeper, or
+// past its pending_expires_at before the sweeper got to it — is ErrExpired, and any other
+// non-pending record ErrTerminal: a duplicate or late decision changes nothing. The enrollment row
+// is locked before the request row — the same order every other enrollment-then-request writer in
+// this package takes them in, so none of them deadlock.
 func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bool, login string) (Decision, error) {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -444,8 +445,10 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	if err != nil {
 		return Decision{}, err
 	}
-	if err := m.currentPolicyAdmits(ctx, tx, requestID, enr.requester(), login); err != nil {
-		return Decision{}, err
+	if approve {
+		if err := m.currentPolicyAdmits(ctx, tx, requestID, enr.requester(), login); err != nil {
+			return Decision{}, err
+		}
 	}
 	switch {
 	case state == "expired" || state == "pending" && expired:
@@ -491,13 +494,15 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	return Decision{RequestID: requestID, State: next, GrantID: grantID}, tx.Commit(ctx)
 }
 
-// currentPolicyAdmits refuses login a decision on request requestID when the current policy wants
+// currentPolicyAdmits refuses login an approval of request requestID when the current policy wants
 // one of its names approved by someone else (record.MayDecide), since a change of owner since the
-// request was made moves who decides it: a request waiting on anyone for a secret that is now a
-// person's is that person's alone, and one waiting on a person for a secret that is now another's
-// is no one's (it expires, or its session cancels it and asks again). A name the current policy
-// grants at once, denies or no longer serves names no approver, so it leaves the decision to the
-// record's approver; Values refuses a grant of the last two at its first read.
+// request was made moves who may approve it: a request waiting on anyone for a secret that is now
+// a person's is that person's alone to approve, and one waiting on a person for a secret that is
+// now another's is no one's to approve (its record's approver may still deny it; otherwise it
+// expires, or its session cancels it and asks again). A denial releases nothing, so ApplyDecision
+// does not ask. A name the current policy grants at once, denies or no longer serves names no
+// approver, so it leaves the approval to the record's approver; Values refuses a grant of the last
+// two at its first read.
 func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID string, requester policy.Requester, login string) error {
 	names, err := grantedSecrets(ctx, tx, requestID)
 	if err != nil {

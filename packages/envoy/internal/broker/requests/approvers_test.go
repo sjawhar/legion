@@ -70,45 +70,52 @@ func TestAnApprovalStopsWhenItsSecretChangesHands(t *testing.T) {
 	}
 }
 
-// TestAPendingRequestIsDecidedByWhomTheTagsNameNow pins who decides a request whose secret changed
-// hands while it waited. One waiting on anyone for a shared human-tier secret that is now alice's
-// is refused to its requester's own operator and to any other person, approve and deny alike, and
-// stays pending until alice, whose approval releases the rotated value. One waiting on alice for a
-// secret that is now bob's is refused to both of them.
-func TestAPendingRequestIsDecidedByWhomTheTagsNameNow(t *testing.T) {
+// TestAPendingRequestIsApprovedByWhomTheTagsNameNow pins who decides a request whose secret
+// changed hands while it waited. Approving it follows the current tags: one waiting on anyone for
+// a shared human-tier secret that is now alice's is refused to its requester's own operator and to
+// any other person, and stays pending until alice, whose approval releases the rotated value; one
+// waiting on alice for a secret that is now bob's is refused to both of them. Denying it follows
+// the record, since a denial releases nothing: the approver a stranded request waits on can clear
+// it (any person for one waiting on anyone, alice for one waiting on her), and bob, its secret's
+// new owner but not that approver, cannot.
+func TestAPendingRequestIsApprovedByWhomTheTagsNameNow(t *testing.T) {
 	m, _, _, _ := newFixture(t)
 	ctx := context.Background()
 	enr, key := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
-	shared, err := m.Create(ctx, enr, signRequest(t, m, key, "need the shared one", "SHARED_KEY"), "")
-	if err != nil || shared.RecordID == nil {
-		t.Fatalf("Create(SHARED_KEY) = %+v, %v, want pending", shared, err)
+	otherEnr, otherKey := newEnrollment(t, m.Store, "box", "box-mallory-other-"+t.Name(), new(mallory), nil)
+	pending := func(enrollment string, key *ecdsa.PrivateKey, name string) Request {
+		t.Helper()
+		req, err := m.Create(ctx, enrollment, signRequest(t, m, key, "need "+name, name), "")
+		if err != nil || req.RecordID == nil {
+			t.Fatalf("Create(%s) = %+v, %v, want pending", name, req, err)
+		}
+		return req
 	}
-	alices, err := m.Create(ctx, enr, signRequest(t, m, key, "need alice's", "ALICE_KEY"), "")
-	if err != nil || alices.RecordID == nil {
-		t.Fatalf("Create(ALICE_KEY) = %+v, %v, want pending", alices, err)
-	}
+	shared := pending(enr, key, "SHARED_KEY")
+	strandedShared := pending(otherEnr, otherKey, "SHARED_KEY")
+	alices := pending(enr, key, "ALICE_KEY")
 
 	retag(t, m,
 		policytest.Secret("SHARED_KEY", otherPerson, policy.TierHuman, "alice-owned-v2"),
 		policytest.Secret("ALICE_KEY", bob, policy.TierAgent, "bob-owned-v2"))
 	for _, c := range []struct {
-		recordID string
-		logins   []string
+		req     Request
+		approve bool
+		login   string
 	}{
-		{*shared.RecordID, []string{mallory, "carol@example.com"}},
-		{*alices.RecordID, []string{otherPerson, bob}},
+		{shared, true, mallory},
+		{shared, true, "carol@example.com"},
+		{alices, true, otherPerson},
+		{alices, true, bob},
+		{alices, false, bob},
 	} {
-		for _, login := range c.logins {
-			for _, approve := range []bool{true, false} {
-				if dec, err := m.ApplyDecision(ctx, c.recordID, approve, login); !errors.Is(err, record.ErrNotApprover) {
-					t.Fatalf("ApplyDecision(approve=%v, %s) after the handover = %+v, %v; want record.ErrNotApprover", approve, login, dec, err)
-				}
-			}
+		if dec, err := m.ApplyDecision(ctx, *c.req.RecordID, c.approve, c.login); !errors.Is(err, record.ErrNotApprover) {
+			t.Errorf("ApplyDecision(%s, approve=%v, %s) after the handover = %+v, %v; want record.ErrNotApprover", c.req.Secrets[0].Name, c.approve, c.login, dec, err)
 		}
 	}
-	for _, id := range []string{shared.ID, alices.ID} {
-		if got, err := m.Get(ctx, id); err != nil || got.State != "pending" {
-			t.Fatalf("Get(%s) after refused decisions = %+v, %v; want pending", id, got, err)
+	for _, req := range []Request{shared, strandedShared, alices} {
+		if got, err := m.Get(ctx, req.ID); err != nil || got.State != "pending" {
+			t.Fatalf("Get(%s) after refused decisions = %+v, %v; want pending", req.ID, got, err)
 		}
 	}
 
@@ -118,6 +125,18 @@ func TestAPendingRequestIsDecidedByWhomTheTagsNameNow(t *testing.T) {
 	}
 	if values, _, err := m.Values(ctx, dec.GrantID, enr); err != nil || values["SHARED_KEY"] != "alice-owned-v2" {
 		t.Fatalf("Values after alice approved = %v, %v; want SHARED_KEY=alice-owned-v2", values, err)
+	}
+	for _, c := range []struct {
+		who   string
+		req   Request
+		login string
+	}{
+		{"carol, on a request waiting on anyone", strandedShared, "carol@example.com"},
+		{"alice, on a request waiting on her", alices, otherPerson},
+	} {
+		if dec, err := m.ApplyDecision(ctx, *c.req.RecordID, false, c.login); err != nil || dec.State != "denied" {
+			t.Errorf("deny by %s after the handover = %+v, %v; want denied", c.who, dec, err)
+		}
 	}
 }
 
