@@ -46,7 +46,8 @@ import { harnessPorts } from "./harness-ports";
 
 export const baseUrl =
   process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${harnessPorts.dispatch.port}`;
-const dashboardOrigin = new URL(baseUrl).origin;
+/** The origin the server compares every cookie-authenticated write against (enforceCookieOrigin). */
+export const dashboardOrigin = new URL(baseUrl).origin;
 // A deployed server has its own agent token; the local harness pins `e2e-token` in
 // e2e/run-server.sh, so an E2E_AGENT_TOKEN left in the shell from a deployed run would only
 // make every bearer-seeded call 401 against it.

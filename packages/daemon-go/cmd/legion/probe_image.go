@@ -49,7 +49,7 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // be a user's, and the line before the OK line names that user's public key (bootprobe.NATSUserLine),
 // never the seed, for the daemon to compare with its own.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlags("probe-image", stderr)
+	flags := newFlags("probe-image", "usage: legion probe-image --plugin-root <dir> [flags]", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
 	contract := flags.String("daemon-api-version", strconv.Itoa(api.DaemonAPIVersion),
 		"the daemon API contract the image's pi-legion-envoy must declare (the daemon's probe Sandbox passes its own)")
@@ -58,8 +58,8 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files NAME=contents the probes' Oh My Pi gets, as a worker's shim exports them")
 	skipAgentModels := flags.Bool("skip-agent-models", false, "leave the prompt-named task agents' models unresolved (the image build's probe)")
 	roleReferences := flags.String("role-references", "", "the task agents and skills the daemon's own role prompts name, resolved in place of the image's roles")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
 	}
 	if flags.NArg() > 0 {
 		fmt.Fprintf(stderr, "legion probe-image: unexpected argument %q\n", flags.Arg(0))

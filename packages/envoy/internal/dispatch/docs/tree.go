@@ -12,8 +12,62 @@ import (
 const fragmentName = "prosemirror"
 const marksMapName = "marks"
 
-var ErrInvalidMarkdown = errors.New("markdown is not a Proof document")
-var ErrDocSchema = errors.New("document is outside the Proof schema")
+var (
+	ErrInvalidMarkdown = errors.New("markdown is not a Proof document")
+	ErrDocSchema       = errors.New("document is outside the Proof schema")
+	// ErrDocOutsideSchema is the tree a document holds - not one an operation just produced -
+	// refused by the Proof schema's reader or renderer. A replacement from markdown repairs it, so
+	// every route answers it alike (OutsideSchemaError).
+	ErrDocOutsideSchema = errors.New("document is outside the Proof schema; replace the document from markdown to repair it")
+	// ErrDocumentUnloadable is a document whose stored history does not decode, so nothing can read
+	// or open it. A rebuild from its latest saved version restores it (RebuildDocument).
+	ErrDocumentUnloadable = errors.New("the document's stored history cannot load; rebuild it from its latest saved version")
+	ErrDocumentLive       = errors.New("document is live")
+	ErrDocumentLoads      = errors.New("this document loads; nothing to rebuild — if it is outside the schema, replace it from markdown to repair it")
+)
+
+// OutsideSchemaError is ErrDocOutsideSchema with the refusal that names what is wrong. treeOf and
+// documentMarkdown classify a document's tree by it where they read or render it, so an operation
+// that starts from that tree - a read, an edit, a version - fails with it whatever route called
+// the operation and whatever the route wrapped it in, and its message is the same on every route.
+type OutsideSchemaError struct{ Cause error }
+
+func (e *OutsideSchemaError) Error() string {
+	return ErrDocOutsideSchema.Error() + ": " + e.Cause.Error()
+}
+
+// Is makes it ErrDocOutsideSchema and ErrDocSchema both: a check that a tree is outside the
+// schema holds whoever classified it.
+func (e *OutsideSchemaError) Is(target error) bool {
+	return target == ErrDocOutsideSchema || target == ErrDocSchema
+}
+
+func (e *OutsideSchemaError) Unwrap() error { return e.Cause }
+
+// documentSchemaError classifies err from reading, rendering or walking the tree a document holds -
+// a walk inside a write's transaction included, since a peer can have deepened that tree past the
+// schema's depth bound after the write read it: a schema refusal is an OutsideSchemaError, and any
+// other error is returned as it is.
+func documentSchemaError(err error) error {
+	if err == nil || errors.Is(err, ErrDocOutsideSchema) {
+		return err
+	}
+	if errors.Is(err, ErrDocSchema) || errors.Is(err, pmdoc.ErrSchema) {
+		return &OutsideSchemaError{Cause: err}
+	}
+	return err
+}
+
+// producedSchemaError is err from reading or rendering a tree an operation has just written: a
+// schema refusal there is the operation's fault, not the stored document's, so it is a plain
+// ErrDocSchema that no route answers as a repair.
+func producedSchemaError(err error) error {
+	var outside *OutsideSchemaError
+	if errors.As(err, &outside) {
+		return fmt.Errorf("%w: the write left it outside: %v", ErrDocSchema, outside.Cause)
+	}
+	return err
+}
 
 // ErrDocumentTooLarge is a document whose tree encodes to more items than one document update can
 // store (ygo's cap of 1,048,576, maxUpdateItems): more formatted spans than any real document
@@ -71,19 +125,50 @@ func asUploaded(tree *pmdoc.Node) *pmdoc.Node {
 	return out
 }
 
+// encodeDocumentTree writes tree into a fresh document and returns the first durable update for
+// callers that create or rebuild a document outside a live room.
+func encodeDocumentTree(tree *pmdoc.Node) ([]byte, error) {
+	doc := crdt.New()
+	fragment := doc.GetXmlFragment(fragmentName)
+	doc.GetMap(marksMapName)
+	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
+		return pmdoc.Update(transaction, fragment, tree)
+	}); err != nil {
+		return nil, err
+	}
+	return crdt.EncodeStateAsUpdateV1(doc, nil), nil
+}
+
 // errDocUnloaded is returned for a room whose live document is not resident (evicted, or never
 // warmed). Callers that can reload do so; nothing dereferences a nil document.
 var errDocUnloaded = errors.New("document is not loaded")
 
+// treeOf reads the tree doc holds. A tree outside the Proof schema is an OutsideSchemaError: an
+// operation that reads a tree it has just written takes that back with producedSchemaError.
 func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 	if doc == nil {
 		return nil, errDocUnloaded
 	}
 	tree, err := pmdoc.Read(doc.GetXmlFragment(fragmentName))
 	if err != nil {
-		return nil, docSchema(err)
+		return nil, documentSchemaError(err)
 	}
 	return tree, nil
+}
+
+// lockedTreeOf reads doc's tree from a copy of its state taken under the document's lock
+// (snapshotDocument), so the tree is the document as it stood at one moment. It opens no
+// transaction on doc, since ygo hands the room's persistence an update for every transaction it
+// commits, even one that only reads.
+func lockedTreeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
+	if doc == nil {
+		return nil, errDocUnloaded
+	}
+	copied, err := snapshotDocument(doc)
+	if err != nil {
+		return nil, err
+	}
+	return treeOf(copied)
 }
 
 func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmdoc.Node, error) {
@@ -92,29 +177,52 @@ func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmd
 	}
 	tree, err := pmdoc.ReadInTransaction(txn, fragment)
 	if err != nil {
-		return nil, docSchema(err)
+		return nil, documentSchemaError(err)
 	}
 	return tree, nil
+}
+
+// rewriteLive rewrites doc's tree in one transaction tagged with origin. edit is handed the tree as
+// it stands, read inside that transaction, which holds the document's lock, and reports whether it
+// changed the tree; only a changed tree is written. A repair computed on a tree read before the
+// transaction and written back would revert whatever another writer wrote after that read
+// (LEGION-479). It returns the tree as the transaction left it and whether edit changed it.
+func rewriteLive(doc *crdt.Doc, origin any, edit func(live *pmdoc.Node) bool) (*pmdoc.Node, bool, error) {
+	fragment := doc.GetXmlFragment(fragmentName)
+	var live *pmdoc.Node
+	changed := false
+	err := doc.TransactE(func(transaction *crdt.Transaction) error {
+		var readErr error
+		if live, readErr = treeOfTransaction(transaction, fragment); readErr != nil {
+			return readErr
+		}
+		if changed = edit(live); !changed {
+			return nil
+		}
+		return pmdoc.Update(transaction, fragment, live)
+	}, origin)
+	if err != nil {
+		return nil, false, err
+	}
+	return live, changed, nil
 }
 
 func renderTree(tree *pmdoc.Node) (string, error) {
 	markdown, err := pmdoc.Render(tree)
 	if err != nil {
-		return "", docSchema(err)
+		if errors.Is(err, pmdoc.ErrSchema) {
+			return "", fmt.Errorf("%w: %v", ErrDocSchema, err)
+		}
+		return "", err
 	}
 	return markdown, nil
 }
 
-// docSchema is err with pmdoc's refusal of what a live document holds (pmdoc.ErrSchema) told as
-// that document outside the schema (ErrDocSchema), which the API serves as DOC_SCHEMA: neither the
-// caller's input nor an internal fault. Every read and walk of a live tree through pmdoc tells its
-// refusal this way, including a walk inside a write's transaction, which a peer can have deepened
-// past the schema's depth bound since the write read the tree.
-func docSchema(err error) error {
-	if errors.Is(err, pmdoc.ErrSchema) {
-		return fmt.Errorf("%w: %v", ErrDocSchema, err)
-	}
-	return err
+// documentMarkdown renders a tree treeOf read from a document, so a tree only the renderer refuses
+// is that document's OutsideSchemaError, as treeOf makes one the reader refuses.
+func documentMarkdown(tree *pmdoc.Node) (string, error) {
+	markdown, err := pmdoc.Render(tree)
+	return markdown, documentSchemaError(err)
 }
 
 // renderDocument is what doc renders now, or the error that stopped it being read or rendered.
@@ -123,15 +231,13 @@ func renderDocument(doc *crdt.Doc) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return renderTree(tree)
+	return documentMarkdown(tree)
 }
 
 // snapshotDocument copies doc's state as of one moment. Encoding it takes the document's lock, which
 // every peer update and service write holds while it applies, so the copy is never a tree half
 // way through a write - which a direct walk of a resident room's live tree can read, since the
-// walk takes no lock (YXmlFragment.Children, crdt/yxml.go:301 in the pinned ygo fork) - and
-// nothing writes the copy. It opens no transaction on doc: ygo hands the room's persistence an
-// update for every transaction it commits, even one that only reads.
+// walk takes no lock (reearth/ygo v1.49.5, crdt/yxml.go:195-211) - and nothing writes the copy.
 func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 	snapshot := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(snapshot, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
@@ -140,14 +246,17 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 	return snapshot, nil
 }
 
-// newDocumentCopy is an empty document to decode a copy of a room's whole state into. Decoding a
-// whole document parks each item whose parent ygo cannot place yet - one under a collected
-// container, and every later item of its client behind it - until the end of the update, and a
-// deleted chain a peer nested past 100,000 levels parks more than ygo's default pending cap allows
-// (crdt/doc.go:100 in the pinned fork), which refuses the copy of a room the room itself holds
-// without complaint. That cap guards a room against a peer's update; a copy is the room's own
-// state, so it parks up to the most items one update may carry (maxUpdateItems), which the
-// decoder enforces anyway (crdt/update.go:519).
+// newDocumentCopy is a document to decode a document's state into: a snapshot or a write's fork of
+// a room this server holds, the document's stored history (loadDocument, validateUpdate), which
+// the room itself decodes with the same queue (New sets Server.MaxPendingItems), or one update the
+// store appends (appendUpdate, AppendUpdateTx), decoded alone, so that every item of it leaning on
+// one outside it parks. ygo's decoder parks each later item of a client behind one whose parent it
+// cannot place yet - a container in a later client's group, one outside the update it decodes, or
+// one its garbage collection emptied when a peer deleted it - and refuses the whole update once
+// 100,000 are parked, its default (crdt.WithMaxPendingItems; LEGION-502), so a copy, a load or an
+// append of a document whose deleted subtree or one client's writes run past that fails where the
+// room that holds it serves. No update ygo decodes carries more than maxUpdateItems items, so a
+// queue that long holds every item one update can park.
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems))...)
 }

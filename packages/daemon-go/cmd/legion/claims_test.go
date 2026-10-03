@@ -754,7 +754,7 @@ func TestClaimsWithoutAKnownSubcommandIsAUsageError(t *testing.T) {
 		args []string
 		want string
 	}{
-		{nil, "usage: legion claims spawn|deliver|suspend|resume|stop|close|list [flags]"},
+		{nil, subcommandUsage("claims", claimsCommands)},
 		{[]string{"frobnicate"}, `legion claims: unknown subcommand "frobnicate"`},
 	} {
 		var out, errb bytes.Buffer

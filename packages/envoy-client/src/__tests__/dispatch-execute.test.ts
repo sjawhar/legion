@@ -3709,9 +3709,9 @@ describe("executeDispatchTool", () => {
     expect(dispatchFollowNotice(result.details)).toBeNull();
   });
 
-  // A request names the latest version, and a new version retracts it: a request made over an
-  // open block goes stale the moment the human answers it, and an answer reaches a version only
-  // when the document settles or the agent folds it into the text.
+  // A request names the latest version, and a new version moves it there and back to its agent: a
+  // request made over an open block leaves the human's turn the moment they answer it, and an
+  // answer reaches a version only when the document settles or the agent folds it into the text.
   describe("dispatch_request_approval with decision blocks in the document", () => {
     const opening = (block: string, state: string) =>
       `:::ask{#${block} urgency="med" multiple="false" state="${state}"}\nQuestion of ${block}?\n:::`;
@@ -3796,7 +3796,7 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n").slice(0, 5)).toEqual([
-        "dispatch_request_approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, which would retract this request.",
+        "dispatch_request_approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, which would move this request to that version and leave it waiting on you.",
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
         "- block b-2, whose ask Dispatch has not opened yet",
         "- block b-3, which version 4 does not hold yet",
@@ -3838,7 +3838,7 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n").slice(0, 2)).toEqual([
-        "dispatch_request_approval was not called: spec.md (version 4) has 1 open decision block. Answering one writes a new version, which would retract this request.",
+        "dispatch_request_approval was not called: spec.md (version 4) has 1 open decision block. Answering one writes a new version, which would move this request to that version and leave it waiting on you.",
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
       ]);
       expect(posts).toEqual([]);
@@ -4059,7 +4059,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      "# Spec\n\nApproval: approved v2 by sjawhar, edited since (now v4) - request approval again"
+      "# Spec\n\nApproval: approved v2 by sjawhar, edited since (now v4) - request approval again once the human has agreed to every point in this version"
     );
   });
 

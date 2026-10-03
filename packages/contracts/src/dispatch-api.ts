@@ -515,7 +515,11 @@ export interface AnchorPosition {
   /** Why `anchor_block` is absent although the anchor names a block: the read could not read its
    *  document, named by the code the API answers that error with elsewhere. The read itself still
    *  answers. */
-  readonly anchor_block_error?: "DOC_SERVICE_UNAVAILABLE" | "DOC_SCHEMA" | "INTERNAL";
+  readonly anchor_block_error?:
+    | "DOC_SERVICE_UNAVAILABLE"
+    | "DOC_SCHEMA"
+    | "DOCUMENT_UNLOADABLE"
+    | "INTERNAL";
 }
 
 /** An opaque SHA-256 token for one stable block's full Proof state, including inline marks. */
@@ -1615,7 +1619,7 @@ export type UserState = Record<string, UserIssueState>;
 /** One viewer's state for one agent's conversation. Exchanges whose newest message is at or
  * before `cleared_before` (RFC3339, the viewer's Clear) are hidden for that viewer only;
  * `read_through` is how far the viewer has read; `unread_replies` counts the session's replies
- * to messages this viewer sent that are newer than both. */
+ * to messages this viewer sent that are newer than both and not read by id (`read_replies`). */
 export interface UserAgentState {
   readonly cleared_before?: string;
   readonly read_through?: string;
@@ -1624,11 +1628,14 @@ export interface UserAgentState {
   readonly unread_replies?: number;
 }
 
-/** `PUT /api/v1/me/agents/{session_id}/state`: a Clear, a read mark, or both. `read_through`
- * only moves forward; the response is the session's whole `UserAgentState`. */
+/** `PUT /api/v1/me/agents/{session_id}/state`: a Clear, a read mark, replies read by id, or any
+ * of them together. `read_through` only moves forward and covers every reply up to it;
+ * `read_replies` names the session's own messages and covers those alone, for a view that shows
+ * only some of a session's replies. The response is the session's whole `UserAgentState`. */
 export interface UserAgentStateInput {
   readonly cleared_before?: string;
   readonly read_through?: string;
+  readonly read_replies?: readonly string[];
 }
 
 /** `GET /api/v1/me/agents/state`: keyed by session ID. */
@@ -1920,6 +1927,32 @@ export interface ArtifactText {
   readonly version: number | null;
   /** Opaque SHA-256 token for the full Proof document state, including inline marks, when served by a precondition-aware Dispatch server. */
   readonly token?: string;
+}
+
+/**
+ * The close code the document websocket (`/ws/doc/{room}`) refuses a room with when the tree it
+ * holds is outside the Proof schema: it completes the upgrade and closes with this code, and
+ * `DOCUMENT_SCHEMA_CLOSE_REASON`, before any sync, so a browser editor never receives a tree it
+ * would normalize and write back. It is in the private 4000-4999 range beside Hocuspocus's own 4401
+ * and 4403, and the dashboard reads it as the document's repair state, never as a dropped
+ * connection to retry. Generated into Go as `contracts.DocumentSchemaCloseCode`.
+ */
+export const DOCUMENT_SCHEMA_CLOSE_CODE = 4409;
+
+/** The reason the document websocket closes with `DOCUMENT_SCHEMA_CLOSE_CODE`: the code reads of
+ *  that document answer (`409 DOC_SCHEMA`). Generated into Go as
+ *  `contracts.DocumentSchemaCloseReason`. */
+export const DOCUMENT_SCHEMA_CLOSE_REASON = "DOC_SCHEMA";
+
+export interface ArtifactRebuildReport {
+  readonly head: number;
+  readonly removed_checkpoints: number;
+  readonly removed_snapshots: number;
+  readonly removed_updates: number;
+  /** The version whose markdown the rebuilt document holds: its latest saved version, or the
+   *  version a rebuild from supplied markdown that changed the document wrote. */
+  readonly source_version: number;
+  readonly validation_error: string;
 }
 
 export interface ArtifactVersionText extends Version {
