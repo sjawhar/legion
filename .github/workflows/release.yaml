@@ -18,7 +18,6 @@ on:
       - "packages/envoy/internal/dispatch/pmdoc/gen/package.json"
       - "docs/site/package.json"
       - "packages/daemon/**"
-      - "packages/daemon/**"
       - "go.work"
       - "go.work.sum"
       - "packages/envoy/**"

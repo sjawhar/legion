@@ -60,7 +60,6 @@ on:
       - packages/contracts/**
       - packages/workspace/**
       - skills/**
-      - packages/daemon/**
       - go.work
       - go.work.sum
       - packages/envoy/**

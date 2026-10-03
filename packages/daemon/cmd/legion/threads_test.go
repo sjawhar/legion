@@ -329,8 +329,7 @@ if [ -e "$dir/fail" ]; then
   echo 'HTTP 401: Bad credentials (https://api.github.com/graphql)' >&2
   exit 4
 fi
-printf '%s' '` + strings.TrimSuffix(ghNotice, "\n") + `' >&2
-echo >&2
+printf %s '` + ghNotice + `' >&2
 if grep -q resolveReviewThread "$dir/request-$n"; then
   echo '{"data":{"resolveReviewThread":{"thread":{"id":"resolved","isResolved":true}}}}'
 else
