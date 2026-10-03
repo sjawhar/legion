@@ -25,9 +25,10 @@ import (
 )
 
 // noCredentialMsg is the exact instruction returned whenever the helper has no machine
-// credential to authenticate the launcher routes with: never having logged in, and having had
-// its credential cleared by a broker 401 LAUNCHER_INVALID (clearOnInvalid). It never
-// auto-relogins; a login is a human ceremony.
+// credential to authenticate the launcher routes with: never having logged in, and having dropped
+// its credential (drop), because the broker refused it with 401 LAUNCHER_INVALID (clearOnInvalid)
+// or it reached the expiry the broker named (watchExpiry). It never auto-relogins; a login is a
+// human ceremony.
 const noCredentialMsg = "no machine credential; run: agent-secrets launcher login"
 
 var errNoCredential = errors.New(noCredentialMsg)

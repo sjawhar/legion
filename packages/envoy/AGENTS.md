@@ -1613,22 +1613,30 @@ expired or revoked credential and for any launcher proof it cannot verify, such 
 an `AGENT_SECRETS_URL` that is not the broker's public URL) or because it reaches the expiry the
 broker named: from then until a login starts or settles, the helper reports every state but
 `pending` as `expired` (`login_state`), the word the dotfiles launcher gate matches, so an older
-client exits 1 on it too, and stderr says the credential reached its expiry or the broker refused
-it when the helper reports that (`login_refused`); a helper from before that field gets the plain
-"the last machine login is expired". A re-login pending at the refusal reports its own outcome
-once it settles, so its `launcher login` prints `denied` for a denial. The helper logs every change
-of the credential: `machine login issued` (credential id, its `expires_at`, and the operator the
-login was signed with) when a login installs one, a WARN that it expires soon a day before its
-expiry (at once when less is left), and at ERROR `launcher credential expired; cleared` or
-`launcher credential refused; cleared` (credential id, the expiry or the broker's code) when it
-drops it; a broker that names no expiry gets a WARN that the helper cannot warn ahead. While it
-holds none, every enrollment attempt (and every revoke a re-pinned or lapsed session needs before
-it enrolls) logs at ERROR `session cannot enroll` with `why`: no login since the start (a restart
-discards the credential), a login awaiting approval, a denied or unapproved login, or a credential
-dropped. SIGINT or SIGTERM, from systemd or anything else, stops the helper with exit 0 after a
-WARN `agent-secrets-helper stopping on a signal` naming the signal, the registered sessions and
-whether it held a launcher credential; the dotfiles unit restarts it unless systemd itself stopped
-it (`Restart=always`).
+client exits 1 on it too, with `login_refused` and the cause (`credential_dropped`). Stderr says
+why the helper holds no credential in the words its journal uses for the same state
+(`helper.NoCredentialReason`): a login awaiting approval, the cause it dropped the credential for,
+a broker refusal on a helper from before `credential_dropped` (which sets `login_refused` only for
+one), a denied login, a login that expired before anyone approved it, or no login since the
+helper started. A re-login pending at the drop reports its own outcome once it settles, so its
+`launcher login` prints `denied` for a denial. The helper logs every change of the credential:
+`machine login issued` (credential id, its `expires_at`, and the operator the login was signed
+with) when a login installs one, a WARN that it expires soon a day before its expiry (at once when
+less is left), and one ERROR when it drops it, `<cause>; cleared: no session can enroll until a
+human approves a new machine login`, the cause being `the launcher credential reached its expiry`
+(with the expiry) or `the broker refused the launcher credential (…)` (with the broker's code); a
+broker that names no expiry gets a WARN that the helper cannot warn ahead. A refusal of a
+credential a newer login has already replaced drops nothing, and the enrollment it failed retries
+at once with the new one after the ordinary `enroll failed; retrying` WARN. While it holds none,
+every enrollment attempt, a session's or an `enroll-box`'s (and every revoke a re-pinned or lapsed
+session needs before it enrolls), logs at ERROR `session cannot enroll` with that `why`; an
+attempt that failed for want of a credential a login has installed since logs the WARN instead.
+SIGINT or SIGTERM, from systemd or anything else, stops the helper with exit 0 after a WARN
+`agent-secrets-helper stopping on a signal` naming the signal, how many sessions it had
+registered (`sessions`) and whether it held a launcher credential (`launcher_credential`); the
+dotfiles unit restarts it unless systemd itself stopped it (`Restart=always`). The helper writes
+these lines to stderr as slog text, so journald stores the ERROR lines at priority 6 (info), and
+`journalctl -p err` does not list them.
 `agent-secrets --version` and `agent-secrets-helper --version` print the release tag the release
 job stamps in (`internal/buildversion`), `devel` for any other build, and the helper's startup
 line (`agent-secrets-helper listening`) carries the same version.
