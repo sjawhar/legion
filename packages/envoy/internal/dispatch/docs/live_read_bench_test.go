@@ -61,8 +61,8 @@ func BenchmarkLiveDocumentRead(b *testing.B) {
 					variant = "keystroke"
 				}
 				b.Run(name+"/"+read.name+"/replica-"+variant, func(b *testing.B) {
-					reads := new(replica)
-					reads.catchUp("bench", live)
+					replica := &renderedReplica{}
+					replica.catchUp("bench", live)
 					for b.Loop() {
 						if typed {
 							b.StopTimer()
@@ -70,7 +70,7 @@ func BenchmarkLiveDocumentRead(b *testing.B) {
 							b.StartTimer()
 						}
 						var readErr error
-						if !reads.read("bench", live, func(doc *crdt.Doc) { _, readErr = read.read(doc) }) {
+						if !replica.read("bench", live, func(doc *crdt.Doc) { _, readErr = read.read(doc) }) {
 							b.Fatal("the replica has nothing to read")
 						}
 						if readErr != nil {
@@ -86,15 +86,15 @@ func BenchmarkLiveDocumentRead(b *testing.B) {
 			}
 		})
 		b.Run(name+"/lock/replica-keystroke", func(b *testing.B) {
-			reads := new(replica)
-			reads.catchUp("bench", live)
+			replica := &renderedReplica{}
+			replica.catchUp("bench", live)
 			for b.Loop() {
 				b.StopTimer()
 				typeOneCharacter(b, live)
 				b.StartTimer()
-				update := crdt.EncodeStateAsUpdateV1(live, reads.doc.StateVector())
+				update := crdt.EncodeStateAsUpdateV1(live, replica.doc.StateVector())
 				b.StopTimer()
-				if err := crdt.ApplyUpdateV1(reads.doc, update, nil); err != nil {
+				if err := crdt.ApplyUpdateV1(replica.doc, update, nil); err != nil {
 					b.Fatal(err)
 				}
 				b.StartTimer()
@@ -107,10 +107,10 @@ func BenchmarkLiveDocumentRead(b *testing.B) {
 // browsers while reads of the room run beside it: none, one every 250 ms, or one after another,
 // each through a copy (snapshotDocument, as main read) or through readLive. ygo broadcasts a
 // peer's update only once the room's update observer has returned, so a keystroke's latency here
-// is its transaction on the live document and the observer's catch-up of its own replica
-// (onLoadDocument). The observer's render is left out, so what is measured is the wait for what a
-// read holds that the keystroke needs: the live document's lock, for a copy's encode or a
-// catch-up's, and the processor time the read takes. 120 keystrokes 20 ms apart on a 524 KiB
+// is its transaction on the live document and the observer's catch-up of the replica under the
+// replica's lock (onLoadDocument). The observer's render is left out, so what is measured is the
+// wait for the two locks a read can hold: the live document's, for a copy's encode or a
+// catch-up's, and the replica's, for a read's walk. 120 keystrokes 20 ms apart on a 524 KiB
 // document; each run reports the latencies' percentiles in milliseconds.
 func BenchmarkKeystrokeBesideReads(b *testing.B) {
 	live := benchmarkLiveDocument(b, 524<<10)
@@ -155,8 +155,10 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 			}
 			b.Run(name, func(b *testing.B) {
 				service := &Service{}
-				observed := new(renderedReplica)
-				observed.catchUp("bench", live)
+				replica := service.keepReplica(live, nil)
+				replica.mu.Lock()
+				replica.catchUp("bench", live)
+				replica.mu.Unlock()
 				for b.Loop() {
 					stop := make(chan struct{})
 					var reading sync.WaitGroup
@@ -177,9 +179,9 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 						time.Sleep(20 * time.Millisecond)
 						start := time.Now()
 						live.Transact(func(txn *crdt.Transaction) { texts[0].Insert(txn, 0, "y", nil) })
-						observed.mu.Lock()
-						observed.catchUp("bench", live)
-						observed.mu.Unlock()
+						replica.lockForUpdate()
+						replica.catchUp("bench", live)
+						replica.mu.Unlock()
 						latencies = append(latencies, time.Since(start))
 					}
 					close(stop)
