@@ -73,6 +73,12 @@ screen showing an error (any visible `role="alert"`), the not-found page, an unc
 exception, or an empty state the shot does not allow. A refused shot fails the run, and what the
 page showed is kept in `.work/failed-shots/`.
 
+A shot, from its `prepare` to its capture, has two minutes, and so does a set's reset and seed. One
+that takes longer ends the run with a message naming the shot and what it was doing, and has the
+Dispatch server write every goroutine's stack to the end of `.work/harness/dispatch.log`, which
+shows what the server was waiting on. CI keeps `.work/failed-shots/` and `.work/harness/` from a
+failed run.
+
 ### A section's own set
 
 A section that needs screens of its own adds `docs/site/media/<section>/shots.config.ts`, whose

@@ -1,22 +1,11 @@
-import { Plugin, PluginKey, type Transaction } from "@milkdown/kit/prose/state";
+import { Plugin, type Transaction } from "@milkdown/kit/prose/state";
 import { AddMarkStep, RemoveMarkStep, type Step } from "@milkdown/kit/prose/transform";
-import type { EditorView } from "@milkdown/kit/prose/view";
 import { $prose } from "@milkdown/kit/utils";
 
 import { isRecordMarkRemoval, RECORD_MARK_TYPES } from "./record-mark-retype";
 
-/** The plugin's state: the record mark the open margin composer holds, or null. */
-const composerMarkKey = new PluginKey<string | null>("recordMarkHistory");
-
 /** Transactions this plugin kept out of history, for `appendTransaction` to recognise. */
 const stamped = new WeakSet<Transaction>();
-
-/** Tells the editor which record mark the open margin composer holds, or that none is open: a
- *  write that cuts into that mark - the reader refining the selection before closing the
- *  composer - is the composer's own and stays out of undo history. */
-export function setComposerMark(view: EditorView, markId: string | null): void {
-  view.dispatch(view.state.tr.setMeta(composerMarkKey, markId));
-}
 
 function isRecordMarkStep(step: Step): step is AddMarkStep | RemoveMarkStep {
   return (
@@ -42,22 +31,15 @@ function merged(spans: readonly Span[]): Span[] {
   return result;
 }
 
-/** Whether record-mark `steps` take nothing from another record: every span they remove is of
- *  the composer's own mark, or added back with the same type and id. Mark steps map no positions,
- *  so every step's range is in the same coordinates. */
-function takesNothing(
-  steps: readonly (AddMarkStep | RemoveMarkStep)[],
-  composerMarkId: string | null
-): boolean {
+/** Whether record-mark `steps` take nothing from another record: every span they remove is added
+ *  back with the same type and id. Mark steps map no positions, so every step's range is in the
+ *  same coordinates. */
+function takesNothing(steps: readonly (AddMarkStep | RemoveMarkStep)[]): boolean {
   const removed = new Map<string, Span[]>();
   const added = new Map<string, Span[]>();
   for (const step of steps) {
-    const { id } = step.mark.attrs;
-    if (step instanceof RemoveMarkStep && composerMarkId !== null && id === composerMarkId) {
-      continue;
-    }
     const spans = step instanceof RemoveMarkStep ? removed : added;
-    const key = `${step.mark.type.name} ${id}`;
+    const key = `${step.mark.type.name} ${step.mark.attrs.id}`;
     spans.set(key, [...(spans.get(key) ?? []), { from: step.from, to: step.to }]);
   }
   for (const [key, spans] of removed) {
@@ -83,23 +65,15 @@ function takesNothing(
  *
  * A transaction of record-mark steps only is stamped `addToHistory: false` when it takes nothing
  * from another record: `removeRecordMark`'s removal of the composer's own provisional mark (which
- * only that function can label, `isRecordMarkRemoval`), or a write whose every removal is either
- * of the mark the open composer holds (`setComposerMark`) or put straight back over the same text.
- * Upstream's creators write that last kind: they restamp every suggestion mark whose attributes
- * differ from its metadata - a recorded suggestion, whose replacement only the marks map carries -
- * with a removal and an addition of the same mark. A write that removes another record's mark is
- * one that displaced that record's span - a mark type excludes itself, so `addMark` over text
- * another comment covers cuts that comment's anchor there (LEGION-458) - and it keeps its undo
- * step, exactly as before this plugin, so one undo still restores the span. A mixed transaction - a
- * suggestion accept that replaces text and drops its mark - is the reader's edit and stays
- * undoable too.
- *
- * Two channels mark a removal as the composer's own, and each covers callers the other does not.
- * The composer-mark rule covers the margin: every removal it makes - a replaced composer's mark,
- * a cancelled one, and the old mark inside a retype - runs while `setComposerMark` still names
- * that mark. The label covers `removeRecordMark`'s callers that name no composer mark: it keeps
- * `retypeMark` and the handle's `removeMark` self-sufficient for any host, and the cancel and
- * switch cases in tests/record-mark-history.test.ts rely on it. Neither is redundant.
+ * only that function can label, `isRecordMarkRemoval`), or a write whose every removal is put
+ * straight back over the same text. A creation removes nothing at all: the record marks declare
+ * `excludes: ''`, so a mark written over text another record's mark covers sits beside that mark
+ * rather than cutting it (LEGION-458). Upstream's creators also restamp every suggestion mark
+ * whose attributes differ from its metadata - a recorded suggestion, whose replacement only the
+ * marks map carries - with a removal and an addition of the same mark, which takes nothing either.
+ * Any other removal of a record mark - upstream's `deleteMark`, or any writer's own
+ * `tr.removeMark` - is the reader's edit and keeps its undo step, as before this plugin, and so
+ * does a mixed transaction: a suggestion accept that replaces text and drops its mark.
  *
  * Both undo managers honour the stamp. prosemirror-history skips the transaction, and the
  * transactions other plugins append to it. y-prosemirror's sync plugin copies the flag of the
@@ -109,7 +83,7 @@ function takesNothing(
  */
 export const recordMarkHistoryPlugin = $prose(
   () =>
-    new Plugin<string | null>({
+    new Plugin({
       appendTransaction(transactions, _oldState, newState) {
         const last = transactions[transactions.length - 1];
         if (last === undefined) return null;
@@ -119,28 +93,17 @@ export const recordMarkHistoryPlugin = $prose(
         }
         return newState.tr.setMeta("addToHistory", false);
       },
-      filterTransaction(transaction, state) {
+      filterTransaction(transaction) {
         if (transaction.steps.length === 0 || transaction.getMeta("addToHistory") === false) {
           return true;
         }
         const steps = transaction.steps;
         if (!steps.every(isRecordMarkStep)) return true;
-        if (
-          isRecordMarkRemoval(transaction) ||
-          takesNothing(steps, composerMarkKey.getState(state) ?? null)
-        ) {
+        if (isRecordMarkRemoval(transaction) || takesNothing(steps)) {
           transaction.setMeta("addToHistory", false);
           stamped.add(transaction);
         }
         return true;
-      },
-      key: composerMarkKey,
-      state: {
-        apply: (transaction, held) => {
-          const next: string | null | undefined = transaction.getMeta(composerMarkKey);
-          return next === undefined ? held : next;
-        },
-        init: () => null,
       },
     })
 );
