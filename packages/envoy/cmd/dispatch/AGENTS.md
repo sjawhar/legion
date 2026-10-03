@@ -26,13 +26,16 @@ Every Dispatch setting `cmd/dispatch` reads is a row of the settings table
 (`settingValues`, which panics on a name the table does not list), and each
 reader in `internal/dispatch` is handed its value — a parameter, an option
 (`routes.AppContextOptions.InsecureCookie`/`EnvoyToken`, `envoy.WithToken`),
-or the table's lookup (`config.Load`'s environment, `bus.WithEnvironment`,
-`auth.LoadAppFromEnv`). A new setting is a new row, never an `os.Getenv`:
-`TestNoReaderBypassesTheSettingsTable` fails on any other environment read under
-`cmd/dispatch` or `internal/dispatch`, and `TestEverySettingReachesItsReader`
-fails until the row has a case that hands it to its reader. `envoy-dispatch
-settings` prints the table, and the docs site's configuration reference
-(`docs/site/generators/dispatch-config.ts`) is generated from it.
+or the table's lookup (`config.Load`'s environment, `auth.LoadAppFromEnv`) —
+as are the NATS connects `cmd/dispatch` makes through `internal/bus`
+(`bus.WithEnvironment`, `bus.Dial`'s environment). A new setting is a new row,
+never an `os.Getenv`: `TestNoReaderBypassesTheSettingsTable` fails on any other
+environment read under `cmd/dispatch` or `internal/dispatch`, and on a dot import
+of `os` or `syscall`, whose bare `Getenv` it could not tell from a local
+function; `TestEverySettingReachesItsReader` fails until the row has a case that
+hands it to its reader. `envoy-dispatch settings` prints the table, and the docs
+site's configuration reference (`docs/site/generators/dispatch-config.ts`) is
+generated from it.
 
 `dispatchHandler` mounts the one `GET /healthz` the process serves on its own
 mux, above the dashboard router, and the probe reads the database through

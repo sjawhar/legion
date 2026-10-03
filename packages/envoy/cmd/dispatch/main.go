@@ -416,8 +416,11 @@ func loadAppCredentials(env settingValues, dataDir string) (*auth.AppConfig, app
 	return cfg, appCredentialSource{Path: path}, nil
 }
 
-// resolveBootConfig is the server's configuration from what the settings table read (env):
-// every setting the server takes from the environment, checked before anything connects.
+// resolveBootConfig is the server's configuration from what the settings table read (env),
+// checked before anything connects. It holds the settings main hands on as values; three groups
+// reach their readers from env instead, through the table's lookup: the GitHub App credentials
+// (loadAppCredentials), the envoy.json overrides (loadEnvoyConfig) and NATS's reach and nkey (the
+// bus connects). A new setting goes wherever its reader takes it, and always into the table.
 func resolveBootConfig(env settingValues) (bootConfig, error) {
 	boot := bootConfig{
 		DatabaseURL:      strings.TrimSpace(env.get("DATABASE_URL")),
