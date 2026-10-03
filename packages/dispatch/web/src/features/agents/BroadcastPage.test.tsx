@@ -75,7 +75,8 @@ function broadcast(deliveries: MessageDelivery[]): BroadcastRead {
 function renderBroadcast(
   read: BroadcastRead,
   state?: { excluded: readonly BroadcastExclusion[] },
-  agentState: UserAgentStates = {}
+  agentState: UserAgentStates = {},
+  markRefused = false
 ) {
   const getBroadcast = spyOn(api, "getBroadcast").mockResolvedValue(read);
   const listAgents = spyOn(api, "listAgents").mockResolvedValue(agents);
@@ -83,12 +84,13 @@ function renderBroadcast(
     attempt({ attempt: 2, state: "sent" })
   );
   const getMyAgentState = spyOn(api, "getMyAgentState").mockResolvedValue(agentState);
-  const putAgentState = spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 });
+  const putAgentState = markRefused
+    ? spyOn(api, "putAgentState").mockRejectedValue(new Error("Dispatch is restarting"))
+    : spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 });
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter initialEntries={[{ pathname: "/agents/broadcasts/broadcast-1", state }]}>
-      <QueryClientProvider
-        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
-      >
+      <QueryClientProvider client={queryClient}>
         <Routes>
           <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
         </Routes>
@@ -98,6 +100,7 @@ function renderBroadcast(
   return {
     createMessageDelivery,
     putAgentState,
+    queryClient,
     restore: () => {
       putAgentState.mockRestore();
       getMyAgentState.mockRestore();
@@ -122,31 +125,35 @@ function threadMessage(id: string, author: Message["author"], body: string): Mes
   };
 }
 
-// The page shows a recipient's whole thread, which holds the viewer's own follow-ups beside the
-// session's answers. The read marks the session's messages alone: the server refuses an id the
-// session did not write, and one such id in the list would leave every answer on the page unread.
-test("opening a broadcast marks the recipient's answers read by id, and only the session's own", async () => {
+/** A broadcast whose one recipient's thread holds two answers from the session and the viewer's
+ *  own follow-up between them. */
+function answeredBroadcast(): BroadcastRead {
   const read = broadcast([attempt({ envelope_id: "e1", state: "sent" })]);
   const [recipient] = read.recipients;
   if (recipient === undefined) throw new Error("the fixture has no recipient");
   const session = { id: "planner-session", kind: "session" } as const;
-  const page = renderBroadcast(
-    {
-      ...read,
-      recipients: [
-        {
-          ...recipient,
-          replies: [
-            threadMessage("answer-1", session, "Standing down."),
-            threadMessage("follow-up", { id: "alice", kind: "user" }, "And the build?"),
-            threadMessage("answer-2", session, "Green."),
-          ],
-        },
-      ],
-    },
-    undefined,
-    { "planner-session": { unread_replies: 2 } }
-  );
+  return {
+    ...read,
+    recipients: [
+      {
+        ...recipient,
+        replies: [
+          threadMessage("answer-1", session, "Standing down."),
+          threadMessage("follow-up", { id: "alice", kind: "user" }, "And the build?"),
+          threadMessage("answer-2", session, "Green."),
+        ],
+      },
+    ],
+  };
+}
+
+// The page shows a recipient's whole thread, which holds the viewer's own follow-ups beside the
+// session's answers. The read marks the session's messages alone: the server refuses an id the
+// session did not write, and one such id in the list would leave every answer on the page unread.
+test("opening a broadcast marks the recipient's answers read by id, and only the session's own", async () => {
+  const page = renderBroadcast(answeredBroadcast(), undefined, {
+    "planner-session": { unread_replies: 2 },
+  });
   try {
     await waitFor(() =>
       expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
@@ -159,6 +166,30 @@ test("opening a broadcast marks the recipient's answers read by id, and only the
     page.restore();
   }
 });
+
+// A mark the server keeps refusing - a 5xx, an expired session, an old server's 400 during a
+// rolling deploy - is sent once and retried twice, and then the row waits for the unread count or
+// the replies it shows to change. A refetch of the broadcast renders the same replies in a new
+// array, as every render does, and sends nothing more.
+test("a refused mark is sent three times and then left alone, however often the row re-renders", async () => {
+  const page = renderBroadcast(
+    answeredBroadcast(),
+    undefined,
+    { "planner-session": { unread_replies: 2 } },
+    true
+  );
+  try {
+    await waitFor(() => expect(page.putAgentState).toHaveBeenCalledTimes(3), { timeout: 8000 });
+    await page.queryClient.invalidateQueries({ queryKey: ["broadcast"] });
+    const quiet = Promise.withResolvers<void>();
+    setTimeout(quiet.resolve, 2500);
+    await quiet.promise;
+    expect(page.putAgentState).toHaveBeenCalledTimes(3);
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+}, 20_000);
 
 test("a broadcast page keeps the server exclusion reason as written", async () => {
   const serverExcluded = [

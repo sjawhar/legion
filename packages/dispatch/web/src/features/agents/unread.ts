@@ -85,11 +85,12 @@ export function storeAgentState(
 /**
  * The write both read hooks make: `input(value)` for `sessionId`, once per `dedupeKey(value)`,
  * whenever the server counts one of the session's replies unread, with the answer put into the
- * shared agent-state query. The key, not the value, says whether this view has sent a mark already,
- * so a value rebuilt on every render is sent once. A failed write is retried twice with backoff; if
- * it still fails the key is forgotten, so it is sent again when the unread count or the key next
- * changes or the view is reopened, rather than the badge staying up until the session replies once
- * more.
+ * shared agent-state query. The key, not the value, decides when to write: the effect reruns when
+ * the key or the unread count changes, never on a value a caller rebuilds on every
+ * render. A failed write is retried twice with backoff; if it still fails the key is forgotten, so
+ * it is sent again when the unread count or the key next changes or the view is reopened, rather
+ * than the badge staying up until the session replies once more. Rerunning on the value would
+ * instead resend on every render after a failure, for as long as the server kept refusing.
  */
 function useSendReadMark<V>(
   sessionId: string,
@@ -110,11 +111,17 @@ function useSendReadMark<V>(
     retry: 2,
   });
   const key = value === undefined ? undefined : dedupeKey(value);
+  // This render's value, which the effect reads when the key calls for a write.
+  const latest = useRef(value);
+  latest.current = value;
   useEffect(() => {
-    if (unread === 0 || value === undefined || key === undefined || marked.current === key) return;
+    const current = latest.current;
+    if (unread === 0 || current === undefined || key === undefined || marked.current === key) {
+      return;
+    }
     marked.current = key;
-    mutate(input(value));
-  }, [input, key, mutate, unread, value]);
+    mutate(input(current));
+  }, [input, key, mutate, unread]);
 }
 
 const ownString = (value: string): string => value;
