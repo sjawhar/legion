@@ -1,6 +1,8 @@
 ---
 title: Walkthrough
 description: A narrated video of one secret request from start to finish - an agent asks the secrets broker for an API key, a person approves it in Dispatch, and the agent's command runs with it.
+sidebar:
+  order: 5
 ---
 
 Before you start, the agent's machine needs `agent-secrets-helper serve` running, with its operator
@@ -8,6 +10,7 @@ Before you start, the agent's machine needs `agent-secrets-helper serve` running
 `AGENT_SECRETS_URL` set to the broker's address, for the helper and in the shells agents start
 from. The video's machine also sets `AGENT_SECRETS_APPROVE_URL` to Dispatch's address, which makes
 the commands below print the Dispatch page to open.
+[Log a machine in](/legion/broker/guides/log-a-machine-in/) sets all of this up.
 
 <video controls preload="metadata" poster="/legion/media/broker/walkthrough.jpg" style="width: 100%" aria-label="Walkthrough: an agent requests a secret and a person approves it in Dispatch">
   <source src="/legion/media/broker/walkthrough.mp4" type="video/mp4">
