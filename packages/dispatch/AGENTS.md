@@ -460,7 +460,10 @@ caller's environment or `~/.config/opencode/envoy.json` /
 `~/.local/share/dispatch/{app.json,signing-key}` therefore cannot point the
 test server at a live Envoy, dashboard origin or GitHub App (every Legion pane
 exports `ENVOY_URL`). The harness ports stay inputs because the server script reads them too; on
-the TypeScript side `e2e/harness-ports.ts` is the one place they are resolved.
+the TypeScript side `e2e/harness-ports.ts` is the one place they are resolved. The one opt-in input
+is `DISPATCH_E2E_AGENT_SECRETS_URL`/`_TOKEN`, which the broker's docs rig
+(`docs/site/media/broker/rig.sh`) sets and the script passes on as the server's
+`DISPATCH_AGENT_SECRETS_URL`/`_TOKEN`; unset, credential routes answer `404 FEATURE_OFF`.
 
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
 layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile

@@ -22,6 +22,18 @@ e2e_port="${DISPATCH_E2E_PORT:-8777}"
 fake_envoy_port="${FAKE_ENVOY_PORT:-9021}"
 fake_github_port="${FAKE_GITHUB_PORT:-9022}"
 
+# The docs media rig (docs/site/media/broker/rig.sh) points the server at a secrets broker it
+# started on this machine, read here before the sweep below drops every DISPATCH_* variable; every
+# other run leaves the credential-request feature off (404 FEATURE_OFF).
+broker_env=()
+if [ -n "${DISPATCH_E2E_AGENT_SECRETS_URL:-}" ]; then
+  : "${DISPATCH_E2E_AGENT_SECRETS_TOKEN:?DISPATCH_E2E_AGENT_SECRETS_TOKEN must accompany DISPATCH_E2E_AGENT_SECRETS_URL}"
+  broker_env=(
+    DISPATCH_AGENT_SECRETS_URL="$DISPATCH_E2E_AGENT_SECRETS_URL"
+    DISPATCH_AGENT_SECRETS_TOKEN="$DISPATCH_E2E_AGENT_SECRETS_TOKEN"
+  )
+fi
+
 # Resolve the concrete Go executable before hiding HOME. A mise shim can use
 # the caller's configuration here, but the hermetic server process invokes the
 # resolved Go binary directly and never asks mise to choose a version.
@@ -50,6 +62,7 @@ signing_key="$(openssl rand -hex 32)"
 
 cd "$(dirname "$0")/../../envoy"
 exec env \
+  "${broker_env[@]}" \
   DATABASE_URL="$database_url" \
   DISPATCH_AGENT_TOKEN=e2e-token \
   DISPATCH_ALLOWED_LOGINS=alice,bob \

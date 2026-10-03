@@ -49,7 +49,11 @@ key and cookie-signing key, a loopback listen host and the suite's dashboard
 origin. The server process has no caller Home or XDG directory and receives no
 inherited `DISPATCH_*`, `ENVOY_*` or `NATS_*` variable, so neither a shell
 setting nor `~/.config/opencode/envoy.json` /
-`~/.local/share/dispatch` can redirect it.
+`~/.local/share/dispatch` can redirect it. The one opt-in is
+`DISPATCH_E2E_AGENT_SECRETS_URL` with `DISPATCH_E2E_AGENT_SECRETS_TOKEN`, which
+the secrets broker's docs rig (`docs/site/media/broker/rig.sh`) sets to point
+the server's credential requests at a broker it started; unset, those routes
+answer `404 FEATURE_OFF`.
 
 `DATABASE_URL` is required and must name an isolated database: `e2e/seed.ts`
 truncates it before every scenario and never selects a shared default. The
