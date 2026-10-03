@@ -354,7 +354,13 @@ const legion: ShotSet<LegionJourney> = {
       prepare: async (journey) => {
         const api = await dispatchApi();
         const [decision] = (await api.getIssue(journey.key)).open_asks;
+        const versions = (await api.getArtifact(journey.spec)).versions.length;
         await api.answerAsk(decision.id, { expected_edited_at: null, selected: ["Server"] });
+        // The answer is written into the decision block as a new spec version. An approval asked
+        // for before that version lands goes stale with it, and its ask is resolved.
+        await expect
+          .poll(async () => (await api.getArtifact(journey.spec)).versions.length)
+          .toBeGreaterThan(versions);
         const requested = await api.requestApproval(
           journey.spec,
           {

@@ -1,8 +1,9 @@
 // The docs media tooling's shared harness: it boots Dispatch the way the e2e suite does
 // (`packages/dispatch/e2e/playwright.config.ts`: the fake Envoy, the fake GitHub, and
-// `run-server.sh` with trusted header identity) on ports of its own, seeds example data, opens a
-// signed-in browser context at a docs viewport, and checks a page is ready and clean before it is
-// captured. `shots.ts` and `walkthrough.ts` both run on it, as does any section's own media.
+// `run-server.sh`, which signs a browser in at its dev sign-in route) on ports of its own, seeds
+// example data, opens a signed-in browser context at a docs viewport, and checks a page is ready
+// and clean before it is captured. `shots.ts` and `walkthrough.ts` both run on it, as does any
+// section's own media.
 import { type ChildProcess, spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { connect } from "node:net";
@@ -40,7 +41,7 @@ export const expect = baseExpect.configure({ timeout: 15_000 });
 
 export interface Harness {
   readonly baseURL: string;
-  /** Truncates every table and empties the fake Envoy's live sessions. */
+  /** Truncates every table, empties the fake Envoy, and revokes every session cookie. */
   reset(): Promise<void>;
 }
 
@@ -149,12 +150,9 @@ export async function withHarness<T>(body: (harness: Harness) => Promise<T>): Pr
     await ready(`http://127.0.0.1:${PORTS.FAKE_GITHUB_PORT}/`, github);
     await ready(`${baseURL}/healthz`, dispatch);
     const { resetDatabase } = await import("../../../packages/dispatch/e2e/seed");
-    const { setLiveSessions } = await fakeEnvoy();
     return await body({
       baseURL,
-      reset: async () => {
-        await Promise.all([resetDatabase(), setLiveSessions([])]);
-      },
+      reset: resetDatabase,
     });
   } catch (error) {
     for (const entry of processes) {
@@ -176,7 +174,8 @@ export async function withHarness<T>(body: (harness: Harness) => Promise<T>): Pr
 // sets them only once it knows the ports are free. A seed reaches the suite's helpers through
 // these two.
 
-/** The e2e suite's API client (`packages/dispatch/e2e/api.ts`): alice by header, or an agent. */
+/** The e2e suite's API client (`packages/dispatch/e2e/api.ts`): alice by her session cookie, or
+ *  an agent by the harness's bearer. */
 export const dispatchApi = () => import("../../../packages/dispatch/e2e/api");
 /** The fake Envoy's fixtures (`packages/dispatch/e2e/agents.ts`): which sessions are live. */
 export const fakeEnvoy = () => import("../../../packages/dispatch/e2e/agents");
@@ -228,28 +227,31 @@ export interface ViewerOptions {
 
 const DESKTOP = { width: 1440, height: 900 };
 
-/** A browser context signed in as `VIEWER` through the harness's trusted identity header. */
-export function newViewerContext(
+/** A browser context signed in as `VIEWER` at the harness server's dev sign-in route. The cookie
+ *  names a session the next `reset()` revokes, so open a context after the reset. */
+export async function newViewerContext(
   browser: Browser,
   baseURL: string,
   options: ViewerOptions
 ): Promise<BrowserContext> {
+  const { signIn } = await import("../../../packages/dispatch/e2e/users");
   const { defaultBrowserType: _engine, ...iphone } = devices["iPhone 13"];
   const device =
     options.viewport === "phone"
       ? iphone
       : { viewport: options.size ?? DESKTOP, deviceScaleFactor: 2 };
-  return browser.newContext({
+  const context = await browser.newContext({
     ...device,
     ...(options.deviceScaleFactor === undefined
       ? {}
       : { deviceScaleFactor: options.deviceScaleFactor }),
     baseURL,
     colorScheme: options.theme,
-    extraHTTPHeaders: { "X-Dispatch-User": VIEWER },
     reducedMotion: "reduce",
     ...(options.recordVideo === undefined ? {} : { recordVideo: options.recordVideo }),
   });
+  await signIn(context, VIEWER);
+  return context;
 }
 
 /** Collects every uncaught exception the page throws; a capture with one is refused. */
