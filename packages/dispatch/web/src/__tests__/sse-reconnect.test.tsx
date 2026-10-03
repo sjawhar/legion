@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider, QueryObserver, useQuery } from "@tans
 import { render, renderHook, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
+import { getConnectionState } from "../api/live";
 import { useEventStream, WHOLE_CACHE_REFRESH_MS } from "../api/sse";
 import { countWholeCacheRefreshes, openStreamResponse } from "./sse-test-harness";
 
@@ -195,6 +196,53 @@ test("a reconnect refreshes every rendered query, including ones no key list nam
     globalThis.fetch = originalFetch;
   }
 }, 10_000);
+
+// The page's queries are read when it loads, and a first attempt that never opened leaves the
+// stream covering none of what followed; `forceReconnect` resets the backoff counter, so the
+// `online` route reopens at attempt 0 like a first connection would.
+const firstAttemptReopenCases = [
+  ["the backoff timer", 2_000, () => {}],
+  ["an online event", 500, () => window.dispatchEvent(new Event("online"))],
+] as const;
+
+test.each(
+  firstAttemptReopenCases
+)("the open after a first attempt that never opened refreshes everything (%s)", async (_reopen, timeout, reopen) => {
+  const originalFetch = globalThis.fetch;
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wholeCache = countWholeCacheRefreshes(queryClient);
+  const streamCalls: number[] = [];
+
+  function Wrapper({ children }: { children: ReactNode }): ReactNode {
+    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  }
+
+  try {
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit
+    ): Promise<Response> => {
+      streamCalls.push(streamCalls.length);
+      if (streamCalls.length === 1) {
+        // What a network change does to a request: it rejects before any response.
+        throw new TypeError("Failed to fetch");
+      }
+      return openStreamResponse(init?.signal);
+    }) as typeof fetch;
+
+    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+    await waitFor(() => expect(streamCalls.length).toBe(1));
+    await waitFor(() => expect(getConnectionState()).toBe("reconnecting"));
+    reopen();
+    await waitFor(() => expect(streamCalls.length).toBe(2), { timeout });
+    await waitFor(() => expect(wholeCache.count()).toBe(1));
+
+    unmount();
+  } finally {
+    wholeCache.restore();
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("an event during a list's first load beats the response that predates it", async () => {
   const originalFetch = globalThis.fetch;

@@ -68,9 +68,12 @@ const knownEventTypes: Record<EventType, true> = {
   "subscription.removed": true,
 };
 
-// A dead connection reveals no client-visible signal until this much time passes with
-// no bytes at all (application events or heartbeat comments): the server sends a `:
-// heartbeat` comment every 15s, so 45s is three missed heartbeats.
+// One window bounds every stream attempt: armed when the attempt starts, re-armed when its
+// response headers arrive and on every chunk (application events or heartbeat comments), and
+// cleared when the attempt settles. An attempt that receives nothing for this long is aborted
+// and reconnects with the backoff, whether its request never got headers or its open connection
+// went silent. The server sends a `: heartbeat` comment every 15s, so 45s is three missed
+// heartbeats.
 const WATCHDOG_MS = 45_000;
 
 const inboxQueryKey = inboxQuery().queryKey;
@@ -623,9 +626,10 @@ function markAskThreadsSeededByAnInFlightInbox(
 }
 
 /**
- * `watchdogMs` overrides the no-chunk watchdog window and `wholeCacheRefreshMs` the whole-cache
- * refresh throttle; the only callers that set either are tests that would otherwise have to wait
- * out the real 45 s and 5 s windows. Production calls this with no argument.
+ * `watchdogMs` overrides the attempt watchdog's window (`WATCHDOG_MS`) and `wholeCacheRefreshMs`
+ * the whole-cache refresh throttle; the only callers that set either are tests that would
+ * otherwise have to wait out the real 45 s and 5 s windows. Production calls this with no
+ * argument.
  */
 export function useEventStream({
   watchdogMs = WATCHDOG_MS,
