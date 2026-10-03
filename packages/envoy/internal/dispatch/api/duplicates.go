@@ -3,34 +3,36 @@ package api
 import (
 	"context"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 const duplicateHeadlineOptions = "StartSel=" + markStart + ", StopSel=" + markEnd + ", HighlightAll=true"
 
 // duplicateQuery finds the issues of project $1, other than the parent $3, whose title
-// near-duplicates the new title $2, comparing their lexemes: the lexemes of the search_vector of a
-// title's search_text, with an empty head. The new title's are built here, and every stored title's
-// are read from issues.title_lexemes, which the issues trigger writes with that expression
-// (migration 0069), so a creation parses one title, not every title in the project. search_vector
-// (0068) bounds a vector to what Postgres holds in one tsvector, so a title past that limit, the new
-// one or a stored one, is compared by the words that open it rather than failing the creation.
+// near-duplicates the new title $2, comparing their title_lexemes (migration 0069): the new title's
+// are built here, and every stored title's are read from issues.title_lexemes, which the issues
+// trigger writes with the same function, so a creation parses one title, not every title in the
+// project. A stored title past Postgres's limit on one tsvector is compared by the words that open
+// it (search_vector, 0068); a new one cannot pass it, being capped at contracts.IssueTitleMax.
 //
 // The parent's lexemes count on neither side. terms holds the new title's lexemes less the
 // parent's, marked new, and the parent's, marked not, each once, so one join of every stored lexeme
 // in the project against it counts both what a title shares with the new one and how many of its
 // own lexemes are the parent's.
 //
-// A candidate's headline marks the words its title shares with the new one, so its query is those
-// words, at most duplicateHeadlineWords of them: the words the candidate's title holds of the new
-// title's are exactly the shared ones, and the query is one OR node per word, which Postgres reads
-// recursively. A query of 20,000 such words overflows the default 2 MB max_stack_depth (SQLSTATE
-// 54001) where 10,000 does not, on Postgres 16.15, and a title of distinct words shares that many.
+// A candidate's headline marks the words its title shares with the new one: its query is the shared
+// lexemes. Before 0069 the query was every lexeme of the new title less the parent's, which marks
+// the same words with one exception: to_tsquery reads a hyphenated lexeme as a phrase of its parts
+// as well (`legion-resolv` is 'legion-resolv' <-> 'legion' <-> 'resolv'), and ts_headline marks a
+// word matching any of them, so a part the parent's lexemes removed was marked in a candidate that
+// held it alone. Beside parent `Legion`, the new title `legion-resolve launch window` marked
+// `legion` in the candidate `launch window legion`; it now marks `launch` and `window`.
 const duplicateQuery = `
 with parent as (select coalesce((select title_lexemes from issues where key = $3), '{}') as lexemes),
 new_title as (
-  select array(select unnest(tsvector_to_array(search_vector('', search_text($2))))
-               except select unnest(p.lexemes)) as lexemes
+  select array(select unnest(title_lexemes($2)) except select unnest(p.lexemes)) as lexemes
     from parent p),
 terms as (
   select unnest(n.lexemes) as lexeme, true as new from new_title n
@@ -48,31 +50,32 @@ cand as (
   having bool_or(t.new)),
 scored as (
   select c.key, c.title, c.status, c.updated_at, c.shared_lex,
+         cardinality(c.shared_lex) as shared,
          least(c.own, cardinality(n.lexemes)) as shorter
     from cand c, new_title n)
-select key, title, status, cardinality(shared_lex) as shared,
+select key, title, status, shared,
        ts_headline('english', search_text(title),
-         to_tsquery('simple', (select string_agg(quote_literal(x), ' | ') from unnest(shared_lex[1:$5]) x)), $4) as headline
+         to_tsquery('simple', (select string_agg(quote_literal(x), ' | ') from unnest(shared_lex) x)), $4) as headline
   from scored
- where (cardinality(shared_lex) >= 3 and 2 * cardinality(shared_lex) >= shorter)
-    or (cardinality(shared_lex) >= 1 and cardinality(shared_lex) = shorter)
+ where (shared >= 3 and 2 * shared >= shorter) or (shared >= 1 and shared = shorter)
  order by shared desc, updated_at desc
  limit 5
 `
 
-// duplicateHeadlineWords bounds a candidate's headline query (duplicateQuery), a tenth of the
-// 10,000 words Postgres's default stack reads.
-const duplicateHeadlineWords = 1000
-
 // duplicateCandidates returns issues in project whose title near-duplicates title,
 // excluding parentKey and ignoring the parent title's terms. parentKey may be "".
 func (s *server) duplicateCandidates(ctx context.Context, q queryer, project, title, parentKey string) ([]model.DuplicateCandidate, error) {
-	rows, err := q.Query(ctx, duplicateQuery, project, title, parentKey, duplicateHeadlineOptions, duplicateHeadlineWords)
+	rows, err := q.Query(ctx, duplicateQuery, project, title, parentKey, duplicateHeadlineOptions)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	return scanDuplicateCandidates(rows)
+}
 
+// scanDuplicateCandidates reads the duplicate check's rows, (key, title, status, shared, headline),
+// and closes them.
+func scanDuplicateCandidates(rows pgx.Rows) ([]model.DuplicateCandidate, error) {
+	defer rows.Close()
 	candidates := []model.DuplicateCandidate{}
 	for rows.Next() {
 		var candidate model.DuplicateCandidate

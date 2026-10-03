@@ -278,21 +278,25 @@ the broadcast page writes for the replies it shows and the unread count leaves o
 per-session read mark, and its `(login, session_id)` index, which the read mark's prune of one
 session's rows reads. It creates a table and touches no row; its census answers `0`.
 
-Migration `0068_search_vector_bound` creates `search_vector` and replaces the bodies of the five
-search triggers' functions so that each builds its vector with it ([Search](#search)). Replacing a
-function locks no table, and for every text whose vector fits, which is every row already stored,
-the new functions build the vector the old ones did, so it re-indexes nothing; its census answers
-`0`.
+Migration `0068_search_vector_bound` creates `search_vector` and replaces the bodies of four
+search triggers' functions (documents, comments, asks and messages) so that each builds its vector
+with it ([Search](#search)). Replacing a function locks no table, and for every text whose vector
+fits, which is every row already stored, the new functions build the vector the old ones did, so
+it re-indexes nothing; its census answers `0`.
 
 Migrations `0069_issues_title_lexemes` and `0070_issues_title_lexemes_backfill` store each issue
 title's lexemes, which the duplicate-title check reads ([Search](#search)). `0069` adds
 `issues.title_lexemes` with the constant default `{}`, a catalog change that rewrites no row, so it
 holds `issues` `ACCESS EXCLUSIVE` for milliseconds (3 ms on 2,905 issues with production's titles),
-and has the issues trigger fill the column on every insert and every retitle. `0070` fills it on
-every issue stored before, under `ROW EXCLUSIVE` and a row lock on each issue: a read does not wait,
-and neither does a write of a row that references an issue, while a write that locks an issue's
-row, as every event an issue owns does, waits until it commits (0.58 s on those issues at load 85).
-Neither refuses a row; both censuses answer `0`.
+creates `title_lexemes(title)`, the one definition of a title's lexemes, and has the issues trigger
+build `search` with `search_vector` and fill the column on every insert and every retitle. `0070`
+fills it on every issue stored before, under `issues` `EXCLUSIVE` taken before it writes a row: a
+read does not wait, while every write of an issue's row, and of a row that references an issue,
+waits until it commits (0.58 s on those issues at load 85). The update alone locked each issue's
+row in the order rows lie on disk, which a reparent, locking its two issues in key order, could
+cross: on 60,000 issues the two deadlocked (`40P01`) in each of two runs, and with the table lock
+the reparent waited for the migration and committed. Neither refuses a row; both censuses answer
+`0`.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
@@ -473,13 +477,14 @@ limited to 1,000 characters. Search covers issue titles, the latest settled docu
 comments, asks (questions and free-text answers), and messages. Live document text takes up to
 the 2 s settle delay to appear in search results.
 
-Every trigger builds its vector with `search_vector` (0068), and so does the duplicate-title check
-for the new title. Postgres holds at most 1,048,575 bytes of lexemes and positions in one vector.
-Prose stays far below that, since its words repeat, but text of words no two alike passes it well
-inside a document's 1 MiB: about 700 KB of `w000001 w000002 …`, or 475 KB of UUIDs. `search_vector`
-indexes a text whole when its vector fits, and otherwise the longest of its first half, quarter,
-eighth, … that fits, so such a document, title, comment, ask or message is found by the words in
-that opening part and not by the words after it. An issue's key is always indexed whole.
+Every trigger builds its vector with `search_vector` (0068; the issues trigger's from 0069).
+Postgres holds at most 1,048,575 bytes of lexemes and positions in one vector. Prose stays far
+below that, since its words repeat, but text of words no two alike passes it well inside a
+document's 1 MiB: about 700 KB of `w000001 w000002 …`, or 475 KB of UUIDs. `search_vector` indexes a
+text whole when its vector fits, and otherwise the longest of its first half, quarter, eighth, …
+that fits, cut between two words, so such a document, comment, ask or message is found by the whole
+words in that opening part and not by the words after it; a text with no whitespace before the cut
+is found by none of its own. An issue's key is always indexed whole.
 
 Search snippets are escaped text with only server-inserted `<mark>` elements around matches. Native
 issue creation rejects a title that near-duplicates an existing issue in the same project with
@@ -487,11 +492,12 @@ issue creation rejects a title that near-duplicates an existing issue in the sam
 references skip it. An issue title is at most 1,000 characters (`contracts.IssueTitleMax`, UTF-16
 units after trimming), on creation and on a retitle, and a longer one is `400 CAP_EXCEEDED` before
 the duplicate check runs. The check compares the new title's lexemes with those of every other
-title in the project, read from `issues.title_lexemes`, which the issues trigger fills with the
-same expression (0069), so a creation parses one title; the `POSSIBLE_DUPLICATE` message quotes a
-candidate's whole title. The cap bounds what one stored title adds to every later creation in its
-project, and how long that message can be: beside 2,000 stored titles at the cap, a check takes
-56–95 ms, where parsing every title as it ran took 2.1–7.6 s.
+title in the project, read from `issues.title_lexemes`, which the issues trigger fills with
+`title_lexemes(title)` (0069), the function the check calls for the new title, so a creation parses
+one title; a candidate's snippet marks the words its title shares with the new one, and the
+`POSSIBLE_DUPLICATE` message quotes a candidate's whole title. The cap bounds what one stored title
+adds to every later creation in its project, and how long that message can be: beside 2,000 stored
+titles at the cap, a check takes 56–95 ms, where parsing every title as it ran took 2.1–7.6 s.
 
 To measure search latency against a restored corpus copy, run:
 

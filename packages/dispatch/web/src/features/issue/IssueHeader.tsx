@@ -74,6 +74,9 @@ import type { IssuePriorityWrite } from "./useIssuePriority";
 const routeHint =
   "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly. It is where messages go, not who is working the issue — that is the claim.";
 
+/** Refusals of a title save that the same title meets every time. */
+const titleRefusals: Record<string, true> = { CAP_EXCEEDED: true, ISSUE_CLOSED: true };
+
 export function IssueHeader({
   documentArtifact,
   isClosed,
@@ -285,14 +288,14 @@ export function IssueHeader({
   const parentSaveFailed = updateIssue.isError && updateIssue.variables?.parent !== undefined;
   const parentError = apiErrorMessage(updateIssue.error, "Could not save parent.");
   // A title Dispatch refused (CAP_EXCEEDED past ISSUE_TITLE_MAX, ISSUE_CLOSED) shows its reason
-  // with no Retry, since the same title is refused every time; a save that got no such answer keeps
-  // the generic line and its Retry.
+  // with no Retry, since the same title is refused every time; any other failure keeps the generic
+  // line and its Retry.
   const titleRefusal =
     updateIssue.isError &&
     updateIssue.variables?.title !== undefined &&
     updateIssue.error instanceof ApiError &&
-    updateIssue.error.status >= 400 &&
-    updateIssue.error.status < 500
+    updateIssue.error.code !== undefined &&
+    titleRefusals[updateIssue.error.code] === true
       ? updateIssue.error.message
       : null;
   const routeLabel = `Messages default to ${drafts.route === "" ? "no route" : drafts.route}`;
