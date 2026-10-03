@@ -1308,6 +1308,51 @@ func TestSuggestionAcceptClearsPendingAuthorBeforeNextVersion(t *testing.T) {
 	}
 }
 
+// An upload's version credits its uploader and holds the upload's write to the document, so the
+// next version, a session's named edit, credits that session alone (LEGION-503).
+func TestUploadClearsItsUploaderBeforeNextVersion(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Uploaded author", "before")
+	path := "/api/v1/issues/" + issue.Key + "/artifacts"
+	for _, content := range []string{"before\n", "after\n"} {
+		if response := dispatchRequest(t, handler, http.MethodPost, path, map[string]string{
+			"name": "notes.md", "content": content,
+		}, "alice"); response.Code != http.StatusCreated {
+			t.Fatalf("upload %q: status=%d body=%s", content, response.Code, response.Body.String())
+		}
+	}
+	listed := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")
+	var notes model.Artifact
+	for _, artifact := range decodeBody[[]model.Artifact](t, listed) {
+		if artifact.Name == "notes.md" {
+			notes = artifact
+		}
+	}
+	if notes.ID == "" {
+		t.Fatalf("uploaded document missing from %s", listed.Body.String())
+	}
+
+	next := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+notes.ID+"/edits", map[string]any{
+		"ops":     []map[string]string{{"op": "replace", "find": "after", "with": "next"}},
+		"summary": "Next version",
+		"actor":   sessionActor(),
+	})
+	if next.Code != http.StatusOK {
+		t.Fatalf("create next version: status=%d body=%s", next.Code, next.Body.String())
+	}
+	result := decodeBody[struct {
+		Version *model.Version `json:"version"`
+	}](t, next)
+	if result.Version == nil || len(result.Version.Authors) != 1 || result.Version.Authors[0] != (model.Actor{Kind: "session", ID: "session-0123456789abcdef"}) {
+		t.Fatalf("next version = %#v, want one crediting only the next session editor", result.Version)
+	}
+}
+
 func TestConcurrentSuggestionAcceptAppliesReplacementExactlyOnce(t *testing.T) {
 	var documentService *docs.Service
 	var gate *firstReplaceGate

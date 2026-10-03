@@ -65,9 +65,11 @@ type liveWrite struct {
 	// anchorsTree is the tree the transaction's anchors were last refreshed against, so the
 	// version write does not refresh the same tree's anchors a second time.
 	anchorsTree *pmdoc.Node
-	// credits are the authors of the transaction's content changes; actor made the latest.
+	// credits are the authors of the transaction's content changes; actor made the latest, and
+	// edits counts them, so a version can say it holds them all (authorCapture).
 	credits map[string]model.Actor
 	actor   *model.Actor
+	edits   int
 	// loss records what this write's latest batch of operations inserted, so a merge with the
 	// room's concurrent changes can be told from a clean one (see lossCheck). A later operation
 	// of the same transaction that inserts nothing an operation claims - an accept's margin
@@ -328,6 +330,7 @@ func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 	}
 	write.credits[actorKey(actor)] = actor
 	write.actor = new(actor)
+	write.edits++
 }
 
 // publishLiveWrite applies write's updates to the room one operation at a time, in the order

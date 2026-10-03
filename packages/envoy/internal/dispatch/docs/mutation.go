@@ -21,16 +21,11 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-type versionPending struct {
-	generation uint64
-	authors    map[string]model.Actor
-}
-
 type versionWrite struct {
 	named            bool
 	summary          *string
 	authors          []model.Actor
-	capture          *versionPending
+	capture          *authorCapture
 	docUpdateVersion *int64
 }
 
@@ -576,32 +571,6 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil
 }
 
-// commitVersion clears authors consumed by a version only after its enclosing transaction has
-// committed (Ledger.Commit).
-func (s *Service) commitVersion(artifactID string, version model.Version) {
-	state := s.room(artifactID)
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	capture, ok := state.pendingVersions[version.Number]
-	if !ok {
-		return
-	}
-	delete(state.pendingVersions, version.Number)
-	if state.gen != capture.generation {
-		return
-	}
-	for key := range capture.authors {
-		delete(state.pending, key)
-	}
-}
-
-func (s *Service) discardPendingVersion(room string, version model.Version) {
-	state := s.room(room)
-	state.mu.Lock()
-	delete(state.pendingVersions, version.Number)
-	state.mu.Unlock()
-}
-
 // prevalidateLiveOperations performs database-backed table-anchor checks
 // before the Yjs transaction, retaining the table-mark snapshots the
 // transaction re-derives before it writes.
@@ -1084,13 +1053,13 @@ func (s *Service) recordLastActor(room string, actor model.Actor) {
 // the calling transaction's fork up to date with the room, which is where a browser change made
 // while the transaction's write was in flight merges with it - and where a write whose text that
 // merge annihilated is refused rather than versioned as applied (refuseLostWrite, LEGION-269).
-func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (*pmdoc.Node, string, versionPending, []model.Actor, error) {
+func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (*pmdoc.Node, string, authorCapture, []model.Actor, error) {
 	fork, err := s.joinRead(ctx, room)
 	if err != nil {
-		return nil, "", versionPending{}, nil, err
+		return nil, "", authorCapture{}, nil, err
 	}
 	if err := s.refuseLostWrite(ctx, room, fork, actor); err != nil {
-		return nil, "", versionPending{}, nil, err
+		return nil, "", authorCapture{}, nil, err
 	}
 	if write := joinedLiveWrite(ctx, room); fork != nil && write != nil && write.tree != nil && write.fork == fork {
 		state := s.room(room)
@@ -1109,7 +1078,7 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	// Apply that loads and holds the room, as docView reads it: a room looked up again once that
 	// Apply returned can have been evicted in between.
 	doc := fork
-	var capture versionPending
+	var capture authorCapture
 	var authors []model.Actor
 	if doc != nil {
 		state := s.room(room)
@@ -1130,47 +1099,37 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 			}
 		})
 		if copyErr != nil {
-			return nil, "", versionPending{}, nil, copyErr
+			return nil, "", authorCapture{}, nil, copyErr
 		}
 		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-			return nil, "", versionPending{}, nil, fmt.Errorf("warm live document: %w", err)
+			return nil, "", authorCapture{}, nil, fmt.Errorf("warm live document: %w", err)
 		}
 	}
 	tree, err := treeOf(doc)
 	if err != nil {
-		return nil, "", versionPending{}, nil, err
+		return nil, "", authorCapture{}, nil, err
 	}
 	markdown, err := documentMarkdown(tree)
 	if err != nil {
-		return nil, "", versionPending{}, nil, err
+		return nil, "", authorCapture{}, nil, err
 	}
 	return tree, markdown, capture, authors, nil
 }
 
 // captureAuthors is a version's authors: the room's pending actors, those the calling
 // transaction's own write will credit once it commits, and actor.
-func captureAuthors(state *roomState, write *liveWrite, actor *model.Actor) (versionPending, []model.Actor) {
-	authors := make(map[string]model.Actor, len(state.pending)+1)
-	for key, pendingActor := range state.pending {
-		authors[key] = pendingActor
-	}
+func captureAuthors(state *roomState, write *liveWrite, actor *model.Actor) (authorCapture, []model.Actor) {
+	capture := state.takeAuthors()
 	if write != nil {
 		for key, credited := range write.credits {
-			authors[key] = credited
+			capture.authors[key] = credited
 		}
+		capture.write, capture.edits = write, write.edits
 	}
 	if actor != nil {
-		authors[actorKey(*actor)] = *actor
+		capture.authors[actorKey(*actor)] = *actor
 	}
-	capture := versionPending{generation: state.gen, authors: authors}
-	return capture, actorSlice(authors)
-}
-
-func (s *Service) rememberPendingVersion(room string, version model.Version, capture versionPending) {
-	state := s.room(room)
-	state.mu.Lock()
-	state.pendingVersions[version.Number] = capture
-	state.mu.Unlock()
+	return capture, actorSlice(capture.authors)
 }
 
 func latestVersion(ctx context.Context, tx pgx.Tx, artifactID string) (struct {
@@ -1271,9 +1230,8 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 		}
 	}
 	if write.capture != nil {
-		s.rememberPendingVersion(artifactID, version, *write.capture)
 		if ledger := ledgerFrom(ctx); ledger != nil && ledger.tx == tx {
-			ledger.recordVersion(artifactID, version)
+			ledger.captures = append(ledger.captures, *write.capture)
 		}
 	}
 	return versionWriteResult{version: version, changes: changes}, nil

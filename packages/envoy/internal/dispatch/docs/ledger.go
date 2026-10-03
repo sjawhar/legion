@@ -31,17 +31,13 @@ type Ledger struct {
 	events   []model.Event
 	// live holds, per document, the writes this transaction made to it; order is the order it
 	// first wrote them in.
-	live     map[string]*liveWrite
-	order    []string
-	versions []ledgerVersion
+	live  map[string]*liveWrite
+	order []string
+	// captures are the authors each version this transaction wrote credits (authorCapture).
+	captures []authorCapture
 	// rebuilds are the documents this transaction rebuilds (RebuildDocument), whose rooms refuse
 	// loads until it ends, committed or not.
 	rebuilds []string
-}
-
-type ledgerVersion struct {
-	artifactID string
-	version    model.Version
 }
 
 type ledgerContextKey struct{}
@@ -124,10 +120,10 @@ func (l *Ledger) commit(ctx context.Context) error {
 		return err
 	}
 	l.credit()
-	for _, written := range l.versions {
-		l.service.commitVersion(written.artifactID, written.version)
+	for _, capture := range l.captures {
+		capture.release()
 	}
-	l.versions = nil
+	l.captures = nil
 	return nil
 }
 
@@ -138,10 +134,7 @@ func (l *Ledger) Discard() {
 	for _, artifactID := range l.order {
 		l.service.finishLiveWrite(l.live[artifactID])
 	}
-	for _, written := range l.versions {
-		l.service.discardPendingVersion(written.artifactID, written.version)
-	}
-	l.versions = nil
+	l.captures = nil
 	l.endRebuilds()
 }
 
@@ -156,8 +149,23 @@ func (l *Ledger) endRebuilds() {
 	l.rebuilds = nil
 }
 
-func (l *Ledger) recordVersion(artifactID string, version model.Version) {
-	l.versions = append(l.versions, ledgerVersion{artifactID: artifactID, version: version})
+// WroteVersion records a version of artifactID that the caller wrote itself in this transaction,
+// outside the document service, crediting authors - an upload, credited to its uploader. Commit
+// then releases their pending entries, and leaves out of the document's pending authors the
+// transaction's own write to it, which the version holds and credits, rather than credit that
+// write again on the document's next version.
+func (l *Ledger) WroteVersion(artifactID string, authors []model.Actor) {
+	state := l.service.room(artifactID)
+	state.mu.Lock()
+	capture := authorCapture{state: state, through: state.credits, authors: make(map[string]model.Actor, len(authors))}
+	state.mu.Unlock()
+	for _, author := range authors {
+		capture.authors[actorKey(author)] = author
+	}
+	if write := l.liveWriteFor(artifactID); write != nil {
+		capture.write, capture.edits = write, write.edits
+	}
+	l.captures = append(l.captures, capture)
 }
 
 func (l *Ledger) liveWriteFor(artifactID string) *liveWrite {
@@ -190,8 +198,8 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 }
 
 // credit credits each content change of a committed transaction to its room, for the room's
-// next version. It runs before the transaction's own versions are released, which clears the
-// authors those versions already name.
+// next version, unless a version the transaction wrote holds every change of the write and
+// credits its author already. It runs before the transaction's own versions are released.
 func (l *Ledger) credit() {
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
@@ -201,11 +209,24 @@ func (l *Ledger) credit() {
 		state := l.service.room(artifactID)
 		state.mu.Lock()
 		for key, actor := range write.credits {
-			state.pending[key] = actor
+			if !l.versionCredits(write, key) {
+				state.creditAuthor(actor)
+			}
 		}
 		state.lastActor = write.actor
 		state.mu.Unlock()
 	}
+}
+
+// versionCredits reports whether a version this transaction wrote holds every content change
+// write made and credits the author keyed key.
+func (l *Ledger) versionCredits(write *liveWrite, key string) bool {
+	for _, capture := range l.captures {
+		if _, credited := capture.authors[key]; credited && capture.write == write && capture.edits == write.edits {
+			return true
+		}
+	}
+	return false
 }
 
 // publish applies the committed transaction's live writes to their rooms and broadcasts them.
