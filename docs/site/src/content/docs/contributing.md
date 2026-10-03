@@ -104,8 +104,14 @@ published at `/legion/media/<path>`, so a page embeds a screenshot as
 Media shows example data only: this repository is public, so no real hostname, account, token or
 private URL appears in a page, image or video.
 
-The secrets broker's media differs in one way: its screenshots and walkthrough need a rig of
-their own (a broker, its client and an example agent machine) that CI does not run, so its
-screenshots are committed too. `docs/site/media/broker/` holds its scripts, the walkthrough's
-sources (its raw takes, its cut and its narration, in the shared voice) and a README saying how to
-run them.
+The secrets broker's media is made differently. It needs a rig of its own (a broker, its client
+and an example agent machine) that the shared harness does not boot and CI does not run, so its
+screenshots are committed too, and its walkthrough has a build of its own:
+`docs/site/media/broker/walkthrough/build.py` makes it from the cut in `edl.py`, not
+`walkthrough.ts`. Its terminal casts are recorded live against the rig between its browser
+sections, since each section acts on what the one before it left. Its browser sections are
+Playwright's `recordVideo` at 1280x720 and 30 fps, the recorder the shared pipeline avoids for its
+blur, because the committed footage and the marks the cut is placed at come from it, and changing
+it needs a new take. It publishes the video, its captions and its poster to
+`public/media/broker/`. `docs/site/media/broker/walkthrough/README.md` says how to record and
+build it.

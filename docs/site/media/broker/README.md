@@ -15,7 +15,7 @@ production service is involved.
 | `agent/` | What the agent machine mounts: its shell prompt and the demo command, `check-demo-key.sh`. |
 | `screenshots.sh`, `screenshots.spec.ts` | Retake the screenshots into `docs/site/public/media/broker/`. |
 | `walkthrough.sh`, `walkthrough.record.ts` | Record the walkthrough's raw footage into `walkthrough/raw/`. |
-| `walkthrough/` | The walkthrough's footage, cut, narration and build, which writes `docs/site/public/media/broker/walkthrough.mp4`. |
+| `walkthrough/` | The walkthrough's footage, cut, narration and build, which writes `docs/site/public/media/broker/walkthrough.mp4` with its captions and poster. |
 | `playwright.config.ts` | The Playwright config both specs run under; it starts no server, since the rig has. |
 
 ## The rig
