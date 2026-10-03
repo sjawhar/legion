@@ -277,7 +277,12 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if err != nil {
 			return err
 		}
+		// A repair is a whole new document, held to the ask content rule for every ask, as
+		// RebuildDocument holds supplied markdown, and it keeps every open ask block.
 		if repairing {
+			if err := pmdoc.AskContentError(target); err != nil {
+				return &ErrInvalidAskBlock{Reason: err}
+			}
 			if err := s.refuseDroppedAskBlocks(ctx, artifactID, target); err != nil {
 				return &ErrInvalidAskBlock{Reason: err}
 			}

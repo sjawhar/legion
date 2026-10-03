@@ -117,6 +117,49 @@ func TestSchemaRepairKeepsOpenAskBlocks(t *testing.T) {
 	}
 }
 
+// A repair's markdown is a whole new document, so every ask block it holds is held to the ask
+// content rule, as a replacement over a readable document holds each ask it writes: a question
+// given only a list is refused, and the unreadable document stays as it was rather than taking
+// an ask block the browser editor would drop.
+func TestSchemaRepairRefusesAnAskBlockTheContentRuleRefuses(t *testing.T) {
+	const broken = ":::ask{#ask-broken}\n- only a list\n- no question\n:::\n"
+	for _, test := range []struct {
+		name       string
+		unreadable bool
+	}{
+		{"over a readable document", false},
+		{"repairing an unreadable document", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database := storetest.Open(t)
+			artifactID := createDocument(t, database, "")
+			service := newSchemaRepairService(database)
+			t.Cleanup(func() {
+				if err := service.Shutdown(context.Background()); err != nil {
+					t.Errorf("shutdown document service: %v", err)
+				}
+			})
+			seedServiceText(t, service, artifactID, "before\n")
+			if test.unreadable {
+				writeSchemaInvalidElement(t, service, artifactID)
+			}
+			_, err := service.ReplaceText(context.Background(), artifactID, broken, model.Actor{Kind: "user", ID: "alice"})
+			var invalid *ErrInvalidAskBlock
+			if !errors.As(err, &invalid) {
+				t.Fatalf("replace with an ask block holding only a list: %v, want ErrInvalidAskBlock", err)
+			}
+			text, err := service.Text(context.Background(), artifactID)
+			if test.unreadable {
+				if !errors.Is(err, ErrDocOutsideSchema) {
+					t.Fatalf("read after the refused repair: %q (%v), want ErrDocOutsideSchema", text, err)
+				}
+			} else if err != nil || text != "before\n" {
+				t.Fatalf("read after the refused replacement: %q (%v), want \"before\\n\"", text, err)
+			}
+		})
+	}
+}
+
 // A stored task item can pass the tree validator while the renderer rejects it: a checked task
 // whose empty first paragraph precedes a heading has no markdown representation the browser reads
 // back as a task. It remains repairable instead of failing room creation.

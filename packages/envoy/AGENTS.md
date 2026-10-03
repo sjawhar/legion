@@ -1202,7 +1202,9 @@ Markdown that becomes a whole document - a spec at issue creation, an uploaded d
 is refused with `400 INVALID_ASK_BLOCK` when an ask's body breaks its content rule,
 `paragraph+ bullet_list?` - one or more paragraphs, then at most one bullet list, last
 (`pmdoc.AskContentError`) - as the browser editor's parser refuses to build such a block. A new
-document is held to it for every ask, a new version only for each ask it writes or changes
+document is held to it for every ask, and so are a version that repairs a stored tree outside the
+schema, which has no readable asks to compare with, and a rebuild from supplied markdown; any other
+new version only for each ask it writes or changes
 (`refuseChangedAsks`), comparing the ask's rendering with the current one (`newAskMarkdown`, the
 asks of one check sharing one budget of span cells, spent in document order as the document's own
 render spent it, so a live ask over a table with colspans or rowspans matches the cells its stored
