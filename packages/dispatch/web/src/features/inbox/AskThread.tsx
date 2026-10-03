@@ -23,8 +23,9 @@ import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 
-const createReply = (issueKey: string, input: CreateCommentInput): Promise<Comment> =>
-  api.createComment(issueKey, input);
+type CreateReply = (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
+
+const createReply: CreateReply = (issueKey, input) => api.createComment(issueKey, input);
 
 function AskReply({ comment }: { comment: Comment }): ReactNode {
   return (
@@ -38,29 +39,26 @@ function AskReply({ comment }: { comment: Comment }): ReactNode {
     </li>
   );
 }
+
 /** AskCard owns the `["ask-thread", ask.id]` query, initializing it from an Inbox row when
  *  available; every card renders the shared thread without a duplicate read. */
 export type AskThreadQuery = UseQueryResult<AskRead, Error>;
 
-interface UseAskThreadResult {
-  replies: Comment[];
-  body: string;
-  setBody: (value: string) => void;
-  submitReply: (event: FormEvent<HTMLFormElement>) => void;
-  isPending: boolean;
-  isError: boolean;
-  retry: () => void;
-}
-
-/** Reply mutation for an ask's thread, kept separate from AskThread's markup so it can be
- * reasoned about (and, if ever needed, reused) independently of the JSX. Reads replies from
- * the shared `thread` query AskCard owns rather than fetching its own copy. */
-function useAskThread(
-  ask: Ask,
-  createReply: (issueKey: string, input: CreateCommentInput) => Promise<Comment>,
-  thread: AskThreadQuery
-): UseAskThreadResult {
+/**
+ * The reply form under an answered ask. It posts to the ask's issue, or to its document for a
+ * project-document ask, then invalidates the shared thread so the reply shows first.
+ */
+export function AskReplyComposer({
+  ask,
+  createReply: reply = createReply,
+}: {
+  ask: Ask;
+  createReply?: CreateReply;
+}): ReactNode {
   const queryClient = useQueryClient();
+  // Each composer owns its field id so transient duplicate mounts during a responsive
+  // transition cannot share an ask-id-derived id.
+  const fieldId = `${useId()}-reply`;
   const [body, setBody] = useState("");
   const submit = useMutation({
     mutationFn: (text: string) => {
@@ -70,7 +68,7 @@ function useAskThread(
         }
         return api.createArtifactComment(ask.artifact_id, { ask_id: ask.id, body: text });
       }
-      return createReply(ask.issue_key, { ask_id: ask.id, body: text });
+      return reply(ask.issue_key, { ask_id: ask.id, body: text });
     },
     onSuccess: () => {
       setBody("");
@@ -87,26 +85,47 @@ function useAskThread(
     submit.mutate(text);
   };
 
-  return {
-    replies: thread.data?.replies ?? [],
-    body,
-    setBody,
-    submitReply,
-    isPending: submit.isPending,
-    isError: submit.isError,
-    retry: () => {
-      if (submit.variables !== undefined) {
-        submit.mutate(submit.variables);
-      }
-    },
-  };
+  return (
+    <form className="flex flex-col gap-2" onSubmit={submitReply}>
+      <label className={`block text-sm font-medium ${textSecondaryOnCanvas}`} htmlFor={fieldId}>
+        Reply
+        <textarea
+          className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
+          disabled={submit.isPending}
+          id={fieldId}
+          onChange={(event) => setBody(event.target.value)}
+          onKeyDown={(event) => submitOnModifiedEnter(event)}
+          value={body}
+        />
+      </label>
+      <button
+        className={`self-start rounded-lg border px-3 py-1.5 text-sm font-medium ${borderStrong} ${textSecondaryOnSurface} ${enabledCardHoverBorder} disabled:cursor-not-allowed disabled:opacity-50`}
+        disabled={body.trim() === "" || submit.isPending}
+        type="submit"
+      >
+        {submit.isPending ? "Replying…" : "Reply"}
+      </button>
+      {submit.isError ? (
+        <QueryError
+          message="Could not post your reply."
+          onRetry={() => {
+            if (submit.variables !== undefined) {
+              submit.mutate(submit.variables);
+            }
+          }}
+          retrying={submit.isPending}
+        />
+      ) : null}
+    </form>
+  );
 }
+
 export interface AskThreadProps {
   ask: Ask;
   /** The shared ask-thread query AskCard owns; this component never requests thread data itself. */
   thread: AskThreadQuery;
-  createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
-  /** Compact cards keep their answered-ask composer behind their Reply control. */
+  createReply?: CreateReply;
+  /** Compact cards render the answered-ask composer themselves, after their Reply control. */
   showComposer?: boolean;
   /** A thread inside an open ask card inherits the card's compact flow. */
   embedded?: boolean;
@@ -116,8 +135,8 @@ export interface AskThreadProps {
  * The reply thread under a question: every comment that replies directly to
  * the ask (Comment.ask_id) plus their own reply chains, newest first. The newest two replies stay
  * visible; a card-local control reveals the remaining older replies. Answered asks keep a plain
- * reply composer; open asks reserve their single composer for answering or asking back. A resolved
- * ask keeps its history and recorded resolution without a composer.
+ * reply composer; open asks reserve their single composer for answering or asking back, and a
+ * resolved ask keeps its history without a composer.
  */
 export function AskThread({
   ask,
@@ -126,19 +145,12 @@ export function AskThread({
   showComposer = true,
   embedded = false,
 }: AskThreadProps): ReactNode {
-  // Each AskThread instance owns its reply field label so transient duplicate
-  // mounts during a responsive transition cannot share an ask-id-derived id.
-  const replyFieldId = `${useId()}-reply`;
-  const { replies, body, setBody, submitReply, isPending, isError, retry } = useAskThread(
-    ask,
-    reply,
-    thread
-  );
+  const olderRepliesId = useId();
+  const replies = thread.data?.replies ?? [];
   const [showAllReplies, setShowAllReplies] = useState(false);
   const hiddenReplyCount = Math.max(replies.length - 2, 0);
   const recentReplies = replies.slice(-2).reverse();
   const olderReplies = showAllReplies ? replies.slice(0, -2).reverse() : [];
-  const isResolved = ask.state === "resolved";
 
   return (
     <section
@@ -155,6 +167,7 @@ export function AskThread({
       )}
       {hiddenReplyCount === 0 ? null : (
         <button
+          aria-controls={olderRepliesId}
           aria-expanded={showAllReplies}
           className={`min-h-11 text-sm font-medium ${linkText} ${linkHoverText}`}
           onClick={() => setShowAllReplies((showing) => !showing)}
@@ -166,39 +179,14 @@ export function AskThread({
         </button>
       )}
       {olderReplies.length === 0 ? null : (
-        <ul className="space-y-2">
+        <ul className="space-y-2" id={olderRepliesId}>
           {olderReplies.map((comment) => (
             <AskReply comment={comment} key={comment.id} />
           ))}
         </ul>
       )}
-      {showComposer && !isResolved && ask.state === "answered" ? (
-        <form className="flex flex-col gap-2" onSubmit={submitReply}>
-          <label
-            className={`block text-sm font-medium ${textSecondaryOnCanvas}`}
-            htmlFor={replyFieldId}
-          >
-            Reply
-            <textarea
-              className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
-              disabled={isPending}
-              id={replyFieldId}
-              onChange={(event) => setBody(event.target.value)}
-              onKeyDown={(event) => submitOnModifiedEnter(event)}
-              value={body}
-            />
-          </label>
-          <button
-            className={`self-start rounded-lg border px-3 py-1.5 text-sm font-medium ${borderStrong} ${textSecondaryOnSurface} ${enabledCardHoverBorder} disabled:cursor-not-allowed disabled:opacity-50`}
-            disabled={body.trim() === "" || isPending}
-            type="submit"
-          >
-            {isPending ? "Replying…" : "Reply"}
-          </button>
-          {isError ? (
-            <QueryError message="Could not post your reply." onRetry={retry} retrying={isPending} />
-          ) : null}
-        </form>
+      {showComposer && ask.state === "answered" ? (
+        <AskReplyComposer ask={ask} createReply={reply} />
       ) : null}
     </section>
   );

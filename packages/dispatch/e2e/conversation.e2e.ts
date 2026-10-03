@@ -7,6 +7,7 @@ import {
   setSessionSendStatus,
 } from "./agents";
 import {
+  answerAsk,
   createAsk,
   createComment,
   createIssue,
@@ -364,6 +365,57 @@ test("an agent's answer on a failed attempt is accepted and shown as the answer"
     expect(stored.message.deliveries).toMatchObject([
       { attempt: 1, error: null, reply_id: answer.id, state: "sent" },
     ]);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a compact answered ask's Reply opens its composer as the next keyboard stop", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Reply order" });
+  const ask = await createAsk(
+    issue.key,
+    { options: [{ label: "Ship" }], question: "Ship it?" },
+    agent
+  );
+  await answerAsk(ask.id, { expected_edited_at: null, selected: ["Ship"] }, { login: "bob" });
+  await createComment(issue.key, { ask_id: ask.id, body: "Thanks" }, agent);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const askTurn = page
+      .getByRole("region", { name: "Conversation" })
+      .locator(`[data-turn="ask:${ask.id}"]`);
+    const replies = askTurn.getByRole("region", { name: "Replies" }).locator("li");
+    await expect(replies).toHaveCount(1);
+    await expect(replies.first()).toContainText("Thanks");
+
+    const closedToggle = askTurn.getByRole("button", {
+      exact: true,
+      expanded: false,
+      name: "Reply",
+    });
+    await closedToggle.focus();
+    await page.keyboard.press("Enter");
+    const openToggle = askTurn.getByRole("button", { exact: true, expanded: true, name: "Reply" });
+    await expect(openToggle).toBeFocused();
+    await page.keyboard.press("Tab");
+    const field = askTurn.getByRole("textbox", { name: "Reply" });
+    await expect(field).toBeFocused();
+    const controls = await openToggle.getAttribute("aria-controls");
+    expect(controls).not.toBeNull();
+    await expect(
+      page.locator(`[id="${controls}"]`).getByRole("textbox", { name: "Reply" })
+    ).toBeFocused();
+
+    await page.keyboard.type("Following up");
+    await page.keyboard.press("Control+Enter");
+    await expect(replies.first()).toContainText("Following up");
+    await expect(replies.nth(1)).toContainText("Thanks");
   } finally {
     await alice.close();
   }

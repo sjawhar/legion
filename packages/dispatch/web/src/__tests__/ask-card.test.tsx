@@ -94,6 +94,24 @@ function renderCard(node: ReactNode) {
   return { queryClient, view };
 }
 
+/** The element a forward Tab reaches from `from`: the next enabled, unhidden focusable element in
+ *  document order (nothing these cards render sets a positive tabindex). */
+function nextTabStop(from: Element): HTMLElement | undefined {
+  const stops = Array.from(
+    document.querySelectorAll<HTMLElement>("a[href], button, input, select, textarea, [tabindex]")
+  ).filter(
+    (element) =>
+      element.tabIndex >= 0 && !element.matches(":disabled") && element.closest("[hidden]") === null
+  );
+  return stops[stops.indexOf(from as HTMLElement) + 1];
+}
+
+/** The element a control names in `aria-controls`. */
+function controlledBy(control: HTMLElement): HTMLElement | null {
+  const id = control.getAttribute("aria-controls");
+  return id === null ? null : document.getElementById(id);
+}
+
 test("AskCard links a non-primary block ask to its owning artifact", async () => {
   const input = ask({
     block_artifact: { id: "artifact-design", primary: false, slug: "design-notes" },
@@ -1558,6 +1576,7 @@ test("AskCard shows the newest two replies, expands older replies, and puts a fr
 
     const showMore = view.getByRole("button", { name: "Show 3 more replies" });
     expect(showMore.getAttribute("aria-expanded")).toBe("false");
+    expect(showMore.getAttribute("aria-controls")).not.toBeNull();
     showMore.focus();
     fireEvent.click(showMore);
     await waitFor(() =>
@@ -1572,6 +1591,7 @@ test("AskCard shows the newest two replies, expands older replies, and puts a fr
     const showFewer = view.getByRole("button", { name: "Show fewer replies" });
     expect(document.activeElement).toBe(showFewer);
     expect(showFewer.getAttribute("aria-expanded")).toBe("true");
+    expect(controlledBy(showFewer)?.textContent).toContain("Middle reply");
     fireEvent.click(showFewer);
     await waitFor(() =>
       expect(shownReplyBodies(threadElement)).toEqual(["Newest reply", "Newer reply"])
@@ -1584,6 +1604,92 @@ test("AskCard shows the newest two replies, expands older replies, and puts a fr
     await waitFor(() =>
       expect(shownReplyBodies(threadElement)).toEqual(["Fresh reply", "Newest reply"])
     );
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a compact answered ask's Reply reveals its composer as the next keyboard stop", async () => {
+  const input = answered(ask(), ["Ship"]);
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      getAskThread={async () => ({
+        ask: input,
+        edits: [],
+        followers: [],
+        replies: [reply({ body: "Earlier reply" })],
+      })}
+      thread="collapsed"
+    />
+  );
+
+  try {
+    await view.findByText("Earlier reply");
+    const replyToggle = view.getByRole("button", { name: "Reply" });
+    // Enter or Space on a native button activates it as a click; focus stays on the button.
+    replyToggle.focus();
+    fireEvent.click(replyToggle);
+    expect(replyToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(replyToggle);
+
+    const field = view.getByLabelText("Reply");
+    nextTabStop(replyToggle)?.focus();
+    expect(document.activeElement).toBe(field);
+    expect(controlledBy(replyToggle)?.contains(field)).toBe(true);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a reply arriving while the older replies are shown lands first and keeps them shown", async () => {
+  const input = answered(ask(), ["Ship"]);
+  let replies = [
+    reply({ body: "Oldest reply", created_at: "2026-09-09T00:01:00Z", id: "comment-1" }),
+    reply({ body: "Middle reply", created_at: "2026-09-09T00:02:00Z", id: "comment-2" }),
+    reply({ body: "Newest reply", created_at: "2026-09-09T00:03:00Z", id: "comment-3" }),
+  ];
+  const { queryClient, view } = renderCard(
+    <AskCard
+      ask={input}
+      getAskThread={async () => ({ ask: input, edits: [], followers: [], replies })}
+      thread="collapsed"
+    />
+  );
+  const shownReplyBodies = (container: HTMLElement) =>
+    Array.from(
+      container.querySelectorAll("li"),
+      (item) => item.querySelector(".dispatch-markdown")?.textContent
+    );
+
+  try {
+    const threadElement = await view.findByTestId("thread-ask-1");
+    fireEvent.click(await view.findByRole("button", { name: "Show 1 more reply" }));
+    await waitFor(() =>
+      expect(shownReplyBodies(threadElement)).toEqual([
+        "Newest reply",
+        "Middle reply",
+        "Oldest reply",
+      ])
+    );
+
+    // A comment event invalidates the ask's thread, as the live stream does.
+    replies = [
+      ...replies,
+      reply({ body: "Arriving reply", created_at: "2026-09-09T00:04:00Z", id: "comment-4" }),
+    ];
+    await queryClient.invalidateQueries({ queryKey: ["ask-thread", input.id] });
+
+    await waitFor(() =>
+      expect(shownReplyBodies(threadElement)).toEqual([
+        "Arriving reply",
+        "Newest reply",
+        "Middle reply",
+        "Oldest reply",
+      ])
+    );
+    const showFewer = view.getByRole("button", { name: "Show fewer replies" });
+    expect(showFewer.getAttribute("aria-expanded")).toBe("true");
   } finally {
     view.unmount();
   }
