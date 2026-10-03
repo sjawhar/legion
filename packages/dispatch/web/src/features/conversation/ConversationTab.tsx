@@ -84,7 +84,7 @@ import {
   receiptAnsweredWithError,
   withGuidance,
 } from "./delivery";
-import { useHeldSends, useHeldSendsUnder } from "./held-sends";
+import { useHeldReplyTo, useHeldSendsUnder } from "./held-sends";
 import { MentionComposer } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
 import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
@@ -833,7 +833,6 @@ export function ConversationTab({
   // whatever unmounts its composer; this decides what the reader sees.
   const sendKey = useMemo<MutationKey>(() => ["conversation-composer", issueKey], [issueKey]);
   const { sending: composerSending, sendingNow } = useSending(sendKey);
-  const heldSends = useHeldSends();
   // Comments whose card's own reply the store holds, out or refused.
   const heldCardReplies = useHeldSendsUnder(threadRepliesSendKey(sendKey));
   const [failedOps, setFailedOps] = useState<FailedStateOperations>();
@@ -974,9 +973,7 @@ export function ConversationTab({
   // The docked composer's reply. A message's Reply answers here at every width, and so does a
   // comment's above the phone layout. A send the composer holds still answers its reply when the
   // tab mounts again, so the composer shows it there.
-  const [replyTo, setReplyTo] = useState<ReplyTarget | null>(
-    () => heldSends.get(sendKey)?.request.replyTo ?? null
-  );
+  const [replyTo, setReplyTo] = useHeldReplyTo(sendKey);
   const beginReply = (target: ReplyTarget): boolean => {
     if (sendingNow()) return false;
     setReplyTo(target);

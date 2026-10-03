@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useSending } from "../../hooks/useSending";
 import type { ReplyTarget } from "./composer-model";
-import { useHeldSends } from "./held-sends";
+import { useHeldReplyTo, useHeldSends } from "./held-sends";
 
 /** The name every comment thread card's own reply send in a tab sits beneath. */
 export function threadRepliesSendKey(sendKey: MutationKey): MutationKey {
@@ -61,9 +61,7 @@ export function usePhoneThread({
   const composerKey = useMemo<MutationKey>(() => [...sendKey, "phone-thread"], [sendKey]);
   // The thread composer's reply is its send's address: a send it has held - out, or refused -
   // still answers that reply when the tab mounts again, so the composer shows it there.
-  const [replyTo, setReplyTo] = useState<ReplyTarget | null>(
-    () => store.get(composerKey)?.request.replyTo ?? null
-  );
+  const [replyTo, setReplyTo] = useHeldReplyTo(composerKey);
   // Set when the viewport widened past the phone layout while a send from the view was out - its
   // card's own reply, or the thread composer's: the view stays open, full-screen at any width,
   // until the reader leaves it with Back, so the send's draft and its refusal stay where the

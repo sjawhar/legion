@@ -5,10 +5,17 @@ import {
   type QueryClient,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useMemo, useSyncExternalStore } from "react";
+import {
+  type Dispatch,
+  type SetStateAction,
+  useCallback,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 import { agentMessagesQuery } from "../../api/queries";
 import { pastDeadlineKey } from "../../hooks/useSending";
+import type { ReplyTarget } from "./composer-model";
 import {
   SendDeadlineError,
   type SentDraft,
@@ -88,7 +95,12 @@ function refreshAfter(client: QueryClient, { anchor, owner }: SentRequest): void
 export class HeldSends {
   readonly #client: QueryClient;
   readonly #entries = new Map<string, HeldSend>();
-  #snapshot: readonly HeldSend[] = [];
+  /** `under`'s answers, by the prefix's hash, each dropped when a send beneath its prefix
+   *  changes. */
+  readonly #under = new Map<
+    string,
+    { readonly prefix: MutationKey; readonly sends: readonly HeldSend[] }
+  >();
   readonly #listeners = new Set<() => void>();
   readonly #outcomes = new Set<(outcome: HeldSendOutcome) => void>();
 
@@ -100,9 +112,17 @@ export class HeldSends {
     return this.#entries.get(hashKey(mutationKey));
   }
 
-  /** Every held send, as one array that changes only when an entry does. */
-  all(): readonly HeldSend[] {
-    return this.#snapshot;
+  /** Every held send whose name starts with `prefix`, as one array that changes only when one of
+   *  those sends does, whatever else the store holds. */
+  under(prefix: MutationKey): readonly HeldSend[] {
+    const prefixId = hashKey(prefix);
+    const cached = this.#under.get(prefixId);
+    if (cached !== undefined) return cached.sends;
+    const sends = [...this.#entries.values()].filter((held) =>
+      partialMatchKey(held.mutationKey, prefix)
+    );
+    this.#under.set(prefixId, { prefix, sends });
+    return sends;
   }
 
   /** Whether a send under `mutationKey` is out now - from the task that starts it on. */
@@ -210,9 +230,14 @@ export class HeldSends {
   }
 
   #set(id: string, held: HeldSend | undefined): void {
+    const changed = held ?? this.#entries.get(id);
     if (held === undefined) this.#entries.delete(id);
     else this.#entries.set(id, held);
-    this.#snapshot = [...this.#entries.values()];
+    if (changed !== undefined) {
+      for (const [prefixId, { prefix }] of this.#under) {
+        if (partialMatchKey(changed.mutationKey, prefix)) this.#under.delete(prefixId);
+      }
+    }
     for (const listener of this.#listeners) listener();
   }
 
@@ -246,15 +271,19 @@ export function useHeldSend(mutationKey: MutationKey | undefined): HeldSend | un
   );
 }
 
-/** Every held send whose name starts with `prefix`, re-rendering when one changes. */
+/** Every held send whose name starts with `prefix`, re-rendering only when one of them changes. */
 export function useHeldSendsUnder(prefix: MutationKey): readonly HeldSend[] {
   const store = useHeldSends();
   const subscribe = useCallback((listener: () => void) => store.subscribe(listener), [store]);
-  const all = useSyncExternalStore(subscribe, () => store.all());
-  const prefixId = hashKey(prefix);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the prefix's hash is its identity
-  return useMemo(
-    () => all.filter((held) => partialMatchKey(held.mutationKey, prefix)),
-    [all, prefixId]
-  );
+  return useSyncExternalStore(subscribe, () => store.under(prefix));
+}
+
+/** A host's reply for its composer under `mutationKey`, as state: it starts as the reply the send
+ *  the store holds there - out, or refused - was sent with, so a host that mounts again shows that
+ *  send under the reply it answers, and as none otherwise. */
+export function useHeldReplyTo(
+  mutationKey: MutationKey
+): [ReplyTarget | null, Dispatch<SetStateAction<ReplyTarget | null>>] {
+  const store = useHeldSends();
+  return useState<ReplyTarget | null>(() => store.get(mutationKey)?.request.replyTo ?? null);
 }

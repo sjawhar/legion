@@ -49,7 +49,7 @@ export function useComposerSend(
   const held = useHeldSend(key);
   const outcomes = useRef({ landed, refused });
   outcomes.current = { landed, refused };
-  const id = hashKey(key);
+  const id = useMemo(() => hashKey(key), [key]);
   useEffect(
     () =>
       store.onOutcome(({ kind, send }) => {
