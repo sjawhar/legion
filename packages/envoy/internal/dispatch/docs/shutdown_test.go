@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -84,8 +86,8 @@ func TestAnEditorThatNeverStopsTypingHoldsNoOtherRoomsSettlementAtShutdown(t *te
 	if err := service.waitForDurableAppends(ctx, quiet); err != nil {
 		t.Fatalf("wait for the quiet document's edit to be stored: %v", err)
 	}
-	keyboard.start(t)
 	defer keyboard.stop()
+	keyboard.start(t)
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancelShutdown()
@@ -188,6 +190,113 @@ func TestShutdownJoinsTheSettlementItsLastBrowserLeavingStarted(t *testing.T) {
 		t.Fatalf("the document owes no settlement (%v) after a shutdown that settled nothing", err)
 	}
 	waitForPersistedProofText(t, database, artifactID, "before\n\nadded\n")
+}
+
+// An append a room queued before the signal can be slow to store - waiting on its document's lock
+// or a slow write - and only that room's settlement can wait on it. Every other room drains, reads
+// what it owes and settles on its own, so the quiet document's edit is versioned while the held
+// room's append is still outstanding, and the held room alone is left to resume.
+func TestShutdownSettlesEveryOtherRoomWhileOneRoomsQueuedAppendIsHeld(t *testing.T) {
+	database := storetest.Open(t)
+	quiet := createIssueDocument(t, database, 1, "quiet")
+	held := createIssueDocument(t, database, 2, "held")
+	appends := &heldStore{VersionedStore: NewPgVersioned(database), room: held, entered: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(appends.let)
+	service := newShutdownTestService(t, database, appends)
+	seedServiceText(t, service, quiet, "quiet")
+	settleCurrentGeneration(t, service, quiet)
+	seedServiceText(t, service, held, "held")
+	settleCurrentGeneration(t, service, held)
+	editLiveTree(t, service, quiet, replaceRun("quiet", "quiet, edited"))
+	waitForSettlementOwed(t, service, quiet)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := service.waitForDurableAppends(ctx, quiet); err != nil {
+		t.Fatalf("wait for the quiet document's edit to be stored: %v", err)
+	}
+	appends.armed.Store(true)
+	editLiveTree(t, service, held, replaceRun("held", "held, edited"))
+	select {
+	case <-appends.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the held room's append never reached the store")
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelShutdown()
+	shutdown := make(chan error, 1)
+	go func() { shutdown <- service.Shutdown(shutdownCtx) }()
+	var shutdownErr error
+	select {
+	case shutdownErr = <-shutdown:
+	case <-time.After(ShutdownDrainBudget + 5*time.Second):
+		t.Fatal("Shutdown did not return once its drain budget ended")
+	}
+	appends.let()
+	if number, markdown, _ := latestDocumentVersion(t, database, quiet); number != 2 || markdown != "quiet, edited\n" {
+		t.Errorf("the quiet document's latest version is %d holding %q, want version 2 holding %q: another room's held append spent its settlement's budget",
+			number, markdown, "quiet, edited\n")
+	}
+	if owed, err := settlementPending(context.Background(), database.Pool, quiet); err != nil || owed {
+		t.Errorf("the quiet document still owes its settlement (%v) after the shutdown that ran it", err)
+	}
+	// The held append lands once let go, and the pending-settlement row it writes resumes the
+	// held document's settlement in the next process.
+	waitForSettlementOwed(t, service, held)
+	if number, _, _ := latestDocumentVersion(t, database, held); number != 1 {
+		t.Errorf("the held document's latest version is %d, want 1 with its settlement left to the next process", number)
+	}
+	if !errors.Is(shutdownErr, context.DeadlineExceeded) {
+		t.Errorf("Shutdown returned %v, want the held room's append the drain budget did not see through", shutdownErr)
+	}
+}
+
+// A settlement that has to write into its room - stamping a block id here - is refused that write
+// once Shutdown begins closing the room. Shutdown leaves the document to resume from its
+// pending-settlement row, says so at WARN, and counts no settlement failure, which three of would
+// fail the room.
+func TestShutdownLeavesASettlementThatMustWriteIntoItsRoomToResume(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	service := newShutdownTestService(t, database, nil)
+	seedServiceText(t, service, artifactID, "before")
+	settleCurrentGeneration(t, service, artifactID)
+	// A block with no id arms the room's settlement, which has to stamp one.
+	editLiveTree(t, service, artifactID, appendUnidentifiedBlocks(t, "added"))
+	waitForSettlementOwed(t, service, artifactID)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
+		t.Fatalf("wait for the edit to reach persistence: %v", err)
+	}
+	if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
+		t.Fatalf("wait for the edit to be stored: %v", err)
+	}
+	logs := &lockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	if err := service.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown with a settlement that must stamp its room: %v", err)
+	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	failures := state.settleFailures
+	state.mu.Unlock()
+	if failures != 0 {
+		t.Errorf("the refused write counted %d settlement failures, want none", failures)
+	}
+	output := logs.String()
+	if !strings.Contains(output, `msg="dispatch: skip shutdown document settlement that has to write into its room" room=`+artifactID) {
+		t.Errorf("Shutdown did not log the settlement it left because its room refused the write:\n%s", output)
+	}
+	if strings.Contains(output, `msg="dispatch: settle document"`) {
+		t.Errorf("Shutdown logged the refused write as a settlement failure:\n%s", output)
+	}
+	if owed, err := settlementPending(context.Background(), database.Pool, artifactID); err != nil || !owed {
+		t.Errorf("the document owes no settlement (%v), want it left to resume", err)
+	}
 }
 
 // newShutdownTestService is a document service whose settlements wait an hour, so a test's
@@ -411,6 +520,27 @@ type typingStore struct {
 func (s *typingStore) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
 	if room == s.typist.room {
 		s.typist.next()
+	}
+	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
+}
+
+// heldStore stores a document's updates as the store does, but holds the held room's next append,
+// once armed, until the test lets it go.
+type heldStore struct {
+	VersionedStore
+	room    string
+	armed   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *heldStore) let() { s.once.Do(func() { close(s.release) }) }
+
+func (s *heldStore) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+	if room == s.room && s.armed.CompareAndSwap(true, false) {
+		close(s.entered)
+		<-s.release
 	}
 	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
 }
