@@ -180,21 +180,27 @@ test("a send holds every ask control", async ({ browser }) => {
   });
 });
 
+// A key reaches the composer from a control in it, never from the form, which takes no focus: the
+// Escape goes to the field, in Send's own task, before React has disabled anything.
 test("an Escape in Send's task cannot open a margin Discard prompt", async ({ browser }) => {
   await withReaders(browser, "Held margin close", async ({ alicePage }) => {
     await selectEditorText(alicePage, "brown");
     await barAction(alicePage, "Comment");
     const refusal = await refusePosts(alicePage, "**/api/v1/issues/*/comments");
     const form = composer(alicePage);
-    await form.getByLabel("Comment").fill("Keep this draft");
-    await form.evaluate((node) => {
+    const field = form.getByLabel("Comment");
+    await field.fill("Keep this draft");
+    const input = await field.elementHandle();
+    await form.evaluate((node, control) => {
       const send = node.querySelector<HTMLButtonElement>('button[type="submit"]');
-      if (send === null) throw new Error("expected Send");
+      if (send === null || !(control instanceof HTMLTextAreaElement)) {
+        throw new Error("expected Send and the Comment field");
+      }
       send.click();
-      node.dispatchEvent(
+      control.dispatchEvent(
         new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" })
       );
-    });
+    }, input);
 
     await expect(form.getByRole("button", { name: "Discard" })).toHaveCount(0);
     refusal();
