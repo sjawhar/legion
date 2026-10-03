@@ -16,10 +16,12 @@
 # at /opt/legion/roles for the in-cluster daemon; jj; git at /usr/bin/git (>= 2.42, from the
 # debian:trixie-slim runtime base — jj's git backend requires it); gh; and a generic toolchain for the
 # repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and corepack's
-# pnpm and yarn, and the AWS CLI v2, each on PATH at /usr/local/bin. The last three RUNs gate the
-# publish, as the runtime user: the first checks every binary runs on the base, proves jj accepts the
-# image's git with a network-free `jj git clone` of a scratch repository, and links the plugins into
-# the profile, which fetches Oh My Pi's natives; the second runs every toolchain command; the last
+# pnpm and yarn, and the AWS CLI v2, each on PATH at /usr/local/bin; and the license of every
+# third-party piece of all that at /usr/share/doc/legion/THIRD_PARTY_NOTICES (the notices stage).
+# The last three RUNs gate the publish, as the runtime user: the first checks every binary runs on
+# the base, proves jj accepts the image's git with a network-free `jj git clone` of a scratch
+# repository, and links the plugins into the profile, which fetches Oh My Pi's natives; the second
+# runs every toolchain command; the last
 # runs `legion version` and `legion probe-image`, which runs the three launch probes (the daemon's two
 # plus the session-storage probe), holds the plugin to the daemon API contract, and prints the OK line
 # the daemon's probe Sandbox reads. A broken image never publishes.
@@ -98,6 +100,8 @@ COPY packages/contracts packages/contracts
 COPY packages/envoy-client packages/envoy-client
 COPY packages/pi-envoy packages/pi-envoy
 COPY skills skills
+# prepack.sh writes the plugin's dist/THIRD_PARTY_NOTICES with this.
+COPY scripts/third-party-notices.ts scripts/third-party-notices.ts
 
 # The plugin ships from this checkout with the steps release.yaml's pi_envoy job runs before
 # `bun pm pack` (prepack.sh refuses to pack with the source manifest). The tarball is unpacked into a
@@ -150,9 +154,18 @@ COPY go.work go.work.sum ./
 COPY packages/daemon/go.mod packages/daemon/go.sum packages/daemon/
 COPY packages/envoy/go.mod packages/envoy/go.sum packages/envoy/
 RUN go mod download
+# The notices stage's Go part: go-licenses (pinned in go-third-party-notices.sh) is built in a layer of
+# its own, so a source change reuses it.
+COPY scripts/go-third-party-notices.sh /usr/local/bin/
+RUN go-third-party-notices.sh --install
 COPY packages/daemon packages/daemon
 COPY packages/envoy packages/envoy
 WORKDIR /src/packages/daemon
+# The licenses of the Go modules `legion` and `agent-secrets` compile in, with the build's CGO_ENABLED
+# (which decides them, with the GOARCH this stage builds for); fails the build when one's license
+# cannot be determined.
+RUN mkdir -p /out && CGO_ENABLED=0 go-third-party-notices.sh /out/go-notices \
+    ./cmd/legion github.com/sjawhar/envoy/cmd/agent-secrets
 # Declared here, after the dependency layers, so a new commit re-runs only the compile.
 ARG LEGION_REVISION
 RUN test -n "$LEGION_REVISION" \
@@ -198,7 +211,60 @@ RUN set -eu; \
     done; \
     unzip -q "$t/awscli.zip" -d "$t"; \
     "$t/aws/install" --install-dir /opt/aws-cli --bin-dir /out/bin; \
+    mkdir -p /out/licenses; \
+    cp "$t/aws/THIRD_PARTY_LICENSES" /out/licenses/aws-cli-THIRD_PARTY_LICENSES; \
     rm -rf "$t"
+
+# ------------------------------------------------------------------------------------------------
+# notices: /out/THIRD_PARTY_NOTICES, the image's /usr/share/doc/legion/THIRD_PARTY_NOTICES — the
+# license of every third-party piece the image ships beyond the Debian packages (whose terms are in
+# /usr/share/doc/<package>/copyright) and the npm packages installed unmodified with their own license
+# files beside them. What this checkout builds carries notices generated from what the build included
+# (the go stage's, the packed plugin's); a prebuilt tool carries the license files its distribution
+# ships (Node's LICENSE, the AWS CLI's THIRD_PARTY_LICENSES) and those its source repository holds at
+# the pinned release, fetched here. A missing or empty one fails the build.
+FROM tools AS notices
+ARG BUN_VERSION
+ARG JJ_TOOL
+ARG GH_TOOL
+ARG UV_VERSION
+ARG AWS_CLI_VERSION
+ARG CODEGRAPH_VERSION
+COPY scripts/assemble-third-party-notices.sh /usr/local/bin/
+COPY --from=go /out/go-notices /in/go-notices
+COPY --from=plugin /out/pi-legion-envoy/dist/THIRD_PARTY_NOTICES /in/plugin-notices
+COPY --from=toolchain /opt/node/LICENSE /in/node-LICENSE
+COPY --from=toolchain /out/licenses/aws-cli-THIRD_PARTY_LICENSES /in/aws-cli-THIRD_PARTY_LICENSES
+RUN set -eu; mkdir -p /out; \
+    omp_pin="$(cat /omp-pin)"; omp_repo="${omp_pin#github:}"; omp_repo="${omp_repo%@*}"; \
+    omp_tag="v${omp_pin##*@}"; \
+    jj_repo="${JJ_TOOL#github:}"; jj_repo="${jj_repo%@*}"; jj_tag="v${JJ_TOOL##*@}"; \
+    gh_tag="v${GH_TOOL#gh@}"; \
+    fetch() { curl -fsSL "https://raw.githubusercontent.com/$1/$2/$3" -o "/in/$4"; }; \
+    fetch oven-sh/bun "bun-v${BUN_VERSION}" LICENSE.md bun-LICENSE.md; \
+    fetch "$omp_repo" "$omp_tag" LICENSE omp-LICENSE; \
+    fetch "$omp_repo" "$omp_tag" THIRD-PARTY-NOTICES.txt omp-THIRD-PARTY-NOTICES.txt; \
+    fetch "$jj_repo" "$jj_tag" LICENSE jj-LICENSE; \
+    fetch cli/cli "$gh_tag" LICENSE gh-LICENSE; \
+    fetch astral-sh/uv "$UV_VERSION" LICENSE-APACHE uv-LICENSE-APACHE; \
+    fetch astral-sh/uv "$UV_VERSION" LICENSE-MIT uv-LICENSE-MIT; \
+    fetch aws/aws-cli "$AWS_CLI_VERSION" LICENSE.txt aws-cli-LICENSE.txt; \
+    fetch colbymchenry/codegraph "v${CODEGRAPH_VERSION}" LICENSE codegraph-LICENSE; \
+    assemble-third-party-notices.sh /out/THIRD_PARTY_NOTICES \
+      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, and the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules." \
+      "Go modules compiled into /opt/legion/bin/legion and /opt/legion/bin/agent-secrets" /in/go-notices \
+      "npm packages inlined into the pi-legion-envoy plugin, /opt/legion/pi-legion-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/plugin-notices \
+      "Bun ${BUN_VERSION}, /usr/local/bin/bun: LICENSE.md of github.com/oven-sh/bun at bun-v${BUN_VERSION}" /in/bun-LICENSE.md \
+      "Oh My Pi, /opt/omp and the native modules it fetched into /home/legion/.omp/natives: LICENSE of github.com/${omp_repo} at ${omp_tag}" /in/omp-LICENSE \
+      "Oh My Pi: THIRD-PARTY-NOTICES.txt of github.com/${omp_repo} at ${omp_tag}" /in/omp-THIRD-PARTY-NOTICES.txt \
+      "jj, /usr/local/bin/jj: LICENSE of github.com/${jj_repo} at ${jj_tag}" /in/jj-LICENSE \
+      "GitHub CLI, /usr/local/bin/gh: LICENSE of github.com/cli/cli at ${gh_tag}" /in/gh-LICENSE \
+      "uv and uvx, /usr/local/bin/uv and uvx: LICENSE-APACHE of github.com/astral-sh/uv at ${UV_VERSION} (uv is offered under Apache-2.0 or MIT)" /in/uv-LICENSE-APACHE \
+      "uv: LICENSE-MIT of github.com/astral-sh/uv at ${UV_VERSION}" /in/uv-LICENSE-MIT \
+      "Node.js, /opt/node (with npm and corepack): the LICENSE its release archive ships" /in/node-LICENSE \
+      "AWS CLI v2, /opt/aws-cli: LICENSE.txt of github.com/aws/aws-cli at ${AWS_CLI_VERSION}" /in/aws-cli-LICENSE.txt \
+      "AWS CLI v2: the THIRD_PARTY_LICENSES its installer archive ships" /in/aws-cli-THIRD_PARTY_LICENSES \
+      "CodeGraph CLI, /opt/codegraph: LICENSE of github.com/colbymchenry/codegraph at v${CODEGRAPH_VERSION}" /in/codegraph-LICENSE
 
 # ------------------------------------------------------------------------------------------------
 # runtime: debian:trixie-slim for its git (2.47; jj 0.45's git backend needs >= 2.42 — bookworm and
@@ -299,6 +365,9 @@ RUN set -eu; \
     for shim in pnpm yarn yarnpkg; do "$shim" --version; done; \
     pnpx --help > "$scratch/pnpx-help"; sed -n 1p "$scratch/pnpx-help"; \
     rm -rf "$scratch"
+# The notices stage's file, after the toolchain step so a notices change never reruns it, and before
+# `legion`, which changes on every commit while the notices change only with a dependency or a pin.
+COPY --from=notices /out/THIRD_PARTY_NOTICES /usr/share/doc/legion/THIRD_PARTY_NOTICES
 # `legion` goes in after the probe layer and the toolchain: its binary differs on every commit (it
 # links the commit), so a new commit rebuilds only the layers from here down, never the probe layer and
 # its natives.

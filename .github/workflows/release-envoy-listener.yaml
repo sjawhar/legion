@@ -24,6 +24,10 @@ on:
       - "docs/site/package.json"
       - ".dockerignore"
       - ".github/workflows/release-envoy-listener.yaml"
+      # The image's and the binaries' third-party notices.
+      - "scripts/third-party-notices.ts"
+      - "scripts/go-third-party-notices.sh"
+      - "scripts/assemble-third-party-notices.sh"
   workflow_dispatch:
 
 permissions:
@@ -53,11 +57,15 @@ jobs:
       - name: Generate Go contracts
         run: bun run gen:go
         working-directory: packages/contracts
+      # The archive holds envoy-listener and THIRD_PARTY_NOTICES, the license of every Go module the
+      # binary compiles in (scripts/go-third-party-notices.sh, run with the build's own GOOS and
+      # GOARCH), which fails the build when one cannot be determined.
       - name: Build envoy binary
         run: |
           mkdir -p out
           GOOS=linux GOARCH=${{ matrix.arch }} go build -buildvcs=false -o out/envoy-listener ./cmd/listener
-          tar czf legion-envoy-${{ matrix.arch }}.tar.gz -C out envoy-listener
+          GOOS=linux GOARCH=${{ matrix.arch }} ../../scripts/go-third-party-notices.sh out/THIRD_PARTY_NOTICES ./cmd/listener
+          tar czf legion-envoy-${{ matrix.arch }}.tar.gz -C out envoy-listener THIRD_PARTY_NOTICES
         working-directory: packages/envoy
       - uses: actions/upload-artifact@v4
         with:
@@ -376,7 +384,10 @@ jobs:
       # directory from an asset shaped like that, so the installed tree still ends
       # up bin/agent-secrets, bin/agent-secrets-helper; a bare bin/... top level
       # would itself be the one directory mise strips, flattening the binaries to
-      # the install root instead.
+      # the install root instead. agent-secrets/THIRD_PARTY_NOTICES, beside bin/, is
+      # the license of every Go module the two binaries compile in
+      # (scripts/go-third-party-notices.sh, run with the build's own environment),
+      # and fails the build when one cannot be determined.
       - name: Build agent-secrets binaries
         if: steps.publish.outputs.should_release == 'true'
         env:
@@ -391,6 +402,8 @@ jobs:
                 -ldflags "-X github.com/sjawhar/envoy/internal/buildversion.tag=$TAG" \
                 -o "out/$arch/agent-secrets/bin/$cmd" "./cmd/$cmd"
             done
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" ../../scripts/go-third-party-notices.sh \
+              "out/$arch/agent-secrets/THIRD_PARTY_NOTICES" ./cmd/agent-secrets ./cmd/agent-secrets-helper
             tar czf "../../agent-secrets-assets/agent-secrets-$arch.tar.gz" -C "out/$arch" agent-secrets
           done
         working-directory: packages/envoy
