@@ -10,7 +10,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 )
 
-const issueStatusUsage = "usage: legion status <issue> todo|backlog|icebox [--operator-token-file <file>] [--config <legion.yaml> | --port <port>]"
+// issueStatusSynopsis is `legion status <issue> <status>`, the second line of `legion status`'s usage.
+const issueStatusSynopsis = "legion status <issue> todo|backlog|icebox [--operator-token-file <file>] [--config <legion.yaml> | --port <port>]"
 
 // runIssueStatus is `legion status <issue> <status>`, the controller's capability: Dispatch moves
 // the issue to one of the three statuses a controller sets, through the daemon's issue status
@@ -20,9 +21,12 @@ const issueStatusUsage = "usage: legion status <issue> todo|backlog|icebox [--op
 // grant of its own; the bearer is read and sent as every operator command reads and sends it
 // (operatorCall). The daemon is found as `legion state` finds it.
 func runIssueStatus(ctx context.Context, issue, status string, args []string, stdout, stderr io.Writer) int {
-	c := newOperatorCall("status", "file holding the operator bearer; mints the controller grant from an operator shell", stdout, stderr)
-	if !c.parse(args) || (status != "todo" && status != "backlog" && status != "icebox") {
-		fmt.Fprintln(stderr, issueStatusUsage)
+	c := newOperatorCall("status", "usage: "+issueStatusSynopsis, "file holding the operator bearer; mints the controller grant from an operator shell", stdout, stderr)
+	if code, ok := c.parse(args); !ok {
+		return code
+	}
+	if status != "todo" && status != "backlog" && status != "icebox" {
+		c.flags.Usage()
 		return 2
 	}
 	// One decision, made once: an operator shell mints the grant with its bearer; otherwise the

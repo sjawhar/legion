@@ -282,7 +282,7 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 			name: "no subcommand",
 			args: func(*treeVolume) []string { return nil },
 			code: 2,
-			says: func(*treeVolume) string { return "usage: " + workspaceFetchUsage },
+			says: func(*treeVolume) string { return subcommandUsage("workspace-init", workspaceInitCommands) },
 		},
 		{
 			name: "an unknown subcommand",

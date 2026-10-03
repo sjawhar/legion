@@ -113,15 +113,15 @@ const (
 const agentModelsMark = "agent-models="
 
 // OKLine is that line: the OMP invocation probed, the session-storage mark, the agent-models mark
-// (AgentModelsResolved or AgentModelsSkipped), and the Go daemon API contract the image's plugin
+// (AgentModelsResolved or AgentModelsSkipped), and the daemon API contract the image's plugin
 // declared. The daemon's probe Sandbox passes the image only on a line that confirms the daemon's
 // own contract (ConfirmedContract) with the agents' models resolved (AgentModels).
 func OKLine(omp string, contract int, agentModels string) string {
-	return fmt.Sprintf("%s (%s) %s %s%s go-daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, agentModelsMark, agentModels, contract)
+	return fmt.Sprintf("%s (%s) %s %s%s daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, agentModelsMark, agentModels, contract)
 }
 
 // agentModelsState is the agent-models mark on an OK line.
-var agentModelsState = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(OKPrefix) + ` .* ` + agentModelsMark + `(\S+) go-daemon-api-version=[0-9]+$`)
+var agentModelsState = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(OKPrefix) + ` .* ` + agentModelsMark + `(\S+) daemon-api-version=[0-9]+$`)
 
 // AgentModels is the agent-models state an OK line in output carries, and "" when output holds
 // none: no OK line, or one from a CLI that predates the agent-model check.
@@ -133,12 +133,11 @@ func AgentModels(output string) string {
 	return match[1]
 }
 
-// confirmation is an OK line ending with the Go contract token. The space before the token keeps
-// the TypeScript CLI's own `daemon-api-version=<N>` from reading as one.
-var confirmation = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(OKPrefix) + ` .* go-daemon-api-version=([0-9]+)$`)
+// confirmation is an OK line ending with the contract token.
+var confirmation = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(OKPrefix) + ` .* daemon-api-version=([0-9]+)$`)
 
 // ConfirmedContract is the contract an OK line in output confirmed, and false when output holds
-// none: no OK line, or one from a CLI that predates the Go contract check.
+// none: no OK line, or one from a CLI that predates the contract check.
 func ConfirmedContract(output string) (int, bool) {
 	match := confirmation.FindStringSubmatch(output)
 	if match == nil {

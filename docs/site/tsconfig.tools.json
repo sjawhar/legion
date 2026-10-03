@@ -1,4 +1,4 @@
-// The build scripts, generators and media scripts, which Bun and Playwright run without
+// The build scripts, the generators and the media scripts, which Bun and Playwright run without
 // typechecking. `bun run typecheck` checks them alone: tsconfig.json also reaches the plugins'
 // TypeScript sources through astro.config.mjs and src/content.config.ts, and those sources do not
 // typecheck under this project's settings; `astro build` validates those two files itself.

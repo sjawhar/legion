@@ -2,6 +2,8 @@ package classify
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"go/parser"
@@ -54,6 +56,61 @@ func TestFixturesReplayByteExactly(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFixtureRecordsFollowTheDirectoryContract holds every record to the contract in the fixture
+// directory's README: a record sits in the directory named for its function, its bytes are its
+// canonical JSON, and its file name is the SHA-256 of its input's canonical JSON. A record edited
+// by hand and left misfiled, reformatted or misnamed fails here.
+func TestFixtureRecordsFollowTheDirectoryContract(t *testing.T) {
+	for _, path := range fixtureFiles(t) {
+		name := filepath.Join(filepath.Base(filepath.Dir(path)), filepath.Base(path))
+		encoded, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		canonical, err := canonicalRecordJSON(encoded)
+		if err != nil {
+			t.Fatalf("re-encode %s: %v", name, err)
+		}
+		if !bytes.Equal(encoded, canonical) {
+			t.Errorf("%s is not in canonical form; `jq -cjS . %s` prints it", name, name)
+		}
+		var parsed fixture
+		if err := json.Unmarshal(encoded, &parsed); err != nil {
+			t.Fatalf("decode %s: %v", name, err)
+		}
+		if directory := filepath.Base(filepath.Dir(path)); parsed.Function != directory {
+			t.Errorf("%s is in %s/, but its fn is %q", name, directory, parsed.Function)
+		}
+		input, err := canonicalRecordJSON(parsed.Input)
+		if err != nil {
+			t.Fatalf("re-encode the input of %s: %v", name, err)
+		}
+		sum := sha256.Sum256(input)
+		if want := hex.EncodeToString(sum[:]) + ".json"; filepath.Base(path) != want {
+			t.Errorf("%s is not named for its input, whose SHA-256 names it %s", name, want)
+		}
+	}
+}
+
+// canonicalRecordJSON re-encodes raw in the records' canonical form, the one `jq -cjS .` prints:
+// object keys sorted, no whitespace, no trailing newline, numbers as written, and no HTML escaping.
+// The replay compares both of its sides in this form too.
+func canonicalRecordJSON(raw []byte) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(encoded.Bytes(), []byte("\n")), nil
 }
 
 // TestProductionImportsArePure protects the pure decision package from gaining transport, clock,
@@ -160,24 +217,6 @@ func replayFixture(function string, input json.RawMessage) ([]byte, error) {
 			return nil, err
 		}
 		return canonicalOutcome(EffectiveOutcome(decoded.PR.record(), decoded.Incoming))
-	case "acceptGitHubFence":
-		var decoded struct {
-			PR        fixturePullRequest  `json:"pr"`
-			CheckRuns []record.AttemptRun `json:"checkRuns"`
-		}
-		if err := decodeFixture(input, &decoded); err != nil {
-			return nil, err
-		}
-		return canonicalJSON(AcceptGitHubFence(decoded.PR.record(), decoded.CheckRuns))
-	case "supersededBy":
-		var decoded struct {
-			Incoming fixtureHeadClock `json:"incoming"`
-			Applied  fixtureHeadClock `json:"applied"`
-		}
-		if err := decodeFixture(input, &decoded); err != nil {
-			return nil, err
-		}
-		return canonicalJSON(SupersededBy(decoded.Incoming.clock(), decoded.Applied.clock()))
 	case "classifyPush":
 		var decoded PushPayload
 		if err := decodeFixture(input, &decoded); err != nil {
@@ -276,7 +315,7 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 
 func keptFixtureOutput(function string, raw json.RawMessage) ([]byte, error) {
 	if function != "reduceDispatchEvent" && function != "reduceGithubEvent" {
-		return canonicalJSONRaw(raw)
+		return canonicalRecordJSON(raw)
 	}
 	var output map[string]json.RawMessage
 	if err := decodeFixture(raw, &output); err != nil {
@@ -289,14 +328,6 @@ func keptFixtureOutput(function string, raw json.RawMessage) ([]byte, error) {
 		}
 	}
 	return canonicalJSON(kept)
-}
-
-func canonicalJSONRaw(raw json.RawMessage) ([]byte, error) {
-	var value any
-	if err := decodeFixture(raw, &value); err != nil {
-		return nil, err
-	}
-	return canonicalJSON(value)
 }
 
 func decodeFixture(input json.RawMessage, target any) error {
@@ -314,16 +345,13 @@ func decodeFixture(input json.RawMessage, target any) error {
 	return nil
 }
 
+// canonicalJSON is value encoded in the records' canonical form (canonicalRecordJSON).
 func canonicalJSON(value any) ([]byte, error) {
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
 	}
-	var generic any
-	if err := json.Unmarshal(encoded, &generic); err != nil {
-		return nil, err
-	}
-	return json.Marshal(generic)
+	return canonicalRecordJSON(encoded)
 }
 
 func canonicalOutcome(outcome CiOutcome) ([]byte, error) {
@@ -331,20 +359,18 @@ func canonicalOutcome(outcome CiOutcome) ([]byte, error) {
 	if outcome.Verdict == "" {
 		verdict = nil
 	}
-	return canonicalJSON(map[string]any{"verdict": verdict, "failing": outcome.Failing, "failingStatuses": outcome.FailingStatuses})
+	return canonicalJSON(map[string]any{"verdict": verdict, "failing": outcome.Failing})
 }
 
 type fixturePullRequest struct {
-	Key                 string          `json:"key"`
-	Repo                string          `json:"repo"`
-	Number              int             `json:"number"`
-	Branch              string          `json:"branch"`
-	HeadSHA             string          `json:"headSha"`
-	HeadUpdatedAt       json.RawMessage `json:"headUpdatedAt"`
-	HeadUpdatedAtSource string          `json:"headUpdatedAtSource"`
-	Verdict             string          `json:"verdict"`
-	Failing             []string        `json:"failing"`
-	FailingStatuses     []string        `json:"failingStatuses"`
+	Key           string          `json:"key"`
+	Repo          string          `json:"repo"`
+	Number        int             `json:"number"`
+	Branch        string          `json:"branch"`
+	HeadSHA       string          `json:"headSha"`
+	HeadUpdatedAt json.RawMessage `json:"headUpdatedAt"`
+	Verdict       string          `json:"verdict"`
+	Failing       []string        `json:"failing"`
 	// ReviewDecision is the shipped state's; the Go record keeps it on the review round instead.
 	ReviewDecision  string                 `json:"reviewDecision"`
 	FixAttempts     int                    `json:"fixAttempts"`
@@ -352,7 +378,6 @@ type fixturePullRequest struct {
 	CheckRuns       *[]record.AttemptRun   `json:"ciCheckRuns"`
 	Generation      *int64                 `json:"ciSettlementGeneration"`
 	Snapshot        *string                `json:"ciSnapshot"`
-	Reconciled      bool                   `json:"ciReconciled"`
 	PendingPush     *record.ClassifiedPush `json:"pendingPush"`
 	HeadCounted     *bool                  `json:"headCounted"`
 	PlannedRed      bool                   `json:"plannedRed"`
@@ -386,19 +411,9 @@ func (fixture fixturePullRequest) record() record.PullRequest {
 	}
 	// The shipped state's verdict is always its head's: a new head cleared it.
 	return record.PullRequest{Issue: fixture.Key, Repo: fixture.Repo, Number: fixture.Number, Branch: fixture.Branch, HeadSHA: fixture.HeadSHA, CheckedHead: fixture.HeadSHA,
-		HeadUpdatedAt: timestampJSON(fixture.HeadUpdatedAt), HeadUpdatedAtSource: fixture.HeadUpdatedAtSource, Verdict: fixture.Verdict,
-		Failing: append([]string{}, fixture.Failing...), FailingStatuses: append([]string{}, fixture.FailingStatuses...),
+		HeadUpdatedAt: timestampJSON(fixture.HeadUpdatedAt), Verdict: fixture.Verdict, Failing: append([]string{}, fixture.Failing...),
 		FixAttempts: fixture.FixAttempts, BlockedAttempts: blocked, CheckRuns: checkRuns, Generation: generation, Snapshot: snapshot,
-		Reconciled: fixture.Reconciled, Pushes: pushes, HeadCounted: headCounted, PlannedRed: fixture.PlannedRed}
-}
-
-type fixtureHeadClock struct {
-	UpdatedAt json.RawMessage `json:"updatedAt"`
-	Source    string          `json:"source"`
-}
-
-func (fixture fixtureHeadClock) clock() HeadClock {
-	return HeadClock{UpdatedAt: timestampJSON(fixture.UpdatedAt), Source: fixture.Source}
+		Pushes: pushes, HeadCounted: headCounted, PlannedRed: fixture.PlannedRed}
 }
 
 type fixtureGate struct {

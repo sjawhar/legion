@@ -33,9 +33,9 @@ type operatorCall struct {
 }
 
 // newOperatorCall is the `legion <sub>` command's flag set with the three flags every operator
-// command takes; tokenUsage is how --operator-token-file reads in its help.
-func newOperatorCall(sub, tokenUsage string, stdout, stderr io.Writer) *operatorCall {
-	flags := newFlags(sub, stderr)
+// command takes; usage heads its help, and tokenUsage is how --operator-token-file reads in it.
+func newOperatorCall(sub, usage, tokenUsage string, stdout, stderr io.Writer) *operatorCall {
+	flags := newFlags(sub, usage, stderr)
 	return &operatorCall{
 		name:       "legion " + sub,
 		flags:      flags,
@@ -48,22 +48,25 @@ func newOperatorCall(sub, tokenUsage string, stdout, stderr io.Writer) *operator
 }
 
 // parse reads args, then refuses a word that is not a flag and any required flag left out or
-// empty, by name — each a usage error, before anything is read or sent.
-func (c *operatorCall) parse(args []string, required ...string) bool {
-	if err := c.flags.Parse(args); err != nil {
-		return false
+// empty, by name — each a usage error, before anything is read or sent. A false ok carries the
+// exit code, 0 for a help request (parseFlags).
+func (c *operatorCall) parse(args []string, required ...string) (code int, ok bool) {
+	if code, ok := parseFlags(c.flags, args); !ok {
+		return code, false
 	}
 	if c.flags.NArg() > 0 {
 		fmt.Fprintf(c.stderr, "%s: unexpected argument %q\n", c.name, c.flags.Arg(0))
-		return false
+		c.flags.Usage()
+		return 2, false
 	}
 	for _, name := range required {
 		if c.flags.Lookup(name).Value.String() == "" {
 			fmt.Fprintf(c.stderr, "%s: --%s is required\n", c.name, name)
-			return false
+			c.flags.Usage()
+			return 2, false
 		}
 	}
-	return true
+	return 0, true
 }
 
 // connect reads the bearer --operator-token-file names, when the command was given one, by

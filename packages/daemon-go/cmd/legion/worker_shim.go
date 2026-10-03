@@ -20,7 +20,7 @@ const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:p
 // the Sandbox runtime passes and a tmux pane never does, OMP starts on the pod's baseline
 // (podsafety.Apply, its overlay written to LEGION_STATE_DIR).
 func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlags("worker-shim", stderr)
+	flags := newFlags("worker-shim", "usage: legion worker-shim [flags] -- <omp argv…>", stderr)
 	connect := flags.String("connect", "", "the daemon's worker stream: unix:///<path> or tcp://<host>:<port>")
 	bootTokenFile := flags.String("boot-token-file", "", "the file holding the pane's boot token")
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files become NAME=contents in OMP's environment only")
@@ -28,8 +28,8 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 	keyDir := flags.String("agent-secrets-key-dir", "", "the pod's tmpfs directory for its agent-secrets key and enrollment id")
 	tokenFile := flags.String("pod-token-file", "", "the projected service-account token for the secrets broker's audience")
 	agentSecretsBin := flags.String("agent-secrets-bin", "", "the agent-secrets binary that generates the key and renews the lease")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	if code, ok := parseFlags(flags, args); !ok {
+		return code
 	}
 	set := map[string]bool{}
 	flags.Visit(func(f *flag.Flag) { set[f.Name] = true })

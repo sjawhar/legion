@@ -6,13 +6,13 @@
 -- docs.ScanAsk reads SQL null as no approval and any other value as a model.AskApproval, and
 -- fails on one that does not decode. On an approval ask the check admits only an approval whose
 -- three keys hold what the route writes: artifact_id as Postgres writes a uuid (lowercase hex
--- text, which docs.ApprovalAskAt compares as text and answering the ask casts to uuid), name a
+-- text, which docs.OpenApprovalAsk compares as text and answering the ask casts to uuid), name a
 -- string, and version a JSON number written as a whole number from 1 of at most ten digits, which
 -- an int holds. A missing key, the JSON null and a key of the wrong type all fail it. Any of them
 -- would otherwise reach the ask's readers: an id not written that way fails the cast or is never
 -- found, and a value that does not decode fails every read of the ask, every Inbox listing it and
--- every version write on its document, since docs.ApprovalAskAt reads each open approval ask of
--- the document then.
+-- every version write on its document, since docs.OpenApprovalAsk reads the document's open
+-- approval ask then.
 --
 -- The check tests the three exact keys, and encoding/json matches keys to fields ignoring case,
 -- Unicode folding included, so it guarantees neither a decode nor that the version decoded is the

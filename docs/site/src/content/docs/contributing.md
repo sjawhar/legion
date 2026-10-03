@@ -95,11 +95,17 @@ description in its `SKILL.md`, as [Skills](/legion/legion/reference/skills/).
 
 ## Media
 
-Scripts that produce screenshots and narrated walkthroughs go in `docs/site/media/<section>/`, with a
-README there saying how to run them (`docs/site/media/broker/` is the example), and so do a
-walkthrough's sources: its raw takes, its cut and its narration. Only their output goes in
+The scripts that make screenshots and narrated walkthroughs live in `docs/site/media/`, and its
+README says how to run and extend them. Screenshots are taken in CI before every site build and
+are not committed; videos are committed with their sources. Only their output goes in
 `docs/site/public/media/`, which the site publishes as it is. A file at `public/media/<path>` is
-published at `/legion/media/<path>`,
-so a page embeds a screenshot as `![The Inbox](/legion/media/<path>.png)`.
+published at `/legion/media/<path>`, so a page embeds a screenshot as
+`![The Inbox](/legion/media/<path>.png)`.
 Media shows example data only: this repository is public, so no real hostname, account, token or
 private URL appears in a page, image or video.
+
+The secrets broker's media differs in one way: its screenshots and walkthrough need a rig of
+their own (a broker, its client and an example agent machine) that CI does not run, so its
+screenshots are committed too. `docs/site/media/broker/` holds its scripts, the walkthrough's
+sources (its raw takes, its cut and its narration, in the shared voice) and a README saying how to
+run them.

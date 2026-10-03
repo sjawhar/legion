@@ -23,8 +23,9 @@ import { DispatchClient } from "../dispatch-http";
 import { dispatchFollowNotice } from "../dispatch-subscribe";
 import { ToolInputError } from "../tool-input-errors";
 
-function response(body: unknown): Response {
+function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
+    status,
     headers: { "Content-Type": "application/json" },
   });
 }
@@ -3546,17 +3547,20 @@ describe("executeDispatchTool", () => {
       if (target.pathname === "/api/v1/artifacts/artifact-42/approval-requests") {
         const body = JSON.parse(String(init?.body)) as { summary: string };
         posts.push({ path: target.pathname, body });
-        return response({
-          ask: {
-            id: "ask-9",
-            issue_key: "DSP-42",
-            artifact_id: null,
-            kind: "approval",
-            question: `Approve spec.md (version 3)? ${body.summary}`,
+        return response(
+          {
+            ask: {
+              id: "ask-9",
+              issue_key: "DSP-42",
+              artifact_id: null,
+              kind: "approval",
+              question: `Approve spec.md (version 3)? ${body.summary}`,
+            },
+            artifact_id: "artifact-42",
+            version: 3,
           },
-          artifact_id: "artifact-42",
-          version: 3,
-        });
+          201
+        );
       }
       throw new Error(`unexpected request: ${target.pathname}`);
     };
@@ -3590,9 +3594,10 @@ describe("executeDispatchTool", () => {
     expect(result.details).not.toHaveProperty("topic");
   });
 
-  // A repeat at the version an open request already names returns that request unchanged, so
-  // the question the human sees carries the earlier summary, not the one this call sent.
-  test("dispatch_request_approval reports the open request's own question, not the summary it sent", async () => {
+  // A call that finds the open request already waiting on the human (Dispatch's 200) changed
+  // nothing, and says so rather than reporting a fresh request; the question it quotes is the open
+  // request's own.
+  test("dispatch_request_approval says a repeat changed nothing and quotes the open request's question", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
       if (target.pathname === "/api/v1/issues/DSP-42") {
@@ -3632,7 +3637,7 @@ describe("executeDispatchTool", () => {
 
     const result = await executeDispatchTool({
       tool: "dispatch_request_approval",
-      args: { issue: "DSP-42", summary: "Proposes a live sync in place of the nightly export." },
+      args: { issue: "DSP-42", summary: "Proposes a nightly export to the archive." },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -3641,10 +3646,13 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
+    expect(result.text).toStartWith(
+      "The approval request for spec.md (document id artifact-42) at version 3 (ask ask-8) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you."
+    );
+    expect(result.text).not.toContain("Approval requested");
     expect(result.text).toContain(
       '"Approve spec.md (version 3)? Proposes a nightly export to the archive."'
     );
-    expect(result.text).not.toContain("live sync");
   });
 
   test("dispatch_request_approval on a document approved at its current version opens nothing", async () => {
@@ -3740,11 +3748,14 @@ describe("executeDispatchTool", () => {
         if (target.pathname === "/api/v1/issues/DSP-42/asks") return response(asks);
         if (target.pathname === "/api/v1/artifacts/artifact-42/approval-requests") {
           posts.push(target.pathname);
-          return response({
-            ask: { id: "ask-9", kind: "approval", question: "Approve spec.md (version 4)? X." },
-            artifact_id: "artifact-42",
-            version: 4,
-          });
+          return response(
+            {
+              ask: { id: "ask-9", kind: "approval", question: "Approve spec.md (version 4)? X." },
+              artifact_id: "artifact-42",
+              version: 4,
+            },
+            201
+          );
         }
         throw new Error(`unexpected request: ${target.pathname}`);
       };
@@ -4050,6 +4061,58 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe(
       "# Spec\n\nApproval: approved v2 by sjawhar, edited since (now v4) - request approval again"
     );
+  });
+
+  // A version moves an open request back to its agent, the agent's own revision included, which
+  // sends that agent no event, so the document's approval line says whom the request waits on.
+  test("dispatch_doc_read says whom an awaiting approval request waits on", async () => {
+    for (const waitingOn of ["agent", "human"] as const) {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/issues/DSP-42") {
+          return response({
+            key: "DSP-42",
+            primary_artifact_id: "artifact-42",
+            artifacts: [
+              {
+                id: "artifact-42",
+                slug: "spec",
+                name: "spec.md",
+                primary: true,
+                approval: {
+                  state: "awaiting",
+                  latest_version: 4,
+                  ask_id: "ask-9",
+                  requested_by: { kind: "session", id: "session-1" },
+                  waiting_on: waitingOn,
+                },
+              },
+            ],
+            open_asks: [],
+          });
+        }
+        if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
+          return response({ markdown: "# Spec", version: 4 });
+        }
+        if (target.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+
+      const result = await executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { issue: "DSP-42" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+      expect(result.text).toBe(
+        `# Spec\n\nApproval: awaiting, waiting on ${waitingOn} (requested by session-1, ask ask-9)`
+      );
+    }
   });
 
   test("resolves a project artifact by its filename when the slug route 404s", async () => {
@@ -4677,9 +4740,9 @@ describe("executeDispatchTool", () => {
       unchanged_ops: [],
       lost_ops: null,
     });
-    expect(undetermined.text).toContain(
-      "; could not confirm this edit survived, because the live document is being reloaded — re-read it"
-    );
+    expect(undetermined.text).toContain("could not confirm this edit survived");
+    expect(undetermined.text).not.toContain("no longer has");
+    expect(undetermined.details).toMatchObject({ lost_ops: null });
   });
 
   // A Dispatch server predating the edit token returns none, and the result reads as it always
@@ -5489,6 +5552,7 @@ describe("executeDispatchTool", () => {
         reply_to: null,
         ask_id: askID,
         turn: "human",
+        ask_waiting_on: "human",
         resolved: false,
         suggestion: null,
         created_at: "2026-09-09T00:00:00Z",
@@ -5582,6 +5646,7 @@ describe("executeDispatchTool", () => {
         reply_to: null,
         ask_id: askID,
         turn: "agent",
+        ask_waiting_on: "agent",
         resolved: false,
         suggestion: null,
         created_at: "2026-09-09T00:00:00Z",
@@ -5616,6 +5681,30 @@ describe("executeDispatchTool", () => {
         body: expect.objectContaining({ ask_id: askID, turn: "agent" }),
       },
     ]);
+  });
+
+  test("reports a moved approval ask's derived turn instead of the replying agent's turn", async () => {
+    const askID = "01234567-0000-4000-8000-000000000045";
+    const result = await executeDispatchTool({
+      tool: "dispatch_comment",
+      args: { issue: "DSP-42", body: "The revision is ready.", reply_to_ask: askID },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: (async () =>
+        response({
+          id: "comment-3",
+          issue_key: "DSP-42",
+          ask_id: askID,
+          turn: "human",
+          ask_waiting_on: "agent",
+        })) as unknown as typeof fetch,
+    });
+
+    expect(result.text).toContain("ask now waiting on agent");
+    expect(result.details).toMatchObject({ ask_waiting_on: "agent" });
   });
 
   test("rejects a comment turn without reply_to_ask before calling the server", async () => {

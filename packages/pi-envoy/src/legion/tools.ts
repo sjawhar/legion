@@ -1,11 +1,8 @@
-import { randomUUID } from "node:crypto";
 import {
-  ISSUE_STATUSES,
-  isIssueStatus,
-  LEGION_ROLES,
-  LegionDaemonApi,
-  type LegionRole,
-} from "@legion/contracts";
+  LEGION_GO_WORKFLOW_PHASES,
+  LegionGoGateRegisterRequest,
+  type LegionGoState,
+} from "@legion/contracts/legion-go-api";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
 import { toolFailure, toolSuccess } from "../tool-result";
 import type { LegionDaemonClient } from "./daemon-client";
@@ -18,223 +15,254 @@ import {
   runHandoffAction,
 } from "./handoff-actions";
 
-/** The session's registered Legion role. A root architect runs the architect operations; a phase
- * worker the handoff actions, and a sub-architect (a phase worker whose role is architect) both. */
-interface LegionToolSession {
-  readonly kind: "root-architect" | "phase-worker";
+export type LegionToolRole = "architect" | "phase-worker";
+
+export interface LegionToolSession {
+  readonly kind: LegionToolRole;
+  readonly sessionId: string;
   readonly tree: string;
   readonly issue: string;
-  readonly role: LegionRole;
   readonly secret: string;
 }
+
+const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
+  architect: [
+    "register_gate",
+    "release_children",
+    "request_backward_move",
+    "retry_or_escalate",
+    "sign_off",
+    "close_root",
+    "park_child",
+    "rerun_child",
+    "read_record",
+  ],
+  "phase-worker": ["request_backward_move", "read_record"],
+};
+
+const OPERATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  register_gate: ["issue", "artifactId", "version"],
+  release_children: ["issues"],
+  request_backward_move: ["to", "reason"],
+  retry_or_escalate: ["issue", "decision"],
+  sign_off: ["issue"],
+  close_root: ["issue", "reason"],
+  park_child: ["issue"],
+  rerun_child: ["issue"],
+  read_record: ["issue"],
+};
 
 const jsonSuccess = (details: Readonly<Record<string, unknown>>): ToolResult =>
   toolSuccess(JSON.stringify(details), details);
 
-/** A Dispatch artifact id: what `artifact.approved` and its siblings carry as `artifact_id`, and
- * therefore the only value `register_gate` may record. The daemon's contract owns the
- * definition (`LegionDaemonApi.GatesRegister.request`'s `artifactId`, a UUID); this check exists
- * to fail with a message that says where the id comes from, before the round trip. */
-function isDispatchArtifactId(value: string): boolean {
-  return LegionDaemonApi.GatesRegister.request.shape.artifactId.safeParse(value).success;
-}
-
-// pi.zod exposes only object/string/number/boolean/array/enum/unknown (no union or
-// discriminatedUnion), so per-op typing cannot be expressed as a discriminated
-// union at the schema layer. The schema stays a flat optional-fields bag; execute()
-// below enforces, per op, which fields are actually accepted.
-const ARCHITECT_OP_FIELDS: Readonly<Record<string, readonly string[]>> = {
-  set_status: ["issue", "status"],
-  register_gate: ["issue", "artifactId", "version"],
-  release_wave: ["issues"],
-  escalate: ["kind", "context"],
-  spawn_worker: ["issue", "role", "task"],
-};
-
-function legionToolSchema(pi: PiApi): unknown {
+function toolSchema(pi: PiApi): unknown {
   const z = pi.zod;
   return z.object({
-    op: z.enum([...Object.keys(ARCHITECT_OP_FIELDS), ...HANDOFF_OPERATIONS]),
+    op: z.enum([
+      "register_gate",
+      "release_children",
+      "request_backward_move",
+      "retry_or_escalate",
+      "sign_off",
+      "close_root",
+      "park_child",
+      "rerun_child",
+      "read_record",
+      ...HANDOFF_OPERATIONS,
+    ]),
     issue: z.string().optional(),
-    status: z.enum(ISSUE_STATUSES).optional(),
-    artifactId: z.string().optional(),
+    artifactId: z
+      .string()
+      .describe(
+        "register_gate's root spec document: its artifact id, slug, or filename, as the Dispatch tools take it"
+      )
+      .optional(),
     version: z.number().optional(),
-    kind: z.enum(["re-file", "capacity", "cross-tree"]).optional(),
-    context: z.unknown().optional(),
     issues: z.array(z.string()).optional(),
-    rationale: z.string().optional(),
-    role: z.enum(LEGION_ROLES).optional(),
-    task: z.string().optional(),
+    to: z.enum(LEGION_GO_WORKFLOW_PHASES).optional(),
+    reason: z.string().optional(),
+    decision: z.enum(["retry", "escalate"]).optional(),
     ...handoffSchemaFields(z),
   });
 }
 
+function requiredString(
+  parameters: Record<string, unknown>,
+  operation: string,
+  name: string
+): string {
+  const value = parameters[name];
+  if (typeof value !== "string" || value.trim() === "")
+    throw new Error(`${operation} requires ${name}`);
+  return value;
+}
+
+function assertOperationInput(parameters: Record<string, unknown>, operation: string): void {
+  const fields = OPERATION_FIELDS[operation];
+  if (fields === undefined) throw new Error(`Unsupported legion operation: ${operation}`);
+  for (const name of Object.keys(parameters)) {
+    if (name !== "op" && !fields.includes(name)) {
+      throw new Error(`${operation} does not accept field "${name}"`);
+    }
+  }
+}
+
+async function grantFor(daemon: LegionDaemonClient, session: LegionToolSession): Promise<string> {
+  return (
+    await daemon.grant({
+      sessionId: session.sessionId,
+      secret: session.secret,
+      tree: session.tree,
+      issue: session.issue,
+    })
+  ).grantId;
+}
+
+function recordFrom(state: LegionGoState, issue: string): Readonly<Record<string, unknown>> {
+  const record = state.issues[issue];
+  if (record === undefined) throw new Error(`The daemon has no record for ${issue}`);
+  return record;
+}
+
+/** The daemon's role-local workflow surface: no operation can schedule a worker. The handoff
+ * actions belong to every session but the root architect: a phase worker, and a sub-architect (an
+ * architect whose issue is not its tree). */
 export function createLegionTool(deps: {
   readonly pi: PiApi;
-  readonly roleDaemon: () => LegionDaemonClient;
+  readonly daemon: () => LegionDaemonClient;
   readonly session: (context: SessionContext) => LegionToolSession;
   /** Told of each `handoff_complete` that succeeded: the session's phase is complete. */
   readonly onPhaseCompleted: (context: SessionContext) => void;
+  /** The id of the document `issue` carries under `reference` (`spec`, a slug, or a filename),
+   * looked up in Dispatch as the Dispatch tools do; throws naming the reference when none matches,
+   * or when it names two documents. */
+  readonly resolveDocument: (issue: string, reference: string) => Promise<string>;
 }): RegisteredTool {
-  const { pi, roleDaemon, session, onPhaseCompleted } = deps;
+  const { pi, daemon, session, onPhaseCompleted, resolveDocument } = deps;
   return {
     name: "legion",
     label: "legion",
     description:
-      "Perform a Legion lifecycle write through the Legion daemon. " +
-      "Architect operations (set_status, register_gate, release_wave, escalate, spawn_worker): " +
-      "register_gate records the root spec document a human must approve: `artifactId` is the " +
-      "document id (a UUID) and `version` the version number, both copied from the `artifact` and " +
-      "`version` fields of dispatch_request_approval's result — never the slug or file name you " +
-      "passed to that tool. " +
-      'spawn_worker\'s response "status" means: "spawned" — a fresh pane just opened and is ' +
-      'running now; "resumed" — an existing worker was prompted directly over its live socket ' +
-      "and its turn started, or (if its boot has not confirmed yet) its task was recorded to " +
-      'deliver once that boot completes; "queued" — the task was recorded and this role will ' +
-      "start on its own: either the running-worker cap is full, or the live worker acknowledged " +
-      "the task without starting a turn and the daemon is retrying it. Never re-spawn a role " +
-      'after "resumed" or "queued" — wait for the worker-started notification instead. A call ' +
-      'that fails with "got no response in 3 attempts" was retried by the plugin with one ' +
-      "request id; the daemon may still have received it — read legion state " +
-      "(workerAdmission.queue, and the role in roles) before sending it again. A spawn_worker " +
-      "identical to the task already queued for the role changes nothing and is not announced again. " +
+      "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
       HANDOFF_DESCRIPTION,
     defaultInactive: true,
-    parameters: legionToolSchema(pi),
+    parameters: toolSchema(pi),
     execute: async (_id, parameters, signal, _onUpdate, context) => {
       try {
         const active = session(context);
-        const sessionId = context.sessionManager.getSessionId();
-        const op = String(parameters.op);
-        if (isHandoffOperation(op)) {
-          if (active.kind !== "phase-worker") {
-            throw new Error(rootArchitectHandoffRefusal(op));
+        const operation = requiredString(parameters, "legion", "op");
+        if (isHandoffOperation(operation)) {
+          if (active.kind === "architect" && active.issue === active.tree) {
+            throw new Error(rootArchitectHandoffRefusal(operation));
           }
           return await runHandoffAction({
-            operation: op,
+            operation,
             parameters,
             signal,
-            mintGrant: async () =>
-              (
-                await roleDaemon().grant({
-                  tree: active.tree,
-                  issue: active.issue,
-                  sessionId,
-                  secret: active.secret,
-                })
-              ).grantId,
+            mintGrant: () => grantFor(daemon(), active),
             onPhaseCompleted: () => onPhaseCompleted(context),
           });
         }
-        if (active.role !== "architect") {
-          throw new Error(`${op} is not available to a ${active.role} session`);
+        if (!OPERATIONS[active.kind].includes(operation)) {
+          throw new Error(`${operation} is not available to a ${active.kind} session`);
         }
-        const daemon = roleDaemon();
-        const stringInput = (name: string): string => {
-          const value = parameters[name];
-          if (typeof value !== "string")
-            throw new Error(`${String(parameters.op)} requires ${name}`);
-          return value;
-        };
-        const allowedFields = ARCHITECT_OP_FIELDS[op];
-        if (allowedFields) {
-          for (const key of Object.keys(parameters)) {
-            if (key !== "op" && !allowedFields.includes(key)) {
-              throw new Error(`${op} does not accept field "${key}"`);
-            }
-          }
-        }
-        switch (parameters.op) {
-          case "set_status": {
-            const status = parameters.status;
-            if (typeof status !== "string" || !isIssueStatus(status)) {
-              throw new Error("set_status requires a valid Legion issue status");
-            }
-            await daemon.issueStatus({
-              tree: active.tree,
-              sessionId,
-              secret: active.secret,
-              issue: stringInput("issue"),
-              status,
-            });
-            return jsonSuccess({});
+        assertOperationInput(parameters, operation);
+        const client = daemon();
+        switch (operation) {
+          case "read_record": {
+            const issue = requiredString(parameters, operation, "issue");
+            return jsonSuccess({ record: recordFrom(await client.state(), issue) });
           }
           case "register_gate": {
             const version = parameters.version;
-            if (typeof version !== "number" || !Number.isSafeInteger(version) || version <= 0) {
+            if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 1) {
               throw new Error("register_gate requires a positive integer version");
             }
-            const artifactId = stringInput("artifactId");
-            if (!isDispatchArtifactId(artifactId)) {
+            // The gate is the tree root's, registered by the root's own architect, as the daemon
+            // requires: anyone else is refused before a lookup could answer for the wrong issue.
+            const issue = requiredString(parameters, operation, "issue");
+            if (active.issue !== active.tree) {
               throw new Error(
-                `register_gate requires artifactId to be the document id (a UUID) from dispatch_request_approval's result, not "${artifactId}"`
+                `the design gate belongs to the tree root ${active.tree}; its root architect registers it`
               );
             }
-            await daemon.gatesRegister({
-              tree: active.tree,
-              sessionId,
-              secret: active.secret,
-              issue: stringInput("issue"),
-              artifactId,
-              version,
-            });
+            if (issue !== active.issue) {
+              throw new Error(
+                `the design gate belongs to the tree root ${active.tree}; register it there`
+              );
+            }
+            // The daemon takes the document's id alone; `spec`, a slug or a filename, the
+            // references the Dispatch tools accept, is looked up first, so the architect's first
+            // call names the document however it knows it.
+            const reference = requiredString(parameters, operation, "artifactId");
+            const isId = LegionGoGateRegisterRequest.shape.artifactId.safeParse(reference).success;
+            const artifactId = isId ? reference : await resolveDocument(issue, reference);
+            const grantId = await grantFor(client, active);
+            await client.gateRegister({ grantId, issue, artifactId, version });
             return jsonSuccess({});
           }
-          case "release_wave": {
+          case "release_children": {
             const issues = parameters.issues;
-            if (
-              !Array.isArray(issues) ||
-              !issues.every((issue: unknown): issue is string => typeof issue === "string")
-            ) {
-              throw new Error("release_wave requires issues");
+            if (!Array.isArray(issues) || !issues.every((issue) => typeof issue === "string")) {
+              throw new Error("release_children requires issues");
             }
-            return jsonSuccess(
-              await daemon.releaseWave({
-                tree: active.tree,
-                issues,
-                sessionId,
-                secret: active.secret,
-              })
-            );
+            const grantId = await grantFor(client, active);
+            return jsonSuccess(await client.waveRelease({ grantId, issues }));
           }
-          case "escalate": {
-            const kind = stringInput("kind");
-            if (kind !== "re-file" && kind !== "capacity" && kind !== "cross-tree") {
-              throw new Error("Unknown Legion escalation kind");
-            }
-            if (!("context" in parameters) || parameters.context === undefined)
-              throw new Error("escalate requires context");
-            await daemon.escalate({
-              tree: active.tree,
-              kind,
-              context: parameters.context,
-              sessionId,
-              secret: active.secret,
+          case "request_backward_move": {
+            const grantId = await grantFor(client, active);
+            await client.phaseBackward({
+              grantId,
+              to: requiredString(
+                parameters,
+                operation,
+                "to"
+              ) as (typeof LEGION_GO_WORKFLOW_PHASES)[number],
+              reason: requiredString(parameters, operation, "reason"),
             });
             return jsonSuccess({});
           }
-          case "spawn_worker": {
-            const role = parameters.role;
-            if (typeof role !== "string" || !LEGION_ROLES.includes(role as LegionRole)) {
-              throw new Error("spawn_worker requires a valid Legion role");
+          case "retry_or_escalate": {
+            const decision = parameters.decision;
+            if (decision !== "retry" && decision !== "escalate") {
+              throw new Error("retry_or_escalate requires decision retry or escalate");
             }
-            // One request id per tool call: the daemon dedupes repeats of it, so a transport
-            // retry (daemon-client.ts) can never queue the same task twice.
-            const requestId = randomUUID();
-            return jsonSuccess(
-              await daemon.spawnWorker({
-                tree: active.tree,
-                sessionId,
-                secret: active.secret,
-                issue: stringInput("issue"),
-                role: role as LegionRole,
-                task: stringInput("task"),
-                requestId,
-              })
-            );
+            const grantId = await grantFor(client, active);
+            await client.phaseRetry({
+              grantId,
+              issue: requiredString(parameters, operation, "issue"),
+              decision,
+            });
+            return jsonSuccess({});
+          }
+          case "sign_off": {
+            const grantId = await grantFor(client, active);
+            await client.signOff({
+              grantId,
+              issue: requiredString(parameters, operation, "issue"),
+            });
+            return jsonSuccess({});
+          }
+          case "close_root": {
+            const grantId = await grantFor(client, active);
+            await client.rootClose({
+              grantId,
+              issue: requiredString(parameters, operation, "issue"),
+              reason: requiredString(parameters, operation, "reason"),
+            });
+            return jsonSuccess({});
+          }
+          case "park_child":
+          case "rerun_child": {
+            const grantId = await grantFor(client, active);
+            const request = { grantId, issue: requiredString(parameters, operation, "issue") };
+            await (operation === "park_child"
+              ? client.childPark(request)
+              : client.childRerun(request));
+            return jsonSuccess({});
           }
           default:
-            throw new Error(`Unsupported legion operation: ${String(parameters.op)}`);
+            throw new Error(`Unsupported legion operation: ${operation}`);
         }
       } catch (error) {
         return toolFailure(error);
