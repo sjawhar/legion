@@ -382,9 +382,11 @@ func addedAskBlocks(before, after *pmdoc.Node) int {
 	added := 0
 	pmdoc.Walk(after, func(node *pmdoc.Node) bool {
 		if node.Type == "ask" {
-			id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
-			if _, kept := held[id]; !kept {
-				added++
+			if _, err := parseAskBlock(node); err == nil {
+				id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+				if _, kept := held[id]; !kept {
+					added++
+				}
 			}
 		}
 		return true

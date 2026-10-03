@@ -70,6 +70,31 @@ func TestRepairingAnUnreadableAskBlockCountsTheAskItOpens(t *testing.T) {
 		t.Fatalf("repair opened %d ask(s), reported %d", open, outcome.AskBlocksAdded)
 	}
 }
+func TestEditingBesideAnUnreadableAskBlockAddsNoAsk(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ttl urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich cache TTL?\n\n- Short: 60 seconds\n- Long: one hour\n:::\n")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children[0].Children[1].Children[0].Children[0].Children = []*pmdoc.Node{{Type: "text", Text: ": 60 seconds"}}
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	outcome, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+		{Op: "insert", After: "end", Markdown: "A plain revision."},
+	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+	if err != nil {
+		t.Fatalf("edit beside unreadable ask: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	var open int
+	if err := service.store.Pool.QueryRow(context.Background(),
+		`select count(*) from asks where block_artifact_id = $1 and state = 'open'`, artifactID).Scan(&open); err != nil {
+		t.Fatal(err)
+	}
+	if open != 0 || outcome.AskBlocksAdded != open {
+		t.Fatalf("edit beside unreadable ask opened %d ask(s), reported %d", open, outcome.AskBlocksAdded)
+	}
+}
 
 func TestSettlementIndexesRetractsAndRestoresTypedAskBlocks(t *testing.T) {
 	service, artifactID := newTestService(t)
