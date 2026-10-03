@@ -882,7 +882,14 @@ func (s *Service) retrySettle(room string, generation uint64, err error) {
 }
 
 func (s *Service) retrySettleLocked(room string, state *roomState, generation uint64, err error) {
-	slog.Error("dispatch: settle document", "room", room, "error", err)
+	if errors.Is(err, errRoomReplaced) {
+		// Expected, not a fault: the settlement wrote nothing (one that wrote fails the room
+		// instead) because the room it read was replaced first, and the replacement's load arms
+		// the settlement the document still owes.
+		slog.Info("dispatch: document settlement wrote nothing into a replaced room", "room", room, "error", err)
+	} else {
+		slog.Error("dispatch: settle document", "room", room, "error", err)
+	}
 	if state.gen != generation {
 		return
 	}
