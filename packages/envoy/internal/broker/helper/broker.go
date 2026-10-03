@@ -408,13 +408,17 @@ func (b *Broker) launcherProof(method, url string) (string, *machineCredential, 
 // rejects: an expired or revoked credential, and also a proof it cannot verify, such as one
 // signed outside its clock-skew window or for a URL other than its own (an AGENT_SECRETS_URL that
 // does not match the broker's public URL). It never auto-relogins. cred is the credential the
-// refused call was signed with, and only that one is dropped.
+// refused call was signed with, and only that one is dropped. A refusal of a credential a newer
+// login has already replaced drops nothing and is returned as it came: the helper holds a
+// credential, and the caller's retry, which that login woke, uses it at once.
 func (b *Broker) clearOnInvalid(cred *machineCredential, err error) error {
 	var be *BrokerError
 	if !errors.As(err, &be) || be.Status != http.StatusUnauthorized || be.Code != "LAUNCHER_INVALID" {
 		return err
 	}
-	b.drop(cred, dropRefused, "code", be.Code)
+	if !b.drop(cred, dropRefused, "code", be.Code) && b.HasCredential() {
+		return err
+	}
 	return errNoCredential
 }
 

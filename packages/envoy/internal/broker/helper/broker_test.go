@@ -108,6 +108,9 @@ type fakeBroker struct {
 	// enrollGate, when set, holds every enroll POST until the test closes it, so a test can keep a
 	// session enrolling for exactly as long as it needs.
 	enrollGate chan struct{}
+	// enrollArrivals counts every enroll POST this fake received, on arrival and before any gate, so
+	// a test can tell that an enroll is waiting at the gate.
+	enrollArrivals int
 	// renewGate, when set, holds every renew until the test closes it. A renew reads the gate as it
 	// arrives, so a test can hold one renew, swap in another gate for the next, and release them
 	// one at a time.
@@ -133,6 +136,7 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/enrollments", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
+		f.enrollArrivals++
 		gate := f.enrollGate
 		f.mu.Unlock()
 		if gate != nil {
@@ -500,7 +504,9 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 // TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone covers a 401 LAUNCHER_INVALID that
 // answers a call signed with a credential another login has since replaced (a session's enroll
 // retry in flight while the operator logs in again): it clears nothing, since the credential it
-// rejects is no longer the one installed, and the new login still reports "issued".
+// rejects is no longer the one installed, and the new login still reports "issued". The caller
+// gets the broker's refusal rather than errNoCredential, since the helper holds a credential and
+// its retry can use it.
 func TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone(t *testing.T) {
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
@@ -512,8 +518,8 @@ func TestALateRejectionOfAnOldCredentialLeavesTheNewLoginAlone(t *testing.T) {
 	fresh := b.cred.Load()
 
 	rejected := &BrokerError{Status: http.StatusUnauthorized, Code: "LAUNCHER_INVALID", Message: "the launcher credential is not valid"}
-	if err := b.clearOnInvalid(old, rejected); !errors.Is(err, errNoCredential) {
-		t.Fatalf("a rejected credential still reports the login command to its caller: %v", err)
+	if err := b.clearOnInvalid(old, rejected); err != rejected {
+		t.Fatalf("a rejection of a replaced credential reached its caller as %v; want the broker's refusal as it came", err)
 	}
 	if b.cred.Load() != fresh || b.LoginStatus().State != "issued" {
 		t.Fatalf("a late rejection of the replaced credential changed the new login: cred replaced %v, state %q", b.cred.Load() != fresh, b.LoginStatus().State)

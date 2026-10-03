@@ -337,6 +337,14 @@ func (s *Server) loginStatus() Response {
 	return resp
 }
 
+// lacksCredential reports whether err failed for want of a launcher credential the helper still
+// lacks: errNoCredential, unless a login has installed one since the attempt failed. That login
+// woke the retry, which uses the new credential at once, so the failure is an ordinary retry
+// rather than a session that cannot enroll.
+func (s *Server) lacksCredential(err error) bool {
+	return errors.Is(err, errNoCredential) && !s.Broker.HasCredential()
+}
+
 // enrollBox registers a box's key as kind box — a pass-through broker call requiring no
 // registered session (a box enrollment is not a registry session; see Broker.EnrollBox's doc
 // comment), so unlike sign it does not check descendancy at all.
@@ -441,7 +449,7 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		// rather than when a backoff of up to a minute comes round.
 		enrolled := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 			sess.setError(err.Error())
-			if errors.Is(err, errNoCredential) {
+			if s.lacksCredential(err) {
 				s.Log.Error("session cannot enroll: the helper holds no launcher credential; run: agent-secrets launcher login, and have a human approve it",
 					"runtime_id", sess.RuntimeID, "why", s.Broker.noCredentialReason(), "in", delay)
 				return
@@ -509,7 +517,7 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 // nothing further is attempted.
 func (s *Server) revokeLapsed(ctx context.Context, sess *Session, id string) bool {
 	revoked := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
-		if errors.Is(err, errNoCredential) {
+		if s.lacksCredential(err) {
 			s.Log.Error("session cannot enroll: revoking its lapsed enrollment first needs a launcher credential, and the helper holds none; run: agent-secrets launcher login, and have a human approve it",
 				"runtime_id", sess.RuntimeID, "enrollment_id", id, "why", s.Broker.noCredentialReason(), "in", delay)
 			return
