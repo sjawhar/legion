@@ -212,10 +212,25 @@ func writeUnavailable(w http.ResponseWriter, code, op string, err error) {
 	writeError(w, http.StatusServiceUnavailable, code, op+" failed: a dependency the broker needs is unavailable")
 }
 
+// writeJSON answers status with v, which is one of this package's named response types: the
+// broker's generated HTTP reference (scripts/docs/broker/refgen) documents each route's answer
+// from that type's fields and refuses a value it cannot name.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// stateResponse is what a denial, a cancel or a revoke answers.
+type stateResponse struct {
+	// The state the call left the request, record or grant in: "denied", "cancelled" or "revoked".
+	State string `json:"state"`
+}
+
+// healthResponse is GET /healthz's answer while the broker can reach Postgres.
+type healthResponse struct {
+	// "ok".
+	Status string `json:"status"`
 }
 
 func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +238,7 @@ func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 		writeUnavailable(w, "DATABASE_UNAVAILABLE", "ping Postgres", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
 }
 
 // strPtr is nil for "" and &s otherwise, for an optional wire field that is null rather than "".

@@ -3,9 +3,7 @@ package main
 import (
 	"fmt"
 	"go/ast"
-	"go/printer"
 	"go/token"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -83,8 +81,17 @@ func readRoutes(src *source, funcs map[string]*ast.FuncDecl) ([]route, error) {
 // authClass is one route adapter: the credential its routes need and the refusals
 // server.authenticate answers for it.
 type authClass struct {
-	Wrapper, Constant, Doc string
-	Refusals               []outcome
+	Wrapper, Label, Doc string
+	Refusals            []outcome
+}
+
+// credentialLabels names, for a reader, the credential each adapter accepts. refgen refuses an
+// adapter missing here, so a new one cannot reach the page under its Go name.
+var credentialLabels = map[string]string{
+	"public":       "None",
+	"sessionAuth":  "Session proof",
+	"launcherAuth": "Machine credential",
+	"uiAuth":       "Dispatch token",
 }
 
 // readAuthClasses reads each adapter a route uses: its doc comment, the routeAuth constant it
@@ -124,6 +131,10 @@ func (g *graph) readAuthClasses(routes []route) ([]authClass, error) {
 		if !ok {
 			return nil, fmt.Errorf("%s: no adapter %s", r.At, r.Wrapper)
 		}
+		label, ok := credentialLabels[r.Wrapper]
+		if !ok {
+			return nil, fmt.Errorf("%s: adapter %s has no reader label in refgen's credentialLabels", r.At, r.Wrapper)
+		}
 		constant := ""
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			if kv, ok := n.(*ast.KeyValueExpr); ok {
@@ -144,16 +155,16 @@ func (g *graph) readAuthClasses(routes []route) ([]authClass, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, authClass{Wrapper: r.Wrapper, Constant: constant, Doc: prose(fn.Doc), Refusals: refusals})
+		out = append(out, authClass{Wrapper: r.Wrapper, Label: label, Doc: prose(fn.Doc), Refusals: refusals})
 	}
 	return out, nil
 }
 
 // graph is the broker API package's functions, read for what each one can answer.
 type graph struct {
-	src       *source
-	funcs     map[string]*ast.FuncDecl
-	sentinels map[string]*source // parsed packages, by directory, for errors.Is targets
+	src   *source
+	funcs map[string]*ast.FuncDecl
+	pkgs  map[string]*source // the broker's other packages, parsed on first use, by directory
 }
 
 func newGraph(root string) (*graph, error) {
@@ -165,7 +176,7 @@ func newGraph(root string) (*graph, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &graph{src: src, funcs: funcs, sentinels: map[string]*source{}}, nil
+	return &graph{src: src, funcs: funcs, pkgs: map[string]*source{}}, nil
 }
 
 type siteKind int
@@ -183,6 +194,7 @@ type site struct {
 	callee    string
 	sentinels []string // the messages of the errors.Is targets of the case clause around it
 	bodyType  string   // readJSON's: the request body's type
+	respType  string   // writeJSON's: the response body's type, "" when refgen cannot name it
 	query     string   // r.URL.Query().Get's: the query parameter
 	at        string
 }
@@ -244,6 +256,9 @@ func (g *graph) collect(file *ast.File, body ast.Node, params *ast.FieldList) fu
 				s.kind = siteError
 			case fun.Name == "writeJSON":
 				s.kind = siteSuccess
+				if len(call.Args) == 3 {
+					s.respType = g.typeName(call.Args[2], info.assigned, locals)
+				}
 			case g.funcs[fun.Name] != nil:
 				s.kind, s.callee = siteCall, fun.Name
 				if fun.Name == "readJSON" && len(call.Args) > 2 {
@@ -279,6 +294,42 @@ func (g *graph) collect(file *ast.File, body ast.Node, params *ast.FieldList) fu
 		return true
 	})
 	return info
+}
+
+// typeName is the package type e is a value of, when refgen can read it: a composite literal
+// (or its address), a call to one of the package's functions with one named result, or a local
+// variable declared with, or assigned, one of those. "" means it cannot.
+func (g *graph) typeName(e ast.Expr, assigned map[string][]ast.Expr, locals map[string]string) string {
+	switch x := e.(type) {
+	case *ast.CompositeLit:
+		if id, ok := x.Type.(*ast.Ident); ok {
+			return id.Name
+		}
+	case *ast.UnaryExpr:
+		if x.Op == token.AND {
+			return g.typeName(x.X, assigned, locals)
+		}
+	case *ast.CallExpr:
+		id, ok := x.Fun.(*ast.Ident)
+		if !ok {
+			return ""
+		}
+		fn := g.funcs[id.Name]
+		if fn == nil || fn.Recv != nil || fn.Type.Results == nil || len(fn.Type.Results.List) != 1 {
+			return ""
+		}
+		if result, ok := fn.Type.Results.List[0].Type.(*ast.Ident); ok {
+			return result.Name
+		}
+	case *ast.Ident:
+		if t, ok := locals[x.Name]; ok {
+			return t
+		}
+		if values := assigned[x.Name]; len(values) > 0 {
+			return g.typeName(values[0], assigned, locals)
+		}
+	}
+	return ""
 }
 
 // isQueryCall reports whether e is r.URL.Query().
@@ -346,14 +397,9 @@ func (g *graph) sentinel(file *ast.File, e ast.Expr) (string, bool) {
 		if !ok {
 			return "", false
 		}
-		src, ok := g.sentinels[dir]
-		if !ok {
-			parsed, err := parseDir(g.src.root, dir)
-			if err != nil {
-				return "", false
-			}
-			src = parsed
-			g.sentinels[dir] = src
+		src, err := g.pkg(dir)
+		if err != nil {
+			return "", false
 		}
 		return src.stringConst(x.Sel.Name)
 	}
@@ -367,6 +413,7 @@ type outcome struct {
 	Messages []string
 	Query    string // a query parameter the route reads
 	BodyType string // the type its JSON request body decodes into
+	RespType string // a success's: the type its JSON response body encodes, "" for no body
 	At       string
 }
 
@@ -422,12 +469,15 @@ func (g *graph) resolve(info funcInfo, params map[string][]string, visiting map[
 				}
 				return nil, fmt.Errorf("%s: cannot read this answer's status", s.at)
 			}
+			if fun, ok := s.call.Fun.(*ast.Ident); ok && fun.Name == "writeJSON" && s.respType == "" {
+				return nil, fmt.Errorf("%s: cannot name this answer's body type; answer with one of the package's named response types", s.at)
+			}
 			for _, st := range statuses {
 				status, err := strconv.Atoi(st)
 				if err != nil {
 					return nil, fmt.Errorf("%s: status %q is not a number", s.at, st)
 				}
-				out = append(out, outcome{Status: status, At: s.at})
+				out = append(out, outcome{Status: status, RespType: s.respType, At: s.at})
 			}
 		case siteCall:
 			if s.query != "" {
@@ -542,71 +592,6 @@ func (g *graph) handlerOutcomes(r route) ([]outcome, error) {
 	}
 	info := g.collect(g.src.fileOf(fn), fn.Body, fn.Type.Params)
 	return g.resolve(info, map[string][]string{}, map[string]bool{r.Handler: true})
-}
-
-// field is one JSON field of a request body type.
-type field struct{ Name, Type, Doc string }
-
-// bodyFields reads a struct type's JSON fields from their tags.
-func (g *graph) bodyFields(typeName string) ([]field, error) {
-	ts := g.src.typeSpec(typeName)
-	if ts == nil {
-		return nil, fmt.Errorf("%s declares no type %s", apiDir, typeName)
-	}
-	st, ok := ts.Type.(*ast.StructType)
-	if !ok {
-		return nil, fmt.Errorf("%s: %s is not a struct", g.src.at(ts), typeName)
-	}
-	var out []field
-	for _, f := range st.Fields.List {
-		if f.Tag == nil {
-			continue
-		}
-		tag, err := strconv.Unquote(f.Tag.Value)
-		if err != nil {
-			return nil, err
-		}
-		jsonTag, ok := reflect.StructTag(tag).Lookup("json")
-		if !ok || jsonTag == "-" {
-			continue
-		}
-		name, _, _ := strings.Cut(jsonTag, ",")
-		typ, err := g.jsonType(f.Type)
-		if err != nil {
-			return nil, err
-		}
-		doc := prose(f.Doc)
-		if doc == "" {
-			doc = prose(f.Comment)
-		}
-		out = append(out, field{Name: name, Type: typ, Doc: doc})
-	}
-	return out, nil
-}
-
-// jsonType names a Go field type as its JSON appears on the wire: a pointer is the value or
-// null, a slice an array; a type refgen does not know is printed as Go spells it.
-func (g *graph) jsonType(e ast.Expr) (string, error) {
-	switch x := e.(type) {
-	case *ast.StarExpr:
-		inner, err := g.jsonType(x.X)
-		return inner + " or null", err
-	case *ast.ArrayType:
-		inner, err := g.jsonType(x.Elt)
-		return "array of " + inner, err
-	case *ast.Ident:
-		switch x.Name {
-		case "string":
-			return "string", nil
-		case "bool":
-			return "boolean", nil
-		case "int", "int32", "int64", "float64":
-			return "number", nil
-		}
-	}
-	var typ strings.Builder
-	err := printer.Fprint(&typ, g.src.fset, e)
-	return typ.String(), err
 }
 
 // refusals is the distinct error outcomes in outs, by code and then status.

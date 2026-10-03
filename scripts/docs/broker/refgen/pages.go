@@ -22,7 +22,8 @@ func frontMatter(title, description, from string) string {
 		strconv.Quote(title), strconv.Quote(description), from)
 }
 
-// apiPage is the HTTP API reference: the authentication classes, then every route.
+// apiPage is the HTTP API reference: the credentials routes take, then every route with its
+// request body, response body and refusals.
 func apiPage(root string) (string, error) {
 	g, err := newGraph(root)
 	if err != nil {
@@ -36,12 +37,16 @@ func apiPage(root string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	labels := map[string]string{}
+	for _, c := range classes {
+		labels[c.Wrapper] = c.Label
+	}
 	var b strings.Builder
 	b.WriteString(frontMatter("HTTP API", "Every route the secrets broker serves, the credential each needs, and what each answers.", apiDir))
 	b.WriteString("The broker answers JSON. A refusal is `{\"code\": \"…\", \"error\": \"…\"}` with the HTTP status below; the [error reference](/legion/broker/reference/errors/) lists every code.\n\n")
 
-	b.WriteString("## Authentication\n\nEach route is served behind one adapter, which fixes the credential it accepts. These are the refusals the adapter itself answers, before the route's handler runs.\n\n")
-	b.WriteString("| Adapter | What it accepts | Refusals |\n| --- | --- | --- |\n")
+	b.WriteString("## Authentication\n\nEach route takes one kind of credential, or none. These are the refusals the broker answers for the credential itself, before the route runs.\n\n")
+	b.WriteString("| Credential | Description | Refusals |\n| --- | --- | --- |\n")
 	for _, c := range classes {
 		var refused []string
 		for _, o := range refusals(c.Refusals) {
@@ -50,12 +55,12 @@ func apiPage(root string) (string, error) {
 		if len(refused) == 0 {
 			refused = []string{"none"}
 		}
-		fmt.Fprintf(&b, "| `%s` | %s | %s |\n", c.Wrapper, cell(lead(c.Wrapper, c.Doc)), strings.Join(refused, "<br>"))
+		fmt.Fprintf(&b, "| %s | %s | %s |\n", c.Label, cell(lead(c.Wrapper, c.Doc)), strings.Join(refused, "<br>"))
 	}
 
-	b.WriteString("\n## Routes\n\n| Method | Path | Adapter | What it does |\n| --- | --- | --- | --- |\n")
+	b.WriteString("\n## Routes\n\n| Method | Path | Credential | What it does |\n| --- | --- | --- | --- |\n")
 	for _, r := range routes {
-		fmt.Fprintf(&b, "| `%s` | `%s` | `%s` | %s |\n", r.Method, r.Pattern, r.Wrapper, cell(r.Summary))
+		fmt.Fprintf(&b, "| `%s` | `%s` | %s | %s |\n", r.Method, r.Pattern, labels[r.Wrapper], cell(r.Summary))
 	}
 
 	for _, r := range routes {
@@ -64,7 +69,7 @@ func apiPage(root string) (string, error) {
 			return "", err
 		}
 		fmt.Fprintf(&b, "\n### %s %s\n\n%s\n\n", r.Method, r.Pattern, cell(r.Summary))
-		fmt.Fprintf(&b, "- Adapter: `%s`\n", r.Wrapper)
+		fmt.Fprintf(&b, "- Credential: %s\n", labels[r.Wrapper])
 		if params := pathParams.FindAllStringSubmatch(r.Pattern, -1); len(params) > 0 {
 			var names []string
 			for _, p := range params {
@@ -72,7 +77,7 @@ func apiPage(root string) (string, error) {
 			}
 			fmt.Fprintf(&b, "- Path parameters: %s\n", strings.Join(names, ", "))
 		}
-		var queries, bodies, successes []string
+		var queries, bodies, successes, answers []string
 		for _, o := range outs {
 			switch {
 			case o.Query != "":
@@ -81,35 +86,62 @@ func apiPage(root string) (string, error) {
 				bodies = union(bodies, []string{o.BodyType})
 			case o.Code == "" && o.Status != 0:
 				successes = union(successes, []string{fmt.Sprintf("`%d`", o.Status)})
+				if o.RespType != "" {
+					answers = union(answers, []string{o.RespType})
+				}
 			}
 		}
 		if len(queries) > 0 {
 			fmt.Fprintf(&b, "- Query parameters: %s\n", strings.Join(queries, ", "))
 		}
 		if len(successes) > 0 {
-			fmt.Fprintf(&b, "- Success: %s\n", strings.Join(successes, ", "))
+			if len(answers) == 0 {
+				fmt.Fprintf(&b, "- Success: %s, with no body\n", strings.Join(successes, ", "))
+			} else {
+				fmt.Fprintf(&b, "- Success: %s\n", strings.Join(successes, ", "))
+			}
 		}
-		fmt.Fprintf(&b, "- Handler: `%s` (`%s`)\n", r.Handler, g.src.at(g.funcs[r.Handler]))
+		fmt.Fprintf(&b, "- Source: `%s`\n", g.src.at(g.funcs[r.Handler]))
 		for _, typeName := range bodies {
-			fields, err := g.bodyFields(typeName)
+			ref, err := g.localStruct(typeName)
 			if err != nil {
 				return "", err
 			}
-			hasNotes := false
-			for _, f := range fields {
-				hasNotes = hasNotes || f.Doc != ""
+			b.WriteString("\nRequest body (JSON):\n\n")
+			if err := g.writeFields(&b, ref, ""); err != nil {
+				return "", err
 			}
-			fmt.Fprintf(&b, "\nRequest body (`%s`, JSON):\n\n", typeName)
-			if hasNotes {
-				b.WriteString("| Field | Type | Notes |\n| --- | --- | --- |\n")
-			} else {
-				b.WriteString("| Field | Type |\n| --- | --- |\n")
+		}
+		switch len(answers) {
+		case 0:
+		case 1:
+			ref, err := g.localStruct(answers[0])
+			if err != nil {
+				return "", err
 			}
-			for _, f := range fields {
-				if hasNotes {
-					fmt.Fprintf(&b, "| `%s` | `%s` | %s |\n", f.Name, cellCode(f.Type), cell(capitalize(f.Doc)))
-				} else {
-					fmt.Fprintf(&b, "| `%s` | `%s` |\n", f.Name, cellCode(f.Type))
+			b.WriteString("\nResponse body (JSON):\n\n")
+			if err := g.writeFields(&b, ref, ""); err != nil {
+				return "", err
+			}
+		default:
+			b.WriteString("\nResponse body (JSON), one of:\n")
+			for _, typeName := range answers {
+				ref, err := g.localStruct(typeName)
+				if err != nil {
+					return "", err
+				}
+				doc := prose(ref.spec.Doc)
+				if doc == "" {
+					if gd := genDeclOf(g.src, ref.spec); gd != nil {
+						doc = prose(gd.Doc)
+					}
+				}
+				if doc == "" {
+					return "", fmt.Errorf("%s: %s is one of several answers of %s %s, so it needs a doc comment saying when", g.src.at(ref.spec), typeName, r.Method, r.Pattern)
+				}
+				fmt.Fprintf(&b, "\n%s:\n\n", strings.TrimSuffix(lead(typeName, doc), "."))
+				if err := g.writeFields(&b, ref, ""); err != nil {
+					return "", err
 				}
 			}
 		}
@@ -121,6 +153,34 @@ func apiPage(root string) (string, error) {
 		}
 	}
 	return b.String(), nil
+}
+
+// localStruct is the struct type the API package declares as name.
+func (g *graph) localStruct(name string) (structRef, error) {
+	ref, ok, err := g.structOf(g.src, nil, ast.NewIdent(name))
+	if err != nil {
+		return structRef{}, err
+	}
+	if !ok {
+		return structRef{}, fmt.Errorf("%s declares no struct type %s", apiDir, name)
+	}
+	return ref, nil
+}
+
+// genDeclOf is the declaration holding spec, whose doc comment a lone type spec's is.
+func genDeclOf(src *source, spec *ast.TypeSpec) *ast.GenDecl {
+	for _, f := range src.files {
+		for _, d := range f.Decls {
+			if gd, ok := d.(*ast.GenDecl); ok {
+				for _, s := range gd.Specs {
+					if s == spec {
+						return gd
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 var pathParams = regexp.MustCompile(`\{([a-z_]+)\}`)
