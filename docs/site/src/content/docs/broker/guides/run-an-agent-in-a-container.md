@@ -36,8 +36,12 @@ edd9a18c-41ff-46f9-8a15-bddb30f0abc3
 ```
 
 The helper enrolls the box under the machine's login, and `enroll` writes the enrollment id to
-`$AGENT_SECRETS_KEY_DIR/enrollment`, where the box reads it. A call the box makes before then waits
-up to `AGENT_SECRETS_ENROLL_WAIT` (20 seconds by default) for that file.
+`$AGENT_SECRETS_KEY_DIR/enrollment`, where the box reads it. A box that may start before this, such
+as one whose agent connects at launch, needs its launcher to create
+`$AGENT_SECRETS_KEY_DIR/enrollment.pending` before the box starts and remove it once `enroll` has
+written the id. While that file is there, and for up to 160 seconds, a call waits up to
+`AGENT_SECRETS_ENROLL_WAIT` (20 seconds by default) for the enrollment. Without it, a call made
+before enrollment fails at once.
 
 ## 3. Keep its lease alive, inside the box
 

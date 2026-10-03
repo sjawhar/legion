@@ -30,7 +30,7 @@ generated from the code, lists every code.
 | `request … was denied` (exit 77) | The approver denied it, or the rules deny one of the names for this session. Nothing ran. | Ask the approver, or the rules' owner, why. |
 | `request … is still waiting for approval; nothing was run. Check it with: agent-secrets status …` (exit 75) | Nobody decided within `--wait` (30 minutes by default). | Ask the approver; check with `agent-secrets status`; rerun the command once it is granted, or with a longer `--wait`, a duration such as `1h`. |
 | `invalid value "…" for flag -wait: parse error` (exit 2) | `--wait` takes a duration with its unit (`90s`, `5m`, `1h`), not a bare number. `register --wait` is the exception: it takes whole seconds. | Add the unit. |
-| `request … was expired` or `request … was cancelled` | Nobody decided it within 12 hours, or the session cancelled it (or ended). | Ask again. |
+| `request … was expired` or `request … was cancelled` | Nobody decided it within 12 hours, or the session cancelled it (`agent-secrets cancel`). A session that ended reads none of its requests: its calls are refused `PROOF_INVALID`. | Ask again. |
 | `no rule names this secret (UNKNOWN_SECRET)` | The name is not in the broker's rules. | Check the spelling, or ask the rules' owner to add it. |
 | `the requested secrets need different approvers; request them separately (MIXED_APPROVERS)` | One command asked for secrets that different people approve. | Request them in separate commands. |
 | `… not released (proxy-delivery or otherwise unavailable)` | The grant came back without one of the names' values: a `delivery: proxy` secret, which the broker never releases. | Use an `inject` secret. |

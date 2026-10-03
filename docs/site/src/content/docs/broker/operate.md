@@ -1,6 +1,6 @@
 ---
 title: Operating the broker
-description: Running the secrets broker - its configuration, its Postgres and secret-store dependencies, Dispatch's connection to it, health, logs and the audit record.
+description: Running the Secrets Broker - its configuration, its Postgres and secret-store dependencies, Dispatch's connection to it, health, logs and the audit record.
 sidebar:
   order: 3
 ---
@@ -100,12 +100,17 @@ limit 50;
 and the decisions on credential requests:
 
 ```sql
-select r.id, r.kind, r.approver, e.event, e.actor, e.at
-from credential_requests r
-left join credential_request_events e on e.record_id = r.id
-order by r.created_at desc
+select cr.id, cr.kind, cr.approver, r.state as request_state, e.event, e.actor, e.at
+from credential_requests cr
+left join requests r on r.record_id = cr.id
+left join credential_request_events e on e.record_id = cr.id
+order by cr.created_at desc
 limit 50;
 ```
+
+A secret request's state is its request's (`request_state`), which is what the broker goes by: a
+request an older broker cancelled when its session ended carries no event on its record. A machine
+login has no request, and its events alone say how it was decided.
 
 Neither holds a secret value.
 

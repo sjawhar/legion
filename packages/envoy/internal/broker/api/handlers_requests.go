@@ -88,7 +88,8 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 // and when.
 type requestDecision struct {
 	// Who decided it: the approver's login, "session:<enrollment id>" (the session cancelled it),
-	// "launcher:<credential id>" (its launcher ended the session) or "broker".
+	// "launcher:<credential id>" (its launcher ended the session) or "broker" (the session's lease
+	// lapsed).
 	By string `json:"by"`
 	// When it was decided.
 	At time.Time `json:"at"`
@@ -104,7 +105,8 @@ type requestStatusResponse struct {
 	RecordID *string `json:"record_id"`
 	// When it left "pending"; null while pending.
 	DecidedAt *time.Time `json:"decided_at"`
-	// Who decided it and when; null while pending, and when the rules decided it at once.
+	// Who decided it and when; null while pending, when the rules decided it at once, and when it
+	// expired.
 	Decision *requestDecision `json:"decision"`
 }
 

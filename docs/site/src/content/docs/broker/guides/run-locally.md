@@ -1,6 +1,6 @@
 ---
 title: Run the broker locally
-description: Start a whole secrets broker stack on your machine with one script and drive a machine login, a session and an approval by hand.
+description: Start a whole Secrets Broker stack on your machine with one script and drive a machine login, a session and an approval by hand.
 sidebar:
   order: 13
 ---

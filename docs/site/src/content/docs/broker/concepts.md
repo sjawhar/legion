@@ -41,8 +41,10 @@ lapse. Ending an enrollment either way revokes every grant it held and cancels e
 still had pending, so those leave the approver's Inbox and an approval can never land on a session
 that is gone (`packages/envoy/internal/broker/enroll/enroll.go`, `endEnrollment`).
 
-Every enrollment records an **operator**: the person whose machine it runs on. The operator is the
-person who approved the machine login that enrolled it, never a value the launcher chooses.
+Every `host` and `box` enrollment records an **operator**: the person whose machine it runs on. The
+operator is the person who approved the machine login that enrolled it, never a value the launcher
+chooses. A `pod` enrollment records none, since the Legion daemon logs in as a service rather than
+as a person.
 
 ## Machine login
 

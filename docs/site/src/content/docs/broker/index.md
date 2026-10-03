@@ -1,12 +1,12 @@
 ---
-title: Secrets broker
+title: Secrets Broker
 description: How agents get the secrets they need without holding long-lived keys, with a person approving what needs approval and every grant recorded.
 sidebar:
   label: Introduction
   order: 0
 ---
 
-The secrets broker hands agent sessions the secret values they need, one request at a time, so an
+The Secrets Broker hands agent sessions the secret values they need, one request at a time, so an
 agent never holds a long-lived API key. An agent asks for a secret by name; the broker decides from
 its rules whether to grant it at once, refuse it, or ask a person; and the person approves or denies
 it in Dispatch. A granted value reaches only the command that asked for it, and every request,
@@ -40,7 +40,7 @@ sequenceDiagram
     participant Agent as Agent session
     participant CLI as agent-secrets
     participant Helper as agent-secrets-helper
-    participant Broker as Secrets broker
+    participant Broker as Secrets Broker
     participant Dispatch
     actor Person as Approver
     Agent->>CLI: agent-secrets DEMO_API_KEY -- ./deploy.sh
@@ -71,7 +71,7 @@ container](/legion/broker/guides/run-an-agent-in-a-container/) shows a box's set
 
 | Piece | What it does | Where it runs |
 | --- | --- | --- |
-| Secrets broker (`envoy-broker`) | Enrolls sessions, evaluates the rules, records requests and decisions, and releases granted values. | A server, beside Postgres and the secret store. |
+| Secrets Broker (`envoy-broker`) | Enrolls sessions, evaluates the rules, records requests and decisions, and releases granted values. | A server, beside Postgres and the secret store. |
 | `agent-secrets` | The command an agent runs to use a secret, and the tool people and launchers use to log machines in and inspect sessions. | Wherever agents run. |
 | `agent-secrets-helper` | A per-user daemon that holds each host agent session's key, enrolls it, and signs for it. | Each machine that runs agents directly. |
 | Dispatch | Shows people the requests they must decide and the grants they can revoke, and passes their decisions to the broker. | Dispatch's server and web app. |
