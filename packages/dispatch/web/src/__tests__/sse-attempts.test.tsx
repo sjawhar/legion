@@ -16,6 +16,8 @@ test("a stale reconnect timer never opens a second stream once online preempts i
     return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
   }
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = String(input);
@@ -29,7 +31,7 @@ test("a stale reconnect timer never opens a second stream once online preempts i
       return openStreamResponse(init?.signal);
     }) as typeof fetch;
 
-    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+    unmount = renderHook(() => useEventStream(), { wrapper: Wrapper }).unmount;
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
 
@@ -47,9 +49,8 @@ test("a stale reconnect timer never opens a second stream once online preempts i
     setTimeout(settle, 1_300);
     await settled;
     expect(streamCalls.length).toBe(2);
-
-    unmount();
   } finally {
+    unmount?.();
     globalThis.fetch = originalFetch;
   }
 }, 10_000);
@@ -63,6 +64,8 @@ test("the watchdog reconnects a connection that opens and then goes silent witho
     return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
   }
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = (async (
       _input: RequestInfo | URL,
@@ -75,13 +78,12 @@ test("the watchdog reconnects a connection that opens and then goes silent witho
       return openStreamResponse(init?.signal);
     }) as typeof fetch;
 
-    const { unmount } = renderHook(() => useEventStream({ watchdogMs: 50 }), { wrapper: Wrapper });
+    unmount = renderHook(() => useEventStream({ watchdogMs: 50 }), { wrapper: Wrapper }).unmount;
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
     await waitFor(() => expect(streamCalls.length).toBeGreaterThanOrEqual(2), { timeout: 2_000 });
-
-    unmount();
   } finally {
+    unmount?.();
     globalThis.fetch = originalFetch;
   }
 });
@@ -95,6 +97,8 @@ test("the watchdog retries a request that never receives response headers", asyn
   function Wrapper({ children }: { children: ReactNode }): ReactNode {
     return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
   }
+
+  let unmount: (() => void) | undefined;
 
   try {
     globalThis.fetch = (async (
@@ -112,14 +116,13 @@ test("the watchdog retries a request that never receives response headers", asyn
       return openStreamResponse(init?.signal);
     }) as typeof fetch;
 
-    const { unmount } = renderHook(() => useEventStream({ watchdogMs: 50 }), { wrapper: Wrapper });
+    unmount = renderHook(() => useEventStream({ watchdogMs: 50 }), { wrapper: Wrapper }).unmount;
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
     await waitFor(() => expect(streamCalls.length).toBe(2), { timeout: 2_000 });
     await waitFor(() => expect(wholeCache.count()).toBe(1));
-
-    unmount();
   } finally {
+    unmount?.();
     wholeCache.restore();
     globalThis.fetch = originalFetch;
   }
@@ -142,6 +145,8 @@ test("a 401 on the stream invalidates whoami and schedules no reconnect", async 
     return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
   }
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = (async (_input: RequestInfo | URL): Promise<Response> => {
       streamCalls.push(streamCalls.length);
@@ -149,7 +154,7 @@ test("a 401 on the stream invalidates whoami and schedules no reconnect", async 
       return new Response(null, { status: 401 });
     }) as typeof fetch;
 
-    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+    unmount = renderHook(() => useEventStream(), { wrapper: Wrapper }).unmount;
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
     await waitFor(() => expect(invalidated).toContainEqual(["whoami"]));
@@ -161,9 +166,8 @@ test("a 401 on the stream invalidates whoami and schedules no reconnect", async 
     setTimeout(settle, 1_300);
     await settled;
     expect(streamCalls.length).toBe(1);
-
-    unmount();
   } finally {
+    unmount?.();
     globalThis.fetch = originalFetch;
   }
 }, 10_000);
@@ -199,6 +203,8 @@ test("a non-auth 4xx on the stream marks the connection unavailable and schedule
 
   setConnectionState("connected");
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = (async (_input: RequestInfo | URL): Promise<Response> => {
       streamCalls.push(streamCalls.length);
@@ -206,11 +212,11 @@ test("a non-auth 4xx on the stream marks the connection unavailable and schedule
       return new Response(null, { status: 404 });
     }) as typeof fetch;
 
-    const { unmount } = render(
+    unmount = render(
       <QueryClientProvider client={queryClient}>
         <ConnectionPillProbe />
       </QueryClientProvider>
-    );
+    ).unmount;
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
     await waitFor(() => expect(getConnectionState()).toBe("unavailable"));
@@ -233,9 +239,8 @@ test("a non-auth 4xx on the stream marks the connection unavailable and schedule
     expect(streamCalls.length).toBe(1);
     expect(getConnectionState()).toBe("unavailable");
     expect(screen.getByText("Live updates unavailable")).toBeTruthy();
-
-    unmount();
   } finally {
+    unmount?.();
     globalThis.fetch = originalFetch;
   }
 }, 10_000);
@@ -249,6 +254,8 @@ test("a 429 on the stream keeps reconnecting instead of going terminal", async (
     return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
   }
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = (async (
       _input: RequestInfo | URL,
@@ -261,13 +268,12 @@ test("a 429 on the stream keeps reconnecting instead of going terminal", async (
       return openStreamResponse(init?.signal);
     }) as typeof fetch;
 
-    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+    unmount = renderHook(() => useEventStream(), { wrapper: Wrapper }).unmount;
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
     await waitFor(() => expect(streamCalls.length).toBe(2), { timeout: 2_000 });
-
-    unmount();
   } finally {
+    unmount?.();
     globalThis.fetch = originalFetch;
   }
 }, 10_000);

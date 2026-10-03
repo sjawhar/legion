@@ -48,6 +48,8 @@ test("an out-of-order lower-id live event is applied and never regresses the rec
   const frame = (id: number) =>
     `id: ${id}\nevent: issue.updated\ndata: {"id":${id},"issue_key":"CORE-1","seq":${id},"type":"issue.updated","actor":{"kind":"session","id":"s"},"notify":false,"created_at":"2026-01-01T00:00:00Z","payload":{}}\n\n`;
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = String(input);
@@ -61,7 +63,7 @@ test("an out-of-order lower-id live event is applied and never regresses the rec
       return openStreamResponse(init?.signal);
     }) as typeof fetch;
 
-    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+    unmount = renderHook(() => useEventStream(), { wrapper: Wrapper }).unmount;
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
     // The very first connection ever omits since entirely — the server
@@ -79,9 +81,8 @@ test("an out-of-order lower-id live event is applied and never regresses the rec
     window.dispatchEvent(new Event("online"));
     await waitFor(() => expect(streamCalls.length).toBe(2));
     expect(new URL(streamCalls[1], "http://localhost").searchParams.get("since")).toBe("101");
-
-    unmount();
   } finally {
+    unmount?.();
     globalThis.fetch = originalFetch;
   }
 }, 10_000);
@@ -98,6 +99,8 @@ test("visibilitychange while a stream is open replaces it once, resuming from th
   const frame = (id: number) =>
     `id: ${id}\nevent: issue.updated\ndata: {"id":${id},"issue_key":"CORE-1","seq":${id},"type":"issue.updated","actor":{"kind":"session","id":"s"},"notify":false,"created_at":"2026-01-01T00:00:00Z","payload":{}}\n\n`;
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = String(input);
@@ -109,7 +112,7 @@ test("visibilitychange while a stream is open replaces it once, resuming from th
       return openStreamResponse(init?.signal);
     }) as typeof fetch;
 
-    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+    unmount = renderHook(() => useEventStream(), { wrapper: Wrapper }).unmount;
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
     // Let the enqueued frame drain through the reader loop before forcing a reconnect.
@@ -129,9 +132,8 @@ test("visibilitychange while a stream is open replaces it once, resuming from th
     setTimeout(settle, 200);
     await settled;
     expect(streamCalls.length).toBe(2);
-
-    unmount();
   } finally {
+    unmount?.();
     globalThis.fetch = originalFetch;
   }
 }, 10_000);
@@ -161,6 +163,8 @@ test("a reconnect refreshes every rendered query, including ones no key list nam
     return null;
   }
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = (async (
       _input: RequestInfo | URL,
@@ -170,11 +174,11 @@ test("a reconnect refreshes every rendered query, including ones no key list nam
       return openStreamResponse(init?.signal);
     }) as typeof fetch;
 
-    const { unmount } = render(
+    unmount = render(
       <QueryClientProvider client={queryClient}>
         <Probe />
       </QueryClientProvider>
-    );
+    ).unmount;
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
     await waitFor(() => expect(fetches).toEqual({ checks: 1, issues: 1 }));
@@ -190,9 +194,8 @@ test("a reconnect refreshes every rendered query, including ones no key list nam
     window.dispatchEvent(new Event("online"));
     await waitFor(() => expect(streamCalls.length).toBe(2));
     await waitFor(() => expect(fetches).toEqual({ checks: 2, issues: 2 }));
-
-    unmount();
   } finally {
+    unmount?.();
     globalThis.fetch = originalFetch;
   }
 }, 10_000);
@@ -217,6 +220,8 @@ test.each(
     return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
   }
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = (async (
       _input: RequestInfo | URL,
@@ -230,15 +235,14 @@ test.each(
       return openStreamResponse(init?.signal);
     }) as typeof fetch;
 
-    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+    unmount = renderHook(() => useEventStream(), { wrapper: Wrapper }).unmount;
     await waitFor(() => expect(streamCalls.length).toBe(1));
     await waitFor(() => expect(getConnectionState()).toBe("reconnecting"));
     reopen();
     await waitFor(() => expect(streamCalls.length).toBe(2), { timeout });
     await waitFor(() => expect(wholeCache.count()).toBe(1));
-
-    unmount();
   } finally {
+    unmount?.();
     wholeCache.restore();
     globalThis.fetch = originalFetch;
   }
@@ -271,16 +275,18 @@ test("an event during a list's first load beats the response that predates it", 
     return <p>{data ?? "loading"}</p>;
   }
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = emittingStream((send) => {
       emit = send;
     });
 
-    const { unmount } = render(
+    unmount = render(
       <QueryClientProvider client={queryClient}>
         <Probe />
       </QueryClientProvider>
-    );
+    ).unmount;
 
     // The list's first request is in flight and its response is held open.
     await waitFor(() => expect(listCalls).toBe(1));
@@ -299,9 +305,8 @@ test("an event during a list's first load beats the response that predates it", 
     setTimeout(settle, 200);
     await settled;
     expect(screen.getByText("NEWTITLE")).toBeTruthy();
-
-    unmount();
   } finally {
+    unmount?.();
     globalThis.fetch = originalFetch;
   }
 }, 10_000);
@@ -319,11 +324,13 @@ test("an unknown live event conservatively refreshes everything", async () => {
     return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
   }
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
       openStreamResponse(init?.signal, "id: 1\nevent: future.event\ndata: {}\n\n")) as typeof fetch;
 
-    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+    unmount = renderHook(() => useEventStream(), { wrapper: Wrapper }).unmount;
     const isStale = (key: readonly unknown[]) =>
       queryClient.getQueryCache().find({ queryKey: key, exact: true })?.isStale();
 
@@ -332,9 +339,8 @@ test("an unknown live event conservatively refreshes everything", async () => {
     expect(isStale(["user-state"])).toBe(true);
     // A key no hand-written list ever named refreshes too.
     expect(isStale(["user-agent-state"])).toBe(true);
-
-    unmount();
   } finally {
+    unmount?.();
     globalThis.fetch = originalFetch;
   }
 });
@@ -364,13 +370,15 @@ test("a queued prefix key replaces the narrower key instead of refetching it twi
     '"type":"child.status","actor":{"kind":"session","id":"s"},"notify":false,' +
     '"created_at":"2026-01-01T00:00:00Z","payload":{"child_key":"CORE-2"}}\n\n';
 
+  let unmount: (() => void) | undefined;
+
   try {
     await waitFor(() => expect(issueFetches).toBe(1));
 
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
       openStreamResponse(init?.signal, childStatus)) as typeof fetch;
 
-    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+    unmount = renderHook(() => useEventStream(), { wrapper: Wrapper }).unmount;
 
     await waitFor(() => expect(issueFetches).toBe(2));
     // Without the prefix drop the cancelled refetch starts again and the count reaches 3.
@@ -378,9 +386,8 @@ test("a queued prefix key replaces the narrower key instead of refetching it twi
     setTimeout(settle, 400);
     await settled;
     expect(issueFetches).toBe(2);
-
-    unmount();
   } finally {
+    unmount?.();
     unsubscribe();
     globalThis.fetch = originalFetch;
   }
@@ -434,16 +441,17 @@ test("a steady event trickle never starves a slow first load", async () => {
   });
   const list = deferredListQuery();
   let emit: ((frame: string) => void) | undefined;
+  let unmount: (() => void) | undefined;
 
   try {
     globalThis.fetch = emittingStream((send) => {
       emit = send;
     });
-    const { unmount } = render(
+    unmount = render(
       <QueryClientProvider client={queryClient}>
         <ListProbe list={list} />
       </QueryClientProvider>
-    );
+    ).unmount;
     await waitFor(() => expect(list.starts()).toBe(1));
     await waitFor(() => expect(emit).toBeDefined());
 
@@ -470,9 +478,8 @@ test("a steady event trickle never starves a slow first load", async () => {
     await waitFor(() => expect(screen.getByText("list-3")).toBeTruthy());
     await new Promise((resolve) => setTimeout(resolve, 400));
     expect(list.starts()).toBe(3);
-
-    unmount();
   } finally {
+    unmount?.();
     list.releaseAll();
     globalThis.fetch = originalFetch;
   }
@@ -492,11 +499,13 @@ test("unknown frames refresh at most once per window, leading and trailing", asy
     return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
   }
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = emittingStream((send) => {
       emit = send;
     });
-    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+    unmount = renderHook(() => useEventStream(), { wrapper: Wrapper }).unmount;
     await waitFor(() => expect(emit).toBeDefined());
 
     // Fifty frames of a type this build cannot parse, inside one window. Unthrottled this is
@@ -521,9 +530,8 @@ test("unknown frames refresh at most once per window, leading and trailing", asy
     await new Promise((resolve) => setTimeout(resolve, WHOLE_CACHE_REFRESH_MS));
     emit?.("id: 99\nevent: future.event\ndata: {}\n\n");
     await waitFor(() => expect(wholeCache.count()).toBe(3));
-
-    unmount();
   } finally {
+    unmount?.();
     wholeCache.restore();
     globalThis.fetch = originalFetch;
   }
@@ -543,11 +551,14 @@ test("a query removed and recreated between flushes still has its first load can
       </QueryClientProvider>
     );
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = emittingStream((send) => {
       emit = send;
     });
     const signedIn = renderProbe();
+    unmount = signedIn.unmount;
     await waitFor(() => expect(list.starts()).toBe(1));
     await waitFor(() => expect(emit).toBeDefined());
 
@@ -560,6 +571,7 @@ test("a query removed and recreated between flushes still has its first load can
     signedIn.unmount();
     queryClient.removeQueries({ queryKey: ["issues"] });
     const signedInAgain = renderProbe();
+    unmount = signedInAgain.unmount;
     await waitFor(() => expect(list.starts()).toBe(3));
 
     // An event during that load must restart it, so the body composed before the event never
@@ -573,9 +585,8 @@ test("a query removed and recreated between flushes still has its first load can
     await waitFor(() => expect(screen.getByText("list-4")).toBeTruthy());
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(screen.queryByText("list-3")).toBeNull();
-
-    signedInAgain.unmount();
   } finally {
+    unmount?.();
     list.releaseAll();
     globalThis.fetch = originalFetch;
   }
@@ -595,11 +606,14 @@ test("a settle refresh still fires for a key that was removed mid-load", async (
       </QueryClientProvider>
     );
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = emittingStream((send) => {
       emit = send;
     });
     const signedIn = renderProbe();
+    unmount = signedIn.unmount;
     await waitFor(() => expect(list.starts()).toBe(1));
     await waitFor(() => expect(emit).toBeDefined());
 
@@ -618,6 +632,7 @@ test("a settle refresh still fires for a key that was removed mid-load", async (
     // Signing back in. The refresh owed to the removed load must not be owed forever: this
     // key's next starved load still gets a settle refresh of its own.
     const signedInAgain = renderProbe();
+    unmount = signedInAgain.unmount;
     await waitFor(() => expect(list.starts()).toBe(3));
     emit?.(issueUpdatedFrame(3));
     await waitFor(() => expect(list.starts()).toBe(4));
@@ -627,9 +642,8 @@ test("a settle refresh still fires for a key that was removed mid-load", async (
 
     list.release(4);
     await waitFor(() => expect(list.starts()).toBe(5));
-
-    signedInAgain.unmount();
   } finally {
+    unmount?.();
     list.releaseAll();
     globalThis.fetch = originalFetch;
   }
@@ -647,6 +661,8 @@ test("repeated visibility reconnects cost one whole-cache refresh plus a trailin
     return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
   }
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = (async (
       _input: RequestInfo | URL,
@@ -659,9 +675,9 @@ test("repeated visibility reconnects cost one whole-cache refresh plus a trailin
     // A short injected window, so the test waits out its own trailing refresh rather than the
     // production 5 s. The unknown-frames test keeps the real window: its burst is what bounds
     // its runtime, and shortening the window there without tightening the burst proves less.
-    const { unmount } = renderHook(() => useEventStream({ wholeCacheRefreshMs: 3_000 }), {
+    unmount = renderHook(() => useEventStream({ wholeCacheRefreshMs: 3_000 }), {
       wrapper: Wrapper,
-    });
+    }).unmount;
     await waitFor(() => expect(streamCalls.length).toBe(1));
 
     // `forceReconnect` resets the backoff on every `visibilitychange`, and a reconnect refresh
@@ -679,9 +695,8 @@ test("repeated visibility reconnects cost one whole-cache refresh plus a trailin
     await waitFor(() => expect(wholeCache.count()).toBe(2), { timeout: 4_000 });
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(wholeCache.count()).toBe(2);
-
-    unmount();
   } finally {
+    unmount?.();
     wholeCache.restore();
     globalThis.fetch = originalFetch;
   }
@@ -700,13 +715,15 @@ test("a backwards system-clock step does not park the whole-cache throttle", asy
     return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
   }
 
+  let unmount: (() => void) | undefined;
+
   try {
     globalThis.fetch = emittingStream((send) => {
       emit = send;
     });
-    const { unmount } = renderHook(() => useEventStream({ wholeCacheRefreshMs: 1_000 }), {
+    unmount = renderHook(() => useEventStream({ wholeCacheRefreshMs: 1_000 }), {
       wrapper: Wrapper,
-    });
+    }).unmount;
     await waitFor(() => expect(emit).toBeDefined());
 
     emit?.("id: 1\nevent: future.event\ndata: {}\n\n");
@@ -721,9 +738,8 @@ test("a backwards system-clock step does not park the whole-cache throttle", asy
 
     emit?.("id: 2\nevent: future.event\ndata: {}\n\n");
     await waitFor(() => expect(wholeCache.count()).toBe(2), { timeout: 4_000 });
-
-    unmount();
   } finally {
+    unmount?.();
     Date.now = originalNow;
     wholeCache.restore();
     globalThis.fetch = originalFetch;
