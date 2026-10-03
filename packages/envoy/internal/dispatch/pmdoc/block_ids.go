@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -73,14 +74,14 @@ func blockIDCounts(tree *Node) map[string]int {
 	return counts
 }
 
-// walkBlockIDs visits the id of every block in tree that carries one, in document order, until
-// visit returns false.
+// walkBlockIDs visits the id of every block in tree that carries one (storedBlockID), in document
+// order, until visit returns false.
 func walkBlockIDs(tree *Node, visit func(id string) bool) {
 	Walk(tree, func(node *Node) bool {
 		if node.Type == "doc" || isInlineNodeType(node.Type) {
 			return true
 		}
-		if id, _ := node.Attrs[BlockIDAttr].(string); id != "" {
+		if id, ok := storedBlockID(node); ok {
 			return visit(id)
 		}
 		return true
@@ -94,8 +95,7 @@ func BlockIDRepairCount(tree *Node) (repairs int) {
 		if node.Type == "doc" || isInlineNodeType(node.Type) {
 			return true
 		}
-		id, ok := node.Attrs[BlockIDAttr].(string)
-		if ok && writableBlockID(id) {
+		if id, ok := storedBlockID(node); ok {
 			if _, duplicate := seen[id]; !duplicate {
 				seen[id] = struct{}{}
 				return true
@@ -107,16 +107,15 @@ func BlockIDRepairCount(tree *Node) (repairs int) {
 	return repairs
 }
 
-// EnsureBlockIDsCount gives every block in tree a unique blockId and reports how many missing,
-// unwritable (writableBlockID) or duplicate IDs it replaced.
+// EnsureBlockIDsCount gives every block in tree a unique blockId and reports how many missing
+// (storedBlockID) or duplicate IDs it replaced.
 func EnsureBlockIDsCount(tree *Node) (stamped int) {
 	seen := make(map[string]struct{})
 	walk(tree, func(node *Node, _ []int, _, _ int) bool {
 		if node.Type == "doc" || isInlineNodeType(node.Type) {
 			return true
 		}
-		id, ok := node.Attrs[BlockIDAttr].(string)
-		if ok && writableBlockID(id) {
+		if id, ok := storedBlockID(node); ok {
 			if _, duplicate := seen[id]; !duplicate {
 				seen[id] = struct{}{}
 				return true
@@ -125,6 +124,7 @@ func EnsureBlockIDsCount(tree *Node) (stamped int) {
 		if node.Attrs == nil {
 			node.Attrs = Attrs{}
 		}
+		var id string
 		for {
 			id = mintBlockID()
 			if _, duplicate := seen[id]; !duplicate && id != "" {
@@ -139,26 +139,21 @@ func EnsureBlockIDsCount(tree *Node) (stamped int) {
 	return stamped
 }
 
-// writableBlockID reports whether id is one a typed block's markdown can carry and read back
-// (`#id`: letters, digits, `_` and `-`, as directiveNameByte reads them), which every id this
-// package mints is. A browser's update can set any string, one holding U+0000 among them, which
-// an ask row or an anchor cannot store and a version cannot render, so such an id is minted again
-// as a missing one is.
-func writableBlockID(id string) bool {
-	if id == "" {
-		return false
-	}
-	for index := range len(id) {
-		if !directiveNameByte(id[index]) {
-			return false
-		}
-	}
-	return true
+// storedBlockID is node's block id, and whether it has one an ask row or an anchor can store: any
+// text but the empty string and one holding U+0000, which PostgreSQL's text cannot hold. A
+// browser's update can set any string, so such an id is minted again as a missing one is. Every
+// other id stays: the browser editor keeps whatever a pasted typed block's `#id` names up to a
+// quote, `#`, `.`, `<`, `=`, `>`, a backtick, `}` or whitespace (`q:1`, `décision`), and an ask row
+// or anchor stored under such an id is found by it.
+func storedBlockID(node *Node) (string, bool) {
+	id, _ := node.Attrs[BlockIDAttr].(string)
+	return id, id != "" && strings.IndexByte(id, 0) < 0
 }
 
-// BlockIDForRange returns the lowest block that contains all of r. A range
-// spanning top-level siblings has only the document root in common, which has
-// no usable block identity, so it returns an empty ID without an error.
+// BlockIDForRange returns the lowest block that contains all of r and carries an id
+// (storedBlockID). A range spanning top-level siblings has only the document root in common,
+// which has no usable block identity, so it returns an empty ID without an error, as it does for a
+// range whose blocks carry none.
 func BlockIDForRange(tree *Node, r Range) (string, error) {
 	if tree == nil || tree.Type != "doc" {
 		return "", ErrTargetNotFound
@@ -168,7 +163,7 @@ func BlockIDForRange(tree *Node, r Range) (string, error) {
 		if node.Type == "doc" || isInlineNodeType(node.Type) || r.From < pos || r.To > end {
 			return true
 		}
-		if id, ok := node.Attrs[BlockIDAttr].(string); ok && id != "" {
+		if id, ok := storedBlockID(node); ok {
 			blockID = id
 		}
 		return true

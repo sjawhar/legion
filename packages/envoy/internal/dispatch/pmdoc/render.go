@@ -847,10 +847,11 @@ func asWritten(doc *Node) *Node {
 // NulAsReplacement is text with each U+0000 written as U+FFFD, which is what CommonMark reads the
 // character as (§2.3 Insecure characters), so no markdown carries one back; PostgreSQL's text and
 // jsonb cannot store one either. A browser's edit can still put one in a live document, past every
-// check a route makes, so text Dispatch takes from a document's tree to store passes through this:
-// its rendering (asWritten), an anchor's quote (FindMark) and an ask block's question and options.
-// A document's settlement and every write that versions it store that text, so one U+0000 left in
-// it as it is would fail all of them.
+// check a route makes, so text Dispatch takes from a document's tree passes through this: its
+// rendering (asWritten), an anchor's quote (FindMark), an ask block's question and options
+// (TextContent), and the text a quote is matched against (buildFlattenedText). A document's
+// settlement and every write that versions it store that text, so one U+0000 left in it as it is
+// would fail all of them, and a quote copied from what a read serves would match nothing.
 func NulAsReplacement(text string) string {
 	if strings.IndexByte(text, 0) < 0 {
 		return text

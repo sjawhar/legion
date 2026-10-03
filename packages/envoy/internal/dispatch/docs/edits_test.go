@@ -2400,7 +2400,7 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 			pmdoc.EnsureBlockIDs(tree)
 			var id string
 			pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
-				if node.Type == "paragraph" && nodeText(node) == "Body." {
+				if node.Type == "paragraph" && pmdoc.TextContent(node) == "Body." {
 					id = blockID(node)
 				}
 				return true
@@ -2416,7 +2416,7 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 				}
 				return true
 			})
-			if emptied == nil || emptied.Type != "paragraph" || nodeText(emptied) != "" {
+			if emptied == nil || emptied.Type != "paragraph" || pmdoc.TextContent(emptied) != "" {
 				t.Fatalf("after replacing with nothing, block %q = %+v, want an empty paragraph", id, emptied)
 			}
 		})
@@ -2558,7 +2558,7 @@ func TestApplyOperationReplaceEscapesBlockSyntaxBesideAnEmptiedParagraph(t *test
 			}
 			kept := false
 			pmdoc.Walk(back.Children[1], func(node *pmdoc.Node) bool {
-				kept = kept || node.Type == "paragraph" && nodeText(node) == test.with
+				kept = kept || node.Type == "paragraph" && pmdoc.TextContent(node) == test.with
 				return true
 			})
 			if !kept {

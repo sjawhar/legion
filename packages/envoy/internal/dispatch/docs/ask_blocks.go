@@ -460,13 +460,13 @@ func parseAskBlock(node *pmdoc.Node) (askBlock, error) {
 	for _, child := range node.Children {
 		switch child.Type {
 		case "paragraph":
-			questionParts = append(questionParts, strings.TrimSpace(nodeText(child)))
+			questionParts = append(questionParts, strings.TrimSpace(pmdoc.TextContent(child)))
 		case "bullet_list":
 			for _, item := range child.Children {
 				if len(item.Children) == 0 {
 					return askBlock{}, fmt.Errorf("ask block %q has an empty option", blockID)
 				}
-				label, description, found := strings.Cut(strings.TrimSpace(nodeText(item.Children[0])), ": ")
+				label, description, found := strings.Cut(strings.TrimSpace(pmdoc.TextContent(item.Children[0])), ": ")
 				if !found {
 					description = ""
 				}
@@ -485,22 +485,6 @@ func parseAskBlock(node *pmdoc.Node) (askBlock, error) {
 		return askBlock{}, fmt.Errorf("ask block %q has an empty question", blockID)
 	}
 	return askBlock{node: node, id: blockID, question: question, options: options, multiple: multiple, urgency: urgency}, nil
-}
-
-// nodeText is node's text as an ask row stores it: hard breaks as line feeds, and each U+0000 a
-// browser edit left as U+FFFD (pmdoc.NulAsReplacement), since the row's columns cannot hold one.
-func nodeText(node *pmdoc.Node) string {
-	if node.Type == "text" {
-		return pmdoc.NulAsReplacement(node.Text)
-	}
-	if node.Type == "hardbreak" {
-		return "\n"
-	}
-	var text strings.Builder
-	for _, child := range node.Children {
-		text.WriteString(nodeText(child))
-	}
-	return text.String()
 }
 
 // loadAskBlocks reads and locks every ask anchored to a block of this document. `for no key

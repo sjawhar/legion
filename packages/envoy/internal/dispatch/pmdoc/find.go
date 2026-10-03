@@ -225,7 +225,7 @@ func headingNotFound(doc *Node, title string) error {
 		if child.Type != "heading" {
 			continue
 		}
-		heading := textContent(child)
+		heading := TextContent(child)
 		candidates = append(candidates, ranked{text: heading, prefix: commonPrefixLength(title, heading)})
 	}
 	sort.SliceStable(candidates, func(left, right int) bool {
@@ -304,7 +304,9 @@ func buildFlattenedText(doc *Node) flattenedText {
 			marks = append(marks, 0)
 		}
 		markup := nodeInlineMarkup(node)
-		for _, char := range node.Text {
+		// A quote is matched against the text every read serves, so a browser's U+0000 is U+FFFD
+		// here too; both are one UTF-16 unit, so no position moves.
+		for _, char := range NulAsReplacement(node.Text) {
 			out.WriteRune(char)
 			width := 1
 			if char > 0xffff {
@@ -503,7 +505,7 @@ func nearestBlocks(doc *Node, quote string, limit int) []string {
 	var candidates []ranked
 	walk(doc, func(node *Node, _ []int, _, _ int) bool {
 		if isTextblock(node.Type) {
-			candidate := textContent(node)
+			candidate := TextContent(node)
 			candidates = append(candidates, ranked{text: candidate, prefix: commonPrefixLength(quote, candidate)})
 		}
 		return true
@@ -540,16 +542,19 @@ func headingQuoteMatches(doc *Node, text flattenedText, title string) []quoteMat
 	return matches
 }
 
-func textContent(node *Node) string {
+// TextContent is node's text, hard breaks as line feeds, as a read serves it: each U+0000 a browser
+// edit left as U+FFFD (NulAsReplacement). An ask row's question and options and a quote miss's
+// nearest blocks are read through it.
+func TextContent(node *Node) string {
 	if node.Type == "text" {
-		return node.Text
+		return NulAsReplacement(node.Text)
 	}
 	if node.Type == "hardbreak" {
 		return "\n"
 	}
 	var out strings.Builder
 	for _, child := range node.Children {
-		out.WriteString(textContent(child))
+		out.WriteString(TextContent(child))
 	}
 	return out.String()
 }
