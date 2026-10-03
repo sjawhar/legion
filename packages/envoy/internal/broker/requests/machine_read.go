@@ -242,10 +242,10 @@ type PendingSummary struct {
 func (m *Machine) PendingForApprover(ctx context.Context, approver string) ([]PendingSummary, error) {
 	rows, err := m.Store.Pool.Query(ctx, `select cr.id, cr.kind, cr.body, cr.created_at from credential_requests cr
 		where (
-			cr.approver in ($1, $3) and cr.kind='agent_secret' and cr.id in (select r.record_id from requests r where r.state='pending')
+			cr.approver in ($1, $2) and cr.kind='agent_secret' and cr.id in (select r.record_id from requests r where r.state='pending')
 			or cr.approver=$1 and cr.kind='launcher_credential' and not exists (
-				select 1 from credential_request_events ev where ev.record_id=cr.id and ev.event = any($2))
-		) order by cr.created_at desc`, record.CanonicalLogin(approver), record.TerminalEventNames(), record.AnyoneApprover)
+				select 1 from credential_request_events ev where ev.record_id=cr.id and ev.event = any($3))
+		) order by cr.created_at desc`, record.CanonicalLogin(approver), record.AnyoneApprover, record.TerminalEventNames())
 	if err != nil {
 		return nil, err
 	}

@@ -161,13 +161,13 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	} else if ok {
 		return existing, nil
 	}
-	e, err := m.evaluate(set, names, requester)
+	e, err := evaluate(set, names, requester)
 	if err != nil {
 		return Request{}, err
 	}
 	r := newRequest{
 		id: uuid.NewString(), enrollmentID: enrollmentID, reason: obj.Reason, state: e.state,
-		approver: e.approver, rulesVersion: set.Version, sessionID: sessionID, lifetime: e.lifetime, decisions: e.decisions,
+		approver: e.approver, rulesVersion: set.Version, sessionID: sessionID, lifetime: m.MaxGrant, decisions: e.decisions,
 	}
 	if e.state == "pending" {
 		r.pendingExpiresAt = time.Now().Add(m.PendingTTL)
@@ -186,7 +186,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 		return Request{}, err
 	}
 	if e.state == "granted" {
-		grantID, err := insertGrant(ctx, tx, r.id, enrollmentID, "", e.lifetime)
+		grantID, err := insertGrant(ctx, tx, r.id, enrollmentID, "", r.lifetime)
 		if err != nil {
 			return Request{}, err
 		}
@@ -195,17 +195,17 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	return req, tx.Commit(ctx)
 }
 
-// evaluation is one pass of the policy over a request's names.
+// evaluation is one pass of the policy over a request's names. approver is set when a name needs
+// approval, and then names the one approver every such name has.
 type evaluation struct {
 	decisions []SecretDecision
 	state     string // granted, denied or pending
 	approver  string
-	lifetime  time.Duration
 }
 
-func (m *Machine) evaluate(set *policy.Set, names []string, requester policy.Requester) (evaluation, error) {
-	e := evaluation{decisions: make([]SecretDecision, 0, len(names)), state: "granted", lifetime: m.MaxGrant}
-	needsApproval, denied := false, false
+func evaluate(set *policy.Set, names []string, requester policy.Requester) (evaluation, error) {
+	e := evaluation{decisions: make([]SecretDecision, 0, len(names)), state: "granted"}
+	denied := false
 	for _, name := range names {
 		d, err := set.Evaluate(name, requester)
 		if err != nil {
@@ -219,14 +219,13 @@ func (m *Machine) evaluate(set *policy.Set, names []string, requester policy.Req
 				return evaluation{}, ErrMixedApprovers
 			}
 			e.approver = d.Approver
-			needsApproval = true
 		}
 		e.decisions = append(e.decisions, SecretDecision{Name: name, Decision: d.Outcome, Source: d.Source})
 	}
 	switch {
 	case denied:
 		e.state = "denied"
-	case needsApproval:
+	case e.approver != "":
 		e.state = "pending"
 	}
 	return e, nil
