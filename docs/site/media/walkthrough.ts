@@ -13,7 +13,7 @@
 // `--record-only` records and cuts without narrating, to iterate on a section's footage; it prints
 // each clip's length and the moment of each cue its action marked.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -42,13 +42,9 @@ const WALKTHROUGHS = join(import.meta.dir, "walkthroughs");
  *  answering one needs no scroll. */
 const FRAME = { width: 1024, height: 896 };
 const FPS = 25;
-/** Playwright's recorder opens on a blank frame: recording runs this long before the action,
- *  and the clip starts `CUT_IN` seconds in, past the blank frame and into the still, ready page. */
-const LEAD_MS = 400;
-/** How much shorter than the wall clock a recording may run: its first frame's delay (measured
- *  under 0.1 s) plus a frame. */
-const FIRST_FRAME_SLACK = 0.25;
-const CUT_IN = 0.3;
+/** Recording starts this long before the action, so a clip opens on a still moment of the ready
+ *  page. */
+const LEAD_MS = 100;
 /** A terminal clip is letterboxed on agg's `asciinema` theme background. */
 const CAST_THEME = "asciinema";
 const CAST_BACKGROUND = "0x121314";
@@ -71,13 +67,62 @@ function duration(file: string): number {
   );
 }
 
-const H264 = ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p"];
+/** Near-lossless for small UI text. `stillimage` keeps a still page still: without it, x264
+ *  re-quantises sharp edges differently frame to frame, and text edges shimmer. */
+// biome-ignore format: a command's flags read as flag-value pairs
+const H264 = [
+  "-c:v", "libx264", "-preset", "slow", "-crf", "15", "-tune", "stillimage", "-pix_fmt", "yuv420p",
+];
 
 interface Recorded {
   /** Wall-clock seconds the action took. */
   readonly action: number;
   /** Each cue the action marked, in seconds from the action's start. */
   readonly cues: Readonly<Record<string, number>>;
+  /** How many frames the browser drew while recording: the capture rate's record. */
+  readonly frames: number;
+}
+
+interface ScreencastFrame {
+  /** When the browser drew the frame, in wall-clock milliseconds. */
+  readonly at: number;
+  readonly jpeg: Buffer;
+}
+
+/**
+ * Writes a section's recording from the frames the browser drew: each is shown from the moment it
+ * was drawn until the next one, from `from` to `to` (wall-clock milliseconds), resampled to the
+ * video's frame rate and kept lossless for the cut. The browser sends a frame only when the page
+ * changes, and each carries its own time, so the recording runs exactly as long as the wall clock
+ * did. Playwright's own recorder is not used: it re-encodes the frames as 1 Mbit/s VP8, whose
+ * keyframe every 128 frames blurs the page's text and borders for a frame or two.
+ */
+function writeRecording(frames: readonly ScreencastFrame[], from: number, to: number, out: string) {
+  const dir = `${out}.frames`;
+  rmSync(dir, { force: true, recursive: true });
+  mkdirSync(dir);
+  const list = ["ffconcat version 1.0"];
+  let last = "";
+  for (const [index, frame] of frames.entries()) {
+    // A frame drawn before the recording starts is shown from its start; one drawn over in the
+    // same millisecond, or before the start, is never shown.
+    const start = Math.max(frame.at, from);
+    const end = Math.min(frames[index + 1]?.at ?? to, to);
+    if (end <= start) continue;
+    last = join(dir, `${index}.jpg`);
+    writeFileSync(last, frame.jpeg);
+    list.push(`file '${last}'`, `duration ${((end - start) / 1000).toFixed(3)}`);
+  }
+  // The concat demuxer holds the last entry for its duration only when a file follows it.
+  list.push(`file '${last}'`);
+  const listFile = join(dir, "frames.ffconcat");
+  writeFileSync(listFile, list.join("\n"));
+  // biome-ignore format: a command's flags read as flag-value pairs
+  run("ffmpeg", [
+    "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", listFile,
+    "-vf", `fps=${FPS}`, "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", out,
+  ]);
+  rmSync(dir, { recursive: true });
 }
 
 /** Records one browser section: the ready page, then its action, as one clip. */
@@ -101,10 +146,22 @@ async function recordBrowserSection<Seeded>(
     await section.open(page, seeded);
     await waitForSettled(page);
     await assertScreenClean(page, errors);
+    const frames: ScreencastFrame[] = [];
     if (raw !== undefined) {
-      await page.screencast.start({ path: raw, size: FRAME });
+      const first = Promise.withResolvers<void>();
+      await page.screencast.start({
+        onFrame: ({ data, timestamp }) => {
+          frames.push({ at: timestamp, jpeg: data });
+          first.resolve();
+        },
+        quality: 100,
+        size: FRAME,
+      });
+      // The browser sends the page as it stands first, so the clip opens on the ready page.
+      await first.promise;
       await page.waitForTimeout(LEAD_MS);
     }
+    const startedAt = Date.now();
     const started = performance.now();
     const cues: Record<string, number> = {};
     await section.act(page, seeded, (cue) => {
@@ -112,9 +169,14 @@ async function recordBrowserSection<Seeded>(
       cues[cue] = (performance.now() - started) / 1000;
     });
     const action = (performance.now() - started) / 1000;
-    if (raw !== undefined) await page.screencast.stop();
+    if (raw !== undefined) {
+      const stoppedAt = Date.now();
+      await page.screencast.stop();
+      writeRecording(frames, startedAt - LEAD_MS, stoppedAt, raw);
+    }
     await assertScreenClean(page, errors);
-    return { action, cues };
+    await section.finish?.(page, seeded);
+    return { action, cues, frames: frames.length };
   } finally {
     await context.close();
   }
@@ -185,7 +247,7 @@ if (unknown.length > 0) throw new Error(`${name} has no section ${unknown.join("
 
 const work = join(WORK, "walkthroughs", name);
 mkdirSync(join(work, "narration"), { recursive: true });
-const rawPath = (id: string) => join(work, `${id}.webm`);
+const rawPath = (id: string) => join(work, `${id}.mkv`);
 const metaPath = (id: string) => join(work, `${id}.json`);
 const clipPath = (id: string) => join(work, `${id}.mp4`);
 const isCast = (section: BrowserSection<unknown> | CastSection): section is CastSection =>
@@ -218,12 +280,10 @@ if (browserSections.length > 0) {
   });
 }
 
-// 2. Cut each section to its action and measure it. The recorder stamps every frame with the wall
-//    clock, sends a frame only when the page changes, and holds its last frame to the moment it
-//    stopped, so the recording runs as long as the wall clock did, less the moment its first frame
-//    took. The clip ends where the action did. A recording more than that moment short of the
-//    wall clock lost time, and is refused. A cue's moment in the clip is its moment in the action
-//    plus the lead-in, less the cut-in.
+// 2. Encode each section's recording as its clip and measure it. A recording runs from the lead-in
+//    to the end of the action, by the wall clock, so a cue's moment in the clip is its moment in
+//    the action plus the lead-in. The report sets the action's wall clock beside the recording's
+//    length and the frames the browser drew, the capture rate's record.
 interface Clip {
   readonly seconds: number;
   readonly note: string;
@@ -241,27 +301,19 @@ for (const section of sections) {
     });
     continue;
   }
-  const { action, cues } = JSON.parse(readFileSync(metaPath(section.id), "utf8")) as Recorded;
-  const raw = duration(rawPath(section.id));
-  const wall = LEAD_MS / 1000 + action;
-  if (raw < wall - FIRST_FRAME_SLACK) {
-    throw new Error(
-      `${name}/${section.id}: the recording runs ${raw.toFixed(2)} s for ${wall.toFixed(2)} s of ` +
-        "wall clock; re-record it (--only)."
-    );
-  }
-  const end = Math.min(wall, raw);
+  const { action, cues, frames } = JSON.parse(
+    readFileSync(metaPath(section.id), "utf8")
+  ) as Recorded;
   // biome-ignore format: a command's flags read as flag-value pairs
   run("ffmpeg", [
     "-y", "-v", "error", "-i", rawPath(section.id),
-    "-ss", CUT_IN.toFixed(3), "-to", end.toFixed(3),
     "-vf", `fps=${FPS},format=yuv420p`, ...H264, "-an", clipPath(section.id),
   ]);
   clips.push({
-    cues: Object.fromEntries(
-      Object.entries(cues).map(([cue, at]) => [cue, LEAD_MS / 1000 + at - CUT_IN])
-    ),
-    note: `action ${action.toFixed(2)} s, recording ${raw.toFixed(2)} s`,
+    cues: Object.fromEntries(Object.entries(cues).map(([cue, at]) => [cue, LEAD_MS / 1000 + at])),
+    note:
+      `action ${action.toFixed(2)} s, recording ${duration(rawPath(section.id)).toFixed(2)} s, ` +
+      `${frames} frames`,
     seconds: duration(clipPath(section.id)),
   });
 }

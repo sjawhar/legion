@@ -26,6 +26,10 @@ export interface BrowserSection<Seeded> extends SectionBase {
   readonly open: (page: Page, seeded: Seeded) => Promise<void>;
   /** Recorded: the section's action, from the ready page to the state it ends on. */
   readonly act: (page: Page, seeded: Seeded, cue: Cue) => Promise<void>;
+  /** Unrecorded: waits for what the action's last step set going, such as the navigation or the
+   *  write a click starts, before the page closes. A section that ends on a click ends its clip
+   *  there, and the next section opens on the page the click loaded. */
+  readonly finish?: (page: Page, seeded: Seeded) => Promise<void>;
 }
 
 /** A section rendered from an asciinema recording. */
@@ -105,6 +109,63 @@ export async function pointTo(page: Page, target: Locator): Promise<void> {
   }
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 8 });
   await page.waitForTimeout(GLIDE_MS + 50);
+}
+
+/** Rings `target` with a drawn outline that moves there from whatever it ringed before, and waits
+ *  for it to settle, leaving the pointer where it is. The ring is placed in the viewport, so any
+ *  scroll fades it out. */
+export async function ring(page: Page, target: Locator): Promise<void> {
+  const box = await target.boundingBox();
+  if (box === null) throw new Error("ring: the target is not rendered");
+  await page.evaluate(
+    ({ box, glide }) => {
+      // Wider than tall, so a ringed line of text leaves the lines above and below it legible.
+      const pad = { x: 6, y: 3 };
+      const place = {
+        height: `${box.height + 2 * pad.y}px`,
+        left: `${box.x - pad.x}px`,
+        top: `${box.y - pad.y}px`,
+        width: `${box.width + 2 * pad.x}px`,
+      };
+      let outline = document.getElementById("walkthrough-ring");
+      if (outline === null) {
+        outline = document.createElement("div");
+        outline.id = "walkthrough-ring";
+        outline.setAttribute("aria-hidden", "true");
+        Object.assign(outline.style, {
+          ...place,
+          border: "2px solid #2563eb",
+          borderRadius: "8px",
+          boxShadow: "0 0 0 3px rgb(37 99 235 / 0.2)",
+          opacity: "0",
+          pointerEvents: "none",
+          position: "fixed",
+          transition: ["opacity", "left", "top", "width", "height"]
+            .map((property) => `${property} ${glide}ms ease-in-out`)
+            .join(", "),
+          zIndex: "2147483646",
+        });
+        document.documentElement.append(outline);
+        // Lay the ring out unseen first, so it fades in where it lands rather than flying in.
+        outline.getBoundingClientRect();
+      }
+      Object.assign(outline.style, { ...place, opacity: "1" });
+      const placed = outline;
+      window.addEventListener("scroll", () => Object.assign(placed.style, { opacity: "0" }), {
+        capture: true,
+        once: true,
+      });
+    },
+    { box, glide: GLIDE_MS }
+  );
+  await page.waitForTimeout(GLIDE_MS + 50);
+}
+
+/** Rings `target` and glides the pointer to it together, so each thing a narration line names
+ *  changes on screen as it is named: the pointer alone is too small a change to read on a still
+ *  page. */
+export async function highlight(page: Page, target: Locator): Promise<void> {
+  await Promise.all([ring(page, target), pointTo(page, target)]);
 }
 
 /** Scrolls the page under the pointer by `pixels` (down when positive) as one steady, visible

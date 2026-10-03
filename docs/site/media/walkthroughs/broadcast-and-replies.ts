@@ -54,8 +54,7 @@ const card = (page: Page, title: string) =>
 const answered = (page: Page, count: number) =>
   page.getByRole("region", { name: "Broadcast" }).getByText(`${count} of 3 answered`);
 
-/** Where the pointer rests at the end of the send section and the start of the replies
- *  section, so the cut between them changes nothing on screen. */
+/** Where the pointer rests as the replies section opens. */
 const RESTING = { x: 760, y: 300 } as const;
 
 const broadcastAndReplies: Walkthrough<Seeded> = {
@@ -64,31 +63,28 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
   sections: [
     {
       id: "result",
-      narration: [
-        {
-          at: 0.4,
-          text: "A broadcast sends one message to many agents and gathers their replies.",
-        },
-      ],
+      narration: [{ at: 0.2, text: "One message out, every reply back." }],
       open: async (page, seeded) => {
         await page.goto(`/agents/broadcasts/${seeded.broadcast.id}`);
         await expect(answered(page, 3)).toBeVisible();
         await expect(card(page, "Tester")).toContainText(EARLIER_REPLIES.Tester);
       },
       act: async (page) => {
-        await linger(page, 1.2);
+        // The pointer goes to the broadcast as the line says one message went out, and to its
+        // count of replies as it says they came back; the clip ends just after the line.
+        await linger(page, 0.1);
+        await pointTo(page, page.getByRole("heading", { name: "Broadcast to 3 agents" }));
+        await linger(page, 0.6);
         await pointTo(page, answered(page, 3));
         await linger(page, 1.4);
-        await pointTo(page, card(page, "Tester").getByText(EARLIER_REPLIES.Tester));
-        await linger(page, 2.6);
       },
     },
     {
       id: "send",
       narration: [
-        { at: "filter", text: "Filter the Agents page to the agents you mean," },
-        { at: "tick", text: "tick each one," },
-        { at: "mode", text: "choose Send," },
+        { at: "filter", text: "Filter to the agents you mean," },
+        { at: "select", text: "select all three," },
+        { at: "mode", text: "set the mode to Send," },
         { at: "write", text: "write the message once," },
         { at: "send", text: "and send it to all three." },
       ],
@@ -101,22 +97,27 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
           ).toBeVisible();
         }
       },
-      act: async (page, seeded, cue) => {
-        await linger(page, 0.6);
+      act: async (page, _seeded, cue) => {
+        await linger(page, 0.3);
         const machine = page.getByRole("combobox", { name: "Machine" });
         await pointTo(page, machine);
         await machine.selectOption("build-host");
         cue("filter");
-        await expect(page.getByRole("checkbox", { name: /^Select Reviewer/ })).toHaveCount(0);
-        await linger(page, 3.2);
-        for (const [index, { title }] of RECIPIENTS.entries()) {
-          const tick = page.getByRole("checkbox", { name: `Select ${title} for broadcast` });
-          await pointTo(page, tick);
-          await tick.check();
-          if (index === 0) cue("tick");
-        }
+        const matching = page.getByText("3 matching", { exact: true });
+        await expect(matching).toBeVisible();
+        // The pointer goes to the filter's count of agents, then to the select-all box as the
+        // line ends.
+        await linger(page, 0.6);
+        await pointTo(page, matching);
+        await linger(page, 0.7);
+        const all = page.getByRole("checkbox", { name: "Select all matching agents" });
+        await pointTo(page, all);
+        await all.check();
+        cue("select");
+        await expect(page.getByText("3 of 3 matching selected", { exact: true })).toBeVisible();
         const composer = page.getByRole("region", { name: "Broadcast" });
         const mode = composer.getByRole("combobox", { name: "Delivery mode" });
+        await linger(page, 1.45);
         await pointTo(page, mode);
         await mode.selectOption("steer");
         cue("mode");
@@ -126,24 +127,24 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
         await message.click();
         cue("write");
         await message.pressSequentially(MESSAGE, { delay: 35 });
-        await linger(page, 0.4);
+        cue("send");
         const send = composer.getByRole("button", { name: "Send to 3" });
         await pointTo(page, send);
+        // The click lands as the line ends, and ends the clip: the next section opens on the
+        // broadcast's page, loaded, rather than on its loading skeleton.
+        await linger(page, 1.25);
         await send.click();
+      },
+      finish: async (page, seeded) => {
         await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
-        cue("send");
         seeded.sent = page.url().split("/").at(-1);
         await expect(page.getByRole("heading", { name: "Broadcast to 3 agents" })).toBeVisible();
-        await expect(answered(page, 0)).toBeVisible();
-        await page.mouse.move(RESTING.x, RESTING.y, { steps: 8 });
-        await page.mouse.move(RESTING.x, RESTING.y);
-        await linger(page, 1.6);
       },
     },
     {
       id: "replies",
       narration: [
-        { at: 0.4, text: "Each card shows that its message was sent." },
+        { at: 0.2, text: "Each card shows that its message was sent." },
         { at: "first", text: "As each agent answers, its reply appears," },
         { at: "all", text: "until all three are in." },
       ],
@@ -151,6 +152,7 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
         if (seeded.sent === undefined) throw new Error("the send section sent no broadcast");
         await page.goto(`/agents/broadcasts/${seeded.sent}`);
         await expect(answered(page, 0)).toBeVisible();
+        await expect(card(page, "Tester").getByText("Sent to Tester (Send)")).toBeVisible();
         await page.mouse.move(RESTING.x, RESTING.y);
         await linger(page, 0.6);
       },
@@ -159,7 +161,8 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
         const api = await dispatchApi();
         const { recipients } = await api.getBroadcast(seeded.sent);
         await pointTo(page, card(page, "Tester").getByText("Sent to Tester (Send)"));
-        await linger(page, 2.4);
+        // The first reply lands as the line ends.
+        await linger(page, 1.35);
         for (const [index, { reply, title }] of RECIPIENTS.entries()) {
           const recipient = recipients.find((one) => one.session_id === sessionOf(title).id);
           if (recipient === undefined) throw new Error(`${title} received no copy`);
@@ -171,13 +174,18 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
           // The open page hears the reply on its event stream; nothing reloads it.
           await expect(card(page, title)).toContainText(reply);
           await expect(answered(page, index + 1)).toBeVisible();
-          await pointTo(page, card(page, title).getByText(reply));
-          if (index === 0) cue("first");
-          await linger(page, index === 0 ? 2 : 1.2);
+          // The pointer follows each reply but the last, which lands as the line ends.
+          if (index < RECIPIENTS.length - 1) {
+            await pointTo(page, card(page, title).getByText(reply));
+            if (index === 0) cue("first");
+            await linger(page, 0.8);
+          }
         }
+        // The last reply completes the count the pointer moves to.
         await pointTo(page, answered(page, 3));
         cue("all");
-        await linger(page, 2.2);
+        // The clip ends just after the line.
+        await linger(page, 1.85);
       },
     },
   ],

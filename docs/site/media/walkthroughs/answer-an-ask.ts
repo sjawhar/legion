@@ -4,7 +4,7 @@
 import type { Page } from "@playwright/test";
 
 import { type DispatchWorkspace, dispatchApi, expect, seedDispatchWorkspace } from "../harness";
-import { linger, pointTo, scrollBy, type Walkthrough } from "../recording";
+import { highlight, linger, pointTo, ring, scrollBy, type Walkthrough } from "../recording";
 
 const ISSUE_TITLE = "Retry failed webhook deliveries";
 const SPEC =
@@ -66,14 +66,17 @@ const retryRow = (page: Page) => row(page, "How many times should a failed deliv
 const alertRow = (page: Page) =>
   row(page, "Where should the endpoint's owner hear about failures?");
 const needsYou = (page: Page) => page.getByText(/^Needs you \d+$/);
+const openInDocument = (page: Page) =>
+  alertRow(page).getByRole("link", { name: "Open in document" });
+const answeredBlock = (page: Page) => page.locator('[data-dispatch-ask-block="retry-limit"]');
 
 /** The top bar's count of asks waiting on the viewer. */
 async function needsYouCount(page: Page): Promise<number> {
   return Number((await needsYou(page).textContent())?.replace("Needs you ", ""));
 }
 
-/** Where the pointer rests at the end of the Inbox section, and where the next section's
- *  pointer starts, so the cut between them changes nothing on screen. */
+/** Where the pointer moves once the answer is sent: off the row, which the Inbox holds while the
+ *  pointer rests on it. */
 const RESTING = { x: 900, y: 360 } as const;
 
 const answerAnAsk: Walkthrough<Seeded> = {
@@ -86,8 +89,10 @@ const answerAnAsk: Walkthrough<Seeded> = {
         { at: 0.4, text: "Your Inbox holds the questions agents are waiting on you to answer." },
         { at: "asker", text: "This one is the Planner's." },
         { at: "pick", text: "Pick an option, and give your reason in a note." },
-        { at: "ask-back", text: "Unclear? Ask back instead." },
+        { at: "ask-back", text: "Unclear? Ask back." },
         { at: "gone", text: "Answered, it leaves your Inbox." },
+        { at: "open", text: "Open in document shows where your answer landed." },
+        { at: "click", text: "Open it there." },
       ],
       open: async (page) => {
         await page.goto("/");
@@ -102,10 +107,13 @@ const answerAnAsk: Walkthrough<Seeded> = {
         const countBefore = await needsYouCount(page);
         const card = retryRow(page);
         await linger(page, 1.5);
+        // The pointer moves to the question as the first line names it, and to its asker as the
+        // second does.
+        await pointTo(page, card.getByText("How many times should a failed delivery be retried?"));
+        await linger(page, 1.65);
         await pointTo(page, card.getByText("Planner", { exact: true }));
-        await linger(page, 2.6);
         cue("asker");
-        await linger(page, 2);
+        await linger(page, 1.25);
         const three = card.getByRole("radio", { name: /^Three times/ });
         await pointTo(page, three);
         cue("pick");
@@ -114,64 +122,74 @@ const answerAnAsk: Walkthrough<Seeded> = {
         await pointTo(page, note);
         await note.click();
         await note.pressSequentially(NOTE, { delay: 40 });
-        await linger(page, 0.4);
-        await pointTo(page, card.getByRole("button", { exact: true, name: "Ask back" }));
+        // The line starts as the typing ends; the pointer reaches Ask back as it is named, and
+        // Answer as the line ends.
         cue("ask-back");
-        await linger(page, 3.4);
+        await pointTo(page, card.getByRole("button", { exact: true, name: "Ask back" }));
+        await linger(page, 1);
         const answer = card.getByRole("button", { exact: true, name: "Answer" });
         await pointTo(page, answer);
         await answer.click();
-        // The Inbox holds the row the pointer rests on; moving off it lets it leave.
         await page.mouse.move(RESTING.x, RESTING.y, { steps: 8 });
         await expect(retryRow(page)).toHaveCount(0);
         await expect(needsYou(page)).toHaveText(`Needs you ${countBefore - 1}`);
-        // A take's drawn pointer stopped one step short of this move, whose path empties the row
-        // under it; one more move at the resting point puts it where the next section starts it.
-        await page.mouse.move(RESTING.x, RESTING.y);
         cue("gone");
-        await linger(page, 3);
+        // The Inbox's own count, one lower, is ringed as the line says the ask left.
+        await linger(page, 0.9);
+        await ring(page, page.getByText(`Blocked on you: ${countBefore - 1} items`));
+        await linger(page, 1.4);
+        // The ring moves to the next question's link as its line names it, and the pointer
+        // follows; the click lands on the next line and ends the clip there, so the next section
+        // opens on the loaded spec rather than on its loading skeleton.
+        cue("open");
+        const open = openInDocument(page);
+        await ring(page, open);
+        await linger(page, 0.85);
+        await pointTo(page, open);
+        await linger(page, 0.86);
+        cue("click");
+        await linger(page, 0.9);
+        await open.click();
       },
     },
     {
       id: "spec",
       narration: [
-        { at: 0.4, text: "The Planner's next question is on the same spec. Open it there." },
-        { at: "choice", text: "The decision block keeps the option you picked," },
+        { at: "block", text: "The decision block keeps the option you picked," },
         { at: "note", text: "your reason," },
         { at: "who", text: "and who answered." },
       ],
-      open: async (page) => {
+      open: async (page, seeded) => {
+        // The click the Inbox section ended on, and the spec it opens, loaded.
         await page.goto("/");
-        await expect(alertRow(page)).toBeVisible();
-        await expect(retryRow(page)).toHaveCount(0);
-        await page.mouse.move(RESTING.x, RESTING.y);
+        await openInDocument(page).click();
+        await page.waitForURL(new RegExp(`/issues/${seeded.webhooks}`));
+        await expect(answeredBlock(page)).toContainText("Answered by alice");
         await linger(page, 0.6);
       },
-      act: async (page, seeded, cue) => {
-        const open = alertRow(page).getByRole("link", { name: "Open in document" });
-        await pointTo(page, open);
-        await linger(page, 1.4);
-        await open.click();
-        await page.waitForURL(new RegExp(`/issues/${seeded.webhooks}`));
-        const block = page.locator('[data-dispatch-ask-block="retry-limit"]');
-        await expect(block).toContainText("Answered by alice");
-        await linger(page, 1);
+      act: async (page, _seeded, cue) => {
+        const block = answeredBlock(page);
+        await linger(page, 0.2);
         // One visible scroll brings the whole answered block above the review sheet's handle.
         const box = await block.boundingBox();
         const viewport = page.viewportSize();
         if (box === null || viewport === null) throw new Error("the decision is not rendered");
         const below = box.y + box.height - (viewport.height - 100);
         if (below > 0) await scrollBy(page, below);
-        const chosen = block.locator('ul[aria-label="Options"] li[data-selected="true"]');
-        await pointTo(page, chosen.getByText("Three times", { exact: true }));
-        cue("choice");
-        await linger(page, 3);
-        await pointTo(page, block.getByText(NOTE, { exact: true }));
+        // The ring follows the line: the block, the option, the reason, then who answered. Each
+        // next ring starts gliding as the words before it end.
+        await highlight(page, block);
+        cue("block");
+        await linger(page, 0.8);
+        await highlight(page, block.locator('ul[aria-label="Options"] li[data-selected="true"]'));
+        await linger(page, 1.3);
+        await highlight(page, block.getByText(NOTE, { exact: true }));
         cue("note");
-        await linger(page, 1.4);
-        await pointTo(page, block.getByText("alice", { exact: true }));
+        await linger(page, 0.35);
+        await highlight(page, block.getByText(/Answered by alice/));
         cue("who");
-        await linger(page, 2.6);
+        // The clip ends just after the line.
+        await linger(page, 1.1);
       },
     },
   ],

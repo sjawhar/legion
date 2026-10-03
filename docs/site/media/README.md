@@ -12,7 +12,7 @@ everything needed to record them again.
 | `shots.config.ts` | The Dispatch and Legion sets. |
 | `shots.ts` | Takes every set: `shots.config.ts` and each `<section>/shots.config.ts`. |
 | `narration.ts` | `NARRATION_VOICE`, the one voice every video is narrated in, and the call that speaks a section's text. |
-| `recording.ts` | What a walkthrough file declares, and the helpers its browser sections act with: the drawn pointer, `pointTo`, `scrollBy` and `linger`. |
+| `recording.ts` | What a walkthrough file declares, and the helpers its browser sections act with: the drawn pointer, `pointTo`, `ring`, `highlight`, `scrollBy` and `linger`. |
 | `walkthrough.ts` | Records, cuts, narrates and assembles one walkthrough into a video. |
 | `walkthroughs/` | One file per video, holding each section's actions and narration; casts beside it in `walkthroughs/<name>/`. |
 
@@ -99,9 +99,11 @@ poster frame in `<name>.jpg`. Commit all three with the walkthrough file. A page
 
 ### What the pipeline enforces
 
-- A browser section is recorded with Playwright's own video recorder, from the ready page to the
-  end of its action, then cut to exactly that action. Recordings are timed by the wall clock, and
-  one shorter than its action is refused.
+- A browser section is recorded from the ready page to the end of its action, from the frames the
+  browser draws (Playwright's screencast, JPEG at quality 100): each frame is shown from the moment
+  it was drawn until the next, so a recording runs exactly as long as the wall clock did, and the
+  report prints each section's action, recording length and frame count. Playwright's own video
+  recorder is not used: its 1 Mbit/s VP8 blurs the page's text and borders at every keyframe.
 - Video is never stretched, slowed or frozen to fit narration. Each narration line is generated
   after its clip is cut and measured, with ElevenLabs' leading and trailing silence removed, and
   placed at the moment it describes. The build fails when a line runs into the next one or past
@@ -132,9 +134,15 @@ Add a section to a walkthrough's `sections`:
 - `act(page, seeded, cue)`: the recorded action. Move with `pointTo(page, locator)` before each
   click, so the drawn pointer arrives before the click lands. `pointTo` refuses a target off
   screen: bring it into view with `scrollBy(page, pixels)`, which the viewer sees move, since an
-  instant jump reads as a cut. Use `linger(page, seconds)` where a viewer needs time to read; a
-  linger is real page time, so keep it short. Call `cue(name)` at a moment a narration line
-  describes, once that moment is on screen.
+  instant jump reads as a cut. Where a line names something on a still page, `highlight(page,
+  locator)` moves the pointer there and rings it, since the pointer alone is too small a change
+  to see. Use `linger(page, seconds)` where a viewer needs time to read; a linger is real page
+  time, so keep it short. Call `cue(name)` at a moment a narration line describes, once that
+  moment is on screen.
+- `finish(page, seeded)` (optional): unrecorded, run after the action and before the page closes.
+  A section that ends on a click (a send, a link) waits here for what the click starts, so its
+  clip ends on the click and the next section opens on the loaded page rather than its loading
+  skeleton.
 - `narration`: the lines the narrator says, each `{ at, text }`, where `at` is seconds into the
   clip or the name of a cue. Write them after the clip is cut, to its measured length; each claims
   only what the screen shows, and is said after the action it names.
