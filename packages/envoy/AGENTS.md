@@ -267,41 +267,81 @@ writer's `context.Canceled` in its cause. Nor does that read wait for a failed r
 (`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`,
 `GET /blocks` and the block route wait.
 
-A read of a resident room never walks the live tree. It reads the room as of one moment under its
-document lock (`readLive`): the replica the room's update observer keeps (`renderedReplica`,
-below), brought up to date under that lock with what the room gained since, or, while the room has
-none - no update has reached it since it loaded - a copy taken under that lock (`snapshotDocument`,
-`crdt.EncodeStateAsUpdateV1`). `GET /text`, `GET /blocks`, the block route and the document
-websocket's admission check (`loadTree`), a read outside any transaction (`docTree`), a published
-write's loss check (`recordPublishedLoss`) and settlement's reads of the room (`settleRoomWithin`'s
-first read and its version's, and the block-id backfill's read, through `liveTree`) read it so, so
-a torn read is never versioned as the document; a repair reads the tree inside the transaction
-that writes it (`rewriteLive`), and the unrecorded-mark sweep (`sweepUnrecordedMarks`) inside the
-transaction that unmarks it. A room's load reads the live tree before ygo hands the room to anyone
-(`onLoadDocument`). A walk of the live tree takes no lock (reearth/ygo v1.49.5, `crdt/yxml.go`)
-while every peer update and service write holds that lock as it applies, so the walk can read a
-write halfway through as a tree outside the schema and answer a healthy document 409 with the
-repair. A version's capture (`captureLiveTextAndAuthors`) reads a copy: it holds the room's state
-lock across the read and the authors it captures, so an author the update observer credits is
-captured only with that update's text, and the observer takes that state lock while it holds the
-replica's. The order - state lock, then document lock - is never reversed, since only a Yjs
-transaction's own function holds a document's lock and none takes a room's state lock. A read that
-may load its room (a version's capture, `docTree`, `VerifyMark`'s subscription) takes what it reads
-inside the `Server.Apply` that loads and holds the room: a room looked up again with `GetDoc` once
-that Apply returned can have been evicted in between.
+A read of a resident room outside a write never walks the live tree. It reads the room as of one
+moment under its document lock (`readLive`): the replica the room's reads keep (`readReplica`),
+brought up to date under that lock with what the room gained since, or, while another read holds
+that replica, a copy taken under the lock (`snapshotDocument`, `crdt.EncodeStateAsUpdateV1`).
+`GET /text`, `GET /blocks`, the block route and the document websocket's admission check
+(`loadTree`), a read outside any transaction (`docTree`), a published write's loss check
+(`recordPublishedLoss`), a version's capture (`captureLiveTextAndAuthors`) and settlement's reads of
+the room (`settleRoomWithin`'s first read and its version's, and the block-id backfill's read,
+through `liveTree`) read it so, so a torn read is never versioned as the document; a repair reads
+the tree inside the transaction that writes it (`rewriteLive`), and the unrecorded-mark sweep
+(`sweepUnrecordedMarks`) inside the transaction that unmarks it. A room's load reads the live tree
+before ygo hands the room to anyone (`onLoadDocument`). A write reads its transaction's fork, except
+on a branch production never takes: a document operation called outside any transaction
+(`applyLive`'s unjoined branch, which `ReplaceText`, `MarkQuote`, `SetBlockAttributes` and the other
+operations take when nothing joined one) walks the room's own document inside `Server.Apply`, which
+holds no lock across its callback. Every API handler joins its transaction first (`Docs.Join`), so
+only tests call an operation unjoined. A walk of the live tree takes no lock (reearth/ygo v1.49.5,
+`crdt/yxml.go`) while every peer update and service write holds that lock as it applies, so the walk
+can read a write halfway through as a tree outside the schema and answer a healthy document 409
+with the repair. A tree a read returns shares no map or slice with the document it was read from
+(`pmdoc.Read` copies each mark's attributes and every list or object an attribute holds), so a
+reader that edits its tree changes nothing a later read of the replica meets
+(`TestEditingALiveReadsTreeChangesNoLaterRead`).
 
-A read through the replica holds the live document's lock only for the catch-up's encode and walks
-the replica, which no peer writes, where a copy encodes and decodes the whole document. On the
-development machine at load 25 to 80 (`BenchmarkLiveDocumentRead`), a 524 KiB document's tree read
-took about 60 ms walking the live tree, 238 ms through a copy and 62 ms through the replica (about
-80 ms with a keystroke to catch up), its render about 210, 390 and 180 ms, and a read held the
-live lock about 35 ms for a copy and 2 ms for a catch-up. The replica is listed for the room's reads
-(`Service.replicas`) under a weak pointer to the room's document, and the listing goes once an
-evicted document is collected (`keepReplica`, `TestAnEvictedRoomsReplicaGoesWithIt`), so a reload
-never reads another instance's replica and an evicted room keeps no copy.
+A read takes up to three locks, in one order: the room's state lock, which only a version's capture
+holds, from its read to the authors it captures, so an author the update observer credits is
+captured only with that update's text; then the reads' replica's; then the live document's, for the
+catch-up's or the copy's encode. Nothing takes them in another order: the update observer never
+takes the reads' replica, and takes the state lock only once it has released its own replica
+(`recordUpdateClass`); only a Yjs transaction's own function holds a document's lock, and it takes
+neither of the others. So the caller of `readLive` may hold the room's state lock, and must not hold
+the live document's lock - run inside a Yjs transaction on it - since the catch-up and the copy
+encode under that lock. A read that may load its room (a version's capture, `docTree`,
+`VerifyMark`'s subscription) takes what it reads inside the `Server.Apply` that loads and holds the
+room: a room looked up again with `GetDoc` once that Apply returned can have been evicted in between.
+
+The reads' replica is not the update observer's (`renderedReplica`, below). The observer takes its
+replica for every peer update, and ygo broadcasts the update to the room's other browsers only once
+the observer has returned (reearth/ygo v1.49.5, `provider/websocket/peer.go`), so a read that walked
+the observer's replica held every other browser's copy of the keystroke for its walk, and reads
+queued behind it held it longer. A read never waits for the reads' replica either: one that finds
+another read walking it reads a copy, so reads never queue behind each other. What a keystroke
+still waits for is the live document's lock, for a catch-up's encode (about 2.5 ms on a 524 KiB
+document) or a copy's (about 39 ms), and the processor time reads take. `BenchmarkKeystrokeBesideReads`
+measures it: a keystroke's transaction and the observer's catch-up, without its render, 120
+keystrokes 20 ms apart on a 524 KiB document, beside reads. Two runs of each, keystroke latency p50
+/ p90 / p99 in ms, on the development machine (32 cores, load 72 to 98) and on half a processor
+(`GOMAXPROCS=1` under a 50% CPU quota, load 57 to 142):
+
+| Reads beside the keystrokes | 32 cores, one every 250 ms | 32 cores, back to back | Half a processor, one every 250 ms | Half a processor, back to back |
+| --- | --- | --- | --- | --- |
+| none | 5.3-6.0 / 7-18 / 10-54 | | 5.1-7.0 / 7-18 / 15-56 | |
+| copies | 5.6-6.3 / 10-26 / 55-81 | 5.7-7.0 / 18-35 / 60-115 | 5.4-7.5 / 26-57 / 96-212 | 5.8-25 / 38-85 / 126-211 |
+| the observer's replica, waited for | 5.8-6.0 / 72 / 113-152 | 140-151 / 184-224 / 263-312 | 5.7-7.1 / 55-105 / 383-387 | 317-342 / 689-694 / 748-805 |
+| the observer's replica, tried | 6.3-6.5 / 28-36 / 117-171 | 6.3-7.0 / 25-52 / 193-201 | 5.7-6.3 / 79-94 / 335-410 | 6.5-7.4 / 72-94 / 403-580 |
+| the reads' own replica, tried | 5.6-5.7 / 10-12 / 24-32 | 5.5-5.8 / 10-11 / 24-35 | 5.9-7.4 / 22-30 / 82-90 | 7.7-7.8 / 50-60 / 121-122 |
+
+Trying the observer's replica rather than waiting for it took the median back to the baseline, but
+a keystroke still waited for the one read walking it, so the 99th percentile stayed at 117 to 201
+ms on 32 cores and 335 to 580 ms on half a processor. The reads' own replica leaves keystrokes
+beside reads at or below where copies left them.
+The trade is memory: a room read while resident holds a second whole copy of its document beside the
+observer's, from its first read until the room is evicted - about 6.6 MiB of heap for a 51 KiB
+document, 63 MiB for 524 KiB and 123 MiB for 1 MiB. A read's own cost (`BenchmarkLiveDocumentRead`,
+the development machine at load about 40): a 524 KiB document's tree read took about 68 ms walking
+the live tree, 283 ms through a copy and 86 ms through the replica (77 ms with a keystroke to catch
+up), and its render about 181, 391 and 194 ms; a room's first read copies the whole document into
+the replica. The replica is listed for its document's reads (`Service.replicas`) under a weak
+pointer to that document, and the listing goes once an evicted document is collected
+(`readReplica`, `TestAnEvictedRoomsReplicaGoesWithIt`), so a reader holding an evicted instance of a
+room reaches that instance's replica, never its successor's, and an evicted room keeps no copy.
 `TestReadsOfALiveDocumentRunBesideItsPeers` runs each of these reads while a websocket peer types,
-and CI's `envoy-go-race` job runs the `docs` and `api` packages under `-race`, which reports a walk
-of the live tree beside a write; the unit tests' own step runs without it.
+until 50 of its runs have overlapped one of the peer's updates, and CI's `envoy-go-race` job runs the
+`docs` and `api` packages under `-race`, which reports a walk of the live tree beside a write; the
+unit tests' own step runs without it.
 
 Every decode of a document's whole state takes a pending queue as long as the most items one
 update can carry (`newDocumentCopy`, `maxUpdateItems`): the copy, a write's fork (`forkLive`), and
@@ -353,16 +393,18 @@ publish it runs inside, and the publish, its request and the document's writer s
 (`TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt`, `TestAWriteSurvivesItsIssueClosingAsItPublishes`).
 A publish whose room `CloseRoom` removed has no peer left to broadcast to and returns.
 
-The room's update observer (`updateChangesMarkdown`) renders a replica of the room, the one its
-reads walk, not the live tree, since ygo fires it after the transaction has released the
-document's lock and another write can be integrating meanwhile (`renderedReplica`). The replica is
-copied from the room on its first update and then brought up to date under the room's lock with
-what the room gained since its state vector, as `forkLive` brings a fork up to date. The update
-the observer is handed cannot stand in: two transactions' observers run concurrently in either
-order, and each update carries the room's whole delete set. On a 1 MiB document a catch-up after
-one typed character took about 8 ms where the render took about 160 ms and a whole copy about 420
-ms, and the replica holds about 80 MiB of heap
-while its room is resident.
+The room's update observer (`updateChangesMarkdown`) renders a replica of the room of its own, not
+the live tree and not the replica its reads walk, since ygo fires it after the transaction has
+released the document's lock and another write can be integrating meanwhile (`renderedReplica`). It
+keeps the rendering it compares the next one with in that replica (`renderedReplica.markdown`), so
+each instance of a room compares with its own, and it takes the room's state lock only once it has
+released the replica. The replica is copied from the room on its first update and then brought up
+to date under the room's lock with what the room gained since its state vector, as `forkLive`
+brings a fork up to date. The update the observer is handed cannot stand in: two transactions'
+observers run concurrently in either order, and each update carries the room's whole delete set.
+On a 1 MiB document a catch-up after one typed character took about 8 ms where the render took
+about 160 ms and a whole copy about 420 ms, and the replica holds a whole copy's heap (above) while
+its room is resident.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
