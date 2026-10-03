@@ -12,6 +12,9 @@
 **/docker-data
 tmp
 docs
+# The documentation site is a root workspace, so every frozen Bun install needs its manifest
+# (.github/scripts/check-bun-workspace-manifests.sh).
+!docs/site/package.json
 # skills/ ships inside the worker image's plugin tarball (packages/pi-envoy/scripts/prepack.sh).
 
 # Envoy: test files and deploy tooling not needed in the image.
