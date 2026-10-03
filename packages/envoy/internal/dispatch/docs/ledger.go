@@ -118,6 +118,12 @@ func (l *Ledger) publishEvents() {
 // commit is Commit up to the publish. Another transaction can run between the two, and tests
 // call them apart to hold that window open.
 func (l *Ledger) commit(ctx context.Context) error {
+	if err := l.recordSettlementCredit(ctx); err != nil {
+		_ = l.tx.Rollback(context.Background())
+		l.endRebuilds()
+		l.fail(err)
+		return err
+	}
 	err := l.tx.Commit(ctx)
 	// The transaction has ended whichever way the commit went, so a rebuild's room reads the
 	// history the commit left from here.
@@ -126,7 +132,7 @@ func (l *Ledger) commit(ctx context.Context) error {
 		l.fail(err)
 		return err
 	}
-	l.credit(ctx)
+	l.credit()
 	for _, written := range l.versions {
 		l.service.commitVersion(written.artifactID, written.version)
 	}
@@ -192,20 +198,36 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 	l.order = append(l.order, write.artifactID)
 }
 
-// credit credits each content change of a committed transaction to its room, for the room's
-// next version, and each seed to its room's settlement. It runs before the transaction's own
-// versions are released, which clears the authors those versions already name. It also writes that
-// credit to the pending-settlement row, so a process that ends before its room's settlement does
-// not lose attribution.
-func (l *Ledger) credit(ctx context.Context) {
+// recordSettlementCredit adds each committed transaction's credit to the pending-settlement row in
+// the transaction that wrote the document. The durable row therefore commits or rolls back with
+// its content, before the request context can be canceled after commit.
+func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
+	for artifactID, actor := range l.seeds {
+		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(nil, &actor), false); err != nil {
+			return err
+		}
+	}
+	for _, artifactID := range l.order {
+		write := l.live[artifactID]
+		if len(write.credits) == 0 {
+			continue
+		}
+		if err := upsertSettlementCredit(ctx, l.tx, artifactID, settlementCreditFor(write.credits, write.actor), false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// credit mirrors committed settlement credit into each room before the transaction's versions
+// release their captured authors and before its live writes publish.
+func (l *Ledger) credit() {
 	for artifactID, actor := range l.seeds {
 		state := l.service.lockState(artifactID)
 		state.lastActor = new(actor)
 		state.unsettled = true
 		state.creditVersion++
-		credit, creditVersion := state.settlementCreditLocked(), state.creditVersion
 		l.service.unlockState(artifactID, state)
-		l.service.recordSettlementCredit(ctx, artifactID, credit, creditVersion)
 	}
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
@@ -219,9 +241,7 @@ func (l *Ledger) credit(ctx context.Context) {
 		state.lastActor = write.actor
 		state.unsettled = true
 		state.creditVersion++
-		credit, creditVersion := state.settlementCreditLocked(), state.creditVersion
 		l.service.unlockState(artifactID, state)
-		l.service.recordSettlementCredit(ctx, artifactID, credit, creditVersion)
 	}
 }
 

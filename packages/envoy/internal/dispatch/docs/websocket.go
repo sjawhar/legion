@@ -91,24 +91,24 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 	if a.service.roomFailed(room) {
 		return nil
 	}
-	contentChanged, durable, credit, creditVersion, found := a.service.consumeUpdateClass(room, update)
-	if found && durable {
+	class, found := a.service.consumeUpdateClass(room, update)
+	if found && class.durable {
 		defer a.service.finishDurableAppend(room)
 	}
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
 		return nil
 	}
 	var err error
-	creditStored := credit.empty()
+	creditStored := class.credit.empty()
 	if store, ok := a.store.(creditedUpdateStore); ok {
-		encodedCredit, encodeErr := json.Marshal(credit)
+		encodedCredit, encodeErr := json.Marshal(class.credit)
 		if encodeErr != nil {
 			return fmt.Errorf("encode document settlement authors: %w", encodeErr)
 		}
-		_, err = store.AppendUpdateWithSettlementCredit(context.Background(), room, update, contentChanged, encodedCredit)
+		_, err = store.AppendUpdateWithSettlementCredit(context.Background(), room, update, class.contentChanged, encodedCredit)
 		creditStored = true
 	} else if store, ok := a.store.(classifiedUpdateStore); ok {
-		_, err = store.AppendUpdateWithClass(context.Background(), room, update, contentChanged)
+		_, err = store.AppendUpdateWithClass(context.Background(), room, update, class.contentChanged)
 	} else {
 		_, err = a.store.AppendUpdate(context.Background(), room, update)
 	}
@@ -117,9 +117,9 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 		return err
 	}
 	if found && creditStored {
-		a.service.settlementCreditPersisted(room, creditVersion)
+		a.service.settlementCreditPersisted(room, class.creditVersion)
 	}
-	if found && durable && contentChanged {
+	if found && class.durable && class.contentChanged {
 		a.service.scheduleSettleAfterAppend(room)
 	}
 	return nil
@@ -129,24 +129,24 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	if a.service.roomFailed(room) {
 		return nil
 	}
-	contentChanged, durable, credit, creditVersion, found := a.service.consumeUpdateClass(room, update)
-	if found && durable {
+	class, found := a.service.consumeUpdateClass(room, update)
+	if found && class.durable {
 		defer a.service.finishDurableAppend(room)
 	}
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
 		return nil
 	}
 	var err error
-	creditStored := credit.empty()
+	creditStored := class.credit.empty()
 	if store, ok := a.store.(creditedUpdateStore); ok {
-		encodedCredit, encodeErr := json.Marshal(credit)
+		encodedCredit, encodeErr := json.Marshal(class.credit)
 		if encodeErr != nil {
 			return fmt.Errorf("encode document settlement authors: %w", encodeErr)
 		}
-		_, err = store.AppendUpdateWithSettlementCredit(ctx, room, update, contentChanged, encodedCredit)
+		_, err = store.AppendUpdateWithSettlementCredit(ctx, room, update, class.contentChanged, encodedCredit)
 		creditStored = true
 	} else if store, ok := a.store.(classifiedUpdateStore); ok {
-		_, err = store.AppendUpdateWithClass(ctx, room, update, contentChanged)
+		_, err = store.AppendUpdateWithClass(ctx, room, update, class.contentChanged)
 	} else {
 		_, err = a.store.AppendUpdate(ctx, room, update)
 	}
@@ -155,9 +155,9 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		return err
 	}
 	if found && creditStored {
-		a.service.settlementCreditPersisted(room, creditVersion)
+		a.service.settlementCreditPersisted(room, class.creditVersion)
 	}
-	if found && durable && contentChanged {
+	if found && class.durable && class.contentChanged {
 		a.service.scheduleSettleAfterAppend(room)
 	}
 	return nil
@@ -490,14 +490,11 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		replica.catchUp(room, doc)
 		contentChanged := s.updateChangesMarkdown(room, replica.doc)
 		replica.mu.Unlock()
-		var (
-			credit        settlementCredit
-			creditVersion uint64
-		)
+		class := documentUpdateClass{contentChanged: contentChanged, durable: true}
 		if contentChanged {
-			credit, creditVersion = s.creditContentChange(room, origin)
+			class.credit, class.creditVersion = s.creditContentChange(room, origin)
 		}
-		s.recordUpdateClass(room, update, contentChanged, true, credit, creditVersion)
+		s.recordUpdateClass(room, update, class)
 		s.scheduleSettle(room)
 	})
 	return nil

@@ -181,12 +181,12 @@ transaction's ledger (`docs/ledger.go`), the only way to give a document operati
 `SeedText` and `SnapshotVersion` take theirs from the ledger and refuse a context that was not
 joined. A joined operation never writes the room: it runs on the transaction's fork of the room's
 document (`docs/livewrite.go`), appends its update inside the transaction, and reads through the
-same fork. The handler ends the transaction with `ledger.Commit`, which commits, credits the
-writes' actor to their rooms, releases the authors a version the transaction wrote named, then
-applies and broadcasts the updates, and last publishes the events its document operations
-appended, ahead of the handler's own; it defers `ledger.Discard`, so a transaction that does not
-commit leaves the room, every connected browser, every version and the durable document as they
-were.
+same fork. The handler ends the transaction with `ledger.Commit`, which records each settlement
+credit with the document content, commits, credits the writes' actor to their rooms, releases the
+authors a version the transaction wrote named, then applies and broadcasts the updates, and last
+publishes the events its document operations appended, ahead of the handler's own; it defers
+`ledger.Discard`, so a transaction that does not commit leaves the room, every connected browser,
+every version and the durable document as they were.
 
 While a transaction's write to a document is open it holds that room's writer slot, so another
 transaction's joined operation on the document waits for it to be published or discarded, and it
@@ -335,10 +335,10 @@ forgets a state that holds nothing once its room has gone, so whatever ends last
 `OnUnloadDocument` when the room goes, or a holder's own end - releases it. The durable row that
 says a document's settlement is owed (`doc_settlements_pending`, migration 0063) also carries the
 authors that settlement needs (0068): a browser update records them in the update's own transaction,
-and a committed joined write records them before it publishes. Closing an issue writes every
-unsettled state into that row before it releases the state, so the reopened document's settlement
-credits the same version, ask and event authors even after a room release or restart. The document
-socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms, never
+and a joined write records them in the transaction that commits its content. Closing an issue writes
+every unsettled state into that row before it releases the state, so the reopened document's
+settlement credits the same version, ask and event authors even after a room release or restart. The
+document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms, never
 documents touched since the process started (LEGION-513). A room an `Apply` opened with no peer is
 idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484). `PgVersioned`'s
 per-room locks likewise live only while a caller holds or waits for one.

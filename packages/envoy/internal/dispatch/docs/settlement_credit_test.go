@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -51,6 +53,79 @@ func TestAnAskWrittenJustBeforeItsIssueClosedKeepsItsAuthorAfterRestartAndReopen
 		t.Fatalf("resume the reopened document's settlement: %v", err)
 	}
 	waitForAskAuthor(t, restarted, artifactID, actor)
+}
+
+// A request can be canceled immediately after its transaction commits. That must not leave the
+// document's durable pending-settlement credit naming the earlier seed author instead of this
+// committed edit's author.
+func TestCommittedLedgerWritePersistsSettlementCreditWhenCallerContextCancelsAfterCommit(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin edit: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	joined, ledger := service.Join(ctx, cancelAfterCommitTx{Tx: tx, cancel: cancel})
+	defer ledger.Discard()
+	actor := model.Actor{Kind: "session", ID: "canceled-after-commit-session"}
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{
+		Op: "insert", After: "end", Markdown: ":::ask{#canceled-credit urgency=\"med\" multiple=\"false\"}\nWho wrote this?\n:::\n",
+	}}, actor, nil); err != nil {
+		t.Fatalf("write the ask block: %v", err)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the ask block: %v", err)
+	}
+
+	owed, credit, err := pendingSettlementCredit(context.Background(), service.store.Pool, artifactID)
+	if err != nil {
+		t.Fatalf("read durable settlement credit: %v", err)
+	}
+	if !owed || credit.LastActor == nil || *credit.LastActor != actor {
+		t.Fatalf("durable settlement credit after the canceled-context commit = %+v, want last actor %+v", credit, actor)
+	}
+}
+
+// Once a settlement consumes its final credit, closing the document's issue must not recreate a
+// pending settlement from the already-consumed last actor.
+func TestCloseAfterSettlementDoesNotRecreatePendingSettlementFromConsumedLastActor(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = 20 * time.Millisecond
+	actor := model.Actor{Kind: "session", ID: "settled-before-close-session"}
+	seedServiceText(t, service, artifactID, "# Decision\n\nContext.\n")
+
+	writeAskBeforeClose(t, service, artifactID, actor)
+	waitForAskAuthor(t, service, artifactID, actor)
+	waitFor(t, 30*time.Second, "the ask settlement to clear its pending row", func() bool {
+		owed, _, err := pendingSettlementCredit(context.Background(), service.store.Pool, artifactID)
+		return err == nil && !owed
+	})
+
+	closeTestIssue(t, service)
+	owed, _, err := pendingSettlementCredit(context.Background(), service.store.Pool, artifactID)
+	if err != nil {
+		t.Fatalf("read settlement row after close: %v", err)
+	}
+	if owed {
+		t.Fatal("closing an already settled document recreated a pending settlement from its consumed last actor")
+	}
+}
+
+type cancelAfterCommitTx struct {
+	pgx.Tx
+	cancel context.CancelFunc
+}
+
+func (tx cancelAfterCommitTx) Commit(ctx context.Context) error {
+	err := tx.Tx.Commit(ctx)
+	if err == nil {
+		tx.cancel()
+	}
+	return err
 }
 
 func writeAskBeforeClose(t *testing.T, service *Service, artifactID string, actor model.Actor) {

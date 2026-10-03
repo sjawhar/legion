@@ -1416,6 +1416,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		}
 		// An author credited after this settlement read the room's still waits for the next.
 		state.unsettled = len(state.pending) > 0
+		if !state.unsettled {
+			state.lastActor = nil
+		}
 	}
 	s.unlockState(room, state)
 	for _, event := range published {
@@ -1654,13 +1657,16 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			"issue", issueKey, "error", err)
 		return
 	}
+	type closingRoom struct {
+		room          string
+		credit        settlementCredit
+		creditVersion uint64
+	}
+	closingRooms := make([]closingRoom, 0, len(rooms))
 	for _, room := range rooms {
 		state := s.lockExistingState(room)
 		changed := true
-		var (
-			credit        settlementCredit
-			creditVersion uint64
-		)
+		var snapshot closingRoom
 		if state != nil {
 			changed = state.closed != closed
 			state.closed = closed
@@ -1670,19 +1676,30 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 				// Snapshot while the state is locked, then write after unlocking: settlement holds
 				// the document's advisory lock before it takes state.mu, so taking that lock here
 				// while holding the state would invert the lock order.
-				credit, creditVersion = state.settlementCreditLocked(), state.creditVersion
+				snapshot.credit, snapshot.creditVersion = state.settlementCreditLocked(), state.creditVersion
 			}
 			s.unlockState(room, state)
 		}
 		if closed && changed {
-			if err := s.persistSettlementCredit(ctx, room, credit); err != nil {
-				slog.Error("dispatch: record closing document settlement authors", "room", room, "error", err)
+			snapshot.room = room
+			closingRooms = append(closingRooms, snapshot)
+		}
+	}
+	finished := make(chan struct{}, len(closingRooms))
+	for _, snapshot := range closingRooms {
+		go func(snapshot closingRoom) {
+			if err := s.persistSettlementCredit(ctx, snapshot.room, snapshot.credit); err != nil {
+				slog.Error("dispatch: record closing document settlement authors", "room", snapshot.room, "error", err)
 			} else {
-				s.settlementCreditPersisted(room, creditVersion)
+				s.settlementCreditPersisted(snapshot.room, snapshot.creditVersion)
 			}
 			// A room still loading has no state yet, and is closed once it has loaded.
-			_ = s.srv.CloseRoom(room, true)
-		}
+			_ = s.srv.CloseRoom(snapshot.room, true)
+			finished <- struct{}{}
+		}(snapshot)
+	}
+	for range closingRooms {
+		<-finished
 	}
 }
 
