@@ -250,7 +250,8 @@ func parseAgentStateCutoff(name string, value *string) (*time.Time, error) {
 // mark (read_through, which only ever moves forward, so a tab that read less a moment ago cannot
 // make a reply unread again), and/or replies read one by one (read_replies, the session's own
 // messages by id, which a view that shows only some of a session's replies writes so it marks
-// nothing it did not show), and answers with the session's whole state.
+// nothing it did not show), announces the write to the viewer's other tabs unless it was only
+// replies already read, and answers with the session's whole state.
 func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -279,12 +280,17 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// An id is taken in any form uuid.Parse reads and sent to Postgres in the canonical one, which
+	// Postgres takes; a urn:uuid: id, which Postgres refuses, would otherwise fail the write.
+	readReplies := make([]string, 0, len(input.ReadReplies))
 	for _, id := range input.ReadReplies {
-		if _, err := uuid.Parse(id); err != nil {
+		parsed, err := uuid.Parse(id)
+		if err != nil {
 			s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_STATE",
 				"read_replies: %q is not a message id", id))
 			return
 		}
+		readReplies = append(readReplies, parsed.String())
 	}
 	sessionID := r.PathValue("session_id")
 	// The state is announced on an event the session owns, and only a session id a route can
@@ -316,6 +322,7 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	changed := clearedBefore != nil || readThrough != nil
 	if readThrough != nil {
 		if _, err := tx.Exec(r.Context(), `
 			insert into user_agent_read (login, session_id, read_through)
@@ -327,9 +334,10 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if len(input.ReadReplies) > 0 {
-		// Only the session's own messages are its replies; any other id is refused rather than
-		// stored, so a mark can never name something the unread count would not.
+	if len(readReplies) > 0 {
+		// The check proves each id is a message the path's session wrote, and no more: the unread
+		// count reads a row only for that session's reply under a direct message this viewer sent
+		// (unreadDirectRepliesCTE), so a row naming any other message the session wrote is inert.
 		var foreign string
 		err := tx.QueryRow(r.Context(), `
 			select wanted.id::text from unnest($1::uuid[]) as wanted(id)
@@ -339,7 +347,7 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 				  and messages.author->>'kind' = 'session' and messages.author->>'id' = $2
 			)
 			limit 1
-		`, input.ReadReplies, sessionID).Scan(&foreign)
+		`, readReplies, sessionID).Scan(&foreign)
 		if err == nil {
 			s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_STATE",
 				"read_replies: %s is not a message session %s wrote", foreign, sessionID))
@@ -349,32 +357,46 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if _, err := tx.Exec(r.Context(), `
+		inserted, err := tx.Exec(r.Context(), `
 			insert into user_agent_reply_read (login, reply_id)
 			select $1, unnest($2::uuid[])
 			on conflict do nothing
-		`, canonicalLogin(actor.ID), input.ReadReplies); err != nil {
+		`, canonicalLogin(actor.ID), readReplies)
+		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
+		changed = changed || inserted.RowsAffected() > 0
 	}
-	// The viewer's other open tabs and devices refresh their badge from this event rather than
-	// waiting for a focus or the next message. It is owned by the session, like its messages,
-	// so the outbox publishes it nowhere and it reaches only the dashboard's event stream.
-	event, err := s.appendEvent(r.Context(), tx, model.Event{
-		Type:    "user_agent_state.updated",
-		Actor:   actor,
-		Payload: model.UserAgentStateEventPayload{Login: actor.ID, SessionID: sessionID},
-	})
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+	// Replies read by id that were all read already change nothing, so nothing is announced: a
+	// broadcast page sends its replies again on every visit while the session has an unread reply
+	// elsewhere, and each event would refetch the badge in every tab the viewer has open.
+	if !changed {
+		// Nothing was written; end the transaction before the state is read through the pool.
+		if err := tx.Rollback(r.Context()); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	} else {
+		// The viewer's other open tabs and devices refresh their badge from this event rather
+		// than waiting for a focus or the next message. It is owned by the session, like its
+		// messages, so the outbox publishes it nowhere and it reaches only the dashboard's event
+		// stream.
+		event, err := s.appendEvent(r.Context(), tx, model.Event{
+			Type:    "user_agent_state.updated",
+			Actor:   actor,
+			Payload: model.UserAgentStateEventPayload{Login: actor.ID, SessionID: sessionID},
+		})
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		s.publish(event)
 	}
-	if err := tx.Commit(r.Context()); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	s.publish(event)
 	states, err := s.loadUserAgentStates(r.Context(), actor.ID, &sessionID)
 	if err != nil {
 		s.writeHandlerError(w, err)

@@ -1085,7 +1085,7 @@ func TestRepliesReadByIDMarkOnlyThoseReplies(t *testing.T) {
 }
 
 // read_replies names the session's own messages; anything else is refused before a row is
-// written, so a mark can never hold an id the unread count does not read as that session's.
+// written, so every row the table holds names a message the path's session wrote.
 func TestRepliesReadByIDRefuseAnythingButTheSessionsOwnMessages(t *testing.T) {
 	handler, root, reply, _ := directConversation(t)
 	answer := decodeBody[model.Message](t, reply("On it."))
@@ -1111,6 +1111,75 @@ func TestRepliesReadByIDRefuseAnythingButTheSessionsOwnMessages(t *testing.T) {
 	}
 	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 1 {
 		t.Fatalf("after the refusals: %#v, want the answer still unread", got)
+	}
+}
+
+// An id passes as any form uuid.Parse reads, and the write and its check take the canonical form,
+// the one Postgres takes, so a form Postgres refuses (urn:uuid:) never reaches it and is not a 500
+// where the route documents 400 INVALID_STATE for what it refuses.
+func TestRepliesReadByIDTakeEveryFormOfAnIDThatParses(t *testing.T) {
+	for _, form := range []struct {
+		name  string
+		write func(id string) string
+	}{
+		{"urn", func(id string) string { return "urn:uuid:" + id }},
+		{"braced upper case", func(id string) string { return "{" + strings.ToUpper(id) + "}" }},
+	} {
+		t.Run(form.name, func(t *testing.T) {
+			handler, _, reply, _ := directConversation(t)
+			answer := decodeBody[model.Message](t, reply("On it."))
+			marked := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+				"read_replies": []string{form.write(answer.ID)},
+			}, "alice")
+			if marked.Code != http.StatusOK {
+				t.Fatalf("read %s by id: status=%d body=%s", form.write(answer.ID), marked.Code, marked.Body.String())
+			}
+			if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
+				t.Fatalf("after reading the answer by id: %#v, want nothing unread", got)
+			}
+		})
+	}
+}
+
+// Reading by id replies that are already read changes nothing, so it records nothing: no
+// user_agent_state.updated event, which would refetch the badge in every tab the viewer has open.
+// A broadcast page sends its replies again on each visit while the session has an unread reply
+// elsewhere. A read that adds a reply still announces itself.
+func TestRepliesReadByIDAgainRecordNoEvent(t *testing.T) {
+	handler, database, _, reply, _ := directConversationFrom(t, "alice")
+	answer := decodeBody[model.Message](t, reply("On it."))
+	announced := func() int {
+		t.Helper()
+		var count int
+		if err := database.Pool.QueryRow(context.Background(), `
+			select count(*) from events where type = 'user_agent_state.updated'
+		`).Scan(&count); err != nil {
+			t.Fatalf("count user_agent_state.updated events: %v", err)
+		}
+		return count
+	}
+	read := func(ids ...string) {
+		t.Helper()
+		marked := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+			"read_replies": ids,
+		}, "alice")
+		if marked.Code != http.StatusOK {
+			t.Fatalf("read %v by id: status=%d body=%s", ids, marked.Code, marked.Body.String())
+		}
+	}
+
+	read(answer.ID)
+	if got := announced(); got != 1 {
+		t.Fatalf("after the first read: %d events, want 1", got)
+	}
+	read(answer.ID)
+	if got := announced(); got != 1 {
+		t.Fatalf("after reading the same reply again: %d events, want still 1", got)
+	}
+	followUp := decodeBody[model.Message](t, reply("Done."))
+	read(answer.ID, followUp.ID)
+	if got := announced(); got != 2 {
+		t.Fatalf("after a read that adds the follow-up: %d events, want 2", got)
 	}
 }
 
