@@ -72,19 +72,25 @@ interface CommentsTabProps {
  *  tab, a phone margin thread and the rail the margin collapses to, so an unsent draft stays with
  *  it; a send it has out, and that send's refusal, are the held-send store's, so they stay with
  *  the document whatever unmounts the composer. On a closed issue it shows only that send or its
- *  refusal. While a newer selection-bar action waits on its send, it says so. */
+ *  refusal. While a newer selection-bar action waits on its send, it says so. It takes focus the
+ *  first time it is on screen: a compose mounts it before the margin has opened the compact sheet,
+ *  left its rail or the Pinned tab for it, and a field out of sight takes no focus. */
 export function MarginComposerSlot({
   composer,
   hidden,
   isClosed,
   onClose,
   onKindChange,
+  onScreen,
 }: {
   composer: MarginComposer;
   hidden: boolean;
   isClosed: boolean;
   onClose: (composer: MarginComposer) => void;
   onKindChange: (kind: ComposerKind) => string | undefined;
+  /** The reader can see it: the margin's tabs are not covered, the compact sheet is open, and the
+   *  Comments tab shows. */
+  onScreen: boolean;
 }): ReactNode {
   const sendKey = useMemo(
     () => marginComposeSendKey(composer.anchor.artifact),
@@ -103,7 +109,7 @@ export function MarginComposerSlot({
       ) : null}
       <MentionComposer
         anchor={composer.anchor}
-        autoFocus
+        autoFocus={onScreen}
         closed={isClosed}
         frame="pt-3"
         kind={composer.kind}

@@ -325,6 +325,9 @@ export function MarginSheet({
               key={composer.anchor.artifact}
               onClose={actions.closeComposer}
               onKindChange={actions.onComposerKindChange}
+              onScreen={
+                !covered && tab.value === "comments" && (sheet.expanded || !isCompactViewport)
+              }
             />
           )}
           {tab.value === "comments" &&

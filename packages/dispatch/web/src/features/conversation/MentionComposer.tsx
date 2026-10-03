@@ -363,6 +363,9 @@ function draftRefusal(
 interface MentionComposerProps {
   readonly agents?: readonly Agent[];
   readonly anchor?: ComposerAnchor;
+  /** Focuses the field once, on the first render this is true. A host that keeps the composer
+   *  mounted out of sight - the margin's, under its collapsed sheet, its rail or the Pinned tab -
+   *  passes it once the composer is on screen, since a field out of sight takes no focus. */
   readonly autoFocus?: boolean;
   /** The owner takes no more sends: its issue is closed. The composer stays mounted, so a send
    *  still out and its refusal keep their draft: it shows itself only while it holds one of them,
@@ -557,8 +560,11 @@ export function MentionComposer({
     editedFrom.current = editBody;
     replaceDraft({ body: editBody, mentions: [] });
   }, [editBody, replaceDraft]);
+  const autoFocused = useRef(false);
   useEffect(() => {
-    if (autoFocus) textarea.current?.focus();
+    if (!autoFocus || autoFocused.current) return;
+    autoFocused.current = true;
+    textarea.current?.focus();
   }, [autoFocus]);
   useEffect(() => {
     if (focusAddedOption.current) {

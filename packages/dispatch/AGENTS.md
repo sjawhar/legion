@@ -259,11 +259,14 @@ shows, a new one, a turned-away one or one held for the document the reader come
 the desktop margin out of its rail (`Margin.tsx`). A send on another document holds no compose
 here: the check is the document's own. `MarginSheet` keeps the composer mounted, hidden, under
 the Pinned tab, under a phone margin thread, and under the rail the desktop margin collapses to,
-so an unsent draft is where the reader left it. Leaving the document, or the issue closing, ends
-an unsent compose; a sent one is the store's, shown again on its document, and on a closed issue
-it shows only that send and then its outcome, as a closed issue's composers do. The margin also
-names the mark the composer on the open document holds to the editor
-(`ProofEditorHandle.setComposerMark`). The composer's own mark writes are never undo steps
+so an unsent draft is where the reader left it. A composer mounts as its compose opens, before the
+margin has opened the compact sheet or come back from its rail or the Pinned tab for it, where its
+field can take no focus, so it takes focus the first time it is on screen (`onScreen` on
+`MarginComposerSlot`, `autoFocus` on `MentionComposer`, which focuses once). Leaving the document,
+or the issue closing, ends an unsent compose; a sent one is the store's, shown again on its
+document, and on a closed issue it shows only that send and then its outcome, as a closed issue's
+composers do. The margin also names the mark the composer on the open document holds to the
+editor (`ProofEditorHandle.setComposerMark`). The composer's own mark writes are never undo steps
 (`@legion/proof-editor`'s `recordMarkHistoryPlugin`), in prosemirror-history or y-prosemirror's
 UndoManager: neither undo nor redo writes one back, beside a recorded suggestion or after the
 reader refines the selection under an open composer. A bar Comment that cut into someone else's
