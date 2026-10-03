@@ -432,6 +432,13 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	state.mu.Unlock()
 	replica := &renderedReplica{}
 	doc.OnUpdate(func(update []byte, origin any) {
+		// A published write's update is already durable. Its suppression slot is finished here,
+		// before ygo's persistence observer, which the room registers after OnLoadDocument, hands
+		// the update on: to the room's worker, or, once CloseRoom has retired the worker, to
+		// stranded persistence on this goroutine, which waits on that slot (publishLiveUpdate).
+		if published, ok := origin.(*liveWriteOrigin); ok {
+			s.finishSuppressedPersistence(published.slot, update)
+		}
 		if _, identityRepair := origin.(*identityClosureOrigin); identityRepair {
 			return
 		}

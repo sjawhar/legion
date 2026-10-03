@@ -427,7 +427,13 @@ func New(deps Deps) *Service {
 	// write on a state missing the first. The two writes, each made from the same document, merge
 	// into a document neither wrote, which can hold no block at all. Idle eviction refuses a
 	// room any Apply holds, or has touched since its last peer left (idle_sweep.go:185), so every
-	// write a room takes is durable before a successor can load.
+	// write a room the sweeper evicts has taken is durable before a successor can load. CloseRoom
+	// checks peers alone too (inject.go:475-621), and the service still calls it to close an
+	// issue's rooms (SetIssueClosed), for a room with an editor at Shutdown, and to evict one
+	// (evictRoom): a write that commits on a room it has retired reaches the store through ygo's
+	// stranded persistence, on the committing goroutine (persistence.go:126-163). A published
+	// write's suppression slot is finished before ygo's persistence observer runs
+	// (onLoadDocument), so that persistence never waits on the publish it is running in.
 	srv.RoomIdleTimeout = roomIdleTimeout
 
 	service.srv = srv

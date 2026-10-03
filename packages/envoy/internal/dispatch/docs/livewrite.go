@@ -84,8 +84,10 @@ type liveWrite struct {
 
 // liveWriteOrigin tags the room transaction that applies a committed live write, so the room's
 // update observer credits it to no one: Ledger.Commit credited it when its transaction
-// committed. It must remain non-zero sized because ygo compares origins by interface equality.
-type liveWriteOrigin struct{ _ byte }
+// committed. It carries the write's persistence-suppression slot, which that observer finishes
+// (onLoadDocument). It must remain non-zero sized because ygo compares origins by interface
+// equality.
+type liveWriteOrigin struct{ slot *suppressSlot }
 
 // joinedLiveWrite is the calling transaction's open write to artifactID, if it has one.
 func joinedLiveWrite(ctx context.Context, artifactID string) *liveWrite {
@@ -390,10 +392,16 @@ func (s *Service) recordPublishedLoss(write *liveWrite) {
 // held its row until it committed, so the injections are owner-verified. Other transactions'
 // writes to the document hold pooled connections while they wait for this write's slot, so a
 // publish that asked the shared pool for the issue state could wait on them for good.
+//
+// The update is already durable, so the room's persistence must not append it again: the
+// suppression slot the publish queues is finished by the room's own update observer, with the
+// bytes ygo's persistence observer is handed next (onLoadDocument), never after Apply returns. A
+// room whose persistence worker CloseRoom retired under this Apply hands the commit to ygo's
+// stranded persistence on this goroutine, which would otherwise wait on this slot for good.
 func (s *Service) publishLiveUpdate(room string, update []byte) error {
 	ctx := withOwnerVerified(context.Background())
-	origin := &liveWriteOrigin{}
 	slot := s.prepareSuppressedPersistence(room)
+	origin := &liveWriteOrigin{slot: slot}
 	recorded, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
 		return crdt.ApplyUpdateV1(doc, update, origin)
 	})
@@ -410,8 +418,11 @@ func (s *Service) publishLiveUpdate(room string, update []byte) error {
 		s.cancelSuppressedPersistence(room, slot)
 		return fmt.Errorf("merge committed live document write: %w", err)
 	}
-	s.finishSuppressedPersistence(slot, applied)
 	if err := s.srv.BroadcastUpdate(ctx, room, applied); err != nil {
+		// A room CloseRoom retired under this Apply has no peer left to tell.
+		if errors.Is(err, websocket.ErrRoomNotFound) {
+			return nil
+		}
 		// Connected browsers did not receive the write the room now holds; failing the room
 		// closes them, and they sync the durable document when they reconnect.
 		return fmt.Errorf("broadcast committed live document write: %w", err)

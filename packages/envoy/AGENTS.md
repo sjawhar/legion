@@ -267,9 +267,18 @@ missing the first. Two such writes, each a diff of the same document, merge into
 wrote, and into one holding no block at all once each kept a block the other replaced: the
 healthy-room probe met it as a socket closed with `DOC_SCHEMA`. The idle sweeper evicts only a room
 no Apply holds or has touched since its last peer left (`provider/websocket/idle_sweep.go`), so every
-write a room takes is durable before another instance of it loads, and a peer that returns within
-the minute rejoins the warm room. `TestAHealthyRoomUnderWritesIsNeverRefused` checks every load of a
-room against the writes its earlier instances took.
+write a room the sweeper evicts has taken is durable before another instance of it loads, and a peer
+that returns within the minute rejoins the warm room. `TestAHealthyRoomUnderWritesIsNeverRefused`
+checks every load of a room against the writes its earlier instances took. ygo's `CloseRoom` checks
+only the peers as well, and the service still calls it to close an issue's rooms (`SetIssueClosed`),
+for a room with an editor at `Shutdown`, and to evict one (`evictRoom`): a write that commits on a
+room it has retired reaches the store through ygo's stranded persistence, on the committing goroutine
+(`provider/websocket/persistence.go`). A committed write's publish (`publishLiveUpdate`) is already
+durable and suppresses that append; the room's own update observer finishes its suppression slot
+before ygo's persistence observer runs (`onLoadDocument`), so the stranded append never waits on the
+publish it runs inside, and the publish, its request and the document's writer slot are released
+(`TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt`, `TestAWriteSurvivesItsIssueClosingAsItPublishes`).
+A publish whose room `CloseRoom` removed has no peer left to broadcast to and returns.
 
 The room's update observer (`updateChangesMarkdown`) renders a replica of the room, not the live
 tree, since ygo fires it after the transaction has released the document's lock and another write

@@ -150,6 +150,12 @@
 
 ### Fixed
 
+- A document write whose issue closed, or whose server shut down with an editor connected, while
+  the committed write was being applied to its room no longer hangs. Closing the room retired its
+  persistence worker under the write, and ygo's fallback append, run on the write's own goroutine,
+  waited for the write to finish first: the request that made it got no answer, every later write
+  to the document waited on its writer slot, and the document's later rooms stopped persisting.
+  The room's own update observer now releases the write before that append runs (LEGION-469).
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds
