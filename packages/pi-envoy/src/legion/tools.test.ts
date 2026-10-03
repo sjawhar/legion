@@ -79,6 +79,19 @@ test("the legion tool exposes only the workflow operations each role owns", asyn
         secret: "claim-secret",
       }),
     }).execute("", parameters, undefined, undefined, context());
+  const phaseWorkerTool = createLegionTool({
+    pi,
+    daemon: daemonWithState as never,
+    onPhaseCompleted: () => undefined,
+    resolveDocument: noDocumentLookup,
+    session: () => ({
+      kind: "phase-worker",
+      sessionId: "ses_208",
+      tree: "LEGION-208",
+      issue: "LEGION-208",
+      secret: "claim-secret",
+    }),
+  });
 
   await expect(
     run("architect", {
@@ -103,6 +116,12 @@ test("the legion tool exposes only the workflow operations each role owns", asyn
       },
     ],
   ]);
+
+  expect(
+    (phaseWorkerTool.parameters as z.ZodType)
+      .safeParse({ op: "request_backward_move", to: "integrating", reason: "test failed" })
+      .success
+  ).toBeFalse();
 
   await expect(
     run("phase-worker", { op: "request_backward_move", to: "implementing", reason: "test failed" })

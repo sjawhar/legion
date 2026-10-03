@@ -95,6 +95,18 @@ test("state accepts optional fields emitted by later workflow slices", () => {
   expect(LegionStateResponse.safeParse(later).success).toBeTrue();
 });
 
+test("state rejects malformed optional workflow fields", () => {
+  const negativeFree = fixture("state.json") as { admission: Record<string, unknown> };
+  negativeFree.admission.free = -1;
+  expect(LegionStateResponse.safeParse(negativeFree).success).toBeFalse();
+
+  const malformedLender = fixture("state.json") as {
+    issues: Record<string, { slot?: Record<string, unknown> }>;
+  };
+  malformedLender.issues["LEGION-208"]!.slot!.lentTo = "not an issue key";
+  expect(LegionStateResponse.safeParse(malformedLender).success).toBeFalse();
+});
+
 test("state accepts the existing done phase", () => {
   const completed = fixture("state.json") as {
     issues: Record<string, { phase: string }>;
@@ -102,6 +114,16 @@ test("state accepts the existing done phase", () => {
   completed.issues["LEGION-208"]!.phase = "done";
 
   expect(LegionStateResponse.safeParse(completed).success).toBeTrue();
+});
+
+test("a backward move rejects future read-only phases", () => {
+  expect(
+    LegionPhaseBackwardRequest.safeParse({
+      grantId: "grant-208",
+      to: "integrating",
+      reason: "test failed",
+    }).success
+  ).toBeFalse();
 });
 
 test("every workflow request has a strict schema", () => {
@@ -178,14 +200,11 @@ test("every workflow request has a strict schema", () => {
   }
 });
 
-test("an escalation rejects an empty reason", () => {
-  expect(
-    LegionEscalateRequest.safeParse({
-      grantId: "grant-208",
-      issue: "LEGION-208",
-      reason: "",
-    }).success
-  ).toBeFalse();
+test("an escalation rejects empty required fields", () => {
+  const request = { grantId: "grant-208", issue: "LEGION-208", reason: "needs controller triage" };
+  for (const field of ["grantId", "issue", "reason"] as const) {
+    expect(LegionEscalateRequest.safeParse({ ...request, [field]: "" }).success).toBeFalse();
+  }
 });
 
 test("a workflow refusal preserves its stable code and message", () => {

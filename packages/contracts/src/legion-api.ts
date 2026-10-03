@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { LEGION_ROLES } from "./legion-roles";
+import { DISPATCH_KEY_PATTERN, LEGION_ROLES } from "./legion-roles";
 
 /**
  * The Legion daemon's HTTP API, as its readers see it.
@@ -15,6 +15,7 @@ import { LEGION_ROLES } from "./legion-roles";
  */
 
 const nonEmptyString = z.string().min(1);
+const issueKey = z.string().regex(DISPATCH_KEY_PATTERN);
 /** Go emits RFC 3339 through `time.Time`; a daemon on a non-UTC clock emits an offset. */
 const timestamp = z.iso.datetime({ offset: true });
 
@@ -30,6 +31,22 @@ export const LEGION_WORKFLOW_PHASES = [
   "merging",
   "awaiting_merge",
   "integrating",
+  "production_check",
+  "done",
+  "held",
+] as const;
+
+/** The `api.PhaseBackwardRequest` targets contract-12's daemon accepts. Future state-only phases
+ * join this list only with their daemon transition. */
+export const LEGION_PHASE_BACKWARD_TARGETS = [
+  "admitted",
+  "planning",
+  "implementing",
+  "testing",
+  "reviewing",
+  "retro",
+  "merging",
+  "awaiting_merge",
   "production_check",
   "done",
   "held",
@@ -122,7 +139,7 @@ const legionGateView = z.strictObject({
 const legionSlotView = z.strictObject({
   index: z.number().int().nonnegative(),
   admittedAt: timestamp,
-  lentTo: z.string().optional(),
+  lentTo: issueKey.optional(),
 });
 
 /** `api.PendingStatusWrite` — one `dispatch_status` effect the outbox has not finished, due now or
@@ -171,7 +188,7 @@ const legionAdmission = z.strictObject({
   cap: z.number().int().nonnegative(),
   active: z.array(nonEmptyString),
   waiting: z.array(nonEmptyString),
-  free: z.number().int().optional(),
+  free: z.number().int().nonnegative().optional(),
 });
 
 /** `api.ControllerLocator` — the external record of the operator-launched controller: the
@@ -377,7 +394,7 @@ export const LegionWaveReleaseRequest = z.strictObject({
 /** `api.PhaseBackwardRequest`, the active worker's request to return to an earlier phase. */
 export const LegionPhaseBackwardRequest = z.strictObject({
   grantId: nonEmptyString,
-  to: z.enum(LEGION_WORKFLOW_PHASES),
+  to: z.enum(LEGION_PHASE_BACKWARD_TARGETS),
   reason: nonEmptyString,
 });
 
@@ -390,9 +407,9 @@ export const LegionPhaseRetryRequest = z.strictObject({
 
 /** `api.EscalateRequest`, the architect's report to the controller. */
 export const LegionEscalateRequest = z.strictObject({
-  grantId: z.string(),
-  issue: z.string(),
-  reason: z.string().min(1),
+  grantId: nonEmptyString,
+  issue: nonEmptyString,
+  reason: nonEmptyString,
 });
 
 /** `api.SignOffRequest`, the owning architect's post-production-check sign-off. */
