@@ -279,11 +279,11 @@ func TestAWriteCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 	}{
 		{"900 KB of prose", spec, "end", prose(900_000), 32, true},
 		{"900 KB of a code block's text", spec, "end", "```\n" + strings.Repeat("a line of code, forty bytes long; more\n", 22_500) + "```\n", 32, true},
-		{"42 KB of )_", spec, "end", strings.Repeat(")_", 21_000), 8, false},
-		{"a thousand headings", spec, "end", strings.Repeat("# a\n", 1_000), 24, false},
-		{"two thousand hard breaks", spec, "end", strings.Repeat("a  \n", 2_000) + "a\n", 16, false},
-		{"three thousand list items", spec, "end", strings.Repeat("- a\n", 3_000), 10, false},
-		{"a thousand table rows", spec + "\n| a | b |\n| - | - |\n| A10 | b |\n", "A10", strings.Repeat("| x | y |\n", 1_000), 12, false},
+		{"42 KB of )_", spec, "end", strings.Repeat(")_", 21_000), 5, false},
+		{"a thousand headings", spec, "end", strings.Repeat("# a\n", 1_000), 18, false},
+		{"two thousand hard breaks", spec, "end", strings.Repeat("a  \n", 2_000) + "a\n", 11, false},
+		{"three thousand list items", spec, "end", strings.Repeat("- a\n", 3_000), 6, false},
+		{"a thousand table rows", spec + "\n| a | b |\n| - | - |\n| A10 | b |\n", "A10", strings.Repeat("| x | y |\n", 1_000), 8, false},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
 			insert := map[string]any{"op": "insert", "after": shape.after, "markdown": shape.chunk}
@@ -532,7 +532,9 @@ func heaviestAdmittedShapes(t *testing.T) []admittedShape {
 }
 
 // heaviestAdmitted is the document of the most units build makes that the element limit admits,
-// padded with a paragraph of plain words to the cap, which weighs next to nothing.
+// padded with a paragraph of plain words, which weighs next to nothing, to the cap: the cap of what
+// the server stores, its rendering, which can run longer than the markdown written - a blank line
+// between two headings, a line feed at the end - so the padding gives way to that.
 func heaviestAdmitted(t *testing.T, build func(units int) string) string {
 	t.Helper()
 	document := func(units int) string {
@@ -557,7 +559,22 @@ func heaviestAdmitted(t *testing.T, build func(units int) string) string {
 			high = middle
 		}
 	}
-	return document(low)
+	text := document(low)
+	for {
+		tree, err := pmdoc.Parse(text)
+		if err != nil {
+			t.Fatalf("parse the heaviest document: %v", err)
+		}
+		rendered, err := pmdoc.Render(tree)
+		if err != nil {
+			t.Fatalf("render the heaviest document: %v", err)
+		}
+		over := len(rendered) - documentCap
+		if over <= 0 {
+			return text
+		}
+		text = text[:len(text)-over]
+	}
 }
 
 // memoryHarness is the database and the issue the memory tests' servers share.
