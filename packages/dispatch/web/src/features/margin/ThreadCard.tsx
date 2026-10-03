@@ -423,27 +423,29 @@ export function ThreadCard({
             )}
             {/* Mounted on a closed issue too, where the composer shows only a reply of its own
                 still out or its refusal (`closed`), and otherwise renders nothing, its frame with
-                it. `contents`, so the composer's own box is the one laid out. */}
-            {terminalSuggestion ? null : (
-              <div className="contents" hidden={hideReplyComposer}>
-                <MentionComposer
-                  closed={isClosed}
-                  frame={composerClassName}
-                  inline
-                  kind="comment"
-                  mutationKey={replyMutationKey}
-                  onCancelReply={onToggle}
-                  onClose={onToggle}
-                  onSent={() => {}}
-                  owner={
-                    owner.kind === "issue"
-                      ? { issueKey: owner.key, kind: "issue" }
-                      : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
-                  }
-                  replyTo={{ author: "", excerpt: "", id: root.id, parentKind: "comment" }}
-                />
-              </div>
-            )}
+                it; and on a decided suggestion's thread, which offers no reply, where it shows
+                the same and still sends (`finishing`), so a reply out when anyone accepts or
+                rejects the suggestion keeps its draft and a refusal until it lands or the reader
+                cancels it. `contents`, so the composer's own box is the one laid out. */}
+            <div className="contents" hidden={hideReplyComposer}>
+              <MentionComposer
+                closed={isClosed}
+                finishing={terminalSuggestion}
+                frame={composerClassName}
+                inline
+                kind="comment"
+                mutationKey={replyMutationKey}
+                onCancelReply={onToggle}
+                onClose={onToggle}
+                onSent={() => {}}
+                owner={
+                  owner.kind === "issue"
+                    ? { issueKey: owner.key, kind: "issue" }
+                    : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
+                }
+                replyTo={{ author: "", excerpt: "", id: root.id, parentKind: "comment" }}
+              />
+            </div>
           </>
         ) : (
           <button

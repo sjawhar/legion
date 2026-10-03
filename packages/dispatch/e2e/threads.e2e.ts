@@ -1,6 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
+  acceptSuggestion,
   createAsk,
   createComment,
   createIssue,
@@ -11,6 +12,7 @@ import {
 } from "./api";
 import { threadCard } from "./editor";
 import { resetDatabase } from "./seed";
+import { holdPosts, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 // "bob" names the session that opened the ask - authenticated over the API with
@@ -765,6 +767,101 @@ test("a failed queued Conversation comment action keeps its thread and reply, cl
     await expect.poll(() => requests).toBe(2);
     await expect(threadCard(page, first.id)).toHaveCount(0);
     await expect(threadCard(page, second.id)).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
+/** An issue whose spec's last word carries a suggestion, and the route its comment sends post to. */
+async function seedSuggestion(
+  title: string
+): Promise<{ comments: string; issueKey: string; suggestionId: string }> {
+  await createProject({ key: "SUGG", name: "Suggestion cards" });
+  const issue = await createIssue({ project: "SUGG", spec: "The quick brown fox", title });
+  const suggestion = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "fox" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "cat" },
+  });
+  return {
+    comments: `**/api/v1/issues/${issue.key}/comments`,
+    issueKey: issue.key,
+    suggestionId: suggestion.id,
+  };
+}
+
+// A decided suggestion's thread offers no reply, but a reply already out when someone else accepts
+// the suggestion is still the reader's: its composer stays with the draft until the server answers,
+// a refusal hands that draft back beside Retry, and Retry still sends it as a reply.
+test("a suggestion accepted while its thread's own reply is out keeps the reply's draft and refusal", async ({
+  browser,
+}) => {
+  const { comments, issueKey, suggestionId } = await seedSuggestion("Accepted under a reply");
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issueKey}/conversation`);
+    const thread = await expandedThread(page, suggestionId);
+    const form = thread.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const refuse = await refusePosts(page, comments);
+    await field.fill("Reply under an accept");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await acceptSuggestion(suggestionId, { login: "bob" });
+    await expect(thread.getByText(/^Accepted by bob/)).toBeVisible();
+    await expect(thread.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(field).toHaveValue("Reply under an accept");
+
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(field).toHaveValue("Reply under an accept");
+    await expect(field).toBeEnabled();
+
+    await page.unroute(comments);
+    await form.getByRole("button", { name: "Retry" }).click();
+    await expect(thread.getByRole("list", { name: "Replies" })).toContainText(
+      "Reply under an accept"
+    );
+    await expect(form).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The composer a decided suggestion's thread keeps for a reply out is only that reply's: once the
+// reply lands it leaves, as the thread offers no new one.
+test("a reply out when its suggestion is accepted lands and leaves no composer behind", async ({
+  browser,
+}) => {
+  const { comments, issueKey, suggestionId } = await seedSuggestion(
+    "Accepted before a reply lands"
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issueKey}/conversation`);
+    const thread = await expandedThread(page, suggestionId);
+    const form = thread.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const send = await holdPosts(page, comments);
+    await field.fill("Reply that lands after");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await acceptSuggestion(suggestionId, { login: "bob" });
+    await expect(thread.getByText(/^Accepted by bob/)).toBeVisible();
+    await expect(field).toHaveValue("Reply that lands after");
+
+    send.release();
+    await expect(thread.getByRole("list", { name: "Replies" })).toContainText(
+      "Reply that lands after"
+    );
+    await expect(form).toHaveCount(0);
+    expect(send.posts()).toBe(1);
   } finally {
     await alice.close();
   }

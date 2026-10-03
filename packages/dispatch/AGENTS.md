@@ -79,7 +79,10 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   for a send of its own still out or that send's refusal, with Send refused and `Discard draft` in
   place of Retry, and otherwise renders nothing - the box a host places it in, its `frame`, with
   it - its draft kept for a reopen, so an issue closed, or closed and reopened, under a send leaves
-  that send's composer where it was.
+  that send's composer where it was. A decided suggestion's thread offers no reply, yet its card
+  keeps the reply composer mounted (`finishing` on `MentionComposer`), which shows itself the same
+  way but sends as ever, Retry included: a reply out when anyone accepts or rejects the suggestion
+  keeps its draft and a refusal until it lands or the reader cancels it.
   `Jump to latest` takes an edge of the screen the docked composer leaves free, so it never covers
   the composer's controls. Below `sm`, where the composer sits at the foot of the screen and grows
   upward with a refusal's Retry or Discard draft, the pill sits where the turns begin and sticks at

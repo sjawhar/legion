@@ -373,9 +373,13 @@ interface MentionComposerProps {
    *  kept for a reopen. */
   readonly closed?: boolean;
   readonly docked?: boolean;
+  /** The host offers no new message here - a decided suggestion's thread offers no reply - so the
+   *  composer only finishes a send of its own: it shows itself while that send is out and for its
+   *  refusal, with Send and Retry as ever, and otherwise renders nothing, its frame with it. */
+  readonly finishing?: boolean;
   /** The box a host places the composer in - its border, padding and place on screen - which the
-   *  composer draws around itself, so the box goes with it: a closed owner's composer with nothing
-   *  of its own to show renders neither. */
+   *  composer draws around itself, so the box goes with it: a closed or finishing composer with
+   *  nothing of its own to show renders neither. */
   readonly frame?: string;
   readonly edit?: { readonly body: string; readonly id: string };
   /** The channel's own mentions: seeded at mount, again by every reset (a send, Discard), and
@@ -406,6 +410,7 @@ export function MentionComposer({
   autoFocus = false,
   closed = false,
   docked = false,
+  finishing = false,
   frame,
   edit,
   seedMentions = [],
@@ -626,8 +631,9 @@ export function MentionComposer({
     : save.isError && !(save.error instanceof SendDeadlineError)
       ? save.error
       : undefined;
-  // Closed, with no send out and no refusal to show: nothing of this composer is on screen.
-  const dormant = closed && !sending && refusal === undefined;
+  // Closed or finishing, with no send out and no refusal to show: nothing of this composer is on
+  // screen.
+  const dormant = (closed || finishing) && !sending && refusal === undefined;
   useEffect(() => {
     const form = formRef.current;
     if (form === null || dormant) return;
@@ -1313,8 +1319,9 @@ export function MentionComposer({
       </p>
     </fieldset>
   );
-  // A closed owner's composer stays mounted, keeping its draft, and shows itself only for a send
-  // of its own that is out or that send's refusal; otherwise it renders nothing, its frame with it.
+  // A closed owner's composer, or a finishing one, stays mounted, keeping its draft, and shows
+  // itself only for a send of its own that is out or that send's refusal; otherwise it renders
+  // nothing, its frame with it.
   if (dormant) return null;
   const form = (
     <form
