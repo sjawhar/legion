@@ -135,7 +135,9 @@ func TestLoginIssuesAKeyBoundCredentialOnTypedCodeApproval(t *testing.T) {
 		t.Fatalf("LookupByCode = %+v, want host example-host-devbox, approver sjawhar, state pending", view)
 	}
 
+	beforeDecision := time.Now()
 	state, credentialID, err := svc.ApplyDecision(ctx, view.RecordID, true, testApprover, code)
+	afterDecision := time.Now()
 	if err != nil {
 		t.Fatalf("ApplyDecision: %v", err)
 	}
@@ -143,12 +145,16 @@ func TestLoginIssuesAKeyBoundCredentialOnTypedCodeApproval(t *testing.T) {
 		t.Fatalf("ApplyDecision = state=%q credentialID=%q, want issued and a credential id", state, credentialID)
 	}
 
-	readState, readCredentialID, err := svc.Read(ctx, pendingID)
+	readState, readCredentialID, readExpiresAt, err := svc.Read(ctx, pendingID)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
 	if readState != "issued" || readCredentialID != credentialID {
 		t.Fatalf("Read = %q %q, want issued %q", readState, readCredentialID, credentialID)
+	}
+	// The credential expires CredentialLifetime after the approval, and the machine's poll says when.
+	if earliest, latest := beforeDecision.Add(svc.CredentialLifetime), afterDecision.Add(svc.CredentialLifetime); readExpiresAt.Before(earliest.Truncate(time.Microsecond)) || readExpiresAt.After(latest) {
+		t.Fatalf("Read expires_at = %s, want between %s and %s", readExpiresAt, earliest, latest)
 	}
 
 	// The key-bound credential authenticates a proof.SignLauncher proof by the same machine key
@@ -205,7 +211,7 @@ func TestApplyDecisionTakesTheCodeThenOnlyTheApproversLogin(t *testing.T) {
 			t.Fatalf("ApplyDecision(approve=%v, mallory, right code) = %v, want record.ErrNotApprover", approve, err)
 		}
 	}
-	if state, _, err := svc.Read(ctx, pendingID); err != nil || state != "pending" {
+	if state, _, _, err := svc.Read(ctx, pendingID); err != nil || state != "pending" {
 		t.Fatalf("Read after refused decisions = %q, %v, want pending", state, err)
 	}
 
@@ -364,7 +370,7 @@ func TestExpirePendingMarksOverdueLoginsExpired(t *testing.T) {
 		t.Fatalf("ExpirePending: %v", err)
 	}
 
-	if state, _, err := svc.Read(ctx, overduePending); err != nil || state != "expired" {
+	if state, _, _, err := svc.Read(ctx, overduePending); err != nil || state != "expired" {
 		t.Fatalf("Read(overdue) = %q, %v, want expired", state, err)
 	}
 	if state, _, err := svc.recordState(ctx, decidedView.RecordID); err != nil || state != "denied" {

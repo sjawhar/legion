@@ -21,6 +21,17 @@ type machineLoginResponse struct {
 	Code      string `json:"code"`
 }
 
+// machineLoginStateResponse is GET /v1/launcher-credentials/{pending}'s answer.
+type machineLoginStateResponse struct {
+	// Once the login is approved, the minted machine credential's id; absent before then.
+	CredentialID string `json:"credential_id,omitempty"`
+	// Once the login is approved, the moment the minted credential expires; absent before then.
+	// Renewing it takes a new machine login a human approves.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// "pending", "issued" (approved), "denied" or "expired".
+	State string `json:"state"`
+}
+
 // machineLogin is POST /v1/launcher-credentials: public, rate-limited per source address and per
 // named operator (limits.go, unchanged from v8). The request object is verified once here — to
 // resolve the operator the rate limiter buckets on before any state is written — and again,
@@ -52,7 +63,7 @@ func (s *server) machineLogin(w http.ResponseWriter, r *http.Request) {
 // minted credential is usable only with proofs signed by the key the request object embedded.
 func (s *server) readMachineLogin(w http.ResponseWriter, r *http.Request) {
 	pendingID := r.PathValue("pending")
-	state, credentialID, err := s.deps.MachineLogin.Read(r.Context(), pendingID)
+	state, credentialID, expiresAt, err := s.deps.MachineLogin.Read(r.Context(), pendingID)
 	switch {
 	case errors.Is(err, machine.ErrNotFound):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such pending machine login")
@@ -61,9 +72,10 @@ func (s *server) readMachineLogin(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, "read machine login", err)
 		return
 	}
+	resp := machineLoginStateResponse{CredentialID: credentialID, State: state}
 	if state == "issued" {
-		writeJSON(w, http.StatusOK, map[string]string{"state": state, "credential_id": credentialID})
-		return
+		expires := expiresAt.UTC()
+		resp.ExpiresAt = &expires
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"state": state})
+	writeJSON(w, http.StatusOK, resp)
 }

@@ -96,6 +96,10 @@ type fakeBroker struct {
 	pendingCode        string // the confirmation code minted for the most recent login
 	loginOutcome       string // what the pending login's poll answers: "issued", "pending", "denied", or "expired"
 	issuedCredentialID string // the launcher credential id minted for the most recent "issued" login
+	// loginLifetime is how long an issued credential lives: the poll answers expires_at that far
+	// past the poll, a week unless a test shortens it; zero answers no expires_at, as a broker from
+	// before it does.
+	loginLifetime time.Duration
 
 	// refuseRenewNext answers the next N renews 401 LEASE_EXPIRED whatever the lease, so a test
 	// lapses a session on its next renew without racing the lease's wall clock. A renew that
@@ -124,7 +128,7 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 	f := &fakeBroker{
 		enrolled: map[string]string{}, byTP: map[string]string{}, runtimeIDToID: map[string]string{},
 		leaseExpiry: map[string]time.Time{}, seen: map[string]bool{}, lease: 900 * time.Second,
-		loginOutcome: "issued",
+		loginOutcome: "issued", loginLifetime: 7 * 24 * time.Hour,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/enrollments", func(w http.ResponseWriter, r *http.Request) {
@@ -308,7 +312,11 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		default:
 			f.next++
 			f.issuedCredentialID = fmt.Sprintf("lcred-%d", f.next)
-			writeJSON(w, 200, map[string]string{"state": "issued", "credential_id": f.issuedCredentialID})
+			issued := map[string]string{"state": "issued", "credential_id": f.issuedCredentialID}
+			if f.loginLifetime != 0 {
+				issued["expires_at"] = time.Now().Add(f.loginLifetime).UTC().Format(time.RFC3339Nano)
+			}
+			writeJSON(w, 200, issued)
 		}
 	})
 	f.srv = httptest.NewServer(mux)

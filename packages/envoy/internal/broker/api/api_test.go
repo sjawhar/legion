@@ -480,10 +480,11 @@ func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *te
 		t.Fatalf("GET /v1/launcher-credentials/{pending} (pending) = %d: %s", status, body)
 	}
 	pendingRead := decode[struct {
-		State string `json:"state"`
+		State     string     `json:"state"`
+		ExpiresAt *time.Time `json:"expires_at"`
 	}](t, body)
-	if pendingRead.State != "pending" {
-		t.Fatalf("pending state = %q, want pending", pendingRead.State)
+	if pendingRead.State != "pending" || pendingRead.ExpiresAt != nil {
+		t.Fatalf("pending read = %+v, want state pending and no expires_at", pendingRead)
 	}
 
 	status, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
@@ -531,11 +532,21 @@ func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *te
 		t.Fatalf("GET /v1/launcher-credentials/{pending} (issued) = %d: %s", status, body)
 	}
 	issuedRead := decode[struct {
-		State        string `json:"state"`
-		CredentialID string `json:"credential_id"`
+		State        string     `json:"state"`
+		CredentialID string     `json:"credential_id"`
+		ExpiresAt    *time.Time `json:"expires_at"`
 	}](t, body)
 	if issuedRead.State != "issued" || issuedRead.CredentialID != credentialID {
 		t.Fatalf("issued read = %+v, want state=issued credential_id=%s", issuedRead, credentialID)
+	}
+	// The machine learns when its credential expires: there is no renewal, so it must log in again
+	// before then.
+	var minted time.Time
+	if err := ts.Store.Pool.QueryRow(context.Background(), `select expires_at from launcher_credentials where id=$1`, credentialID).Scan(&minted); err != nil {
+		t.Fatalf("read the minted credential's expiry: %v", err)
+	}
+	if issuedRead.ExpiresAt == nil || !issuedRead.ExpiresAt.Equal(minted) {
+		t.Fatalf("issued read expires_at = %v, want the minted credential's %s", issuedRead.ExpiresAt, minted)
 	}
 	_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+looked.RecordID, nil)
 	if decided := decode[wireRecord](t, body).Decided; decided == nil || decided.CredentialID == nil || *decided.CredentialID != credentialID {

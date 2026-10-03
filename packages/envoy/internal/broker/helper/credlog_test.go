@@ -25,9 +25,10 @@ var proofShaped = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]{16,}\.[
 
 // TestTheHelperLogsEveryChangeOfTheLauncherCredential: a machine login installing the credential
 // and a broker refusal clearing it each leave one line in the journal, carrying identifiers only —
-// the credential id, the operator the login was signed with, the broker's code — and never a
-// proof, a request object or key material. The operator file changes while the login is pending,
-// and the line still names the operator the login was signed with.
+// the credential id, its expiry, the operator the login was signed with, the broker's code — and
+// never a proof, a request object or key material. The refusal is an ERROR: from then on no
+// session can enroll until a human approves a new login. The operator file changes while the login
+// is pending, and the line still names the operator the login was signed with.
 func TestTheHelperLogsEveryChangeOfTheLauncherCredential(t *testing.T) {
 	var out syncBuffer
 	f := newFakeBroker(t)
@@ -55,7 +56,7 @@ func TestTheHelperLogsEveryChangeOfTheLauncherCredential(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	credentialID := b.cred.Load().id
+	credentialID, expiresAt := b.cred.Load().id, b.cred.Load().expiresAt.Format(time.RFC3339)
 	if _, _, err := b.Enroll(context.Background(), sess); err != nil {
 		t.Fatalf("a fresh credential must enroll: %v", err)
 	}
@@ -76,8 +77,8 @@ func TestTheHelperLogsEveryChangeOfTheLauncherCredential(t *testing.T) {
 		records = append(records, rec)
 	}
 	want := []map[string]any{
-		{"level": "INFO", "msg": "machine login issued; the helper holds a launcher credential", "credential_id": credentialID, "operator": "ada@example.com"},
-		{"level": "WARN", "msg": "launcher credential refused; cleared", "credential_id": credentialID, "code": "LAUNCHER_INVALID"},
+		{"level": "INFO", "msg": "machine login issued; the helper holds a launcher credential", "credential_id": credentialID, "operator": "ada@example.com", "expires_at": expiresAt},
+		{"level": "ERROR", "msg": "launcher credential refused; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)", "credential_id": credentialID, "code": "LAUNCHER_INVALID"},
 	}
 	if len(records) != len(want) {
 		t.Fatalf("log records %v; want exactly %v", records, want)

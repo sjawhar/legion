@@ -60,7 +60,8 @@ type contractRig struct {
 }
 
 // newContractRig mounts a real broker (brokertest.NewRig) and serves this package's own Server
-// on a real unix socket, its Broker pointed at that real broker's URL and OperatorFile. Every
+// on a real unix socket, its Broker pointed at that real broker's URL and OperatorFile, both
+// logging to logBuf through one logger, as cmd/agent-secrets-helper wires them. Every
 // socket/registry/operator artifact lives under its own TempDir, never under $HOME — the caller
 // is expected to have set HOME to a separate, otherwise-untouched TempDir of its own so it can
 // later assert nothing wrote there.
@@ -71,12 +72,13 @@ func newContractRig(t *testing.T) *contractRig {
 	logBuf := &syncBuffer{}
 	sessionsPath := filepath.Join(artifacts, "sessions.json")
 	cr := &contractRig{broker: broker, sessionsPath: sessionsPath, logBuf: logBuf}
+	log := slog.New(slog.NewTextHandler(logBuf, nil))
 	cr.srv = &Server{
 		Registry: NewRegistry(sessionsPath),
-		Broker:   &Broker{URL: broker.URL, OperatorFile: broker.OperatorFile, HTTP: http.DefaultClient},
+		Broker:   &Broker{URL: broker.URL, OperatorFile: broker.OperatorFile, HTTP: http.DefaultClient, Log: log},
 		Hostname: "contract-test-host",
 		PeerOf:   PeerOf,
-		Log:      slog.New(slog.NewTextHandler(logBuf, nil)),
+		Log:      log,
 		MinRenew: 50 * time.Millisecond,
 	}
 	cr.sock = filepath.Join(artifacts, "helper.sock")
@@ -306,5 +308,76 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	}
 	if files != 0 {
 		t.Fatalf("nothing must ever write under HOME; found %d file(s)", files)
+	}
+}
+
+// TestContractARefusedLauncherCredentialIsAnErrorAndTheHelperKeepsServing reproduces a machine
+// login dying under a running helper, against a real broker: the credential passes its expiry
+// on the broker (direct SQL, as BROKER_LAUNCHER_CREDENTIAL_SECONDS elapsing would) and a session
+// registers after it. The helper keeps serving — register, sessions and login-status all answer —
+// but says at ERROR that the broker refused the credential and that the session cannot enroll and
+// why, where a minute-by-minute stream of retry warnings once hid it for hours.
+func TestContractARefusedLauncherCredentialIsAnErrorAndTheHelperKeepsServing(t *testing.T) {
+	cr := newContractRig(t)
+	b := cr.srv.Broker
+	code, err := b.Login(context.Background(), cr.srv.Hostname)
+	if err != nil {
+		t.Fatalf("Broker.Login: %v", err)
+	}
+	credentialID := cr.broker.DecideMachineLogin(t, code, true)
+	waitForIssued(t, b)
+	if _, err := cr.broker.Store.Pool.Exec(context.Background(),
+		`update launcher_credentials set expires_at = now() - interval '1 minute' where id = $1::uuid`, credentialID); err != nil {
+		t.Fatalf("expire launcher credential: %v", err)
+	}
+
+	if reg := cr.call(t, Request{Op: "register"}); !reg.OK || reg.EnrollmentID != "" {
+		t.Fatalf("register after the credential expired: %+v; want OK and not enrolled", reg)
+	}
+	const cannotEnroll = `level=ERROR msg="session cannot enroll: the helper holds no launcher credential; run: agent-secrets launcher login, and have a human approve it"`
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(cr.logBuf.String(), cannotEnroll) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no ERROR says the session cannot enroll; log:\n%s", cr.logBuf.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	log := cr.logBuf.String()
+	refused := `level=ERROR msg="launcher credential refused; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)" credential_id=` + credentialID + " code=LAUNCHER_INVALID"
+	why := `why="the broker refused the launcher credential or it reached its expiry; only a new machine login a human approves replaces it"`
+	if !strings.Contains(log, refused) || !strings.Contains(log, why) {
+		t.Fatalf("log:\n%s\nwant %s, and the session's error naming %s", log, refused, why)
+	}
+	if strings.Contains(log, `level=WARN msg="enroll failed; retrying"`) {
+		t.Fatalf("a missing credential is an ERROR, never a retry warning; log:\n%s", log)
+	}
+
+	if sessions := cr.call(t, Request{Op: "sessions"}); !sessions.OK || len(sessions.Sessions) != 1 || sessions.Sessions[0].State != "enrolling" {
+		t.Fatalf("sessions after the refusal: %+v; want the one session, still enrolling", sessions)
+	}
+	if status := cr.call(t, Request{Op: "login-status"}); !status.OK || status.LoginState != "expired" || !status.LoginRefused || status.CredentialHeld {
+		t.Fatalf("login-status after the refusal: %+v; want expired, refused, none held", status)
+	}
+}
+
+// TestContractLoginStatusNamesWhenTheLauncherCredentialExpires: the real broker's issued poll
+// carries the minted credential's expiry, and login-status hands it on, so a human sees the
+// deadline for the next machine login before the credential lapses.
+func TestContractLoginStatusNamesWhenTheLauncherCredentialExpires(t *testing.T) {
+	cr := newContractRig(t)
+	b := cr.srv.Broker
+	code, err := b.Login(context.Background(), cr.srv.Hostname)
+	if err != nil {
+		t.Fatalf("Broker.Login: %v", err)
+	}
+	credentialID := cr.broker.DecideMachineLogin(t, code, true)
+	waitForIssued(t, b)
+	var minted time.Time
+	if err := cr.broker.Store.Pool.QueryRow(context.Background(), `select expires_at from launcher_credentials where id = $1::uuid`, credentialID).Scan(&minted); err != nil {
+		t.Fatalf("read the minted credential's expiry: %v", err)
+	}
+	status := cr.call(t, Request{Op: "login-status"})
+	if want := minted.UTC().Format(time.RFC3339); !status.OK || !status.CredentialHeld || status.CredentialExpiresAt != want {
+		t.Fatalf("login-status: %+v; want the credential held, expiring at %s", status, want)
 	}
 }

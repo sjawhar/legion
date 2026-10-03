@@ -1601,19 +1601,33 @@ exits 0 and prints `issued`, and stderr names the most recent login and its code
 (`credential_held` beside `login_state`, the most recent login's state, which `launcher login`'s
 own poll reads). A helper from before that field reports only the most recent login, so there a
 denied re-login still reads `denied` and exits 1 until the helper restarts on a release that
-carries it. With no credential held, login-status exits 1 and prints the most recent login's state
-(`pending`, `denied`, `expired`, or `none` before any login), except once the broker refuses the
-held credential (401 `LAUNCHER_INVALID`, which it answers for an expired or revoked credential and
-for any launcher proof it cannot verify, such as clock skew or an `AGENT_SECRETS_URL` that is not
-the broker's public URL): from then until a login starts or settles, the helper reports every state
-but `pending` as `expired` (`login_state`), the word the dotfiles launcher gate matches, so an older
-client exits 1 on it too, and stderr says the broker refused it when the helper reports that
-(`login_refused`); a helper from before that field gets the plain "the last machine login is
-expired". A re-login pending at the refusal reports its own outcome once it settles, so its
-`launcher login` prints `denied` for a denial. The helper logs every change of the credential:
-`machine login issued` (credential id, and the operator the login was signed with) when a login
-installs one, and `launcher credential refused; cleared` (credential id, the broker's code) when a
-refusal clears it.
+carries it. While a credential is held, login-status's last stderr line says when it expires and
+how long that is from now (`credential_expires_at`, from the `expires_at` the broker's issued poll
+carries); the broker has no renewal, so a new machine login a human approves must replace it before
+then, and a helper or broker from before that field gets a line saying the expiry is unknown.
+With no credential held, login-status exits 1 and prints the most recent login's state
+(`pending`, `denied`, `expired`, or `none` before any login), except once the helper drops the
+held credential, because the broker refuses it (401 `LAUNCHER_INVALID`, which it answers for an
+expired or revoked credential and for any launcher proof it cannot verify, such as clock skew or
+an `AGENT_SECRETS_URL` that is not the broker's public URL) or because it reaches the expiry the
+broker named: from then until a login starts or settles, the helper reports every state but
+`pending` as `expired` (`login_state`), the word the dotfiles launcher gate matches, so an older
+client exits 1 on it too, and stderr says the credential reached its expiry or the broker refused
+it when the helper reports that (`login_refused`); a helper from before that field gets the plain
+"the last machine login is expired". A re-login pending at the refusal reports its own outcome
+once it settles, so its `launcher login` prints `denied` for a denial. The helper logs every change
+of the credential: `machine login issued` (credential id, its `expires_at`, and the operator the
+login was signed with) when a login installs one, a WARN that it expires soon a day before its
+expiry (at once when less is left), and at ERROR `launcher credential expired; cleared` or
+`launcher credential refused; cleared` (credential id, the expiry or the broker's code) when it
+drops it; a broker that names no expiry gets a WARN that the helper cannot warn ahead. While it
+holds none, every enrollment attempt (and every revoke a re-pinned or lapsed session needs before
+it enrolls) logs at ERROR `session cannot enroll` with `why`: no login since the start (a restart
+discards the credential), a login awaiting approval, a denied or unapproved login, or a credential
+dropped. SIGINT or SIGTERM, from systemd or anything else, stops the helper with exit 0 after a
+WARN `agent-secrets-helper stopping on a signal` naming the signal, the registered sessions and
+whether it held a launcher credential; the dotfiles unit restarts it unless systemd itself stopped
+it (`Restart=always`).
 `agent-secrets --version` and `agent-secrets-helper --version` print the release tag the release
 job stamps in (`internal/buildversion`), `devel` for any other build, and the helper's startup
 line (`agent-secrets-helper listening`) carries the same version.
@@ -1792,8 +1806,9 @@ credential no decision names. Approving a login whose key already holds a live l
 under another record (a machine that signed two logins with one key) is `409
 KEY_HOLDS_LIVE_CREDENTIAL`, and that record stays pending. `Read` (the machine's own
 poll, `GET /v1/launcher-credentials/{pending}`) answers only the record's state and, once issued,
-the minted credential's id — no token is ever returned; the credential is usable only with proofs
-signed by the key the request object embedded.
+the minted credential's id and `expires_at` — no token is ever returned; the credential is usable
+only with proofs signed by the key the request object embedded. The broker has no renewal route:
+past `expires_at` the machine logs in again, with a new key, a new code and a new human approval.
 
 `internal/broker/enroll.Service.AuthenticateLauncher` is `proof.Verifier`'s `LookupLauncher` hook: a
 launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials` row and then

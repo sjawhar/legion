@@ -173,8 +173,9 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 // registerReply answers a register, first waiting up to wait for the session to enroll. Without a
 // launcher credential the enroll loop cannot succeed until a human logs the helper in, so it does
 // not wait at all: a launcher's `register --wait N` then costs nothing on a helper that was never
-// logged in, or whose credential the broker has refused once. An expired credential stays held
-// until a call is refused, so the first register after it expires still waits the full N. A
+// logged in, or whose credential the broker has refused or that reached its expiry. A credential
+// the broker revoked early, or one an older broker named no expiry for, stays held until a call is
+// refused, so the first register after that still waits the full N. A
 // session the helper cannot enroll for want of a credential gets Code NO_CREDENTIAL and that reason
 // in Error, so a launcher can say what the session will do. The credential is read once, before
 // the wait, and that one reading decides both: an unenrolled session's reply says NO_CREDENTIAL
@@ -321,14 +322,18 @@ func (s *Server) login(ctx context.Context) Response {
 	return Response{OK: true, Code: code, LoginState: s.Broker.LoginStatus().State}
 }
 
-// loginStatus reports the most recent machine login, current or settled, and whether the helper
-// holds a launcher credential; an empty LoginState means none has ever run. CredentialHeld stays
-// true through a re-login that is denied, expires or is pending while an earlier login's
-// credential is held, and LoginRefused marks a credential the broker refused rather than a login
-// nobody approved.
+// loginStatus reports the most recent machine login, current or settled, whether the helper holds
+// a launcher credential and when it expires; an empty LoginState means none has ever run.
+// CredentialHeld stays true through a re-login that is denied, expires or is pending while an
+// earlier login's credential is held, and LoginRefused marks a credential the helper dropped
+// (refused, or past its expiry) rather than a login nobody approved.
 func (s *Server) loginStatus() Response {
 	ls := s.Broker.LoginStatus()
-	return Response{OK: true, Code: ls.Code, LoginState: ls.State, CredentialHeld: ls.CredentialHeld, LoginRefused: ls.Refused}
+	resp := Response{OK: true, Code: ls.Code, LoginState: ls.State, CredentialHeld: ls.CredentialHeld, LoginRefused: ls.Refused}
+	if !ls.CredentialExpiresAt.IsZero() {
+		resp.CredentialExpiresAt = ls.CredentialExpiresAt.UTC().Format(time.RFC3339)
+	}
+	return resp
 }
 
 // enrollBox registers a box's key as kind box — a pass-through broker call requiring no
@@ -435,6 +440,11 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 		// rather than when a backoff of up to a minute comes round.
 		enrolled := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 			sess.setError(err.Error())
+			if errors.Is(err, errNoCredential) {
+				s.Log.Error("session cannot enroll: the helper holds no launcher credential; run: agent-secrets launcher login, and have a human approve it",
+					"runtime_id", sess.RuntimeID, "why", s.Broker.noCredentialReason(), "in", delay)
+				return
+			}
 			s.Log.Warn("enroll failed; retrying", "runtime_id", sess.RuntimeID, "error", err, "in", delay)
 		}, func() error {
 			var err error
@@ -498,6 +508,11 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 // nothing further is attempted.
 func (s *Server) revokeLapsed(ctx context.Context, sess *Session, id string) bool {
 	revoked := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
+		if errors.Is(err, errNoCredential) {
+			s.Log.Error("session cannot enroll: revoking its lapsed enrollment first needs a launcher credential, and the helper holds none; run: agent-secrets launcher login, and have a human approve it",
+				"runtime_id", sess.RuntimeID, "enrollment_id", id, "why", s.Broker.noCredentialReason(), "in", delay)
+			return
+		}
 		s.Log.Warn("revoking the lapsed enrollment failed; retrying", "runtime_id", sess.RuntimeID, "enrollment_id", id, "error", err, "in", delay)
 	}, func() error { return s.revokeOnce(ctx, id) })
 	if !revoked && ctx.Err() == nil {
