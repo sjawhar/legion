@@ -96,8 +96,10 @@ description in its `SKILL.md`, as [Skills](/legion/legion/reference/skills/).
 ## Media
 
 Scripts that produce screenshots and narrated walkthroughs go in `docs/site/media/<section>/`, with a
-README there saying how to run them (`docs/site/media/broker/` is the example). Their output goes in
-`docs/site/public/media/`. A file at `public/media/<path>` is published at `/legion/media/<path>`,
+README there saying how to run them (`docs/site/media/broker/` is the example), and so do a
+walkthrough's sources: its raw takes, its cut and its narration. Only their output goes in
+`docs/site/public/media/`, which the site publishes as it is. A file at `public/media/<path>` is
+published at `/legion/media/<path>`,
 so a page embeds a screenshot as `![The Inbox](/legion/media/<path>.png)`.
 Media shows example data only: this repository is public, so no real hostname, account, token or
 private URL appears in a page, image or video.
