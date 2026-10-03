@@ -93,11 +93,11 @@ interface PaneOptions {
 
 /**
  * Runs one implementer pane on the real Oh My Pi until its run settles: the Legion and Envoy
- * extensions from this checkout, booted against a stand-in for the TypeScript daemon's worker
- * routes and the Envoy listener (no NATS: the Envoy extension then skips inbound delivery, and
- * the role claim is two listener calls), with a stand-in model gateway that answers the pane's
- * turns from `replies`, and a stand-in `legion` on PATH that records what it was run with. The
- * daemon's assignment arrives as the RPC `prompt`, as both daemons deliver it.
+ * extensions from this checkout, booted against a stand-in for the daemon's claim routes and the
+ * Envoy listener (no NATS: the Envoy extension then skips inbound delivery, and the role claim is
+ * two listener calls), with a stand-in model gateway that answers the pane's turns from
+ * `replies`, and a stand-in `legion` on PATH that records what it was run with. The daemon's
+ * assignment arrives as the RPC `prompt`.
  */
 async function runPane(
   binary: string,

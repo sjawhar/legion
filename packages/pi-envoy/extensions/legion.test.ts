@@ -24,14 +24,7 @@ import {
 } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-  agentSubject,
-  type IssueKey,
-  LEGION_ROLES,
-  type LegionRole,
-  roleToken,
-} from "@legion/contracts";
-import { z } from "zod";
+import { type IssueKey, LEGION_ROLES, type LegionRole, roleToken } from "@legion/contracts";
 import pkg from "../package.json";
 import { noteInjectedUserTurn, resetInjectedUserTurnsForTests } from "../src/dispatch-user-turn";
 import { classifySession } from "../src/legion/classify";
@@ -42,7 +35,6 @@ import type {
   RegisteredTool,
   SessionContext,
   ZodNumberProperty,
-  ZodProperty,
 } from "../src/pi-types";
 
 const natsConnections: {
@@ -325,23 +317,6 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   // handlers for one session event run in the opposite order to the manifest's.
   if (options.bindEnvoy !== false) envoyExtension(pi as never);
   return { commands, handlers, tools, sentMessages, entries, activeTools, title, pi };
-}
-
-/** A real zod-backed `pi.zod`, unlike `createPi()`'s identity-passthrough fake: lets a test parse
- * raw tool input through the actual schema `legionToolSchema` builds, proving a field survives
- * (or a malformed input is rejected) at the real registered-tool boundary, not only through a
- * mocked direct `execute()` call. */
-function createRealZodPi(): TestPi["zod"] {
-  return {
-    object: (shape) => z.object(shape as Record<string, z.ZodTypeAny>),
-    string: () => z.string() as unknown as ZodProperty,
-    number: () => z.number() as unknown as ZodNumberProperty,
-    boolean: () => z.boolean() as unknown as ZodProperty,
-    array: (item) => z.array(item as z.ZodTypeAny) as unknown as ZodProperty,
-    enum: (values) => z.enum(values as [string, ...string[]]) as unknown as ZodProperty,
-    unknown: () => z.unknown() as unknown as ZodProperty,
-    discriminatedUnion: () => ({}),
-  };
 }
 
 /** One SessionManager per pane, exactly as OMP hands it out: `/new` mutates the manager the
@@ -1021,9 +996,11 @@ describe("Legion OMP extension", () => {
 
     await bootWorker({ role: "tester", workspace, requests, sessionId: "ses_file_worker" });
 
-    expect(requests.find((request) => request.path === "/legion/v1/claims/register")).toMatchObject({
-      body: { bootToken: "file-boot-token" },
-    });
+    expect(requests.find((request) => request.path === "/legion/v1/claims/register")).toMatchObject(
+      {
+        body: { bootToken: "file-boot-token" },
+      }
+    );
   });
   test("exits the phase worker naming LEGION_BOOT_TOKEN_FILE and its path when the file is unreadable, never falling back to LEGION_BOOT_TOKEN", async () => {
     process.env.ENVOY_URL = "http://envoy.test";
@@ -3573,7 +3550,11 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
     await expect(
       controller.handlers.get("tool_call")?.(
-        { toolName: "bash", toolCallId: "go-controller-refused", input: { command: "legion state" } },
+        {
+          toolName: "bash",
+          toolCallId: "go-controller-refused",
+          input: { command: "legion state" },
+        },
         context
       )
     ).resolves.toEqual({
@@ -3608,7 +3589,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     );
     expect(subagent.title.set).toEqual([]);
     expect(registrations()).toEqual([
-      expect.objectContaining({ body: expect.objectContaining({ ompSessionFile: "/tmp/first.jsonl" }) }),
+      expect.objectContaining({
+        body: expect.objectContaining({ ompSessionFile: "/tmp/first.jsonl" }),
+      }),
     ]);
     expect(controller.holder()).toBe("ses_pane_first");
 
@@ -3619,7 +3602,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       controller.context("ses_pane_first", "/tmp/elsewhere/first.jsonl")
     );
     expect(registrations()).toEqual([
-      expect.objectContaining({ body: expect.objectContaining({ ompSessionFile: "/tmp/first.jsonl" }) }),
+      expect.objectContaining({
+        body: expect.objectContaining({ ompSessionFile: "/tmp/first.jsonl" }),
+      }),
       expect.objectContaining({
         body: expect.objectContaining({ ompSessionFile: "/tmp/elsewhere/first.jsonl" }),
       }),

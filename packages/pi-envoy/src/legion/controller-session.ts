@@ -31,9 +31,9 @@ export interface ControllerDaemon {
 }
 
 /**
- * Owns the controller session's identity, resume transcript, role claim, and grant path. This is
+ * Owns the controller session's identity, transcript, role claim, and grant path. This is
  * deliberately separate from the extension's root/worker bootstrap and tool-routing policy: a
- * controller has no worker capability or recovery token, and its session can change in place.
+ * controller has no worker capability, and its session can change in place.
  */
 export function createControllerSession(
   persistedTranscript: PersistedTranscript,
@@ -43,7 +43,7 @@ export function createControllerSession(
   let controllerSessionID: string | undefined;
   let controllerCapability: string | undefined;
   let mintControllerGrant: (() => Promise<GrantResponse>) | undefined;
-  // The daemon pane's own transcript as of the last successful claim, which a session navigation
+  // The controller's own transcript as of the last successful claim, which a session navigation
   // compares to decide whether to claim again; a hand-started takeover records none.
   let controllerTranscript: string | undefined;
 

@@ -7,7 +7,11 @@ import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { messageFor } from "@legion/envoy-client/errors";
 import { logger } from "@oh-my-pi/pi-utils";
 import { matchInjectedUserTurn } from "../src/dispatch-user-turn";
-import { classifySession, type LegionSessionKind, requiredEnvironment } from "../src/legion/classify";
+import {
+  classifySession,
+  type LegionSessionKind,
+  requiredEnvironment,
+} from "../src/legion/classify";
 import { createControllerSession } from "../src/legion/controller-session";
 import {
   bootstrapGoClaim,

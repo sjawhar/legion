@@ -121,10 +121,9 @@ function recordFrom(state: LegionGoState, issue: string): Readonly<Record<string
   return record;
 }
 
-/** The Go daemon's role-local workflow surface. The TypeScript-daemon tool remains separate until
- * Stage 7; no Go operation can schedule a worker. The handoff actions belong to every session but
- * the root architect: a phase worker, and a sub-architect (an architect whose issue is not its
- * tree). */
+/** The Go daemon's role-local workflow surface: no operation can schedule a worker. The handoff
+ * actions belong to every session but the root architect: a phase worker, and a sub-architect (an
+ * architect whose issue is not its tree). */
 export function createGoLegionTool(deps: {
   readonly pi: PiApi;
   readonly daemon: () => LegionGoDaemonClient;
