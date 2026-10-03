@@ -29,18 +29,16 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -85,25 +83,7 @@ type e2eServer struct {
 	URL     string
 	Store   *store.Store
 	Secrets *secrets.Local
-	Log     *lockedBuffer
-}
-
-// lockedBuffer is the broker's log, written by the reload ticker's goroutine and read by the test.
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
+	Log     fmt.Stringer
 }
 
 // newE2EServer holds e2eSecrets in a fake Secrets Manager and wires the full service graph —
@@ -114,12 +94,7 @@ func (b *lockedBuffer) String() string {
 func newE2EServer(t *testing.T) *e2eServer {
 	t.Helper()
 	st := storetest.Open(t)
-
-	logged := &lockedBuffer{}
-	flags, output := log.Flags(), log.Writer()
-	log.SetFlags(0)
-	log.SetOutput(logged)
-	t.Cleanup(func() { log.SetFlags(flags); log.SetOutput(output) })
+	logged := policytest.CaptureLog(t)
 
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
@@ -658,8 +633,7 @@ func TestEndToEnd(t *testing.T) {
 // tick.
 func (s *e2eServer) awaitStatus(t *testing.T, name string, status int, code string) {
 	t.Helper()
-	key := newSigningKey(t)
-	enrollmentID := s.insertEnrollment(t, key, testApprover)
+	enrollmentID, key := s.loginAndEnroll(t, testApprover, "e2e-reload-"+uuid.NewString()[:8])
 	deadline := time.Now().Add(reloadTimeout)
 	for {
 		got, body := s.session(t, key, enrollmentID, http.MethodPost, "/v1/requests",
@@ -672,27 +646,6 @@ func (s *e2eServer) awaitStatus(t *testing.T, name string, status int, code stri
 		}
 		time.Sleep(reloadInterval)
 	}
-}
-
-// insertEnrollment inserts a live box enrollment of operator directly, for a step that needs a
-// session of its own and no machine login.
-func (s *e2eServer) insertEnrollment(t *testing.T, key *ecdsa.PrivateKey, operator string) string {
-	t.Helper()
-	thumbprint, err := proof.Thumbprint(&key.PublicKey)
-	if err != nil {
-		t.Fatalf("thumbprint: %v", err)
-	}
-	ctx := context.Background()
-	credentialID, enrollmentID := uuid.NewString(), uuid.NewString()
-	if _, err := s.Store.Pool.Exec(ctx, `insert into launcher_credentials (id, operator, host, key_thumbprint, public_jwk, expires_at)
-		values ($1,$2,'e2e-reload',$3,'{}'::jsonb, now() + interval '1 day')`, credentialID, operator, uuid.NewString()); err != nil {
-		t.Fatalf("insert launcher_credentials: %v", err)
-	}
-	if _, err := s.Store.Pool.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, thumbprint, launcher_credential_id, lease_expires_at)
-		values ($1,'box',$2,$3,$4,$5, now() + interval '1 hour')`, enrollmentID, "e2e-reload-"+enrollmentID, operator, thumbprint, credentialID); err != nil {
-		t.Fatalf("insert enrollments: %v", err)
-	}
-	return enrollmentID
 }
 
 // awaitPendingFor fails t unless GET /v1/pending?approver=<person> lists recordID.

@@ -3,7 +3,11 @@
 package policytest
 
 import (
+	"bytes"
+	"fmt"
+	"log"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,4 +53,34 @@ func Current(t testing.TB, store *secrets.Local, services ...string) *policy.Cur
 		t.Fatalf("policy.NewCurrent: %v", err)
 	}
 	return cur
+}
+
+// CaptureLog points the default slog handler, which the broker logs through, at a buffer with no
+// timestamp until t ends, so a test reads the exact lines the broker writes; the reload ticker's
+// goroutine may write while the test reads.
+func CaptureLog(t testing.TB) fmt.Stringer {
+	t.Helper()
+	logged := &lockedBuffer{}
+	flags, output := log.Flags(), log.Writer()
+	log.SetFlags(0)
+	log.SetOutput(logged)
+	t.Cleanup(func() { log.SetFlags(flags); log.SetOutput(output) })
+	return logged
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

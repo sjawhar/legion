@@ -1,10 +1,8 @@
 package policy_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log"
 	"strings"
 	"sync"
 	"testing"
@@ -20,35 +18,6 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
-// captureLog points the default slog handler, which the broker logs through, at a buffer with
-// no timestamp, so a test reads the exact lines the broker writes.
-func captureLog(t *testing.T) *lockedBuffer {
-	t.Helper()
-	logged := &lockedBuffer{}
-	flags, output := log.Flags(), log.Writer()
-	log.SetFlags(0)
-	log.SetOutput(logged)
-	t.Cleanup(func() { log.SetFlags(flags); log.SetOutput(output) })
-	return logged
-}
-
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
 // refusedLine is the exact line the broker logs for a refused secret: the deployment's alarm
 // filters on it.
 func refusedLine(name, reason string) string {
@@ -60,7 +29,7 @@ func refusedLine(name, reason string) string {
 // as the source, for every form Secrets Manager reports the agent-secrets key in — its ARN, its
 // key id, and an alias that points at it by name or by ARN.
 func TestLoadServesEveryWellTaggedSecretOnTheKey(t *testing.T) {
-	logged := captureLog(t)
+	logged := policytest.CaptureLog(t)
 	keyID := policytest.KeyARN[strings.LastIndex(policytest.KeyARN, "/")+1:]
 	byForm := map[string]string{
 		"BY_ARN":       policytest.KeyARN,
@@ -138,7 +107,7 @@ func TestLoadRefusesEachUnservableSecretByNameWithTheExactLine(t *testing.T) {
 	badName.Name = policytest.Prefix + "Deel_Api_Key"
 	store.Put(badName)
 
-	logged := captureLog(t)
+	logged := policytest.CaptureLog(t)
 	set, err := policytest.Loader(store, legion).Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -207,7 +176,7 @@ func TestLoadReadsEveryPageOfThePrefixOnly(t *testing.T) {
 		entry(strings.ToUpper(policytest.Prefix) + "third"), entry(policytest.Prefix + "fourth"),
 	}}
 	loader := policy.Loader{Secrets: sm, Aliases: noAliases{t}, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
-	logged := captureLog(t)
+	logged := policytest.CaptureLog(t)
 	set, err := loader.Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -252,7 +221,7 @@ func (f *failingSecrets) ListSecrets(ctx context.Context, in *secretsmanager.Lis
 func TestReloadKeepsThePolicyWhenSecretsManagerFails(t *testing.T) {
 	store := &failingSecrets{Local: secrets.NewLocal(policytest.Secret("DEEL_API_KEY", owner, policy.TierAgent, "v"))}
 	loader := policy.Loader{Secrets: store, Aliases: store, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
-	logged := captureLog(t)
+	logged := policytest.CaptureLog(t)
 	cur, err := policy.NewCurrent(t.Context(), loader, 10*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewCurrent: %v", err)
