@@ -4,6 +4,8 @@
 
 ### Changed
 
+- The `dispatch_doc_read` description says it reads an uploaded file's text at its latest or named
+  version, and describes a file that is not UTF-8 text.
 - `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary
   and no question, and an approval is requested only once the human has agreed to every point in
   the document (LEGION-475).

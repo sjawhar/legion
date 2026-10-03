@@ -848,9 +848,11 @@ export const dispatchToolSpecs = [
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
     description:
-      "Read a live document or a named document version. Do not use it for issue status, asks, or events; " +
+      "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " +
+      "Do not use it for issue status, asks, or events; " +
       "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
       "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " +
+      "A file that is not UTF-8 text is described, with the route that serves its bytes. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),

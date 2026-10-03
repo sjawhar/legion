@@ -1659,6 +1659,45 @@ async function blockAsks(
 }
 
 /**
+ * dispatch_doc_read of an uploaded file or image. Dispatch serves a file's content only as the
+ * bytes of one of its versions (its `/text` route answers a file 400 NOT_DOCUMENT), so this reads
+ * the version asked for, or the latest, and returns it when it is UTF-8 text. A file carries no
+ * token, anchors or approval, so nothing else is read; bytes that are not text are described,
+ * with the route that serves them.
+ */
+async function readUploadedFile(
+  client: DispatchClient,
+  resolved: ResolvedArtifact,
+  requested: number | undefined
+): Promise<DispatchToolResult> {
+  const { artifact } = resolved;
+  const latest = Math.max(0, ...artifact.versions.map((version) => version.number));
+  const number = requested ?? latest;
+  const file = await client.fileVersion(artifact.id, number);
+  const of = number === latest ? "" : ` of ${latest}`;
+  const size = `${file.bytes.length.toLocaleString("en-US")} bytes`;
+  const details =
+    resolved.owner.kind === "project"
+      ? { project: artifact.project, document: `${artifact.project}/${artifact.slug}` }
+      : { issue: resolved.issue?.key };
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(file.bytes);
+  } catch {
+    return {
+      text:
+        `${artifact.name} is an uploaded ${file.mime} file (version ${number}${of}, ${size}) that is not ` +
+        `UTF-8 text, so dispatch_doc_read cannot show it. GET /api/v1/artifacts/${artifact.id}/versions/${number} serves its bytes.`,
+      details,
+    };
+  }
+  return {
+    text: `File ${artifact.name}: ${file.mime}, version ${number}${of}, ${size}.\n\n${text}`,
+    details,
+  };
+}
+
+/**
  * Refuses an approval request while the document holds an open decision block. A request names
  * the latest version, and a new version moves it to that version and leaves it waiting on its
  * agent, so a request over a block the human has yet to answer leaves their turn the moment they
@@ -2697,6 +2736,9 @@ export async function executeDispatchTool(
           : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
       const version = optionalNumber(args, "version") ?? ownerArguments.ref?.version;
+      if (resolved.artifact.kind === "file" || resolved.artifact.kind === "image") {
+        return readUploadedFile(client, resolved, version);
+      }
       const documentPromise = client.docRead(resolved.artifact.id, version);
       const marksPromise = openArtifactMarks(client, resolved);
       const marksResultPromise = marksPromise.then(
