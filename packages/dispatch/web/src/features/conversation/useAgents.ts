@@ -17,12 +17,13 @@ export function useAgents(
   refetch: () => Promise<unknown>;
   titles: ReadonlyMap<string, string>;
 } {
+  // It retries as every read does (`main.tsx`): a dropped connection or a 5xx is tried twice more
+  // before the Agents page says it could not load agents.
   const { data, error, isError, isPending, refetch } = useQuery({
     enabled,
     queryFn: () => api.listAgents(),
     queryKey: ["agents"],
     refetchInterval: refreshWhileOpen ? 15_000 : false,
-    retry: false,
     staleTime: 10_000,
   });
   const agents = data ?? EMPTY_AGENTS;
