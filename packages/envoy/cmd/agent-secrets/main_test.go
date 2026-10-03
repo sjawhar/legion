@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -298,22 +299,41 @@ func TestExecFormGrantRunsChildWithValueInEnvironment(t *testing.T) {
 	}
 }
 
+// TestExecFormPendingExitsSeventyFiveWithNoChild also pins what the wait says before it starts:
+// the request id and the bound, and where to decide it — the record's Dispatch page under
+// AGENT_SECRETS_APPROVE_URL, or the Inbox when that is unset.
 func TestExecFormPendingExitsSeventyFiveWithNoChild(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	broker, _ := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
-		"PENDING_ME", "--wait", "200ms", "--", "sh", "-c", "echo ran-the-child")
-	if exit != exitPending {
-		t.Fatalf("exit = %d, want %d (pending): stdout=%q stderr=%q", exit, exitPending, stdout, stderr)
-	}
-	if strings.Contains(stdout, "ran-the-child") {
-		t.Fatalf("child ran while request was still pending: stdout=%q", stdout)
-	}
-	if !strings.Contains(stderr, "agent-secrets status req-pending") {
-		t.Fatalf("stderr = %q, want the request id and the status command to check it", stderr)
+	for _, tc := range []struct {
+		approveURL, where string
+	}{
+		{"", "approve or deny it under Credential requests in the Dispatch Inbox"},
+		{"https://dispatch.example/", "approve or deny it at https://dispatch.example/credentials/rec-pending-1\n"},
+	} {
+		t.Run("approve URL "+strconv.Quote(tc.approveURL), func(t *testing.T) {
+			t.Setenv("AGENT_SECRETS_APPROVE_URL", tc.approveURL)
+			stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
+				"PENDING_ME", "--wait", "200ms", "--", "sh", "-c", "echo ran-the-child")
+			if exit != exitPending {
+				t.Fatalf("exit = %d, want %d (pending): stdout=%q stderr=%q", exit, exitPending, stdout, stderr)
+			}
+			if strings.Contains(stdout, "ran-the-child") {
+				t.Fatalf("child ran while request was still pending: stdout=%q", stdout)
+			}
+			if !strings.Contains(stderr, "request req-pending is waiting for approval; waiting up to 200ms\n") {
+				t.Fatalf("stderr = %q, want the wait announced with the request id and its bound", stderr)
+			}
+			if !strings.Contains(stderr, tc.where) {
+				t.Fatalf("stderr = %q, want %q", stderr, tc.where)
+			}
+			if !strings.Contains(stderr, "agent-secrets status req-pending") {
+				t.Fatalf("stderr = %q, want the request id and the status command to check it", stderr)
+			}
+		})
 	}
 }
 
