@@ -793,11 +793,11 @@ type compactIfIdleKey struct{}
 
 // compactIfIdle marks ctx so Compact leaves a room whose lock another holder has for a later
 // compaction rather than waiting for the lock. The room's persistence worker compacts under it
-// (servicePersistenceAdapter.Compact): the worker compacts as it exits, and a settlement holding
-// the room's lock can be waiting for that exit, since an update the settlement commits into a room
-// whose worker is leaving is stored on the settlement's own goroutine once the worker has gone
-// (ygo's persistStranded). A compaction that waited for the lock would wait for itself. Compaction
-// is housekeeping, and the next one folds what a skipped one would have.
+// (servicePersistenceAdapter.Compact) as it exits. roomServer prevents that exit from racing a
+// repair, but intentionally does not gate a published live write: it is already durable, and its
+// room can still retire under publishLiveUpdate's Apply. Compaction is housekeeping, so that
+// worker leaves a busy room for the next compaction rather than waiting behind a document-lock
+// holder. A failed room's eviction is the exception: it compacts under the lock before recovery.
 func compactIfIdle(ctx context.Context) context.Context {
 	return context.WithValue(ctx, compactIfIdleKey{}, true)
 }
@@ -904,6 +904,15 @@ var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 // maxUpdateItems is the most items one V1 document update may carry: ygo's maxV2Items, which it
 // does not export. TestUploadRefusesADocumentTooLargeToStore (api) holds the two together: a
 // document encoding to more than this is refused by ygo and answered as CAP_EXCEEDED with the count.
+//
+// It is also the pending queue every decode of document bytes takes, whether the service builds
+// the decoder (newDocumentCopy) or ygo builds it for the service (Server.MaxPendingItems: the
+// rooms, and ygo's check of each update the service broadcasts). ygo's decoder parks each item
+// whose parent it cannot place yet and refuses the update once its queue is full, 100,000 items at
+// ygo's default. An update decoded alone parks every item that leans on the document it was
+// written against, and no update carries more items than this, so no decode parks past it.
+// TestTheStoreTakesOneBrowserUpdateItsRoomTook and TestASettlementStampsMoreBlocksThanYgosDefaultQueue
+// are the updates ygo's default refuses.
 const maxUpdateItems = 1 << 20
 
 // updateItems is the number of items a V1 update of one client declares in its header: the

@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import type { Artifact, Ask, Comment, IssueDetails } from "../../api/types";
 import { buildIssuePath } from "../refs/routes";
-import { useMargin } from "./margin-context";
+import { type DocumentBridge, useMargin } from "./margin-context";
 
 export const specArtifact: Artifact = {
   created_at: "2026-09-09T00:00:00Z",
@@ -126,14 +126,37 @@ export function SameCommentLink(): ReactNode {
   );
 }
 
-/** Stands in for the open document reporting its layout. A document with no live mark and no
- *  typed ask block reports empty maps, which is still an answer. */
-export function ReportEmptyLayoutButton(): ReactNode {
-  const { setBlockPlacements, setMarkPlacements } = useMargin();
+/** A document bridge whose editor actions do nothing unless a test supplies them. */
+export function stubDocumentBridge(
+  artifactId: string,
+  overrides: Partial<DocumentBridge> = {}
+): DocumentBridge {
+  return {
+    artifactId,
+    focusBlock: () => {},
+    focusMark: () => {},
+    removeMark: () => {},
+    retypeMark: () => ({ refused: "missing" }),
+    setActiveBlocks: () => {},
+    setActiveMarks: () => {},
+    ...overrides,
+  };
+}
+
+/** Stands in for a document registering with the margin and reporting its layout: by default the
+ *  spec the landing tests' margin shows. A document with no live mark and no typed ask block
+ *  reports empty maps, which is still an answer. */
+export function ReportEmptyLayoutButton({
+  artifactId = specArtifact.id,
+}: {
+  artifactId?: string;
+}): ReactNode {
+  const { registerDocument, setBlockPlacements, setMarkPlacements } = useMargin();
 
   return (
     <button
       onClick={() => {
+        registerDocument(stubDocumentBridge(artifactId));
         setMarkPlacements(new Map());
         setBlockPlacements(new Map());
       }}
