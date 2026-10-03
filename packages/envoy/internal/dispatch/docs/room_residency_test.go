@@ -472,30 +472,32 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	t.Logf("%d peer writes and %d projections", writes.Load(), projections.Load())
 }
 
-// A room's reads walk a replica of their own (readLive), and the replica goes with the room: it
-// holds a whole copy of the room's document, so a listing that outlived the room would keep that
-// copy for every room the server has ever evicted.
+// A room's reads walk the replica its update observer keeps (readLive), and the replica goes with
+// the room: it holds a whole copy of the room's document, so a listing that outlived the room would
+// keep that copy for every room the server has ever evicted.
 func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
 	ctx := context.Background()
-	// A read that loads the room, which makes the replica the room's reads walk.
-	if _, err := service.docTree(ctx, artifactID); err != nil {
+	// A write the room's update observer sees, which makes its replica.
+	if err := service.ProjectMark(ctx, artifactID, "projection", MarkRecord{
+		Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
+	}, model.Actor{Kind: "user", ID: "bob"}); err != nil {
 		t.Fatal(err)
 	}
 	// The listing's key holds the room's document weakly, as the listing does.
 	key := weak.Make(service.srv.GetDoc(artifactID))
 	listed, ok := service.replicas.Load(key)
 	if !ok {
-		t.Fatal("the read room lists no replica")
+		t.Fatal("the written room lists no replica")
 	}
-	reads := listed.(*replica)
-	reads.mu.Lock()
-	held := reads.doc != nil
-	reads.mu.Unlock()
+	replica := listed.(*renderedReplica)
+	replica.mu.Lock()
+	held := replica.doc != nil
+	replica.mu.Unlock()
 	if !held {
-		t.Fatal("the read room's replica holds no copy")
+		t.Fatal("the written room's replica holds no copy")
 	}
 
 	if err := service.Evict(ctx, artifactID); err != nil {
@@ -509,7 +511,7 @@ func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
 }
 
 // A tree a read of a resident room returns is its reader's to change. The read walks the replica
-// the room's reads keep (readLive), which every later read walks too, so a tree that held the
+// the room's update observer keeps (readLive), which every later read walks too, so a tree that held the
 // replica's own mark attributes or attribute values would carry its reader's edit into the next
 // read: a link reading back with the target the reader wrote, an answered ask with the choice it
 // wrote.
@@ -535,7 +537,7 @@ see [link](https://a.example/) here
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// The first read makes the replica the later ones walk.
+	// The answer's update made the room's replica, which the reads walk.
 	before, err := service.Text(ctx, artifactID)
 	if err != nil {
 		t.Fatal(err)

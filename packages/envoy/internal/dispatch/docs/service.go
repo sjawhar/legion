@@ -154,8 +154,9 @@ type Service struct {
 	// preloads holds, per room, the durable state a document socket's admission check decoded
 	// (*preloadedDocument), for the room load that socket makes next (takePreload).
 	preloads sync.Map
-	// replicas holds, for each room document its reads have walked, the replica they walk
-	// (*replica), keyed by a weak pointer to that document (readReplica).
+	// replicas holds, for each resident room document, the replica its update observer keeps
+	// (*renderedReplica), which the document's reads walk (readLive), keyed by a weak pointer to
+	// that document (keepReplica).
 	replicas sync.Map
 }
 
