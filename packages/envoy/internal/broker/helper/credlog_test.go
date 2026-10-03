@@ -55,6 +55,9 @@ func TestTheHelperLogsEveryChangeOfTheLauncherCredential(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	// pollLogin logs the login after it records it; wait for the line so it lands before the
+	// refusal's own.
+	waitForRecord(t, &out, "machine login issued; the helper holds a launcher credential")
 	credentialID, expiresAt := b.cred.Load().id, b.cred.Load().expiresAt.Format(time.RFC3339)
 	if _, _, err := b.Enroll(context.Background(), sess); err != nil {
 		t.Fatalf("a fresh credential must enroll: %v", err)
