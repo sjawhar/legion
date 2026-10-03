@@ -62,7 +62,9 @@
   `Approve` and `Request changes` close it, so the next call opens a new one.
 - The run-end nudge offers a decision block in the document a question concerns, or `dispatch_ask`
   for a to-do. A `dispatch_doc_edit` that inserts an ask block or retypes a block into one spends
-  the nudge's check, as `dispatch_ask` does.
+  the nudge's check, as `dispatch_ask` does, and so does a `dispatch_issue` or `dispatch_artifact`
+  whose stored document the server counted a decision block in. An inserted opener is read on its
+  own line, so a long run of blank lines no longer stalls the session for seconds.
 
 ### Fixed
 

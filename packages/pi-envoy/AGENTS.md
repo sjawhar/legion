@@ -402,8 +402,10 @@ its verdict. A failure is logged once per session (`logger.warn`), never notifie
 
 The check is owed and spent like the host's todo reminder rather than once per period: the arming
 turn owes one, running it spends it whatever came back, the agent opening the ask itself spends it
-too (`dispatch_ask`, `dispatch_request_approval`, or a `dispatch_doc_edit` that inserts an ask block
-or retypes a block into one: `opensAsk`), and the agent's next real work — a successful
+too (`dispatch_ask`, `dispatch_request_approval`, a `dispatch_issue` or `dispatch_artifact` whose
+result counts a decision block in the stored document (`advice.decision_blocks`), or a
+`dispatch_doc_edit` that inserts an ask block, its opener alone on a line, or retypes a block into
+one: `opensAsk`), and the agent's next real work — a successful
 `tool_result` whose tool is not a `dispatch_*` one — owes another. A settled turn that
 only replies calls no tool, so the nudge's continuation cannot re-arm itself; work is bounded by
 `ASK_CHECKS_PER_PERIOD` (5).

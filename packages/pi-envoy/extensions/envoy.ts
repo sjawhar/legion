@@ -245,17 +245,42 @@ const UNASKED_WAIT_REMINDER =
   "dispatch_ask for a to-do only a human can do, naming exactly what you need and from whom.";
 
 /**
- * Whether a successful call opened the ask itself, so the nudge has nothing to say: `dispatch_ask`,
- * `dispatch_request_approval`, or a `dispatch_doc_edit` that writes a decision block, by inserting
- * an `ask` block or by retyping a block into one.
+ * An `ask` block's opener: `:::ask{` at the start of a line, after nothing but spaces or tabs, as the
+ * server reads an opener only on a line of its own. `[ \t]*` keeps each attempt on one line, where a
+ * `\s*` would cross line breaks and make every line start of a long blank run rescan the run.
  */
-function opensAsk({ toolName, input }: Pick<ToolResultEvent, "toolName" | "input">): boolean {
+const ASK_BLOCK_OPENER = /^[ \t]*:::ask\{/mu;
+
+/** How many decision blocks the server counted in the document a write stored (its result's
+ * `advice.decision_blocks`); 0 when the result carries no count. */
+function storedDecisionBlocks(details: unknown): number {
+  if (typeof details !== "object" || details === null) return 0;
+  const { advice } = details as { advice?: unknown };
+  if (typeof advice !== "object" || advice === null) return 0;
+  const { decision_blocks: blocks } = advice as { decision_blocks?: unknown };
+  return typeof blocks === "number" ? blocks : 0;
+}
+
+/**
+ * Whether a successful call opened the ask itself, so the nudge has nothing to say: `dispatch_ask`,
+ * `dispatch_request_approval`, a `dispatch_issue` or `dispatch_artifact` whose stored document holds
+ * a decision block, or a `dispatch_doc_edit` that writes one, by inserting an `ask` block or by
+ * retyping a block into one.
+ */
+function opensAsk({
+  toolName,
+  input,
+  details,
+}: Pick<ToolResultEvent, "toolName" | "input" | "details">): boolean {
   if (toolName === "dispatch_ask" || toolName === "dispatch_request_approval") return true;
+  if (toolName === "dispatch_issue" || toolName === "dispatch_artifact") {
+    return storedDecisionBlocks(details) > 0;
+  }
   if (toolName !== "dispatch_doc_edit" || !Array.isArray(input.ops)) return false;
   // A successful edit's operations passed the tool's schema.
   return (input.ops as readonly EditOp[]).some(
     ({ op, markdown, type }) =>
-      (op === "insert" && markdown !== undefined && /^\s*:::ask\{/mu.test(markdown)) ||
+      (op === "insert" && markdown !== undefined && ASK_BLOCK_OPENER.test(markdown)) ||
       (op === "retype" && type === "ask")
   );
 }

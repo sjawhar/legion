@@ -2176,6 +2176,71 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
+  test("a document written through dispatch_issue or dispatch_artifact spends the check only when it holds a decision block", async () => {
+    // The query creates a fresh extension module with isolated module-level awareness state.
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-document-upload");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_document_upload", () => ({}));
+
+    // The server's count, which a `path` upload carries too, not the input's text.
+    await session.userTurn();
+    await session.toolResult({
+      toolName: "dispatch_issue",
+      toolCallId: "call-issue",
+      input: { project: "DSP", title: "Saved carts" },
+      details: { issue: "DSP-1", advice: { decision_blocks: 1 } },
+      isError: false,
+    });
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+
+    await session.userTurn();
+    await session.toolResult({
+      toolName: "dispatch_artifact",
+      toolCallId: "call-artifact",
+      input: { issue: "DSP-1", name: "spec.md", path: "/tmp/spec.md" },
+      details: { issue: "DSP-1", advice: { decision_blocks: 2 } },
+      isError: false,
+    });
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([]);
+
+    await session.userTurn();
+    await session.toolResult({
+      toolName: "dispatch_artifact",
+      toolCallId: "call-artifact-plain",
+      input: { issue: "DSP-1", name: "notes.md", content: "Notes." },
+      details: { issue: "DSP-1", advice: { decision_blocks: 0 } },
+      isError: false,
+    });
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([
+      expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
+    ]);
+  });
+
+  test("an inserted run of blank lines is read in linear time and opens no ask", async () => {
+    // The query creates a fresh extension module with isolated module-level awareness state.
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-blank-run");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_blank_run", () => ({}));
+
+    await session.userTurn();
+    const startedAt = performance.now();
+    await session.toolResult({
+      toolName: "dispatch_doc_edit",
+      toolCallId: "call-blank-run",
+      input: { ops: [{ op: "insert", markdown: `${"\n".repeat(200_000)}A plain revision.` }] },
+      details: {},
+      isError: false,
+    });
+    // A pattern whose leading whitespace crosses lines rescans the run from each line start: tens
+    // of seconds for this one, inside the session's tool_result handler.
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    await session.stop();
+    expect(session.fixture.deliveries).toEqual([
+      expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
+    ]);
+  });
+
   test("the five-check period budget applies while the session holds open asks", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-held-budget");
     const session = await bootAskNudge(
