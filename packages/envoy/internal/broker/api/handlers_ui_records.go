@@ -21,10 +21,14 @@ import (
 // enrollment's slot, one of several independent identities in one pod, and null for every
 // enrollment without one.
 type recordEnrollmentResp struct {
-	Kind      string  `json:"kind"`
-	RuntimeID string  `json:"runtime_id"`
-	Operator  string  `json:"operator"`
-	Slot      *string `json:"slot"`
+	// "box", "host" or "pod".
+	Kind string `json:"kind"`
+	// The session's runtime: a host session's host:pid:start time, a box's id, a pod's UID.
+	RuntimeID string `json:"runtime_id"`
+	// The person the session runs for; empty for a pod.
+	Operator string `json:"operator"`
+	// The pod slot it holds; null for every enrollment without one.
+	Slot *string `json:"slot"`
 }
 
 func enrollmentResp(e record.Enrollment) recordEnrollmentResp {
@@ -34,25 +38,44 @@ func enrollmentResp(e record.Enrollment) recordEnrollmentResp {
 // recordDecisionResp is a decided record's terminal event. CredentialID is null unless the
 // decision minted a launcher credential: an agent_secret record's approval names none.
 type recordDecisionResp struct {
-	Event        string    `json:"event"`
-	At           time.Time `json:"at"`
-	CredentialID *string   `json:"credential_id"`
+	// "approved", "denied", "expired" or "cancelled".
+	Event string `json:"event"`
+	// When it was decided.
+	At time.Time `json:"at"`
+	// The machine credential an approved machine login minted; null otherwise.
+	CredentialID *string `json:"credential_id"`
 }
 
+// recordResponse is a credential-request record as GET /v1/credential-requests/{record} and
+// POST /v1/machine-logins/lookup answer it.
 type recordResponse struct {
-	RecordID        string                `json:"record_id"`
-	Kind            string                `json:"kind"`
-	State           string                `json:"state"`
-	Approver        string                `json:"approver"`
-	Enrollment      *recordEnrollmentResp `json:"enrollment"`
-	Identifiers     []string              `json:"identifiers"`
-	Service         *string               `json:"service"`
-	Reason          string                `json:"reason"`
-	LifetimeSeconds int                   `json:"lifetime_seconds"`
-	RulesVersion    string                `json:"rules_version"`
-	ExpiresAt       time.Time             `json:"expires_at"`
-	RequestedAt     time.Time             `json:"requested_at"`
-	Decided         *recordDecisionResp   `json:"decided"`
+	// The record's id: the SHA-256 of its text.
+	RecordID string `json:"record_id"`
+	// "agent_secret" (a secret request) or "launcher_credential" (a machine login).
+	Kind string `json:"kind"`
+	// "pending", or how it ended: "approved", "denied", "expired", "cancelled" or "revoked".
+	State string `json:"state"`
+	// The one login that may decide it.
+	Approver string `json:"approver"`
+	// The session asking; null for a machine login.
+	Enrollment *recordEnrollmentResp `json:"enrollment"`
+	// The secrets asked for, or the machine logging in.
+	Identifiers []string `json:"identifiers"`
+	// The service a machine login is for, when it logs a service in rather than a person's
+	// machine; null otherwise.
+	Service *string `json:"service"`
+	// The reason the session gave, verbatim.
+	Reason string `json:"reason"`
+	// How long the grant or credential lasts once approved.
+	LifetimeSeconds int `json:"lifetime_seconds"`
+	// The SHA-256 of the rules that decided it needs approval.
+	RulesVersion string `json:"rules_version"`
+	// When it expires undecided.
+	ExpiresAt time.Time `json:"expires_at"`
+	// When it was asked.
+	RequestedAt time.Time `json:"requested_at"`
+	// How it was decided; null while pending.
+	Decided *recordDecisionResp `json:"decided"`
 }
 
 // buildRecordResponse is GET /v1/credential-requests/{id}'s exact shape, reused verbatim by
@@ -97,8 +120,20 @@ func (s *server) readRecord(w http.ResponseWriter, r *http.Request) {
 // checks it unconditionally on both approve and deny — and ignored for an agent_secret record,
 // which requests.Machine.ApplyDecision never asks for.
 type decideBody struct {
-	Approver string  `json:"approver"`
-	Code     *string `json:"code"`
+	// The Dispatch login of the person deciding, which must be the record's approver.
+	Approver string `json:"approver"`
+	// A machine login only: its confirmation code, typed again; ignored for a secret request.
+	Code *string `json:"code"`
+}
+
+// decisionResponse is what an approval answers.
+type decisionResponse struct {
+	// The machine credential an approved machine login minted; null for a secret request.
+	CredentialID *string `json:"credential_id"`
+	// The grant an approved secret request made; null for a machine login.
+	GrantID *string `json:"grant_id"`
+	// "approved".
+	State string `json:"state"`
 }
 
 func (s *server) approveRecord(w http.ResponseWriter, r *http.Request) { s.decideRecord(w, r, true) }
@@ -163,10 +198,10 @@ func (s *server) decideMachineLogin(w http.ResponseWriter, r *http.Request, reco
 		return
 	}
 	if !approve {
-		writeJSON(w, http.StatusOK, map[string]string{"state": "denied"})
+		writeJSON(w, http.StatusOK, stateResponse{State: "denied"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"state": "approved", "grant_id": nil, "credential_id": strPtr(credentialID)})
+	writeJSON(w, http.StatusOK, decisionResponse{CredentialID: strPtr(credentialID), State: "approved"})
 }
 
 func (s *server) decideAgentSecret(w http.ResponseWriter, r *http.Request, recordID string, approve bool, login string) {
@@ -189,8 +224,8 @@ func (s *server) decideAgentSecret(w http.ResponseWriter, r *http.Request, recor
 		return
 	}
 	if !approve {
-		writeJSON(w, http.StatusOK, map[string]string{"state": "denied"})
+		writeJSON(w, http.StatusOK, stateResponse{State: "denied"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"state": "approved", "grant_id": strPtr(dec.GrantID), "credential_id": nil})
+	writeJSON(w, http.StatusOK, decisionResponse{GrantID: strPtr(dec.GrantID), State: "approved"})
 }

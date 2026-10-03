@@ -10,7 +10,7 @@ export type LegionNoticeSubject<
 
 /** The Go daemon's controller topic for `project` (the project token): the notice family's one
  * member that names no issue, since no issue key can be `controller`. What the Go daemon publishes
- * here is listed at `notify.ControllerTopic` (packages/daemon-go/internal/notify). */
+ * here is listed at `notify.ControllerTopic` (packages/daemon/internal/notify). */
 export function legionControllerNoticeSubject<Project extends string>(
   project: Project
 ): LegionNoticeSubject<Project, "controller"> {
@@ -110,7 +110,7 @@ type SubjectSegmentReplaced = (typeof SUBJECT_SEGMENT_REPLACED)[number];
 
 /**
  * Makes a value one NATS subject segment, writing each of `SUBJECT_SEGMENT_REPLACED` as `_`; a
- * slash is kept. The Go coordinator's intake (`packages/daemon-go/internal/intake`) mirrors it for
+ * slash is kept. The Go coordinator's intake (`packages/daemon/internal/intake`) mirrors it for
  * the GitHub subjects' owner and name, where only a dot can occur.
  *
  * Note: this is intentionally lossy; subscribers needing the exact identifier

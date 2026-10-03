@@ -22,7 +22,7 @@ const workerRoot = path.join(skillsRoot, "legion-worker");
 const linkingRoots = [
   skillsRoot,
   path.join(repoRoot, "packages/pi-envoy/roles"),
-  path.join(repoRoot, "packages/daemon-go/internal/prompts"),
+  path.join(repoRoot, "packages/daemon/internal/prompts"),
 ];
 const SPILL_THRESHOLD_BYTES = 50 * 1024;
 // A link's path stops at whitespace, a closing bracket or quote, a code span, or Markdown emphasis

@@ -202,7 +202,8 @@ func (w *marginWatch) refusal() error {
 const maxAnchorBytes = 1 << 20
 
 // anchorWatch is a write's document tree before it and after it, whose anchor marks refusal
-// weighs.
+// weighs. before is nil for a write that repairs a tree outside the schema (applyLive), whose marks
+// are weighed as a new document's would be: against none.
 type anchorWatch struct{ before, after *pmdoc.Node }
 
 // refusal is the refusal of a write that leaves the anchor marks of the document holding more than
@@ -221,8 +222,12 @@ func (w anchorWatch) refusal() error {
 }
 
 // anchorText is the text the anchor marks on tree's text carry: every string in each comment's,
-// suggestion's and ask's mark, counted once however many texts the mark covers.
+// suggestion's and ask's mark, counted once however many texts the mark covers. No tree carries
+// none.
 func anchorText(tree *pmdoc.Node) int {
+	if tree == nil {
+		return 0
+	}
 	seen := map[string]bool{}
 	text := 0
 	for stack := []*pmdoc.Node{tree}; len(stack) > 0; {
