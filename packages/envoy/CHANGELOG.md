@@ -92,7 +92,7 @@
   GitHub reads (`/api/github/rest/...`) go to GitHub as the GitHub App installation, GET only and
   only a pull request, an issue or a commit's check runs. `DISPATCH_ALLOWED_LOGINS` and
   `DISPATCH_APP_CLIENT_SECRET` are removed and refused at boot; GitHub OAuth sign-in, the per-user
-  GitHub token table (`users`, dropped by `0068`) and the GraphQL proxy are gone (AGENTC-1563).
+  GitHub token table (`users`, dropped by `0068`) and the GraphQL proxy are gone.
 - A blank approval-request `summary` is refused (`400 SUMMARY_INPUT`) with text that asks for what
   the human is approving, rather than for what the version proposes that the human has not agreed
   to, and the advice in `409 APPROVAL_WAITS_ON_HUMAN` and in an approval ask's `409 ASK_KIND_FIXED`

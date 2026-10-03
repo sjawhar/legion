@@ -1,5 +1,5 @@
 -- 0068_people.up.sql
--- AGENTC-1563: people sign in to Dispatch with Google Workspace through the shared sign-in pool
+-- People sign in to Dispatch with Google Workspace through the shared sign-in pool
 -- and are named by lowercase email.
 --
 -- `people` is everyone who has signed in: the options the assignee picker offers and the only
