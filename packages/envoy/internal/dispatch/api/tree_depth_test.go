@@ -19,7 +19,8 @@ import (
 // room's CRDT, below pmdoc.Update's own validation. At the bound, the last peer's settlement stamps
 // the chain's blocks and versions it, GET /text answers 200 with its markdown and token, and
 // GET /blocks 200 with a token for every block, each of which hashes the subtree below it. One level
-// deeper, settlement writes no version and both reads answer 500 DOC_SCHEMA.
+// deeper, settlement writes no version and both reads answer 409 DOC_SCHEMA naming the repair: the
+// stored tree is outside the schema, and a replacement from markdown repairs it.
 func TestEveryReadServesATreeAtTheDepthBound(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -28,7 +29,7 @@ func TestEveryReadServesATreeAtTheDepthBound(t *testing.T) {
 		versions int
 	}{
 		{name: "at the bound", depth: pmdoc.MaxTreeDepth, status: http.StatusOK, versions: 2},
-		{name: "past the bound", depth: pmdoc.MaxTreeDepth + 1, status: http.StatusInternalServerError, versions: 1},
+		{name: "past the bound", depth: pmdoc.MaxTreeDepth + 1, status: http.StatusConflict, versions: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			documentService, handler, database := browserDocumentService(t)
@@ -60,8 +61,8 @@ func TestEveryReadServesATreeAtTheDepthBound(t *testing.T) {
 				if read.response.Code != test.status {
 					t.Fatalf("%s of a tree %d levels deep: status=%d body=%.300s, want %d", read.route, test.depth, read.response.Code, read.response.Body.String(), test.status)
 				}
-				if test.status != http.StatusOK && !strings.Contains(read.response.Body.String(), `"code":"DOC_SCHEMA"`) {
-					t.Fatalf("%s of a tree %d levels deep: body=%.300s, want DOC_SCHEMA", read.route, test.depth, read.response.Body.String())
+				if test.status != http.StatusOK && (!strings.Contains(read.response.Body.String(), `"code":"DOC_SCHEMA"`) || !strings.Contains(read.response.Body.String(), "replace the document from markdown to repair it")) {
+					t.Fatalf("%s of a tree %d levels deep: body=%.300s, want DOC_SCHEMA naming the repair", read.route, test.depth, read.response.Body.String())
 				}
 			}
 			if test.status != http.StatusOK {
