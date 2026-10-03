@@ -129,10 +129,10 @@ export function isSourceNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "SOURCE_NOT_FOUND";
 }
 
-// A broker deployed without credential requests configured (no DISPATCH_AGENT_SECRETS_URL)
-// answers every credential route with this 404 — the same class as the architecture-source
-// 404 above it: retrying changes nothing, and every credential query (the Inbox's requests
-// section, Settings' live grants) treats it as "not configured" rather than a failure.
+// A Dispatch with no secrets broker configured (no DISPATCH_AGENT_SECRETS_URL) answers every
+// credential route but the pending list with this 404 — the same class as the architecture-source
+// 404 above it: retrying changes nothing. The pending list, which every page reads, answers `null`
+// instead (`getCredentialPending`).
 export function isCredentialFeatureOff(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "FEATURE_OFF";
 }
@@ -668,9 +668,10 @@ export class DispatchApiClient {
   }
 
   /** `GET /api/v1/credential-requests?approver=me`: every request waiting on the viewer, as
-   *  the Inbox's credential-requests section lists them. */
-  getCredentialPending(): Promise<CredentialPendingResponse> {
-    return this.json<CredentialPendingResponse>(
+   *  the Inbox's credential-requests section lists them, or `null` when this Dispatch has no
+   *  secrets broker. */
+  getCredentialPending(): Promise<CredentialPendingResponse | null> {
+    return this.json<CredentialPendingResponse | null>(
       pathWithQuery("/api/v1/credential-requests", { approver: "me" })
     );
   }

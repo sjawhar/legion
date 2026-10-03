@@ -173,16 +173,22 @@ names its count. The full vocabulary, with the reason each call beat its alterna
 `features/credentials/` renders the whole AGENTC-393 credential-request approval surface —
 directed, signature-verified, immutable-record requests the broker owns and decides; Dispatch
 relays, renders, and names the deciding human. The feature is off — the inbox section and the
-Settings grants section hidden, its routes 404-clean — whenever `DISPATCH_AGENT_SECRETS_URL` is
-unset on the server; every SPA read of that state comes from an ordinary `404 FEATURE_OFF` on the
-pending-list query, never a separate capability flag. `CredentialRequestsSection.tsx` mounts in
-`features/inbox/Inbox.tsx`, above the ask sections and outside its roving-focus/`ViewportAnchor`
-mechanism (it is not an ask row): each pending row shows a kind badge ("Secret request" for
-`agent_secret`, "Machine login" for `launcher_credential`), the requested identifiers, and a
+Settings grants section hidden — whenever `DISPATCH_AGENT_SECRETS_URL` is unset on the server, and
+the SPA learns so from the pending list itself, never a separate capability flag: there it answers
+`200` with `null` (every other credential route answers `404 FEATURE_OFF`), since every page reads
+that list for the `Needs you` badge and a 404 made each page of a deployment without a broker log a
+failed request. The server reads its broker setting once, at boot, so `credentialPendingQuery` holds
+a `null` answer for the session: the query is never fetched again (`enabled` is false once its data
+is `null`) - not when another reader mounts, on a focus, or when the event stream refreshes every
+query - which `features/inbox/Inbox.no-broker.test.tsx` holds. `CredentialRequestsSection.tsx`
+mounts in `features/inbox/Inbox.tsx`, above the ask sections and outside its
+roving-focus/`ViewportAnchor` mechanism (it is not an ask row): each pending row shows a kind
+badge ("Secret request" for `agent_secret`, "Machine login" for `launcher_credential`), the
+requested identifiers, and a
 relative `Timestamp`, linking to `/credentials/:recordId` — except a machine-kind row, which links
 to `/credentials/machine` instead, since only the typed code selects a machine login (ruling 13: a
 direct record link can never approve a machine login). `pending.ts`'s `useCredentialRequests` is
-the one reading of that list - `listed` (empty under `FEATURE_OFF`), `loading` or `failed` - and
+the one reading of that list - `listed` (empty under `null`), `loading` or `failed` - and
 the section, the Inbox's empty state, its `Blocked on you` banner and both `Needs you N` badges
 all read it, so a request one of them counts is one the section lists.
 
@@ -207,7 +213,7 @@ recorded decision and no buttons, on the record page and on the machine page ali
 machine page looked the login up already decided or decided it itself; every broker error
 surfaces verbatim through `ApiError`'s message, never reworded.
 
-`GrantsSection.tsx` renders on `/settings`, under the same `FEATURE_OFF` gate: the live
+`GrantsSection.tsx` renders on `/settings` only where the pending list is not `null`: the live
 approval-granted grants the viewer approved, and those on enrollments the viewer operates whoever
 approved them (`grants.ts`'s `credentialGrantsQuery`, `?approver=me`). Each row names its approver
 (the broker's `approver` field), a pod enrollment's slot under its enrollment, and has a Revoke
@@ -232,7 +238,8 @@ rows every page above calls:
 `POST /api/v1/credential-requests/{id}/approve|deny`,
 `POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-grants`, and
 `POST /api/v1/credential-grants/{id}/revoke`. Every handler requires a human caller first, then a
-configured client (`404 FEATURE_OFF` on a nil one); the two `?approver=` routes accept only the
+configured client (`404 FEATURE_OFF` on a nil one), except the pending list, which answers `null`
+without a broker once its input is checked; the two `?approver=` routes accept only the
 literal string `"me"` (`400 APPROVER_ME_ONLY` otherwise) and resolve it to the caller's own
 canonical login — the UI never asks for anyone else's list. A `*agentsecrets.Error` forwards the
 broker's exact status and body verbatim (e.g. `403 NOT_APPROVER`, `409 RECORD_TERMINAL`); any other

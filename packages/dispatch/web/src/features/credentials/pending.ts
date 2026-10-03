@@ -1,13 +1,16 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 
-import { api, isCredentialFeatureOff } from "../../api/client";
+import { api } from "../../api/client";
 import type { CredentialPendingRow } from "../../api/types";
 
 /** Every credential request waiting on the viewer, as the Inbox's credential-requests section
- *  lists them; a 404 FEATURE_OFF (the broker isn't configured) is the one query error the
- *  section hides silently rather than surfacing. */
+ *  lists them; `null` is a Dispatch with no secrets broker. The server reads its broker setting
+ *  once, at boot, so that answer holds for the session: the query is never fetched again once it
+ *  holds it - not when a page mounts another reader, the window regains focus, or the event
+ *  stream refreshes every query - so a deployment without a broker asks once per page load. */
 export const credentialPendingQuery = () =>
   queryOptions({
+    enabled: (query) => query.state.data !== null,
     queryKey: ["credential-pending"],
     queryFn: () => api.getCredentialPending(),
   });
@@ -27,8 +30,6 @@ export interface CredentialRequests {
 export function useCredentialRequests(): CredentialRequests {
   const pending = useQuery(credentialPendingQuery());
   if (pending.isPending) return { requests: [], status: "loading" };
-  if (pending.isError) {
-    return { requests: [], status: isCredentialFeatureOff(pending.error) ? "listed" : "failed" };
-  }
-  return { requests: pending.data.pending, status: "listed" };
+  if (pending.isError) return { requests: [], status: "failed" };
+  return { requests: pending.data?.pending ?? [], status: "listed" };
 }

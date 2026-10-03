@@ -4,7 +4,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 
-import { ApiError, api } from "../api/client";
+import { api } from "../api/client";
 import type { CredentialPendingRow, IssueSummary, Project } from "../api/types";
 import { Sidebar } from "../features/sidebar/Sidebar";
 
@@ -40,8 +40,8 @@ function project(overrides: Partial<Project> = {}): Project {
   };
 }
 
-/** `pending` is the broker's list of credential requests waiting on the viewer; without it the
- *  broker is not configured (404 FEATURE_OFF). */
+/** `pending` is the broker's list of credential requests waiting on the viewer; without it this
+ *  Dispatch has no broker (the list answers `null`). */
 function renderSidebar(pathname = "/", pending?: CredentialPendingRow[]) {
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([
     {
@@ -110,12 +110,9 @@ function renderSidebar(pathname = "/", pending?: CredentialPendingRow[]) {
       urgency: "med",
     },
   ]);
-  const getCredentialPending =
-    pending === undefined
-      ? spyOn(api, "getCredentialPending").mockRejectedValue(
-          new ApiError(404, { code: "FEATURE_OFF" })
-        )
-      : spyOn(api, "getCredentialPending").mockResolvedValue({ pending });
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(
+    pending === undefined ? null : { pending }
+  );
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(undefined as never);
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([issue()]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([

@@ -23,8 +23,8 @@ function pendingRowPath(row: CredentialPendingRow): string {
 }
 
 /** The Inbox's supplementary credential-requests section, mounted above the ask sections. A
- *  broker that isn't configured for this deployment (404 FEATURE_OFF) lists none, so the whole
- *  section hides silently - the one deliberate quiet path; any other failure is surfaced instead. */
+ *  Dispatch with no secrets broker lists none, so the whole section hides silently - the one
+ *  deliberate quiet path; a failure to load the list is surfaced instead. */
 export function CredentialRequestsSection(): ReactNode {
   const { requests, status } = useCredentialRequests();
 

@@ -62,10 +62,8 @@ test("renders every pending credential request, linking a machine row to /creden
   }
 });
 
-test("hides silently when the broker answers 404 FEATURE_OFF", async () => {
-  const getCredentialPending = spyOn(api, "getCredentialPending").mockRejectedValue(
-    new ApiError(404, { code: "FEATURE_OFF" })
-  );
+test("hides silently on a Dispatch with no secrets broker", async () => {
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
   try {
@@ -80,7 +78,7 @@ test("hides silently when the broker answers 404 FEATURE_OFF", async () => {
   }
 });
 
-test("surfaces a non-FEATURE_OFF failure instead of hiding the section", async () => {
+test("surfaces a failure to load the list instead of hiding the section", async () => {
   const getCredentialPending = spyOn(api, "getCredentialPending").mockRejectedValue(
     new ApiError(500, { error: "broker unreachable" })
   );

@@ -546,20 +546,6 @@ test("a credential list that fails to load keeps the Inbox from saying nothing n
   }
 });
 
-test("an Inbox whose broker is not configured has nothing pending there and says so", async () => {
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
-  getCredentialPending.mockRejectedValue(new ApiError(404, { code: "FEATURE_OFF" }));
-  const { unmount } = renderInbox();
-  try {
-    const emptyState = await screen.findByRole("region", { name: "Inbox empty state" });
-    expect(within(emptyState).getByText("Nothing needs you")).toBeTruthy();
-    expect(screen.queryByText("Couldn't load credential requests.")).toBeNull();
-  } finally {
-    unmount();
-    getInbox.mockRestore();
-  }
-});
-
 test("Inbox narrows to one agent's asks from ?agent and clears back to the whole inbox", async () => {
   const fromPlanner = issueAsk({ id: "ask-planner", question: "Planner question" });
   const plannerWaits = issueAsk({
