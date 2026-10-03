@@ -331,8 +331,19 @@ printf 'PASS: two concurrent DEV_BROKER_POSTGRES_URL instances use two databases
 # --- A dbname= in DEV_BROKER_POSTGRES_URL's query string would point the broker at another
 # database: the run refuses before the broker starts, and drops only the database it created. ---
 run_instance 1 "$log1" "$docker_calls1" "$curl_calls1" "${admin_url}&dbname=victim"
+# A run that does not refuse goes on to serve until killed, so the wait is bounded: still running
+# after 5 s is the failure, reported below, not a hang.
+for _ in $(seq 1 50); do
+  kill -0 "${instance_pid[1]}" 2>/dev/null || break
+  sleep 0.1
+done
 refused_status=0
-wait "${instance_pid[1]}" || refused_status=$?
+if kill -0 "${instance_pid[1]}" 2>/dev/null; then
+  kill -TERM "${instance_pid[1]}" 2>/dev/null || true
+  wait "${instance_pid[1]}" 2>/dev/null || true
+else
+  wait "${instance_pid[1]}" || refused_status=$?
+fi
 instance_pid[1]=""
 refused_db="$(created_database "$docker_calls1")"
 if [[ "$refused_status" -eq 0 ]] || ! grep -q "dev-broker: refused: the broker's database URL connects to 'victim'" "$log1" || grep -q 'starting broker' "$log1"; then
