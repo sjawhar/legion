@@ -7,7 +7,6 @@ import { api } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
 import { whoAmIQuery } from "../../api/queries";
 import type { UserState } from "../../api/types";
-import { useSending } from "../../hooks/useSending";
 import { isRetractedAsk } from "../conversation/conversation-model";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import { eventItemId, stateForIssue } from "../issue/pins";
@@ -20,7 +19,7 @@ import { parseIssuePath, parseProjectPath } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, PHONE_VIEWPORT_QUERY } from "../shell/useDialog";
 import type { MarginComposer } from "./CommentsTab";
 import type { MarginSheetModel } from "./MarginSheet";
-import { MARGIN_COMPOSER_SEND_KEY, useMargin } from "./margin-context";
+import { marginComposeSendKey, useMargin } from "./margin-context";
 import {
   type MarginItem,
   type MarginItemAction,
@@ -316,27 +315,41 @@ export function useMarginSheet(): MarginSheetModel {
     },
     [ownerId, sheetExpanded]
   );
-  const closeComposer = useCallback(() => {
-    setComposer(undefined);
-    settleCompose("cancelled");
-  }, [settleCompose]);
-  const onComposerSaved = useCallback(() => {
-    settleCompose("saved");
-  }, [settleCompose]);
+  // A composer's close and save name the compose they belong to, so a send of a compose the reader
+  // left behind, landing after a newer one opened, closes and settles nothing of the newer one.
+  const closeComposer = useCallback(
+    (seq: number) => {
+      setComposer((current) => (current?.seq === seq ? undefined : current));
+      settleCompose("cancelled", seq);
+    },
+    [settleCompose]
+  );
+  const onComposerSaved = useCallback(
+    (seq: number) => {
+      settleCompose("saved", seq);
+    },
+    [settleCompose]
+  );
 
+  // A compose the margin publishes is shown: a new one, and the open one brought back because a
+  // newer selection-bar action had to wait for its send (`turnedAway`).
   useEffect(() => {
     if (pendingCompose === undefined) {
       return;
     }
     setTab("comments");
-    setComposer({ anchor: pendingCompose.anchor, kind: pendingCompose.kind });
+    setComposer({
+      anchor: pendingCompose.anchor,
+      kind: pendingCompose.kind,
+      seq: pendingCompose.seq,
+      turnedAway: pendingCompose.turnedAway === true,
+    });
     openCompactSheet();
   }, [openCompactSheet, pendingCompose]);
   // The composer ends unsaved when the reader leaves its document, and when its issue closes -
   // unless its send is out then: it stays, showing that send and then its outcome (`closed` on
   // `MentionComposer`), until the send lands or the reader discards its refusal. The latch keeps
   // the send's settling from closing it after all.
-  const { sendingNow: marginSendingNow } = useSending(MARGIN_COMPOSER_SEND_KEY);
   const outlivedClose = useRef(false);
   useEffect(() => {
     if (composer === undefined) {
@@ -344,7 +357,7 @@ export function useMarginSheet(): MarginSheetModel {
       return;
     }
     if (composer.anchor !== undefined && composer.anchor.artifact !== visibleArtifact?.id) {
-      closeComposer();
+      closeComposer(composer.seq);
       return;
     }
     if (!isClosed) {
@@ -352,12 +365,12 @@ export function useMarginSheet(): MarginSheetModel {
       return;
     }
     if (outlivedClose.current) return;
-    if (marginSendingNow()) {
+    if (queryClient.isMutating({ mutationKey: marginComposeSendKey(composer.seq) }) > 0) {
       outlivedClose.current = true;
       return;
     }
-    closeComposer();
-  }, [closeComposer, composer, isClosed, marginSendingNow, visibleArtifact?.id]);
+    closeComposer(composer.seq);
+  }, [closeComposer, composer, isClosed, queryClient, visibleArtifact?.id]);
   // A project-document item link has nowhere else to land, so the compact sheet opens on it.
   // An issue's comment or ask deep link lands on its Conversation turn; the margin selects the
   // card without covering that turn with the sheet.
@@ -486,7 +499,7 @@ export function useMarginSheet(): MarginSheetModel {
   }, [documentBridge, marginItems, markPlacements, routeItemId, routeItemKey, selectMarginItem]);
 
   useMarginListeners({
-    composerOpen: composer !== undefined,
+    composer,
     focus,
     margin: marginRef,
     onSelectCard,

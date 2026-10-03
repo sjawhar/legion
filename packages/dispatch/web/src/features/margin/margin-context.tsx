@@ -42,12 +42,20 @@ interface MarkComposeRequest {
   kind: ComposerKind;
 }
 
-type PendingCompose = MarkComposeRequest & { seq: number };
+/** `turnedAway`: a newer selection-bar action had to wait for this compose's send, and the margin
+ *  brought this compose back on screen to say so. */
+type PendingCompose = MarkComposeRequest & { seq: number; turnedAway?: true };
 
-/** The name of the margin composer's send (`MentionComposer`'s `mutationKey`). While one is out
- *  the open compose is that send's: it neither moves to a newer selection nor ends unsaved, so the
- *  send's outcome - its refusal, with its draft - lands on the composer that sent it. */
+/** The name every margin compose's send sits beneath (`MentionComposer`'s `mutationKey`). */
 export const MARGIN_COMPOSER_SEND_KEY: MutationKey = ["margin-composer"];
+
+/** The name of the compose `seq`'s send. While it is out the open compose is that send's: it
+ *  neither moves to a newer selection nor ends unsaved, so the send's outcome - its refusal, with
+ *  its draft - lands on the composer that sent it. A send of a compose already closed - its
+ *  document left behind - holds no newer compose. */
+export function marginComposeSendKey(seq: number): MutationKey {
+  return [...MARGIN_COMPOSER_SEND_KEY, seq];
+}
 
 /** The open mark composer: what it is about, and the editor's promise it settles. */
 interface OpenCompose {
@@ -86,7 +94,10 @@ interface MarginContextValue {
   setHoveredItemId(id: string | undefined): void;
   setMarkItemIds(markItemIds: ReadonlyMap<string, string>): void;
   setMarkPlacements(placements: ReadonlyMap<string, MarkPlacement>): void;
-  settleCompose(outcome: "saved" | "cancelled"): void;
+  /** Settles the compose `seq` - the one a composer's own send or close names - if it is still
+   *  the open one: a send a compose left behind lands after a newer compose opened, and settles
+   *  nothing. */
+  settleCompose(outcome: "saved" | "cancelled", seq: number): void;
 }
 
 const unavailableMargin = (): never => {
@@ -160,23 +171,29 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   // the composer (`retypeCompose`). The editor's own catch (`runAction` in
   // @legion/proof-editor's dispatch-action-bar.ts) still removes the mark it created, which is a
   // no-op by then, and cannot know a retyped mark's id. A newer selection-bar action while the
-  // open composer's send is out is refused, and the margin takes back the mark that action wrote,
-  // as it does a replaced one - that catch cannot see a provisional comment, whose body is empty
-  // (`removeRecordMark` in @legion/proof-editor says why). The compose is the send's until the
-  // server answers: re-pointing it would hand the send's outcome to the newer one - a success
-  // closing it as saved, a refusal's Retry posting to its mark.
+  // open compose's own send is out is refused, and the margin takes back the mark that action
+  // wrote, as it does a replaced one - that catch cannot see a provisional comment, whose body is
+  // empty (`removeRecordMark` in @legion/proof-editor says why). The compose is the send's until
+  // the server answers: re-pointing it would hand the send's outcome to the newer one - a success
+  // closing it as saved, a refusal's Retry posting to its mark. The refused action shows the
+  // reader why nothing opened: the open compose is published again, `turnedAway`, so the margin
+  // brings it back on screen saying its send is still out.
   const composeForMark = useCallback(
     (request: MarkComposeRequest): Promise<void> =>
       new Promise<void>((resolve, reject) => {
-        if (queryClient.isMutating({ mutationKey: MARGIN_COMPOSER_SEND_KEY }) > 0) {
+        const open = openCompose.current;
+        if (
+          open !== undefined &&
+          queryClient.isMutating({ mutationKey: marginComposeSendKey(open.request.seq) }) > 0
+        ) {
           bridgeRef.current?.removeMark(request.anchor.mark_id);
+          publishCompose({ ...open, request: { ...open.request, turnedAway: true } });
           reject(new Error("the open composer's send is out"));
           return;
         }
-        const replaced = openCompose.current;
-        if (replaced !== undefined) {
-          bridgeRef.current?.removeMark(replaced.request.anchor.mark_id);
-          replaced.reject(new Error("replaced by a newer composer"));
+        if (open !== undefined) {
+          bridgeRef.current?.removeMark(open.request.anchor.mark_id);
+          open.reject(new Error("replaced by a newer composer"));
         }
         sequence.current += 1;
         publishCompose({ reject, request: { ...request, seq: sequence.current }, resolve });
@@ -184,10 +201,11 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
     [publishCompose, queryClient]
   );
   const settleCompose = useCallback(
-    (outcome: "saved" | "cancelled") => {
+    (outcome: "saved" | "cancelled", seq: number) => {
       const open = openCompose.current;
-      // Nothing is open when a reply composer closes, or the composer closes after its save.
-      if (open === undefined) {
+      // Nothing to settle once the compose closed - the composer closing after its save - or when
+      // a newer compose is the open one.
+      if (open === undefined || open.request.seq !== seq) {
         return;
       }
       if (outcome === "cancelled") {

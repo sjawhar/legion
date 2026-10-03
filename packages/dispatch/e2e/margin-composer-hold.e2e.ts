@@ -24,6 +24,10 @@ function compact(page: Page): boolean {
   return (page.viewportSize()?.width ?? 1280) < 1280;
 }
 
+/** What the margin's open composer says while a newer selection-bar action waits on its send. */
+const stillSending =
+  "This one is still sending, so the new selection wasn't kept. Select it again once this one is sent.";
+
 /** Below `xl` the margin is a sheet: open or close it so the composer in it is on screen or not. */
 async function setSheet(page: Page, open: boolean): Promise<void> {
   if (!compact(page)) return;
@@ -65,7 +69,8 @@ function refusal(page: Page, issueKey: string, status: number) {
 
 // A newer selection-bar action while a send is out would move the open composer to the newer mark:
 // the send's success would close it as saved, and a refusal's Retry would post to the newer mark.
-// It is refused instead, and the editor takes back the mark it wrote.
+// It is refused instead, the editor takes back the mark it wrote, and the margin brings the open
+// composer back on screen saying why.
 test("a newer bar Comment while a margin send is out leaves the composer on the send's own mark", async ({
   browser,
 }) => {
@@ -84,8 +89,9 @@ test("a newer bar Comment while a margin send is out leaves the composer on the 
     await barAction(page, "Comment");
     const marks = documentEditor(page).locator('span[data-proof="comment"][data-id]');
     await expect(marks).toHaveText(["quick"]);
-    await setSheet(page, true);
     const form = composer(page);
+    await expect(form).toBeVisible();
+    await expect(page.getByText(stillSending)).toBeVisible();
     await expect(form.locator("blockquote")).toHaveText("quick");
     await expect(form.getByLabel("Comment")).toHaveValue("About quick");
 
@@ -93,8 +99,56 @@ test("a newer bar Comment while a margin send is out leaves the composer on the 
     refuse();
     await refused;
     await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(page.getByText(stillSending)).toHaveCount(0);
     await expect(form.getByLabel("Comment")).toHaveValue("About quick");
     await expect(form.locator("blockquote")).toHaveText("quick");
+  } finally {
+    await alice.close();
+  }
+});
+
+// Each compose names its own send: the reader leaving a document with its send out leaves that
+// send behind, and a bar Comment on the next document opens its own composer, which the earlier
+// send's landing neither closes nor settles.
+test("a bar Comment on another document while a margin send is out opens its own composer", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const first = await createIssue({ project: "CORE", spec, title: "Left mid-send" });
+  const second = await createIssue({ project: "CORE", spec, title: "Opened next" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, first.key);
+    const send = await holdPosts(page, `**/api/v1/issues/${first.key}/comments`);
+    await sendFromBar(page, "quick", "Left behind");
+
+    // In-app navigation, as a link does: a reload would drop the send with the page.
+    await page.evaluate((path) => {
+      window.history.pushState(null, "", path);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }, `/issues/${second.key}/spec`);
+    await expect(page.getByRole("heading", { level: 1, name: "Opened next" })).toBeVisible();
+    await expect(connectedDot(page)).toHaveText("connected");
+    await setSheet(page, false);
+    await selectEditorText(page, "brown");
+    await barAction(page, "Comment");
+    const form = composer(page);
+    await expect(form.locator("blockquote")).toHaveText("brown");
+    await form.getByLabel("Comment").fill("Second draft");
+
+    const landed = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().endsWith(`/api/v1/issues/${first.key}/comments`) &&
+        response.ok()
+    );
+    send.release();
+    await landed;
+    await expect(form.locator("blockquote")).toHaveText("brown");
+    await expect(form.getByLabel("Comment")).toHaveValue("Second draft");
+    await expect(form.getByLabel("Comment")).toBeEnabled();
   } finally {
     await alice.close();
   }
@@ -157,6 +211,38 @@ test("collapsing the margin while its send is out keeps the composer, its draft 
     const form = composer(page);
     await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
     await expect(form.getByLabel("Comment")).toHaveValue("Through the rail");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A bar Comment while the collapsed margin's send is out brings the margin back from its rail, with
+// the open composer saying why the new selection waits.
+test("a bar Comment while the collapsed margin's send is out shows the margin and why", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "below xl the margin is a sheet, with no rail");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec, title: "Rail mid-send" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 900, width: 1440 });
+    await openSpec(page, issue.key);
+    const send = await holdPosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await sendFromBar(page, "brown", "Through the rail");
+
+    await page.getByRole("button", { name: "Hide margin" }).click();
+    await expect(page.getByTestId("margin-rail")).toBeVisible();
+    await selectEditorText(page, "fox");
+    await barAction(page, "Comment");
+    await expect(page.getByTestId("margin-rail")).toHaveCount(0);
+    const form = composer(page);
+    await expect(form.locator("blockquote")).toHaveText("brown");
+    await expect(page.getByText(stillSending)).toBeVisible();
+    send.release();
+    await expect(composer(page)).toHaveCount(0);
   } finally {
     await alice.close();
   }

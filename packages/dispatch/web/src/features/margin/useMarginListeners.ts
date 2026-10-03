@@ -2,12 +2,15 @@ import { type RefObject, useEffect, useMemo, useRef } from "react";
 
 import type { Artifact } from "../../api/types";
 import { COMPACT_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
+import type { MarginComposer } from "./CommentsTab";
 import { scrollMarginTo, useCardHold } from "./useCardHold";
 import type { MarginTab } from "./useMarginItems";
 
 interface UseMarginListenersOptions {
-  /** Whether the margin is showing a composer the reader opened. */
-  composerOpen: boolean;
+  /** The composer the reader opened, if the margin shows one: each one published - a new one, or
+   *  the open one brought back for a selection-bar action that had to wait (`turnedAway`) - is
+   *  shown. */
+  composer: MarginComposer | undefined;
   focus: { itemId: string; seq: number } | undefined;
   margin: RefObject<HTMLElement | null>;
   onSelectCard: (id: string, blockID?: string) => void;
@@ -24,7 +27,7 @@ interface UseMarginListenersOptions {
 }
 
 export function useMarginListeners({
-  composerOpen,
+  composer,
   focus,
   margin,
   onSelectCard,
@@ -38,6 +41,7 @@ export function useMarginListeners({
   visibleArtifact,
 }: UseMarginListenersOptions): void {
   const isCompactViewport = useMediaQuery(COMPACT_VIEWPORT_QUERY);
+  const composerOpen = composer !== undefined;
   // Read when the reader presses, not when a hold is armed, so a hold is not torn down and
   // rebuilt every time the open document republishes its offsets.
   const placed = useRef(placementsPublished);
@@ -83,21 +87,17 @@ export function useMarginListeners({
   // is what brings the reader here.
   useEffect(() => {
     const container = margin.current;
-    if (!composerOpen || container === null || tab !== "comments") {
+    if (composer === undefined || container === null || tab !== "comments") {
       return;
     }
     if (isCompactViewport && !sheetExpanded) {
       return;
     }
-    const composer = container.querySelector<HTMLElement>("[data-margin-composer]");
-    if (composer !== null) {
-      scrollMarginTo(
-        container,
-        composer.getBoundingClientRect(),
-        container.getBoundingClientRect()
-      );
+    const slot = container.querySelector<HTMLElement>("[data-margin-composer]");
+    if (slot !== null) {
+      scrollMarginTo(container, slot.getBoundingClientRect(), container.getBoundingClientRect());
     }
-  }, [composerOpen, isCompactViewport, margin, sheetExpanded, tab]);
+  }, [composer, isCompactViewport, margin, sheetExpanded, tab]);
 
   // The margin sheet stays mounted while comments change, so listeners must re-attach when the
   // tab or artifact changes; the ref itself is not reactive.

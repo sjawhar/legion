@@ -129,7 +129,7 @@ test("a document owner shows the Comments tab and comment composer only", () => 
             onToggleThread: () => {},
             onEditingChange: () => {},
           },
-          composer: { anchor: undefined, kind: "comment" },
+          composer: { anchor: undefined, kind: "comment", seq: 1, turnedAway: false },
           items: {
             actionFailure: undefined,
             answeredAsksPending: false,

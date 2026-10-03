@@ -921,6 +921,153 @@ test("the margin removes the composer's mark when the composer is cancelled or r
   }
 });
 
+// A selection-bar action while the open compose's own send is out cannot take the margin, and
+// the reader sees why: the open compose comes back on screen - here from under the Pinned tab -
+// saying its send is still out, until that send lands.
+test("a newer compose while the open compose's send is out brings that compose back, saying why", async () => {
+  const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
+  const sent = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockImplementation(() => sent.promise);
+  const view = renderMarginWithBridge(fake.bridge);
+
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
+    const composer = await screen.findByRole("form", { name: "Comment composer" });
+    fireEvent.change(within(composer).getByLabelText("Comment"), { target: { value: "why?" } });
+    fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    const pinned = screen.getByRole("tab", { name: "Pinned" });
+    fireEvent.click(pinned);
+    await waitFor(() => expect(pinned.getAttribute("aria-selected")).toBe("true"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Compose second" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Second composer outcome").textContent).toBe(
+        "the open composer's send is out"
+      )
+    );
+    expect(fake.removed).toEqual(["m-2"]);
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
+        "true"
+      )
+    );
+    const shown = screen.getByRole("form", { name: "Comment composer" });
+    expect(within(shown).getByText("selected")).toBeTruthy();
+    expect(within(shown).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("why?");
+    expect(
+      screen.getByText(
+        "This one is still sending, so the new selection wasn't kept. Select it again once this one is sent."
+      )
+    ).toBeTruthy();
+
+    await act(async () => {
+      sent.resolve({ ...comment, body: "why?" });
+      await sent.promise;
+    });
+    await waitFor(() => {
+      expect(screen.getByLabelText("First composer outcome").textContent).toBe("saved");
+      expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull();
+    });
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+function SecondDocumentCompose(): ReactNode {
+  const { composeForMark } = useMargin();
+  const [outcome, setOutcome] = useState("idle");
+  return (
+    <>
+      <button
+        onClick={() => {
+          void composeForMark({
+            anchor: { artifact: "artifact-2", mark_id: "m-3", quote: "elsewhere" },
+            kind: "comment",
+          }).then(
+            () => setOutcome("saved"),
+            (error: unknown) => setOutcome(error instanceof Error ? error.message : String(error))
+          );
+        }}
+        type="button"
+      >
+        Compose on the second document
+      </button>
+      <output aria-label="Second document composer outcome">{outcome}</output>
+    </>
+  );
+}
+
+// Each compose names its own send, so a send the reader left behind with its document holds no
+// compose on the next one, and when it lands it closes and settles nothing there.
+test("a compose after leaving a document mid-send opens, and that send's landing leaves it open", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["issue", secondIssue.key], secondIssue);
+  const getIssue = spyOn(api, "getIssue").mockImplementation(async (key) =>
+    key === "CORE-2" ? secondIssue : issue
+  );
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listComments = spyOn(api, "listComments").mockResolvedValue([]);
+  const sent = Promise.withResolvers<Comment>();
+  const createComment = spyOn(api, "createComment").mockImplementation(() => sent.promise);
+
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <MarkComposerProbe />
+          <SecondDocumentCompose />
+          <NavigateToSecondIssue />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
+    const first = await screen.findByRole("form", { name: "Comment composer" });
+    fireEvent.change(within(first).getByLabelText("Comment"), { target: { value: "why?" } });
+    fireEvent.click(within(first).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Open second issue" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("First composer outcome").textContent).toBe("composer closed")
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Compose on the second document" }));
+    const second = await screen.findByRole("form", { name: "Comment composer" });
+    expect(within(second).getByText("elsewhere")).toBeTruthy();
+    fireEvent.change(within(second).getByLabelText("Comment"), {
+      target: { value: "Second draft" },
+    });
+
+    await act(async () => {
+      sent.resolve({ ...comment, body: "why?" });
+      await sent.promise;
+    });
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+    const still = screen.getByRole("form", { name: "Comment composer" });
+    expect(within(still).getByText("elsewhere")).toBeTruthy();
+    expect(within(still).getByLabelText<HTMLTextAreaElement>("Comment").value).toBe("Second draft");
+    expect(screen.getByLabelText("Second document composer outcome").textContent).toBe("idle");
+  } finally {
+    view.unmount();
+    getIssue.mockRestore();
+    getInbox.mockRestore();
+    listIssueAsks.mockRestore();
+    getMyState.mockRestore();
+    listComments.mockRestore();
+    createComment.mockRestore();
+  }
+});
+
 test("Margin links an orphaned ask to its original document version", async () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },

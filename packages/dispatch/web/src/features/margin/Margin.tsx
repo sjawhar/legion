@@ -1,4 +1,4 @@
-import { type ReactNode, useRef } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 import { useLocation } from "react-router-dom";
 
 import {
@@ -12,6 +12,7 @@ import {
 import { routeHasMargin } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { MarginSheet } from "./MarginSheet";
+import { useMargin } from "./margin-context";
 import { useMarginSheet } from "./useMarginSheet";
 
 export const DEFAULT_MARGIN_WIDTH = 384;
@@ -51,6 +52,19 @@ export function Margin({
   const setClampedMarginWidth = (nextWidth: number) => {
     onWidthChange?.(clampMarginWidth(nextWidth));
   };
+  // Collapsed to its rail, the margin stays mounted under it, hidden: an open composer - its
+  // draft, a send it has out and that send's refusal - is still there when the margin comes back.
+  const railShown = !isCompactViewport && collapsed;
+  // Each compose the margin publishes - a new one, or the open one brought back for a
+  // selection-bar action that had to wait for its send - is the reader's to see, so the rail opens
+  // for it; collapsing the rail with a compose open keeps it collapsed.
+  const { pendingCompose } = useMargin();
+  const shownCompose = useRef(pendingCompose);
+  useEffect(() => {
+    if (pendingCompose === shownCompose.current) return;
+    shownCompose.current = pendingCompose;
+    if (pendingCompose !== undefined && railShown) onCollapsedChange?.(false);
+  }, [onCollapsedChange, pendingCompose, railShown]);
 
   // A margin is a property of a document surface. On a route that has none - the Inbox, a
   // project, Settings, Agents - the desktop column takes no width at all, rather than spending
@@ -61,9 +75,6 @@ export function Margin({
     return null;
   }
 
-  // Collapsed to its rail, the margin stays mounted under it, hidden: an open composer - its
-  // draft, a send it has out and that send's refusal - is still there when the margin comes back.
-  const railShown = !isCompactViewport && collapsed;
   return (
     <>
       {railShown ? (

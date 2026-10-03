@@ -34,9 +34,9 @@ import type {
 
 export interface MarginSheetModel {
   actions: {
-    closeComposer: () => void;
+    closeComposer: (seq: number) => void;
     onAction: (id: string, action: MarginItemAction) => void;
-    onComposerSaved: () => void;
+    onComposerSaved: (seq: number) => void;
     onComposerKindChange: (kind: ComposerKind) => string | undefined;
     onEdit: (id: string, body: string) => Promise<unknown>;
     onRetryAction: () => void;

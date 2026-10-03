@@ -89,7 +89,7 @@ function renderProofDocument({
                 seq: number;
               }
             | undefined;
-          settleCompose(outcome: "saved" | "cancelled"): void;
+          settleCompose(outcome: "saved" | "cancelled", seq: number): void;
         }
       | undefined,
   };
@@ -597,6 +597,12 @@ test("ProofDocument links to the current version when a historic version is unav
 
 test("a selection-bar action opens the margin composer for the mark and settles the library promise", async () => {
   const { editors, margin, sync, view } = renderProofDocument();
+  /** Settles the compose the margin has open, as its composer does. */
+  const settleOpenCompose = (outcome: "saved" | "cancelled") => {
+    const open = margin.current?.pendingCompose;
+    if (open === undefined) throw new Error("expected an open compose");
+    margin.current?.settleCompose(outcome, open.seq);
+  };
 
   try {
     await sync();
@@ -620,7 +626,7 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       anchor: { artifact: artifact.id, mark_id: "m-9", quote: "brown" },
       kind: "comment",
     });
-    act(() => margin.current?.settleCompose("saved"));
+    act(() => settleOpenCompose("saved"));
     await expect(comment).resolves.toBeUndefined();
 
     let suggest: Promise<void> | undefined;
@@ -634,7 +640,7 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       throw new Error("The suggestion action did not return a promise.");
     }
     expect(margin.current?.pendingCompose?.kind).toBe("suggestion");
-    act(() => margin.current?.settleCompose("saved"));
+    act(() => settleOpenCompose("saved"));
     await expect(suggest).resolves.toBeUndefined();
 
     let ask: Promise<void> | undefined;
@@ -648,7 +654,7 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       throw new Error("The ask action did not return a promise.");
     }
     expect(margin.current?.pendingCompose?.kind).toBe("ask");
-    act(() => margin.current?.settleCompose("cancelled"));
+    act(() => settleOpenCompose("cancelled"));
     await expect(ask).rejects.toThrow("composer closed");
 
     let unsupported: unknown;

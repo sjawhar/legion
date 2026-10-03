@@ -1,14 +1,20 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useMemo } from "react";
 
 import type { Ask } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { QueryError } from "../../components/QueryError";
-import { borderDefault, highlightRing, textPrimaryOnSurface } from "../../theme/classes";
+import { useSending } from "../../hooks/useSending";
+import {
+  borderDefault,
+  highlightRing,
+  textMutedOnSurfaceMuted,
+  textPrimaryOnSurface,
+} from "../../theme/classes";
 import type { ComposerAnchor, ComposerKind } from "../conversation/composer-model";
 import { MentionComposer } from "../conversation/MentionComposer";
 import { AskCard } from "../inbox/AskCard";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
-import { MARGIN_COMPOSER_SEND_KEY } from "./margin-context";
+import { marginComposeSendKey } from "./margin-context";
 import { ThreadList } from "./ThreadList";
 import type { CommentActionFailure } from "./useCommentActionQueue";
 import type { MarginItemAction, MarginOwner, MarkPlacement, Thread } from "./useMarginItems";
@@ -17,6 +23,10 @@ export interface MarginComposer {
   anchor: ComposerAnchor | undefined;
   kind: ComposerKind;
   replyTo?: string;
+  /** The compose this composer belongs to, which names its send (`marginComposeSendKey`). */
+  seq: number;
+  /** A newer selection-bar action had to wait for this compose's send. */
+  turnedAway: boolean;
 }
 
 interface CommentsTabProps {
@@ -58,7 +68,8 @@ interface CommentsTabProps {
 /** The composer a selection-bar action (or a margin Reply) opened. `MarginSheet` keeps it mounted
  *  for as long as its compose is open, whatever the margin shows over it - the Pinned tab, a phone
  *  margin thread, the rail the margin collapses to - so its draft, a send it has out and that
- *  send's refusal stay with it; on a closed issue it shows only that send or its refusal. */
+ *  send's refusal stay with it; on a closed issue it shows only that send or its refusal. While a
+ *  newer selection-bar action waits on its send, it says so. */
 export function MarginComposerSlot({
   composer,
   hidden,
@@ -71,25 +82,33 @@ export function MarginComposerSlot({
   composer: MarginComposer;
   hidden: boolean;
   isClosed: boolean;
-  onClose: () => void;
+  onClose: (seq: number) => void;
   onKindChange: (kind: ComposerKind) => string | undefined;
-  onSent: () => void;
+  onSent: (seq: number) => void;
   owner: MarginOwner;
 }): ReactNode {
+  const sendKey = useMemo(() => marginComposeSendKey(composer.seq), [composer.seq]);
+  const { sending } = useSending(sendKey);
   return (
     // The margin scrolls this into its scrollport when it opens: a composer the reader started
     // from the document renders at the top of the margin's scroll content, which can be thousands
     // of pixels above wherever the margin is parked.
     <div data-margin-composer="" hidden={hidden}>
+      {composer.turnedAway && sending ? (
+        <p className={`pt-3 text-sm ${textMutedOnSurfaceMuted}`} role="status">
+          This one is still sending, so the new selection wasn't kept. Select it again once this one
+          is sent.
+        </p>
+      ) : null}
       <MentionComposer
         anchor={composer.anchor}
         autoFocus
         closed={isClosed}
         frame="pt-3"
         kind={composer.kind}
-        mutationKey={MARGIN_COMPOSER_SEND_KEY}
-        onClose={onClose}
-        onSent={onSent}
+        mutationKey={sendKey}
+        onClose={() => onClose(composer.seq)}
+        onSent={() => onSent(composer.seq)}
         owner={
           owner.kind === "issue"
             ? { issueKey: owner.key, kind: "issue" }

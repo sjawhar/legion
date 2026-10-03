@@ -214,13 +214,19 @@ The composer a selection-bar action opens is anchored to the provisional mark th
 the margin owns that mark from then on (`margin-context.tsx`): its Comment / Suggest / Ask switch
 retypes the mark through `ProofEditorHandle.retypeMark` so the server verifies a mark of the kind
 being sent, and the mark is removed when the composer ends unsaved — cancelled, or replaced by a
-newer composer. A newer selection-bar action while the open composer's send is out is refused
-(the margin reads the send under `MARGIN_COMPOSER_SEND_KEY`) and the editor takes its mark back,
-so a send's outcome lands on the composer and mark it was sent from. That composer lives as long
+newer composer. Each compose names its send beneath `MARGIN_COMPOSER_SEND_KEY`
+(`marginComposeSendKey`). A newer selection-bar action while the open compose's own send is out is
+refused and the editor takes its mark back, so a send's outcome lands on the composer and mark it
+was sent from; the margin then brings the open composer back on screen - the Comments tab, the
+compact sheet - saying the new selection waits on its send. Every compose the margin publishes,
+this one and a new one alike, opens the desktop margin out of its rail (`Margin.tsx`).
+A send a compose left behind holds nothing: once the reader has left its document, a selection-bar
+action on the next one opens, and that send's landing closes and settles only its own compose
+(`settleCompose` takes the compose's `seq`). That composer lives as long
 as its compose, whatever the margin shows: `MarginSheet` keeps it mounted, hidden, under the
 Pinned tab, under a phone margin thread, and under the rail the desktop margin collapses to
 (`Margin.tsx` keeps the sheet mounted there), so its draft, a send it has out and that send's
-refusal are where the reader left them. The issue closing ends an idle composer as before, but
+refusal are where the reader left them. The issue closing ends an idle composer, but
 one whose send is out stays, showing that send and then its outcome as a closed issue's composers
 do; leaving the document or the page ends it, and the send still lands. The margin also names
 the mark the open composer holds to the editor
