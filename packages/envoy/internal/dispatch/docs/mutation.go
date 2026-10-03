@@ -901,7 +901,6 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			if outcome, mutationErr = batch.outcome(len(ops)); mutationErr != nil {
 				return
 			}
-			outcome.AskBlocksAdded = addedAskBlocks(tree, next)
 			mutationErr = recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
 				return pmdoc.Update(transaction, fragment, next)
 			})
@@ -958,7 +957,6 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		if outcome, err = batch.outcome(len(ops)); err != nil {
 			return err
 		}
-		outcome.AskBlocksAdded = addedAskBlocks(tree, next)
 		return recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
 			var updateErr error
 			transact(func(transaction *crdt.Transaction) {

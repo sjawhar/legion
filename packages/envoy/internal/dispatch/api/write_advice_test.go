@@ -656,6 +656,31 @@ func TestWriteAdviceFailureDoesNotAbortWrite(t *testing.T) {
 		t.Fatalf("committed messages = %d, want 1", messages)
 	}
 }
+func TestDocumentEditAdviceKeepsCountWhenIssueAdviceFails(t *testing.T) {
+	handler, _ := newFailingAdviceHandler(t, "session_writes_since_human")
+	createAdviceProject(t, handler, "COUNT")
+	spec := "# Count-only advice\n"
+	issue := createAdviceIssue(t, handler, "COUNT", "Failed issue advice", &spec)
+
+	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{{"op": "insert", "markdown": ":::ask{#window}\nWhich deployment window?\n:::", "after": "end"}},
+	}, "alice")
+	advice := adviceFromResponse(t, edited.Code, edited.Body.String())
+	if advice.DecisionBlocksAdded == nil || *advice.DecisionBlocksAdded != 1 {
+		t.Fatalf("edit advice = %#v, want one added decision block: %s", advice, edited.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(edited.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode count-only edit response: %v", err)
+	}
+	var rawAdvice map[string]json.RawMessage
+	if err := json.Unmarshal(body["advice"], &rawAdvice); err != nil {
+		t.Fatalf("decode count-only advice: %v body=%s", err, edited.Body.String())
+	}
+	if len(rawAdvice) != 1 {
+		t.Fatalf("count-only advice fields = %#v, want decision_blocks_added alone", rawAdvice)
+	}
+}
 
 func newFailingAdviceHandler(t *testing.T, query string) (http.Handler, *store.Store) {
 	t.Helper()

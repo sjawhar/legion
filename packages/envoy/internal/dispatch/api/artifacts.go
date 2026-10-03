@@ -853,13 +853,11 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	// operation's markdown makes a block depends on where it lands and on the parser's reading of
 	// code and containers, which a caller's own reading of that markdown would only approximate.
 	blocks := &editBlocks{DecisionBlocksAdded: edit.AskBlocksAdded}
-	if artifact.IssueKey == nil {
+	if artifact.IssueKey == nil || advice == nil {
 		WriteJSON(w, http.StatusOK, withDocumentBlockAdvice(responsePayload, blocks))
 		return
 	}
-	if advice != nil {
-		advice.editBlocks = blocks
-	}
+	advice.editBlocks = blocks
 	WriteJSON(w, http.StatusOK, withAdvice(responsePayload, advice))
 }
 

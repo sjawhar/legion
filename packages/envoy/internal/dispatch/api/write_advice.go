@@ -302,9 +302,9 @@ func withAdvice(payload any, advice *writeAdvice) any {
 	return advisedResponse{payload: payload, advice: advice}
 }
 
-// withDocumentBlockAdvice is a project document write's response: its advice is only what it read
-// of the document's typed blocks - an upload's documentBlocks, an edit's editBlocks - since a
-// project document has no issue state to report.
-func withDocumentBlockAdvice[Blocks documentBlocks | editBlocks](payload any, blocks *Blocks) any {
+// withDocumentBlockAdvice is a document write's count-only response: a project document has no
+// issue state to report, and an issue document keeps its count when the bounded issue-advice query
+// fails.
+func withDocumentBlockAdvice(payload any, blocks any) any {
 	return advisedResponse{payload: payload, advice: blocks}
 }

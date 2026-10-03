@@ -411,7 +411,9 @@ are the Dispatch server's reading of the document, so the extension parses no ma
 quoted in code counts nothing and one in a blockquote or a list item counts, as the server stores
 them, and an edit result from a server that reports no count spends nothing. The server counts
 answered blocks in a stored document too, so re-uploading a document whose blocks are all answered
-spends the check with nothing new in the Inbox: that stop goes without a reminder. A tool-device
+spends the check with nothing new in the Inbox: that stop goes without a reminder. An edit that
+writes an answered or person-retracted block's id back reports it added, though settlement leaves
+that row closed, so it has the same gap. A tool-device
 call (a `write` to `xd://<tool>`, named by its result's `details.xdev.tool`: `deviceTool`) never
 opens an ask by its `write`, and counts as work by the tool it names: a write to a `dispatch_*`
 device is no work, and a write to any other device is work, as before. A device backed by a
