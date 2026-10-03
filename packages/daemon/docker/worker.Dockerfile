@@ -208,11 +208,16 @@ FROM debian:trixie-slim
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
 ARG PI_CODEGRAPH_VERSION
 # git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
+# /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
+# creates a missing parent with its own --chown, so the plugin's legion:legion copy below would
+# otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
+# refuses an image where either is not root's.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 legion \
-    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash legion
+    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash legion \
+    && install -d -m 0755 -o root -g root /opt/legion /opt/legion/bin
 # Pinned Bun: the binary the plugin stage packed with (oven/bun:${BUN_VERSION}-slim).
 COPY --from=plugin /usr/local/bin/bun /usr/local/bin/bun
 RUN ln -s bun /usr/local/bin/bunx
@@ -304,7 +309,9 @@ COPY --from=go /out/legion /opt/legion/bin/legion
 # mainEnvironment sets in packages/daemon/internal/runtime/sandbox/manifest.go). The daemon's
 # Tools.AgentSecrets names this path.
 COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
-# The final step: the `legion` on the image PATH is this one, it runs on this base, and it names the
+# The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
+# neither rename nor replace what they hold.
+# Then the `legion` on the image PATH is this one, it runs on this base, and it names the
 # commit the workflow built. git resolves to /usr/bin/git on the image PATH and the step refuses any
 # other path, so git's absolute path is as fixed as gh's and jj's (/usr/local/bin, copied above) and a
 # pod environment can name all three. Then `legion probe-image` runs the three launch probes through
@@ -320,6 +327,9 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # the cached probe layer above carries.
 ARG LEGION_REVISION
 RUN set -eu; \
+    for dir in /opt/legion /opt/legion/bin; do \
+      owner="$(stat -c '%u:%g %a' "$dir")"; echo "$dir: $owner"; test "$owner" = "0:0 755"; \
+    done; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
     legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
     agent_secrets="$(command -v agent-secrets)"; test "$agent_secrets" = /opt/legion/bin/agent-secrets; \
