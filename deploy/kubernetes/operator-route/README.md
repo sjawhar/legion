@@ -67,8 +67,14 @@ again after a 401. It signs in with Cognito's custom authentication (`InitiateAu
 service-account token, and prints the access token. It signs in on every run and keeps no token,
 which suits Oh My Pi: Oh My Pi holds the token for the life of its process, so the run after a 401
 brings a token never used, the one a gateway that refuses a spent token accepts. It never keeps or
-uses the refresh or ID token Cognito also returns. A refused sign-in exits non-zero with the reason
-on stderr and prints no token.
+uses the refresh or ID token Cognito also returns. A refused sign-in exits 1 with Cognito's error
+code on stderr, never the endpoint's own text, and prints no token. It reaches Cognito directly and
+trusts only the image's certificate store: Oh My Pi runs it with the workspace's `.env` in its
+environment, so no `HTTPS_PROXY`, `SSL_CERT_FILE` or `SSL_CERT_DIR` steers it.
+
+The daemon's image probe runs the command too, so every probe performs a real sign-in. The probe's
+pod runs on the image's `PATH`, where `legion` is the TypeScript CLI, which has no `model-token`;
+that is why the line names the Go `legion` by its full path.
 
 Every value is the operator's, passed as flags in their own `models.yml`:
 
@@ -79,8 +85,7 @@ Every value is the operator's, passed as flags in their own `models.yml`:
 The service-account token is the projected token `pod.yml` already mounts at
 `/var/run/operator/token`, with the operator's dedicated sign-in audience in place of
 `${MODEL_TOKEN_AUDIENCE}`; `legion start --check-config` refuses that placeholder unfilled. Set
-`X-Api-Key` to the same command. The examples here keep the gateway's current route and model names
-until the operator switches their own copies.
+`X-Api-Key` to the same command.
 
 ## How the pieces compose
 

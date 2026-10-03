@@ -832,19 +832,10 @@ claim's pod and the image probe's.
   example of one, the one the Go live harnesses run on: a `models.yml` and a settings overlay from a
   ConfigMap, and a mounted token its key command reads. Its README lists what an operator supplies
   and how `pod` and `provider_keys` compose.
-- **The Legion machine-user sign-in.** `legion model-token` (in the worker image at
-  `/opt/legion/go/bin/legion`) is a model `apiKey` command: it answers Cognito's custom challenge
-  with the pod's projected service-account token (a `projected` `service_account_token` in `pod`,
-  with the dedicated audience) and prints the access token. It signs in on every run and keeps no
-  token, which suits Oh My Pi re-running the command after a 401: Oh My Pi holds the token for the
-  life of its process, so that run brings a token never used. It never keeps a refresh token. A
-  refused sign-in exits non-zero with the reason and prints no token. Region, client id, username
-  and the token's path are flags in the operator's `models.yml`; the
-  [operator route README](../deploy/kubernetes/operator-route/README.md) shows the line.
-  Cut over in one step, after agent-c's custom-challenge triggers are live: switch the pod's
-  projected-token audience in `legion.yaml` (it takes effect for pods started after a daemon
-  restart) and the `models.yml` apiKey command (`apply.sh`) together, since a pod with the new
-  audience cannot reach the old `-legion` route and a pod with the old audience cannot sign in.
+- **The Legion machine-user sign-in.** `legion model-token` is a model `apiKey` command that signs a
+  pod in to Cognito with its projected service-account token and prints the access token; the
+  [operator route README](../deploy/kubernetes/operator-route/README.md) shows the line and what the
+  command does.
 - **Each role's model** is the operator's: the `models.yml` and `overlay.yml` they keep in a
   directory of their own (for example `~/.local/state/legion-model-config`), which
   `deploy/kubernetes/operator-route/apply.sh --context <kube context> <directory>` writes into the
