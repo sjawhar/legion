@@ -79,8 +79,7 @@ func ghIssueWrite(args []string) bool {
 }
 
 func issueAPIPath(value string) bool {
-	path := strings.SplitN(value, "?", 2)[0]
-	path = strings.SplitN(path, "#", 2)[0]
+	path := endpointPath(value)
 	return strings.Contains(path, "/issues/") || strings.HasSuffix(path, "/issues")
 }
 
@@ -103,12 +102,12 @@ func ghMergeIntent(args []string) bool {
 		return false
 	}
 	for _, word := range positional {
-		path := strings.TrimRight(strings.SplitN(strings.SplitN(word, "?", 2)[0], "#", 2)[0], "/")
+		path := endpointPath(word)
 		if strings.HasSuffix(path, "/merge") || strings.HasSuffix(path, "/merges") {
 			return true
 		}
 	}
-	if !slices.Contains(positional, "graphql") && !anyGraphQLEndpoint(positional) {
+	if !anyGraphQLEndpoint(positional) {
 		return false
 	}
 	bodies, known := inlineGraphQLBodies(args)
@@ -123,10 +122,20 @@ func ghMergeIntent(args []string) bool {
 	return false
 }
 
+// endpointPath is a `gh api` word as the route it names: everything from its first `?` or `#` and
+// its trailing slashes are cut before any comparison, since gh sends `graphql?x=1` and `graphql#x`
+// to the GraphQL endpoint as it sends `graphql`.
+func endpointPath(word string) string {
+	if cut := strings.IndexAny(word, "?#"); cut >= 0 {
+		word = word[:cut]
+	}
+	return strings.TrimRight(word, "/")
+}
+
 func anyGraphQLEndpoint(words []string) bool {
 	for _, word := range words {
-		path := strings.TrimRight(strings.SplitN(strings.SplitN(word, "?", 2)[0], "#", 2)[0], "/")
-		if strings.HasSuffix(path, "/graphql") {
+		path := endpointPath(word)
+		if path == "graphql" || strings.HasSuffix(path, "/graphql") {
 			return true
 		}
 	}
