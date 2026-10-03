@@ -497,12 +497,12 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 // currentPolicyAdmits refuses login an approval of request requestID when the current policy wants
 // one of its names approved by someone else (record.MayDecide), since a change of owner since the
 // request was made moves who may approve it: a request waiting on anyone for a secret that is now
-// a person's is that person's alone to approve, and one waiting on a person for a secret that is
-// now another's is no one's to approve (its record's approver may still deny it; otherwise it
-// expires, or its session cancels it and asks again). A denial releases nothing, so ApplyDecision
-// does not ask. A name the current policy grants at once, denies or no longer serves names no
-// approver, so it leaves the approval to the record's approver; Values refuses a grant of the last
-// two at its first read.
+// a person's is that person's alone to approve, and one waiting on a person for a secret another
+// person must now approve is no one's to approve (its record's approver may still deny it;
+// otherwise it expires, or its session cancels it and asks again). A denial releases nothing, so
+// ApplyDecision does not ask. A name the current policy grants at once, denies or no longer serves
+// names no approver, so it leaves the approval to the record's approver; Values refuses a grant of
+// the last two at its first read.
 func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID string, requester policy.Requester, login string) error {
 	names, err := requestedSecrets(ctx, tx, requestID)
 	if err != nil {

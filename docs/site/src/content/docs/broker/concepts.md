@@ -163,20 +163,24 @@ secret names the approver `anyone`: it waits on every person's pending list, and
 in to Dispatch may decide it.
 
 An approval belongs to the person who gave it, so a change to a secret's tags reaches what was
-approved before it:
+approved before it wherever the new tags want the secret approved for that session:
 
-- A grant keeps releasing its value only while the person who approved it may still approve the
-  secret. Once a shared human-tier secret becomes a person's, or a person's secret becomes
-  another's, every grant its new owner did not approve stops with `GRANT_NOT_LIVE`, whatever value
-  the secret holds by then, and the session's next request is decided under the new tags. A grant
-  its owner approved keeps working when the secret becomes shared, since anyone may approve a
-  shared human-tier secret.
-- A pending request is approved by whoever the tags name now. One waiting on anyone for a secret
-  that has become a person's is that person's alone to approve; anyone else's approval is refused
-  `NOT_APPROVER`, the requester's own operator included. One waiting on a person for a secret that
-  has become someone else's can be approved by no one. A denial releases nothing, so the approver
-  a request waits on can still deny it, which takes it off the pending list; otherwise it expires,
-  or its session cancels it (`agent-secrets cancel`) and asks again.
+- An approved grant keeps releasing its value only while the person who approved it may still
+  approve the secret for its session. Once a shared human-tier secret becomes a person's, or a
+  person's secret becomes another's, every such grant the new owner must approve and did not stops
+  with `GRANT_NOT_LIVE`, whatever value the secret holds by then, and the session's next request is
+  decided under the new tags. A grant keeps working when the secret becomes shared (anyone may
+  approve a shared human-tier secret, and a shared agent-tier one needs no approval), and when the
+  new tags give its session the secret without asking, as they do once an agent-tier secret is the
+  session's operator's.
+- A pending request is approved by whomever the new tags name to approve it for its session. One
+  waiting on anyone for a secret that has become a person's is that person's alone to approve;
+  anyone else's approval is refused `NOT_APPROVER`, the requester's own operator included. One
+  waiting on a person for a secret another person must now approve can be approved by no one. One
+  waiting on a person stays that person's when the secret becomes shared, or when the new tags give
+  its session the secret without asking. A denial releases nothing, so the approver a request waits
+  on can still deny it, which takes it off the pending list; otherwise it expires, or its session
+  cancels it (`agent-secrets cancel`) and asks again.
 
 A record is decided once. A second click, a concurrent one, or one after the record expired gets
 `RECORD_TERMINAL`. A pending request nobody decides expires after 12 hours, a fixed time rather than

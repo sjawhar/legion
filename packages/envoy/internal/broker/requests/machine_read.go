@@ -109,8 +109,8 @@ func requestedSecrets(ctx context.Context, q querier, requestID string) ([]reque
 // since no human ever approved it; and so does a name the current policy wants approved by
 // someone decidedBy, the login that decided the request, is not (record.MayDecide). So an
 // approval keeps its grant while the secret stays the approver's, or becomes shared, whose
-// approver is anyone, and a secret handed to a person stops every grant that person did not
-// approve.
+// approver is anyone, or once the policy gives this requester the secret without asking; and a
+// secret handed to a person stops every grant of it that person must approve and did not.
 func stillAllowed(set *policy.Set, name, frozenDecision, decidedBy string, requester policy.Requester) error {
 	d, err := set.Evaluate(name, requester)
 	if errors.Is(err, policy.ErrUnknownSecret) {
