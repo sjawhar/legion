@@ -443,6 +443,20 @@ export interface ArtifactApproval {
   readonly reason?: string | null;
   readonly ask_id?: string | null;
   readonly requested_by?: Actor;
+  /** Whose move the open request waits on (`Ask.waiting_on`), on `awaiting` alone: `agent` once a
+   *  version moved it past the one its agent last handed to the human, or a reply left it with the
+   *  agent; `human` otherwise. */
+  readonly waiting_on?: AskTurn;
+}
+
+/** What `POST /api/v1/artifacts/{id}/approval-requests` answers: the document's open request (null
+ *  when its latest version is already approved), the version it names, and the document's approval
+ *  as the call left it. */
+export interface ApprovalRequestResponse {
+  readonly ask: Ask | null;
+  readonly artifact_id: string;
+  readonly version: number;
+  readonly approval: ArtifactApproval;
 }
 
 export interface ArtifactBlock {
@@ -541,6 +555,15 @@ export interface Version {
 
 export type AskKind = "question" | "approval";
 
+/** The document and version an approval ask names. `requested_version` is the version the agent
+ *  last handed to the human; a lower value means the agent is revising the moved request. */
+export interface AskApproval {
+  readonly artifact_id: string;
+  readonly name: string;
+  readonly version: number;
+  readonly requested_version: number;
+}
+
 export interface Ask extends AnchorPosition {
   readonly id: string;
   readonly issue_key: string | null;
@@ -573,11 +596,15 @@ export interface Ask extends AnchorPosition {
    *  null when nobody has replied. Who spoke last; whose turn it is comes from `waiting_on`.
    *  Absent on every other ask read. */
   readonly last_reply?: AskLastReply | null;
-  /** Whose reply an open ask needs next: the `turn` of its newest reply, `human` when nobody
-   *  has replied. Present on every open-ask read (inbox rows, ask lists, the ask detail, the
-   *  issue detail's `open_asks`); absent on closed asks and on `ask.*` event payloads. */
+  /** Whose reply an open ask needs next. A moved approval request stays with its agent while
+   *  `requested_version` is below `version`; a hand-back (`ask.handed_back`) returns it to the
+   *  human until a reply newer than the one it answered decides it by its `turn`. Present on every
+   *  open-ask read (inbox rows, ask lists, the ask detail, the issue detail's `open_asks`); absent on
+   *  closed asks and on `ask.*` event payloads. */
   readonly waiting_on?: AskTurn;
   readonly edited_at: string | null;
+  /** Present only on a server-created approval ask. */
+  readonly approval?: AskApproval;
 }
 
 /** Who holds the turn on an open ask after a reply: `human` when the human needs to act,
@@ -718,6 +745,11 @@ export type AskEventPayload = Ask & ReferenceChangesPayload;
 export type AskEditEventPayload = AskEventPayload & {
   readonly previous: AskEditPrevious;
   readonly edited_by: Actor;
+  /** A version move of an approval request that already waits on its agent: it changes only the
+   *  version the request names, so its event, like a human's unnamed `artifact.version`, carries
+   *  `notify: false` and reaches no follower. Absent on every other edit, the move that takes the
+   *  request from the human included. */
+  readonly quiet?: true;
 };
 
 /** One recorded rewording of an ask: what the question was before this edit, who edited, when. */
@@ -795,6 +827,17 @@ export interface Comment extends AnchorPosition {
   readonly created_at: string;
   readonly mentions: CommentMention[];
   readonly deliveries: CommentDelivery[];
+}
+
+/** What a route that writes a comment answers (`POST /api/v1/issues/{key}/comments`,
+ *  `POST /api/v1/artifacts/{id}/comments`, and the delivery callback
+ *  `POST /api/v1/comments/{id}/reply`): the comment row and, on a reply to an open ask, whom that
+ *  ask waits on now that the reply is its newest. It is the value the comment's event carries
+ *  under the same name, and may differ from `turn`: an agent's reply on a moved approval request
+ *  leaves that request waiting on the agent. A replayed delivery callback, which writes nothing,
+ *  answers the stored reply without it. */
+export interface CommentWriteResponse extends Comment {
+  readonly ask_waiting_on?: AskTurn;
 }
 
 export interface Suggestion {
@@ -1428,9 +1471,18 @@ export type DispatchEvent =
       readonly type: "ask.anchor_refreshed";
       readonly payload: AskEventPayload;
     })
+  /** Every rewording: a PATCH edit, a block ask's new text, and an approval request's move to a new
+   *  version or new summary. Each one stamps the ask's `edited_at`. */
   | (DispatchEventBase & {
       readonly type: "ask.edited";
       readonly payload: AskEditEventPayload;
+    })
+  /** An agent handed its approval request back to the human: `approval.requested_version` is the
+   *  version it handed back. It rewords nothing and leaves `edited_at` as it was; a hand-back
+   *  with a new summary is an `ask.edited` followed by this event. */
+  | (DispatchEventBase & {
+      readonly type: "ask.handed_back";
+      readonly payload: AskEventPayload;
     })
   | (DispatchEventBase & { readonly type: "ask.answered"; readonly payload: AskEventPayload })
   | (DispatchEventBase & {

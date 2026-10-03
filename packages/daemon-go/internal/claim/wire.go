@@ -6,7 +6,7 @@ import "net/http"
 // the 0600 file the daemon named on its pane and posts it with the session it actually became.
 // `OmpSessionFile` is the transcript path that session persisted — the one value `--resume`
 // takes, so a relaunch of this claim resumes this agent and no other. `PluginContract` is the
-// plugin's `legion.goDaemonApiVersion`; a daemon that speaks another one refuses the boot.
+// plugin's `legion.daemonApiVersion`; a daemon that speaks another one refuses the boot.
 type RegisterRequest struct {
 	BootToken      string `json:"bootToken"`
 	SessionID      string `json:"sessionId"`

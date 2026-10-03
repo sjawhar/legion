@@ -420,7 +420,10 @@ type ArtifactReview struct {
 // ArtifactApproval is a document's approval state as of its latest version:
 // draft (never reviewed or requested), awaiting (an approval ask is open),
 // approved (approved at the latest version), stale (approved at an older
-// version), or changes_requested (the latest review asks for changes).
+// version), or changes_requested (the latest review asks for changes). An
+// awaiting approval carries its request's WaitingOn: agent once a version moved
+// the request past the one its agent handed to the human, or a reply left it with
+// the agent; human otherwise (the ask reads' waiting_on).
 type ArtifactApproval struct {
 	State         string  `json:"state"`
 	LatestVersion int     `json:"latest_version"`
@@ -430,6 +433,7 @@ type ArtifactApproval struct {
 	Reason        *string `json:"reason,omitempty"`
 	AskID         *string `json:"ask_id,omitempty"`
 	RequestedBy   *Actor  `json:"requested_by,omitempty"`
+	WaitingOn     string  `json:"waiting_on,omitempty"`
 }
 
 // ArtifactReviewEventPayload is the payload of artifact.approved and
@@ -554,10 +558,10 @@ type Ask struct {
 	EditedAt          *string `json:"edited_at"`
 	// Approval names the document an approval ask is about; nil for questions.
 	Approval *AskApproval `json:"approval,omitempty"`
-	// WaitingOn is whose reply an open ask needs next: "human" or "agent". It is the
-	// Turn of the newest comment in the ask's thread, "human" when nobody has replied.
-	// Set on ask reads only (inbox rows, ask lists, the ask detail), never on the
-	// ask.* event payloads; empty for answered and resolved asks.
+	// WaitingOn is whose reply an open ask needs next: a moved approval request stays with its
+	// agent while RequestedVersion is below Version, and a hand-back returns it to the human until
+	// a reply newer than the one it answered decides it. Set on ask reads only (inbox rows, ask lists,
+	// the ask detail), never on the ask.* event payloads; empty for answered and resolved asks.
 	WaitingOn string `json:"waiting_on,omitempty"`
 }
 
@@ -576,12 +580,14 @@ type AskBlockArtifact struct {
 	Primary bool   `json:"primary"`
 }
 
-// AskApproval is the document an approval ask asks about, at the version the
-// request was made for.
+// AskApproval is the document an approval ask names. Version follows the document's latest
+// settled version while the ask remains open. RequestedVersion is the version the agent most
+// recently handed to a human, so a lower value means the agent is revising the moved request.
 type AskApproval struct {
-	ArtifactID string `json:"artifact_id"`
-	Name       string `json:"name"`
-	Version    int    `json:"version"`
+	ArtifactID       string `json:"artifact_id"`
+	Name             string `json:"name"`
+	Version          int    `json:"version"`
+	RequestedVersion int    `json:"requested_version"`
 }
 
 // AskEditPrevious is the mutable content of an ask before an edit.
@@ -616,9 +622,9 @@ type AskFollowerEventPayload struct {
 	By        Actor  `json:"by"`
 }
 
-// AskLastReply is the newest comment in an ask's thread, carried on inbox rows and
-// on the issue detail's open asks so a human can see who spoke last. Whose turn it
-// is comes from that comment's Turn (Ask.WaitingOn), not from its author.
+// AskLastReply is the newest comment in an ask's thread, carried on inbox rows and on the issue
+// detail's open asks so a human can see who spoke last. Its Turn decides an ordinary ask's
+// WaitingOn; a moved approval request and one handed back after this reply override it.
 type AskLastReply struct {
 	Author    Actor  `json:"author"`
 	CreatedAt string `json:"created_at"`
@@ -674,6 +680,12 @@ type AskEditEventPayload struct {
 	ReferenceChangesPayload
 	Previous AskEditPrevious `json:"previous"`
 	EditedBy Actor           `json:"edited_by"`
+	// Quiet marks a version move of an approval request that already waited on its agent: it
+	// changes only the version the request names, so like a human's unnamed artifact.version it
+	// wakes nobody (events.Broker.Notify) and reaches no follower (the outbox's follower routes),
+	// while the event log and SSE carry it as they carry every event. The move that takes the
+	// request from the human is not quiet.
+	Quiet bool `json:"quiet,omitempty"`
 }
 
 // NewAskEditEventPayload builds the payload of an `ask.edited` event.
@@ -787,11 +799,12 @@ type Comment struct {
 	AnchorPosition
 	ReplyTo *string `json:"reply_to"`
 	AskID   *string `json:"ask_id"`
-	// Turn is set on a reply to an open ask (AskID non-nil) and names who holds the
-	// turn after this comment: "human" when the human needs to act, "agent" when the
-	// comment is a progress note and the asking agent still owes the next move. A
-	// human's reply always hands the turn to the agent. Nil on replies under a closed
-	// ask (nothing is waiting) and on every other comment.
+	// Turn is set on a reply to an open ask (AskID non-nil) and names whose turn the reply hands
+	// over: "human" when the human needs to act, "agent" when the comment is a progress note and
+	// the asking agent still owes the next move. A human's reply always hands the turn to the
+	// agent. The ask's WaitingOn follows its newest reply's Turn except where an approval request
+	// overrides it (moved, or handed back after this reply). Nil on replies under a closed ask
+	// (nothing is waiting) and on every other comment.
 	Turn       *string           `json:"turn"`
 	Resolved   bool              `json:"resolved"`
 	ResolvedBy *Actor            `json:"resolved_by"`

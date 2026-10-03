@@ -100,8 +100,8 @@ type pluginGate struct {
 	// timeout is each probe attempt's budget, `slow_command_timeout_seconds`.
 	timeout time.Duration
 	retry   bootprobe.Retry
-	// contract is the Go daemon API contract the plugin must declare: the daemon's own
-	// GoDaemonAPIVersion, or the one `legion probe-image` is asked for.
+	// contract is the daemon API contract the plugin must declare: the daemon's own
+	// DaemonAPIVersion, or the one `legion probe-image` is asked for.
 	contract int
 	// pluginRoot is the plugin directory a pod passes Oh My Pi as its one explicit extension
 	// (ImageProbe): the load probe then runs as a pod runs, with discovery off, and the contract
@@ -182,7 +182,7 @@ func (g pluginGate) verify(ctx context.Context) error {
 		return err
 	}
 	g.log.Info("boot gate: pi-legion-envoy speaks this daemon's contract and loads",
-		"lane", lane.described, "manifest", lane.manifest, "version", plugin.version, "goDaemonApiVersion", g.contract)
+		"lane", lane.described, "manifest", lane.manifest, "version", plugin.version, "daemonApiVersion", g.contract)
 	return nil
 }
 
@@ -238,7 +238,7 @@ func (g pluginGate) lane() (pluginLane, error) {
 					version, root, root)
 			},
 			elsewhere: func(owner, read string, contract int) error {
-				return fmt.Errorf("pi-legion-envoy loads from %s, but the probe passed %s as Oh My Pi's one explicit extension, with discovery off, and held its manifest %s to Go daemon API contract %d: the OMP invocation, or its launch prefix, loads another copy of the plugin",
+				return fmt.Errorf("pi-legion-envoy loads from %s, but the probe passed %s as Oh My Pi's one explicit extension, with discovery off, and held its manifest %s to daemon API contract %d: the OMP invocation, or its launch prefix, loads another copy of the plugin",
 					owner, root, read, contract)
 			},
 		}, nil
@@ -260,7 +260,7 @@ func (g pluginGate) lane() (pluginLane, error) {
 			return fmt.Errorf("pi-legion-envoy %s is installed but not loaded by omp (disabled or unregistered): run %s", version, list)
 		},
 		elsewhere: func(owner, read string, contract int) error {
-			return fmt.Errorf("pi-legion-envoy loads in a pane from %s, but the manifest this gate held to Go daemon API contract %d is %s, at the plugin root of %s in the pane environment: the launch prefix, or a dotenv file Oh My Pi reads, selects another plugin root. Select the OMP profile in the daemon's own environment, which every pane inherits",
+			return fmt.Errorf("pi-legion-envoy loads in a pane from %s, but the manifest this gate held to daemon API contract %d is %s, at the plugin root of %s in the pane environment: the launch prefix, or a dotenv file Oh My Pi reads, selects another plugin root. Select the OMP profile in the daemon's own environment, which every pane inherits",
 				owner, contract, read, profileWords(profile))
 		},
 	}, nil
@@ -389,9 +389,8 @@ type pluginManifest struct {
 	skills  []string
 }
 
-// readPluginManifest reads the manifest once and is the contract probe
-// (verifyLegionPluginContract, boot-probes.ts, on the Go daemon's own field): the
-// manifest's `legion.goDaemonApiVersion` must be contract. A manifest that is missing,
+// readPluginManifest reads the manifest once and is the contract probe: the manifest's
+// `legion.daemonApiVersion` must be contract. A manifest that is missing,
 // unreadable, or without the field is the same refusal, never a fallback — the load probe would
 // call such a plugin merely "not loaded" and send the operator to `omp plugin list` when the fix
 // is a reinstall. installInto names where the refusal says to install the release.
@@ -403,7 +402,7 @@ func readPluginManifest(manifest, installInto string, contract int) (pluginManif
 		err = json.Unmarshal(raw, &parsed)
 	}
 	if err != nil {
-		return pluginManifest{}, fmt.Errorf("pi-legion-envoy manifest at %s could not be read (%v); this daemon requires a plugin speaking Go daemon API contract %d. %s",
+		return pluginManifest{}, fmt.Errorf("pi-legion-envoy manifest at %s could not be read (%v); this daemon requires a plugin speaking daemon API contract %d. %s",
 			manifest, err, contract, install)
 	}
 	record, _ := parsed.(map[string]any)
@@ -412,7 +411,7 @@ func readPluginManifest(manifest, installInto string, contract int) (pluginManif
 		version = "unknown"
 	}
 	legion, _ := record["legion"].(map[string]any)
-	declared, present := legion["goDaemonApiVersion"]
+	declared, present := legion["daemonApiVersion"]
 	if number, ok := declared.(float64); ok && number == float64(contract) {
 		plugin := pluginManifest{version: version}
 		// `omp` and `omp.skills` may be absent or null; any other shape is a manifest the gate
@@ -439,7 +438,7 @@ func readPluginManifest(manifest, installInto string, contract int) (pluginManif
 		encoded, _ := json.Marshal(declared)
 		spoken = string(encoded)
 	}
-	return pluginManifest{}, fmt.Errorf("pi-legion-envoy at %s (package %s) speaks Go daemon API contract %s; this daemon requires %d. %s",
+	return pluginManifest{}, fmt.Errorf("pi-legion-envoy at %s (package %s) speaks daemon API contract %s; this daemon requires %d. %s",
 		manifest, version, spoken, contract, install)
 }
 
@@ -741,7 +740,7 @@ func (g pluginGate) run(ctx context.Context, script string, args ...string) (ran
 type ImageProbe struct {
 	// Omp is the OMP invocation as the shell runs it: the image's LEGION_OMP_PATH, or --omp.
 	Omp string
-	// Contract is the Go daemon API contract the image's plugin must declare.
+	// Contract is the daemon API contract the image's plugin must declare.
 	Contract int
 	// Env is the environment the probes resolve the plugin under and run Oh My Pi with: the
 	// image's own, since the command runs where a pod's Oh My Pi runs.
@@ -824,7 +823,7 @@ type ControllerProbe struct {
 	Stdin io.Reader
 	// Stderr also receives each foreground attempt's stderr, where a prefix's prompt goes.
 	Stderr io.Writer
-	// Contract is the Go daemon API contract the loaded plugin must declare.
+	// Contract is the daemon API contract the loaded plugin must declare.
 	Contract int
 	// Log receives each transient failure the retry waits out.
 	Log *slog.Logger

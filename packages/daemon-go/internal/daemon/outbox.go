@@ -297,10 +297,10 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 }
 
 // notice publishes a notice row to the architect that owns its issue, on that architect's own role
-// topic, and to nothing else. Every notice kind is for an architect, and every issue topic is a
-// subject that issue's phase workers subscribe to (packages/pi-envoy/src/legion/go-bootstrap.ts),
-// so no issue topic carries one. The owner, the earlier notices it waits behind, and whether its
-// tree lingers are read from one snapshot of the tree (notice_routing.go). A notice waits
+// topic, and to nothing else. Every notice kind is for an architect, and no claim subscribes to an
+// issue topic (packages/pi-envoy/src/legion/claim-session.ts), so no issue topic carries one. The
+// owner, the earlier notices it waits behind, and whether its tree lingers are read from one
+// snapshot of the tree (notice_routing.go). A notice waits
 // (errNoticeWaits) behind an earlier notice of its tree that is held for the same architect, so
 // each architect is told in the order the notices were written. A role topic with no live holder
 // refuses the publish (notify.ErrNoHolder): while the owning architect's claim can hold its role

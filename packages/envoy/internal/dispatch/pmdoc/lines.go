@@ -38,7 +38,10 @@ func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budg
 		pc.Set(unclosedFrontmatterKey, true)
 	}
 	pc.Set(tablePaddingBudgetKey, budget)
-	root := withLineStarts(reader.md.Parser(), source, pc)
+	root, err := parseSource(reader.md.Parser(), source, pc)
+	if err != nil {
+		return nil, err
+	}
 	if err, _ := pc.Get(tablePaddingErrorKey).(error); err != nil {
 		return nil, err
 	}
@@ -524,7 +527,7 @@ func (taskMarkerParser) Parse(parent ast.Node, block gmtext.Reader, _ parser.Con
 type lineRecordingParagraph struct{ parser.BlockParser }
 
 // untrimmedLinesKey holds the recorded lines while a document parses, and untrimmedLinesAttr on
-// the parsed document root afterwards (withLineStarts).
+// the parsed document root afterwards (parseSource).
 var (
 	untrimmedLinesKey  = parser.NewContextKey()
 	untrimmedLinesAttr = []byte("pmdoc-untrimmed-lines")
@@ -564,15 +567,25 @@ func recordLine(line gmtext.Segment, source []byte, pc parser.Context) {
 	recorded[line.TrimLeftSpace(source).Start] = line
 }
 
-// withLineStarts parses source with context, with each footnote definition where it is written
-// (definitionsInPlace), and leaves the lines lineRecordingParagraph recorded on the document root.
-func withLineStarts(p parser.Parser, source []byte, context parser.Context) ast.Node {
+// parseSource is pmdoc's one parse of markdown: it parses source with context, puts each footnote
+// definition where it is written (definitionsInPlace), and leaves the lines lineRecordingParagraph
+// recorded on the document root. It refuses markdown nested past either bound - a block
+// nestingGuard refused, or a textblock's inline marks past maxInlineNesting (nestingRefusal) -
+// before anything walks the tree, and goldmark's own walk through a link's label inside the parse
+// meets each image imageNesting held to the inline bound. Goldmark runs an AST transformer inside
+// its parse, so pmdoc registers none, and takes the backslash out of a cell's escaped pipes itself
+// once the bounds hold (unescapeTablePipes).
+func parseSource(p parser.Parser, source []byte, context parser.Context) (ast.Node, error) {
 	root := p.Parse(gmtext.NewReader(source), parser.WithContext(context))
 	definitionsInPlace(root, context)
 	if recorded := context.Get(untrimmedLinesKey); recorded != nil {
 		root.SetAttribute(untrimmedLinesAttr, recorded)
 	}
-	return root
+	if err := nestingRefusal(root, source, context); err != nil {
+		return nil, err
+	}
+	unescapeTablePipes(root, source)
+	return root, nil
 }
 
 // multilineCodeSpanText is the text of a code span that runs over more than one line, as the
