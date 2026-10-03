@@ -24,8 +24,8 @@ async function standIn(dir: string, list: readonly string[], body: string): Prom
   return binary;
 }
 
-/** The cache's name for `binary`, as the Go tests' testbin.OMPHome names it. */
-async function goDigest(binary: string): Promise<string> {
+/** The cache's name for `binary`, as the daemon's tests name it (`testbin.OMPHome`). */
+async function cacheDigest(binary: string): Promise<string> {
   const hasher = new Bun.CryptoHasher("sha256").update(await readFile(binary));
   return hasher.digest("hex").slice(0, 32);
 }
@@ -50,7 +50,7 @@ test("fills racing for one binary's natives cache run it once, and each HOME lin
     `echo run >>${runs}\nmkdir -p "$HOME/.omp/natives/9.9.9"\nprintf native >"$HOME/.omp/natives/9.9.9/pi_natives.test.node"\n`
   );
   const root = path.join(dir, "cache");
-  const cache = path.join(root, await goDigest(binary));
+  const cache = path.join(root, await cacheDigest(binary));
   const dead = `${cache}.fill-dead`;
   await mkdir(path.join(dead, "home"), { recursive: true });
 
@@ -83,7 +83,7 @@ test("a fill whose extraction lacks a file the binary embeds caches nothing, and
       `[ -e ${runs} ] && printf baseline >"$natives/pi_natives.test-baseline.node"\necho run >>${runs}\n`
   );
   const root = path.join(dir, "cache");
-  const cache = path.join(root, await goDigest(binary));
+  const cache = path.join(root, await cacheDigest(binary));
 
   await expect(fillNativesCache(root, binary)).rejects.toThrow(
     "embeds pi_natives.test-baseline.node, but its extraction"

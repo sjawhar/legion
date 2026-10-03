@@ -823,6 +823,13 @@ var subcommands = []subcommand{
 		}
 		return 0
 	}},
+	{"routes", func(_ context.Context, _ []string, _ settingValues, stdout, stderr io.Writer) int {
+		if err := api.WriteRouteIndex(stdout); err != nil {
+			fmt.Fprintf(stderr, "routes: %v\n", err)
+			return 1
+		}
+		return 0
+	}},
 }
 
 // runSubcommand runs the subcommand args name and returns its exit code. A name it does not know

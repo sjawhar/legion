@@ -870,18 +870,18 @@ async function driveTui(launch: WorkerLaunch, prompt: string, label: string): Pr
     );
   }
 
-  // Boot is complete when the stand-in has answered `/worker/ready` for this run.
+  // Boot is complete when the stand-in has answered `/claims/ready` for this run.
   const bootDeadline = Date.now() + 120_000;
   for (;;) {
     const ready = ((await readJsonLines(standinLog)) as unknown as StandinLine[]).some(
       (line) =>
-        line.path === "/legion/v1/worker/ready" &&
-        line.status === 200 &&
+        line.path === "/legion/v1/claims/ready" &&
+        line.status === 204 &&
         Date.parse(line.at) >= startedAt
     );
     if (ready) break;
     if (Date.now() > bootDeadline)
-      throw new Error("the interactive worker never reached /worker/ready");
+      throw new Error("the interactive worker never reached /claims/ready");
     await Bun.sleep(2_000);
   }
   await Bun.sleep(5_000);
