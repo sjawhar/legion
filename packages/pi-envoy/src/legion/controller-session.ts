@@ -1,7 +1,16 @@
-import type { GrantResponse } from "@legion/contracts";
+import {
+  controllerToken,
+  type GrantResponse,
+  legionControllerNoticeSubject,
+  legionProjectToken,
+} from "@legion/contracts";
 import { messageFor } from "@legion/envoy-client/errors";
+import pkg from "../../package.json";
 import type { CommandContext, SessionContext } from "../pi-types";
-import { classifySession, requiredControllerCapability } from "./classify";
+import { recordBootstrappedSession } from "../subagent-session";
+import { classifySession, requiredControllerCapability, requiredEnvironment } from "./classify";
+import { LegionDaemonApiError, type LegionDaemonClient } from "./daemon-client";
+import { claimEnvoyRole, subscribeLegionNotice } from "./role-claim-bridge";
 
 type PersistedTranscript = (
   context: CommandContext | SessionContext
@@ -15,31 +24,17 @@ export interface ControllerSession {
   readonly mintGrant: (sessionID: string) => Promise<GrantResponse>;
 }
 
-/** One controller claim as the daemon's API takes it. */
-export interface ControllerClaim {
-  readonly sessionID: string;
-  /** `LEGION_CONTROLLER_SECRET(_FILE)`: the capability the daemon issued this controller. */
-  readonly capability: string;
-  readonly context: CommandContext | SessionContext;
-}
-
-/** How the daemon makes a session its controller: the Envoy role claim and the daemon's own
- * registration, in the order its API needs, answering the grant minter the registration
- * authorises (`goControllerDaemon`, `go-bootstrap.ts`). */
-export interface ControllerDaemon {
-  readonly claim: (claim: ControllerClaim) => Promise<() => Promise<GrantResponse>>;
-}
-
 /**
  * Owns the controller session's identity, transcript, role claim, and grant path. This is
- * deliberately separate from the extension's root/worker bootstrap and tool-routing policy: a
- * controller has no worker capability, and its session can change in place.
+ * deliberately separate from the claim session (`claim-session.ts`) and the extension's
+ * tool-routing policy: a controller holds no claim, and its session can change in place.
  */
-export function createControllerSession(
-  persistedTranscript: PersistedTranscript,
-  checkSubagentSession: (context: SessionContext) => Promise<boolean>,
-  daemon: ControllerDaemon
-): ControllerSession {
+export function createControllerSession(deps: {
+  readonly daemon: () => LegionDaemonClient;
+  readonly persistedTranscript: PersistedTranscript;
+  readonly checkSubagentSession: (context: SessionContext) => Promise<boolean>;
+}): ControllerSession {
+  const { daemon, persistedTranscript, checkSubagentSession } = deps;
   let controllerSessionID: string | undefined;
   let controllerCapability: string | undefined;
   let mintControllerGrant: (() => Promise<GrantResponse>) | undefined;
@@ -47,18 +42,82 @@ export function createControllerSession(
   // compares to decide whether to claim again; a hand-started takeover records none.
   let controllerTranscript: string | undefined;
 
-  /** Claims the controller role for the context's session and registers it with the daemon. */
+  /**
+   * Makes the context's session the controller: it registers on the claim route with the
+   * capability `legion controller start` fetched in place of a boot token, then claims the role
+   * token the registration names (`legion-<project>-controller`), then subscribes to that
+   * project's controller topic (`notifications.legion.<project>.controller`,
+   * `notify.ControllerTopic` in the daemon, which lists what it carries) for as long as it holds
+   * the role: a later `legion controller start` takes the role, and Envoy closes the subscription
+   * at this session's next heartbeat. The project is `LEGION_PROJECT`, and it must be the
+   * daemon's, or the topic would be one nobody publishes on. Both are settled before registering,
+   * since a registration replaces the running controller's session and secret: an unset
+   * `LEGION_PROJECT` stops the claim, and so does one whose controller role is not that of the
+   * project `GET /legion/v1/state` names (`legionProjectToken`, the rule the daemon applies to its
+   * own). The registration's claim token is compared once more after it, the daemon's own answer.
+   * The subscription is a live wake only: an Oh My Pi session subscribes over core NATS, so a
+   * notice published while no controller runs never reaches one, and the controller skill reads
+   * `legion state` and Dispatch's triage listing at boot for what it missed. Its grants are minted
+   * with the registration's own secret, which a later `legion controller start` revokes. Nothing
+   * re-runs on a role regain: the daemon holds nothing for a controller, and the Envoy heartbeat
+   * keeps the role itself. A refusal is logged and propagates without exiting — the operator
+   * started this session and reads it; a refused capability was replaced by a later start. The
+   * transcript is reported on every claim, a takeover's included, because the route requires one;
+   * the daemon records only the session.
+   */
   const claim = async (context: CommandContext | SessionContext): Promise<void> => {
     const sessionID = context.sessionManager.getSessionId();
     const capability = controllerCapability ?? requiredControllerCapability(process.env);
     controllerCapability = capability;
-    const transcript =
-      classifySession(process.env).kind === "controller"
-        ? (await persistedTranscript(context)).sessionFile
-        : undefined;
-    mintControllerGrant = await daemon.claim({ sessionID, capability, context });
+    // The controller's own transcript (isSubagentSession's ensureOnDisk already persisted it) is
+    // recorded so the controller's own `task` subagents are recognised even when the transcript
+    // is not a file on disk; a hand-started takeover records nothing.
+    const { sessionFile, agentId } = await persistedTranscript(context);
+    const launched = classifySession(process.env).kind === "controller";
+    if (launched) recordBootstrappedSession(sessionFile);
+
+    const project = requiredEnvironment(process.env, "LEGION_PROJECT");
+    const client = daemon();
+    const { daemon: served } = await client.state();
+    const servedRole = controllerToken(legionProjectToken(served.project, "the daemon's project"));
+    if (controllerToken(project) !== servedRole) {
+      throw new Error(
+        `LEGION_PROJECT ${project} names controller role ${controllerToken(project)}, but the daemon at ${requiredEnvironment(process.env, "LEGION_DAEMON_URL")} serves project ${served.project}, whose controller role is ${servedRole}`
+      );
+    }
+    const registration = await client
+      .registerController({
+        bootToken: capability,
+        sessionId: sessionID,
+        ompSessionFile: sessionFile,
+        agentId,
+        pluginContract: pkg.legion.daemonApiVersion,
+      })
+      .catch((error: unknown) => {
+        if (error instanceof LegionDaemonApiError) {
+          console.error(
+            `[legion] claims/register for the controller failed (${error.status}): ${error.detail}`
+          );
+        }
+        throw error;
+      });
+    if (controllerToken(project) !== registration.claimToken) {
+      throw new Error(
+        `LEGION_PROJECT ${project} names controller role ${controllerToken(project)}, but the daemon registered this controller as ${registration.claimToken}`
+      );
+    }
+    const envoyContext = "setInterval" in context ? context : undefined;
+    await claimEnvoyRole(sessionID, registration.claimToken, envoyContext);
+    await subscribeLegionNotice(
+      sessionID,
+      legionControllerNoticeSubject(project),
+      envoyContext,
+      registration.claimToken
+    );
+    mintControllerGrant = () =>
+      client.controllerGrant({ sessionId: sessionID, secret: registration.secret });
     controllerSessionID = sessionID;
-    controllerTranscript = transcript;
+    controllerTranscript = launched ? sessionFile : undefined;
   };
 
   const handleSessionStart = async (context: SessionContext): Promise<void> => {

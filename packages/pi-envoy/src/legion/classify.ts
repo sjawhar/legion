@@ -12,10 +12,10 @@ export function classifySession(env: NodeJS.ProcessEnv): LegionSessionKind {
     throw new Error("Legion session has both controller and tree launch markers");
   }
 
-  // The controller marker is LEGION_CONTROLLER alone. The daemon also sets
-  // LEGION_ROLE=controller on that process, but "controller" is not a
-  // LegionRole and this extension never reads LEGION_ROLE for it — one
-  // signal, checked once, so the two markers can never disagree in practice.
+  // The controller marker is LEGION_CONTROLLER alone. `legion controller start` also sets
+  // LEGION_ROLE=controller on that process, but "controller" is not a LegionRole and this
+  // extension never reads LEGION_ROLE for it — one signal, checked once, so the two markers can
+  // never disagree in practice.
   if (env.LEGION_CONTROLLER === "1") return { kind: "controller" };
 
   if (env.LEGION_ROLE === undefined) return { kind: "not-legion" };

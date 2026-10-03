@@ -7,22 +7,14 @@ import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { messageFor } from "@legion/envoy-client/errors";
 import { logger } from "@oh-my-pi/pi-utils";
 import { matchInjectedUserTurn } from "../src/dispatch-user-turn";
+import { createClaimSession } from "../src/legion/claim-session";
 import {
   classifySession,
   type LegionSessionKind,
   requiredEnvironment,
 } from "../src/legion/classify";
 import { createControllerSession } from "../src/legion/controller-session";
-import {
-  bootstrapGoClaim,
-  type GoClaimCapability,
-  goControllerDaemon,
-} from "../src/legion/go-bootstrap";
-import {
-  createLegionGoDaemonClient,
-  type LegionGoDaemonClient,
-} from "../src/legion/go-daemon-client";
-import { createGoLegionTool } from "../src/legion/go-tools";
+import { createLegionDaemonClient, type LegionDaemonClient } from "../src/legion/daemon-client";
 import { writeMintedGrant } from "../src/legion/grant-file";
 import {
   assistantText,
@@ -34,6 +26,7 @@ import {
   stepPhaseStall,
 } from "../src/legion/phase-stall";
 import { applySessionTitle, legionSessionTitle } from "../src/legion/session-title";
+import { createLegionTool } from "../src/legion/tools";
 import type {
   CommandContext,
   PiApi,
@@ -41,7 +34,7 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
 } from "../src/pi-types";
-import { recordBootstrappedSession, subagentSessionCheck } from "../src/subagent-session";
+import { subagentSessionCheck } from "../src/subagent-session";
 
 // Fatal bootstrap failures call this instead of `process.exit` directly, so a
 // test can substitute a throwing stand-in without killing the test runner.
@@ -378,12 +371,6 @@ export default function legionExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url, instance });
   (globalThis as Record<symbol, unknown>)[LEGION_LOADED_MARKER] = import.meta.url;
 
-  // A Legion root or phase-worker session boots as its own OMP process and
-  // holds exactly one role for its whole lifetime, so its identity lives in
-  // plain closure state.
-  let capability: GoClaimCapability | undefined;
-  let bootstrap: Promise<void> | undefined;
-
   // Gates both session_start and tool_call below; memoised so it runs once per session, not
   // once per tool call.
   const checkSubagentSession = subagentSessionCheck();
@@ -398,10 +385,10 @@ export default function legionExtension(pi: PiApi): void {
   // or a `task` subagent (whose instance returns at checkSubagentSession before any capability
   // exists). Restored from the transcript at session_start and appended to it on every change.
   let phaseStall: PhaseStall = "closed";
-  const phaseWorkerSession = (context: SessionContext): boolean =>
-    capability !== undefined &&
-    capability.sessionID === context.sessionManager.getSessionId() &&
-    capability.role !== "architect";
+  const phaseWorkerSession = (context: SessionContext): boolean => {
+    const role = claimSession.capability(context.sessionManager.getSessionId())?.role;
+    return role !== undefined && role !== "architect";
+  };
   const advancePhaseStall = (input: PhaseStallInput): string | undefined => {
     const step = stepPhaseStall(phaseStall, input);
     if (step.state !== phaseStall) {
@@ -411,26 +398,25 @@ export default function legionExtension(pi: PiApi): void {
     return step.followUp;
   };
 
-  let daemonClient: LegionGoDaemonClient | undefined;
-  const roleDaemon = (): LegionGoDaemonClient => {
-    daemonClient ??= createLegionGoDaemonClient(
+  let daemonClient: LegionDaemonClient | undefined;
+  const roleDaemon = (): LegionDaemonClient => {
+    daemonClient ??= createLegionDaemonClient(
       requiredEnvironment(process.env, "LEGION_DAEMON_URL")
     );
     return daemonClient;
   };
 
-  const controllerSession = createControllerSession(
-    async (context) => {
-      const persisted = await persistedTranscript(context);
-      // The controller's own transcript (isSubagentSession's ensureOnDisk already persisted it):
-      // record it so the controller's own `task` subagents are recognised even when the
-      // transcript is not a file on disk. A hand-started takeover never reaches here.
-      recordBootstrappedSession(persisted.sessionFile);
-      return persisted;
-    },
+  // A root architect's or phase worker's claim, and the operator-launched controller's.
+  const claimSession = createClaimSession({
+    daemon: roleDaemon,
+    persistedTranscript,
+    exitProcess: (code) => exitProcess(code),
+  });
+  const controllerSession = createControllerSession({
+    daemon: roleDaemon,
+    persistedTranscript,
     checkSubagentSession,
-    goControllerDaemon(roleDaemon, persistedTranscript)
-  );
+  });
 
   /**
    * Names the session by its Legion identity (`src/legion/session-title.ts`), so every Dispatch
@@ -460,20 +446,7 @@ export default function legionExtension(pi: PiApi): void {
       await controllerSession.handleSessionStart(context);
       return;
     }
-    await bootstrapGoClaim(context, {
-      capability: () => capability,
-      setCapability: (next) => {
-        capability = next;
-      },
-      bootstrap: () => bootstrap,
-      setBootstrap: (next) => {
-        bootstrap = next;
-      },
-      daemon: roleDaemon,
-      exitProcess,
-      persistedTranscript,
-      recordBootstrappedSession,
-    });
+    await claimSession.bootstrap(context);
     registerLegionTool();
     await activateLegionTool();
   });
@@ -516,7 +489,7 @@ export default function legionExtension(pi: PiApi): void {
     // it (see the architect `task` block below and isSubagentSession).
     if (await checkSubagentSession(context)) return undefined;
     const sessionID = context.sessionManager.getSessionId();
-    const active = capability?.sessionID === sessionID ? capability : undefined;
+    const active = claimSession.capability(sessionID);
     // A `write` to an `xd://<tool>` path is OMP's tool-device invocation convention (e.g. the
     // nine Dispatch tools), not a file mutation. Short-circuit it out of every mutation gate
     // below so the architect/reviewer/merger role checks apply only to real file writes.
@@ -639,13 +612,12 @@ export default function legionExtension(pi: PiApi): void {
     if (legionToolRegistered) return;
     legionToolRegistered = true;
     pi.registerTool(
-      createGoLegionTool({
+      createLegionTool({
         pi,
         daemon: roleDaemon,
         session: (context) => {
-          const sessionID = context.sessionManager.getSessionId();
-          const active = capability;
-          if (active === undefined || active.sessionID !== sessionID) {
+          const active = claimSession.capability(context.sessionManager.getSessionId());
+          if (active === undefined) {
             throw new Error("legion is available only to this session's registered claim");
           }
           return {

@@ -46,7 +46,7 @@ const RoleTopicPrefix = "notifications.role."
 // (`[A-Z][A-Z0-9]*-[0-9]+`) can be `controller`, and the plugin's controller subscribes to it while
 // it holds the controller role (legionControllerNoticeSubject, packages/contracts/src/subject.ts).
 // project is the project token panes are told as LEGION_PROJECT
-// (packages/pi-envoy/src/legion/go-bootstrap.ts), never the Dispatch project key. It is a live
+// (packages/pi-envoy/src/legion/controller-session.ts), never the Dispatch project key. It is a live
 // wake only: the stream retains it, but an Oh My Pi session subscribes over core NATS and is never
 // handed a retained copy, so a controller learns what happened before it started from `legion
 // state` and Dispatch.

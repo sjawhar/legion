@@ -5,7 +5,7 @@ import {
 } from "@legion/contracts/legion-go-api";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
 import { toolFailure, toolSuccess } from "../tool-result";
-import type { LegionGoDaemonClient } from "./go-daemon-client";
+import type { LegionDaemonClient } from "./daemon-client";
 import {
   HANDOFF_DESCRIPTION,
   HANDOFF_OPERATIONS,
@@ -15,17 +15,17 @@ import {
   runHandoffAction,
 } from "./handoff-actions";
 
-export type GoLegionToolRole = "architect" | "phase-worker";
+export type LegionToolRole = "architect" | "phase-worker";
 
-export interface GoLegionToolSession {
-  readonly kind: GoLegionToolRole;
+export interface LegionToolSession {
+  readonly kind: LegionToolRole;
   readonly sessionId: string;
   readonly tree: string;
   readonly issue: string;
-  readonly secret?: string;
+  readonly secret: string;
 }
 
-const OPERATIONS: Readonly<Record<GoLegionToolRole, readonly string[]>> = {
+const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
   architect: [
     "register_gate",
     "release_children",
@@ -73,7 +73,9 @@ function toolSchema(pi: PiApi): unknown {
     issue: z.string().optional(),
     artifactId: z
       .string()
-      .describe("register_gate's root spec document: its artifact id, slug, or filename, as the Dispatch tools take it")
+      .describe(
+        "register_gate's root spec document: its artifact id, slug, or filename, as the Dispatch tools take it"
+      )
       .optional(),
     version: z.number().optional(),
     issues: z.array(z.string()).optional(),
@@ -84,15 +86,20 @@ function toolSchema(pi: PiApi): unknown {
   });
 }
 
-function requiredString(parameters: Record<string, unknown>, operation: string, name: string): string {
+function requiredString(
+  parameters: Record<string, unknown>,
+  operation: string,
+  name: string
+): string {
   const value = parameters[name];
-  if (typeof value !== "string" || value.trim() === "") throw new Error(`${operation} requires ${name}`);
+  if (typeof value !== "string" || value.trim() === "")
+    throw new Error(`${operation} requires ${name}`);
   return value;
 }
 
 function assertOperationInput(parameters: Record<string, unknown>, operation: string): void {
   const fields = OPERATION_FIELDS[operation];
-  if (fields === undefined) throw new Error(`Unsupported Go Legion operation: ${operation}`);
+  if (fields === undefined) throw new Error(`Unsupported legion operation: ${operation}`);
   for (const name of Object.keys(parameters)) {
     if (name !== "op" && !fields.includes(name)) {
       throw new Error(`${operation} does not accept field "${name}"`);
@@ -100,34 +107,30 @@ function assertOperationInput(parameters: Record<string, unknown>, operation: st
   }
 }
 
-async function grantFor(
-  daemon: LegionGoDaemonClient,
-  session: GoLegionToolSession
-): Promise<string> {
-  if (session.secret === undefined) {
-    throw new Error("Go Legion session has no registered claim capability");
-  }
-  return (await daemon.grant({
-    sessionId: session.sessionId,
-    secret: session.secret,
-    tree: session.tree,
-    issue: session.issue,
-  })).grantId;
+async function grantFor(daemon: LegionDaemonClient, session: LegionToolSession): Promise<string> {
+  return (
+    await daemon.grant({
+      sessionId: session.sessionId,
+      secret: session.secret,
+      tree: session.tree,
+      issue: session.issue,
+    })
+  ).grantId;
 }
 
 function recordFrom(state: LegionGoState, issue: string): Readonly<Record<string, unknown>> {
   const record = state.issues[issue];
-  if (record === undefined) throw new Error(`The Go daemon has no record for ${issue}`);
+  if (record === undefined) throw new Error(`The daemon has no record for ${issue}`);
   return record;
 }
 
-/** The Go daemon's role-local workflow surface: no operation can schedule a worker. The handoff
+/** The daemon's role-local workflow surface: no operation can schedule a worker. The handoff
  * actions belong to every session but the root architect: a phase worker, and a sub-architect (an
  * architect whose issue is not its tree). */
-export function createGoLegionTool(deps: {
+export function createLegionTool(deps: {
   readonly pi: PiApi;
-  readonly daemon: () => LegionGoDaemonClient;
-  readonly session: (context: SessionContext) => GoLegionToolSession;
+  readonly daemon: () => LegionDaemonClient;
+  readonly session: (context: SessionContext) => LegionToolSession;
   /** Told of each `handoff_complete` that succeeded: the session's phase is complete. */
   readonly onPhaseCompleted: (context: SessionContext) => void;
   /** The id of the document `issue` carries under `reference` (`spec`, a slug, or a filename),
@@ -140,7 +143,7 @@ export function createGoLegionTool(deps: {
     name: "legion",
     label: "legion",
     description:
-      "Perform the workflow operation the Go Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
+      "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
       HANDOFF_DESCRIPTION,
     defaultInactive: true,
     parameters: toolSchema(pi),
@@ -172,11 +175,7 @@ export function createGoLegionTool(deps: {
           }
           case "register_gate": {
             const version = parameters.version;
-            if (
-              typeof version !== "number" ||
-              !Number.isSafeInteger(version) ||
-              version < 1
-            ) {
+            if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 1) {
               throw new Error("register_gate requires a positive integer version");
             }
             // The gate is the tree root's, registered by the root's own architect, as the daemon
@@ -214,7 +213,11 @@ export function createGoLegionTool(deps: {
             const grantId = await grantFor(client, active);
             await client.phaseBackward({
               grantId,
-              to: requiredString(parameters, operation, "to") as (typeof LEGION_GO_WORKFLOW_PHASES)[number],
+              to: requiredString(
+                parameters,
+                operation,
+                "to"
+              ) as (typeof LEGION_GO_WORKFLOW_PHASES)[number],
               reason: requiredString(parameters, operation, "reason"),
             });
             return jsonSuccess({});
@@ -253,11 +256,13 @@ export function createGoLegionTool(deps: {
           case "rerun_child": {
             const grantId = await grantFor(client, active);
             const request = { grantId, issue: requiredString(parameters, operation, "issue") };
-            await (operation === "park_child" ? client.childPark(request) : client.childRerun(request));
+            await (operation === "park_child"
+              ? client.childPark(request)
+              : client.childRerun(request));
             return jsonSuccess({});
           }
           default:
-            throw new Error(`Unsupported Go Legion operation: ${operation}`);
+            throw new Error(`Unsupported legion operation: ${operation}`);
         }
       } catch (error) {
         return toolFailure(error);

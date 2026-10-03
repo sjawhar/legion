@@ -2,7 +2,7 @@ package api
 
 // DaemonAPIVersion is the contract this daemon speaks with the Oh My Pi plugin: the claim,
 // credential, workflow, controller and state shapes the plugin's client parses strictly
-// (`packages/pi-envoy/src/legion/go-daemon-client.ts`, through
+// (`packages/pi-envoy/src/legion/daemon-client.ts`, through
 // `packages/contracts/src/legion-go-api.ts`), and the pane environment it reads — every variable
 // the tmux runtime sets on a pane (`internal/runtime/tmux/spawn.go`'s `panePairs`) and the Sandbox
 // runtime on a pod's worker container (`internal/runtime/sandbox/manifest.go`'s
@@ -27,5 +27,7 @@ package api
 //
 // 12: LEGION-223 -- one daemon: the manifest field is renamed `legion.daemonApiVersion`, `legion
 // probe-image` takes `--daemon-api-version` and its OK line ends `daemon-api-version=<N>`, and no
-// pane or pod carries the variable that chose between two daemons' clients.
+// pane or pod carries the variable that chose between two daemons' clients. `POST
+// /legion/v1/controller/secret` takes the contract `legion controller start` held the controller's
+// plugin to (`pluginContract`) and refuses another before it mints.
 const DaemonAPIVersion = 12

@@ -240,8 +240,6 @@ exit %[2]d
 	return c
 }
 
-
-
 // installPlugin installs, in the operator's default Oh My Pi profile, a pi-legion-envoy manifest
 // declaring contract, and has the recording Oh My Pi load it.
 func (c *operatorMachine) installPlugin(contract int) {
@@ -382,8 +380,8 @@ func modeOf(t *testing.T, path string) os.FileMode {
 	return info.Mode().Perm()
 }
 
-// The one daemon call: POST /legion/v1/controller/secret, the operator token as a bearer, an
-// empty JSON object as the body.
+// The one daemon call: POST /legion/v1/controller/secret, the operator token as a bearer, and the
+// contract the probe held the plugin to as the body.
 func TestControllerStartFetchesTheSecretWithTheOperatorBearer(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{})
@@ -397,7 +395,7 @@ func TestControllerStartFetchesTheSecretWithTheOperatorBearer(t *testing.T) {
 	got := requests[0]
 	if got.method != http.MethodPost || got.path != "/legion/v1/controller/secret" ||
 		got.authorization != "Bearer "+controllerOperatorToken || got.contentType != "application/json" ||
-		string(got.body) != "{}" || got.status != http.StatusOK {
+		string(got.body) != fmt.Sprintf(`{"pluginContract":%d}`, api.DaemonAPIVersion) || got.status != http.StatusOK {
 		t.Fatalf("secret request = %s %s auth %q type %q body %q → %d", got.method, got.path, got.authorization, got.contentType, got.body, got.status)
 	}
 }
@@ -571,7 +569,7 @@ func TestControllerSecretWithoutADesignGatePolicyIsRefused(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(body))
 		}))
-		_, _, err := fetchControllerSecret(context.Background(), server.URL, controllerOperatorToken)
+		_, _, err := fetchControllerSecret(context.Background(), server.URL, controllerOperatorToken, api.DaemonAPIVersion)
 		server.Close()
 		if err == nil || !strings.Contains(err.Error(), "not 'root-issues' or 'off'; upgrade the daemon") {
 			t.Fatalf("fetchControllerSecret(%s) error = %v; want the policy refusal", body, err)

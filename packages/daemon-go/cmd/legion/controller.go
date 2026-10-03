@@ -78,7 +78,9 @@ func runController(ctx context.Context, args []string, stdout, stderr io.Writer)
 // binary's, which would refuse the controller at session start (daemon.ProbeController). The probe
 // runs `omp models`, which starts no session, so it neither registers, takes the controller role,
 // nor reads a controller secret. Then fetch the controller secret with the operator token as a
-// bearer (the daemon mints a fresh capability and revokes the previous controller's); write it
+// bearer, naming the contract the probe held the plugin to, which the daemon refuses before it
+// mints when it is not its own (the daemon mints a fresh capability and revokes the previous
+// controller's); write it
 // 0600 under the local state directory beside the gh shim, the `legion` launcher, and the
 // deployment instructions; then run Oh My Pi interactive — the launch prefix and the resolved invocation, one joined
 // `--append-system-prompt`, and controllerStartMessage as its one message, no `--resume`, no
@@ -264,12 +266,13 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 }
 
 // probeAndMint is the controller probe and then the one daemon call, which mints the capability:
-// the probe's refusal comes before the mint, never after it.
+// the probe's refusal comes before the mint, never after it, and the call names the contract the
+// probe held the plugin to, so a daemon of another contract refuses it before minting.
 func probeAndMint(ctx context.Context, daemonURL string, probe daemon.ControllerProbe, operatorToken string) (string, config.DesignGate, error) {
 	if err := daemon.ProbeController(ctx, probe); err != nil {
 		return "", "", err
 	}
-	return fetchControllerSecret(ctx, daemonURL, operatorToken)
+	return fetchControllerSecret(ctx, daemonURL, operatorToken, probe.Contract)
 }
 
 // makeDirs creates dir and its missing parents, 0700, and answers the ones it created, deepest
@@ -297,13 +300,14 @@ func removeDirs(created []string) {
 }
 
 // fetchControllerSecret is `POST /legion/v1/controller/secret` with the operator token as a
-// bearer, answering the capability and the daemon's design gate policy. A failed request names the
+// bearer and the plugin's daemon API contract in the body, answering the capability and the
+// daemon's design gate policy. A failed request names the
 // daemon URL and never tries another address; a refusal quotes the daemon's `error` (the shipped
 // fetchControllerSecret, packages/daemon/src/cli/controller-start.ts). An answer without a known
 // policy is a daemon from before the controller was told it, refused rather than guessed at.
-func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string) (string, config.DesignGate, error) {
+func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string, contract int) (string, config.DesignGate, error) {
 	const route = "/legion/v1/controller/secret"
-	status, body, err := operator{base: daemonURL, bearer: operatorToken}.do(ctx, http.MethodPost, route, struct{}{})
+	status, body, err := operator{base: daemonURL, bearer: operatorToken}.do(ctx, http.MethodPost, route, api.ControllerSecretRequest{PluginContract: contract})
 	if err != nil {
 		return "", "", fmt.Errorf("could not reach the Legion daemon at %s: %v; is the port-forward running? (never falls back to another address)", daemonURL, err)
 	}

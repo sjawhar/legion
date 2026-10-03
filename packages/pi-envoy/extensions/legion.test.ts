@@ -12,7 +12,6 @@ import {
 } from "bun:test";
 import {
   access,
-  chmod,
   cp,
   mkdir,
   mkdtemp,
@@ -144,7 +143,6 @@ const environmentKeys = [
   "LEGION_CONTROLLER",
   "LEGION_CONTROLLER_SECRET",
   "LEGION_DAEMON_URL",
-  "LEGION_GENERATION",
   "LEGION_BOOT_TOKEN",
   "LEGION_TREE",
   "LEGION_PROJECT",
@@ -448,72 +446,150 @@ async function grantFileContents(file: string): Promise<{ grant: string; mode: n
   };
 }
 
-/** Boots a phase-worker session and returns its tool_call handler bound to that session. `branch`
- * is what the session's `getBranch()` returns: a resumed session's transcript entries. `title` is
- * the title the session already carries when it starts. */
-async function bootWorker(options: {
+interface DaemonRequest {
+  readonly path: string;
+  readonly body: unknown;
+}
+
+interface ClaimPane {
+  readonly claimToken: string;
+  /** The daemon's `claims/register` answer: the claim it issued this pane. */
+  readonly registration: {
+    readonly claimToken: string;
+    readonly tree: IssueKey;
+    readonly issue: IssueKey;
+    readonly role: LegionRole;
+    readonly generation: number;
+    readonly secret: string;
+  };
+  readonly bootToken: string;
+  /** The pane's `LEGION_GRANT_FILE`, `<claim>-grant` in a 0700 secrets directory. */
+  readonly grantFile: string;
+  readonly secretsDir: string;
+  /** Every request the pane made, daemon and Envoy listener alike, in order. */
+  readonly requests: DaemonRequest[];
+  readonly exits: number[];
+  /** What `console.error` printed while `start()` ran. */
+  readonly errors: string[];
+  readonly intervals: (() => void)[];
+  readonly tools: RegisteredTool[];
+  readonly activeTools: string[];
+  readonly entries: AppendedEntry[];
+  readonly title: HostTitle;
+  readonly handlers: Map<string, Handler>;
+  readonly context: SessionContext;
+  readonly toolCall: Handler;
+  /** Runs `session_start` for the pane's session, as Oh My Pi does when the process starts. */
+  readonly start: () => Promise<unknown>;
+}
+
+/** A pane the daemon launched for a claim (a root architect, or a phase worker): the identity
+ * variables the tmux runtime sets (`packages/daemon-go/internal/runtime/tmux/spawn.go`'s
+ * `panePairs`), the boot token as a 0600 file behind `LEGION_BOOT_TOKEN_FILE`, and
+ * `LEGION_GRANT_FILE` naming `<claim>-grant` beside it, under a state directory of its own. The
+ * stub answers `extraRoutes` first, then the daemon's claim routes (`register` and `ready`
+ * override their answers) and grants (`grant-<n>`), and 404s every other daemon path exactly as
+ * the daemon's catch-all does, so a route the extension reached that the daemon does not serve is
+ * visible in `requests` and never mistaken for a success. Each pane is an Oh My Pi process of its
+ * own, so nothing an earlier pane recorded process-wide (its bootstrapped session, its Envoy role
+ * bridge) carries over. `branch` is what the session's `getBranch()` returns: a resumed session's
+ * transcript entries. `title` is the title the session already carries when it starts. Nothing
+ * runs until `start()`; `bootPane` is the started pane. */
+async function claimPane(options: {
   readonly role: LegionRole;
   readonly tree?: IssueKey;
   readonly issue?: IssueKey;
   readonly sessionId?: string;
-  readonly workspace: string;
-  readonly requests?: { readonly path: string; readonly body: unknown }[];
+  readonly sessionFile?: string;
+  readonly workspace?: string;
+  readonly register?: () => Response | Promise<Response>;
+  readonly ready?: (attempt: number) => Response | Promise<Response>;
+  readonly readyPosted?: () => void;
+  readonly roleHolder?: () => string | undefined;
   readonly extraRoutes?: (url: URL, body: unknown) => Response | undefined;
-  readonly intervals?: (() => void)[];
+  readonly ensureOnDisk?: () => Promise<void>;
   readonly branch?: readonly unknown[];
   readonly title?: { readonly name: string; readonly source: "auto" | "user" };
-}): Promise<{
-  readonly toolCall: Handler;
-  readonly context: SessionContext;
-  readonly token: string;
-  /** The pane's `LEGION_GRANT_FILE`, under a 0700 secrets dir, exactly as the daemon names it. */
-  readonly grantFile: string;
-  readonly secretsDir: string;
-  readonly handlers: Map<string, Handler>;
-  readonly entries: AppendedEntry[];
-  readonly tools: RegisteredTool[];
-  readonly title: HostTitle;
-}> {
+}): Promise<ClaimPane> {
+  resetLegionBootstrappedSessionForTests();
+  resetLegionRoleClaimBridgeForTests();
   const tree = options.tree ?? "REPO-42";
   const issue = options.issue ?? "REPO-43";
   const sessionId = options.sessionId ?? `ses_${options.role}`;
-  const token = roleToken("omp", issue, options.role);
+  const workspace = options.workspace ?? "/tmp/legion-workspace";
+  const claimToken = roleToken("omp", issue, options.role);
+  const registration = {
+    claimToken,
+    tree,
+    issue,
+    role: options.role,
+    generation: 2,
+    secret: `secret-${sessionId}`,
+  };
+  const bootToken = `boot-${sessionId}`;
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-pane-state-"));
+  const secretsDir = path.join(stateDir, "secrets");
+  await mkdir(secretsDir, { mode: 0o700 });
+  temporaryPaths.push(stateDir);
+  const bootTokenFile = path.join(secretsDir, claimToken);
+  const grantFile = path.join(secretsDir, `${claimToken}-grant`);
+  await writeFile(bootTokenFile, `${bootToken}\n`, { mode: 0o600 });
   process.env.ENVOY_URL = "http://envoy.test";
   process.env.LEGION_DAEMON_URL = "http://daemon.test";
-  process.env.LEGION_BOOT_TOKEN = `boot-${sessionId}`;
+  process.env.LEGION_BOOT_TOKEN_FILE = bootTokenFile;
+  process.env.LEGION_PROJECT = "omp";
   process.env.LEGION_TREE = tree;
   process.env.LEGION_ISSUE = issue;
   process.env.LEGION_ROLE = options.role;
-  process.env.LEGION_WORKSPACE = options.workspace;
-  const secretsDir = await mkdtemp(path.join(os.tmpdir(), "legion-secrets-"));
-  await chmod(secretsDir, 0o700);
-  temporaryPaths.push(secretsDir);
-  const grantFile = path.join(secretsDir, `${token}-grant`);
+  process.env.LEGION_WORKSPACE = workspace;
+  process.env.LEGION_STATE_DIR = stateDir;
   process.env.LEGION_GRANT_FILE = grantFile;
+
+  const requests: DaemonRequest[] = [];
+  let readyAttempts = 0;
+  let grants = 0;
   globalThis.fetch = (async (input, init) => {
     const url = new URL(input.toString());
     const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
-    options.requests?.push({ path: url.pathname, body });
+    requests.push({ path: url.pathname, body });
     const extra = options.extraRoutes?.(url, body);
-    if (extra) return extra;
+    if (extra !== undefined) return extra;
     if (url.pathname === "/legion/v1/claims/register") {
-      return Response.json({
-        claimToken: token,
-        tree,
-        issue,
-        role: options.role,
-        generation: 1,
-        secret: "worker-secret",
-      });
+      return (await options.register?.()) ?? Response.json(registration);
     }
-    if (url.pathname === "/legion/v1/claims/ready") return new Response(null, { status: 204 });
+    if (url.pathname === "/legion/v1/claims/ready") {
+      readyAttempts += 1;
+      options.readyPosted?.();
+      return (await options.ready?.(readyAttempts)) ?? new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/legion/v1/grants") {
+      grants += 1;
+      return Response.json({ grantId: `grant-${grants}`, expiresAt: "2099-01-01T00:00:00Z" });
+    }
+    if (url.pathname.startsWith("/legion/")) {
+      return Response.json({ error: "no route" }, { status: 404 });
+    }
+    if (url.pathname === `/v1/roles/${claimToken}`) {
+      const holder = options.roleHolder?.() ?? sessionId;
+      if (holder === "") {
+        return Response.json({ error: `no holder for role ${claimToken}` }, { status: 404 });
+      }
+      return Response.json({ role: claimToken, holder, last_seen: 1 });
+    }
     return Response.json({
       session_id: sessionId,
       machine_id: "machine",
-      dir: options.workspace,
-      topics: [token],
+      dir: workspace,
+      topics: [claimToken],
     });
   }) as typeof fetch;
+
+  const exits: number[] = [];
+  setLegionBootstrapExitForTests((code) => {
+    exits.push(code);
+    throw new Error("process would exit");
+  });
+  const intervals: (() => void)[] = [];
   const fixture = createPi();
   if (options.title !== undefined) {
     fixture.title.name = options.title.name;
@@ -523,32 +599,64 @@ async function bootWorker(options: {
   const sessionStart = fixture.handlers.get("session_start");
   const toolCall = fixture.handlers.get("tool_call");
   if (sessionStart === undefined || toolCall === undefined) {
-    throw new Error("worker lifecycle handlers were not registered");
+    throw new Error("the pane's lifecycle handlers were not registered");
   }
+  const base = sessionContext(
+    sessionId,
+    options.sessionFile ?? `/tmp/${sessionId}.jsonl`,
+    options.ensureOnDisk,
+    fixture.title
+  );
   const context: SessionContext = {
-    ...sessionContext(sessionId, undefined, undefined, fixture.title),
-    sessionManager: {
-      ...sessionContext(sessionId, undefined, undefined, fixture.title).sessionManager,
-      getBranch: () => options.branch ?? [],
-    },
-    cwd: options.workspace,
+    ...base,
+    sessionManager: { ...base.sessionManager, getBranch: () => options.branch ?? [] },
+    cwd: workspace,
     setInterval: (callback) => {
-      options.intervals?.push(callback);
+      intervals.push(callback);
     },
   };
-  await sessionStart({}, context);
+  const errors: string[] = [];
   return {
-    toolCall,
-    context,
-    token,
+    claimToken,
+    registration,
+    bootToken,
     grantFile,
     secretsDir,
-    handlers: fixture.handlers,
-    entries: fixture.entries,
+    requests,
+    exits,
+    errors,
+    intervals,
     tools: fixture.tools,
+    activeTools: fixture.activeTools,
+    entries: fixture.entries,
     title: fixture.title,
+    handlers: fixture.handlers,
+    context,
+    toolCall,
+    start: async () => {
+      const errorLog = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+        errors.push(args.map(String).join(" "));
+      });
+      try {
+        return await sessionStart({}, context);
+      } finally {
+        errorLog.mockRestore();
+      }
+    },
   };
 }
+
+async function bootPane(options: Parameters<typeof claimPane>[0]): Promise<ClaimPane> {
+  const pane = await claimPane(options);
+  await pane.start();
+  return pane;
+}
+
+const daemonRequests = <T extends { readonly path: string }>(requests: readonly T[]) =>
+  requests.filter((request) => request.path.startsWith("/legion/"));
+
+const grantRequests = (requests: readonly DaemonRequest[]) =>
+  requests.filter((request) => request.path === "/legion/v1/grants");
 
 describe("Legion OMP extension", () => {
   test("classifies controllers, root architects, sub-architects, phase workers, and ordinary sessions", () => {
@@ -636,49 +744,41 @@ describe("Legion OMP extension", () => {
       "LEGION_CONTROLLER_SECRET or LEGION_CONTROLLER_SECRET_FILE is required to claim the controller. Launch OMP with one of them in its environment before running /legion-claim-controller."
     );
   });
-  test("boots a phase worker from its environment and reports readiness to the daemon", async () => {
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const tree = "REPO-42";
-    const issue = "REPO-43";
-    const role: LegionRole = "tester";
-    const token = roleToken("omp", issue, role);
-    const workspace = await createJjWorkspace();
+  test("a claim registers, claims its Envoy role, and reports ready through the claim routes alone", async () => {
+    const pane = await bootPane({ role: "tester", sessionId: "ses_worker" });
 
-    const { context } = await bootWorker({
-      role,
-      tree,
-      issue,
-      sessionId: "ses_worker",
-      workspace,
-      requests,
-    });
-
-    expect(requests.map((request) => request.path)).toEqual([
-      "/v1/interests/subscribe",
-      "/legion/v1/claims/register",
-      "/v1/interests/subscribe",
-      "/v1/roles/set",
-      "/legion/v1/claims/ready",
-    ]);
-    expect(requests[1]).toEqual({
-      path: "/legion/v1/claims/register",
-      body: {
-        bootToken: "boot-ses_worker",
-        sessionId: "ses_worker",
-        ompSessionFile: "/tmp/session.jsonl",
-        agentId: "session",
-        pluginContract: pkg.legion.daemonApiVersion,
+    expect(daemonRequests(pane.requests)).toEqual([
+      {
+        path: "/legion/v1/claims/register",
+        body: {
+          bootToken: pane.bootToken,
+          sessionId: "ses_worker",
+          ompSessionFile: "/tmp/ses_worker.jsonl",
+          agentId: "ses_worker",
+          pluginContract: pkg.legion.daemonApiVersion,
+        },
       },
-    });
-    expect(requests.find((request) => request.path === "/v1/roles/set")).toEqual({
-      path: "/v1/roles/set",
-      body: { session_id: "ses_worker", role: token },
-    });
-    expect(requests.at(-1)).toEqual({
-      path: "/legion/v1/claims/ready",
-      body: { claimToken: token, sessionId: "ses_worker", secret: "worker-secret", generation: 1 },
-    });
-    expect(context.sessionManager.getSessionId()).toBe("ses_worker");
+      {
+        path: "/legion/v1/claims/ready",
+        body: {
+          claimToken: pane.claimToken,
+          sessionId: "ses_worker",
+          secret: pane.registration.secret,
+          generation: pane.registration.generation,
+        },
+      },
+    ]);
+    // The Envoy role is the claim token, claimed after the registration issued it and before ready.
+    const paths = pane.requests.map((request) => request.path);
+    const roleClaim = pane.requests.findIndex(
+      (request) =>
+        request.path === "/v1/roles/set" &&
+        JSON.stringify(request.body) ===
+          JSON.stringify({ session_id: "ses_worker", role: pane.claimToken })
+    );
+    expect(roleClaim).toBeGreaterThan(paths.indexOf("/legion/v1/claims/register"));
+    expect(roleClaim).toBeLessThan(paths.indexOf("/legion/v1/claims/ready"));
+    expect(pane.exits).toEqual([]);
   });
   test("does nothing for a session with no Legion environment markers", async () => {
     const requests: { readonly path: string }[] = [];
@@ -711,145 +811,40 @@ describe("Legion OMP extension", () => {
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
     expect(fixture.title.set).toEqual([]);
   });
-  test("never bootstraps, claims a role, or exits for a subagent session, even with root-architect environment", async () => {
-    const requests: { readonly path: string }[] = [];
-    const exits: number[] = [];
-    setLegionBootstrapExitForTests((code) => {
-      exits.push(code);
-      throw new Error(`exitProcess(${code})`);
-    });
-    const { childFile } = await createSubagentTranscriptPaths();
-    process.env.ENVOY_URL = "http://envoy.test";
-    process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    process.env.LEGION_GENERATION = "3";
-    process.env.LEGION_BOOT_TOKEN = "boot-subagent-root";
-    process.env.LEGION_TREE = "REPO-42";
-    process.env.LEGION_ROLE = "architect";
-    process.env.LEGION_ISSUE = "REPO-42";
-    globalThis.fetch = (async (input) => {
-      const url = new URL(input.toString());
-      requests.push({ path: url.pathname });
-      return Response.json({
-        session_id: "ses_sub_root",
-        machine_id: "machine",
-        dir: "/tmp/legion-workspace",
-        topics: [],
+  for (const [kind, role, issue] of [
+    ["root-architect", "architect", "REPO-42"],
+    ["phase-worker", "implementer", "REPO-43"],
+  ] as const) {
+    test(`never bootstraps, claims a role, or exits for a subagent session, even with ${kind} environment`, async () => {
+      const { childFile } = await createSubagentTranscriptPaths();
+      const pane = await claimPane({
+        role,
+        issue,
+        sessionId: `ses_sub_${role}`,
+        sessionFile: childFile,
       });
-    }) as typeof fetch;
-    const fixture = createPi();
-    legionExtension(fixture.pi);
-    const sessionStart = fixture.handlers.get("session_start");
-    const toolCall = fixture.handlers.get("tool_call");
-    if (sessionStart === undefined || toolCall === undefined) {
-      throw new Error("session_start or tool_call handler was not registered");
-    }
-    const context = sessionContext("ses_sub_root", childFile);
 
-    await sessionStart({}, context);
+      await pane.start();
 
-    expect(requests.some((request) => request.path.startsWith("/legion/"))).toBe(false);
-    expect(requests.some((request) => request.path === "/v1/roles/set")).toBe(false);
-    expect(exits).toEqual([]);
-    expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
-    expect(fixture.title.set).toEqual([]);
+      expect(daemonRequests(pane.requests)).toEqual([]);
+      expect(pane.requests.some((request) => request.path === "/v1/roles/set")).toBe(false);
+      expect(pane.exits).toEqual([]);
+      expect(pane.tools.find((tool) => tool.name === "legion")).toBeUndefined();
+      expect(pane.title.set).toEqual([]);
 
-    // No tool gate was installed for this session either: a plain bash call, which an
-    // unregistered root/phase worker would otherwise have blocked, passes through untouched.
-    await expect(
-      toolCall(
-        { toolName: "bash", toolCallId: "call-sub-root-bash", input: { command: "ls" } },
-        context
-      )
-    ).resolves.toBeUndefined();
-  });
-  test("never bootstraps, claims a role, or exits for a subagent session, even with phase-worker environment", async () => {
-    const requests: { readonly path: string }[] = [];
-    const exits: number[] = [];
-    setLegionBootstrapExitForTests((code) => {
-      exits.push(code);
-      throw new Error(`exitProcess(${code})`);
+      // No tool gate was installed for this session either: a plain bash call, which an
+      // unregistered root/phase worker would otherwise have blocked, passes through untouched.
+      await expect(
+        pane.toolCall(
+          { toolName: "bash", toolCallId: `call-sub-${role}-bash`, input: { command: "ls" } },
+          pane.context
+        )
+      ).resolves.toBeUndefined();
     });
-    const { childFile } = await createSubagentTranscriptPaths();
-    process.env.ENVOY_URL = "http://envoy.test";
-    process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    process.env.LEGION_GENERATION = "1";
-    process.env.LEGION_BOOT_TOKEN = "boot-subagent-worker";
-    process.env.LEGION_TREE = "REPO-42";
-    process.env.LEGION_ROLE = "implementer";
-    process.env.LEGION_ISSUE = "REPO-43";
-    process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
-    globalThis.fetch = (async (input) => {
-      const url = new URL(input.toString());
-      requests.push({ path: url.pathname });
-      return Response.json({
-        session_id: "ses_sub_worker",
-        machine_id: "machine",
-        dir: "/tmp/legion-workspace",
-        topics: [],
-      });
-    }) as typeof fetch;
-    const fixture = createPi();
-    legionExtension(fixture.pi);
-    const sessionStart = fixture.handlers.get("session_start");
-    const toolCall = fixture.handlers.get("tool_call");
-    if (sessionStart === undefined || toolCall === undefined) {
-      throw new Error("session_start or tool_call handler was not registered");
-    }
-    const context = sessionContext("ses_sub_worker", childFile);
-
-    await sessionStart({}, context);
-
-    expect(requests.some((request) => request.path.startsWith("/legion/"))).toBe(false);
-    expect(requests.some((request) => request.path === "/v1/roles/set")).toBe(false);
-    expect(exits).toEqual([]);
-    expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
-    expect(fixture.title.set).toEqual([]);
-
-    await expect(
-      toolCall(
-        { toolName: "bash", toolCallId: "call-sub-worker-bash", input: { command: "ls" } },
-        context
-      )
-    ).resolves.toBeUndefined();
-  });
+  }
   test("recognises a subagent by the session this process already bootstrapped when no transcript is on disk", async () => {
     // With the transcript in a SQL row there is no parent `.jsonl` beside the subagent's path, so
     // the on-disk layout says nothing; the guard must still fall back on what this process booted.
-    const requests: { readonly path: string }[] = [];
-    const exits: number[] = [];
-    setLegionBootstrapExitForTests((code) => {
-      exits.push(code);
-      throw new Error(`exitProcess(${code})`);
-    });
-    const tree = "REPO-42";
-    const token = roleToken("omp", tree, "architect");
-    process.env.ENVOY_URL = "http://envoy.test";
-    process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    process.env.LEGION_BOOT_TOKEN = "boot-root-sql";
-    process.env.LEGION_TREE = tree;
-    process.env.LEGION_ROLE = "architect";
-    process.env.LEGION_ISSUE = tree;
-    globalThis.fetch = (async (input) => {
-      const url = new URL(input.toString());
-      requests.push({ path: url.pathname });
-      if (url.pathname === "/legion/v1/claims/register") {
-        return Response.json({
-          claimToken: token,
-          tree,
-          issue: tree,
-          role: "architect",
-          generation: 3,
-          secret: "root-secret",
-        });
-      }
-      if (url.pathname === "/legion/v1/claims/ready") return new Response(null, { status: 204 });
-      return Response.json({
-        session_id: "ses_root_sql",
-        machine_id: "machine",
-        dir: "/tmp/legion-workspace",
-        topics: [token],
-      });
-    }) as typeof fetch;
     // Neither transcript exists on disk: the row keys below name files nothing ever wrote.
     const baseDirectory = await mkdtemp(path.join(os.tmpdir(), "legion-sql-subagent-"));
     temporaryPaths.push(baseDirectory);
@@ -862,13 +857,14 @@ describe("Legion OMP extension", () => {
       "2026_task.jsonl"
     );
 
-    const root = createPi();
-    legionExtension(root.pi);
-    const rootStart = root.handlers.get("session_start");
-    if (rootStart === undefined) throw new Error("root session_start handler was not registered");
-    await rootStart({}, sessionContext("ses_root_sql", rootFile));
+    const root = await bootPane({
+      role: "architect",
+      issue: "REPO-42",
+      sessionId: "ses_root_sql",
+      sessionFile: rootFile,
+    });
     expect(root.tools.find((tool) => tool.name === "legion")).toBeDefined();
-    const requestsAfterRoot = requests.length;
+    const requestsAfterRoot = root.requests.length;
 
     // The root runs a `task`: a fresh extension instance binds in the same process and its
     // subagent session starts with a different transcript path and the inherited environment.
@@ -884,11 +880,11 @@ describe("Legion OMP extension", () => {
 
     // Only Envoy's own direct-subject registration for the new session may follow: no Legion
     // daemon route and no role claim.
-    const afterRoot = requests.slice(requestsAfterRoot).map((request) => request.path);
+    const afterRoot = root.requests.slice(requestsAfterRoot).map((request) => request.path);
     expect(afterRoot.filter((requestPath) => requestPath !== "/v1/interests/subscribe")).toEqual(
       []
     );
-    expect(exits).toEqual([]);
+    expect(root.exits).toEqual([]);
     expect(subagent.tools.find((tool) => tool.name === "legion")).toBeUndefined();
     await expect(
       subagentToolCall(
@@ -898,35 +894,13 @@ describe("Legion OMP extension", () => {
     ).resolves.toBeUndefined();
   });
   test("refuses a subagent's operation-log rewrite and `legion handoff complete` in a phase-worker pane while its other calls stay ungated", async () => {
-    const requests: { readonly path: string }[] = [];
     const { childFile } = await createSubagentTranscriptPaths();
-    process.env.ENVOY_URL = "http://envoy.test";
-    process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    process.env.LEGION_GENERATION = "1";
-    process.env.LEGION_BOOT_TOKEN = "boot-subagent-worker-jj";
-    process.env.LEGION_TREE = "REPO-42";
-    process.env.LEGION_ROLE = "implementer";
-    process.env.LEGION_ISSUE = "REPO-43";
-    process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
-    globalThis.fetch = (async (input) => {
-      const url = new URL(input.toString());
-      requests.push({ path: url.pathname });
-      return Response.json({
-        session_id: "ses_sub_worker_jj",
-        machine_id: "machine",
-        dir: "/tmp/legion-workspace",
-        topics: [],
-      });
-    }) as typeof fetch;
-    const fixture = createPi();
-    legionExtension(fixture.pi);
-    const sessionStart = fixture.handlers.get("session_start");
-    const toolCall = fixture.handlers.get("tool_call");
-    if (sessionStart === undefined || toolCall === undefined) {
-      throw new Error("session_start or tool_call handler was not registered");
-    }
-    const context = sessionContext("ses_sub_worker_jj", childFile);
-    await sessionStart({}, context);
+    const pane = await bootPane({
+      role: "implementer",
+      sessionId: "ses_sub_worker_jj",
+      sessionFile: childFile,
+    });
+    const { toolCall, context } = pane;
 
     // LEGION-45: the subagent's bash runs in the same pane, against the same shared operation
     // log, as the phase worker that spawned it -- the one gate that binds a subagent.
@@ -966,117 +940,45 @@ describe("Legion OMP extension", () => {
         context
       )
     ).resolves.toBeUndefined();
-    expect(requests.some((request) => request.path.startsWith("/legion/"))).toBe(false);
+    expect(daemonRequests(pane.requests)).toEqual([]);
   });
   test("throws naming the missing variable when a phase worker boots without LEGION_BOOT_TOKEN", async () => {
-    process.env.ENVOY_URL = "http://envoy.test";
-    process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    process.env.LEGION_TREE = "REPO-42";
-    process.env.LEGION_ISSUE = "REPO-43";
-    process.env.LEGION_ROLE = "tester";
-    delete process.env.LEGION_BOOT_TOKEN;
-    globalThis.fetch = (async (_input, _init) => Response.json({})) as typeof fetch;
-    const fixture = createPi();
-    legionExtension(fixture.pi);
-    const sessionStart = fixture.handlers.get("session_start");
-    if (sessionStart === undefined) throw new Error("session_start handler was not registered");
+    const pane = await claimPane({ role: "tester" });
+    delete process.env.LEGION_BOOT_TOKEN_FILE;
 
-    await expect(sessionStart({}, sessionContext("ses_missing_boot_token"))).rejects.toThrow(
-      "LEGION_BOOT_TOKEN is required for Legion"
-    );
+    await expect(pane.start()).rejects.toThrow("LEGION_BOOT_TOKEN is required for Legion");
   });
   test("boots a phase worker with the boot token read from LEGION_BOOT_TOKEN_FILE, ignoring LEGION_BOOT_TOKEN", async () => {
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const workspace = await createJjWorkspace();
-    const secretsDir = await mkdtemp(path.join(os.tmpdir(), "legion-secrets-"));
-    temporaryPaths.push(secretsDir);
-    const bootTokenFile = path.join(secretsDir, "legion-omp-repo-43-tester");
-    await writeFile(bootTokenFile, "file-boot-token\n");
-    process.env.LEGION_BOOT_TOKEN_FILE = bootTokenFile;
+    const pane = await claimPane({ role: "tester" });
+    process.env.LEGION_BOOT_TOKEN = "decoy";
+    await pane.start();
 
-    await bootWorker({ role: "tester", workspace, requests, sessionId: "ses_file_worker" });
-
-    expect(requests.find((request) => request.path === "/legion/v1/claims/register")).toMatchObject(
-      {
-        body: { bootToken: "file-boot-token" },
-      }
-    );
+    expect(daemonRequests(pane.requests)[0]).toMatchObject({
+      path: "/legion/v1/claims/register",
+      body: { bootToken: pane.bootToken },
+    });
   });
   test("exits the phase worker naming LEGION_BOOT_TOKEN_FILE and its path when the file is unreadable, never falling back to LEGION_BOOT_TOKEN", async () => {
-    process.env.ENVOY_URL = "http://envoy.test";
-    process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    process.env.LEGION_TREE = "REPO-42";
-    process.env.LEGION_ISSUE = "REPO-43";
-    process.env.LEGION_ROLE = "tester";
+    const pane = await claimPane({ role: "tester" });
     process.env.LEGION_BOOT_TOKEN = "decoy";
     process.env.LEGION_BOOT_TOKEN_FILE = "/nonexistent/legion-secrets/tester";
-    globalThis.fetch = (async (_input, _init) => Response.json({})) as typeof fetch;
-    const fixture = createPi();
-    legionExtension(fixture.pi);
-    const sessionStart = fixture.handlers.get("session_start");
-    if (sessionStart === undefined) throw new Error("session_start handler was not registered");
 
-    await expect(sessionStart({}, sessionContext("ses_bad_boot_file"))).rejects.toThrow(
+    await expect(pane.start()).rejects.toThrow(
       "LEGION_BOOT_TOKEN_FILE names /nonexistent/legion-secrets/tester, which could not be read"
     );
+    expect(daemonRequests(pane.requests)).toEqual([]);
   });
-  test("registers the Legion tool for a sub-architect worker", async () => {
-    const workspace = await createJjWorkspace();
-    const token = roleToken("omp", "REPO-43", "architect");
-    process.env.ENVOY_URL = "http://envoy.test";
-    process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    process.env.LEGION_BOOT_TOKEN = "boot-sub-architect";
-    process.env.LEGION_TREE = "REPO-42";
-    process.env.LEGION_ISSUE = "REPO-43";
-    process.env.LEGION_ROLE = "architect";
-    process.env.LEGION_WORKSPACE = workspace;
-    globalThis.fetch = (async (input) => {
-      const url = new URL(input.toString());
-      if (url.pathname === "/legion/v1/claims/register") {
-        return Response.json({
-          claimToken: token,
-          tree: "REPO-42",
-          issue: "REPO-43",
-          role: "architect",
-          generation: 1,
-          secret: "worker-secret",
-        });
-      }
-      if (url.pathname === "/legion/v1/claims/ready") return new Response(null, { status: 204 });
-      return Response.json({
-        session_id: "ses_sub_architect",
-        machine_id: "machine",
-        dir: workspace,
-        topics: [token],
-      });
-    }) as typeof fetch;
-    const fixture = createPi();
-    const toolsBeforeLegion = fixture.tools.length;
-    legionExtension(fixture.pi);
-    const sessionStart = fixture.handlers.get("session_start");
-    if (sessionStart === undefined) throw new Error("session_start handler was not registered");
+  test("registers the legion tool, and only it, once a sub-architect's claim boots", async () => {
+    const pane = await claimPane({ role: "architect" });
+    const toolsBeforeBoot = pane.tools.length;
 
-    await sessionStart({}, { ...sessionContext("ses_sub_architect"), cwd: workspace });
+    await pane.start();
 
-    expect(fixture.tools).toHaveLength(toolsBeforeLegion + 1);
-    expect(fixture.tools.at(-1)?.name).toBe("legion");
-    expect(fixture.activeTools).toContain("legion");
+    expect(pane.tools.slice(toolsBeforeBoot).map((tool) => tool.name)).toEqual(["legion"]);
+    expect(pane.activeTools).toContain("legion");
   });
   test("allows a single `legion ...` bash invocation for an architect worker but blocks chaining, other commands, and `legion handoff complete`", async () => {
-    const workspace = await createJjWorkspace();
-    const { toolCall, context } = await bootWorker({
-      role: "architect",
-      workspace,
-      extraRoutes: (url) => {
-        if (url.pathname === "/legion/v1/grants") {
-          return Response.json({
-            grantId: "grant-architect",
-            expiresAt: "2099-01-01T00:00:00.000Z",
-          });
-        }
-        return undefined;
-      },
-    });
+    const { toolCall, context } = await bootPane({ role: "architect" });
     const denied = "the architect delegates all code work to phase workers";
     const isAllowed = async (command: string): Promise<boolean> => {
       const result = await toolCall(
@@ -1116,7 +1018,7 @@ describe("Legion OMP extension", () => {
     const workspace = await createJjWorkspace();
     await setJjRepoConfig(workspace, "user.name", "Sentinel Before Boot");
 
-    await bootWorker({ role: "implementer", workspace });
+    await bootPane({ role: "implementer", workspace });
 
     expect(await jjRepoConfig(workspace, "user.name")).toBe('user.name = "Sentinel Before Boot"');
     expect(await jjRepoConfig(workspace, "user.email")).toBe("");
@@ -1147,12 +1049,8 @@ describe("Legion OMP extension", () => {
     ];
     const toolNames = ["edit", "write", "apply_patch", "task", "hub"];
 
-    // One repo for every role: the gate answers from LEGION_ROLE and the tool call alone, and
-    // nothing in the boot path reads or writes the workspace, so six repos bought nothing but
-    // six jj startups against this test's 5 s budget (LEGION-243).
-    const workspace = await createJjWorkspace();
     for (const role of roles) {
-      const { toolCall, context } = await bootWorker({ role, workspace, sessionId: `ses_${role}` });
+      const { toolCall, context } = await bootPane({ role, sessionId: `ses_${role}` });
       for (const toolName of toolNames) {
         const reason = blockedReason(role, toolName);
         const result = await toolCall(
@@ -1165,10 +1063,8 @@ describe("Legion OMP extension", () => {
     }
   });
   test("blocks the architect's task tool but allows an implementer's, per the one-agent-per-process rule", async () => {
-    const architectWorkspace = await createJjWorkspace();
-    const { toolCall: architectToolCall, context: architectContext } = await bootWorker({
+    const { toolCall: architectToolCall, context: architectContext } = await bootPane({
       role: "architect",
-      workspace: architectWorkspace,
       sessionId: "ses_architect_task",
     });
     await expect(
@@ -1182,10 +1078,8 @@ describe("Legion OMP extension", () => {
         "the architect delegates only through child issues and the daemon's phase workers; Legion runs one agent per process",
     });
 
-    const implementerWorkspace = await createJjWorkspace();
-    const { toolCall: implementerToolCall, context: implementerContext } = await bootWorker({
+    const { toolCall: implementerToolCall, context: implementerContext } = await bootPane({
       role: "implementer",
-      workspace: implementerWorkspace,
       sessionId: "ses_implementer_task",
     });
     await expect(
@@ -1203,24 +1097,8 @@ describe("Legion OMP extension", () => {
           ? "the reviewer edits nothing except the final .legion/ cleanup commit via bash"
           : "the architect delegates all code work to phase workers";
 
-    // One repo for all three roles: every write here is judged by its path string and the
-    // role, and the blocked write targets /tmp, not the workspace (LEGION-243).
-    const workspace = await createJjWorkspace();
     for (const role of ["architect", "reviewer", "merger"] as const) {
-      const { toolCall, context } = await bootWorker({
-        role,
-        workspace,
-        sessionId: `ses_${role}_xd`,
-        extraRoutes: (url) => {
-          if (url.pathname === "/legion/v1/grants") {
-            return Response.json({
-              grantId: `grant-${role}`,
-              expiresAt: "2099-01-01T00:00:00.000Z",
-            });
-          }
-          return undefined;
-        },
-      });
+      const { toolCall, context } = await bootPane({ role, sessionId: `ses_${role}_xd` });
 
       // A tool-device invocation (write to an `xd://` path) is a tool call, not a file
       // mutation, and must pass for every gated role.
@@ -1261,20 +1139,11 @@ describe("Legion OMP extension", () => {
     }
   });
   test("refuses a phase worker's bash command that would rewrite the shared jj operation log", async () => {
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const workspace = await createJjWorkspace();
-    const { toolCall, context } = await bootWorker({
+    const { toolCall, context, requests } = await bootPane({
       role: "implementer",
-      workspace,
       sessionId: "ses_implementer_jj_log",
-      requests,
-      extraRoutes: (url) =>
-        url.pathname === "/legion/v1/grants"
-          ? Response.json({ grantId: "grant-jj-log", expiresAt: "2099-01-01T00:00:00.000Z" })
-          : undefined,
     });
-    const mints = (): number =>
-      requests.filter((request) => request.path === "/legion/v1/grants").length;
+    const mints = (): number => grantRequests(requests).length;
     const mintsBefore = mints();
     // Every form the spec names, plus the whole-argument-list, pipeline-position, quoted-shell,
     // unquoted-message-word, and unterminated-quote (plain-text fallback) cases, and (review
@@ -1349,20 +1218,11 @@ describe("Legion OMP extension", () => {
     }
   });
   test("leaves file-level jj restore, jj op log, jj op show, and quoted message words alone", async () => {
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const workspace = await createJjWorkspace();
-    const { toolCall, context } = await bootWorker({
+    const { toolCall, context, requests } = await bootPane({
       role: "implementer",
-      workspace,
       sessionId: "ses_implementer_jj_ok",
-      requests,
-      extraRoutes: (url) =>
-        url.pathname === "/legion/v1/grants"
-          ? Response.json({ grantId: "grant-jj-ok", expiresAt: "2099-01-01T00:00:00.000Z" })
-          : undefined,
     });
-    const mints = (): number =>
-      requests.filter((request) => request.path === "/legion/v1/grants").length;
+    const mints = (): number => grantRequests(requests).length;
     const mintsBefore = mints();
     // The spec's negatives plus the exact commands the legion-worker skill has every role run:
     // the conflict merge, the fingerprint (a `|` inside quotes), the handoff split, the log filter.
@@ -1410,20 +1270,8 @@ describe("Legion OMP extension", () => {
       merger: 'jj -R "$LEGION_WORKSPACE" diff --from abc123 --to def456 --summary',
       architect: "legion gh -- pr view 7",
     };
-    // One repo for every role: the guard reads the bash command text, and no command here is
-    // ever run, so the workspace is a path in an environment variable and nothing more
-    // (LEGION-243).
-    const workspace = await createJjWorkspace();
     for (const role of LEGION_ROLES) {
-      const { toolCall, context } = await bootWorker({
-        role,
-        workspace,
-        sessionId: `ses_${role}_jj_guard`,
-        extraRoutes: (url) =>
-          url.pathname === "/legion/v1/grants"
-            ? Response.json({ grantId: `grant-${role}`, expiresAt: "2099-01-01T00:00:00.000Z" })
-            : undefined,
-      });
+      const { toolCall, context } = await bootPane({ role, sessionId: `ses_${role}_jj_guard` });
       const undo = await toolCall(
         {
           toolName: "bash",
@@ -1452,10 +1300,8 @@ describe("Legion OMP extension", () => {
     }
   });
   test("refuses eval code and hub input that mention jj with an operation-log rewrite, by the plain-text rule", async () => {
-    const workspace = await createJjWorkspace();
-    const { toolCall, context } = await bootWorker({
+    const { toolCall, context } = await bootPane({
       role: "tester",
-      workspace,
       sessionId: "ses_tester_jj_eval_hub",
     });
     const refused: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
@@ -1523,20 +1369,11 @@ describe("Legion OMP extension", () => {
     // The phase stall closes only on the tool's handoff_complete; a completion run from bash
     // would leave it open and draw a follow-up asking the worker to complete again. Writes and
     // reads leave no phase open, and stdin is the shell's route for a payload past argv's cap.
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const workspace = await createJjWorkspace();
-    const { toolCall, context } = await bootWorker({
+    const { toolCall, context, requests } = await bootPane({
       role: "implementer",
-      workspace,
       sessionId: "ses_implementer_handoff_bash",
-      requests,
-      extraRoutes: (url) =>
-        url.pathname === "/legion/v1/grants"
-          ? Response.json({ grantId: "grant-handoff", expiresAt: "2099-01-01T00:00:00.000Z" })
-          : undefined,
     });
-    const mints = (): number =>
-      requests.filter((request) => request.path === "/legion/v1/grants").length;
+    const mints = (): number => grantRequests(requests).length;
     const bash = (command: string) => ({ toolName: "bash", input: { command } });
     const refused: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
       bash("legion handoff complete --summary done"),
@@ -1609,59 +1446,8 @@ describe("Legion OMP extension", () => {
       expect(named).toEqual({ block: true, reason: expect.stringContaining(phrase) });
     }
   });
-  test("writes the minted grant to LEGION_GRANT_FILE as a 0600 file and leaves the bash input untouched", async () => {
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const workspace = await createJjWorkspace();
-
-    const { toolCall, context, grantFile } = await bootWorker({
-      role: "reviewer",
-      workspace,
-      requests,
-      extraRoutes: (url) => {
-        if (url.pathname === "/legion/v1/grants") {
-          return Response.json({ grantId: "grant-1", expiresAt: "2099-01-01T00:00:00.000Z" });
-        }
-        return undefined;
-      },
-    });
-
-    const command = "legion gh -- pr view 7";
-    const result = await toolCall(
-      { toolName: "bash", toolCallId: "call-1", input: { command } },
-      context
-    );
-
-    // Neither `command` (model-visible once written back — LEGION-12) nor `env` (dropped by a
-    // plugin that replaces the bash tool — LEGION-52) carries anything: the hook returns nothing.
-    expect(result).toBeUndefined();
-    expect(await grantFileContents(grantFile)).toEqual({ grant: "grant-1", mode: 0o600 });
-    expect(requests.at(-1)).toEqual({
-      path: "/legion/v1/grants",
-      body: {
-        tree: "REPO-42",
-        issue: "REPO-43",
-        sessionId: "ses_reviewer",
-        secret: "worker-secret",
-      },
-    });
-  });
   test("mints a grant before every tool call Oh My Pi serves by running gh, and before no other", async () => {
-    const workspace = await createJjWorkspace();
-    let minted = 0;
-    const { toolCall, context, grantFile } = await bootWorker({
-      role: "implementer",
-      workspace,
-      extraRoutes: (url) => {
-        if (url.pathname === "/legion/v1/grants") {
-          minted++;
-          return Response.json({
-            grantId: `grant-${minted}`,
-            expiresAt: "2099-01-01T00:00:00.000Z",
-          });
-        }
-        return undefined;
-      },
-    });
+    const { toolCall, context, grantFile, requests } = await bootPane({ role: "implementer" });
 
     // Oh My Pi resolves `pr://` and `issue://` through its internal-URL router, which runs `gh`,
     // from every tool that takes a path (the scheme in any case; a list split on `;`, `,`, or
@@ -1683,7 +1469,7 @@ describe("Legion OMP extension", () => {
       await expect(
         toolCall({ ...call, toolCallId: `call-gh-served-${index}` }, context)
       ).resolves.toBeUndefined();
-      expect({ call, minted }).toEqual({ call, minted: index + 1 });
+      expect({ call, minted: grantRequests(requests).length }).toEqual({ call, minted: index + 1 });
     }
     expect(await grantFileContents(grantFile)).toEqual({
       grant: `grant-${served.length}`,
@@ -1702,7 +1488,7 @@ describe("Legion OMP extension", () => {
     for (const [index, call] of unserved.entries()) {
       await toolCall({ ...call, toolCallId: `call-gh-unserved-${index}` }, context);
     }
-    expect(minted).toBe(served.length);
+    expect(grantRequests(requests)).toHaveLength(served.length);
   });
   /**
    * Fixture note: `createPi().on` keeps every registered handler and its aggregate returns the
@@ -1711,24 +1497,7 @@ describe("Legion OMP extension", () => {
    * counting `/legion/v1/grants` requests, never by inspecting a returned input.
    */
   test("ignores whatever env or text the model supplied and never rewrites command or env", async () => {
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const workspace = await createJjWorkspace();
-    let minted = 0;
-    const { toolCall, context, grantFile } = await bootWorker({
-      role: "implementer",
-      workspace,
-      requests,
-      extraRoutes: (url) => {
-        if (url.pathname === "/legion/v1/grants") {
-          minted++;
-          return Response.json({
-            grantId: `grant-${minted}`,
-            expiresAt: "2099-01-01T00:00:00.000Z",
-          });
-        }
-        return undefined;
-      },
-    });
+    const { toolCall, context, grantFile, requests } = await bootPane({ role: "implementer" });
 
     // A model imitating an earlier session's shape: a stale grant in env and in the command text.
     const command = `export LEGION_GRANT='stale-imitated-grant'; legion credential get`;
@@ -1746,58 +1515,10 @@ describe("Legion OMP extension", () => {
 
     expect(result).toBeUndefined();
     expect(await grantFileContents(grantFile)).toEqual({ grant: "grant-1", mode: 0o600 });
-    expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(1);
-  });
-  test("overwrites the file with a fresh mint on every call, leaving no temp file behind", async () => {
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const workspace = await createJjWorkspace();
-    let minted = 0;
-    const { toolCall, context, grantFile, secretsDir } = await bootWorker({
-      role: "implementer",
-      workspace,
-      requests,
-      extraRoutes: (url) => {
-        if (url.pathname === "/legion/v1/grants") {
-          minted++;
-          return Response.json({
-            grantId: `grant-${minted}`,
-            expiresAt: "2099-01-01T00:00:00.000Z",
-          });
-        }
-        return undefined;
-      },
-    });
-
-    await toolCall(
-      { toolName: "bash", toolCallId: "call-twice", input: { command: "echo hi" } },
-      context
-    );
-    // The same tool call again (a host double-invocation) and a later one: each mints afresh
-    // and the file always holds the newest grant.
-    await toolCall(
-      { toolName: "bash", toolCallId: "call-twice", input: { command: "echo hi" } },
-      context
-    );
-
-    expect(await grantFileContents(grantFile)).toEqual({ grant: "grant-2", mode: 0o600 });
-    // One mint per invocation: the extension never caches a grant, and the host invokes the hook
-    // once per loop dispatch.
-    expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(2);
-    // The atomic rename leaves exactly the named file: no `<file>.<pid>.<uuid>` residue.
-    expect(await readdir(secretsDir)).toEqual([path.basename(grantFile)]);
+    expect(grantRequests(requests)).toHaveLength(1);
   });
   test("creates the grant file's missing directory 0700, as an Agent Sandbox pod's empty state volume has none", async () => {
-    const workspace = await createJjWorkspace();
-    const { toolCall, context, secretsDir } = await bootWorker({
-      role: "implementer",
-      workspace,
-      extraRoutes: (url) => {
-        if (url.pathname === "/legion/v1/grants") {
-          return Response.json({ grantId: "grant-1", expiresAt: "2099-01-01T00:00:00.000Z" });
-        }
-        return undefined;
-      },
-    });
+    const { toolCall, context, secretsDir } = await bootPane({ role: "implementer" });
     const grantFile = path.join(secretsDir, "state", "secrets", "x-grant");
     process.env.LEGION_GRANT_FILE = grantFile;
 
@@ -1811,18 +1532,10 @@ describe("Legion OMP extension", () => {
     expect((await stat(path.dirname(grantFile))).mode & 0o777).toBe(0o700);
   });
   test("blocks the command naming the path when the grant file cannot be written", async () => {
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
     const workspace = await createJjWorkspace();
-    const { toolCall, context, secretsDir } = await bootWorker({
+    const { toolCall, context, secretsDir, requests } = await bootPane({
       role: "implementer",
       workspace,
-      requests,
-      extraRoutes: (url) => {
-        if (url.pathname === "/legion/v1/grants") {
-          return Response.json({ grantId: "grant-1", expiresAt: "2099-01-01T00:00:00.000Z" });
-        }
-        return undefined;
-      },
     });
     // A regular file where the grant file's directory should be: no directory can be made there.
     const notADirectory = path.join(secretsDir, "not-a-directory");
@@ -1844,7 +1557,7 @@ describe("Legion OMP extension", () => {
       ),
     });
     // Mint-then-write: the grant was minted (one wasted 60 s grant), nothing ran under a stale one.
-    expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(1);
+    expect(grantRequests(requests)).toHaveLength(1);
     // A relative pointer (an operator's own export) is refused before any temp file could land
     // in OMP's cwd — the issue workspace.
     process.env.LEGION_GRANT_FILE = "relative/x-grant";
@@ -1860,9 +1573,7 @@ describe("Legion OMP extension", () => {
     expect(await readdir(workspace)).not.toContain(expect.stringMatching(/^x-grant\./));
   });
   test("blocks when the pane carries no LEGION_GRANT_FILE, or a blank one, without minting", async () => {
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const workspace = await createJjWorkspace();
-    const { toolCall, context } = await bootWorker({ role: "implementer", workspace, requests });
+    const { toolCall, context, requests } = await bootPane({ role: "implementer" });
     const blocked = {
       block: true,
       reason:
@@ -1883,20 +1594,15 @@ describe("Legion OMP extension", () => {
         context
       )
     ).resolves.toEqual(blocked);
-    expect(requests.filter((request) => request.path === "/legion/v1/grants")).toHaveLength(0);
+    expect(grantRequests(requests)).toHaveLength(0);
   });
   test("blocks a booted worker's bash calls when the daemon refuses to mint a grant", async () => {
-    const workspace = await createJjWorkspace();
-
-    const { toolCall, context } = await bootWorker({
+    const { toolCall, context } = await bootPane({
       role: "reviewer",
-      workspace,
-      extraRoutes: (url) => {
-        if (url.pathname === "/legion/v1/grants") {
-          return Response.json({ error: "grant minting unavailable" }, { status: 503 });
-        }
-        return undefined;
-      },
+      extraRoutes: (url) =>
+        url.pathname === "/legion/v1/grants"
+          ? Response.json({ error: "grant minting unavailable" }, { status: 503 })
+          : undefined,
     });
 
     await expect(
@@ -1915,13 +1621,7 @@ describe("Legion OMP extension", () => {
   });
   test("blocks a bash call from a worker session that has not completed its boot handshake", async () => {
     // The pane's launch environment is complete; only the boot handshake is missing.
-    process.env.LEGION_TREE = "REPO-42";
-    process.env.LEGION_ISSUE = "REPO-43";
-    process.env.LEGION_ROLE = "implementer";
-    const fixture = createPi();
-    legionExtension(fixture.pi);
-    const toolCall = fixture.handlers.get("tool_call");
-    if (toolCall === undefined) throw new Error("worker tool_call handler was not registered");
+    const { toolCall } = await claimPane({ role: "implementer" });
 
     await expect(
       toolCall(
@@ -1939,92 +1639,26 @@ describe("Legion OMP extension", () => {
   });
   test("materializes the session transcript before the boot handshake", async () => {
     const order: string[] = [];
-    const tree = "REPO-42";
-    const token = roleToken("omp", tree, "architect");
-    process.env.ENVOY_URL = "http://envoy.test";
-    process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    process.env.LEGION_BOOT_TOKEN = "boot-ensure-on-disk";
-    process.env.LEGION_TREE = tree;
-    process.env.LEGION_ROLE = "architect";
-    process.env.LEGION_ISSUE = tree;
-    globalThis.fetch = (async (input) => {
-      const url = new URL(input.toString());
-      order.push(`fetch:${url.pathname}`);
-      if (url.pathname === "/legion/v1/claims/register") {
-        return Response.json({
-          claimToken: token,
-          tree,
-          issue: tree,
-          role: "architect",
-          generation: 3,
-          secret: "root-secret",
-        });
-      }
-      if (url.pathname === "/legion/v1/claims/ready") return new Response(null, { status: 204 });
-      return Response.json({
-        session_id: "ses_ensure_on_disk",
-        machine_id: "machine",
-        dir: "/tmp/legion-workspace",
-        topics: [token],
-      });
-    }) as typeof fetch;
-    const fixture = createPi();
-    legionExtension(fixture.pi);
-    const sessionStart = fixture.handlers.get("session_start");
-    if (sessionStart === undefined) throw new Error("root lifecycle handler was not registered");
-
-    const context = sessionContext("ses_ensure_on_disk", "/tmp/legion-ensure.jsonl", async () => {
-      order.push("ensureOnDisk");
+    const pane = await claimPane({
+      role: "architect",
+      issue: "REPO-42",
+      sessionId: "ses_ensure_on_disk",
+      ensureOnDisk: async () => {
+        order.push("ensureOnDisk");
+      },
+      extraRoutes: (url) => {
+        order.push(`fetch:${url.pathname}`);
+        return undefined;
+      },
     });
-    await sessionStart({}, context);
+    await pane.start();
 
     expect(order.indexOf("ensureOnDisk")).toBeGreaterThanOrEqual(0);
     expect(order.indexOf("ensureOnDisk")).toBeLessThan(
       order.indexOf("fetch:/legion/v1/claims/register")
     );
   });
-  test("registers only the Legion tool for a confirmed architect session", async () => {
-    const tree = "REPO-42";
-    const token = roleToken("omp", tree, "architect");
-    process.env.ENVOY_URL = "http://envoy.test";
-    process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    process.env.LEGION_BOOT_TOKEN = "boot-legion-tool";
-    process.env.LEGION_TREE = tree;
-    process.env.LEGION_ROLE = "architect";
-    process.env.LEGION_ISSUE = tree;
-    globalThis.fetch = (async (input) => {
-      const url = new URL(input.toString());
-      if (url.pathname === "/legion/v1/claims/register") {
-        return Response.json({
-          claimToken: token,
-          tree,
-          issue: tree,
-          role: "architect",
-          generation: 3,
-          secret: "root-secret",
-        });
-      }
-      if (url.pathname === "/legion/v1/claims/ready") return new Response(null, { status: 204 });
-      return Response.json({
-        session_id: "ses_architect",
-        machine_id: "machine",
-        dir: context.cwd,
-        topics: [token],
-      });
-    }) as typeof fetch;
-    const fixture = createPi();
-    const toolsBeforeLegion = fixture.tools.length;
-    const context = sessionContext("ses_architect");
-
-    legionExtension(fixture.pi);
-    const sessionStart = fixture.handlers.get("session_start");
-    if (sessionStart === undefined) throw new Error("session_start handler was not registered");
-    await sessionStart({}, context);
-
-    expect(fixture.tools).toHaveLength(toolsBeforeLegion + 1);
-    expect(fixture.tools.at(-1)?.name).toBe("legion");
-  });
-  test("withholds architect-only Legion tools until an architect session is confirmed", () => {
+  test("registers no legion tool until a session's claim boots", () => {
     const fixture = createPi();
 
     legionExtension(fixture.pi);
@@ -2032,45 +1666,11 @@ describe("Legion OMP extension", () => {
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
   });
   test("blocks code tools in a root architect session", async () => {
-    const tree = "REPO-42";
-    const architectToken = roleToken("omp", tree, "architect");
-    process.env.ENVOY_URL = "http://envoy.test";
-    process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    process.env.LEGION_BOOT_TOKEN = "boot-architect-policy";
-    process.env.LEGION_TREE = tree;
-    process.env.LEGION_ROLE = "architect";
-    process.env.LEGION_ISSUE = tree;
-    globalThis.fetch = (async (input, init) => {
-      const url = new URL(input.toString());
-      if (url.pathname === "/legion/v1/claims/register") {
-        return Response.json({
-          claimToken: architectToken,
-          tree,
-          issue: tree,
-          role: "architect",
-          generation: 3,
-          secret: "root-secret",
-        });
-      }
-      if (url.pathname === "/legion/v1/claims/ready") return new Response(null, { status: 204 });
-      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
-      return Response.json({
-        session_id: body?.session_id,
-        machine_id: "machine",
-        dir: "/tmp/legion-workspace",
-        topics: [architectToken],
-      });
-    }) as typeof fetch;
-    const fixture = createPi();
-    const context = sessionContext("ses_policy_architect");
-
-    legionExtension(fixture.pi);
-    const sessionStart = fixture.handlers.get("session_start");
-    const toolCall = fixture.handlers.get("tool_call");
-    if (sessionStart === undefined || toolCall === undefined) {
-      throw new Error("architect policy handlers were not registered");
-    }
-    await sessionStart({}, context);
+    const { toolCall, context } = await bootPane({
+      role: "architect",
+      issue: "REPO-42",
+      sessionId: "ses_policy_architect",
+    });
 
     await expect(
       toolCall(
@@ -2098,51 +1698,11 @@ describe("Legion OMP extension", () => {
     });
   });
   test("admits a root architect's single `legion` bash command, `legion handoff read` included, except `legion handoff complete`", async () => {
-    const tree = "REPO-42";
-    const architectToken = roleToken("omp", tree, "architect");
-    const secretsDir = await mkdtemp(path.join(os.tmpdir(), "legion-secrets-"));
-    await chmod(secretsDir, 0o700);
-    temporaryPaths.push(secretsDir);
-    process.env.ENVOY_URL = "http://envoy.test";
-    process.env.LEGION_DAEMON_URL = "http://daemon.test";
-    process.env.LEGION_BOOT_TOKEN = "boot-architect-handoff";
-    process.env.LEGION_TREE = tree;
-    process.env.LEGION_ROLE = "architect";
-    process.env.LEGION_ISSUE = tree;
-    process.env.LEGION_GRANT_FILE = path.join(secretsDir, `${architectToken}-grant`);
-    globalThis.fetch = (async (input, init) => {
-      const url = new URL(input.toString());
-      if (url.pathname === "/legion/v1/claims/register") {
-        return Response.json({
-          claimToken: architectToken,
-          tree,
-          issue: tree,
-          role: "architect",
-          generation: 3,
-          secret: "root-secret",
-        });
-      }
-      if (url.pathname === "/legion/v1/claims/ready") return new Response(null, { status: 204 });
-      if (url.pathname === "/legion/v1/grants") {
-        return Response.json({ grantId: "grant-root", expiresAt: "2099-01-01T00:00:00.000Z" });
-      }
-      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
-      return Response.json({
-        session_id: body?.session_id,
-        machine_id: "machine",
-        dir: "/tmp/legion-workspace",
-        topics: [architectToken],
-      });
-    }) as typeof fetch;
-    const fixture = createPi();
-    const context = sessionContext("ses_root_architect_handoff");
-    legionExtension(fixture.pi);
-    const sessionStart = fixture.handlers.get("session_start");
-    const toolCall = fixture.handlers.get("tool_call");
-    if (sessionStart === undefined || toolCall === undefined) {
-      throw new Error("architect policy handlers were not registered");
-    }
-    await sessionStart({}, context);
+    const { toolCall, context } = await bootPane({
+      role: "architect",
+      issue: "REPO-42",
+      sessionId: "ses_root_architect_handoff",
+    });
     const bash = (command: string) =>
       toolCall({ toolName: "bash", toolCallId: `call-${command}`, input: { command } }, context);
 
@@ -2256,7 +1816,7 @@ describe("Legion OMP extension", () => {
     }) => {
       const workspace = await mkdtemp(path.join(os.tmpdir(), "legion-stall-workspace-"));
       temporaryPaths.push(workspace);
-      const booted = await bootWorker({
+      const booted = await bootPane({
         role: options.role ?? "implementer",
         issue: options.issue,
         sessionId: "ses_stall",
@@ -2629,13 +2189,7 @@ describe("Legion OMP extension", () => {
     });
 
     test("a root architect is never nudged", async () => {
-      const pane = await goPane({
-        role: "architect",
-        tree: "REPO-42",
-        issue: "REPO-42",
-        sessionId: "ses_stall",
-      });
-      await pane.start();
+      const pane = await bootPane({ role: "architect", issue: "REPO-42", sessionId: "ses_stall" });
       const root = session(pane.handlers, pane.context);
       await root.arrives(assignment);
 
@@ -2663,8 +2217,8 @@ describe("Legion OMP extension", () => {
     });
 
     test("the controller is never nudged", async () => {
-      const controller = await goController({ sessionId: "ses_go_controller_nudge" });
-      const context = controller.context("ses_go_controller_nudge");
+      const controller = await launchedController({ sessionId: "ses_controller_nudge" });
+      const context = controller.context("ses_controller_nudge");
       await hook(controller.handlers, "session_start")({}, context);
       const pane = session(controller.handlers, context);
       await pane.arrives(assignment);
@@ -2705,239 +2259,22 @@ describe("Legion OMP extension", () => {
 
     test("a task subagent of a phase worker is never nudged", async () => {
       const { childFile } = await createSubagentTranscriptPaths();
-      const requests = listenerOnly("ses_subagent");
-      process.env.LEGION_DAEMON_URL = "http://daemon.test";
-      process.env.LEGION_GENERATION = "1";
-      process.env.LEGION_BOOT_TOKEN = "boot-subagent-worker";
-      process.env.LEGION_TREE = "REPO-42";
-      process.env.LEGION_ROLE = "implementer";
-      process.env.LEGION_ISSUE = "REPO-43";
-      process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
-      const fixture = createPi();
-      legionExtension(fixture.pi);
-      const context = sessionContext("ses_subagent", childFile);
-      await hook(fixture.handlers, "session_start")({}, context);
-      const subagent = session(fixture.handlers, context);
+      const pane = await claimPane({
+        role: "implementer",
+        sessionId: "ses_subagent",
+        sessionFile: childFile,
+      });
+      await pane.start();
+      const subagent = session(pane.handlers, pane.context);
       await subagent.arrives(assignment);
 
       expect(await subagent.settles("Found the file.")).toBeUndefined();
-      expect(requests.filter((request) => request.path.startsWith("/legion/"))).toEqual([]);
-    });
-  });
-});
-
-/** A pane the daemon launched: the identity variables the tmux runtime sets
- * (`packages/daemon-go/internal/runtime/tmux/spawn.go`'s `panePairs`), the boot token as a 0600
- * file behind `LEGION_BOOT_TOKEN_FILE`, and `LEGION_GRANT_FILE` naming `<claim>-grant` beside it.
- * The stub answers the daemon's claim routes and 404s every other daemon path exactly as the
- * daemon's catch-all does, so a route the extension reached that the daemon does not serve is
- * visible in `requests` and never mistaken for a success. */
-async function goPane(options: {
-  readonly role: LegionRole;
-  readonly tree: IssueKey;
-  readonly issue: IssueKey;
-  readonly sessionId: string;
-  readonly register?: () => Response | Promise<Response>;
-  readonly ready?: (attempt: number) => Response | Promise<Response>;
-  readonly roleHolder?: () => string | undefined;
-  readonly readyPosted?: () => void;
-}): Promise<{
-  readonly claimToken: string;
-  readonly registration: Record<string, unknown>;
-  readonly bootToken: string;
-  readonly grantFile: string;
-  readonly requests: { readonly path: string; readonly body: unknown }[];
-  readonly exits: number[];
-  readonly errors: string[];
-  readonly intervals: (() => void)[];
-  readonly tools: RegisteredTool[];
-  readonly title: HostTitle;
-  readonly handlers: Map<string, Handler>;
-  readonly context: SessionContext;
-  readonly start: () => Promise<unknown>;
-}> {
-  const claimToken = `legion-omp-${options.issue.toLowerCase()}-${options.role}`;
-  const registration = {
-    claimToken,
-    tree: options.tree,
-    issue: options.issue,
-    role: options.role,
-    generation: 2,
-    secret: `go-secret-${options.sessionId}`,
-  };
-  const bootToken = `go-boot-${options.sessionId}`;
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-go-state-"));
-  const secretsDir = path.join(stateDir, "secrets");
-  await mkdir(secretsDir, { mode: 0o700 });
-  temporaryPaths.push(stateDir);
-  const bootTokenFile = path.join(secretsDir, `${claimToken}`);
-  const grantFile = path.join(secretsDir, `${claimToken}-grant`);
-  await writeFile(bootTokenFile, `${bootToken}\n`, { mode: 0o600 });
-  process.env.ENVOY_URL = "http://envoy.test";
-  process.env.LEGION_DAEMON_URL = "http://daemon.test";
-  process.env.LEGION_BOOT_TOKEN_FILE = bootTokenFile;
-  process.env.LEGION_GENERATION = "2";
-  process.env.LEGION_PROJECT = "omp";
-  process.env.LEGION_TREE = options.tree;
-  process.env.LEGION_ISSUE = options.issue;
-  process.env.LEGION_ROLE = options.role;
-  process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
-  process.env.LEGION_STATE_DIR = stateDir;
-  process.env.LEGION_GRANT_FILE = grantFile;
-
-  const requests: { readonly path: string; readonly body: unknown }[] = [];
-  let readyAttempts = 0;
-  let grants = 0;
-  globalThis.fetch = (async (input, init) => {
-    const url = new URL(input.toString());
-    const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
-    requests.push({ path: url.pathname, body });
-    if (url.pathname === "/legion/v1/claims/register") {
-      return (await options.register?.()) ?? Response.json(registration);
-    }
-    if (url.pathname === "/legion/v1/claims/ready") {
-      readyAttempts += 1;
-      options.readyPosted?.();
-      return (await options.ready?.(readyAttempts)) ?? new Response(null, { status: 204 });
-    }
-    if (url.pathname === "/legion/v1/grants") {
-      grants += 1;
-      return Response.json({ grantId: `go-grant-${grants}`, expiresAt: "2099-01-01T00:00:00Z" });
-    }
-    if (url.pathname.startsWith("/legion/")) {
-      return Response.json({ error: "no route" }, { status: 404 });
-    }
-    if (url.pathname === `/v1/roles/${claimToken}`) {
-      const holder = options.roleHolder?.() ?? options.sessionId;
-      if (holder === "") {
-        return Response.json({ error: `no holder for role ${claimToken}` }, { status: 404 });
-      }
-      return Response.json({ role: claimToken, holder, last_seen: 1 });
-    }
-    return Response.json({
-      session_id: options.sessionId,
-      machine_id: "machine",
-      dir: "/tmp/legion-workspace",
-      topics: [claimToken],
-    });
-  }) as typeof fetch;
-
-  const exits: number[] = [];
-  setLegionBootstrapExitForTests((code) => {
-    exits.push(code);
-    throw new Error("process would exit");
-  });
-  const errors: string[] = [];
-  const errorLog = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
-    errors.push(args.map(String).join(" "));
-  });
-  const intervals: (() => void)[] = [];
-  const fixture = createPi();
-  legionExtension(fixture.pi);
-  const sessionStart = fixture.handlers.get("session_start");
-  if (sessionStart === undefined) throw new Error("session_start handler was not registered");
-  const context: SessionContext = {
-    ...sessionContext(
-      options.sessionId,
-      `/tmp/${options.sessionId}.jsonl`,
-      undefined,
-      fixture.title
-    ),
-    setInterval: (callback) => {
-      intervals.push(callback);
-    },
-  };
-  return {
-    claimToken,
-    registration,
-    bootToken,
-    grantFile,
-    requests,
-    exits,
-    errors,
-    intervals,
-    tools: fixture.tools,
-    title: fixture.title,
-    handlers: fixture.handlers,
-    context,
-    start: async () => {
-      try {
-        return await sessionStart({}, context);
-      } finally {
-        errorLog.mockRestore();
-      }
-    },
-  };
-}
-
-const daemonRequests = <T extends { readonly path: string }>(requests: readonly T[]) =>
-  requests.filter((request) => request.path.startsWith("/legion/"));
-
-describe("the daemon's pane", () => {
-  test("a root architect registers, claims its role, and reports ready through the Go routes alone", async () => {
-    const pane = await goPane({
-      role: "architect",
-      tree: "REPO-42",
-      issue: "REPO-42",
-      sessionId: "ses_go_root",
-    });
-    await pane.start();
-
-    expect(daemonRequests(pane.requests)).toEqual([
-      {
-        path: "/legion/v1/claims/register",
-        body: {
-          bootToken: pane.bootToken,
-          sessionId: "ses_go_root",
-          ompSessionFile: "/tmp/ses_go_root.jsonl",
-          agentId: "ses_go_root",
-          pluginContract: pkg.legion.daemonApiVersion,
-        },
-      },
-      {
-        path: "/legion/v1/claims/ready",
-        body: {
-          claimToken: pane.claimToken,
-          sessionId: "ses_go_root",
-          secret: pane.registration.secret,
-          generation: pane.registration.generation,
-        },
-      },
-    ]);
-    // The Envoy role is the claim token, claimed after the registration issued it and before ready.
-    const paths = pane.requests.map((request) => request.path);
-    const roleClaim = pane.requests.findIndex(
-      (request) =>
-        request.path === "/v1/roles/set" &&
-        JSON.stringify(request.body) ===
-          JSON.stringify({ session_id: "ses_go_root", role: pane.claimToken })
-    );
-    expect(roleClaim).toBeGreaterThan(paths.indexOf("/legion/v1/claims/register"));
-    expect(roleClaim).toBeLessThan(paths.indexOf("/legion/v1/claims/ready"));
-    expect(pane.exits).toEqual([]);
-    // The claim registers the workflow tool.
-    expect(pane.tools.map((tool) => tool.name)).toContain("legion");
-
-    const toolCall = pane.handlers.get("tool_call");
-    await expect(
-      toolCall?.(
-        { toolName: "edit", toolCallId: "go-architect-edit", input: { path: "a.ts" } },
-        pane.context
-      )
-    ).resolves.toEqual({
-      block: true,
-      reason: "the architect delegates all code work to phase workers",
+      expect(daemonRequests(pane.requests)).toEqual([]);
     });
   });
 
   test("register_gate names the lookup and the reference when Dispatch cannot be reached", async () => {
-    const pane = await goPane({
-      role: "architect",
-      tree: "REPO-42",
-      issue: "REPO-42",
-      sessionId: "ses_go_gate",
-    });
-    await pane.start();
+    const pane = await bootPane({ role: "architect", issue: "REPO-42", sessionId: "ses_gate" });
     // The lookup reads the pane's Dispatch configuration when it runs, and fails to connect.
     process.env.DISPATCH_URL = "http://dispatch.unreachable.test";
     process.env.DISPATCH_TOKEN = "dispatch-token";
@@ -2949,11 +2286,11 @@ describe("the daemon's pane", () => {
       return paneFetch(input, init);
     }) as typeof fetch;
     const legion = pane.tools.find((tool) => tool.name === "legion");
-    if (legion === undefined) throw new Error("the Go legion tool was not registered");
+    if (legion === undefined) throw new Error("the legion tool was not registered");
 
     await expect(
       legion.execute(
-        "go-gate",
+        "register-gate",
         { op: "register_gate", issue: "REPO-42", artifactId: "spec", version: 2 },
         undefined,
         undefined,
@@ -2973,25 +2310,11 @@ describe("the daemon's pane", () => {
     );
   });
 
-  test("subscribes no Go role to an issue's notice topic", async () => {
-    const architect = await goPane({
-      role: "architect",
-      tree: "REPO-42",
-      issue: "REPO-43",
-      sessionId: "ses_go_notice_architect",
-    });
-    await architect.start();
-    resetLegionBootstrappedSessionForTests();
-    resetLegionRoleClaimBridgeForTests();
-    const worker = await goPane({
-      role: "implementer",
-      tree: "REPO-42",
-      issue: "REPO-43",
-      sessionId: "ses_go_notice_worker",
-    });
-    await worker.start();
+  test("subscribes no claim to an issue's notice topic", async () => {
+    await bootPane({ role: "architect", sessionId: "ses_notice_architect" });
+    await bootPane({ role: "implementer", sessionId: "ses_notice_worker" });
 
-    // The Go daemon sends every notice to the owning architect's role topic, which the architect
+    // The daemon sends every notice to the owning architect's role topic, which the architect
     // claims as its Envoy role; a phase worker subscribed to its issue's topic would be woken by
     // notices meant for the architect.
     const subjects = natsConnections.flatMap((connection) => connection.subjects);
@@ -3000,134 +2323,46 @@ describe("the daemon's pane", () => {
     ).toEqual([]);
   });
 
-  test("mints and atomically replaces a Go claim grant for every bash command", async () => {
-    const pane = await goPane({
+  test("mints and atomically replaces a claim's grant for every bash command", async () => {
+    const { toolCall, context, grantFile, requests, registration } = await bootPane({
       role: "implementer",
-      tree: "REPO-42",
-      issue: "REPO-43",
-      sessionId: "ses_go_grant",
+      sessionId: "ses_grant",
     });
-    await pane.start();
-    const toolCall = pane.handlers.get("tool_call");
-    if (toolCall === undefined) throw new Error("Go pane tool_call handler was not registered");
 
     await expect(
       toolCall(
         {
           toolName: "bash",
-          toolCallId: "go-grant-one",
+          toolCallId: "grant-one",
           input: { command: "legion gh -- pr view 7" },
         },
-        pane.context
+        context
       )
     ).resolves.toBeUndefined();
     await expect(
       toolCall(
-        { toolName: "bash", toolCallId: "go-grant-two", input: { command: "legion state" } },
-        pane.context
+        { toolName: "bash", toolCallId: "grant-two", input: { command: "legion state" } },
+        context
       )
     ).resolves.toBeUndefined();
 
-    expect(await grantFileContents(pane.grantFile)).toEqual({ grant: "go-grant-2", mode: 0o600 });
-    expect(
-      daemonRequests(pane.requests).filter((request) => request.path === "/legion/v1/grants")
-    ).toEqual([
-      {
-        path: "/legion/v1/grants",
-        body: {
-          sessionId: "ses_go_grant",
-          secret: pane.registration.secret,
-          tree: "REPO-42",
-          issue: "REPO-43",
-        },
+    expect(await grantFileContents(grantFile)).toEqual({ grant: "grant-2", mode: 0o600 });
+    // Each mint names the claim's session and secret, and its tree and issue.
+    const grant = {
+      path: "/legion/v1/grants",
+      body: {
+        sessionId: "ses_grant",
+        secret: registration.secret,
+        tree: "REPO-42",
+        issue: "REPO-43",
       },
-      {
-        path: "/legion/v1/grants",
-        body: {
-          sessionId: "ses_go_grant",
-          secret: pane.registration.secret,
-          tree: "REPO-42",
-          issue: "REPO-43",
-        },
-      },
-    ]);
-    const secretFiles = await readdir(path.dirname(pane.grantFile));
-    expect(
-      secretFiles.filter((name) => name.startsWith(`${path.basename(pane.grantFile)}.`))
-    ).toEqual([]);
-  });
-
-  test("a root architect's read of pr:// mints its own Go claim grant first", async () => {
-    const pane = await goPane({
-      role: "architect",
-      tree: "REPO-42",
-      issue: "REPO-42",
-      sessionId: "ses_go_root_read",
-    });
-    await pane.start();
-    const toolCall = pane.handlers.get("tool_call");
-    if (toolCall === undefined) throw new Error("Go pane tool_call handler was not registered");
-
-    // The call a root architect makes before its sign-off, with no bash command before it.
-    await expect(
-      toolCall(
-        { toolName: "read", toolCallId: "go-root-read", input: { path: "pr://acme/widgets/179" } },
-        pane.context
-      )
-    ).resolves.toBeUndefined();
-
-    expect(await grantFileContents(pane.grantFile)).toEqual({ grant: "go-grant-1", mode: 0o600 });
-    expect(
-      daemonRequests(pane.requests).filter((request) => request.path === "/legion/v1/grants")
-    ).toEqual([
-      {
-        path: "/legion/v1/grants",
-        body: {
-          sessionId: "ses_go_root_read",
-          secret: pane.registration.secret,
-          tree: "REPO-42",
-          issue: "REPO-42",
-        },
-      },
-    ]);
-  });
-
-  test("a Go pane's grant goes to the file the pane names; a pane that names none is refused", async () => {
-    const pane = await goPane({
-      role: "implementer",
-      tree: "REPO-42",
-      issue: "REPO-43",
-      sessionId: "ses_go_named_grant",
-    });
-    // Oh My Pi copies its environment once for every `gh` it runs, before the claim registers, so
-    // the pointer has to be the pane's own from process start; the extension never makes one up.
-    const named = path.join(path.dirname(pane.grantFile), "named-by-the-pane");
-    process.env.LEGION_GRANT_FILE = named;
-    await pane.start();
-    const toolCall = pane.handlers.get("tool_call");
-    if (toolCall === undefined) throw new Error("Go pane tool_call handler was not registered");
-
-    await expect(
-      toolCall(
-        { toolName: "bash", toolCallId: "go-named", input: { command: "legion state" } },
-        pane.context
-      )
-    ).resolves.toBeUndefined();
-    expect(process.env.LEGION_GRANT_FILE).toBe(named);
-    expect(await grantFileContents(named)).toEqual({ grant: "go-grant-1", mode: 0o600 });
-    await expect(access(pane.grantFile)).rejects.toThrow("ENOENT");
-
-    delete process.env.LEGION_GRANT_FILE;
-    await expect(
-      toolCall(
-        { toolName: "bash", toolCallId: "go-unnamed", input: { command: "legion state" } },
-        pane.context
-      )
-    ).resolves.toEqual({
-      block: true,
-      reason:
-        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; relaunch the pane from a daemon on the matching release (a daemon restart keeps a live pane as it was launched)",
-    });
+    };
+    expect(grantRequests(requests)).toEqual([grant, grant]);
+    // The atomic rename leaves no `<file>.<pid>.<uuid>` residue beside the grant file.
+    const secretFiles = await readdir(path.dirname(grantFile));
+    expect(secretFiles.filter((name) => name.startsWith(`${path.basename(grantFile)}.`))).toEqual(
+      []
+    );
   });
 
   for (const [status, sentence] of [
@@ -3137,10 +2372,8 @@ describe("the daemon's pane", () => {
     [409, "Worker respawn must resume the same agent session"],
   ] as const) {
     test(`a ${status} at claims/register exits the process with one line naming the route, status, and sentence`, async () => {
-      const pane = await goPane({
+      const pane = await claimPane({
         role: "implementer",
-        tree: "REPO-42",
-        issue: "REPO-43",
         sessionId: `ses_refused_${status}`,
         register: () => Response.json({ error: sentence }, { status }),
       });
@@ -3159,10 +2392,8 @@ describe("the daemon's pane", () => {
 
   for (const status of [500, 503]) {
     test(`a ${status} at claims/register propagates and the process stays for the registration deadline`, async () => {
-      const pane = await goPane({
+      const pane = await claimPane({
         role: "implementer",
-        tree: "REPO-42",
-        issue: "REPO-43",
         sessionId: `ses_daemon_${status}`,
         register: () => Response.json({ error: "register failed" }, { status }),
       });
@@ -3178,10 +2409,8 @@ describe("the daemon's pane", () => {
   }
 
   test("a registration that never reached the daemon propagates and the process stays", async () => {
-    const pane = await goPane({
+    const pane = await claimPane({
       role: "implementer",
-      tree: "REPO-42",
-      issue: "REPO-43",
       sessionId: "ses_unreachable",
       register: () => {
         throw new TypeError("fetch failed");
@@ -3193,10 +2422,8 @@ describe("the daemon's pane", () => {
   });
 
   test("claims/ready is retried on a 5xx and on a transport failure, three attempts a second apart", async () => {
-    const recovered = await goPane({
+    const recovered = await claimPane({
       role: "implementer",
-      tree: "REPO-42",
-      issue: "REPO-43",
       sessionId: "ses_ready_recovers",
       ready: (attempt) => {
         if (attempt === 1) return Response.json({ error: "daemon unavailable" }, { status: 503 });
@@ -3214,10 +2441,8 @@ describe("the daemon's pane", () => {
   });
 
   test("claims/ready failing transiently three times ends the boot and exits once", async () => {
-    const exhausted = await goPane({
+    const exhausted = await claimPane({
       role: "implementer",
-      tree: "REPO-42",
-      issue: "REPO-43",
       sessionId: "ses_ready_exhausted",
       ready: () => Response.json({ error: "daemon unavailable" }, { status: 503 }),
     });
@@ -3229,10 +2454,8 @@ describe("the daemon's pane", () => {
   });
 
   test("a 4xx at claims/ready is not retried: the boot ends and the process exits once", async () => {
-    const pane = await goPane({
+    const pane = await claimPane({
       role: "implementer",
-      tree: "REPO-42",
-      issue: "REPO-43",
       sessionId: "ses_ready_refused",
       ready: () => Response.json({ error: "Invalid session secret" }, { status: 403 }),
     });
@@ -3245,14 +2468,12 @@ describe("the daemon's pane", () => {
   });
 
   test("a claim that regains its Envoy role reports ready again", async () => {
-    let holder: string | undefined = "ses_go_regain";
+    let holder: string | undefined = "ses_regain";
     const secondReady = Promise.withResolvers<void>();
     let readies = 0;
-    const pane = await goPane({
+    const pane = await claimPane({
       role: "implementer",
-      tree: "REPO-42",
-      issue: "REPO-43",
-      sessionId: "ses_go_regain",
+      sessionId: "ses_regain",
       roleHolder: () => holder,
       readyPosted: () => {
         readies += 1;
@@ -3269,7 +2490,7 @@ describe("the daemon's pane", () => {
       path: "/legion/v1/claims/ready",
       body: {
         claimToken: pane.claimToken,
-        sessionId: "ses_go_regain",
+        sessionId: "ses_regain",
         secret: pane.registration.secret,
         generation: pane.registration.generation,
       },
@@ -3278,28 +2499,6 @@ describe("the daemon's pane", () => {
       ready,
       ready,
     ]);
-  });
-
-  test("a task subagent in the Go daemon's pane registers nothing and never exits", async () => {
-    const { childFile } = await createSubagentTranscriptPaths();
-    const pane = await goPane({
-      role: "implementer",
-      tree: "REPO-42",
-      issue: "REPO-43",
-      sessionId: "ses_go_subagent",
-    });
-    const sessionStart = pane.handlers.get("session_start");
-
-    await sessionStart?.(
-      {},
-      {
-        ...pane.context,
-        sessionManager: { ...pane.context.sessionManager, getSessionFile: () => childFile },
-      }
-    );
-
-    expect(daemonRequests(pane.requests)).toEqual([]);
-    expect(pane.exits).toEqual([]);
   });
 });
 
@@ -3310,12 +2509,12 @@ describe("the daemon's pane", () => {
  * answers `grant`'s refusal), and 404s every other daemon path as the daemon's catch-all does; its
  * Envoy side keeps a role holder and an interest registry, as the listener does, and names no
  * holder while `listener.lost` is set. */
-async function goController(options: {
+async function launchedController(options: {
   readonly sessionId: string;
   readonly register?: (
     body: Record<string, unknown>
   ) => Response | undefined | Promise<Response | undefined>;
-  /** The project token the Go controller carries as LEGION_PROJECT; `legion controller start`
+  /** The project token the controller carries as LEGION_PROJECT; `legion controller start`
    * derives it from the configured project spelling. */
   readonly project?: string;
   /** The project the daemon's `GET /legion/v1/state` names, as its operator wrote it: `OMP`,
@@ -3330,7 +2529,7 @@ async function goController(options: {
   readonly token: string;
   readonly registration: Record<string, unknown>;
   readonly grantFile: string;
-  readonly requests: { readonly path: string; readonly body: unknown }[];
+  readonly requests: DaemonRequest[];
   readonly exits: number[];
   readonly tools: RegisteredTool[];
   readonly commands: RegisteredCommand[];
@@ -3349,9 +2548,9 @@ async function goController(options: {
     claimToken: token,
     role: "controller",
     generation: 2,
-    secret: `go-controller-secret-${options.sessionId}`,
+    secret: `controller-secret-${options.sessionId}`,
   };
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-go-controller-"));
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-controller-"));
   const secretsDir = path.join(stateDir, "secrets");
   await mkdir(secretsDir, { mode: 0o700 });
   temporaryPaths.push(stateDir);
@@ -3367,7 +2566,7 @@ async function goController(options: {
   process.env.LEGION_STATE_DIR = stateDir;
   process.env.LEGION_GRANT_FILE = grantFile;
 
-  const requests: { readonly path: string; readonly body: unknown }[] = [];
+  const requests: DaemonRequest[] = [];
   const goldenState = JSON.parse(
     await readFile(
       path.join(import.meta.dir, "../../contracts/fixtures/daemon-api/state.json"),
@@ -3394,7 +2593,7 @@ async function goController(options: {
       if (options.grant !== undefined) return options.grant();
       grants += 1;
       return Response.json({
-        grantId: `go-controller-grant-${grants}`,
+        grantId: `controller-grant-${grants}`,
         expiresAt: "2099-01-01T00:00:00Z",
       });
     }
@@ -3478,8 +2677,8 @@ async function goController(options: {
 
 describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   test("reads the daemon's project, registers on the claim route with its capability, then claims the controller role, and asks nothing else", async () => {
-    const controller = await goController({ sessionId: "ses_go_controller" });
-    await controller.handlers.get("session_start")?.({}, controller.context("ses_go_controller"));
+    const controller = await launchedController({ sessionId: "ses_controller" });
+    await controller.handlers.get("session_start")?.({}, controller.context("ses_controller"));
 
     expect(daemonRequests(controller.requests)).toEqual([
       { path: "/legion/v1/state", body: undefined },
@@ -3487,9 +2686,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
         path: "/legion/v1/claims/register",
         body: {
           bootToken: "controller-capability",
-          sessionId: "ses_go_controller",
-          ompSessionFile: "/tmp/ses_go_controller.jsonl",
-          agentId: "ses_go_controller",
+          sessionId: "ses_controller",
+          ompSessionFile: "/tmp/ses_controller.jsonl",
+          agentId: "ses_controller",
           pluginContract: pkg.legion.daemonApiVersion,
         },
       },
@@ -3499,7 +2698,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       (request) =>
         request.path === "/v1/roles/set" &&
         JSON.stringify(request.body) ===
-          JSON.stringify({ session_id: "ses_go_controller", role: controller.token })
+          JSON.stringify({ session_id: "ses_controller", role: controller.token })
     );
     expect(roleClaim).toBeGreaterThan(paths.indexOf("/legion/v1/claims/register"));
     expect(controller.exits).toEqual([]);
@@ -3508,12 +2707,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   });
 
   test("claims with the capability LEGION_CONTROLLER_SECRET_FILE names over LEGION_CONTROLLER_SECRET, and /legion-claim-controller moves the role to a hand-started session", async () => {
-    const controller = await goController({ sessionId: "ses_go_controller_pane" });
+    const controller = await launchedController({ sessionId: "ses_controller_pane" });
     process.env.LEGION_CONTROLLER_SECRET = "decoy";
-    await controller.handlers.get("session_start")?.(
-      {},
-      controller.context("ses_go_controller_pane")
-    );
+    await controller.handlers.get("session_start")?.({}, controller.context("ses_controller_pane"));
     // A hand-started takeover session carries no controller marker.
     delete process.env.LEGION_CONTROLLER;
     delete process.env.LEGION_ROLE;
@@ -3521,7 +2717,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       (command) => command.name === "legion-claim-controller"
     );
     if (claimCommand === undefined) throw new Error("controller claim command was not registered");
-    await claimCommand.handler("", controller.context("ses_go_controller_takeover"));
+    await claimCommand.handler("", controller.context("ses_controller_takeover"));
 
     expect(
       controller.requests
@@ -3530,29 +2726,29 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     ).toEqual([
       expect.objectContaining({
         bootToken: "controller-capability",
-        sessionId: "ses_go_controller_pane",
+        sessionId: "ses_controller_pane",
       }),
       expect.objectContaining({
         bootToken: "controller-capability",
-        sessionId: "ses_go_controller_takeover",
+        sessionId: "ses_controller_takeover",
       }),
     ]);
-    expect(controller.holder()).toBe("ses_go_controller_takeover");
+    expect(controller.holder()).toBe("ses_controller_takeover");
   });
 
   test("blocks a bash call when the daemon refuses the controller grant", async () => {
-    const controller = await goController({
-      sessionId: "ses_go_controller_refused",
+    const controller = await launchedController({
+      sessionId: "ses_controller_refused",
       grant: () => Response.json({ error: "Invalid controller capability" }, { status: 403 }),
     });
-    const context = controller.context("ses_go_controller_refused");
+    const context = controller.context("ses_controller_refused");
     await controller.handlers.get("session_start")?.({}, context);
 
     await expect(
       controller.handlers.get("tool_call")?.(
         {
           toolName: "bash",
-          toolCallId: "go-controller-refused",
+          toolCallId: "controller-refused",
           input: { command: "legion state" },
         },
         context
@@ -3564,7 +2760,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   });
 
   test("a tree navigation that changes nothing and a task subagent's switch claim nothing; a tree navigation after the transcript moved under the same id claims again with the moved file", async () => {
-    const controller = await goController({ sessionId: "ses_pane_first" });
+    const controller = await launchedController({ sessionId: "ses_pane_first" });
     await controller.handlers.get("session_start")?.(
       {},
       controller.context("ses_pane_first", "/tmp/first.jsonl")
@@ -3619,7 +2815,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   // pane's id as drift and soft-claim the controller role for the subagent's session.
   for (const order of ["envoy.ts", "legion.ts"] as const) {
     test(`after /new in a pane that ran a task subagent, the heartbeat re-asserts the controller for the pane's new session when ${order} handles the switch first`, async () => {
-      const controller = await goController({ sessionId: "ses_pane_first", order });
+      const controller = await launchedController({ sessionId: "ses_pane_first", order });
       const paneTicks: (() => void)[] = [];
       const pane = controllerPane(paneTicks);
       await controller.handlers.get("session_start")?.({}, pane.context);
@@ -3676,8 +2872,8 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   }
 
   test("mints nothing before its claim, then a grant with its registration secret for every bash command, leaving the input as the model wrote it", async () => {
-    const controller = await goController({ sessionId: "ses_go_controller_bash" });
-    const context = controller.context("ses_go_controller_bash");
+    const controller = await launchedController({ sessionId: "ses_controller_bash" });
+    const context = controller.context("ses_controller_bash");
     const toolCall = controller.handlers.get("tool_call");
     if (toolCall === undefined) throw new Error("tool_call handler was not registered");
 
@@ -3685,7 +2881,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     // unwrapped rather than being blocked as an unregistered worker.
     await expect(
       toolCall(
-        { toolName: "bash", toolCallId: "go-controller-unclaimed", input: { command: "true" } },
+        { toolName: "bash", toolCallId: "controller-unclaimed", input: { command: "true" } },
         context
       )
     ).resolves.toBeUndefined();
@@ -3698,7 +2894,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       toolCall(
         {
           toolName: "bash",
-          toolCallId: "go-controller-env",
+          toolCallId: "controller-env",
           input: {
             command: "legion state",
             env: { KEEP: "model-value", LEGION_GRANT: "made-up-by-the-model" },
@@ -3708,7 +2904,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       )
     ).resolves.toBeUndefined();
     expect(await grantFileContents(controller.grantFile)).toEqual({
-      grant: "go-controller-grant-1",
+      grant: "controller-grant-1",
       mode: 0o600,
     });
     // LEGION-45: the controller does not commit and is not a phase worker; the operation-log guard
@@ -3717,7 +2913,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       toolCall(
         {
           toolName: "bash",
-          toolCallId: "go-controller-jj",
+          toolCallId: "controller-jj",
           input: { command: "jj -R /tmp/legion-workspace undo" },
         },
         context
@@ -3728,20 +2924,20 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     ).toEqual([
       {
         path: "/legion/v1/grants",
-        body: { sessionId: "ses_go_controller_bash", secret: controller.registration.secret },
+        body: { sessionId: "ses_controller_bash", secret: controller.registration.secret },
       },
       {
         path: "/legion/v1/grants",
-        body: { sessionId: "ses_go_controller_bash", secret: controller.registration.secret },
+        body: { sessionId: "ses_controller_bash", secret: controller.registration.secret },
       },
     ]);
   });
 
   test("subscribes to its project's controller topic", async () => {
-    const controller = await goController({ sessionId: "ses_go_controller_notices" });
+    const controller = await launchedController({ sessionId: "ses_controller_notices" });
     await controller.handlers.get("session_start")?.(
       {},
-      controller.context("ses_go_controller_notices")
+      controller.context("ses_controller_notices")
     );
 
     expect(natsConnections.flatMap((connection) => connection.subjects)).toContain(
@@ -3751,13 +2947,13 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
 
   test("closes its controller-topic subscription once a later controller takes the role", async () => {
     const topic = "notifications.legion.omp.controller";
-    const first = await goController({ sessionId: "ses_go_controller_first" });
+    const first = await launchedController({ sessionId: "ses_controller_first" });
     const ticks: (() => void)[] = [];
     const refused = Promise.withResolvers<void>();
     await first.handlers.get("session_start")?.(
       {},
       {
-        ...first.context("ses_go_controller_first"),
+        ...first.context("ses_controller_first"),
         setInterval: (callback) => ticks.push(callback),
         ui: {
           notify: (message) => {
@@ -3771,17 +2967,17 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     resetLegionBootstrappedSessionForTests();
     const second = createPi();
     legionExtension(second.pi);
-    await second.handlers.get("session_start")?.({}, first.context("ses_go_controller_second"));
+    await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
 
     // The first session's next heartbeat finds the role held by the second and is refused.
     for (const tick of ticks) tick();
     await refused.promise;
 
     const firstConnection = natsConnections.find(
-      (candidate) => candidate.name === "omp-ses_go_controller_first"
+      (candidate) => candidate.name === "omp-ses_controller_first"
     );
     const secondConnection = natsConnections.find(
-      (candidate) => candidate.name === "omp-ses_go_controller_second"
+      (candidate) => candidate.name === "omp-ses_controller_second"
     );
     expect(firstConnection?.unsubscribed).toEqual([topic]);
     expect(secondConnection?.subjects).toContain(topic);
@@ -3792,19 +2988,19 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const topic = "notifications.legion.omp.controller";
     let replaced = false;
     // The daemon refuses the first session's capability once a later start replaced it.
-    const first = await goController({
-      sessionId: "ses_go_controller_first",
+    const first = await launchedController({
+      sessionId: "ses_controller_first",
       register: (body) =>
-        replaced && body.sessionId === "ses_go_controller_first"
+        replaced && body.sessionId === "ses_controller_first"
           ? Response.json({ error: "Invalid boot token" }, { status: 403 })
           : undefined,
     });
-    await first.handlers.get("session_start")?.({}, first.context("ses_go_controller_first"));
+    await first.handlers.get("session_start")?.({}, first.context("ses_controller_first"));
     // A later `legion controller start` takes the role, in another process.
     resetLegionBootstrappedSessionForTests();
     const second = createPi();
     legionExtension(second.pi);
-    await second.handlers.get("session_start")?.({}, first.context("ses_go_controller_second"));
+    await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
     replaced = true;
 
     // The first session's process died, and the session is resumed within the listener's reap
@@ -3815,7 +3011,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const connectionsBeforeResume = natsConnections.length;
     const resumed = createPi();
     legionExtension(resumed.pi);
-    const context = first.context("ses_go_controller_first");
+    const context = first.context("ses_controller_first");
     const errorLog = spyOn(console, "error").mockImplementation(() => undefined);
     try {
       await expect(
@@ -3841,12 +3037,12 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
         (request) =>
           request.path === "/v1/roles/set" &&
           JSON.stringify(request.body) ===
-            JSON.stringify({ session_id: "ses_go_controller_first", role: first.token, soft: true })
+            JSON.stringify({ session_id: "ses_controller_first", role: first.token, soft: true })
       )
     ).toHaveLength(1);
     const resumedConnections = natsConnections.slice(connectionsBeforeResume);
     expect(resumedConnections.flatMap((connection) => connection.subjects)).toContain(
-      "notifications.agent.ses_go_controller_first"
+      "notifications.agent.ses_controller_first"
     );
     expect(resumedConnections.flatMap((connection) => connection.subjects)).not.toContain(topic);
   });
@@ -3859,14 +3055,14 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const reconnecting = Promise.withResolvers<void>();
     // Registration is where the claim stands when its connection drops: the role claim and the
     // topic's subscription follow, and the subscription waits for the reconnect.
-    const first = await goController({
-      sessionId: "ses_go_controller_first",
+    const first = await launchedController({
+      sessionId: "ses_controller_first",
       register: () => {
         const live = natsConnections.find(
-          (candidate) => candidate.name === "omp-ses_go_controller_first"
+          (candidate) => candidate.name === "omp-ses_controller_first"
         );
         if (live !== undefined) live.closed = true;
-        natsConnectGates.set("omp-ses_go_controller_first", () => connectGate.promise);
+        natsConnectGates.set("omp-ses_controller_first", () => connectGate.promise);
         reconnecting.resolve();
         return undefined;
       },
@@ -3874,7 +3070,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const starting = first.handlers.get("session_start")?.(
       {},
       {
-        ...first.context("ses_go_controller_first"),
+        ...first.context("ses_controller_first"),
         setInterval: (callback) => ticks.push(callback),
         ui: {
           notify: (message) => {
@@ -3889,14 +3085,14 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     resetLegionBootstrappedSessionForTests();
     const second = createPi();
     legionExtension(second.pi);
-    await second.handlers.get("session_start")?.({}, first.context("ses_go_controller_second"));
+    await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
     for (const tick of ticks) tick();
     await refused.promise;
     connectGate.resolve();
     await starting;
 
     const firstSubjects = natsConnections
-      .filter((candidate) => candidate.name === "omp-ses_go_controller_first")
+      .filter((candidate) => candidate.name === "omp-ses_controller_first")
       .flatMap((connection) =>
         connection.subjects.filter((subject) => !connection.unsubscribed.includes(subject))
       );
@@ -3913,13 +3109,13 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const topic = "notifications.legion.omp.controller";
     process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "1";
     try {
-      const first = await goController({ sessionId: "ses_go_controller_first" });
+      const first = await launchedController({ sessionId: "ses_controller_first" });
       const ticks: (() => void)[] = [];
       const refused = Promise.withResolvers<void>();
       await first.handlers.get("session_start")?.(
         {},
         {
-          ...first.context("ses_go_controller_first"),
+          ...first.context("ses_controller_first"),
           setInterval: (callback) => ticks.push(callback),
           ui: {
             notify: (message) => {
@@ -3933,19 +3129,19 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       const connectGate = Promise.withResolvers<void>();
       const reconnecting = Promise.withResolvers<void>();
       let reconnects = 0;
-      natsConnectGates.set("omp-ses_go_controller_first", () => {
+      natsConnectGates.set("omp-ses_controller_first", () => {
         reconnects += 1;
         if (reconnects === 2) reconnecting.resolve();
         return connectGate.promise;
       });
-      natsConnections.find((candidate) => candidate.name === "omp-ses_go_controller_first")?.drop();
+      natsConnections.find((candidate) => candidate.name === "omp-ses_controller_first")?.drop();
       await reconnecting.promise;
       // Meanwhile a later `legion controller start` takes the role, and the first session's
       // heartbeat is refused.
       resetLegionBootstrappedSessionForTests();
       const second = createPi();
       legionExtension(second.pi);
-      await second.handlers.get("session_start")?.({}, first.context("ses_go_controller_second"));
+      await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
       for (const tick of ticks) tick();
       await refused.promise;
       connectGate.resolve();
@@ -3960,13 +3156,11 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       await registered.promise;
 
       const openSubjects = natsConnections
-        .filter(
-          (candidate) => candidate.name === "omp-ses_go_controller_first" && !candidate.closed
-        )
+        .filter((candidate) => candidate.name === "omp-ses_controller_first" && !candidate.closed)
         .flatMap((connection) =>
           connection.subjects.filter((subject) => !connection.unsubscribed.includes(subject))
         );
-      expect(openSubjects).toContain("notifications.agent.ses_go_controller_first");
+      expect(openSubjects).toContain("notifications.agent.ses_controller_first");
       expect(openSubjects).not.toContain(topic);
       expect(
         first.requests.filter(
@@ -3986,10 +3180,10 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     try {
       let replaced = false;
       // The daemon refuses the first session's capability once a later start replaced it.
-      const first = await goController({
-        sessionId: "ses_go_controller_first",
+      const first = await launchedController({
+        sessionId: "ses_controller_first",
         register: (body) =>
-          replaced && body.sessionId === "ses_go_controller_first"
+          replaced && body.sessionId === "ses_controller_first"
             ? Response.json({ error: "Invalid boot token" }, { status: 403 })
             : undefined,
       });
@@ -3998,7 +3192,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       await first.handlers.get("session_start")?.(
         {},
         {
-          ...first.context("ses_go_controller_first"),
+          ...first.context("ses_controller_first"),
           setInterval: (callback) => ticks.push(callback),
           ui: {
             notify: (message) => {
@@ -4011,19 +3205,19 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       const failingConnect = Promise.withResolvers<void>();
       const reconnecting = Promise.withResolvers<void>();
       let reconnects = 0;
-      natsConnectGates.set("omp-ses_go_controller_first", () => {
+      natsConnectGates.set("omp-ses_controller_first", () => {
         reconnects += 1;
         if (reconnects === 2) reconnecting.resolve();
         return failingConnect.promise;
       });
-      natsConnections.find((candidate) => candidate.name === "omp-ses_go_controller_first")?.drop();
+      natsConnections.find((candidate) => candidate.name === "omp-ses_controller_first")?.drop();
       await reconnecting.promise;
       // A later `legion controller start` takes the role, and the heartbeat is refused while the
       // reconnect is in flight.
       resetLegionBootstrappedSessionForTests();
       const second = createPi();
       legionExtension(second.pi);
-      await second.handlers.get("session_start")?.({}, first.context("ses_go_controller_second"));
+      await second.handlers.get("session_start")?.({}, first.context("ses_controller_second"));
       replaced = true;
       for (const tick of ticks) tick();
       await refused.promise;
@@ -4032,7 +3226,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       // reconnect succeeds.
       jest.useFakeTimers();
       const reconnected = Promise.withResolvers<void>();
-      natsConnectGates.set("omp-ses_go_controller_first", async () => reconnected.resolve());
+      natsConnectGates.set("omp-ses_controller_first", async () => reconnected.resolve());
       failingConnect.reject(new Error("nats: connection refused"));
       for (let turn = 0; turn < 50; turn++) await Promise.resolve();
       jest.advanceTimersByTime(60_000);
@@ -4047,13 +3241,11 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       await registered.promise;
 
       const openSubjects = natsConnections
-        .filter(
-          (candidate) => candidate.name === "omp-ses_go_controller_first" && !candidate.closed
-        )
+        .filter((candidate) => candidate.name === "omp-ses_controller_first" && !candidate.closed)
         .flatMap((connection) =>
           connection.subjects.filter((subject) => !connection.unsubscribed.includes(subject))
         );
-      expect(openSubjects).toContain("notifications.agent.ses_go_controller_first");
+      expect(openSubjects).toContain("notifications.agent.ses_controller_first");
       expect(openSubjects).not.toContain(topic);
       expect(
         first.requests.filter(
@@ -4069,7 +3261,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       const connectionsBeforeResume = natsConnections.length;
       const resumed = createPi();
       legionExtension(resumed.pi);
-      const context = first.context("ses_go_controller_first");
+      const context = first.context("ses_controller_first");
       const errorLog = spyOn(console, "error").mockImplementation(() => undefined);
       try {
         await expect(
@@ -4092,7 +3284,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       const resumedSubjects = natsConnections
         .slice(connectionsBeforeResume)
         .flatMap((connection) => connection.subjects);
-      expect(resumedSubjects).toContain("notifications.agent.ses_go_controller_first");
+      expect(resumedSubjects).toContain("notifications.agent.ses_controller_first");
       expect(resumedSubjects).not.toContain(topic);
     } finally {
       jest.useRealTimers();
@@ -4100,55 +3292,23 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     }
   });
 
-  test("mints a controller grant with its registration secret for every bash command", async () => {
-    const controller = await goController({ sessionId: "ses_go_controller_grant" });
-    const context = controller.context("ses_go_controller_grant");
-    await controller.handlers.get("session_start")?.({}, context);
-    const toolCall = controller.handlers.get("tool_call");
-    if (toolCall === undefined) throw new Error("tool_call handler was not registered");
-
-    await expect(
-      toolCall(
-        {
-          toolName: "bash",
-          toolCallId: "go-controller-bash",
-          input: { command: "legion status LEGSMOKE-3 backlog" },
-        },
-        context
-      )
-    ).resolves.toBeUndefined();
-
-    expect(await grantFileContents(controller.grantFile)).toEqual({
-      grant: "go-controller-grant-1",
-      mode: 0o600,
-    });
-    expect(
-      daemonRequests(controller.requests).filter((request) => request.path === "/legion/v1/grants")
-    ).toEqual([
-      {
-        path: "/legion/v1/grants",
-        body: { sessionId: "ses_go_controller_grant", secret: controller.registration.secret },
-      },
-    ]);
-  });
-
   test("a session switch in the controller registers the new session", async () => {
-    const controller = await goController({ sessionId: "ses_go_controller_before" });
+    const controller = await launchedController({ sessionId: "ses_controller_before" });
     await controller.handlers.get("session_start")?.(
       {},
-      controller.context("ses_go_controller_before")
+      controller.context("ses_controller_before")
     );
     await controller.handlers.get("session_switch")?.(
       {},
-      controller.context("ses_go_controller_after", "/tmp/ses_go_controller_after.jsonl")
+      controller.context("ses_controller_after", "/tmp/ses_controller_after.jsonl")
     );
 
     const registrations = controller.requests.filter(
       (request) => request.path === "/legion/v1/claims/register"
     );
     expect(registrations.map((request) => JSON.stringify(request.body))).toEqual([
-      expect.stringContaining('"sessionId":"ses_go_controller_before"'),
-      expect.stringContaining('"sessionId":"ses_go_controller_after"'),
+      expect.stringContaining('"sessionId":"ses_controller_before"'),
+      expect.stringContaining('"sessionId":"ses_controller_after"'),
     ]);
     expect(daemonRequests(controller.requests).map((request) => request.path)).toEqual([
       "/legion/v1/state",
@@ -4166,10 +3326,10 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   for (const order of ["envoy.ts", "legion.ts"] as const) {
     test(`keeps its controller topic open across /new and /resume when ${order} handles the switch first`, async () => {
       const topic = "notifications.legion.omp.controller";
-      const controller = await goController({ sessionId: "ses_go_controller_before", order });
+      const controller = await launchedController({ sessionId: "ses_controller_before", order });
       await controller.handlers.get("session_start")?.(
         {},
-        controller.context("ses_go_controller_before")
+        controller.context("ses_controller_before")
       );
       // A subject is open while it was subscribed more often than unsubscribed on a live connection.
       const openSubjects = () =>
@@ -4185,8 +3345,8 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       expect(openSubjects()).toContain(topic);
 
       for (const [reason, sessionId] of [
-        ["new", "ses_go_controller_new"],
-        ["resume", "ses_go_controller_resumed"],
+        ["new", "ses_controller_new"],
+        ["resume", "ses_controller_resumed"],
       ] as const) {
         await controller.handlers.get("session_switch")?.(
           { reason },
@@ -4201,13 +3361,13 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   test("refuses before it registers when LEGION_PROJECT is not the daemon's project", async () => {
     // Registering replaces the running controller's session and secret, so a claim for another
     // project must stop before it.
-    const controller = await goController({ sessionId: "ses_go_controller_other_project" });
+    const controller = await launchedController({ sessionId: "ses_controller_other_project" });
     process.env.LEGION_PROJECT = "demo";
 
     await expect(
       controller.handlers.get("session_start")?.(
         {},
-        controller.context("ses_go_controller_other_project")
+        controller.context("ses_controller_other_project")
       )
     ).rejects.toThrow(
       "LEGION_PROJECT demo names controller role legion-demo-controller, but the daemon at http://daemon.test serves project OMP, whose controller role is legion-omp-controller"
@@ -4222,8 +3382,8 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   });
 
   test("refuses before claiming the role when the registration names another controller role", async () => {
-    const controller = await goController({
-      sessionId: "ses_go_controller_other_role",
+    const controller = await launchedController({
+      sessionId: "ses_controller_other_role",
       daemonProject: "demo",
     });
     process.env.LEGION_PROJECT = "demo";
@@ -4231,7 +3391,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     await expect(
       controller.handlers.get("session_start")?.(
         {},
-        controller.context("ses_go_controller_other_role")
+        controller.context("ses_controller_other_role")
       )
     ).rejects.toThrow(
       "LEGION_PROJECT demo names controller role legion-demo-controller, but the daemon registered this controller as legion-omp-controller"
@@ -4245,13 +3405,13 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   test("a controller without LEGION_PROJECT refuses before it registers", async () => {
     // Registering replaces the running controller's session and secret, so a claim that cannot
     // name its topic must stop before it.
-    const controller = await goController({ sessionId: "ses_go_controller_no_project" });
+    const controller = await launchedController({ sessionId: "ses_controller_no_project" });
     delete process.env.LEGION_PROJECT;
 
     await expect(
       controller.handlers.get("session_start")?.(
         {},
-        controller.context("ses_go_controller_no_project")
+        controller.context("ses_controller_no_project")
       )
     ).rejects.toThrow("LEGION_PROJECT is required for Legion");
     expect(controller.requests.map((request) => request.path)).not.toContain(
@@ -4260,8 +3420,8 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   });
 
   test("a refused capability is logged and propagates, and the operator's session is not ended", async () => {
-    const controller = await goController({
-      sessionId: "ses_go_controller_replaced",
+    const controller = await launchedController({
+      sessionId: "ses_controller_replaced",
       register: () => Response.json({ error: "Invalid boot token" }, { status: 403 }),
     });
 
@@ -4273,7 +3433,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       await expect(
         controller.handlers.get("session_start")?.(
           {},
-          controller.context("ses_go_controller_replaced")
+          controller.context("ses_controller_replaced")
         )
       ).rejects.toThrow("Invalid boot token");
     } finally {
@@ -4312,29 +3472,20 @@ function registrationBeforeClaim(
 
 describe("a Legion session's title", () => {
   test("a phase worker is titled by its role and issue before its role claim registers it with Envoy", async () => {
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const worker = await bootWorker({
-      role: "implementer",
-      tree: "REPO-42",
-      issue: "REPO-43",
-      workspace: await createJjWorkspace(),
-      requests,
-    });
+    const worker = await bootPane({ role: "implementer" });
 
     expect(worker.title.set).toEqual(["Legion implementer · REPO-43"]);
-    expect(registrationBeforeClaim(requests, worker.token)).toMatchObject({
+    expect(registrationBeforeClaim(worker.requests, worker.claimToken)).toMatchObject({
       title: "Legion implementer · REPO-43",
     });
   });
 
-  test("a root architect under the Go daemon is titled by its tree's issue", async () => {
-    const pane = await goPane({
+  test("a root architect is titled by its tree's issue", async () => {
+    const pane = await bootPane({
       role: "architect",
-      tree: "REPO-42",
       issue: "REPO-42",
-      sessionId: "ses_go_root_title",
+      sessionId: "ses_root_title",
     });
-    await pane.start();
 
     expect(pane.title.set).toEqual(["Legion architect · REPO-42"]);
     expect(registrationBeforeClaim(pane.requests, pane.claimToken)).toMatchObject({
@@ -4342,16 +3493,16 @@ describe("a Legion session's title", () => {
     });
   });
 
-  test("a Go controller titles its lowercased project token with the canonical project spelling", async () => {
+  test("a controller titles its lowercased project token with the canonical project spelling", async () => {
     // `legion controller start` gives the plugin LEGION_PROJECT=agentc from controller.yaml's
     // project: AGENTC; Dispatch and Envoy must show the project as AGENTC.
-    const controller = await goController({
-      sessionId: "ses_go_agentc_controller_title",
+    const controller = await launchedController({
+      sessionId: "ses_agentc_controller_title",
       project: "agentc",
     });
     await controller.handlers.get("session_start")?.(
       {},
-      controller.context("ses_go_agentc_controller_title")
+      controller.context("ses_agentc_controller_title")
     );
 
     expect(controller.title.set).toEqual(["Legion controller · AGENTC"]);
@@ -4361,10 +3512,10 @@ describe("a Legion session's title", () => {
   });
 
   test("the controller titles the session a /new leaves it on", async () => {
-    const controller = await goController({ sessionId: "ses_go_controller_title" });
+    const controller = await launchedController({ sessionId: "ses_controller_title" });
     await controller.handlers.get("session_start")?.(
       {},
-      controller.context("ses_go_controller_title")
+      controller.context("ses_controller_title")
     );
 
     expect(controller.title.set).toEqual(["Legion controller · OMP"]);
@@ -4378,38 +3529,35 @@ describe("a Legion session's title", () => {
     controller.requests.splice(0);
     await controller.handlers.get("session_switch")?.(
       { reason: "new" },
-      controller.context("ses_go_controller_title_new")
+      controller.context("ses_controller_title_new")
     );
 
     expect(controller.title.set).toEqual(["Legion controller · OMP", "Legion controller · OMP"]);
     expect(registrationBeforeClaim(controller.requests, controller.token)).toMatchObject({
-      session_id: "ses_go_controller_title_new",
+      session_id: "ses_controller_title_new",
       title: "Legion controller · OMP",
     });
   });
 
   test("a title a person chose is kept, and Envoy lists the session under it", async () => {
-    const requests: { readonly path: string; readonly body: unknown }[] = [];
-    const worker = await bootWorker({
+    const worker = await bootPane({
       role: "reviewer",
-      workspace: await createJjWorkspace(),
-      requests,
       title: { name: "Reviewing the flaky e2e", source: "user" },
     });
 
     expect(worker.title.set).toEqual([]);
-    expect(registrationBeforeClaim(requests, worker.token)).toMatchObject({
+    expect(registrationBeforeClaim(worker.requests, worker.claimToken)).toMatchObject({
       title: "Reviewing the flaky e2e",
     });
   });
 
   test("a title Oh My Pi generated from the first message gives way to the Legion title", async () => {
-    const controller = await goController({ sessionId: "ses_go_controller_auto_title" });
+    const controller = await launchedController({ sessionId: "ses_controller_auto_title" });
     controller.title.name = "Legion Controller Start Procedure";
     controller.title.source = "auto";
     await controller.handlers.get("session_start")?.(
       {},
-      controller.context("ses_go_controller_auto_title")
+      controller.context("ses_controller_auto_title")
     );
 
     expect(controller.title.set).toEqual(["Legion controller · OMP"]);

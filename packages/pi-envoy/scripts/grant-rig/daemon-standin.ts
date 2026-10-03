@@ -5,10 +5,12 @@
  * (`claims/register`, `claims/ready`, the daemon's claim routes the plugin boots through), grant
  * minting, and the three grant redemptions (git credential, GitHub token, phase completion).
  *
- * The redemption shapes come from `LegionDaemonApi` in `@legion/contracts`, which the rig's
- * `legion` command-line tool speaks, and the grant rule mirrors the real daemon's: a grant lives
- * for 60 seconds and redeems any number of times while it lives; an unknown or expired grant id
- * answers 403 `{"error":"Invalid or expired grant"}`. Nothing is single-use.
+ * The grant request is the plugin's (`LegionGoGrantRequest` in `@legion/contracts/legion-go-api`,
+ * the shape the daemon's grant route takes); the redemption shapes come from `LegionDaemonApi` in
+ * `@legion/contracts`, which the rig's `legion` command-line tool speaks. The grant rule mirrors
+ * the real daemon's: a grant lives for 60 seconds and redeems any number of times while it lives;
+ * an unknown or expired grant id answers 403 `{"error":"Invalid or expired grant"}`. Nothing is
+ * single-use.
  *
  * Every request appends one JSON line to the log file: `{at, path, status, grantId?, sessionId?,
  * mintedGrantId?}`. The rig driver (`run.ts`) reads that log to count grant mints per shell
@@ -22,6 +24,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 import { isLegionRole, LegionDaemonApi, roleToken } from "@legion/contracts";
+import { LegionGoGrantRequest } from "@legion/contracts/legion-go-api";
 
 const GRANT_TTL_MS = 60_000;
 /** Encoded exactly as the daemon encodes it (`legion-<project>-<key>-<role>`, lower-cased),
@@ -106,7 +109,7 @@ function handle(path: string, body: unknown): { response: Response; mintedGrantI
       return { response: new Response(null, { status: 204 }) };
     }
     case "/legion/v1/grants": {
-      const parsed = LegionDaemonApi.Grant.request.safeParse(body);
+      const parsed = LegionGoGrantRequest.safeParse(body);
       if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
       if (parsed.data.secret !== SESSION_SECRET) {
         return { response: forbidden("Invalid session secret") };

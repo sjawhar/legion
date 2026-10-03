@@ -1237,11 +1237,14 @@ keeping nothing until the daemon has answered, the command:
    does not resolve;
 2. probes that Oh My Pi as the controller will run it, with `omp models`, which starts no session, and
    refuses a pi-legion-envoy it does not load, or one speaking another daemon API contract;
-3. asks `POST /legion/v1/controller/secret` with the operator token as `Authorization: Bearer`. The
-   daemon compares it in constant time and mints a fresh controller capability, which replaces the
-   previous one and its registration and ends every controller grant: the last start wins. The
-   answer also carries the daemon's `gates.design`, and an answer without `root-issues` or `off`
-   is refused with a request to upgrade the daemon;
+3. asks `POST /legion/v1/controller/secret` with the operator token as `Authorization: Bearer` and
+   the contract step 2 held the plugin to (`{"pluginContract": <N>}`). The daemon compares the token
+   in constant time, then refuses a contract that is not its own with 409, naming both, before it
+   mints anything, so a `legion` and a daemon from different releases never cut the running
+   controller off. Otherwise it mints a fresh controller capability, which replaces the previous
+   one and its registration and ends every controller grant: the last start wins. The answer also
+   carries the daemon's `gates.design`, and an answer without `root-issues` or `off` is refused
+   with a request to upgrade the daemon;
 4. writes the secret 0600 under the local state directory (`state_dir`, by default
    `$XDG_STATE_HOME/legion/<project>-controller`), beside the `gh` shim, the `legion` launcher and the
    deployment instructions;

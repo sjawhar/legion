@@ -378,9 +378,9 @@ export default function envoyExtension(pi: PiApi): void {
   let claimedRoleTopic: string | undefined;
   // The session id `claimedRoleTopic` was claimed under (endOutgoingRole).
   let claimedRoleSessionID: string | undefined;
-  // Notice subjects this session takes only while it holds `claimedRoleTopic` (the Go controller's
-  // topic, go-bootstrap.ts). They are never registered with the listener, so a resumed process
-  // cannot recover them: the role's claim is their only source, and `endRole` closes them.
+  // Notice subjects this session takes only while it holds `claimedRoleTopic` (the controller's
+  // topic, controller-session.ts). They are never registered with the listener, so a resumed
+  // process cannot recover them: the role's claim is their only source, and `endRole` closes them.
   const roleNoticeSubjects = new Set<string>();
   // Counts role ends, so a role-bound subscription still opening when its role ended can tell
   // (subscribeUnlessRoleEnds).

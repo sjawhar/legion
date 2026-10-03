@@ -12,7 +12,9 @@
   directives are removed. The manifest declares one contract, `legion.daemonApiVersion` at 12, in
   place of `legion.daemonApiVersion` 9 and `legion.goDaemonApiVersion` 11: a daemon at contract 11
   or a TypeScript daemon refuses this release, and a daemon at 12 refuses an earlier one. Install
-  this release together with a Go `legion` built from the same commit.
+  this release together with a Go `legion` built from the same commit and, under
+  `runtime: kubernetes`, pin the worker image built from that commit: a daemon at 12 refuses the
+  previous image at its image probe.
 - A spec is the design conversation (LEGION-387). The `dispatch` skill's "Writing a spec" drops
   the eight required headings: a spec starts as the problem and its evidence, puts each open
   question in a decision block at the end of the section that discusses it, records a settled

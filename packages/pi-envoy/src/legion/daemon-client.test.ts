@@ -2,13 +2,13 @@ import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
-  createLegionGoDaemonClient,
-  LegionGoDaemonApiError,
-  LegionGoDaemonContractError,
-} from "./go-daemon-client";
+  createLegionDaemonClient,
+  LegionDaemonApiError,
+  LegionDaemonContractError,
+} from "./daemon-client";
 
-/** A response the Go daemon's own golden test wrote (`packages/daemon-go/internal/api`). */
-function goFixture(name: string): Record<string, unknown> {
+/** A response the daemon's own golden test wrote (`packages/daemon-go/internal/api`). */
+function daemonFixture(name: string): Record<string, unknown> {
   return JSON.parse(
     readFileSync(
       path.resolve(import.meta.dir, "../../../contracts/fixtures/daemon-api", name),
@@ -49,9 +49,9 @@ const registration = {
 };
 
 test("registers with the claim wire's request and returns the claim the daemon issued", async () => {
-  const issued = goFixture("register.json");
+  const issued = daemonFixture("register.json");
   const { fetch, requests } = daemon(() => Response.json(issued));
-  const client = createLegionGoDaemonClient("http://daemon.test/", fetch);
+  const client = createLegionDaemonClient("http://daemon.test/", fetch);
 
   await expect(client.register(registration)).resolves.toEqual(issued as never);
   expect(requests).toEqual([
@@ -59,16 +59,16 @@ test("registers with the claim wire's request and returns the claim the daemon i
   ]);
 });
 
-test("refuses a registration answer the Go contract does not describe, without quoting its secret", async () => {
-  const registered = goFixture("register.json");
+test("refuses a registration answer the daemon API contract does not describe, without quoting its secret", async () => {
+  const registered = daemonFixture("register.json");
   const issued = { ...registered, roleTokens: {} };
-  const client = createLegionGoDaemonClient(
+  const client = createLegionDaemonClient(
     "http://daemon.test",
     daemon(() => Response.json(issued)).fetch
   );
 
   const refused = client.register(registration);
-  await expect(refused).rejects.toBeInstanceOf(LegionGoDaemonContractError);
+  await expect(refused).rejects.toBeInstanceOf(LegionDaemonContractError);
   await expect(refused).rejects.toThrow("POST /legion/v1/claims/register answered 200");
   await refused.catch((error: Error) => {
     expect(error.message).toContain("roleTokens");
@@ -77,13 +77,13 @@ test("refuses a registration answer the Go contract does not describe, without q
 });
 
 test("a refusal carries its status and the daemon's sentence", async () => {
-  const client = createLegionGoDaemonClient(
+  const client = createLegionDaemonClient(
     "http://daemon.test",
-    daemon(() => Response.json(goFixture("error.json"), { status: 409 })).fetch
+    daemon(() => Response.json(daemonFixture("error.json"), { status: 409 })).fetch
   );
 
   const refused = await client.register(registration).catch((error: unknown) => error);
-  expect(refused).toBeInstanceOf(LegionGoDaemonApiError);
+  expect(refused).toBeInstanceOf(LegionDaemonApiError);
   expect(refused).toMatchObject({
     status: 409,
     detail: "Worker respawn must resume the same agent session",
@@ -92,22 +92,22 @@ test("a refusal carries its status and the daemon's sentence", async () => {
   });
 });
 
-test("a refusal whose body is not the Go refusal shape keeps its status and says so", async () => {
-  const client = createLegionGoDaemonClient(
+test("a refusal whose body is not the daemon's refusal shape keeps its status and says so", async () => {
+  const client = createLegionDaemonClient(
     "http://daemon.test",
     daemon(() => new Response("upstream timed out", { status: 504 })).fetch
   );
 
   const refused = await client.register(registration).catch((error: unknown) => error);
-  expect(refused).toBeInstanceOf(LegionGoDaemonApiError);
+  expect(refused).toBeInstanceOf(LegionDaemonApiError);
   expect(refused).toMatchObject({ status: 504 });
-  expect((refused as LegionGoDaemonApiError).detail).toContain("upstream timed out");
-  expect((refused as LegionGoDaemonApiError).detail).toContain("not the Go daemon's refusal");
+  expect((refused as LegionDaemonApiError).detail).toContain("upstream timed out");
+  expect((refused as LegionDaemonApiError).detail).toContain("not the daemon's refusal");
 });
 
 test("ready and exit post the claim wire's requests and accept only the empty 204", async () => {
   const { fetch, requests } = daemon(() => new Response(null, { status: 204 }));
-  const client = createLegionGoDaemonClient("http://daemon.test", fetch);
+  const client = createLegionDaemonClient("http://daemon.test", fetch);
   const ready = {
     claimToken: "legion-legion-legion-208-architect",
     sessionId: "ses_architect_208",
@@ -126,33 +126,33 @@ test("ready and exit post the claim wire's requests and accept only the empty 20
     },
   ]);
 
-  const talkative = createLegionGoDaemonClient(
+  const talkative = createLegionDaemonClient(
     "http://daemon.test",
     daemon(() => Response.json({})).fetch
   );
-  await expect(talkative.ready(ready)).rejects.toBeInstanceOf(LegionGoDaemonContractError);
+  await expect(talkative.ready(ready)).rejects.toBeInstanceOf(LegionDaemonContractError);
 });
 
-test("reads the Go daemon's state strictly, refusing the TypeScript daemon's shape", async () => {
-  const goState = goFixture("state.json");
-  const { fetch, requests } = daemon(() => Response.json(goState));
+test("reads the daemon's state strictly, refusing the TypeScript daemon's shape", async () => {
+  const state = daemonFixture("state.json");
+  const { fetch, requests } = daemon(() => Response.json(state));
 
-  await expect(createLegionGoDaemonClient("http://daemon.test", fetch).state()).resolves.toEqual(
-    goState as never
+  await expect(createLegionDaemonClient("http://daemon.test", fetch).state()).resolves.toEqual(
+    state as never
   );
   expect(requests).toEqual([
     { method: "GET", url: "http://daemon.test/legion/v1/state", body: undefined },
   ]);
 
   const typescriptState = daemon(() =>
-    Response.json({ ...goState, workerAdmission: { queue: [] } })
+    Response.json({ ...state, workerAdmission: { queue: [] } })
   ).fetch;
   await expect(
-    createLegionGoDaemonClient("http://daemon.test", typescriptState).state()
-  ).rejects.toBeInstanceOf(LegionGoDaemonContractError);
+    createLegionDaemonClient("http://daemon.test", typescriptState).state()
+  ).rejects.toBeInstanceOf(LegionDaemonContractError);
 });
 
-test("posts every Stage 3 workflow request through its matching Go route", async () => {
+test("posts every Stage 3 workflow request through its matching route", async () => {
   type WorkflowClient = {
     readonly grant: (body: object) => Promise<unknown>;
     readonly githubToken: (body: object) => Promise<unknown>;
@@ -224,7 +224,12 @@ test("posts every Stage 3 workflow request through its matching Go route", async
       { grantId: "grant-208", issue: "LEGION-208", decision: "retry" },
       "phase-retry.json",
     ],
-    ["signOff", "/legion/v1/signoff", { grantId: "grant-208", issue: "LEGION-208" }, "signoff.json"],
+    [
+      "signOff",
+      "/legion/v1/signoff",
+      { grantId: "grant-208", issue: "LEGION-208" },
+      "signoff.json",
+    ],
     [
       "childPark",
       "/legion/v1/children/park",
@@ -240,13 +245,13 @@ test("posts every Stage 3 workflow request through its matching Go route", async
   ];
   const { fetch, requests } = daemon((url) => {
     const call = calls.find(([, route]) => route === url.pathname);
-    return Response.json(call === undefined ? { error: "no route" } : goFixture(call[3]));
+    return Response.json(call === undefined ? { error: "no route" } : daemonFixture(call[3]));
   });
-  const client = createLegionGoDaemonClient("http://daemon.test", fetch) as unknown as WorkflowClient;
+  const client = createLegionDaemonClient("http://daemon.test", fetch) as unknown as WorkflowClient;
 
   for (const [operation, route, body, fixture] of calls) {
     expect(client[operation], `${operation} is available`).toBeDefined();
-    await expect(client[operation](body)).resolves.toEqual(goFixture(fixture));
+    await expect(client[operation](body)).resolves.toEqual(daemonFixture(fixture));
     expect(requests.at(-1)).toEqual({
       method: "POST",
       url: `http://daemon.test${route}`,
@@ -256,7 +261,7 @@ test("posts every Stage 3 workflow request through its matching Go route", async
 });
 
 test("a workflow refusal surfaces its stable code and message", async () => {
-  const client = createLegionGoDaemonClient(
+  const client = createLegionDaemonClient(
     "http://daemon.test",
     daemon(() =>
       Response.json(
@@ -287,9 +292,9 @@ test("a workflow refusal surfaces its stable code and message", async () => {
 });
 
 test("a controller registers on the claim route with its capability and reads the controller's answer", async () => {
-  const issued = goFixture("register-controller.json");
+  const issued = daemonFixture("register-controller.json");
   const { fetch, requests } = daemon(() => Response.json(issued));
-  const client = createLegionGoDaemonClient("http://daemon.test", fetch);
+  const client = createLegionDaemonClient("http://daemon.test", fetch);
   const capability = { ...registration, bootToken: "controller-capability" };
 
   await expect(client.registerController(capability)).resolves.toEqual(issued as never);
@@ -297,25 +302,25 @@ test("a controller registers on the claim route with its capability and reads th
     { method: "POST", url: "http://daemon.test/legion/v1/claims/register", body: capability },
   ]);
   // A claim's registration is not a controller's, nor the other way round.
-  const claimAnswer = createLegionGoDaemonClient(
+  const claimAnswer = createLegionDaemonClient(
     "http://daemon.test",
-    daemon(() => Response.json(goFixture("register.json"))).fetch
+    daemon(() => Response.json(daemonFixture("register.json"))).fetch
   );
   await expect(claimAnswer.registerController(capability)).rejects.toBeInstanceOf(
-    LegionGoDaemonContractError
+    LegionDaemonContractError
   );
   await expect(
-    createLegionGoDaemonClient("http://daemon.test", fetch).register(registration)
-  ).rejects.toBeInstanceOf(LegionGoDaemonContractError);
+    createLegionDaemonClient("http://daemon.test", fetch).register(registration)
+  ).rejects.toBeInstanceOf(LegionDaemonContractError);
 });
 
 test("the registered controller mints its grant with the session form that names no tree", async () => {
-  const { fetch, requests } = daemon(() => Response.json(goFixture("grant.json")));
-  const client = createLegionGoDaemonClient("http://daemon.test", fetch);
+  const { fetch, requests } = daemon(() => Response.json(daemonFixture("grant.json")));
+  const client = createLegionDaemonClient("http://daemon.test", fetch);
 
   await expect(
     client.controllerGrant({ sessionId: "ses_controller", secret: "registration-secret" })
-  ).resolves.toEqual(goFixture("grant.json") as never);
+  ).resolves.toEqual(daemonFixture("grant.json") as never);
   expect(requests).toEqual([
     {
       method: "POST",
