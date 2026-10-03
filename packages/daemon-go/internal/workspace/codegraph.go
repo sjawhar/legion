@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,14 +22,15 @@ import (
 // files) takes longer than Provision's own command budget.
 const codegraphTimeout = 30 * time.Minute
 
-// codegraphEmptyLockGrace is how long an empty `.codegraph/codegraph.lock` still counts as held.
-// CodeGraph's FileLock takes the lock with one `fs.writeFileSync(lockPath, String(process.pid),
-// { flag: 'wx' })`: an exclusive create, then the PID write, two syscalls back to back. For a
-// moment the file exists and is empty. The two calls take microseconds, and a scheduling or I/O
-// stall on a loaded host stretches that to tens of milliseconds. Five seconds is two orders of
-// magnitude past such a stall, and short enough that the empty lock a builder leaves when it dies
-// between the two calls, or when its write fails (ENOSPC), stops blocking a repair a few seconds
-// later.
+// codegraphEmptyLockGrace is how long an empty `.codegraph/codegraph.lock` still counts as held,
+// either side of now. CodeGraph's FileLock takes the lock with one `fs.writeFileSync(lockPath,
+// String(process.pid), { flag: 'wx' })`: an exclusive create, then the PID write, two syscalls
+// back to back. For a moment the file exists and is empty. Timed on a 32-core host at load average
+// 130–145, that whole call took about 11 µs at the median and 107 ms at worst, so five seconds
+// is about 50 times the worst stall. An empty lock older than that is what a builder leaves when
+// it dies between the two calls, or when its write fails (ENOSPC); one dated further than that
+// into the future is no starting build's. Both are stale. Nothing reruns a warm-up that skipped
+// its repair for a held lock: the repair waits for the next claim's provisioning of the workspace.
 const codegraphEmptyLockGrace = 5 * time.Second
 
 // warming holds the workspace directories with a background warm-up in flight in this process.
@@ -197,29 +199,37 @@ func codegraphStatus(stdout string) (initialized, complete bool) {
 }
 
 // codegraphLockHeldByLiveProcess reports whether dir's .codegraph/codegraph.lock is held by a
-// build: it names a process that is still alive, or it is empty and younger than
-// codegraphEmptyLockGrace. CodeGraph 1.5.0's FileLock (its installed dist's utils.js) writes the
-// lock's entire content as the builder's decimal PID with no other metadata, but it creates the
-// file before it writes that PID. An empty lock is therefore a build that has just taken it, until
-// the grace runs out; after that it is a builder that died between the two, and stale. CodeGraph's
-// own staleness check compares the lock file's mtime against a fixed 2-minute timeout rather than
-// checking the PID, so a lock can still name a live, actively-writing process past that window.
-// Any other lock this cannot read, or whose content isn't a PID, is treated as not live: this never
-// blocks a repair on a lock it cannot make sense of. Liveness alone is not enough on a host where
-// PIDs recycle: a dead builder's PID reused by an unrelated process would read as live forever,
-// so where `/proc/<pid>/cmdline` exists, the process also has to look like codegraph — a dead
-// builder whose PID is unused, or whose slot now holds something else, is correctly stale.
-// `/proc` absent (non-Linux) falls back to the liveness check alone.
+// build: it names a process that is still alive, or it is empty and its mtime is within
+// codegraphEmptyLockGrace of now. CodeGraph 1.5.0's FileLock (its installed dist's utils.js)
+// writes the lock's entire content as the builder's decimal PID with no other metadata, but it
+// creates the file before it writes that PID, so an empty lock is a build that has just taken it
+// until the grace runs out. The content and the mtime come from one open file, so they describe
+// the same lock. CodeGraph's own staleness check compares the lock file's mtime against a fixed
+// 2-minute timeout rather than checking the PID, so a lock can still name a live,
+// actively-writing process past that window. Any other lock this cannot read, or whose content
+// isn't a PID, is treated as not live: this never blocks a repair on a lock it cannot make sense
+// of. Liveness alone is not enough on a host where PIDs recycle: a dead builder's PID reused by an
+// unrelated process would read as live forever, so where `/proc/<pid>/cmdline` exists, the
+// process also has to look like codegraph — a dead builder whose PID is unused, or whose slot now
+// holds something else, is correctly stale. `/proc` absent (non-Linux) falls back to the liveness
+// check alone.
 func codegraphLockHeldByLiveProcess(dir string) bool {
-	lockPath := filepath.Join(dir, ".codegraph", "codegraph.lock")
-	content, err := os.ReadFile(lockPath)
+	lock, err := os.Open(filepath.Join(dir, ".codegraph", "codegraph.lock"))
+	if err != nil {
+		return false
+	}
+	defer lock.Close()
+	content, err := io.ReadAll(lock)
 	if err != nil {
 		return false
 	}
 	text := strings.TrimSpace(string(content))
 	if text == "" {
-		info, err := os.Stat(lockPath)
-		return err == nil && time.Since(info.ModTime()) < codegraphEmptyLockGrace
+		info, err := lock.Stat()
+		if err != nil {
+			return false
+		}
+		return time.Since(info.ModTime()).Abs() < codegraphEmptyLockGrace
 	}
 	pid, err := strconv.Atoi(text)
 	if err != nil || pid <= 0 {

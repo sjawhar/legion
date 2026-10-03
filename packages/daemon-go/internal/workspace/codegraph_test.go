@@ -357,18 +357,20 @@ esac
 // before it writes the builder's PID into it, so a build that has only just started shows an
 // empty lock. A fresh empty lock is held, and warming skips the repair rather than start a second
 // writer beside that build. One older than codegraphEmptyLockGrace is what a builder that died
-// between the create and the write leaves behind: stale, so the repair runs.
+// between the create and the write leaves behind: stale, so the repair runs. So is one dated
+// further than the grace into the future, which no starting build wrote.
 func TestWarmCodegraphIndexJudgesAnEmptyLockByItsAge(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// fresh: the stub's own `status` creates the empty lock, as a build taking it while
-		// warming runs would, so the lock is as young as it can be when warming reads it.
-		// Otherwise the test creates it and backdates it past codegraphEmptyLockGrace.
-		fresh bool
-		want  []string
+		// age is how old the lock's mtime is when warming reads it; negative is in the future.
+		// Zero means the stub's own `status` creates the lock, as a build taking it while warming
+		// runs would, so the lock is as young as it can be when warming reads it.
+		age  time.Duration
+		want []string
 	}{
-		{"fresh empty lock: a build about to write its PID holds it, no repair", true, []string{"status"}},
-		{"empty lock older than the grace: a dead builder's, repaired", false, []string{"status", "index"}},
+		{"fresh empty lock: a build about to write its PID holds it, no repair", 0, []string{"status"}},
+		{"empty lock older than the grace: a dead builder's, repaired", codegraphEmptyLockGrace + time.Minute, []string{"status", "index"}},
+		{"empty lock dated past the grace in the future: stale, repaired", -codegraphEmptyLockGrace - time.Minute, []string{"status", "index"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			callLog := filepath.Join(t.TempDir(), "calls.log")
@@ -378,14 +380,14 @@ func TestWarmCodegraphIndexJudgesAnEmptyLockByItsAge(t *testing.T) {
 				t.Fatal(err)
 			}
 			takeLock := ""
-			if tc.fresh {
+			if tc.age == 0 {
 				takeLock = " : > .codegraph/codegraph.lock;"
 			} else {
 				if err := os.WriteFile(lock, nil, 0o600); err != nil {
 					t.Fatal(err)
 				}
-				old := time.Now().Add(-codegraphEmptyLockGrace - time.Minute)
-				if err := os.Chtimes(lock, old, old); err != nil {
+				mtime := time.Now().Add(-tc.age)
+				if err := os.Chtimes(lock, mtime, mtime); err != nil {
 					t.Fatal(err)
 				}
 			}
