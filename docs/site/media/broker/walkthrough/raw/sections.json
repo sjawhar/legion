@@ -1,45 +1,82 @@
 [
   {
     "file": "t1-login.cast",
-    "wallSeconds": 7.438
+    "marks": {
+      "typing": 1.259,
+      "code": 3.608
+    },
+    "wallSeconds": 6.475
   },
   {
-    "actSeconds": 17.896,
+    "actSeconds": 15.948,
     "file": "b1-machine.webm",
-    "resultSimilarity": [
-      0.985573,
-      0.985573
-    ],
-    "wallSeconds": 21.313
+    "marks": {
+      "page": 0.598,
+      "typing": 2.806,
+      "record": 5.731,
+      "approve": 10.319,
+      "result": 10.349
+    },
+    "resultSimilarityAtEnd": 0.985436,
+    "resultSimilarityBeforeEnd": 0.983032,
+    "wallSeconds": 17.38
   },
   {
     "file": "t2-session.cast",
-    "wallSeconds": 15.85
+    "marks": {
+      "status-typing": 1.326,
+      "issued": 4.18,
+      "register-typing": 5.68,
+      "self-typing": 11.072,
+      "self": 12.86
+    },
+    "wallSeconds": 19.78
   },
   {
     "file": "t3-request.cast",
-    "wallSeconds": 13.361
+    "marks": {
+      "typing": 1.272,
+      "waiting": 9.936
+    },
+    "wallSeconds": 13.274
   },
   {
-    "actSeconds": 16.99,
+    "actSeconds": 19.526,
     "file": "b2-approve.webm",
-    "resultSimilarity": [
-      1,
-      1
-    ],
-    "wallSeconds": 18.641
+    "marks": {
+      "inbox": 1.838,
+      "record": 5.87,
+      "approve": 13.523,
+      "result": 13.582
+    },
+    "resultSimilarityAtEnd": 0.99209,
+    "resultSimilarityBeforeEnd": 0.99209,
+    "wallSeconds": 21.324
   },
   {
     "file": "t4-ran.cast",
-    "wallSeconds": 14.381
+    "marks": {
+      "approve": 15.042,
+      "key": 20.676,
+      "status-typing": 25.176,
+      "status-typed": 28.976,
+      "decided": 29.465
+    },
+    "wallSeconds": 33.36
   },
   {
-    "actSeconds": 17.664,
+    "actSeconds": 19.069,
     "file": "b3-grants.webm",
-    "resultSimilarity": [
-      0.99641,
-      0.996327
-    ],
-    "wallSeconds": 20.106
+    "marks": {
+      "record": 0.7,
+      "settings": 3.746,
+      "grants": 3.85,
+      "row": 5.077,
+      "revoke": 9.005,
+      "result": 13.218
+    },
+    "resultSimilarityAtEnd": 0.996437,
+    "resultSimilarityBeforeEnd": 0.996402,
+    "wallSeconds": 21.414
   }
 ]
