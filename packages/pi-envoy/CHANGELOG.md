@@ -77,9 +77,36 @@
   in "Before you ask" gate 1, "Writing a spec" and "When you need a human". A contract between two
   lanes is settled by those two lanes over Envoy, and nobody audits or retracts another session's
   asks.
+- Design questions stay in the spec (LEGION-470). The `dispatch` skill and the `dispatch_ask` and
+  `dispatch_message` descriptions put a decision about a document's design in a decision block in
+  that document, at every phase and whether or not it was approved; `dispatch_ask` is for a to-do
+  or permission only a human can give. Legion phase workers send a product, scope or design
+  decision to their architect, which writes the block (`legion-worker`, the headless role text); a
+  new version of an approved root spec closes the design gate, so the root architect requests
+  approval again once the answer is folded in (`legion-architect`, the architect role texts).
+- `dispatch_request_approval`'s description says the request is handed back once per revision,
+  when the revision is complete, never after each edit, that `Approve` and `Request changes` close
+  it, and that a new version of a Legion root spec closes its armed design gate (LEGION-470).
+- The run-end nudge offers a decision block in the document a question concerns, or `dispatch_ask`
+  for a to-do. A `dispatch_doc_edit` whose result reports a decision block the edit added
+  (`advice.decision_blocks_added`) spends the nudge's check, as `dispatch_ask` does, and so does a
+  `dispatch_issue` or `dispatch_artifact` whose stored document the server counted a decision block
+  in (answered blocks too, so a re-upload of a document whose blocks are all answered spends it).
+  Both counts are the Dispatch server's own reading of the document, so an example of the syntax in
+  code leaves the check owed wherever it is fenced or indented, and a block in a blockquote or a
+  list item spends it; the extension reads no markdown itself. An edit result from a server that
+  does not report the count spends nothing.
 
 ### Fixed
 
+- The run-end nudge no longer counts a tool-device `write` to a Dispatch device (`xd://dispatch_*`)
+  as work. Oh My Pi reports the tool such a `write` ran first, and that report alone spends or owes
+  the check; before, the `write` counted as work, so a `dispatch_ask` or a decision block made
+  through a device re-armed the check it had just spent, and every Dispatch call made that way owed
+  a new one. A help write (`?`) to a Dispatch device runs nothing and spends nothing (LEGION-470).
+- An architect, reviewer or merger may write to a tool device with the scheme in any case
+  (`XD://dispatch_doc_edit`), as Oh My Pi routes it; the mutation gate refused it as a file write
+  (LEGION-470).
 - A controller now displays its project token in canonical uppercase
   (`Legion controller · PROJ`), rather than the lowercase token the Go daemon carries in
   `LEGION_PROJECT` (LEGION-480).
