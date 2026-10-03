@@ -453,7 +453,9 @@ the Postgres `postgres` database for a non-default local port.
 
 `GET /api/v1` (no credential) is the authoritative list: every mounted `/api/v1` route with its
 `method`, `path`, `auth` (`public`, `any`, `human`, or `bearer`), and `description`, sorted by path
-then method. The table below is a summary. An unknown path under `/api`, `/v1`, `/auth`, `/ws`,
+then method. `envoy-dispatch routes` prints the same body from the table alone, with no database
+or listener and never a test hook; the docs site's HTTP API reference is generated from it. The
+table below is a summary. An unknown path under `/api`, `/v1`, `/auth`, `/ws`,
 or `/healthz` is a JSON 404 `{"code":"NOT_FOUND","error":"no route for GET
 /v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell; a missing file
 under `/assets` stays `404 {"error":"not found"}`.
