@@ -57,12 +57,12 @@ type testServer struct {
 // podAudience is the audience the test server's pod verifier checks and podToken mints for.
 const podAudience = "legion-broker-pod"
 
-// newTestServer holds two secrets: DEEL_API_KEY, human-tier, which testApprover owns and so
-// approves for every requester, and WORKER_TOKEN, shared and agent-tier, which every session and
-// pod gets at once. It wires a real pod verifier against a local OIDC issuer, as
-// cmd/broker/main.go does when BROKER_K8S_OIDC_ISSUER is set, and mounts api.Register on an
-// httptest.Server so every proof's htu and every request object's aud have one real, consistent
-// PublicURL to check against.
+// newTestServer holds three secrets: DEEL_API_KEY, human-tier, which testApprover owns and so
+// approves for every requester; WORKER_TOKEN, shared and agent-tier, which every session and pod
+// gets at once; and SHARED_KEY, shared and human-tier, which anyone signed in approves. It wires a
+// real pod verifier against a local OIDC issuer, as cmd/broker/main.go does when
+// BROKER_K8S_OIDC_ISSUER is set, and mounts api.Register on an httptest.Server so every proof's
+// htu and every request object's aud have one real, consistent PublicURL to check against.
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
 	st := storetest.Open(t)
@@ -70,6 +70,7 @@ func newTestServer(t *testing.T) *testServer {
 	local := secrets.NewLocal(
 		policytest.Secret("DEEL_API_KEY", testApprover, policy.TierHuman, "deel-v1"),
 		policytest.Secret("WORKER_TOKEN", policy.OwnerShared, policy.TierAgent, "worker-v1"),
+		policytest.Secret("SHARED_KEY", policy.OwnerShared, policy.TierHuman, "shared-v1"),
 	)
 	cur := policytest.Current(t, local)
 
@@ -787,6 +788,20 @@ func TestCreateRequestWithUnknownSecretNameIs400UnknownSecret(t *testing.T) {
 	werr := decode[wireError](t, body)
 	if werr.Code != "UNKNOWN_SECRET" {
 		t.Fatalf("code = %q, want UNKNOWN_SECRET", werr.Code)
+	}
+}
+
+// TestCreateRequestNeedingTwoApproversIs400MixedApprovers pins, over real HTTP, that a request for
+// testApprover's human-tier secret beside a shared human-tier one, whose approver is anyone, is
+// refused 400 MIXED_APPROVERS rather than recorded as one decision.
+func TestCreateRequestNeedingTwoApproversIs400MixedApprovers(t *testing.T) {
+	ts := newTestServer(t)
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), testApprover)
+	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need both", "DEEL_API_KEY", "SHARED_KEY")
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": compact, "session_id": nil})
+	if status != http.StatusBadRequest || decode[wireError](t, body).Code != "MIXED_APPROVERS" {
+		t.Fatalf("POST /v1/requests (DEEL_API_KEY, SHARED_KEY) = %d %s, want 400 MIXED_APPROVERS", status, body)
 	}
 }
 

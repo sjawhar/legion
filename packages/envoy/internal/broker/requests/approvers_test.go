@@ -2,6 +2,7 @@ package requests
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"testing"
 
@@ -149,5 +150,50 @@ func TestAnOwnersApprovalSurvivesLooseningToShared(t *testing.T) {
 	}
 	if dec, err := m.ApplyDecision(ctx, *waiting.RecordID, true, otherPerson); err != nil || dec.GrantID == "" {
 		t.Fatalf("ApplyDecision(alice) on the waiting request once shared = %+v, %v; want granted", dec, err)
+	}
+}
+
+// TestRequestsNeedingTwoApproversAreRefused pins that one request never bundles secrets two
+// approvers decide: a shared human-tier secret's approver is anyone, so a bundle decided as one
+// record would let anyone release the other secret. The owner's human-tier secret beside a shared
+// human-tier one, and another person's session asking for the owner's agent-tier secret beside a
+// shared human-tier one, are both refused ErrMixedApprovers, writing no request and no record.
+func TestRequestsNeedingTwoApproversAreRefused(t *testing.T) {
+	m, ownerEnr, ownerKey, _ := newFixture(t)
+	ctx := context.Background()
+	otherEnr, otherKey := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
+	for _, c := range []struct {
+		who        string
+		enrollment string
+		key        *ecdsa.PrivateKey
+		names      []string
+	}{
+		{"the owner's session", ownerEnr, ownerKey, []string{"DEEL_API_KEY", "SHARED_KEY"}},
+		{"another person's session", otherEnr, otherKey, []string{"AUTO_TOKEN", "SHARED_KEY"}},
+	} {
+		if req, err := m.Create(ctx, c.enrollment, signRequest(t, m, c.key, "both", c.names...), ""); !errors.Is(err, ErrMixedApprovers) {
+			t.Errorf("%s asking for %v = %+v, %v; want ErrMixedApprovers", c.who, c.names, req, err)
+		}
+	}
+	var written int
+	if err := m.Store.Pool.QueryRow(ctx, `select (select count(*) from requests) + (select count(*) from credential_requests)`).Scan(&written); err != nil || written != 0 {
+		t.Fatalf("requests and records written = %d, %v; want none", written, err)
+	}
+}
+
+// TestReuseComparesWholeNames pins that a live grant is handed back only for exactly its names,
+// never for names nobody decided: with a grant of AUTO_TOKEN and SHARED_TOKEN live, a request for
+// the one name "AUTO_TOKEN,SHARED_TOKEN" is not that grant, and is refused as a name the policy
+// does not serve.
+func TestReuseComparesWholeNames(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	retag(t, m, policytest.Secret("SHARED_TOKEN", policy.OwnerShared, policy.TierAgent, "shared-token-v1"))
+	ctx := context.Background()
+	pair, err := m.Create(ctx, enr, signRequest(t, m, key, "both", "AUTO_TOKEN", "SHARED_TOKEN"), "")
+	if err != nil || pair.GrantID == nil {
+		t.Fatalf("Create(AUTO_TOKEN, SHARED_TOKEN) = %+v, %v; want granted", pair, err)
+	}
+	if joined, err := m.Create(ctx, enr, signRequest(t, m, key, "joined", "AUTO_TOKEN,SHARED_TOKEN"), ""); !errors.Is(err, policy.ErrUnknownSecret) {
+		t.Fatalf("Create(%q) = %+v, %v; want policy.ErrUnknownSecret, not the pair's grant", "AUTO_TOKEN,SHARED_TOKEN", joined, err)
 	}
 }
