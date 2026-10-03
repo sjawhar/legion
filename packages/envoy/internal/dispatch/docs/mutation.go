@@ -240,6 +240,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	// makes the document's room, so it waits for the seed to be written: a room leaves only when
 	// it is evicted, and a refused seed would hold one of the live-room slots for good.
 	s.recordLastActor(artifactID, actor)
+	s.trackAuthoredAskBlocks(ctx, artifactID, nil, tree, actor)
 	return canonical, nil
 }
 
@@ -252,6 +253,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	}
 	var canonical string
 	var unchanged bool
+	var authoredBefore, authoredAfter *pmdoc.Node
 	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		current, err := treeOf(doc)
@@ -337,6 +339,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if updateErr != nil {
 			return updateErr
 		}
+		authoredBefore, authoredAfter = current, target
 		return nil
 	})
 	if unchanged && errors.Is(err, websocket.ErrNoChanges) {
@@ -345,6 +348,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	if err != nil {
 		return "", fmt.Errorf("replace live document: %w", err)
 	}
+	s.trackAuthoredAskBlocks(ctx, artifactID, authoredBefore, authoredAfter, actor)
 	return canonical, nil
 }
 
@@ -814,9 +818,10 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		return EditOutcome{Token: token}, nil
 	}
 	var (
-		err       error
-		outcome   EditOutcome
-		snapshots []tableAnchorSnapshot
+		err                           error
+		outcome                       EditOutcome
+		snapshots                     []tableAnchorSnapshot
+		authoredBefore, authoredAfter *pmdoc.Node
 	)
 	if hasTableAnchorMutation(ops) {
 		snapshots, err = s.prevalidateLiveOperations(ctx, artifactID, ops)
@@ -873,6 +878,9 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			mutationErr = recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
 				return pmdoc.Update(transaction, fragment, next)
 			})
+			if mutationErr == nil {
+				authoredBefore, authoredAfter = tree, next
+			}
 		})
 		if mutationErr != nil {
 			return mutationErr
@@ -890,6 +898,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		}
 		return EditOutcome{}, fmt.Errorf("apply live document operations: %w", err)
 	}
+	s.trackAuthoredAskBlocks(ctx, artifactID, authoredBefore, authoredAfter, actor)
 	return outcome, nil
 }
 
@@ -905,7 +914,10 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		}
 		return EditOutcome{Token: token}, nil
 	}
-	var outcome EditOutcome
+	var (
+		outcome                       EditOutcome
+		authoredBefore, authoredAfter *pmdoc.Node
+	)
 	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		since := authoredClock(ctx, artifactID, doc)
@@ -926,13 +938,17 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		if outcome, err = batch.outcome(len(ops)); err != nil {
 			return err
 		}
-		return recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
+		recordErr := recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
 			var updateErr error
 			transact(func(transaction *crdt.Transaction) {
 				updateErr = pmdoc.Update(transaction, fragment, next)
 			})
 			return updateErr
 		})
+		if recordErr == nil {
+			authoredBefore, authoredAfter = tree, next
+		}
+		return recordErr
 	})
 	if err != nil {
 		if errors.Is(err, websocket.ErrNoChanges) {
@@ -943,6 +959,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		}
 		return EditOutcome{}, fmt.Errorf("apply live document operations: %w", err)
 	}
+	s.trackAuthoredAskBlocks(ctx, artifactID, authoredBefore, authoredAfter, actor)
 	return outcome, nil
 }
 
@@ -1127,8 +1144,8 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 func captureAuthors(state *roomState, write *liveWrite, actor *model.Actor) (authorCapture, []model.Actor) {
 	capture := state.takeAuthors()
 	if write != nil {
-		for key, credited := range write.credits {
-			capture.authors[key] = credited
+		for _, credited := range write.credits {
+			capture.credit(credited)
 		}
 	}
 	if actor != nil {
@@ -1217,7 +1234,7 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	}
 	// The open approval request follows the document version without leaving its thread or opening
 	// another Inbox row. The request remains waiting on its agent until it is handed back.
-	moved, err := MoveApprovalAsk(ctx, tx, s.events, artifactID, version, s.serverURL)
+	moved, err := MoveApprovalAsk(ctx, tx, s.events, artifactID, version, actor, s.serverURL)
 	if err != nil {
 		return versionWriteResult{}, err
 	}

@@ -32,9 +32,10 @@ type askBlock struct {
 // the reconciled tree: a settlement whose markdown repeats the latest version writes no version
 // and leaves the document at the one it found.
 type settlementReconciliation struct {
-	repairs   []askRepair
-	events    []model.Event
-	retracted []model.Ask
+	repairs           []askRepair
+	events            []model.Event
+	retracted         []model.Ask
+	authoredAskBlocks []string
 }
 
 // askRepair is one server-owned attribute repair settlement made to the ask block carrying blockID
@@ -132,9 +133,9 @@ func (e *ErrInvalidAskBlock) Error() string { return e.Reason.Error() }
 func (e *ErrInvalidAskBlock) Unwrap() error { return e.Reason }
 
 // SettlementActor writes what a document decides on its own rather than any one person: the
-// retraction of an ask whose block left the document, and an approval request's move when the
-// version credits no writer or several. Crediting the room's last editor instead would put a
-// change nobody made in their name.
+// retraction of an ask whose block left the document, and a settlement derived from ambiguous
+// browser content with no known latest editor. A service write's new ask and an approval move name
+// the actor that introduced them instead.
 var SettlementActor = model.Actor{Kind: "system", ID: "document-settlement"}
 
 // SettlementRetractionReason opens the reason of every retraction settlement writes, followed by
@@ -163,6 +164,7 @@ func (s *Service) reconcileAskBlocks(
 	owner artifactOwner,
 	tree *pmdoc.Node,
 	actor model.Actor,
+	authoredAskBlocks map[string]model.Actor,
 ) (settlementReconciliation, error) {
 	blocks, invalidBlocks, err := collectAskBlocksForSettlement(tree)
 	if err != nil {
@@ -173,7 +175,10 @@ func (s *Service) reconcileAskBlocks(
 		return settlementReconciliation{}, err
 	}
 
-	reconciled := settlementReconciliation{}
+	reconciled := settlementReconciliation{authoredAskBlocks: make([]string, 0, len(authoredAskBlocks))}
+	for blockID := range authoredAskBlocks {
+		reconciled.authoredAskBlocks = append(reconciled.authoredAskBlocks, blockID)
+	}
 	for _, invalid := range invalidBlocks {
 		delete(rows, invalid.id)
 		if reconciled.repair(invalid.node, invalid.id, askInvalidAttribute(invalid.reason.Error())) {
@@ -193,7 +198,11 @@ func (s *Service) reconcileAskBlocks(
 	for _, block := range blocks {
 		ask, exists := rows[block.id]
 		if !exists {
-			ask, err = createAskBlock(ctx, tx, artifactID, owner, block, actor)
+			blockActor := actor
+			if authored, known := authoredAskBlocks[block.id]; known {
+				blockActor = authored
+			}
+			ask, err = createAskBlock(ctx, tx, artifactID, owner, block, blockActor)
 			if err != nil {
 				return settlementReconciliation{}, err
 			}
@@ -202,7 +211,7 @@ func (s *Service) reconcileAskBlocks(
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
 			reconciled.events = append(reconciled.events, documentAskEvent(
-				owner, artifactID, "ask.opened", actor, model.NewAskEventPayload(ask, changes),
+				owner, artifactID, "ask.opened", blockActor, model.NewAskEventPayload(ask, changes),
 			))
 			reconciled.repair(block.node, block.id, askServerAttributes(ask))
 			continue
@@ -361,6 +370,115 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 		return true
 	})
 	return held, err
+}
+
+// changedAskBlockIDs returns every ask block after holds and those introduced since before. It
+// follows block ids rather than the block body's content: a service write that edits an existing
+// ask does not introduce a new author for it.
+func changedAskBlockIDs(before, after *pmdoc.Node) (map[string]struct{}, map[string]struct{}) {
+	beforeIDs := askBlockIDs(before)
+	afterIDs := askBlockIDs(after)
+	introduced := make(map[string]struct{})
+	for id := range afterIDs {
+		if _, held := beforeIDs[id]; !held {
+			introduced[id] = struct{}{}
+		}
+	}
+	return afterIDs, introduced
+}
+
+func askBlockIDs(tree *pmdoc.Node) map[string]struct{} {
+	ids := make(map[string]struct{})
+	if tree == nil {
+		return ids
+	}
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if node.Type != "ask" {
+			return true
+		}
+		if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id != "" {
+			ids[id] = struct{}{}
+		}
+		return true
+	})
+	return ids
+}
+
+// trackAuthoredAskBlocks retains the actor that introduced each new ask block until settlement
+// indexes it. A joined write records the association on its liveWrite, which reaches roomState only
+// once Ledger.Commit has made the write durable; an immediate service write records it directly.
+func (s *Service) trackAuthoredAskBlocks(ctx context.Context, artifactID string, before, after *pmdoc.Node, actor model.Actor) {
+	if write := joinedLiveWrite(ctx, artifactID); write != nil {
+		write.trackAuthoredAskBlocks(before, after, actor)
+		return
+	}
+	state := s.room(artifactID)
+	state.mu.Lock()
+	state.trackAuthoredAskBlocks(before, after, actor)
+	state.mu.Unlock()
+}
+
+// trackAuthoredAskBlocks records this immediate service write's new ask blocks. The caller holds
+// state.mu.
+func (state *roomState) trackAuthoredAskBlocks(before, after *pmdoc.Node, actor model.Actor) {
+	askBlocks, introduced := changedAskBlockIDs(before, after)
+	for id := range state.authoredAskBlocks {
+		if _, held := askBlocks[id]; !held {
+			delete(state.authoredAskBlocks, id)
+		}
+	}
+	if len(introduced) == 0 {
+		return
+	}
+	if state.authoredAskBlocks == nil {
+		state.authoredAskBlocks = make(map[string]model.Actor, len(introduced))
+	}
+	for id := range introduced {
+		state.authoredAskBlocks[id] = actor
+	}
+}
+
+// trackAuthoredAskBlocks retains the service write's final ask blocks and the blocks it introduced
+// until its transaction commits.
+func (write *liveWrite) trackAuthoredAskBlocks(before, after *pmdoc.Node, actor model.Actor) {
+	askBlocks, introduced := changedAskBlockIDs(before, after)
+	write.askBlocks = askBlocks
+	for id := range write.authoredAskBlocks {
+		if _, held := askBlocks[id]; !held {
+			delete(write.authoredAskBlocks, id)
+		}
+	}
+	if len(introduced) == 0 {
+		return
+	}
+	if write.authoredAskBlocks == nil {
+		write.authoredAskBlocks = make(map[string]model.Actor, len(introduced))
+	}
+	for id := range introduced {
+		write.authoredAskBlocks[id] = actor
+	}
+}
+
+// trackCommittedAskBlocks moves a committed write's authored ask blocks into the room. The caller
+// holds state.mu.
+func (state *roomState) trackCommittedAskBlocks(write *liveWrite) {
+	if write.askBlocks == nil {
+		return
+	}
+	for id := range state.authoredAskBlocks {
+		if _, held := write.askBlocks[id]; !held {
+			delete(state.authoredAskBlocks, id)
+		}
+	}
+	if len(write.authoredAskBlocks) == 0 {
+		return
+	}
+	if state.authoredAskBlocks == nil {
+		state.authoredAskBlocks = make(map[string]model.Actor, len(write.authoredAskBlocks))
+	}
+	for id, actor := range write.authoredAskBlocks {
+		state.authoredAskBlocks[id] = actor
+	}
 }
 
 // newAskMarkdown is what an uploaded version can say of an ask, for one refuseChangedAsks call: its

@@ -8,10 +8,10 @@ import "github.com/sjawhar/envoy/internal/dispatch/model"
 // version's commit releases only the entries it took (authorCapture.release).
 //
 // That is sound because a version takes its authors no later than it reads the tree it records,
-// and a change is credited only once the room holds it. A settlement, and a version read straight
-// from the room, holds the room's state lock across the copy it reads (snapshotDocument), and a
-// transaction's version takes its authors before its fork is brought up to date with the room
-// (captureLiveTextAndAuthors, forkLive). The update observer that credits a browser's or the
+// and a change is credited only once the room holds it. A settlement takes its authors under the
+// room's state lock before it copies the tree; a version read straight from the room holds that
+// lock across its copy; and a transaction's version takes its authors before its fork is brought
+// up to date with the room (captureLiveTextAndAuthors, forkLive). The update observer that credits
 // service's change runs only once the change is in the room; a committed transaction's write is
 // credited before its publish, but while the transaction still holds the writer slot, and a
 // settlement that finds the slot held, or published since its read, writes no version
@@ -66,6 +66,12 @@ func (state *roomState) takeAuthors() authorCapture {
 // credit adds actor to the authors the version credits.
 func (capture authorCapture) credit(actor model.Actor) {
 	capture.authors[actorKey(actor)] = actor
+}
+
+// has reports whether the version credits actor.
+func (capture authorCapture) has(actor model.Actor) bool {
+	_, found := capture.authors[actorKey(actor)]
+	return found
 }
 
 // release releases, once the version the capture was taken for has committed, the pending entries

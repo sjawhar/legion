@@ -560,9 +560,9 @@ func TestHeaderReviewAnswersMovedApprovalAskBeforeTheAgentHandsItBack(t *testing
 // ask.edited event reaches followers except the actor who made the version. A write that versions
 // nothing leaves the request at the version the human was already shown.
 //
-// The move is attributed to the version's sole writer. A version credits every writer whose
-// change it carries, so a browser edit with several peers or a settlement combining agents uses
-// SettlementActor: choosing one could suppress the only delivery the requesting session receives.
+// The caller names the actor whose edit moved the request. A route knows its own service write;
+// settlement names the latest known browser editor, or SettlementActor when the browser edit was
+// ambiguous.
 func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 	asker := model.Actor{Kind: "session", ID: sessionActor()["id"].(string)}
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -703,6 +703,15 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			connect(t, doc, askerPeer)
 			typeNote(t, connect(t, doc, humanPeer), "A note from bob.")
 		}, 2, docs.SettlementActor, true},
+		{"an earlier author and the next browser editor", time.Hour, func(t *testing.T, doc *document) {
+			if _, err := doc.documentService.ReplaceText(context.Background(), doc.artifactID, "A temporary spec", alice); err != nil {
+				t.Fatalf("write the earlier edit: %v", err)
+			}
+			if _, err := doc.documentService.ReplaceText(context.Background(), doc.artifactID, "A spec", alice); err != nil {
+				t.Fatalf("undo the earlier edit: %v", err)
+			}
+			typeNote(t, connect(t, doc, humanPeer), "A note from bob.")
+		}, 2, bob, true},
 		{"an agent's joined write and a human's typing in one settlement window", time.Hour, func(t *testing.T, doc *document) {
 			typist := connect(t, doc, humanPeer)
 			ctx := context.Background()
@@ -722,11 +731,11 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			waitForLiveText(t, doc.documentService, doc.artifactID, "A revised spec")
 			typist.barrier(t)
 			typeNote(t, typist, "A note from bob.")
-		}, 2, docs.SettlementActor, true},
+		}, 2, bob, true},
 		{"a human's typing and then an agent's edit that versions both", time.Hour, func(t *testing.T, doc *document) {
 			typeNote(t, connect(t, doc, humanPeer), "A note from bob.")
 			edit(t, doc.handler, doc.artifactID, map[string]any{})
-		}, 2, docs.SettlementActor, true},
+		}, 2, asker, false},
 		{"the only connected peer types", time.Hour, func(t *testing.T, doc *document) {
 			typeNote(t, connect(t, doc, humanPeer), "A note from bob.")
 		}, 1, bob, true},
@@ -822,7 +831,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			t.Fatalf("begin: %v", err)
 		}
 		defer tx.Rollback(ctx)
-		moved, err := docs.MoveApprovalAsk(ctx, tx, events.NewBroker(), doc.artifactID, model.Version{Number: 2}, "")
+		moved, err := docs.MoveApprovalAsk(ctx, tx, events.NewBroker(), doc.artifactID, model.Version{Number: 2}, docs.SettlementActor, "")
 		if err != nil {
 			t.Fatalf("move with no known writer: %v", err)
 		}

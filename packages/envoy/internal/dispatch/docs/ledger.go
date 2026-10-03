@@ -215,17 +215,17 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 func (l *Ledger) credit() {
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
-		if len(write.credits) == 0 {
-			continue
-		}
 		state := l.service.room(artifactID)
 		state.mu.Lock()
-		if !write.versioned {
-			for _, actor := range write.credits {
-				state.creditAuthor(actor)
+		state.trackCommittedAskBlocks(write)
+		if len(write.credits) > 0 {
+			if !write.versioned {
+				for _, actor := range write.credits {
+					state.creditAuthor(actor)
+				}
 			}
+			state.lastActor = write.actor
 		}
-		state.lastActor = write.actor
 		state.mu.Unlock()
 	}
 }

@@ -74,6 +74,11 @@ type liveWrite struct {
 	credits   map[string]model.Actor
 	actor     *model.Actor
 	versioned bool
+	// askBlocks is the ask ids the write's latest tree holds, and authoredAskBlocks those this
+	// service write introduced. Ledger.commit moves the latter to roomState once the transaction
+	// commits, so settlement can author the new asks exactly.
+	askBlocks         map[string]struct{}
+	authoredAskBlocks map[string]model.Actor
 	// loss records what this write's latest batch of operations inserted, so a merge with the
 	// room's concurrent changes can be told from a clean one (see lossCheck). A later operation
 	// of the same transaction that inserts nothing an operation claims - an accept's margin

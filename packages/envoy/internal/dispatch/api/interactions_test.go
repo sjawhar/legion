@@ -1308,6 +1308,48 @@ func TestSuggestionAcceptClearsPendingAuthorBeforeNextVersion(t *testing.T) {
 	}
 }
 
+// An upload's version takes its author sequence at the upload write's room read, so a browser edit
+// made after that read stays pending until a later version holds and credits it (LEGION-503).
+func TestAnUploadKeepsTheCreditOfAnEditItsUploaderMakesWhileItWrites(t *testing.T) {
+	documentService, handler, database := browserDocumentService(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Upload timing", "First.\n\nSecond.\n")
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
+	t.Cleanup(peer.close)
+
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin upload transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := documentService.Join(ctx, tx)
+	defer ledger.Discard()
+	uploaded, err := documentService.ReplaceText(joined, issue.PrimaryArtifactID, "First.\n\nSecond, uploaded.\n", alice)
+	if err != nil {
+		t.Fatalf("replace the document with the upload: %v", err)
+	}
+	peer.appendParagraph(t, "Third, alice.")
+	peer.barrier(t)
+	var nextNumber int
+	if err := tx.QueryRow(ctx, `select coalesce(max(number), 0) + 1 from artifact_versions where artifact_id = $1`, issue.PrimaryArtifactID).Scan(&nextNumber); err != nil {
+		t.Fatalf("read next upload version number: %v", err)
+	}
+	if _, err := writeDocumentVersion(ctx, tx, issue.PrimaryArtifactID, nextNumber, uploaded, []model.Actor{alice}, nil); err != nil {
+		t.Fatalf("write the upload version: %v", err)
+	}
+	ledger.WroteVersion(issue.PrimaryArtifactID, []model.Actor{alice})
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit upload transaction: %v", err)
+	}
+	peer.closeAndWait(t)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, nextNumber+1)
+	version := decodeBody[model.Version](t, dispatchRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d", issue.PrimaryArtifactID, nextNumber+1), nil, "alice"))
+	if len(version.Authors) != 1 || version.Authors[0] != alice {
+		t.Fatalf("version %d authors = %#v, want alice, whose browser edit it holds", nextNumber+1, version.Authors)
+	}
+}
+
 // An upload's version credits its uploader and holds the upload's write to the document, and the
 // uploader's browser edits it is written over, so the next version, a session's named edit,
 // credits that session alone (LEGION-503).
