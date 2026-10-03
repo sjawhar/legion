@@ -288,10 +288,11 @@ async function lowerKeyboard(page: Page): Promise<void> {
 }
 
 test.beforeEach(async () => {
-  await Promise.all([resetDatabase(), setLiveSessions([planner])]);
+  await resetDatabase();
+  await setLiveSessions([planner]);
 });
 
-test("the conversation view replays what the session held, streams its next turn, and sends an aside through the existing delivery", async ({
+test("the conversation view replays what the session held, streams its next turn, and sends as Send, the terminal's Enter, through the existing delivery", async ({
   browser,
 }) => {
   await publishAgentStreamFrame(planner.session_id, replay, "replay");
@@ -330,16 +331,26 @@ test("the conversation view replays what the session held, streams its next turn
       "There are two."
     );
 
-    // Talking to the agent is the delivery the Agents page already uses, not a new write path.
+    // Talking to the agent is the delivery the Agents page already uses, not a new write path,
+    // and its default is Send - Enter at the session's terminal - since the session takes a steer.
     // Send being usable here is also what the late-snapshot rule above buys: a thread left
     // looking like it is still running disables the composer, and a viewer who opens a finished
     // session cannot talk to it.
+    await expect(page.getByRole("combobox", { name: "Delivery mode" })).toHaveValue("steer");
     await page.getByTestId("agent-composer").locator("textarea").fill("try the other branch");
     await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
     await page.getByRole("button", { name: "Send" }).click();
     await expect
-      .poll(async () => (await getSentMessages()).map((sent) => sent.message))
-      .toContain("try the other branch");
+      .poll(async () =>
+        (await getSentMessages()).map((sent) => ({
+          message: sent.message,
+          payload: JSON.parse(String(sent.payload)),
+        }))
+      )
+      .toContainEqual({
+        message: "try the other branch",
+        payload: expect.objectContaining({ delivery: expect.objectContaining({ mode: "steer" }) }),
+      });
   } finally {
     await context.close();
   }
@@ -383,8 +394,8 @@ test("a session's replies to a direct message are unread until the live view sho
 });
 
 // The unread count is over every direct message the human sent, while the conversation list is a
-// window of the fifty that moved last. A reply outside that window used to be counted, never
-// rendered, and then marked read by the mark this view writes - so the live view has to show it.
+// window of the fifty that moved last. A reply outside that window is counted, and the mark this
+// view writes marks it read, so the live view has to show it or it is read without being seen.
 test("the live view shows an unread reply from outside the fifty most active conversations", async ({
   browser,
 }) => {

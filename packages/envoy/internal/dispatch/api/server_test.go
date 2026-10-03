@@ -9,11 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +60,9 @@ type testServerOptions struct {
 	// envoyTimeout shortens that client's window, so a test can exercise a receipt timeout
 	// without holding a stand-in listener for the production five seconds.
 	envoyTimeout time.Duration
+	// persistence is an optional document-store seam for API handlers that need the document
+	// service to observe a persistence boundary condition.
+	persistence func(*store.Store) docs.VersionedStore
 	// agentStream is the live agent conversation relay; nil is the deployment with no NATS,
 	// where the viewer route answers 503.
 	agentStream agentstream.Source
@@ -99,7 +104,11 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 	}
 	database := storetest.Open(t)
 	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: settle})
+	var documentPersistence docs.VersionedStore
+	if options.persistence != nil {
+		documentPersistence = options.persistence(database)
+	}
+	documentService := docs.New(docs.Deps{Store: database, Persistence: documentPersistence, Events: broker, ServerURL: "https://dispatch.example", Settle: settle})
 	t.Cleanup(func() {
 		if err := documentService.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)
@@ -111,7 +120,6 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		Identity:         identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
 		AllowedLogins:    allowed,
 		AgentToken:       "agent-token",
-		RepoProjectsRaw:  "owner/repo=TEST",
 		DefaultProject:   options.defaultProject,
 		ServerURL:        "https://dispatch.example",
 		Docs:             documentService,
@@ -252,6 +260,59 @@ func multipartRequest(t *testing.T, handler http.Handler, target string, fields 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+// databaseFingerprint hashes every row of every table, so a test can tell a request wrote nothing
+// anywhere: no row inserted, updated or deleted.
+func databaseFingerprint(t *testing.T, database *store.Store) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := database.Pool.Query(ctx, `select tablename from pg_tables where schemaname = 'public'`)
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	tables, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read table names: %v", err)
+	}
+	if len(tables) == 0 {
+		t.Fatal("the schema has no tables; a fingerprint of it proves nothing")
+	}
+	fingerprint := make(map[string]string, len(tables))
+	for _, table := range tables {
+		var digest string
+		if err := database.Pool.QueryRow(ctx, fmt.Sprintf(
+			`select count(*) || ':' || coalesce(md5(string_agg(t::text, ',' order by t::text)), '') from %s t`,
+			pgx.Identifier{table}.Sanitize(),
+		)).Scan(&digest); err != nil {
+			t.Fatalf("fingerprint %s: %v", table, err)
+		}
+		fingerprint[table] = digest
+	}
+	return fingerprint
+}
+
+// assertUnchanged fails for each table whose rows differ between two fingerprints of one database.
+func assertUnchanged(t *testing.T, request string, before, after map[string]string) {
+	t.Helper()
+	for _, table := range slices.Sorted(maps.Keys(after)) {
+		if before[table] != after[table] {
+			t.Errorf("%s changed table %s", request, table)
+		}
+	}
+}
+
+// assertRefusal checks an answer is 400 with code and an error naming field first.
+func assertRefusal(t *testing.T, request string, status int, body []byte, code, field string) {
+	t.Helper()
+	var refusal struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &refusal)
+	if status != http.StatusBadRequest || refusal.Code != code || !strings.HasPrefix(refusal.Error, field+" holds a ") {
+		t.Errorf("%s = %d %s %q, want 400 %s naming %s", request, status, refusal.Code, refusal.Error, code, field)
+	}
 }
 
 func decodeBody[T any](t *testing.T, response *httptest.ResponseRecorder) T {
@@ -1716,7 +1777,7 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: cookieIdentity, AllowedLogins: allowed, AgentToken: "agent-token",
-		RepoProjectsRaw: "owner/repo=TEST", Docs: documentService, Events: broker,
+		Docs: documentService, Events: broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -1727,7 +1788,7 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("establish alice's session: %v", err)
 	}
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", generation, "signing-key"))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", generation, "signing-key", true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}
@@ -1854,8 +1915,8 @@ func TestSSEPagesThroughCappedBacklogWithoutDisconnecting(t *testing.T) {
 	scanner := bufio.NewScanner(stream.Body)
 	// The 1005 seeded events plus the issue creation exceed one capped page
 	// (maxSSEReplay=1000); a single connection pages through all of them without
-	// ever disconnecting — a capped page used to end the stream and force a client
-	// reconnect, which left a gap where a low id committing between "read this page"
+	// ever disconnecting: a capped page that ended the stream and forced a client
+	// reconnect would leave a gap where a low id committing between "read this page"
 	// and "a new connection subscribes" could be lost forever.
 	for wantID := 2; wantID <= 1007; wantID++ {
 		frame := readSSEFrame(t, scanner)
@@ -1992,14 +2053,13 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 	})
 	allowed := map[string]struct{}{"alice": {}, "bob": {}}
 	deps, err := NewDeps(DepsInput{
-		Store:           database,
-		Identity:        identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins:   allowed,
-		AgentToken:      "agent-token",
-		RepoProjectsRaw: "owner/repo=TEST",
-		ServerURL:       "https://dispatch.example",
-		Docs:            documentService,
-		Events:          broker,
+		Store:         database,
+		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
+		AllowedLogins: allowed,
+		AgentToken:    "agent-token",
+		ServerURL:     "https://dispatch.example",
+		Docs:          documentService,
+		Events:        broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -2218,11 +2278,11 @@ func TestSSELiveEventBelowSinceIsNotDropped(t *testing.T) {
 	}
 }
 
-// TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging proves the fix for
-// the recurrence: a capped catch-up page used to end the stream (forcing a client
-// reconnect with a higher Last-Event-ID), which meant a still-uncommitted low id —
-// invisible to every catch-up page, since each page's cursor only moves forward —
-// could never be recovered once it finally committed. Keeping one subscription
+// TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging: a capped catch-up
+// page that ended the stream (forcing a client reconnect with a higher
+// Last-Event-ID) would mean a still-uncommitted low id — invisible to every
+// catch-up page, since each page's cursor only moves forward — could never be
+// recovered once it finally committed. Keeping one subscription
 // attached across every page closes that gap.
 func TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging(t *testing.T) {
 	handler, database, broker := newTestHandlerWithBroker(t)
@@ -2308,10 +2368,9 @@ func TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging(t *testing.T)
 	}
 }
 
-// TestSSEColdStartSubscribesBeforeReadingHeadSoLateCommitIsNotLost proves the fix
-// for the cold-start event-loss recurrence: the client used to make two separate
-// requests (GET /events/head, then GET /events?since=<head>), so a transaction
-// that grabbed a lower id before the head was read could commit in the gap
+// TestSSEColdStartSubscribesBeforeReadingHeadSoLateCommitIsNotLost: a client making
+// two separate requests (GET /events/head, then GET /events?since=<head>) would let a
+// transaction that grabbed a lower id before the head was read commit in the gap
 // between those two requests and never be delivered — invisible to a catch-up
 // query (its id is <= since) and to the subscription (registered only by the
 // second request, after the gap). A cold request (no since=, no Last-Event-ID)

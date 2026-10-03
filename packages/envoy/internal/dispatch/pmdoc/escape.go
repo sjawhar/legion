@@ -23,6 +23,8 @@ import (
 
 // escapeContext is what one character's escape depends on beyond the text itself.
 type escapeContext struct {
+	// scan remembers where this text's closers were last found (forwardScan).
+	scan *forwardScan
 	// footnoteLabels is every footnote label the document defines (footnoteLabelSet).
 	footnoteLabels footnoteLabelSet
 	// textLineStart is where the character's line of text begins inside this node, or -1 when it
@@ -88,10 +90,10 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 				needsInlineEscape(value, offset+1, rune(value[offset+1]), context)
 	case '*':
 		return (blockStart(value, textLineStart, offset) && markerTerminator(value, offset+1)) ||
-			emphasisDelimiter(value, offset, '*') || besideDelimiter(value, offset, '*', context) ||
+			emphasisDelimiter(value, offset, '*', context.scan) || besideDelimiter(value, offset, '*', context) ||
 			context.delimiters == delimitersAll
 	case '_':
-		return emphasisDelimiter(value, offset, '_') || context.delimiters == delimitersAll
+		return emphasisDelimiter(value, offset, '_', context.scan) || context.delimiters == delimitersAll
 	case '`':
 		return true
 	case '~':
@@ -100,13 +102,13 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 		// A label whose brackets cannot pair as written escapes them all: a stray `]` closes it
 		// early, and a `[` left raw would then pair with its own closer.
 		return context.label == labelBracketsEscaped ||
-			context.label != labelBracketsWritten && (linkOpener(value, offset) || footnoteReferenceText(value, offset, context.footnoteLabels))
+			context.label != labelBracketsWritten && (linkOpener(value, offset, context.scan) || footnoteReferenceText(value, offset, context.footnoteLabels, context.scan))
 	case '(':
 		return offset > 0 && value[offset-1] == ']'
 	case ']':
 		return context.label == labelBracketsEscaped
 	case '<':
-		return angleConstruct(value, offset)
+		return angleConstruct(value, offset, context.scan)
 	case '&':
 		return entityReference(value, offset)
 	case '#':
@@ -459,8 +461,8 @@ func dedent(lines string, limit int) string {
 
 // blockStart reports whether offset opens its own line: everything back to lineStart is
 // indentation the parser skips, up to three spaces or a run of tabs. A marker one space in is
-// still the marker — AGENTC-193's own payload was indented — and a line that began in an earlier
-// text node (lineStart < 0) is never a block start here.
+// still the marker, and a line that began in an earlier text node (lineStart < 0) is never a block
+// start here.
 func blockStart(value string, lineStart, offset int) bool {
 	if lineStart < 0 || lineStart > offset {
 		return false
@@ -544,24 +546,12 @@ func numericEntity(char rune) string {
 // besideDelimiter reports whether the run of delimiter holding offset touches a mark's run of the
 // same character, which it would join.
 func besideDelimiter(value string, offset int, delimiter byte, context escapeContext) bool {
-	start, end := offset, offset+1
-	for start > 0 && value[start-1] == delimiter {
-		start--
-	}
-	for end < len(value) && value[end] == delimiter {
-		end++
-	}
+	start, end := context.scan.delimiterBounds(offset, delimiter)
 	return start == 0 && context.opener == delimiter || end == len(value) && context.closer == delimiter
 }
 
-func emphasisDelimiter(value string, offset int, delimiter byte) bool {
-	start, end := offset, offset+1
-	for start > 0 && value[start-1] == delimiter {
-		start--
-	}
-	for end < len(value) && value[end] == delimiter {
-		end++
-	}
+func emphasisDelimiter(value string, offset int, delimiter byte, scan *forwardScan) bool {
+	start, end := scan.delimiterBounds(offset, delimiter)
 	before := start > 0 && isASCIIAlphaNumeric(value[start-1])
 	after := end < len(value) && isASCIIAlphaNumeric(value[end])
 	return (delimiter != '_' || !before || !after) && (before || after)
@@ -569,21 +559,100 @@ func emphasisDelimiter(value string, offset int, delimiter byte) bool {
 
 // footnoteReferenceText reports whether the text at offset, a `[`, is shaped like a reference to
 // one of labels, the document's defined footnote labels (footnoteLabelSet.refersTo): `[^label]`.
-func footnoteReferenceText(value string, offset int, labels footnoteLabelSet) bool {
-	if offset+1 >= len(value) || value[offset+1] != '^' {
+func footnoteReferenceText(value string, offset int, labels footnoteLabelSet, scan *forwardScan) bool {
+	if offset+1 >= len(value) || value[offset+1] != '^' || len(labels.keys) == 0 {
 		return false
 	}
-	closing := strings.IndexByte(value[offset+2:], ']')
-	return closing > 0 && labels.refersTo(value[offset+2:offset+2+closing])
+	closing := scan.indexFrom(offset+2, ']')
+	if closing <= offset+2 {
+		return false
+	}
+	label := value[offset+2 : closing]
+	if len(label) > 4*labels.longestRuneCount || strings.Contains(label, "[") && !labels.hasBracket {
+		return false
+	}
+	return labels.refersTo(label)
 }
 
-func linkOpener(value string, offset int) bool {
-	closing := strings.IndexByte(value[offset+1:], ']')
+func linkOpener(value string, offset int, scan *forwardScan) bool {
+	closing := scan.indexFrom(offset+1, ']')
 	if closing < 0 {
 		return false
 	}
-	closing += offset + 1
 	return linkCloser(value, closing)
+}
+
+// forwardScan answers where a byte next occurs at or after an offset of one text, remembering
+// the last answer and the bounds of delimiter runs. writeInlineText asks in offset order, so a
+// text of many `[`, `<`, `&`, `*`, or `_` costs one pass over each run, not one per character
+// (LEGION-465).
+type forwardScan struct {
+	value string
+	// closer is the last answer for `]` and `>`, which are the only closers this renderer scans.
+	closer [2]scanSlot
+	// delimiter is the current `*` or `_` run, which the delimiter rules inspect together.
+	delimiter [2]delimiterRun
+}
+
+type scanSlot struct {
+	next, asked int
+	seen        bool
+}
+
+type delimiterRun struct {
+	start, end int
+	seen       bool
+}
+
+func newForwardScan(value string) *forwardScan {
+	return &forwardScan{value: value}
+}
+
+// indexFrom is the index of the first b at or after offset, or -1 when there is none.
+func (s *forwardScan) indexFrom(offset int, b byte) int {
+	var slot *scanSlot
+	switch b {
+	case ']':
+		slot = &s.closer[0]
+	case '>':
+		slot = &s.closer[1]
+	default:
+		panic("forwardScan asked for an unsupported closer")
+	}
+	if !slot.seen || offset < slot.asked || offset > slot.next {
+		slot.seen, slot.asked = true, offset
+		if found := strings.IndexByte(s.value[offset:], b); found < 0 {
+			slot.next = len(s.value)
+		} else {
+			slot.next = offset + found
+		}
+	}
+	if slot.next == len(s.value) {
+		return -1
+	}
+	return slot.next
+}
+
+func (s *forwardScan) delimiterBounds(offset int, b byte) (int, int) {
+	var run *delimiterRun
+	switch b {
+	case '*':
+		run = &s.delimiter[0]
+	case '_':
+		run = &s.delimiter[1]
+	default:
+		panic("forwardScan asked for an unsupported delimiter")
+	}
+	if !run.seen || offset < run.start || offset >= run.end {
+		run.seen, run.start, run.end = true, offset, offset+1
+		for run.start > 0 && s.value[run.start-1] == b {
+			run.start--
+		}
+		for run.end < len(s.value) && s.value[run.end] == b {
+			run.end++
+		}
+	}
+	return run.start, run.end
 }
 
 func linkCloser(value string, offset int) bool {
@@ -665,8 +734,9 @@ func linkLabel(nodes []*Node, index int, link Mark) string {
 		if nodeHasMark(node, "inlineCode") {
 			continue
 		}
+		scan := newForwardScan(node.Text)
 		for offset := 0; offset < len(node.Text); offset++ {
-			if node.Text[offset] == '[' && linkOpener(node.Text, offset) {
+			if node.Text[offset] == '[' && linkOpener(node.Text, offset, scan) {
 				label.WriteByte(paragraphEscapedBracket)
 				continue
 			}
@@ -676,24 +746,21 @@ func linkLabel(nodes []*Node, index int, link Mark) string {
 	return label.String()
 }
 
-func angleConstruct(value string, offset int) bool {
+func angleConstruct(value string, offset int, scan *forwardScan) bool {
 	if offset+1 >= len(value) || !isASCIIAlphaNumeric(value[offset+1]) && value[offset+1] != '/' && value[offset+1] != '!' && value[offset+1] != '?' {
 		return false
 	}
-	return strings.IndexByte(value[offset+1:], '>') >= 0
+	return scan.indexFrom(offset+1, '>') >= 0
 }
 
+// entityReference reports whether the `&` at offset opens `&name;` or `&#digits;`: letters, digits
+// and `#` up to a `;`. It reads that run alone, so a text of many `&` and no `;` costs one pass.
 func entityReference(value string, offset int) bool {
-	end := strings.IndexByte(value[offset+1:], ';')
-	if end < 0 {
-		return false
+	end := offset + 1
+	for end < len(value) && (isASCIIAlphaNumeric(value[end]) || value[end] == '#') {
+		end++
 	}
-	for _, char := range value[offset+1 : offset+end+1] {
-		if !isASCIIAlphaNumeric(byte(char)) && char != '#' {
-			return false
-		}
-	}
-	return true
+	return end < len(value) && value[end] == ';'
 }
 
 func urlSchemeColon(value string, offset int) bool {
@@ -755,12 +822,17 @@ func imageAlt(alt string, context inlineContext) string {
 // altReadsBack reports whether an image label written as written reads back as the alt text alt,
 // read in the block it is written in: a table cell, where the cell takes its escaped pipes first
 // and a line ending ends the row; a heading, which a line ending ends; or a paragraph, where a
-// line of the label can open a block.
+// line of the label can open a block. In a table cell a label holding a `|` after an even run of
+// backslashes does not: Parse reads that pipe as escaped, while the browser editor's parser, which
+// pairs backslashes before a pipe, ends the cell there.
 func altReadsBack(written, alt string, context inlineContext) bool {
 	image := "![" + written + "](u)"
 	var markdown string
 	switch {
 	case context.tableCell:
+		if pipeAfterEvenBackslashes(written) {
+			return false
+		}
 		markdown = "| h |\n| - |\n| " + image + " |\n"
 	case context.heading:
 		markdown = "# " + image + "\n"
@@ -784,4 +856,27 @@ func altReadsBack(written, alt string, context inlineContext) bool {
 	}
 	got, _ := nodes[0].Attrs["alt"].(string)
 	return got == alt
+}
+
+// pipeAfterEvenBackslashes reports whether value holds a `|` the browser editor's parser ends a
+// table cell at (escapedByBackslashes).
+func pipeAfterEvenBackslashes(value string) bool {
+	for index := range len(value) {
+		if value[index] == '|' && !escapedByBackslashes(value, index) {
+			return true
+		}
+	}
+	return false
+}
+
+// escapedByBackslashes reports whether the character at index stands after an odd run of
+// backslashes. The browser editor's parser pairs backslashes before a pipe, so in a table row a
+// `|` after an odd run is the cell's text and one after an even run, none included, ends the cell;
+// goldmark takes any backslash right before a pipe as escaping it.
+func escapedByBackslashes[T string | []byte](value T, index int) bool {
+	run := 0
+	for run < index && value[index-1-run] == '\\' {
+		run++
+	}
+	return run%2 == 1
 }

@@ -1,6 +1,7 @@
 {
   "name": "@legion/envoy-client",
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     "./delivery": {
@@ -78,7 +79,7 @@
     "build": "bun build src/defaults.ts src/delivery.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-first.ts src/dispatch-http.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/nats-auth.ts src/secret-file.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
-    "lint": "bunx biome check src/"
+    "lint": "bunx biome check src/ bin/"
   },
   "dependencies": {
     "@legion/contracts": "workspace:*",

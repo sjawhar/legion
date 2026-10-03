@@ -2,7 +2,7 @@
 //
 // The App itself is created once at github.com/settings/apps/new (see
 // packages/envoy/cmd/dispatch/README.md for the setup checklist). The
-// resulting client_id, client_secret, webhook secret, and private key (PEM)
+// resulting client_id, client_secret, and private key (PEM)
 // are written by hand into ~/.local/share/dispatch/app.json — dispatch only
 // reads this file, never creates or modifies it.
 package auth
@@ -19,16 +19,15 @@ import (
 
 // AppConfig is the persisted Envoy App credentials.
 type AppConfig struct {
-	ID            int64    `json:"id,omitempty"`
-	Slug          string   `json:"slug,omitempty"`
-	Name          string   `json:"name,omitempty"`
-	HTMLURL       string   `json:"htmlUrl,omitempty"`
-	ClientID      string   `json:"clientId"`
-	ClientSecret  string   `json:"clientSecret"`
-	WebhookSecret string   `json:"webhookSecret,omitempty"`
-	PEM           string   `json:"pem,omitempty"`
-	OwnerLogin    string   `json:"ownerLogin,omitempty"`
-	Permissions   AppPerms `json:"permissions,omitempty"`
+	ID           int64    `json:"id,omitempty"`
+	Slug         string   `json:"slug,omitempty"`
+	Name         string   `json:"name,omitempty"`
+	HTMLURL      string   `json:"htmlUrl,omitempty"`
+	ClientID     string   `json:"clientId"`
+	ClientSecret string   `json:"clientSecret"`
+	PEM          string   `json:"pem,omitempty"`
+	OwnerLogin   string   `json:"ownerLogin,omitempty"`
+	Permissions  AppPerms `json:"permissions,omitempty"`
 }
 
 // AppPerms mirrors the GitHub Apps permissions object. We surface only the
@@ -62,39 +61,38 @@ func ReadApp(path string) (*AppConfig, error) {
 	return &cfg, nil
 }
 
-// LoadAppFromEnv assembles an AppConfig from environment variables. Used
-// by production deployments where credentials come from a secrets manager
-// via the container task definition; the filesystem app.json is the dev
-// path.
+// LoadAppFromEnv assembles an AppConfig from the environment getenv reads (cmd/dispatch hands it
+// its settings table's). Used by production deployments where credentials come from a secrets
+// manager via the container task definition; the filesystem app.json is the dev path.
 //
-// Required env vars:
+// Required:
 //
 //	DISPATCH_APP_CLIENT_ID
 //	DISPATCH_APP_CLIENT_SECRET
-//	DISPATCH_APP_PEM_B64        (base64-encoded PEM — multiline PEM is
-//	                              awkward to ship through most container
-//	                              env interfaces, so we accept base64)
 //
 // Optional:
 //
+//	DISPATCH_APP_PEM_B64           (base64-encoded PEM — multiline PEM is
+//	                                 awkward to ship through most container
+//	                                 env interfaces, so we accept base64; without
+//	                                 it the App signs no App call)
 //	DISPATCH_APP_ID                (integer)
 //	DISPATCH_APP_SLUG
 //	DISPATCH_APP_NAME
-//	DISPATCH_APP_WEBHOOK_SECRET
 //
 // Returns (nil, nil) when DISPATCH_APP_CLIENT_ID is unset so callers can
 // fall through to the file-based path.
-func LoadAppFromEnv() (*AppConfig, error) {
-	clientID := os.Getenv("DISPATCH_APP_CLIENT_ID")
+func LoadAppFromEnv(getenv func(string) string) (*AppConfig, error) {
+	clientID := getenv("DISPATCH_APP_CLIENT_ID")
 	if clientID == "" {
 		return nil, nil
 	}
-	clientSecret := os.Getenv("DISPATCH_APP_CLIENT_SECRET")
+	clientSecret := getenv("DISPATCH_APP_CLIENT_SECRET")
 	if clientSecret == "" {
 		return nil, fmt.Errorf("DISPATCH_APP_CLIENT_ID set but DISPATCH_APP_CLIENT_SECRET missing")
 	}
 	pem := ""
-	if b64 := os.Getenv("DISPATCH_APP_PEM_B64"); b64 != "" {
+	if b64 := getenv("DISPATCH_APP_PEM_B64"); b64 != "" {
 		decoded, err := base64.StdEncoding.DecodeString(b64)
 		if err != nil {
 			return nil, fmt.Errorf("DISPATCH_APP_PEM_B64: %w", err)
@@ -102,7 +100,7 @@ func LoadAppFromEnv() (*AppConfig, error) {
 		pem = string(decoded)
 	}
 	var appID int64
-	if raw := os.Getenv("DISPATCH_APP_ID"); raw != "" {
+	if raw := getenv("DISPATCH_APP_ID"); raw != "" {
 		n, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("DISPATCH_APP_ID: %w", err)
@@ -110,12 +108,11 @@ func LoadAppFromEnv() (*AppConfig, error) {
 		appID = n
 	}
 	return &AppConfig{
-		ID:            appID,
-		Slug:          os.Getenv("DISPATCH_APP_SLUG"),
-		Name:          os.Getenv("DISPATCH_APP_NAME"),
-		ClientID:      clientID,
-		ClientSecret:  clientSecret,
-		WebhookSecret: os.Getenv("DISPATCH_APP_WEBHOOK_SECRET"),
-		PEM:           pem,
+		ID:           appID,
+		Slug:         getenv("DISPATCH_APP_SLUG"),
+		Name:         getenv("DISPATCH_APP_NAME"),
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		PEM:          pem,
 	}, nil
 }

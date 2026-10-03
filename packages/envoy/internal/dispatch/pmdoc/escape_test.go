@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// A paragraph line the document parser reads as a block is the text the caller loses. #1326
-// escaped ATX markers for this reason; these are the rest of the line-start forms: a thematic
+// A paragraph line the document parser reads as a block is the text the caller loses. ATX
+// markers are escaped for that reason; these are the rest of the line-start forms: a thematic
 // break, a setext underline, and a directive opener, which either silently becomes another node
 // or refuses to parse at all.
 func TestRenderEscapesBlockMarkerLinesInsideParagraphs(t *testing.T) {
@@ -265,9 +265,9 @@ func flatText(node *Node) string {
 }
 
 // The parser trims whitespace at the start of a textblock's line and at the end of the
-// textblock, so text that begins or ends with it lost it. The first leading and the last trailing
-// whitespace character are written as references; whitespace inside a mark or a link keeps the
-// bytes main writes, since the parser keeps it there.
+// textblock, so text that begins or ends with it would lose it. The first leading and the last
+// trailing whitespace character are written as references; whitespace inside a mark or a link
+// keeps the bytes main writes, since the parser keeps it there.
 func TestRenderKeepsWhitespaceAtATextblocksEdges(t *testing.T) {
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	hardBreak := &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}}

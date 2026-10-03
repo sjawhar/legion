@@ -13,7 +13,7 @@
 # creates is its own and goes on any exit: its scratch directory, which holds the isolated OMP
 # profile under the HOME the run gives its Oh My Pi processes (make_omp_home, lib/omp-home.sh),
 # the tmux servers, and its Postgres and NATS containers. CONTROLLER_START_EVIDENCE_DIR (default a
-# fresh /tmp directory, kept and printed) keeps the daemon and listener logs.
+# fresh /tmp directory, kept and printed) keeps the transcript and the daemon and listener logs.
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
@@ -25,6 +25,12 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e-controller.$$.XXXXXXXX")
 evidence=${CONTROLLER_START_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e-controller-evidence.XXXXXXXX)}
 mkdir -p "$evidence/logs" "$evidence/checks"
+# Every line of the run also goes to $evidence/transcript.log (lib/transcript.sh), so the driver and
+# its cleanup, which stops the panes and removes both containers, never fail on a write whoever is
+# reading.
+# shellcheck source-path=SCRIPTDIR source=lib/transcript.sh
+. "$root/scripts/e2e/lib/transcript.sh"
+transcript_to "$evidence/transcript.log"
 ok=
 daemon_pid=
 listener_pid=
@@ -54,8 +60,6 @@ fail() { echo "FAIL $check: $*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/leftovers.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
 . "$root/scripts/e2e/lib/omp-home.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 # Unconditional: every run removes what it made, whatever it ended on.
 cleanup() {
@@ -70,7 +74,7 @@ cleanup() {
   docker rm -f "$nats_container" "$pg_container" >/dev/null 2>&1
   rm -rf "$work"
   [ -n "$ok" ] || echo "controller start e2e: FAIL (check $check)"
-  echo "evidence: $evidence (logs/daemon.log, logs/listener.log, and checks/: each check's own output and the controller panes)"
+  echo "evidence: $evidence (transcript.log, logs/daemon.log, logs/listener.log, and checks/: each check's own output and the controller panes)"
   return 0
 }
 trap cleanup EXIT
@@ -104,12 +108,11 @@ for tool in go docker jq curl tmux bun mise; do command -v "$tool" >/dev/null ||
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
 export XDG_STATE_HOME=$work/xdg TMUX_TMPDIR=$work/tmux
-pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
+pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 pick_port daemon_port
 pick_port envoy_port
-(cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
-stage_role_prompts "$root" "$work"
+(cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 note "legion $("$work/legion" version); OMP pin $pin; daemon port $daemon_port; listener port $envoy_port"
 
@@ -135,12 +138,12 @@ until_true 60 "the Envoy listener" curl -fsS -H "@$work/envoy-auth-header" "http
 
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
-want_contract=$(jq -r .legion.goDaemonApiVersion "$root/packages/pi-envoy/package.json")
-note "plugin $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile, goDaemonApiVersion $want_contract"
+want_contract=$(jq -r .legion.daemonApiVersion "$root/packages/pi-envoy/package.json")
+note "plugin $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile, daemonApiVersion $want_contract"
 # The boot gate resolves the model of every task agent the prompts dispatch, so the profile names
-# their roles (@review, @oracle) and the default one model, served by a static-key provider that
-# listens nowhere: this proof takes no model turn, so no model is called and no credential the
-# machine carries decides the gate.
+# their roles and the default one model, served by a static-key provider that listens nowhere: the
+# controller's one model turn, the start message `legion controller start` opens it with, fails
+# against it, no check reads its answer, and no credential the machine carries decides the gate.
 mkdir -p "$profile_agent"
 cat >"$profile_agent/models.yml" <<'EOF'
 providers:
@@ -153,7 +156,7 @@ providers:
       - id: m1
         name: M1
 EOF
-printf 'modelRoles:\n  default: offline/m1\n  review: offline/m1\n  oracle: offline/m1\n' >"$profile_agent/config.yml"
+printf 'modelRoles:\n  default: offline/m1\n  review: offline/m1\n  oracle: offline/m1\n  deep: offline/m1\n' >"$profile_agent/config.yml"
 
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token")
 cat >"$work/legion.yaml" <<EOF
@@ -220,14 +223,14 @@ pass
 begin gate-refuses-the-previous-contract
 cp -p "$work/plugin/package.json" "$work/manifest.orig"
 previous_contract=$((want_contract - 1))
-jq --argjson c "$previous_contract" '.legion.goDaemonApiVersion = $c' "$work/manifest.orig" >"$work/plugin/package.json"
+jq --argjson c "$previous_contract" '.legion.daemonApiVersion = $c' "$work/manifest.orig" >"$work/plugin/package.json"
 st=0
 operator_env timeout 300 "$work/legion" start --config "$work/legion.yaml" >"$evidence/checks/refusal-contract.log" 2>&1 || st=$?
 cp -p "$work/manifest.orig" "$work/plugin/package.json"
 [ "$st" != 0 ] && [ "$st" != 124 ] || fail "legion start exited $st"
-grep -qF "speaks Go daemon API contract $previous_contract; this daemon requires $want_contract" "$evidence/checks/refusal-contract.log" ||
+grep -qF "speaks daemon API contract $previous_contract; this daemon requires $want_contract" "$evidence/checks/refusal-contract.log" ||
   fail "the refusal does not name both contracts: $(head -3 "$evidence/checks/refusal-contract.log")"
-note "legion start exit $st: $(grep -oF "speaks Go daemon API contract $previous_contract; this daemon requires $want_contract" "$evidence/checks/refusal-contract.log" | head -1)"
+note "legion start exit $st: $(grep -oF "speaks daemon API contract $previous_contract; this daemon requires $want_contract" "$evidence/checks/refusal-contract.log" | head -1)"
 pass
 
 # ---- the daemon ------------------------------------------------------------------------------------
@@ -277,17 +280,17 @@ registered=$(jq -R -c --arg s "$session1" 'fromjson? | select(.msg == "api: cont
 [ -n "$registered" ] || fail "the daemon logged no controller registration for $session1"
 note "daemon: api: controller registered $registered"
 omp1=$(controller_omp "$ctl_state") || fail "no omp process carries LEGION_STATE_DIR=$ctl_state"
-for pair in LEGION_CONTROLLER=1 LEGION_ROLE=controller LEGION_DAEMON_API=go "LEGION_PROJECT=$ptoken" \
+for pair in LEGION_CONTROLLER=1 LEGION_ROLE=controller "LEGION_PROJECT=$ptoken" \
   "LEGION_CONTROLLER_SECRET_FILE=$ctl_state/secrets/$role" "LEGION_GRANT_FILE=$ctl_state/secrets/$role-grant" \
   "ENVOY_TOKEN_FILE=$work/envoy-token" "ENVOY_NATS_URL=$nats_url" "HOME=$omp_home" "OMP_PROFILE=$profile"; do
   [ "$(env_of "$omp1" "${pair%%=*}")" = "${pair#*=}" ] || fail "omp $omp1 has ${pair%%=*}=$(env_of "$omp1" "${pair%%=*}"), want ${pair#*=}"
 done
-env_of "$omp1" PI_SHELL_PREFIX | grep -qF "'$ctl_state/worker-bin:$ctl_state/bin:'" || fail "PI_SHELL_PREFIX = $(env_of "$omp1" PI_SHELL_PREFIX)"
+env_of "$omp1" PI_SHELL_PREFIX | grep -qF "PATH='$ctl_state/worker-bin:$ctl_state/bin'\${__legion_path" || fail "PI_SHELL_PREFIX = $(env_of "$omp1" PI_SHELL_PREFIX)"
 [ -z "$(env_of "$omp1" LEGION_CONTROLLER_SECRET)" ] || fail "the controller secret's value is in omp's environment"
 tr '\0' '\n' <"/proc/$omp1/cmdline" | grep -qxF -- "--append-system-prompt" || fail "omp has no --append-system-prompt"
 ! tr '\0' '\n' <"/proc/$omp1/cmdline" | grep -qx -- "--mode\|rpc\|--resume.*" || fail "omp runs --mode rpc or --resume"
 [ "$(stat -c %a "$ctl_state/secrets/$role")" = 600 ] || fail "the secret file is not 0600"
-note "omp $omp1: LEGION_CONTROLLER=1 LEGION_DAEMON_API=go PI_SHELL_PREFIX over $ctl_state; secret only as a 0600 file; interactive (no --mode rpc); HOME=$omp_home"
+note "omp $omp1: LEGION_CONTROLLER=1 PI_SHELL_PREFIX over $ctl_state; secret only as a 0600 file; interactive (no --mode rpc); HOME=$omp_home"
 # The profile Oh My Pi runs on is the run's own, inside its work directory (its plugin link and the
 # log each Oh My Pi start writes are there), and the operator's profile root holds none of it.
 ls "$omp_home/.omp/profiles/$profile/logs"/omp.*.log >/dev/null 2>&1 ||
@@ -380,8 +383,8 @@ func main() {
 	}
 }
 GO
-printf '{"Replace":{"%s":"%s"}}' "$root/packages/daemon-go/cmd/liveprobe-accept/main.go" "$work/liveprobe.go" >"$work/overlay.json"
-verdicts=$(cd "$root/packages/daemon-go" && go run -overlay "$work/overlay.json" ./cmd/liveprobe-accept \
+printf '{"Replace":{"%s":"%s"}}' "$root/packages/daemon/cmd/liveprobe-accept/main.go" "$work/liveprobe.go" >"$work/overlay.json"
+verdicts=$(cd "$root/packages/daemon" && go run -overlay "$work/overlay.json" ./cmd/liveprobe-accept \
   "http://127.0.0.1:$envoy_port" "$work/envoy-token" "$ptoken" "$session2" "$session1" 2>"$evidence/checks/liveprobe.log" | tr '\n' ' ')
 [ "$verdicts" = "$session2=alive $session1=gone " ] || fail "verdicts: $verdicts; log $(cat "$evidence/checks/liveprobe.log")"
 note "controller.Prober on the live listener: $verdicts"

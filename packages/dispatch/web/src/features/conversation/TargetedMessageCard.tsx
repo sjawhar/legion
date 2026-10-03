@@ -9,7 +9,7 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
-import { duplicateText, isSafeRetry, safeRetryGuidance, withGuidance } from "./delivery";
+import { duplicateText, failureGuidance, isSafeRetry, MODE_LABELS, withGuidance } from "./delivery";
 import { ReplyButton } from "./ReplyButton";
 
 /** The current live capabilities behind a stored delivery target - a bare session, or a role
@@ -35,7 +35,12 @@ export function capabilitiesForTarget(
 }
 
 export interface TargetedMessageAttempt {
+  /** The session took this attempt's message as its user's own turn and told Dispatch so: it
+   *  answers in its own conversation, so no Dispatch reply is awaited. */
+  readonly acceptedAs?: "user_turn" | null;
   readonly attempt: number;
+  /** The session answered this attempt with an error (`DeliveryOutcome.answeredWithError`). */
+  readonly answeredWithError?: boolean;
   readonly createdAt: string;
   readonly delivery: MessageDeliveryMode;
   /** The listener already held this message, so this attempt reached it and changed nothing. */
@@ -45,10 +50,19 @@ export interface TargetedMessageAttempt {
   readonly targetName?: string;
 }
 
-/** The headline one targeted message gets: who answered it, why it failed, that it is still
- *  going out, that it is a BTW waiting on an answer, or that it was delivered. `asking` is
- *  that BTW branch, whose line ends in a separator because it carries a timestamp: the two
- *  belong to one decision, so the caller reads it here rather than restating the condition.
+/** Whether the session took a targeted message as its user's own turn: its latest attempt says
+ *  so, as the session recorded it with Dispatch. Such a message has nothing to retry, and that
+ *  outranks a `failed` the send recorded afterwards, since the session already said it took it. */
+export function takenAsUserTurn(deliveries: readonly TargetedMessageAttempt[]): boolean {
+  return deliveries.at(-1)?.acceptedAs === "user_turn";
+}
+
+/** The headline one targeted message gets: who answered it, that it reached the session's own
+ *  conversation, why it failed, that it is still going out, that it is a BTW waiting on an
+ *  answer, or that it was delivered, naming the mode as the composer does (`MODE_LABELS`).
+ *  `asking` is that BTW branch, whose line ends in a separator because it carries a timestamp:
+ *  the two belong to one decision, so the caller reads it here rather than restating the
+ *  condition.
  *
  *  A BTW is tested before `duplicate`: an outstanding BTW is still waiting on its answer even
  *  when the send that carried it changed nothing, so the human must keep seeing that one is
@@ -57,24 +71,27 @@ function deliveryHeadline(
   answeredBy: string | undefined,
   delivery: TargetedMessageAttempt | undefined,
   targetName: string,
-  retryOffered: boolean
+  retryRow: boolean
 ): { text: string; asking: boolean } {
   if (answeredBy !== undefined) return { text: `Answered by ${answeredBy}`, asking: false };
-  if (delivery?.state === "failed") {
-    const cause = `Failed: ${delivery.error ?? "delivery failed"}`;
-    // The promise belongs to the button: it is only true of the Retry this card is actually
-    // offering, and only while that Retry is offered at all.
+  if (delivery?.acceptedAs === "user_turn") {
     return {
-      text: retryOffered ? withGuidance(cause, safeRetryGuidance("card", delivery.error)) : cause,
+      text: `Delivered to ${targetName}'s conversation (${MODE_LABELS[delivery.delivery]})`,
       asking: false,
     };
   }
+  if (delivery?.state === "failed") {
+    const cause = `Failed: ${delivery.error ?? "delivery failed"}`;
+    // Each sentence names a control in the retry row, so it is said only while that row is shown.
+    const guidance = retryRow ? failureGuidance(delivery, "card") : undefined;
+    return { text: guidance === undefined ? cause : withGuidance(cause, guidance), asking: false };
+  }
   const mode = delivery?.delivery ?? "steer";
   if (delivery?.state === "pending")
-    return { text: `Sending to ${targetName} (${mode})`, asking: false };
-  if (mode === "btw") return { text: `Asking ${targetName} (BTW) ·`, asking: true };
+    return { text: `Sending to ${targetName} (${MODE_LABELS[mode]})`, asking: false };
+  if (mode === "btw") return { text: `Asking ${targetName} (${MODE_LABELS.btw}) ·`, asking: true };
   if (delivery?.duplicate === true) return { text: duplicateText, asking: false };
-  return { text: `Sent to ${targetName} (${mode})`, asking: false };
+  return { text: `Sent to ${targetName} (${MODE_LABELS[mode]})`, asking: false };
 }
 
 /** One earlier attempt's line: what it did, and the name its own target resolved to when it
@@ -84,34 +101,26 @@ function attemptSummary(attempt: TargetedMessageAttempt, targetName: string): st
   if (attempt.state === "failed") return `Failed: ${attempt.error ?? "delivery failed"}`;
   if (attempt.duplicate === true) return duplicateText;
   const verb = attempt.state === "pending" ? "Sending" : "Sent";
-  return `${verb} to ${attempt.targetName ?? targetName} (${attempt.delivery})`;
+  return `${verb} to ${attempt.targetName ?? targetName} (${MODE_LABELS[attempt.delivery]})`;
 }
 
-/** Whether this card is offering the same-mode Retry the safe-retry promise describes: the
- *  attempt has to be retryable at all, and the surface has to be showing the button. */
-export function offersSafeRetry(
-  deliveries: readonly TargetedMessageAttempt[],
-  retryAvailable: boolean
-): boolean {
-  const latest = deliveries.at(-1);
-  return retryAvailable && latest !== undefined && isSafeRetry(latest);
-}
-
-/** What became of a targeted message: answered, failed, asking (BTW), or sent - then the
- *  earlier attempts, oldest first. Shared by the card and by a delivered reply in its thread. */
+/** What became of a targeted message: answered, taken into the session's conversation as the
+ *  person's own turn, failed, asking (BTW), or sent - then the earlier attempts, oldest first.
+ *  Shared by the card and by a delivered reply in its thread. `retryRow` is whether the surface
+ *  shows `DeliveryRetry` beneath it, whose buttons the failure's guidance names. */
 export function DeliveryStatus({
   answeredBy,
   deliveries,
-  retryOffered = false,
+  retryRow = false,
   targetName,
 }: {
   answeredBy?: string;
   deliveries: readonly TargetedMessageAttempt[];
-  retryOffered?: boolean;
+  retryRow?: boolean;
   targetName: string;
 }): ReactNode {
   const delivery = deliveries.at(-1);
-  const headline = deliveryHeadline(answeredBy, delivery, targetName, retryOffered);
+  const headline = deliveryHeadline(answeredBy, delivery, targetName, retryRow);
   return (
     <>
       <p className={`mt-2 text-sm font-semibold ${textPrimaryOnSurface}`}>
@@ -135,32 +144,33 @@ export function DeliveryStatus({
  *  button's reason renders as visible text beneath it - not a `title` - so it reaches a phone,
  *  where a tooltip on a disabled control is unreachable.
  *
- *  Retry re-sends in the attempt's OWN mode, and appears only while `isSafeRetry` holds: that
- *  send carries the same idempotency key, so the stream drops it if the message already landed
- *  - but only inside the stream's duplicate window, and only for an attempt that actually
- *  failed. Offering it otherwise would be offering a second delivery under a promise of none.
- *  The mode-change actions have no such limit: they are a different key and are honestly
- *  labelled "instead". */
+ *  Retry re-sends in the attempt's OWN mode, and appears only while `isSafeRetry` holds for
+ *  `latest`, the attempt the failure guidance above it describes: that send carries the same
+ *  idempotency key, so if the message already landed the repeat is recognised and dropped - but
+ *  only inside `DELIVERY_DUPLICATE_WINDOW_MS`, and only for an attempt that actually failed and
+ *  that the session did not answer with an error. Offering it otherwise would be offering a
+ *  second delivery, or no delivery, under a promise of one. The mode-change actions have no such
+ *  limit: they are a different key and are honestly labelled "instead". */
 export function DeliveryRetry({
   canAside,
   canBtw,
   canSteer,
-  mode,
+  latest,
   onRetry,
   retrying,
-  sameModeRetry,
   targetName,
 }: {
   canAside: boolean;
   canBtw: boolean;
   canSteer: boolean;
-  mode: MessageDeliveryMode;
+  /** The attempt this row retries; a message with none retries as a Send. */
+  latest: TargetedMessageAttempt | undefined;
   onRetry: (delivery: MessageDeliveryMode) => void;
   retrying: boolean;
-  /** `offersSafeRetry` for this surface: the same decision the safe-retry sentence is made on. */
-  sameModeRetry: boolean;
   targetName: string;
 }): ReactNode {
+  const mode = latest?.delivery ?? "steer";
+  const sameModeRetry = latest !== undefined && isSafeRetry(latest);
   const supports: Record<MessageDeliveryMode, boolean> = {
     aside: canAside,
     btw: canBtw,
@@ -180,7 +190,7 @@ export function DeliveryRetry({
           </button>
           {supports[mode] ? null : (
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-              {targetName} does not support {mode}.
+              {targetName} does not support {MODE_LABELS[mode]}.
             </p>
           )}
         </div>
@@ -193,11 +203,11 @@ export function DeliveryRetry({
             onClick={() => onRetry("btw")}
             type="button"
           >
-            Send as BTW instead
+            Use {MODE_LABELS.btw} instead
           </button>
           {canBtw ? null : (
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-              {targetName} does not support BTW.
+              {targetName} does not support {MODE_LABELS.btw}.
             </p>
           )}
         </div>
@@ -210,11 +220,12 @@ export function DeliveryRetry({
             onClick={() => onRetry("steer")}
             type="button"
           >
-            Send normally instead
+            Use {MODE_LABELS.steer} instead
           </button>
           {canSteer ? null : (
             <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-              {targetName} does not support normal delivery — use BTW.
+              {targetName} does not support {MODE_LABELS.steer}
+              {canBtw ? ` — use ${MODE_LABELS.btw}.` : "."}
             </p>
           )}
         </div>
@@ -266,8 +277,8 @@ export function TargetedMessageCard({
   turnID,
 }: TargetedMessageCardProps): ReactNode {
   // Narrowed once, so the render below needs no second test of the same condition.
-  const retry = answeredBy === undefined && !isClosed ? onRetry : undefined;
-  const sameModeRetry = offersSafeRetry(deliveries, retry !== undefined);
+  const retry =
+    answeredBy === undefined && !isClosed && !takenAsUserTurn(deliveries) ? onRetry : undefined;
   return (
     <li
       aria-current={current ? "true" : undefined}
@@ -286,7 +297,7 @@ export function TargetedMessageCard({
       <DeliveryStatus
         answeredBy={answeredBy}
         deliveries={deliveries}
-        retryOffered={sameModeRetry}
+        retryRow={retry !== undefined}
         targetName={targetName}
       />
       {retry === undefined ? null : (
@@ -294,10 +305,9 @@ export function TargetedMessageCard({
           canAside={canAside}
           canBtw={canBtw}
           canSteer={canSteer}
-          mode={deliveries.at(-1)?.delivery ?? "steer"}
+          latest={deliveries.at(-1)}
           onRetry={retry}
           retrying={retrying}
-          sameModeRetry={sameModeRetry}
           targetName={targetName}
         />
       )}

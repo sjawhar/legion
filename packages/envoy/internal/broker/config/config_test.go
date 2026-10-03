@@ -17,7 +17,6 @@ func validEnv() map[string]string {
 	return map[string]string{
 		"BROKER_DATABASE_URL": "postgres://x",
 		"BROKER_PUBLIC_URL":   "https://secrets.internal.example",
-		"BROKER_UI_ORIGIN":    "https://secrets-ui.internal.example",
 		"BROKER_UI_TOKEN":     "ui-token",
 		"BROKER_RULES_FILE":   "/r.yaml",
 	}
@@ -32,27 +31,32 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 	}
 }
 
-// TestLoadRefusesDispatchVariables pins that AGENTC-393 v9's removed Dispatch variables fail
-// loudly rather than being silently ignored: the broker holds no Dispatch credential, so a stale
-// deployment env still setting one must refuse to start.
+// TestLoadRefusesDispatchVariables pins that the removed Dispatch variables fail loudly rather
+// than being silently ignored: the broker holds no Dispatch credential, so a stale deployment env
+// still setting one must refuse to start, naming the variable.
 func TestLoadRefusesDispatchVariables(t *testing.T) {
 	e := validEnv()
 	e["BROKER_DISPATCH_URL"] = "https://dispatch.internal.example"
 	_, err := Load(env(e))
-	want := "BROKER_DISPATCH_URL is removed; the broker holds no Dispatch credential (AGENTC-393 v9)"
-	if err == nil || err.Error() != want {
-		t.Fatalf("Load(BROKER_DISPATCH_URL set) = %v, want %q", err, want)
+	if err == nil || !strings.HasPrefix(err.Error(), "BROKER_DISPATCH_URL is removed; ") {
+		t.Fatalf("Load(BROKER_DISPATCH_URL set) = %v, want a refusal naming BROKER_DISPATCH_URL", err)
 	}
 }
 
-func TestLoadRequiresUIOriginAndToken(t *testing.T) {
+// TestLoadRefusesUIOrigin pins that BROKER_UI_ORIGIN, the WebAuthn origin approval by Dispatch
+// login removed, fails loudly rather than being silently ignored: a deployment still setting it
+// was built for the key-signature design and must be updated, not run half-migrated.
+func TestLoadRefusesUIOrigin(t *testing.T) {
 	e := validEnv()
-	delete(e, "BROKER_UI_ORIGIN")
-	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_UI_ORIGIN") {
-		t.Fatalf("expected BROKER_UI_ORIGIN refusal, got %v", err)
+	e["BROKER_UI_ORIGIN"] = "https://secrets-ui.internal.example"
+	_, err := Load(env(e))
+	if err == nil || !strings.HasPrefix(err.Error(), "BROKER_UI_ORIGIN is removed; ") {
+		t.Fatalf("Load(BROKER_UI_ORIGIN set) = %v, want a refusal naming BROKER_UI_ORIGIN", err)
 	}
+}
 
-	e = validEnv()
+func TestLoadRequiresUIToken(t *testing.T) {
+	e := validEnv()
 	delete(e, "BROKER_UI_TOKEN")
 	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_UI_TOKEN") {
 		t.Fatalf("expected BROKER_UI_TOKEN refusal, got %v", err)

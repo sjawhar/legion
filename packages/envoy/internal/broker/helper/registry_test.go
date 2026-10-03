@@ -84,27 +84,35 @@ func TestStateFollowsEnrollment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sess.State() != "enrolling" || sess.EnrollmentID() != "" {
+	if st := sess.snapshot(); st.State != "enrolling" || st.EnrollmentID != "" {
 		t.Fatal("a fresh session is enrolling")
 	}
 	sess.setError("broker 503 DATABASE: postgres unreachable")
-	if sess.LastError() == "" {
+	if sess.snapshot().LastError == "" {
 		t.Fatal("the last broker error is kept for NOT_ENROLLED replies")
 	}
 	sess.setEnrolled("enr-2")
-	if sess.State() != "enrolled" || sess.LastError() != "" {
-		t.Fatalf("enrolled: %s %q", sess.State(), sess.LastError())
+	if st := sess.snapshot(); st.State != "enrolled" || st.LastError != "" {
+		t.Fatalf("enrolled: %s %q", st.State, st.LastError)
 	}
 	select {
 	case <-sess.ready:
 	default:
 		t.Fatal("setEnrolled must close ready")
 	}
-	if id := sess.markLapsed(); id != "enr-2" {
+	if id := sess.markLapsed("the broker refused this session's renew (PROOF_INVALID); enrolling again"); id != "enr-2" {
 		t.Fatalf("markLapsed returns the lapsed id: %q", id)
 	}
-	if sess.State() != "enrolling" || sess.EnrollmentID() != "" {
+	if st := sess.snapshot(); st.State != "enrolling" || st.EnrollmentID != "" {
 		t.Fatal("a refused renew puts the session back to enrolling at once")
+	}
+	if got := sess.snapshot().LastError; got != "the broker refused this session's renew (PROOF_INVALID); enrolling again" {
+		t.Fatalf("a lapse records its reason as the last error: %q", got)
+	}
+	select {
+	case <-sess.readyCh():
+		t.Fatal("a lapse must reopen ready, so a register --wait waits for the re-enrollment")
+	default:
 	}
 	if got := sess.recordedEnrollmentID(); got != "enr-2" {
 		t.Fatalf("the record keeps the lapsed id until its revoke: %q", got)
@@ -112,5 +120,11 @@ func TestStateFollowsEnrollment(t *testing.T) {
 	sess.clearLapsed()
 	if got := sess.recordedEnrollmentID(); got != "" {
 		t.Fatalf("a revoked lapsed id leaves the record: %q", got)
+	}
+	sess.setEnrolled("enr-3")
+	select {
+	case <-sess.readyCh():
+	default:
+		t.Fatal("the re-enrollment must close the reopened ready")
 	}
 }

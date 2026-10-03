@@ -1,5 +1,6 @@
 import type { Actor, Ask, CommentDelivery, CommentMention, Event } from "../../api/types";
 import { actorLabel, describeAskResolution, shortSessionId } from "../refs/actor";
+import { receiptAnsweredWithError, rowAnsweredWithError } from "./delivery";
 
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
@@ -24,7 +25,15 @@ export type CommentEvent = Extract<
 export type CommentDeliveryEvent = Extract<Event, { type: "comment.delivery" }>;
 export type AskEvent = Extract<
   Event,
-  { type: "ask.opened" | "ask.anchor_refreshed" | "ask.edited" | "ask.answered" | "ask.resolved" }
+  {
+    type:
+      | "ask.opened"
+      | "ask.anchor_refreshed"
+      | "ask.edited"
+      | "ask.handed_back"
+      | "ask.answered"
+      | "ask.resolved";
+  }
 >;
 
 interface Turn {
@@ -47,8 +56,9 @@ export interface ThreadReply {
   seq: number;
   deliveries: MessageDeliveryEvent[];
 }
-/** Stored initial delivery rows include `pending`; later delivery events replace their row. */
-export type CommentDeliveryAttempt = CommentDelivery;
+/** Stored initial delivery rows include `pending`; later delivery events replace their row.
+ *  `answeredWithError` is read off whichever of the two it came from (`DeliveryOutcome`). */
+export type CommentDeliveryAttempt = CommentDelivery & { readonly answeredWithError: boolean };
 
 /** A message turn owns its thread: the replies beneath it and when the thread last moved. The
  *  turn sits in the conversation at `lastSeq`, so a reply on an old thread brings the thread to
@@ -136,6 +146,7 @@ function isAskEvent(event: Event): event is AskEvent {
     event.type === "ask.opened" ||
     event.type === "ask.anchor_refreshed" ||
     event.type === "ask.edited" ||
+    event.type === "ask.handed_back" ||
     event.type === "ask.answered" ||
     event.type === "ask.resolved"
   );
@@ -161,8 +172,11 @@ export function commentMentions(payload: CommentEvent["payload"]): readonly Comm
   return payload.mentions ?? [];
 }
 
-export function commentDeliveries(payload: CommentEvent["payload"]): CommentDelivery[] {
-  return payload.deliveries === undefined ? [] : [...payload.deliveries];
+export function commentDeliveries(payload: CommentEvent["payload"]): CommentDeliveryAttempt[] {
+  return (payload.deliveries ?? []).map((row) => ({
+    ...row,
+    answeredWithError: rowAnsweredWithError(row),
+  }));
 }
 
 /** Whether two actors are the same writer: one session id, or one human login. */
@@ -258,12 +272,16 @@ export function activityDescription(
         : `re-anchored an ask after an edit: “${event.payload.question}”`;
     case "ask.edited":
       return `edited the question "${event.payload.question}"`;
+    case "ask.handed_back":
+      return `handed “${event.payload.question}” back for approval`;
     case "ask.answered":
       return `answered “${event.payload.question}”`;
     case "message.created":
       return "sent a message";
     case "message.delivery":
       return "delivered a message";
+    case "message.accepted":
+      return "took a message as its own turn";
     case "message.answered":
       return "answered a message";
     case "child.status":
@@ -348,7 +366,8 @@ export function buildConversationItems({
         existing.ask = event.payload;
         existing.lastSeq = event.seq;
       }
-      if (event.type !== "ask.edited") continue;
+      // A rewording or a hand-back is also an activity line; other ask events are the card alone.
+      if (event.type !== "ask.edited" && event.type !== "ask.handed_back") continue;
     }
 
     if (isConversationComment(event)) {
@@ -409,6 +428,7 @@ export function buildConversationItems({
       const root = commentThreadOf.get(event.payload.comment_id);
       if (node !== undefined && root !== undefined) {
         const attempt: CommentDeliveryAttempt = {
+          answeredWithError: receiptAnsweredWithError(event),
           attempt: event.payload.attempt,
           comment_id: event.payload.comment_id,
           created_at: event.created_at,

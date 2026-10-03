@@ -15,14 +15,21 @@ It returns `details` `{ session, owner, service }`: `owner` is the lowercase log
 
 ## Handing a human a to-do, editing, resolving, and replying
 
-A to-do handed to a human is an ordinary question: phrase the to-do as the question and give it
-the options that name its outcomes, in the human's words - there is no fixed vocabulary and the
-server treats no label specially. If an outcome needs a reason, say so in that option's
-description, and the human's free-text answer carries it:
+A to-do handed to a human still follows the question and options contract that `skill://dispatch`'s
+"Writing for the human" states. For a human-only action, what it changes and risks constrains the
+answer. There is no fixed vocabulary and the server treats no label specially.
+If an outcome needs a reason, say so in that option's description, and the human's free-text answer
+carries it:
 ```ts
-dispatch_ask({ issue: "DSP-42",
-  question: "Run the production deploy for #19125?",
-  options: [{ label: "Deployed" }, { label: "Blocked", description: "Say what is missing." }] })
+dispatch_ask({
+  issue: "DSP-42",
+  question:
+    "The verified fix remains unavailable in production because deployment is pending. Deploying changes production and could expose a deployment problem. How should we proceed? Recommendation: deploy the verified fix now because it restores the intended behavior.",
+  options: [
+    { label: "Deploy the verified fix", description: "Restores the fix but can expose a deployment problem." },
+    { label: "Hold the deploy", description: "Avoids a production change now but leaves production without the fix." },
+  ],
+})
 ```
 
 Correct or refine an open ask in place instead of opening a second question:
@@ -62,8 +69,8 @@ dispatch_resolve_ask({
 Use `retracted` when the question is obsolete and `resolved` when you found the answer. Include the reason because the question remains
 in its Conversation card and reply thread; a reason beginning `removed from the document in version` is refused, because that is how a
 retraction the document's own settlement wrote is recognised. Resolving a block ask records it in the block too, so it stays resolved
-however the document moves afterwards — while deleting the block from the document is the other way to close one, and putting the block
-back reopens it. Resolution is not an answer: it never records a human decision, and an answered ask cannot be
+however the document moves afterwards. `dispatch_doc_edit` refuses deleting the block of an open ask; a block removed another way, by a
+whole-document `dispatch_artifact` replace or by a person in the browser, closes its ask, and putting the block back reopens it. Resolution is not an answer: it never records a human decision, and an answered ask cannot be
 resolved. A human may reply to an open or answered ask; so may you, e.g. after finding the answer — use `reply_to_ask` on
 `dispatch_comment` (mutually exclusive with `reply_to`).
 A review comment you opened has its own closer, `dispatch_resolve_comment` — see

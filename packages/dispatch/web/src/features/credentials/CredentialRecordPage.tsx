@@ -6,7 +6,6 @@ import { ApiError, api } from "../../api/client";
 import type { CredentialDecisionEvent } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
-import { getAssertion } from "../../lib/webauthn";
 import {
   dangerText,
   linkHoverText,
@@ -23,7 +22,7 @@ import { credentialRecordQuery } from "./record";
 function CredentialDecision({ decided }: { decided: CredentialDecisionEvent }): ReactNode {
   return (
     <div className="space-y-1 text-sm">
-      <p className={`font-medium capitalize ${textPrimaryOnCanvas}`}>
+      <p className={`font-medium first-letter:uppercase ${textPrimaryOnCanvas}`}>
         {decided.event} <Timestamp at={decided.at} />
       </p>
       {decided.credential_id === null ? null : (
@@ -36,10 +35,10 @@ function CredentialDecision({ decided }: { decided: CredentialDecisionEvent }): 
 /**
  * The credential-record approval page: an approver reaches `/credentials/:recordId` from the
  * inbox's credential-requests section (or a shared link), sees the broker's facts and the
- * agent's stated reason, and, for a pending `agent_secret` record, runs the WebAuthn ceremony to
- * approve or deny it. A `launcher_credential` (machine) record never gets buttons here (ruling
- * 13 - its challenges only ever come from the code-lookup route); it links to `MachineLoginPage`
- * instead.
+ * agent's stated reason, and, for a pending `agent_secret` record, approves or denies it with one
+ * click — Dispatch names the viewer's own login, and the broker decides whether it is the
+ * record's approver. A `launcher_credential` (machine) record never gets buttons here (ruling
+ * 13 - only its typed code selects it); it links to `MachineLoginPage` instead.
  */
 export function CredentialRecordPage(): ReactNode {
   const { recordId } = useParams<{ recordId: string }>();
@@ -53,24 +52,12 @@ export function CredentialRecordPage(): ReactNode {
   };
 
   const approve = useMutation({
-    mutationFn: async () => {
-      if (recordId === undefined || query.data?.challenges === null || query.data === undefined) {
-        throw new Error("No approve challenge available for this record");
-      }
-      const assertion = await getAssertion(query.data.challenges.approve, window.location.hostname);
-      return api.approveCredentialRecord(recordId, { assertion });
-    },
+    mutationFn: () => api.approveCredentialRecord(recordId ?? ""),
     onSettled: () => submitGuard.release(),
     onSuccess: invalidateAfterDecision,
   });
   const deny = useMutation({
-    mutationFn: async () => {
-      if (recordId === undefined || query.data?.challenges === null || query.data === undefined) {
-        throw new Error("No deny challenge available for this record");
-      }
-      const assertion = await getAssertion(query.data.challenges.deny, window.location.hostname);
-      return api.denyCredentialRecord(recordId, { assertion });
-    },
+    mutationFn: () => api.denyCredentialRecord(recordId ?? ""),
     onSettled: () => submitGuard.release(),
     onSuccess: invalidateAfterDecision,
   });
@@ -108,7 +95,7 @@ export function CredentialRecordPage(): ReactNode {
         >
           Enter the code shown on the machine
         </Link>
-      ) : record.state === "pending" && record.challenges !== null ? (
+      ) : record.state === "pending" ? (
         <CredentialDecisionButtons approve={approve} deny={deny} submitGuard={submitGuard} />
       ) : record.decided !== null ? (
         <CredentialDecision decided={record.decided} />

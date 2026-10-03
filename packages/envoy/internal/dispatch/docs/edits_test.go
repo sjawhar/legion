@@ -1080,13 +1080,12 @@ func TestApplyOperationReplaceKeepsAHeadingMarkerLiteralInATextblock(t *testing.
 	}
 }
 
-// AGENTC-193's own payload was whitespace-prefixed (`   - **Retracted …`), and the parser opens
-// a block on a marker up to three spaces or a tab run in. Markdown cannot carry a textblock's
-// leading indentation — the parser strips it, and no escape exists for a space — so the round
-// trip these rows can hold is the one that matters: the canonical markdown parses at all (inside
-// a list item it used to be outside the Proof schema), no block changes type, and rendering it is
-// a fixed point. Rows named by Deep1326 and Rev1326. Four spaces or a tab is past this boundary:
-// the parser reads that as a code block, so it is refused instead — see the sibling test.
+// A payload can be whitespace-prefixed (`   - **Retracted …`), and the parser opens a block on a
+// marker up to three spaces or a tab run in. Markdown cannot carry a textblock's leading
+// indentation — the parser strips it, and no escape exists for a space — so the round trip these
+// rows can hold is the one that matters: the canonical markdown parses at all, inside a list item
+// too, no block changes type, and rendering it is a fixed point. Four spaces or a tab is past this
+// boundary: the parser reads that as a code block, so it is refused instead — see the sibling test.
 func TestApplyOperationReplaceKeepsAnIndentedMarkerFromChangingTheDocument(t *testing.T) {
 	for _, test := range []struct {
 		name, markdown, find, with string
@@ -1133,11 +1132,10 @@ func TestApplyOperationReplaceKeepsAnIndentedMarkerFromChangingTheDocument(t *te
 	}
 }
 
-// A `with` the caller wrote that renders to nothing used to splice nothing over the match,
-// deleting their text and reporting the batch applied: four spaces or a tab is a code block, and
-// whitespace alone has no inline content. An empty `with` is the only one that deletes on
-// purpose. This is LEGION-280, reachable from the escape the marker refusal suggests
-// (Quality1326, Deep1326).
+// A `with` the caller wrote that renders to nothing is refused, since splicing nothing over the
+// match would delete their text and report the batch applied: four spaces or a tab is a code
+// block, and whitespace alone has no inline content. An empty `with` is the only one that deletes
+// on purpose. This is LEGION-280, reachable from the escape the marker refusal suggests.
 func TestApplyOperationReplaceRefusesAWithThatParsesToNoText(t *testing.T) {
 	for _, test := range []struct{ name, with string }{
 		{name: "four spaces", with: "    - Not a bullet"},
@@ -1168,8 +1166,8 @@ func TestApplyOperationReplaceRefusesAWithThatParsesToNoText(t *testing.T) {
 // A hard line break inside `with` puts the text after it at a true line start, where `1. `, `- `,
 // `# ` and `> ` are block markers — and replace is inline, so that text can only continue the
 // matched block as escaped literal prose, never open the list, heading or blockquote the caller
-// wrote the marker for. It used to be spliced in silently, which is the same silent structural
-// mismatch LEGION-280 closed at position 0, one hard break further in.
+// wrote the marker for. Spliced in silently, it would be the same silent structural mismatch
+// LEGION-280 closed at position 0, one hard break further in.
 func TestApplyOperationReplaceRejectsABlockMarkerAfterAHardBreak(t *testing.T) {
 	for _, test := range []struct{ name, with, marker string }{
 		{name: "a two-space break into an ordered one", with: "Body.  \n1. item", marker: "1. "},
@@ -1426,9 +1424,9 @@ func TestApplyOperationsInsertKeepsAnIDADeleteEarlierInTheBatchFreed(t *testing.
 	}
 }
 
-// A `with` whose text the inline parser cannot hold must be refused, not cut short: an indented
-// code block after the first paragraph used to vanish - and every paragraph after it with it -
-// while the batch reported itself changed.
+// A `with` whose text the inline parser cannot hold must be refused, not cut short: cut short, an
+// indented code block after the first paragraph would vanish - and every paragraph after it with
+// it - while the batch reported itself changed.
 func TestApplyOperationReplaceRefusesAWithItWouldCutShort(t *testing.T) {
 	for _, test := range []struct {
 		with    string
@@ -1459,9 +1457,9 @@ func TestApplyOperationReplaceRefusesAWithItWouldCutShort(t *testing.T) {
 
 // A replace continues the text around it with the spaces and tabs at the edges of its `with`,
 // which parsing strips: once, outside any mark, and without the line breaks, which an inline
-// replacement cannot carry. Each of these once wrote something else - a bold that no longer reads
-// as bold, a code span or link whose text gained the space, a no-break space written twice, a
-// blank line that split the paragraph.
+// replacement cannot carry. Getting any of these wrong writes something else - a bold that no
+// longer reads as bold, a code span or link whose text gained the space, a no-break space written
+// twice, a blank line that split the paragraph.
 func TestApplyOperationReplaceKeepsItsEdgeWhitespaceOnceOutsideTheMarks(t *testing.T) {
 	for _, test := range []struct{ with, want string }{
 		{with: " **x**", want: "foo  **x** bar"},
@@ -1804,9 +1802,9 @@ func blockIDOfText(t *testing.T, tree *pmdoc.Node, text string) string {
 	return id
 }
 
-// AGENTC-193's spec came back with `## ##`, `7. 7\.`, `4. 4\.` and `-    - `: a `with` carrying
-// the marker its own block already renders wrote that marker twice. The heading rename is the
-// one shape that keeps working, because `find` carried the marker through the match.
+// A `with` carrying the marker its own block already renders would write that marker twice
+// (`## ##`, `7. 7\.`, `4. 4\.`, `-    - `). The heading rename is the one shape that keeps
+// working, because `find` carried the marker through the match.
 func TestApplyOperationReplaceKeepsOneHeadingMarkerOnARename(t *testing.T) {
 	tree, err := parseInput("## New since we talked (2026-09-24)\n\nBody.\n")
 	if err != nil {
@@ -1925,9 +1923,9 @@ func TestApplyOperationReplaceSetsAHeadingLevelOnlyFromALevelNamingFind(t *testi
 	}
 }
 
-// The refusal quotes the marker the reader will see in the document, not a stand-in: AGENTC-193's
-// item was `7.`, and telling that reader the block renders `1.` sends them looking for a
-// different bullet. A list beside a list of its kind is written with the kind's other marker.
+// The refusal quotes the marker the reader will see in the document, not a stand-in: telling a
+// reader whose item is `7.` that the block renders `1.` sends them looking for a different
+// bullet. A list beside a list of its kind is written with the kind's other marker.
 func TestApplyOperationReplaceRefusalQuotesTheBlocksRealMarker(t *testing.T) {
 	for _, test := range []struct{ markdown, find, with, want string }{
 		{markdown: "7. Launcher contract\n8. Acceptance\n", find: "Launcher contract", with: "9. Launcher contract", want: `"7. "`},
@@ -2013,8 +2011,8 @@ func TestApplyOperationReplaceKeepsAMarkerTheRendererDoesNotRepeatLiteral(t *tes
 	}
 }
 
-// AGENTC-193's anchor was a prefix of a longer heading, and all the agent was told was
-// `pmdoc: target not found`.
+// An anchor that is a prefix of a longer heading misses, and the miss names the anchor and the
+// nearest headings rather than only `pmdoc: target not found`.
 func TestApplyOperationHeadingAnchorMissNamesTheAnchorAndNearestHeadings(t *testing.T) {
 	tree, err := parseInput("## New since we talked (2026-09-24) - SUPERSEDED, kept as record\n\nBody.\n\n## Acceptance\n")
 	if err != nil {
@@ -2178,6 +2176,79 @@ func TestApplyOperationsTableWidthRefusalHasNoServiceProse(t *testing.T) {
 	}
 }
 
+// A fragment that passes the line check is parsed as rows of the table it lands in, as a
+// whole-document write of the same rows is, whatever one- or two-hyphen rows it holds, and what that
+// parse refuses is refused; a table the fragment makes itself keeps its own refusal, and a fragment
+// that parse does not read as one table is the block path's, read as a document of its own.
+func TestApplyOperationsJudgesTableRowsAgainstTheirTable(t *testing.T) {
+	const three = "| K | V | W |\n| --- | --- | --- |\n| a | b | c |\n"
+	const two = "| K | V |\n| --- | --- |\n| a | c |\n"
+	for _, test := range []struct {
+		name, table, markdown string
+		// code is the error code the insert answers, or "" where it stores the rows as the
+		// whole-document write of the table and the markdown does.
+		code string
+	}{
+		{"dash row under three columns", three, "| A11 | x |\n| - | - |\n| A12 | y | z |", ""},
+		{"dash row of one cell under three columns", three, "| A11 |\n| - |\n| A12 | y |", ""},
+		{"dash row above a wide row", two, "| A11 | x |\n| - | - |\n| A12 | y | z |", "TABLE_WIDTH"},
+		{"wide row", two, "| A11 | x |\n| A12 | y | z |", "TABLE_WIDTH"},
+		{"wide row in a list's own table", two, "- | h |\n  | - |\n  | a | b |", "INVALID_OP"},
+		{"wide row in a table after a heading", two, "# h | x\n| a |\n| - |\n| b | c |", "INVALID_OP"},
+		// U+00A0 is a cell's text to goldmark's row trim, so `|` before one is no lone `|`: the line
+		// is a row, and a dash cell beside one is no delimiter row.
+		{"lone pipe and U+00A0 after a wide row", two, "| A11 | x | y |\n|\u00a0", "TABLE_WIDTH"},
+		{"lone pipe and U+00A0", two, "| A11 | x |\n|\u00a0", ""},
+		{"dash cell and U+00A0", two, "| A11 | x |\n| --- |\u00a0", ""},
+		// The rows parse refuses before it asks whether it read one table, so a heading after a wide
+		// row is answered for the row, where the block path alone would store a paragraph and a heading.
+		{"wide row then a heading", two, "| a | b | c |\n# h | x", "TABLE_WIDTH"},
+		// The only case the block path answers: the heading after the rows makes it read the fragment
+		// as a document of its own, whose dash row makes a table of its first row. Refused at that
+		// table's width, where main stored it with `z` dropped and an upload stores the rows.
+		{"dash row and a heading under three columns", three, "| A11 | x |\n| - | - |\n| A12 | y | z |\n# h | q", "INVALID_OP"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.table)
+			if err != nil {
+				t.Fatal(err)
+			}
+			batch, err := applyOperations(tree, []model.EditOp{{Op: "insert", Markdown: test.markdown, After: "c"}})
+			switch test.code {
+			case "INVALID_OP":
+				var invalid *ErrInvalidOp
+				if !errors.As(err, &invalid) || errors.Is(err, pmdoc.ErrTableWidth) {
+					t.Fatalf("insert = %v, want INVALID_OP and not TABLE_WIDTH", err)
+				}
+			case "TABLE_WIDTH":
+				var invalid *ErrInvalidOp
+				if !errors.Is(err, pmdoc.ErrTableWidth) || errors.As(err, &invalid) {
+					t.Fatalf("insert = %v, want TABLE_WIDTH and not INVALID_OP", err)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("insert = %v, want the rows stored", err)
+				}
+				written, err := pmdoc.ParseForWrite(test.table+test.markdown+"\n", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := pmdoc.Render(batch.tree)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, err := pmdoc.Render(written)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != want {
+					t.Fatalf("insert stored %q, the document write %q", got, want)
+				}
+			}
+		})
+	}
+}
+
 // blockAskHarness seeds a document with the ask fixture, settles it, and returns the ask's
 // id plus helpers that settle the room and count the events on that ask.
 func blockAskHarness(t *testing.T) (*Service, string, string, func(), func() int) {
@@ -2329,7 +2400,7 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 			pmdoc.EnsureBlockIDs(tree)
 			var id string
 			pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
-				if node.Type == "paragraph" && nodeText(node) == "Body." {
+				if node.Type == "paragraph" && pmdoc.TextContent(node) == "Body." {
 					id = blockID(node)
 				}
 				return true
@@ -2345,7 +2416,7 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 				}
 				return true
 			})
-			if emptied == nil || emptied.Type != "paragraph" || nodeText(emptied) != "" {
+			if emptied == nil || emptied.Type != "paragraph" || pmdoc.TextContent(emptied) != "" {
 				t.Fatalf("after replacing with nothing, block %q = %+v, want an empty paragraph", id, emptied)
 			}
 		})
@@ -2487,7 +2558,7 @@ func TestApplyOperationReplaceEscapesBlockSyntaxBesideAnEmptiedParagraph(t *test
 			}
 			kept := false
 			pmdoc.Walk(back.Children[1], func(node *pmdoc.Node) bool {
-				kept = kept || node.Type == "paragraph" && nodeText(node) == test.with
+				kept = kept || node.Type == "paragraph" && pmdoc.TextContent(node) == test.with
 				return true
 			})
 			if !kept {

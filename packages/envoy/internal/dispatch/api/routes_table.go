@@ -1,8 +1,13 @@
 package api
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"sort"
+
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // routeAuth names who may call a route. It describes the check the handler performs; the
@@ -64,7 +69,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodDelete, "/api/v1/me/agent-tokens/{id}", authHuman, "Revoke a personal agent token.", s.revokeAgentToken},
 		{http.MethodGet, "/api/v1/users", authHuman, "The humans who may sign in; the assignee picker's options.", s.listUsers},
 		{http.MethodGet, "/api/v1/whoami", authAny, "Who the server takes the caller for: {kind: user, login} or {kind: agent, owner, service} (owner is a personal token's lowercase login, null for the shared token; service is a verified service-account token's Kubernetes subject, null otherwise).", s.whoami},
-		{http.MethodGet, "/api/v1/issues", authAny, "List issues; filters project, status, parent, label, priority (repeatable: 0-3, or none for unset), open, updated_since, route_status (live, no_holder or unknown; open issues only); ?pinned=true is human-only.", s.listIssues},
+		{http.MethodGet, "/api/v1/issues", authAny, fmt.Sprintf("List issues; filters project, status, parent, label, priority (repeatable: 0-3, or none for unset), open, updated_since, route_status (live, no_holder or unknown; open issues only); ?pinned=true is human-only. Pages with limit (1-%d) and offset (0 or more; alone it pages %d): a paged answer is {issues, total, limit, offset}, total counting every issue the filters match; without either it is every matching issue as an array. cursor is 400 INVALID_QUERY.", contracts.MaxIssuePageLimit, contracts.DefaultIssuePageLimit), s.listIssues},
 		{http.MethodPost, "/api/v1/issues", authAny, "Create an issue (native, or from a GitHub owner/repo#n ref); assignee defaults to the creating human, the personal token's owner, or the parent's assignee.", s.createIssue},
 		{http.MethodGet, "/api/v1/issues/resolve", authAny, "Resolve ?ref=<KEY | owner/repo#n> to an issue key.", s.resolveIssue},
 		{http.MethodGet, "/api/v1/issues/{key}", authAny, "Read an issue with its open asks and primary document.", s.getIssue},
@@ -82,14 +87,15 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/issues/{key}/messages/{id}", authAny, "Read one message with its deliveries and replies.", s.getMessage},
 		{http.MethodGet, "/api/v1/messages/{id}", authAny, "Read the conversation a message belongs to by any message id in it, issue-less or not: the thread root with its deliveries and every reply, oldest first. An issue thread follows the issue's rule. On a direct (issue-less) thread a bearer names its session in ?session= and reads only one whose root targets that session or that it replied in (403 THREAD_FORBIDDEN), a guard against reading another session's conversation by mistake, not an authorization boundary. Direct-conversation text also reaches every authenticated caller through GET /api/v1/events; nothing in Dispatch restricts it by session.", s.getMessageThread},
 		{http.MethodPost, "/api/v1/messages/{id}/deliveries", authAny, "Retry delivering a targeted message.", s.createDelivery},
+		{http.MethodPost, "/api/v1/messages/{id}/deliveries/{attempt}/accept", authBearer, "The attempt's session records that it took the message as its user's own turn; the session names itself in actor (403 ACCEPT_FORBIDDEN for another's attempt). One compare-and-set: only a direct message to that session, on no issue, neither a broadcast's copy nor a reply in a broadcast's thread, in a thread whose root targets it (409 ACCEPT_NOT_DIRECT), that a person wrote (409 ACCEPT_NOT_WRITTEN_BY_PERSON), sent as a Send or an Aside (409 ACCEPT_NOT_ASIDE_OR_STEER); only the message's latest attempt (409 ACCEPT_SUPERSEDED), when no attempt of it was accepted before (409 ACCEPT_ALREADY_ACCEPTED), which a person requested (409 ACCEPT_NOT_REQUESTED_BY_PERSON), that person being the message's author (409 ACCEPT_NOT_REQUESTED_BY_AUTHOR), which did not fail (409 ACCEPT_FAILED; a pending or sent attempt is taken), within the last minute (409 ACCEPT_STALE). Answers the attempt with accepted_at and accepted_as and the message's stored body; leaves the attempt's state to the send, and appends message.accepted.", s.acceptDelivery},
 		{http.MethodPost, "/api/v1/messages/{id}/reply", authBearer, "The targeted session's reply to a delivery; the session names itself in actor. Once the attempt is answered, ?follow_up=true posts other text as the session's follow-up, threaded under its first reply; with follow_up=false or absent, or with text the session already posted there, nothing is posted and the stored message comes back marked duplicate. Any other follow_up is 400 MESSAGE_INPUT.", s.replyMessage},
 		{http.MethodGet, "/api/v1/inbox", authHuman, "Open asks waiting on the caller, grouped by whose turn it is; ?project= and ?assignee=me|unassigned|<login> filter (unassigned includes document asks; an unlisted login is 400 ASSIGNEE_NOT_ALLOWED).", s.listInbox},
-		{http.MethodGet, "/api/v1/search", authAny, "Full-text search ?q= across issues, documents, asks, and comments.", s.search},
+		{http.MethodGet, "/api/v1/search", authAny, fmt.Sprintf("Full-text search ?q= across issues, documents, asks, and comments, within ?project= when given; a q over %d characters is 400 CAP_EXCEEDED, and a project that is not a project key is 400 INVALID_PROJECT.", contracts.SearchQueryMax), s.search},
 		{http.MethodGet, "/api/v1/agents", authAny, "Live sessions with roles, capabilities, open asks, and last activity.", s.listAgents},
 		{http.MethodGet, "/api/v1/agents/{session_id}/messages", authHuman, "A session's targeted messages, newest first.", s.listAgentMessages},
 		{http.MethodPost, "/api/v1/agents/{session_id}/messages", authHuman, "Send an issue-less targeted message to a session.", s.createAgentMessage},
 		{http.MethodGet, "/api/v1/agents/{session_id}/stream", authHuman, "Server-sent stream of a live session's own conversation, relayed from the session itself: an SSE `replay` event with what the session can still replay, then a `frame` event per turn, tool call, and streamed update. Nothing is stored.", s.streamAgentConversation},
-		{http.MethodPost, "/api/v1/broadcasts", authHuman, "Send one message to many sessions: one targeted message per recipient under a shared broadcast. A selected session that is not live or does not advertise the mode is excluded and named in the response, never switched to another mode.", s.createBroadcast},
+		{http.MethodPost, "/api/v1/broadcasts", authHuman, "Send one message to many sessions: one targeted message per recipient under a shared broadcast. A selected session that is not live or does not advertise the mode is excluded and named in the response, never switched to another mode. `idempotency_key` names one send: a repeat with the same key and request answers the original broadcast (200); a reuse for a different request is 409 BROADCAST_KEY_REUSED naming the broadcast that used it, and sends nothing.", s.createBroadcast},
 		{http.MethodGet, "/api/v1/broadcasts", authHuman, "Recent broadcasts, newest first, with their recipient and reply counts.", s.listBroadcasts},
 		{http.MethodGet, "/api/v1/broadcasts/{id}", authHuman, "One broadcast with every recipient's delivery attempts and replies, recipients in the order the send named them; a broadcast from before that order was stored falls back to created_at, id.", s.getBroadcast},
 		{http.MethodPost, "/api/v1/issues/{key}/asks", authAny, "Open a question ask on an issue (options optional).", s.createAsk},
@@ -121,10 +127,12 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/artifacts/{id}/subscribers", authHuman, "Sessions subscribed to a document's topics.", s.listArtifactSubscribers},
 		{http.MethodDelete, "/api/v1/artifacts/{id}/subscribers/{session_id}", authHuman, "Unsubscribe a session from a document.", s.unsubscribeArtifactSession},
 		{http.MethodGet, "/api/v1/artifacts/{id}", authAny, "Read a document's metadata and current version.", s.getArtifact},
+		{http.MethodPost, "/api/v1/artifacts/{id}/rebuild", authHuman, "Rebuild a document history ygo cannot load from its latest saved markdown; a live document is 409 DOCUMENT_LIVE and one that loads is 409 DOCUMENT_LOADS.", s.rebuildArtifact},
 		{http.MethodGet, "/api/v1/artifacts/{id}/reviews", authAny, "List a document's approval reviews.", s.listArtifactReviews},
-		{http.MethodPost, "/api/v1/artifacts/{id}/reviews", authHuman, "Approve or request changes on a document's latest settled version; answers the approval ask open at that version, and retracts one naming an older version.", s.createArtifactReview},
-		{http.MethodPost, "/api/v1/artifacts/{id}/approval-requests", authAny, "Open the approval ask for a document's latest version, with an optional summary; a repeated request returns the ask open at that version and replaces a stale one, which names an older version.", s.requestArtifactApproval},
+		{http.MethodPost, "/api/v1/artifacts/{id}/reviews", authHuman, "Approve or request changes on a document's latest settled version; answers the open approval ask when present, preserving its thread.", s.createArtifactReview},
+		{http.MethodPost, "/api/v1/artifacts/{id}/approval-requests", authAny, "Open an approval ask for a document's latest version, with an optional summary. An open ask follows later versions and waits on its agent until this route hands the same row back to a human.", s.requestArtifactApproval},
 		{http.MethodGet, "/api/v1/artifacts/{id}/blocks", authAny, "A document's blocks with markdown ranges, tokens, and reference counts.", s.getArtifactBlocks},
+		{http.MethodGet, "/api/v1/artifacts/{id}/blocks/{block_id}", authAny, "Where one block stands in a document: its path from the top-level block down (type, id, child index), and for a table block, row or cell the table's id, the row index (0 is the header), the cell's column index, the text of the header cell drawn above it and the row's cells; 404 TARGET_NOT_FOUND for an id the live document does not hold.", s.getArtifactBlockPath},
 		{http.MethodGet, "/api/v1/artifacts/{id}/text", authAny, "A document's canonical markdown and whole-document token.", s.getArtifactText},
 		{http.MethodGet, "/api/v1/artifacts/{id}/versions/{number}", authAny, "One named or settled document version.", s.getArtifactVersion},
 		{http.MethodPost, "/api/v1/artifacts/{id}/versions", authAny, "Name the current document version.", s.createNamedVersion},
@@ -143,25 +151,24 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/projects/{key}/artifacts/{slug}/edits", authAny, "Apply edit ops with an optional optimistic-concurrency precondition to a project document, by slug or unambiguous filename.", s.editArtifact},
 		{http.MethodGet, "/api/v1/me/state", authHuman, "The caller's per-issue read state.", s.getUserState},
 		{http.MethodPut, "/api/v1/me/issues/{key}/state", authHuman, "Update the caller's read state for an issue.", s.putUserState},
-		{http.MethodGet, "/api/v1/me/agents/state", authHuman, "The caller's per-agent conversation state: cleared_before, read_through, and unread_replies (the session's replies to the caller's direct messages newer than both).", s.getUserAgentState},
-		{http.MethodPut, "/api/v1/me/agents/{session_id}/state", authHuman, "Clear an agent's conversation for the caller (cleared_before hides exchanges at or before it) and/or mark it read (read_through only moves forward); answers the session's state.", s.putUserAgentState},
+		{http.MethodGet, "/api/v1/me/agents/state", authHuman, "The caller's per-agent conversation state: cleared_before, read_through, and unread_replies (the session's replies to the caller's direct messages newer than both and not read by id).", s.getUserAgentState},
+		{http.MethodPut, "/api/v1/me/agents/{session_id}/state", authHuman, "Clear an agent's conversation for the caller (cleared_before hides exchanges at or before it), mark it read (read_through only moves forward), and/or mark some of its replies read by id (read_replies, the session's own messages); answers the session's state.", s.putUserAgentState},
 		{http.MethodPut, "/api/v1/me/asks/{id}/snooze", authHuman, "Snooze an inbox row for the caller until snoozed_until.", s.putAskSnooze},
 		{http.MethodDelete, "/api/v1/me/asks/{id}/snooze", authHuman, "Un-snooze an inbox row for the caller.", s.deleteAskSnooze},
 		{http.MethodGet, "/api/v1/events", authAny, "Server-sent event stream; Last-Event-ID or ?since= resumes.", s.streamEvents},
-		{http.MethodGet, "/api/v1/credential-requests", authHuman, "List credential requests pending the caller's own decision (?approver=me only); 404 FEATURE_OFF without a configured secrets broker.", s.listCredentialPending},
-		{http.MethodGet, "/api/v1/credential-requests/{id}", authHuman, "Read one credential request's facts and, while pending, its WebAuthn challenges; the broker is authoritative.", s.getCredentialRecord},
-		{http.MethodPost, "/api/v1/credential-requests/{id}/approve", authHuman, "Approve a credential request with a WebAuthn assertion; relayed verbatim, the broker decides.", s.approveCredentialRecord},
-		{http.MethodPost, "/api/v1/credential-requests/{id}/deny", authHuman, "Deny a credential request with a WebAuthn assertion; relayed verbatim, the broker decides.", s.denyCredentialRecord},
-		{http.MethodPost, "/api/v1/credential-requests/machine-lookup", authHuman, "Resolve a pending machine login by its typed confirmation code, returning its facts and challenges.", s.lookupMachineCredential},
-		{http.MethodGet, "/api/v1/credential-keys/{login}", authHuman, "List a login's registered approver keys.", s.getCredentialKeys},
-		{http.MethodPost, "/api/v1/credential-keys/{login}/{kind}/{step}", authHuman, "Drive one step of a key ceremony (kind register|endorse, step begin|finish; anything else 404).", s.credentialKeyCeremony},
+		{http.MethodGet, "/api/v1/credential-requests", authHuman, "List credential requests pending the caller's own decision (?approver=me only); null without a configured secrets broker.", s.listCredentialPending},
+		{http.MethodGet, "/api/v1/credential-requests/{id}", authHuman, "Read one credential request's facts; the broker is authoritative.", s.getCredentialRecord},
+		{http.MethodPost, "/api/v1/credential-requests/{id}/approve", authHuman, "Approve a credential request as the caller (a machine login also takes its typed code); the broker decides whether the caller is its approver.", s.approveCredentialRecord},
+		{http.MethodPost, "/api/v1/credential-requests/{id}/deny", authHuman, "Deny a credential request as the caller (a machine login also takes its typed code); the broker decides whether the caller is its approver.", s.denyCredentialRecord},
+		{http.MethodPost, "/api/v1/credential-requests/machine-lookup", authHuman, "Resolve a pending machine login by its typed confirmation code, returning its facts.", s.lookupMachineCredential},
 		{http.MethodGet, "/api/v1/credential-grants", authHuman, "List credential grants the caller may revoke (?approver=me only).", s.listCredentialGrants},
-		{http.MethodPost, "/api/v1/credential-grants/{id}/revoke", authHuman, "Revoke a credential grant with a WebAuthn assertion.", s.revokeCredentialGrant},
+		{http.MethodPost, "/api/v1/credential-grants/{id}/revoke", authHuman, "Revoke a credential grant as the caller, its approver or its enrollment's operator.", s.revokeCredentialGrant},
 	}
 	if s.deps.TestHooksEnabled {
 		routes = append(routes,
 			apiRoute{http.MethodPost, "/api/v1/events/_test/disconnect", authAny, "Test hook: drop every open event stream.", s.disconnectAllStreams},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},
+			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
 			apiRoute{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
 		)
 	}
@@ -188,6 +195,18 @@ func routeIndexEntries(routes []apiRoute) []routeIndexEntry {
 	return entries
 }
 
+// routeIndexBody is the body GET /api/v1 answers.
+func routeIndexBody(entries []routeIndexEntry) map[string]any {
+	return map[string]any{"routes": entries, "docs": routeIndexDocs}
+}
+
 func (s *server) getRouteIndex(w http.ResponseWriter, _ *http.Request) {
-	WriteJSON(w, http.StatusOK, map[string]any{"routes": s.routeIndex, "docs": routeIndexDocs})
+	WriteJSON(w, http.StatusOK, routeIndexBody(s.routeIndex))
+}
+
+// WriteRouteIndex writes the body GET /api/v1 answers on a server without test hooks, read
+// from the table alone: no database, no listener. `envoy-dispatch routes` prints it, and the
+// docs site's API reference is generated from that output.
+func WriteRouteIndex(w io.Writer) error {
+	return json.NewEncoder(w).Encode(routeIndexBody(routeIndexEntries((&server{}).routes())))
 }

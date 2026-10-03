@@ -67,11 +67,9 @@ type Registry struct {
 type OpenOption func(*openOpts)
 
 type openOpts struct {
-	replicas       int
-	interestBucket string
-	roleBucket     string
-	now            func() time.Time
-	log            *slog.Logger
+	replicas int
+	now      func() time.Time
+	log      *slog.Logger
 }
 
 // WithLogger sets the logger the registry and its cache watcher write through. The listener passes
@@ -100,7 +98,7 @@ func WithClock(now func() time.Time) OpenOption {
 }
 
 func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
-	opts := openOpts{replicas: 1, interestBucket: Bucket, roleBucket: RoleBucket, now: time.Now, log: slog.Default()}
+	opts := openOpts{replicas: 1, now: time.Now, log: slog.Default()}
 	for _, o := range options {
 		o(&opts)
 	}
@@ -108,11 +106,11 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: opts.interestBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
+	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: Bucket, Replicas: opts.replicas, Storage: nats.FileStorage})
 	if err != nil {
 		return nil, err
 	}
-	roleKV, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: opts.roleBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
+	roleKV, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: RoleBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
 	if err != nil {
 		return nil, err
 	}
@@ -452,9 +450,9 @@ func (r *Registry) releaseRoleClaims(sessionID string, topics []string) error {
 	return nil
 }
 
-// releaseRoleClaim deletes role's claim when sessionID holds it. A claim this build cannot read
-// (bus.ErrRefused) has a holder nothing can tell, so it is left to the role reaper, which deletes
-// it.
+// releaseRoleClaim deletes role's claim when sessionID holds it. A claim stored under a key NATS
+// refuses (bus.ErrRefused: too long, or outside its key alphabet) has a holder nothing can tell, so
+// it is left to the role reaper, which deletes it, or skips one no KV call can delete.
 func (r *Registry) releaseRoleClaim(sessionID, role string) error {
 	claim, entry, err := r.roleClaim(role)
 	if errors.Is(err, bus.ErrRefused) {
@@ -657,9 +655,10 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 	if oldSessionID != "" && oldSessionID != sessionID {
 		err := r.removeInterestTopics(oldSessionID, []string{roleTopic})
 		if errors.Is(err, bus.ErrRefused) {
-			// The old holder is a session an earlier build registered under an id this one cannot
-			// write. The claim is written and the caller named nothing too long, so it succeeds; the
-			// interest reaper removes the old holder's interest once its session is gone.
+			// The old holder's id is a key NATS refuses (too long, or outside its key alphabet): an
+			// earlier build registered it, or a stored claim names it. The claim is written and the
+			// caller named no such key, so it succeeds; the interest reaper removes the old holder's
+			// interest once its session is gone, or skips one no KV call can delete.
 			r.logger().Warn("registry role claim left an old holder's interest it cannot write to the reaper",
 				slog.String("role", role),
 				slog.Int("key_bytes", len(oldSessionID)),
@@ -802,9 +801,10 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 // ReapRoleClaims removes claims whose holders did not re-register before the
 // session TTL elapsed. It is intentionally separate from Reap: the interest
 // reaper must not tear down a role during a listener restart grace window. A
-// claim this build cannot read (bus.ErrRefused: an earlier build stored it past
-// what a read of it may send) no build can resolve or write again, so it is
-// deleted too; one it cannot delete either is skipped, and the sweep goes on.
+// claim this build cannot read (bus.ErrRefused: one stored under a key NATS
+// refuses, too long or outside its key alphabet) no build can resolve or write
+// again, so it is deleted too; one it cannot delete either (a key outside the
+// alphabet) is skipped, and the sweep goes on.
 func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Duration) (int, error) {
 	roles, err := r.roles().Keys()
 	if errors.Is(err, nats.ErrNoKeysFound) {

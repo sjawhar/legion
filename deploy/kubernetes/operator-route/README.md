@@ -2,9 +2,10 @@
 
 Legion carries no model, provider or route knowledge. Everything a Legion pod needs to reach a model
 is the operator's, delivered through `runtime.kubernetes.pod` and `provider_keys`
-(`docs/kubernetes.md`, "Operator configuration"). [`pod.yml`](pod.yml) is the contract: the pieces
-an operator supplies, in the shape the daemon loads. The Go live harnesses run on it, with the
-`models.yml` and `overlay.yml` beside it.
+(`docs/kubernetes.md`, "Operator configuration"). This directory is an example of it:
+[`pod.yml`](pod.yml) is the pieces an operator supplies, in the shape the daemon loads, and
+[`models.yml`](models.yml) and [`overlay.yml`](overlay.yml) are the two files its ConfigMap holds,
+on the model names every other agent uses. The Go live harnesses run on all three.
 
 ## What an operator supplies
 
@@ -16,8 +17,8 @@ an operator supplies, in the shape the daemon loads. The Go live harnesses run o
 - **The credential the provider's key command reads, as a mounted file.** `models.yml`'s `apiKey`
   is a command (`!cat <path>`), and `pod.yml` mounts the directory holding it at
   `/var/run/operator`.
-- **The model endpoint's base URL**, which `apply.sh` puts in place of `models.yml`'s
-  `${MODEL_BASE_URL}` placeholder, so the repository holds no endpoint.
+- **The model endpoint's base URL**, which the operator puts in place of `models.yml`'s
+  `${MODEL_BASE_URL}` placeholder in their own copy, so the repository holds no endpoint.
 - **The audience its model endpoint accepts on the pod's projected ServiceAccount token**, which the
   operator puts in place of `pod.yml`'s `${MODEL_TOKEN_AUDIENCE}` placeholder when copying `pod.yml`
   into `legion.yaml`, so the repository holds no audience either.
@@ -29,22 +30,60 @@ filesystem error.
 
 ## Standing it up
 
+Copy `models.yml` and `overlay.yml` into a directory of the operator's own (for example
+`~/.local/state/legion-model-config`), put the model endpoint's base URL in place of
+`${MODEL_BASE_URL}` in that copy of `models.yml`, and write both into the ConfigMap,
+`legion-operator-route` in namespace `legion`:
+
 ```bash
-deploy/kubernetes/operator-route/apply.sh --context <kubectl context> --base-url https://<endpoint>
+deploy/kubernetes/operator-route/apply.sh --context <kube context> <directory>
 ```
 
-`--context` is required, and the output names the cluster it wrote to. Then put `pod.yml` under
-`runtime.kubernetes.pod` in the deployment's `legion.yaml`, with the gateway's audience in place of
-`${MODEL_TOKEN_AUDIENCE}`, and run `legion start --config <file> --check-config`, which applies the
-daemon's own collision checks and refuses a token audience still holding the placeholder.
+`--context` is required, and the output names the cluster it wrote to. `apply.sh` refuses a
+`models.yml` still holding the placeholder. Then put `pod.yml` under `runtime.kubernetes.pod` in
+the deployment's `legion.yaml`, with the gateway's audience in place of `${MODEL_TOKEN_AUDIENCE}`,
+and run `legion start --config <file> --check-config`, which applies the daemon's own collision
+checks and refuses a token audience still holding the placeholder. Every deployment whose pods
+mount `legion-operator-route` in that namespace reads the same copy.
 
-`pod.yml` mounts both files by `subPath`, and the kubelet never refreshes a `subPath` mount. A
-changed ConfigMap therefore reaches only pods created after the change; a running pod keeps the
-files it started with until it is relaunched.
+## Changing a role's model
+
+The two files in that directory are the operator's, and `apply.sh` is the only writer of the
+ConfigMap. To change the model a role uses, edit that role's line under `modelRoles` in
+`overlay.yml` and run the same `apply.sh` command; nothing in this repository changes. Pods started
+after that read the new file. A running pod keeps the files it started with until it restarts,
+because `pod.yml` mounts both by `subPath`, which the kubelet never refreshes.
 
 The ConfigMap carries no `legion.dev/project` label. A live harness run creates its own copy under a
 run-scoped name and deletes only objects labelled with its own run's project, so it never touches
 this one.
+
+## Signing in as the Legion machine user
+
+A gateway that admits Cognito user tokens takes a token from `legion model-token`, which the worker
+image carries at `/opt/legion/bin/legion`. Oh My Pi runs it as the model `apiKey` and runs it
+again after a 401. It signs in with Cognito's custom authentication (`InitiateAuth` with
+`CUSTOM_AUTH`, then `RespondToAuthChallenge`), answering the challenge with the pod's projected
+service-account token, and prints the access token. It signs in on every run and keeps no token,
+which suits Oh My Pi: Oh My Pi holds the token for the life of its process, so the run after a 401
+brings a token never used, the one a gateway that refuses a spent token accepts. It never keeps or
+uses the refresh or ID token Cognito also returns. A refused sign-in exits 1 with Cognito's error
+code on stderr, never the endpoint's own text, and prints no token. It reaches Cognito directly and
+trusts only the image's certificate store: Oh My Pi runs it with the workspace's `.env` in its
+environment, so no `HTTPS_PROXY`, `SSL_CERT_FILE` or `SSL_CERT_DIR` steers it.
+
+The daemon's image probe runs the command too, so every probe performs a real sign-in.
+
+Every value is the operator's, passed as flags in their own `models.yml`:
+
+```yaml
+    apiKey: "!/opt/legion/bin/legion model-token --region <pool region> --client-id <app client id> --username <machine user> --service-account-token-file /var/run/operator/token"
+```
+
+The service-account token is the projected token `pod.yml` already mounts at
+`/var/run/operator/token`, with the operator's dedicated sign-in audience in place of
+`${MODEL_TOKEN_AUDIENCE}`; `legion start --check-config` refuses that placeholder unfilled. Set
+`X-Api-Key` to the same command.
 
 ## How the pieces compose
 

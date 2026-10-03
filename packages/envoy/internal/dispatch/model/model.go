@@ -209,6 +209,15 @@ type IssueSummary struct {
 	OpenAsks  int       `json:"open_asks"`
 }
 
+// IssueSummaryPage is one page of GET /api/v1/issues?limit=&offset=: the issues at [offset,
+// offset+limit) of the filtered listing, in its order, and Total, how many the filters matched.
+type IssueSummaryPage struct {
+	Issues []IssueSummary `json:"issues"`
+	Total  int            `json:"total"`
+	Limit  int            `json:"limit"`
+	Offset int            `json:"offset"`
+}
+
 // SearchOwner identifies the issue or standalone project document that owns a search result.
 // An issue owner carries Key, Title and Status; a document owner carries Project, Slug,
 // ArtifactID and Name.
@@ -411,7 +420,10 @@ type ArtifactReview struct {
 // ArtifactApproval is a document's approval state as of its latest version:
 // draft (never reviewed or requested), awaiting (an approval ask is open),
 // approved (approved at the latest version), stale (approved at an older
-// version), or changes_requested (the latest review asks for changes).
+// version), or changes_requested (the latest review asks for changes). An
+// awaiting approval carries its request's WaitingOn: agent once a version moved
+// the request past the one its agent handed to the human, or a reply left it with
+// the agent; human otherwise (the ask reads' waiting_on).
 type ArtifactApproval struct {
 	State         string  `json:"state"`
 	LatestVersion int     `json:"latest_version"`
@@ -421,6 +433,7 @@ type ArtifactApproval struct {
 	Reason        *string `json:"reason,omitempty"`
 	AskID         *string `json:"ask_id,omitempty"`
 	RequestedBy   *Actor  `json:"requested_by,omitempty"`
+	WaitingOn     string  `json:"waiting_on,omitempty"`
 }
 
 // ArtifactReviewEventPayload is the payload of artifact.approved and
@@ -454,6 +467,53 @@ type BlockReferences struct {
 	Asks     int `json:"asks"`
 }
 
+// BlockPath is where a block stands in its document: GET /api/v1/artifacts/{id}/blocks/{block_id}'s
+// answer, and the anchor_block a comment's or ask's single read carries for its anchor's block.
+// Derived from the live document at read time; nothing stores it.
+type BlockPath struct {
+	ID    string           `json:"id"`
+	Type  string           `json:"type"`
+	Path  []BlockPathEntry `json:"path"`
+	Table *TablePosition   `json:"table,omitempty"`
+}
+
+// BlockPathEntry is one node on a block's path from the document's top-level block down to the
+// block: its type, block id ("" for a node the live document has not stamped yet) and index
+// among its parent's children.
+type BlockPathEntry struct {
+	Type  string `json:"type"`
+	ID    string `json:"id"`
+	Index int    `json:"index"`
+}
+
+// TablePosition places a block in the table holding it. Row is the row's index (0 the header row)
+// and Column the cell's index in its row, the indexes delete_row and delete_column take; Row is
+// nil for the table block, Column and Header for the table and a row block. Header is the text of
+// the header cell drawn above the cell's column once colspans and rowspans take their places, ""
+// where no header cell covers it. Cells is each cell of the row as its opening words; nil for the
+// table block.
+type TablePosition struct {
+	ID     string   `json:"id"`
+	Row    *int     `json:"row"`
+	Column *int     `json:"column"`
+	Header *string  `json:"header"`
+	Cells  []string `json:"cells"`
+}
+
+// AnchorPosition is where a comment's or an ask's anchor's block stands in the live document. Set
+// by the single-record reads alone (GET /api/v1/comments/{id}, GET /api/v1/asks/{id}), never by
+// lists or events.
+type AnchorPosition struct {
+	// AnchorBlock is nil when there is no anchor, the anchor names no block, the block has left
+	// the document, or the document could not be read, which AnchorBlockError then names.
+	AnchorBlock *BlockPath `json:"anchor_block,omitempty"`
+	// AnchorBlockError is why AnchorBlock is absent when the document could not be read: the code
+	// the API answers that error with elsewhere (DOC_SERVICE_UNAVAILABLE, DOC_SCHEMA,
+	// DOCUMENT_UNLOADABLE, INTERNAL);
+	// empty otherwise.
+	AnchorBlockError string `json:"anchor_block_error,omitempty"`
+}
+
 // Version is an immutable artifact version.
 type Version struct {
 	Number    int       `json:"number"`
@@ -481,12 +541,13 @@ type Ask struct {
 	Author          Actor              `json:"author"`
 	// Kind is "question" for ordinary asks, whose asker chooses the options, and
 	// "approval" for server-created document reviews.
-	Kind          string         `json:"kind"`
-	Question      string         `json:"question"`
-	Options       []AskOption    `json:"options"`
-	Multiple      bool           `json:"multiple"`
-	Urgency       string         `json:"urgency"`
-	Anchor        *Anchor        `json:"anchor"`
+	Kind     string      `json:"kind"`
+	Question string      `json:"question"`
+	Options  []AskOption `json:"options"`
+	Multiple bool        `json:"multiple"`
+	Urgency  string      `json:"urgency"`
+	Anchor   *Anchor     `json:"anchor"`
+	AnchorPosition
 	State         string         `json:"state"`
 	Answer        *AskAnswer     `json:"answer"`
 	Resolution    *AskResolution `json:"resolution,omitempty"`
@@ -498,10 +559,10 @@ type Ask struct {
 	EditedAt          *string `json:"edited_at"`
 	// Approval names the document an approval ask is about; nil for questions.
 	Approval *AskApproval `json:"approval,omitempty"`
-	// WaitingOn is whose reply an open ask needs next: "human" or "agent". It is the
-	// Turn of the newest comment in the ask's thread, "human" when nobody has replied.
-	// Set on ask reads only (inbox rows, ask lists, the ask detail), never on the
-	// ask.* event payloads; empty for answered and resolved asks.
+	// WaitingOn is whose reply an open ask needs next: a moved approval request stays with its
+	// agent while RequestedVersion is below Version, and a hand-back returns it to the human until
+	// a reply newer than the one it answered decides it. Set on ask reads only (inbox rows, ask lists,
+	// the ask detail), never on the ask.* event payloads; empty for answered and resolved asks.
 	WaitingOn string `json:"waiting_on,omitempty"`
 }
 
@@ -520,12 +581,14 @@ type AskBlockArtifact struct {
 	Primary bool   `json:"primary"`
 }
 
-// AskApproval is the document an approval ask asks about, at the version the
-// request was made for.
+// AskApproval is the document an approval ask names. Version follows the document's latest
+// settled version while the ask remains open. RequestedVersion is the version the agent most
+// recently handed to a human, so a lower value means the agent is revising the moved request.
 type AskApproval struct {
-	ArtifactID string `json:"artifact_id"`
-	Name       string `json:"name"`
-	Version    int    `json:"version"`
+	ArtifactID       string `json:"artifact_id"`
+	Name             string `json:"name"`
+	Version          int    `json:"version"`
+	RequestedVersion int    `json:"requested_version"`
 }
 
 // AskEditPrevious is the mutable content of an ask before an edit.
@@ -560,9 +623,9 @@ type AskFollowerEventPayload struct {
 	By        Actor  `json:"by"`
 }
 
-// AskLastReply is the newest comment in an ask's thread, carried on inbox rows and
-// on the issue detail's open asks so a human can see who spoke last. Whose turn it
-// is comes from that comment's Turn (Ask.WaitingOn), not from its author.
+// AskLastReply is the newest comment in an ask's thread, carried on inbox rows and on the issue
+// detail's open asks so a human can see who spoke last. Its Turn decides an ordinary ask's
+// WaitingOn; a moved approval request and one handed back after this reply override it.
 type AskLastReply struct {
 	Author    Actor  `json:"author"`
 	CreatedAt string `json:"created_at"`
@@ -618,6 +681,12 @@ type AskEditEventPayload struct {
 	ReferenceChangesPayload
 	Previous AskEditPrevious `json:"previous"`
 	EditedBy Actor           `json:"edited_by"`
+	// Quiet marks a version move of an approval request that already waited on its agent: it
+	// changes only the version the request names, so like a human's unnamed artifact.version it
+	// wakes nobody (events.Broker.Notify) and reaches no follower (the outbox's follower routes),
+	// while the event log and SSE carry it as they carry every event. The move that takes the
+	// request from the human is not quiet.
+	Quiet bool `json:"quiet,omitempty"`
 }
 
 // NewAskEditEventPayload builds the payload of an `ask.edited` event.
@@ -691,8 +760,9 @@ type CommentDelivery struct {
 	Delivery   string  `json:"delivery"`
 	SessionID  *string `json:"session_id"`
 	EnvelopeID *string `json:"envelope_id"`
-	// Duplicate reports that the stream already held this message when the attempt was sent,
-	// so the recipient gained nothing from it. EnvelopeID is then nil.
+	// Duplicate reports that the stream already held this message when the attempt was sent: an
+	// earlier attempt landed, so this one is a repeat the recipient is not handed again
+	// (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). EnvelopeID is then nil.
 	Duplicate    bool      `json:"duplicate"`
 	State        string    `json:"state"`
 	Error        *string   `json:"error"`
@@ -713,8 +783,8 @@ type CommentDeliveryEventPayload struct {
 	Delivery  string  `json:"delivery"`
 	SessionID *string `json:"session_id"`
 	State     string  `json:"state"`
-	// Duplicate reports that the stream already held this message, so the mentioned session
-	// gained nothing from this attempt.
+	// Duplicate reports that the stream already held this message: an earlier attempt landed, so
+	// this one is a repeat the mentioned session is not handed again.
 	Duplicate bool    `json:"duplicate,omitempty"`
 	Error     string  `json:"error,omitempty"`
 	ReplyID   *string `json:"reply_id"`
@@ -727,13 +797,15 @@ type Comment struct {
 	Author     Actor   `json:"author"`
 	Body       string  `json:"body"`
 	Anchor     *Anchor `json:"anchor"`
-	ReplyTo    *string `json:"reply_to"`
-	AskID      *string `json:"ask_id"`
-	// Turn is set on a reply to an open ask (AskID non-nil) and names who holds the
-	// turn after this comment: "human" when the human needs to act, "agent" when the
-	// comment is a progress note and the asking agent still owes the next move. A
-	// human's reply always hands the turn to the agent. Nil on replies under a closed
-	// ask (nothing is waiting) and on every other comment.
+	AnchorPosition
+	ReplyTo *string `json:"reply_to"`
+	AskID   *string `json:"ask_id"`
+	// Turn is set on a reply to an open ask (AskID non-nil) and names whose turn the reply hands
+	// over: "human" when the human needs to act, "agent" when the comment is a progress note and
+	// the asking agent still owes the next move. A human's reply always hands the turn to the
+	// agent. The ask's WaitingOn follows its newest reply's Turn except where an approval request
+	// overrides it (moved, or handed back after this reply). Nil on replies under a closed ask
+	// (nothing is waiting) and on every other comment.
 	Turn       *string           `json:"turn"`
 	Resolved   bool              `json:"resolved"`
 	ResolvedBy *Actor            `json:"resolved_by"`
@@ -843,31 +915,44 @@ type CommentEventPayload struct {
 
 // Message is a short update, optionally linked to an issue and threaded under another message.
 type Message struct {
-	ID         string            `json:"id"`
-	IssueKey   *string           `json:"issue_key"`
-	Author     Actor             `json:"author"`
-	Body       string            `json:"body"`
-	Target     *string           `json:"target"`
-	InReplyTo  *string           `json:"in_reply_to"`
-	CreatedAt  time.Time         `json:"created_at"`
-	Deliveries []MessageDelivery `json:"deliveries"`
+	ID        string  `json:"id"`
+	IssueKey  *string `json:"issue_key"`
+	Author    Actor   `json:"author"`
+	Body      string  `json:"body"`
+	Target    *string `json:"target"`
+	InReplyTo *string `json:"in_reply_to"`
+	// BroadcastID names the broadcast this message is one recipient's copy of, and is null for
+	// every other message.
+	BroadcastID *string           `json:"broadcast_id"`
+	CreatedAt   time.Time         `json:"created_at"`
+	Deliveries  []MessageDelivery `json:"deliveries"`
 }
 
-// MessageDelivery records one human-requested attempt to reach a live agent.
+// MessageDelivery records one attempt to reach a live agent with a targeted message.
 type MessageDelivery struct {
 	MessageID  string  `json:"message_id"`
 	Attempt    int     `json:"attempt"`
 	Delivery   string  `json:"delivery"`
 	SessionID  string  `json:"session_id"`
 	EnvelopeID *string `json:"envelope_id"`
-	// Duplicate reports that the stream already held this message when the attempt was sent,
-	// so the recipient gained nothing from it. EnvelopeID is then nil: the envelope this send
-	// minted is the one JetStream discarded.
+	// Duplicate reports that the stream already held this message when the attempt was sent: an
+	// earlier attempt landed, so this one is a repeat the recipient is not handed again
+	// (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). EnvelopeID is then nil: the envelope
+	// this send minted is the one JetStream discarded.
 	Duplicate bool      `json:"duplicate"`
 	State     string    `json:"state"`
 	Error     *string   `json:"error"`
 	ReplyID   *string   `json:"reply_id"`
 	CreatedAt time.Time `json:"created_at"`
+	// RequestedBy is the actor whose send opened the attempt: the person who wrote or retried
+	// the message, or the session a bearer's retry named. A resume keeps it. Nil on an attempt
+	// written before Dispatch recorded it, which is never read as a person's.
+	RequestedBy *Actor `json:"requested_by"`
+	// AcceptedAt and AcceptedAs record that the attempt's session took the message
+	// (POST /api/v1/messages/{id}/deliveries/{attempt}/accept), and as what: "user_turn", the
+	// session's own user turn. At most one attempt of a message is ever accepted.
+	AcceptedAt *time.Time `json:"accepted_at"`
+	AcceptedAs *string    `json:"accepted_as"`
 }
 
 // MessageEventPayload wraps a Message with the reply target's body preview (first 160
@@ -909,6 +994,18 @@ type MessageDeliveryEventPayload struct {
 	// nothing from this attempt. Absent means false.
 	Duplicate bool   `json:"duplicate,omitempty"`
 	Error     string `json:"error,omitempty"`
+}
+
+// MessageAcceptedEventPayload is `message.accepted`: the session an attempt went to took the
+// message as AcceptedAs. It is never a second `message.delivery` receipt; the attempt's send
+// still appends its own. Target is the message's own, `session:<recipient>` for a direct
+// message, which is where an issue-less event takes its owner from.
+type MessageAcceptedEventPayload struct {
+	MessageID  string `json:"message_id"`
+	Attempt    int    `json:"attempt"`
+	SessionID  string `json:"session_id"`
+	AcceptedAs string `json:"accepted_as"`
+	Target     string `json:"target"`
 }
 
 // ReferencedBy identifies a post or artifact that mentions an artifact.

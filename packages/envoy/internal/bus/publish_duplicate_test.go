@@ -8,10 +8,11 @@ import (
 )
 
 // LEGION-271. A Dispatch publish carries a JetStream MsgId built from the envelope's dedupe key,
-// so a repeat of a key the stream already holds is suppressed at publish. Publish throws that
-// verdict away, which is why Dispatch cannot tell a retry that changed nothing from one that
-// delivered. PublishReportingDuplicate returns it. Publish itself keeps its signature: it is an
-// interface method in cistore, outbox and webhook.
+// so the stream recognises a repeat of a key it already holds: it stores nothing new, and the
+// publish still reaches the agent's subject. Publish throws that verdict away, which is why
+// Dispatch cannot tell a retry the stream already held from one it stored.
+// PublishReportingDuplicate returns it. Publish itself keeps its signature: it is an interface
+// method in cistore, outbox and webhook.
 func TestPublishReportingDuplicateReportsTheStreamsVerdict(t *testing.T) {
 	client, err := ConnectOwningStream([]string{testnats.URL(t)})
 	if err != nil {
@@ -59,9 +60,9 @@ func TestPublishReportingDuplicateReportsTheStreamsVerdict(t *testing.T) {
 		t.Fatalf("a different dedupe key must not report a duplicate")
 	}
 
-	// An agent-sourced envelope carries no MsgId at all, because its key names no upstream event
-	// (contracts.DedupeKeyNamesTheUpstreamEvent), so the stream cannot recognise a repeat and never
-	// reports one.
+	// An agent-sourced envelope under a key its caller chose carries no MsgId at all, because
+	// that key names no event (contracts.DedupeKeyNamesTheUpstreamEvent), so the stream cannot
+	// recognise a repeat and never reports one.
 	agent := envelope("fourth")
 	agent.Source = "agent"
 	agent.Topic = "notifications.agent.ses_dup"

@@ -167,8 +167,8 @@ func TargetSpansBlocks(doc *Node, r Range) bool {
 	return !withinTextblock
 }
 
-// FindHeading finds the heading whose text equals title exactly. occurrence is
-// zero-based; without it, repeated titles return ErrTargetAmbiguous.
+// FindHeading finds the heading whose text, as a read serves it (TextContent), equals title
+// exactly. occurrence is zero-based; without it, repeated titles return ErrTargetAmbiguous.
 func FindHeading(doc *Node, title string, occurrence *int) (Range, error) {
 	if doc == nil {
 		return Range{}, fmt.Errorf("%w: FindHeading wants a document", ErrSchema)
@@ -182,13 +182,7 @@ func FindHeading(doc *Node, title string, occurrence *int) (Range, error) {
 	for _, child := range doc.Children {
 		end := pos + nodeSize(child)
 		if child.Type == "heading" {
-			var text strings.Builder
-			for _, inline := range child.Children {
-				if inline.Type == "text" {
-					text.WriteString(inline.Text)
-				}
-			}
-			headingText := text.String()
+			headingText := TextContent(child)
 			if headingText == title {
 				matches = append(matches, Candidate{
 					Range:   Range{From: pos, To: end},
@@ -225,7 +219,7 @@ func headingNotFound(doc *Node, title string) error {
 		if child.Type != "heading" {
 			continue
 		}
-		heading := textContent(child)
+		heading := TextContent(child)
 		candidates = append(candidates, ranked{text: heading, prefix: commonPrefixLength(title, heading)})
 	}
 	sort.SliceStable(candidates, func(left, right int) bool {
@@ -304,7 +298,9 @@ func buildFlattenedText(doc *Node) flattenedText {
 			marks = append(marks, 0)
 		}
 		markup := nodeInlineMarkup(node)
-		for _, char := range node.Text {
+		// A quote is matched against the text every read serves, so a browser's U+0000 is U+FFFD
+		// here too; both are one UTF-16 unit, so no position moves.
+		for _, char := range nulAsReplacement(node.Text) {
 			out.WriteRune(char)
 			width := 1
 			if char > 0xffff {
@@ -503,7 +499,7 @@ func nearestBlocks(doc *Node, quote string, limit int) []string {
 	var candidates []ranked
 	walk(doc, func(node *Node, _ []int, _, _ int) bool {
 		if isTextblock(node.Type) {
-			candidate := textContent(node)
+			candidate := TextContent(node)
 			candidates = append(candidates, ranked{text: candidate, prefix: commonPrefixLength(quote, candidate)})
 		}
 		return true
@@ -540,16 +536,19 @@ func headingQuoteMatches(doc *Node, text flattenedText, title string) []quoteMat
 	return matches
 }
 
-func textContent(node *Node) string {
+// TextContent is node's text, hard breaks as line feeds, as a read serves it: each U+0000 a browser
+// edit left as U+FFFD (nulAsReplacement). An ask row's question and options, a heading anchor and
+// a miss's nearest blocks and headings are read through it.
+func TextContent(node *Node) string {
 	if node.Type == "text" {
-		return node.Text
+		return nulAsReplacement(node.Text)
 	}
 	if node.Type == "hardbreak" {
 		return "\n"
 	}
 	var out strings.Builder
 	for _, child := range node.Children {
-		out.WriteString(textContent(child))
+		out.WriteString(TextContent(child))
 	}
 	return out.String()
 }
@@ -670,7 +669,7 @@ func MarkSpans(doc *Node, markType, id string) []Range {
 		if node.Type != "text" {
 			return true
 		}
-		if nodeMarkID(node, markType) != id {
+		if !nodeHasMarkID(node, markType, id) {
 			between = true
 			return true
 		}
@@ -686,7 +685,9 @@ func MarkSpans(doc *Node, markType, id string) []Range {
 }
 
 // FindMark finds the first document-contiguous range covered by a mark identity, the first of
-// its MarkSpans, and its text, the runs joined with a space where a block boundary lies between.
+// its MarkSpans, and its text, the runs joined with a space where a block boundary lies between,
+// each U+0000 written as U+FFFD (nulAsReplacement): the text is what an anchor row stores as its
+// quote.
 func FindMark(doc *Node, markType, id string) (Range, string, bool) {
 	spans := MarkSpans(doc, markType, id)
 	if len(spans) == 0 {
@@ -709,11 +710,14 @@ func FindMark(doc *Node, markType, id string) (Range, string, bool) {
 		last = end
 		return true
 	})
-	return marked, quote.String(), true
+	return marked, nulAsReplacement(quote.String()), true
 }
 
 // anchorMarkTypes are the marks an ask or comment row anchors to: its quote is the text they
-// cover (FindMark).
+// cover (FindMark). They are exactly the marks whose schema declares an empty excludes (the fork's
+// proofComment and proofSuggestion, packages/proof-editor's dispatchAsk), so two of one type may
+// cover one character and each is stored under its own Y attribute key (markAttributeKey). The
+// set moves with those schemas.
 var anchorMarkTypes = map[string]bool{"proofComment": true, "proofSuggestion": true, "dispatchAsk": true}
 
 // AnchorMarksCovering returns each anchor mark that every text run inside r carries, which is
@@ -817,36 +821,39 @@ func MarkAttrs(doc *Node, markType, id string) (Attrs, bool) {
 	var attrs Attrs
 	found := false
 	walk(doc, func(node *Node, _ []int, _, _ int) bool {
-		if node.Type != "text" || nodeMarkID(node, markType) != id {
+		if node.Type != "text" {
 			return true
 		}
 		for _, mark := range node.Marks {
-			if mark.Type != markType {
-				continue
+			if markHasID(mark, markType, id) {
+				attrs = cloneAttrs(mark.Attrs)
+				found = true
+				return false
 			}
-			markID, ok := mark.Attrs["id"].(string)
-			if !ok || markID != id {
-				continue
-			}
-			attrs = cloneAttrs(mark.Attrs)
-			found = true
-			return false
 		}
 		return true
 	})
 	return attrs, found
 }
 
-func nodeMarkID(node *Node, markType string) string {
+// nodeHasMarkID reports whether node carries a markType mark whose id is id. A record mark's type
+// does not exclude itself (anchorMarkTypes), so a run may carry two of one type, and the mark asked
+// for need not be the first of them.
+func nodeHasMarkID(node *Node, markType, id string) bool {
 	for _, mark := range node.Marks {
-		if mark.Type != markType {
-			continue
-		}
-		if id, ok := mark.Attrs["id"].(string); ok {
-			return id
+		if markHasID(mark, markType, id) {
+			return true
 		}
 	}
-	return ""
+	return false
+}
+
+func markHasID(mark Mark, markType, id string) bool {
+	if mark.Type != markType {
+		return false
+	}
+	markID, ok := mark.Attrs["id"].(string)
+	return ok && markID == id
 }
 
 // MarkRange adds mark to every selected text run. A mark may cross textblocks
@@ -876,7 +883,7 @@ func MarkRange(txn *crdt.Transaction, frag *crdt.YXmlFragment, r Range, mark Mar
 		return ErrTargetNotFound
 	}
 
-	attributes := crdt.Attributes{mark.Type: markAttributeValue(mark)}
+	attributes := crdt.Attributes{markAttributeKey(mark): markAttributeValue(mark)}
 	for _, span := range affected {
 		from := max(r.From, span.From) - span.From
 		to := min(r.To, span.To) - span.From
@@ -922,10 +929,12 @@ type textLocation struct {
 }
 
 func yTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
-	doc, err := yFragmentShape(frag)
+	var texts []yTextNode
+	children, err := yFragmentShapeChildren(frag, "", 1, &texts)
 	if err != nil {
 		return nil, err
 	}
+	doc := &Node{Type: "doc", Children: children}
 	var locations []textLocation
 	walk(doc, func(node *Node, _ []int, pos, end int) bool {
 		if node.Type == "text" {
@@ -934,10 +943,6 @@ func yTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 		return true
 	})
 
-	var texts []yTextNode
-	if err := collectYTexts(frag, "", &texts); err != nil {
-		return nil, err
-	}
 	ranges := make([]yTextRange, 0, len(texts))
 	location := 0
 	for _, current := range texts {
@@ -973,40 +978,21 @@ func yTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 	return ranges, nil
 }
 
-func collectYTexts(frag *crdt.YXmlFragment, textblock string, out *[]yTextNode) error {
-	for _, child := range frag.Children() {
-		switch current := child.(type) {
-		case *crdt.YXmlText:
-			*out = append(*out, yTextNode{text: current, textblock: textblock})
-		case *crdt.YXmlElement:
-			next := textblock
-			switch current.NodeName {
-			case "paragraph", "heading", "code_block":
-				next = current.NodeName
-			}
-			if err := collectYTexts(&current.YXmlFragment, next, out); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("%w: unexpected Yjs child %T", ErrSchema, child)
-		}
-	}
-	return nil
-}
-
-func yFragmentShape(frag *crdt.YXmlFragment) (*Node, error) {
-	children, err := yFragmentShapeChildren(frag)
-	if err != nil {
-		return nil, err
-	}
-	return &Node{Type: "doc", Children: children}, nil
-}
-
-func yFragmentShapeChildren(frag *crdt.YXmlFragment) ([]*Node, error) {
+// yFragmentShapeChildren is the shape of frag's children, which stand depth levels below the
+// document, and appends each Yjs text among them to texts with the textblock holding it. It
+// refuses a node past MaxTreeDepth as Read does: an element, or a text holding anything, which Read
+// makes a text node of.
+func yFragmentShapeChildren(frag *crdt.YXmlFragment, textblock string, depth int, texts *[]yTextNode) ([]*Node, error) {
 	var children []*Node
 	for _, child := range frag.Children() {
 		switch current := child.(type) {
 		case *crdt.YXmlText:
+			if current.Len() > 0 {
+				if err := treeDepthError(depth); err != nil {
+					return nil, err
+				}
+			}
+			*texts = append(*texts, yTextNode{text: current, textblock: textblock})
 			delta, err := yTextDeltaInTransaction(current)
 			if err != nil {
 				return nil, err
@@ -1019,7 +1005,15 @@ func yFragmentShapeChildren(frag *crdt.YXmlFragment) ([]*Node, error) {
 				children = append(children, &Node{Type: "text", Text: value})
 			}
 		case *crdt.YXmlElement:
-			grandchildren, err := yFragmentShapeChildren(&current.YXmlFragment)
+			if err := treeDepthError(depth); err != nil {
+				return nil, err
+			}
+			inner := textblock
+			switch current.NodeName {
+			case "paragraph", "heading", "code_block":
+				inner = current.NodeName
+			}
+			grandchildren, err := yFragmentShapeChildren(&current.YXmlFragment, inner, depth+1, texts)
 			if err != nil {
 				return nil, err
 			}

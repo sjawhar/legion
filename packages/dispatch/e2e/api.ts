@@ -1,6 +1,7 @@
 import type { EditArtifactInput } from "@legion/contracts";
 import type {
   Actor,
+  Agent,
   AnswerAskInput,
   ArchitectureSource,
   ArchitectureTree,
@@ -11,6 +12,7 @@ import type {
   Ask,
   AskFollower,
   AskRead,
+  AskSnooze,
   BroadcastCreated,
   BroadcastRead,
   BroadcastSummary,
@@ -36,12 +38,16 @@ import type {
   UpdateIssueInput,
   UserAgentState,
   UserAgentStateInput,
+  UserAgentStates,
   UserIssueState,
   Version,
 } from "../web/src/api/types";
-import { dispatchPort } from "./harness-ports";
+import { harnessPorts } from "./harness-ports";
 
-const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${dispatchPort}`;
+export const baseUrl =
+  process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${harnessPorts.dispatch.port}`;
+/** The origin the server compares every cookie-authenticated write against (enforceCookieOrigin). */
+export const dashboardOrigin = new URL(baseUrl).origin;
 // A deployed server has its own agent token; the local harness pins `e2e-token` in
 // e2e/run-server.sh, so an E2E_AGENT_TOKEN left in the shell from a deployed run would only
 // make every bearer-seeded call 401 against it.
@@ -56,6 +62,64 @@ interface ApiOptions {
   login?: string;
   /** The bearer an `as: "agent"` call sends; the shared `e2eAgentToken` when absent. */
   token?: string;
+}
+
+/** The name of the session cookie the server issues at sign-in, dev or GitHub. */
+export const sessionCookieName = "dsession";
+
+/** The server's dev sign-in route for `login`, relative to the dashboard origin; it answers a
+ *  sign-in with a 302 that sets the session cookie. */
+export function devSignInPath(login: string): string {
+  return `/auth/_dev/signin?login=${encodeURIComponent(login)}`;
+}
+
+export function devSignInError(login: string, status: number, responseText: string): Error {
+  return new Error(`dev sign-in as ${login} failed: ${status} ${responseText}`);
+}
+
+const sessionCookies = new Map<string, Promise<string>>();
+
+/** The session cookie the server issues `login` at its dev sign-in route, minted once per
+ *  spelling of a login and kept until something revokes it: the generation the cookie names lives
+ *  in `user_sessions`, which `resetDatabase` truncates (it calls `forgetSessions`), and a browser
+ *  context's Sign out as the same login advances it. A sign-in that fails, by its answer or by
+ *  the request itself, is not kept, so the next call asks again. */
+function sessionCookie(login: string): Promise<string> {
+  const cached = sessionCookies.get(login);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const cookie = fetch(new URL(devSignInPath(login), baseUrl), { redirect: "manual" }).then(
+    async (response) => {
+      const value = response.headers
+        .getSetCookie()
+        .find((header) => header.startsWith(`${sessionCookieName}=`))
+        ?.split(";")[0];
+      if (response.status !== 302 || value === undefined) {
+        throw devSignInError(login, response.status, await response.text());
+      }
+      return value;
+    }
+  );
+  sessionCookies.set(login, cookie);
+  cookie.catch(() => {
+    if (sessionCookies.get(login) === cookie) {
+      sessionCookies.delete(login);
+    }
+  });
+  return cookie;
+}
+
+/** Forgets every cached session cookie; `resetDatabase` calls it after truncating `user_sessions`. */
+export function forgetSessions(): void {
+  sessionCookies.clear();
+}
+
+/** Headers that make a plain fetch act as `login`: the session cookie, and the dashboard origin
+ *  the server requires on every cookie-authenticated write (enforceCookieOrigin admits a write
+ *  whose `Origin` is the dashboard's). */
+export async function userHeaders(login = "alice"): Promise<Record<string, string>> {
+  return { Cookie: await sessionCookie(login), Origin: dashboardOrigin };
 }
 
 async function request<T>(
@@ -76,7 +140,7 @@ async function request<T>(
   if (as === "agent") {
     headers.Authorization = `Bearer ${options.token ?? e2eAgentToken}`;
   } else {
-    headers["X-Dispatch-User"] = options.login ?? "alice";
+    Object.assign(headers, await userHeaders(options.login));
   }
 
   const response = await fetch(new URL(path, baseUrl), {
@@ -160,9 +224,43 @@ export function getInbox(options: ApiOptions = {}): Promise<InboxRow[]> {
   return request<InboxRow[]>("/api/v1/inbox", "GET", undefined, options);
 }
 
+/** `PUT /api/v1/me/asks/{id}/snooze`: the caller's own snooze on an Inbox row, until
+ *  `snoozedUntil` (RFC 3339, in the future). */
+export function snoozeAsk(
+  id: string,
+  snoozedUntil: string,
+  options: ApiOptions = {}
+): Promise<AskSnooze> {
+  return request<AskSnooze>(
+    `/api/v1/me/asks/${encodeURIComponent(id)}/snooze`,
+    "PUT",
+    { snoozed_until: snoozedUntil },
+    options
+  );
+}
+
+/** The Agents page's rows: every live Envoy session merged with its Dispatch activity. */
+export function listAgents(options: ApiOptions = {}): Promise<Agent[]> {
+  return request<Agent[]>("/api/v1/agents", "GET", undefined, options);
+}
+
+/** A session's conversation as the Agents page reads it: its exchanges in the server's order. */
+export function listAgentMessages(
+  sessionID: string,
+  options: ApiOptions = {}
+): Promise<MessageRead[]> {
+  return request<MessageRead[]>(
+    `/api/v1/agents/${encodeURIComponent(sessionID)}/messages`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
 export function createIssue(
   input: Partial<Pick<Issue, "project" | "title">> & {
     external?: string;
+    force?: boolean;
     parent?: string;
     spec?: string;
   },
@@ -177,6 +275,16 @@ export function createAsk(
   options: ApiOptions = {}
 ): Promise<Ask> {
   return request<Ask>(`/api/v1/issues/${encodeURIComponent(issue)}/asks`, "POST", input, options);
+}
+
+/** Every ask on the issue, whatever its state (the route's default `state=all`). */
+export function listIssueAsks(issue: string, options: ApiOptions = {}): Promise<Ask[]> {
+  return request<Ask[]>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/asks`,
+    "GET",
+    undefined,
+    options
+  );
 }
 
 export function createProjectDocument(
@@ -244,6 +352,18 @@ export function createArtifactComment(
   );
 }
 
+export function listArtifactComments(
+  artifactID: string,
+  options: ApiOptions = {}
+): Promise<Comment[]> {
+  return request<Comment[]>(
+    `/api/v1/artifacts/${encodeURIComponent(artifactID)}/comments`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
 export function editAsk(id: string, input: EditAskInput, options: ApiOptions = {}): Promise<Ask> {
   return request<Ask>(`/api/v1/asks/${encodeURIComponent(id)}`, "PATCH", input, options);
 }
@@ -305,6 +425,14 @@ export function listComments(
     undefined,
     options
   );
+}
+
+/** One comment and its reply chain, as the server holds them now: its anchor's quote included. */
+export function getComment(
+  id: string,
+  options: ApiOptions = {}
+): Promise<{ comment: Comment; replies: Comment[] }> {
+  return request(`/api/v1/comments/${encodeURIComponent(id)}`, "GET", undefined, options);
 }
 
 export function getAsk(id: string, options: ApiOptions = {}): Promise<AskRead> {
@@ -436,11 +564,18 @@ export function createAgentMessage(
   );
 }
 
+/** Sends one broadcast as a human. Every send carries an `idempotency_key`; this mints one unless
+ *  the caller names its own, as a row that replays a request the page made does. */
 export function createBroadcast(
-  input: CreateBroadcastInput,
+  input: Omit<CreateBroadcastInput, "idempotency_key"> & { readonly idempotency_key?: string },
   options: ApiOptions = {}
 ): Promise<BroadcastCreated> {
-  return request<BroadcastCreated>("/api/v1/broadcasts", "POST", input, options);
+  return request<BroadcastCreated>(
+    "/api/v1/broadcasts",
+    "POST",
+    { ...input, idempotency_key: input.idempotency_key ?? crypto.randomUUID() },
+    options
+  );
 }
 
 export function listBroadcasts(options: ApiOptions = {}): Promise<BroadcastSummary[]> {
@@ -518,6 +653,11 @@ export function putAgentState(
     input,
     options
   );
+}
+
+/** The signed-in human's own conversation state with every session, unread counts included. */
+export function getAgentStates(options: ApiOptions = {}): Promise<UserAgentStates> {
+  return request<UserAgentStates>("/api/v1/me/agents/state", "GET", undefined, options);
 }
 
 export function putIssueState(

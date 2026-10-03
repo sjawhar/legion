@@ -79,20 +79,24 @@ import {
   marksPlugins,
   setDefaultMarkdownParser,
   applyRemoteMarks as applyRemoteMarksMutation,
-  deleteMark,
   type StoredMark,
 } from 'proof-sdk-upstream/src/editor/plugins/marks';
 
-import { dispatchMarkPlugins, remarkDispatchMarksPlugin, dispatchMarkHandler, removeAskMark } from './dispatch-marks';
-import type { MarkAction } from './dispatch-marks';
+import { dispatchMarkPlugins, remarkDispatchMarksPlugin, dispatchMarkHandler } from './dispatch-marks';
+import type { MarkAction, SelectionBarActionKind } from './dispatch-marks';
 import { dispatchActionBarPlugin } from './dispatch-action-bar';
 import { registerPopoverHookInstance } from './dispatch-popover-hook';
 import { dispatchMarkEventsPlugin } from './dispatch-mark-events';
 import { remarkSoftBreakAsSpace } from './dispatch-soft-breaks';
 import { configureDispatchLinks } from './dispatch-links';
 import { trailingNewlineInputPlugin } from './trailing-newline-input';
+import { recordMarkHistoryPlugin } from './record-mark-history';
+import { editorHighlightsPlugin, pulseHighlight, setActiveHighlights } from './editor-highlights';
+import { removeRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
+import type { RetypeOutcome } from './record-mark-retype';
 
 export type { MarkAction, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
+export type { RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
 export type {
   BlockAttributeKind,
   BlockAttributeSchema,
@@ -163,14 +167,23 @@ export interface ProofEditorHandle extends TypedBlockCommands {
    *  ./dispatch-marks.ts's module doc for why dispatchAsk marks are outside
    *  this system. */
   applyRemoteMarks(metadata: Record<string, StoredMark>, options?: { hydrateAnchors?: boolean }): void;
-  /** Removes a mark by id, trying the unified marks system first and falling
-   *  back to a dispatchAsk mark. */
+  /** Removes the margin composer's provisional record mark - a comment, suggestion or ask - from
+   *  every span it covers, text and inline atoms alike. The removal is the composer's own, so it
+   *  is never an undo step, and it leaves no tombstone and touches no metadata the way upstream's
+   *  `deleteMark` does; it is not for a recorded mark. See ./record-mark-retype.ts. */
   removeMark(markId: string): void;
+  /** Replaces a provisional record mark with a fresh one of `kind` over the same text, as the
+   *  margin composer's kind switch needs; a refusal names why nothing changed. */
+  retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome;
   /** Scrolls a mark's anchor into view and pulses it. Works for both the
    *  unified marks system and dispatchAsk marks: both render `data-id`. */
   focusMark(markId: string): void;
   /** Scrolls a block into view by its stable `blockId` and pulses it. */
   focusBlock(blockId: string): void;
+  /** Highlights the marks a host has selected without changing the document. */
+  setActiveMarks(markIds: readonly string[]): void;
+  /** Highlights the blocks a host has selected without changing the document. */
+  setActiveBlocks(blockIds: readonly string[]): void;
   /** The stable id of the block containing the selection head, if any. */
   blockIdAtSelection(): string | null;
   /** Tear down the editor and any collab bindings. */
@@ -224,9 +237,6 @@ function installCollabCursorsWhenReady(
 
   attemptInstall(0);
 }
-
-const PULSE_CLASS = 'dispatch-mark-pulse';
-const PULSE_DURATION_MS = 1200;
 
 function cssEscapeAttrValue(value: string): string {
   if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value);
@@ -304,6 +314,9 @@ export async function createProofEditor(
     .use(tableKeyboardPlugin)
     // Firefox puts text typed over a code block's last line before its newline
     .use(trailingNewlineInputPlugin)
+    // The composer's own record-mark writes are never undo steps
+    .use(recordMarkHistoryPlugin)
+    .use(editorHighlightsPlugin)
     .use(placeholderPlugin)
     .config((ctx) => {
       ctx.update(remarkStringifyOptionsCtx, (prev) => ({
@@ -399,26 +412,30 @@ export async function createProofEditor(
       applyRemoteMarksMutation(view, metadata, options);
     },
     removeMark(markId: string): void {
-      if (deleteMark(view, markId)) return;
-      removeAskMark(view, markId);
+      removeRecordMark(view, markId);
+    },
+    retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome {
+      return retypeRecordMark(view, markId, kind, opts.user.name);
     },
     focusMark(markId: string): void {
       const escaped = cssEscapeAttrValue(markId);
       const elements = view.dom.querySelectorAll<HTMLElement>(`[data-id="${escaped}"]`);
       if (elements.length === 0) return;
       elements[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-      for (const element of elements) {
-        element.classList.add(PULSE_CLASS);
-        window.setTimeout(() => element.classList.remove(PULSE_CLASS), PULSE_DURATION_MS);
-      }
+      pulseHighlight(view, 'mark', markId);
     },
     focusBlock(blockId: string): void {
       const escaped = cssEscapeAttrValue(blockId);
       const element = view.dom.querySelector<HTMLElement>(`[${BLOCK_ID_DOM_ATTR}="${escaped}"]`);
       if (element === null) return;
       element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      element.classList.add(PULSE_CLASS);
-      window.setTimeout(() => element.classList.remove(PULSE_CLASS), PULSE_DURATION_MS);
+      pulseHighlight(view, 'block', blockId);
+    },
+    setActiveMarks(markIds: readonly string[]): void {
+      setActiveHighlights(view, 'mark', markIds);
+    },
+    setActiveBlocks(blockIds: readonly string[]): void {
+      setActiveHighlights(view, 'block', blockIds);
     },
     blockIdAtSelection(): string | null {
       const $head = view.state.selection.$head;

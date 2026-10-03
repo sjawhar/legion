@@ -106,15 +106,15 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 	}
 }
 
-// TestStrandedAttemptRetriedDuringAListenerOutageKeepsThePinAndAcceptsTheReply is Deep1296b's
-// case A: a stranded attempt already pinned to its recipient is retried while the listener
-// cannot answer whether that recipient still lives, so the recheck behind the retry fails.
+// TestStrandedAttemptRetriedDuringAListenerOutageKeepsThePinAndAcceptsTheReply: a stranded
+// attempt already pinned to its recipient is retried while the listener cannot answer whether
+// that recipient still lives, so the recheck behind the retry fails.
 // recordCommentDeliveryResolution must not un-name the session holding the frame just because
 // the recheck came back empty - that recheck can only report the same session or nothing, and
-// the listener being unreachable is the outage LEGION-244 exists to survive. Before the fix the
-// row's session_id was overwritten unconditionally with the recheck's result, so the recipient
-// was locked out of the reply for the life of the comment, not merely until the next retry: a
-// retry only resumes a still-"pending" attempt, and this one settles "failed" right here.
+// the listener being unreachable is the outage LEGION-244 exists to survive. Overwriting the
+// row's session_id unconditionally with the recheck's result would lock the recipient out of the
+// reply for the life of the comment, not merely until the next retry: a retry only resumes a
+// still-"pending" attempt, and this one settles "failed" right here.
 func TestStrandedAttemptRetriedDuringAListenerOutageKeepsThePinAndAcceptsTheReply(t *testing.T) {
 	sessionsUnavailable := false
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

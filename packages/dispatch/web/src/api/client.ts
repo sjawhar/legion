@@ -6,6 +6,7 @@ import type {
   ArchitectureTree,
   Artifact,
   ArtifactBlock,
+  ArtifactRebuildReport,
   ArtifactReview,
   ArtifactReviewState,
   ArtifactText,
@@ -16,7 +17,6 @@ import type {
   AskRead,
   AskSnooze,
   AuthenticatedUser,
-  AuthenticationResponseJSON,
   BlockSchema,
   BroadcastCreated,
   BroadcastRead,
@@ -34,11 +34,8 @@ import type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
-  CredentialCeremonyBeginResponse,
-  CredentialCeremonyFinishResponse,
   CredentialDecisionResponse,
   CredentialGrantsResponse,
-  CredentialKeysResponse,
   CredentialPendingResponse,
   CredentialRecord,
   DispatchUser,
@@ -55,7 +52,6 @@ import type {
   MessageDelivery,
   MessageRead,
   Project,
-  RegistrationResponseJSON,
   RepoProject,
   SearchResponse,
   Subscriber,
@@ -134,24 +130,39 @@ export function isSourceNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "SOURCE_NOT_FOUND";
 }
 
-// A broker deployed without credential requests configured (no DISPATCH_AGENT_SECRETS_URL)
-// answers every credential route with this 404 — the same class as the architecture-source
-// 404 above it: retrying changes nothing, and every credential query (the Inbox's requests
-// section, Settings' approver keys) treats it as "not configured" rather than a failure.
+// A Dispatch with no secrets broker configured (no DISPATCH_AGENT_SECRETS_URL) answers every
+// credential route but the pending list with this 404 — the same class as the architecture-source
+// 404 above it: retrying changes nothing. The pending list, which every page reads, answers `null`
+// instead (`getCredentialPending`).
 export function isCredentialFeatureOff(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "FEATURE_OFF";
 }
 
+// A stored document outside the Proof schema is a repairable state, not a transient failure:
+// retrying the read cannot repair it, while opening its live editor could let the browser rewrite it.
+export function isDocumentSchemaError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.code === "DOC_SCHEMA";
+}
+
+// A document whose stored history cannot load at all: the state a rebuild from its latest saved
+// version repairs, and retrying the read cannot.
+export function isDocumentUnloadable(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.code === "DOCUMENT_UNLOADABLE";
+}
+
 // The retry policy every query in the app shares: an auth outcome (401/403), a missing
-// architecture source, or an unconfigured credential broker is definitive and retrying it
-// changes nothing; any other failure (dropped connection, 5xx) is worth a couple of automatic
-// attempts before surfacing a Retry affordance to the user.
+// architecture source, an unconfigured credential broker, a stored document outside Proof's
+// schema, or a stored history that cannot load is definitive and retrying it changes nothing; any
+// other failure (dropped connection, 5xx) is worth a couple of automatic attempts before surfacing
+// a Retry affordance to the user.
 export function isRetryableQueryError(error: unknown): boolean {
   return (
     !isUnauthorized(error) &&
     !isForbidden(error) &&
     !isSourceNotFound(error) &&
-    !isCredentialFeatureOff(error)
+    !isCredentialFeatureOff(error) &&
+    !isDocumentSchemaError(error) &&
+    !isDocumentUnloadable(error)
   );
 }
 
@@ -560,6 +571,12 @@ export class DispatchApiClient {
     return this.json<ArtifactText>(`/api/v1/artifacts/${pathSegment(id)}/text`);
   }
 
+  rebuildArtifact(id: string, markdown?: string): Promise<ArtifactRebuildReport> {
+    return this.post<ArtifactRebuildReport>(`/api/v1/artifacts/${pathSegment(id)}/rebuild`, {
+      ...(markdown === undefined ? {} : { markdown }),
+    });
+  }
+
   getArtifactBlocks(id: string): Promise<ArtifactBlock[]> {
     return this.json<ArtifactBlock[]>(`/api/v1/artifacts/${pathSegment(id)}/blocks`);
   }
@@ -673,9 +690,10 @@ export class DispatchApiClient {
   }
 
   /** `GET /api/v1/credential-requests?approver=me`: every request waiting on the viewer, as
-   *  the Inbox's credential-requests section lists them. */
-  getCredentialPending(): Promise<CredentialPendingResponse> {
-    return this.json<CredentialPendingResponse>(
+   *  the Inbox's credential-requests section lists them, or `null` when this Dispatch has no
+   *  secrets broker. */
+  getCredentialPending(): Promise<CredentialPendingResponse | null> {
+    return this.json<CredentialPendingResponse | null>(
       pathWithQuery("/api/v1/credential-requests", { approver: "me" })
     );
   }
@@ -684,9 +702,12 @@ export class DispatchApiClient {
     return this.json<CredentialRecord>(`/api/v1/credential-requests/${pathSegment(recordId)}`);
   }
 
+  /** Approve a credential request as the signed-in viewer: Dispatch names the viewer's own login
+   *  as the approver, and the broker decides whether that login may. A machine login also carries
+   *  the code the viewer typed. */
   approveCredentialRecord(
     recordId: string,
-    body: { assertion: AuthenticationResponseJSON; code?: string }
+    body: { code?: string } = {}
   ): Promise<CredentialDecisionResponse> {
     return this.post<CredentialDecisionResponse>(
       `/api/v1/credential-requests/${pathSegment(recordId)}/approve`,
@@ -694,9 +715,10 @@ export class DispatchApiClient {
     );
   }
 
+  /** Deny a credential request as the signed-in viewer; a machine login also carries its code. */
   denyCredentialRecord(
     recordId: string,
-    body: { assertion: AuthenticationResponseJSON }
+    body: { code?: string } = {}
   ): Promise<CredentialDecisionResponse> {
     return this.post<CredentialDecisionResponse>(
       `/api/v1/credential-requests/${pathSegment(recordId)}/deny`,
@@ -704,68 +726,24 @@ export class DispatchApiClient {
     );
   }
 
-  /** A machine (`launcher_credential`) record's challenges only ever come from this route,
-   *  never from `getCredentialRecord` — the code the operator types in is what proves which
-   *  pending request they mean. */
+  /** A machine (`launcher_credential`) record is only ever selected through this route: the code
+   *  the operator types in is what proves which pending login they mean, and deciding it takes
+   *  the same code again. */
   lookupMachineCredential(code: string): Promise<CredentialRecord> {
     return this.post<CredentialRecord>("/api/v1/credential-requests/machine-lookup", { code });
   }
 
-  getCredentialKeys(login: string): Promise<CredentialKeysResponse> {
-    return this.json<CredentialKeysResponse>(`/api/v1/credential-keys/${pathSegment(login)}`);
-  }
-
-  beginCredentialKeyRegistration(login: string): Promise<CredentialCeremonyBeginResponse> {
-    return this.post<CredentialCeremonyBeginResponse>(
-      `/api/v1/credential-keys/${pathSegment(login)}/register/begin`,
-      {}
-    );
-  }
-
-  finishCredentialKeyRegistration(
-    login: string,
-    body: { ceremony_id: string; response: RegistrationResponseJSON }
-  ): Promise<CredentialCeremonyFinishResponse> {
-    return this.post<CredentialCeremonyFinishResponse>(
-      `/api/v1/credential-keys/${pathSegment(login)}/register/finish`,
-      body
-    );
-  }
-
-  beginCredentialKeyEndorsement(
-    login: string,
-    body: { credential_id: string; key_hash: string }
-  ): Promise<CredentialCeremonyBeginResponse> {
-    return this.post<CredentialCeremonyBeginResponse>(
-      `/api/v1/credential-keys/${pathSegment(login)}/endorse/begin`,
-      body
-    );
-  }
-
-  finishCredentialKeyEndorsement(
-    login: string,
-    body: { ceremony_id: string; response: AuthenticationResponseJSON }
-  ): Promise<CredentialCeremonyFinishResponse> {
-    return this.post<CredentialCeremonyFinishResponse>(
-      `/api/v1/credential-keys/${pathSegment(login)}/endorse/finish`,
-      body
-    );
-  }
-
-  /** `GET /api/v1/credential-grants?approver=me`: every grant the viewer approved, for the
-   *  revoke-list page a later task adds. */
+  /** `GET /api/v1/credential-grants?approver=me`: every grant the viewer approved or operates. */
   getCredentialGrants(): Promise<CredentialGrantsResponse> {
     return this.json<CredentialGrantsResponse>(
       pathWithQuery("/api/v1/credential-grants", { approver: "me" })
     );
   }
 
-  async revokeCredentialGrant(
-    grantId: string,
-    body: { assertion: AuthenticationResponseJSON }
-  ): Promise<void> {
+  /** Revoke a grant as the signed-in viewer, its approver or its enrollment's operator. */
+  async revokeCredentialGrant(grantId: string): Promise<void> {
     await this.response(`/api/v1/credential-grants/${pathSegment(grantId)}/revoke`, {
-      body: JSON.stringify(body),
+      body: JSON.stringify({}),
       headers: { "Content-Type": "application/json" },
       method: "POST",
     });

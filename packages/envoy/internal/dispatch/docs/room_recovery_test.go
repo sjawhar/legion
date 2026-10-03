@@ -85,9 +85,9 @@ func (s *failRoomDuringLoadStore) Load(ctx context.Context, room string) (persis
 
 // A room that fails while it is still loading recovers. The failure's eviction waits in ygo's
 // CloseRoom for the load's ready barrier and closes the recovery's channel only afterwards, so
-// a load that waited for that recovery held the eviction that would end its wait: the room
-// stayed failed, and every later write to the document answered 503 until the server was
-// restarted (LEGION-282).
+// a load that waits for that recovery holds the eviction that would end its wait: the room stays
+// failed, and every later write to the document answers 503 until the server restarts
+// (LEGION-282).
 func TestARoomThatFailsWhileItIsLoadingRecovers(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "")
@@ -107,7 +107,7 @@ func TestARoomThatFailsWhileItIsLoadingRecovers(t *testing.T) {
 	persist.armed.Store(true)
 
 	// The load runs on context.Background(), as the settlement warm-up and a committed write's
-	// publish do, so nothing but the fix ends it.
+	// publish do, so nothing but the recovery this test pins ends it.
 	loaded := make(chan error, 1)
 	go func() { loaded <- service.warmLiveDocument(context.Background(), artifactID) }()
 	<-persist.failed
@@ -348,6 +348,59 @@ func TestAWriteMeetingAFailedRoomFailsFastWhoeverHoldsItsLock(t *testing.T) {
 		t.Fatalf("commit retry transaction: %v", err)
 	}
 	requireText(t, service, artifactID, "after\n")
+}
+
+// A read whose answer only decorates another (a comment's or ask's anchor_block) does not wait
+// for a failed room's recovery: the eviction compacts under the document's advisory lock, which
+// any transaction can hold, so the whole thread read would wait behind it. The same read without
+// the mark waits, as every document read outside a transaction does, and answers once the room
+// has recovered.
+func TestABlockPathReadThatCannotWaitFailsFastOnAFailedRoom(t *testing.T) {
+	database, service, artifactID := lockOrderService(t)
+	seedServiceText(t, service, artifactID, "before")
+	ctx := context.Background()
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("load live document: %v", err)
+	}
+	blocks, err := service.Blocks(ctx, artifactID)
+	if err != nil || len(blocks) != 1 {
+		t.Fatalf("blocks = %#v err=%v, want the one paragraph", blocks, err)
+	}
+	holder, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin lock holder: %v", err)
+	}
+	defer holder.Rollback(ctx)
+	if err := lockDocumentRoom(ctx, holder, artifactID); err != nil {
+		t.Fatalf("hold document lock: %v", err)
+	}
+	service.failRoom(artifactID, errors.New("injected room failure"))
+
+	failsFast(t, "a block path read that cannot wait", func() error {
+		_, err := service.BlockPath(WithoutRecoveryWait(ctx), artifactID, blocks[0].ID)
+		return err
+	})
+	waited := make(chan error, 1)
+	go func() {
+		_, err := service.BlockPath(ctx, artifactID, blocks[0].ID)
+		waited <- err
+	}()
+	select {
+	case err := <-waited:
+		t.Fatalf("a block path read without the mark returned %v before the room recovered", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatalf("release document lock: %v", err)
+	}
+	select {
+	case err := <-waited:
+		if err != nil {
+			t.Fatalf("a block path read on the recovered room: %v", err)
+		}
+	case <-time.After(recoveryBound):
+		t.Fatal("a block path read without the mark never returned after the room recovered")
+	}
 }
 
 func TestARoomFailingBetweenTwoJoinedOperationsFailsTheSecondFast(t *testing.T) {

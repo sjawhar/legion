@@ -1,7 +1,8 @@
 import { expect, type Page } from "@playwright/test";
 
+import type { CreateBroadcastInput } from "../web/src/api/types";
 import { createAsk, createComment, createIssue, createProject } from "./api";
-import { fakeEnvoyPort } from "./harness-ports";
+import { harnessPorts } from "./harness-ports";
 
 export interface FakeSession {
   session_id: string;
@@ -15,15 +16,14 @@ export interface FakeSession {
   topics?: string[];
 }
 
+/** A request to the harness's fake Envoy. Playwright starts this listener for local and deployed
+ *  runs, so fixture state reaches whichever Dispatch server the suite targets. */
 async function fixtureRequest(
   path: string,
   method: "GET" | "PATCH" | "PUT",
   body?: object
 ): Promise<Response> {
-  if (process.env.PLAYWRIGHT_BASE_URL) {
-    throw new Error("live Envoy fixtures are unavailable with PLAYWRIGHT_BASE_URL");
-  }
-  const response = await fetch(`http://127.0.0.1:${fakeEnvoyPort}${path}`, {
+  const response = await fetch(`http://127.0.0.1:${harnessPorts.fakeEnvoy.port}${path}`, {
     body: body === undefined ? undefined : JSON.stringify(body),
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     method,
@@ -32,6 +32,11 @@ async function fixtureRequest(
     throw new Error(`${method} ${path} failed: ${response.status} ${await response.text()}`);
   }
   return response;
+}
+
+/** Clears all mutable fake Envoy state between e2e rows. */
+export async function resetFakeEnvoy(): Promise<void> {
+  await fixtureRequest("/__fixture/reset", "PUT");
 }
 
 export async function setLiveSessions(rows: FakeSession[]): Promise<void> {
@@ -56,6 +61,38 @@ export async function getSentMessages(): Promise<Record<string, unknown>[]> {
   >;
 }
 
+/** Every broadcast request the page posts from here on, in order, as the body it sent - a route
+ *  that fulfils a request itself still lists it. */
+export function postedBroadcasts(page: Page): CreateBroadcastInput[] {
+  const posted: CreateBroadcastInput[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
+      posted.push(request.postDataJSON() as CreateBroadcastInput);
+    }
+  });
+  return posted;
+}
+
+/** Refuses every broadcast POST the way an unreachable Envoy listener does, until `allow()`. The
+ *  selected sessions stay live, so the page's 15 s agent poll cannot empty the list mid-row. */
+export async function refuseBroadcasts(page: Page): Promise<{ allow: () => void }> {
+  let refusing = true;
+  await page.route("**/api/v1/broadcasts", (route) =>
+    refusing && route.request().method() === "POST"
+      ? route.fulfill({
+          body: JSON.stringify({ code: "ENVOY_UNAVAILABLE", error: "Envoy listener unreachable" }),
+          contentType: "application/json",
+          status: 503,
+        })
+      : route.fallback()
+  );
+  return {
+    allow: () => {
+      refusing = false;
+    },
+  };
+}
+
 export interface FakeInterest {
   session_id: string;
   topics: string[];
@@ -63,41 +100,24 @@ export interface FakeInterest {
 }
 
 export async function setInterests(rows: FakeInterest[]): Promise<void> {
-  if (process.env.PLAYWRIGHT_BASE_URL) {
-    throw new Error("live Envoy fixtures are unavailable with PLAYWRIGHT_BASE_URL");
-  }
-
-  const response = await fetch(`http://127.0.0.1:${fakeEnvoyPort}/__fixture/interests`, {
-    body: JSON.stringify(rows),
-    headers: { "Content-Type": "application/json" },
-    method: "PUT",
-  });
-  if (!response.ok) {
-    throw new Error(`setting interests failed: ${response.status} ${await response.text()}`);
-  }
+  await fixtureRequest("/__fixture/interests", "PUT", rows);
 }
 
 export async function getUnsubscribeCalls(): Promise<{ session_id: string; topics: string[] }[]> {
-  if (process.env.PLAYWRIGHT_BASE_URL) {
-    throw new Error("live Envoy fixtures are unavailable with PLAYWRIGHT_BASE_URL");
-  }
-
-  const response = await fetch(`http://127.0.0.1:${fakeEnvoyPort}/__fixture/unsubscribe-calls`);
-  if (!response.ok) {
-    throw new Error(
-      `reading unsubscribe calls failed: ${response.status} ${await response.text()}`
-    );
-  }
-  return (await response.json()) as { session_id: string; topics: string[] }[];
+  return (await fixtureRequest("/__fixture/unsubscribe-calls", "GET")).json() as Promise<
+    { session_id: string; topics: string[] }[]
+  >;
 }
 
-// The Agents page's keyboard rows, in `keyboard-agents.e2e.ts` and in the picker spec the WebKit
-// and Firefox projects also run, share one page: two live sessions, each with Dispatch activity of
-// its own, so both are listed rows rather than folded into `Inactive` or `No Dispatch activity`.
+// The Agents page's keyboard rows, in `keyboard-agents.e2e.ts`, `keyboard-palette.e2e.ts` and the
+// picker spec the WebKit and Firefox projects also run, share one page: two live sessions, each
+// with Dispatch activity of its own, so both are listed rows rather than folded into `Inactive` or
+// `No Dispatch activity`.
 // The Planner's open ask waits on the viewer, which puts it above the Reviewer. Neither carries a
-// `last_seen`, so the fake Envoy stamps each seed when it is made: this module is evaluated once
-// per Playwright worker, at the first spec that imports it, and a time computed here would age with
-// every spec the worker runs after that, until the sessions fold under `Inactive`.
+// `last_seen`: the fake Envoy answers every read of a session seeded without one with the current
+// time, so a shared seed never ages into Inactive. A time computed here would: this module is
+// evaluated once per Playwright worker, at the first spec that imports it, and the time would age
+// with every spec the worker runs after that, until the sessions fold under `Inactive`.
 export const plannerSession: FakeSession = {
   capabilities: ["aside", "btw"],
   dir: "/srv/planner",

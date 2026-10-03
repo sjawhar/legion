@@ -20,16 +20,20 @@ applies_when:
   - A test proves exact matching of prefixed numeric ids (`%N`, `@N`, session or run ids that can be prefixes of one another)
   - A test asserts an event sequence that interleaves a retry/poll cadence with the behavior under test
   - A reviewer asks "which plausible bug would this test NOT catch?" and the answer is not obvious
+  - A test's accept set is widened to a disjunction (ends on A or B) and the change needs a negative control
 related_issues:
   - "LEGION-9"
   - "sjawhar/legion#945"
+  - "LEGION-370"
+  - "sjawhar/legion#1678"
 ---
 
 # Mutation-Proof Probe Tests
 
 Two findings from the review of `sjawhar/legion#945`, both found the same way: mutate the production code into a
 plausible wrong implementation and see whether the test notices. Both were blind spots in tests that were green and
-read correctly.
+read correctly. A third, from `sjawhar/legion#1678`, is the same method applied as the negative control for a test
+whose accept set was widened.
 
 ## 1. Id-matching fixtures need ids that are prefixes of one another, longer id listed first
 
@@ -98,6 +102,27 @@ Exact sequences are right when the order *is* the claim — this case's own seco
 because pid probe, then socket probe, then retirement is the contract. They are wrong when a fixed cadence parameter
 is interleaved with the behavior under test; use `filter`/`slice`/`indexOf` to assert the invariant and let the
 cadence float.
+
+## 3. A control for a widened accept set flips every accepting path at once
+
+When a loop ends on a disjunction (`Kind == Gone || Kind == NotRecordedProcess`), a mutation that
+breaks one disjunct proves nothing: the other still ends the loop and the test stays green. Flip
+every member in one control, and give each exit the widening did not touch a control of its own.
+Name the exact failure string each control must produce before running it.
+
+LEGION-370 widened `TestRealTmuxObserveReportsGoneOnce`'s post-kill loop from `Gone` alone to
+either final verdict (`packages/daemon-go/internal/runtime/tmux/tmux_real_test.go:1319`). Flipping
+only `verify.go:299` (`Gone` → `Alive`) leaves a probe that straddled the kill ending the loop
+with `NotRecordedProcess`, so the control passes by the other door. The control that
+discriminates is one `sed` on both lines — `299s/runtime.Gone/runtime.Alive/;
+305s/runtime.NotRecordedProcess/runtime.Alive/` — which failed 5 of 5 at the 10 s deadline in
+three pods, printing `last = {… Kind:alive … Detail:pane %1 is gone …}`. The silence check that
+follows the loop is a separate exit and needed a separate control (`observe.go:58`'s untrack
+condition → `if false`, 5 of 5 `the sweep reported a final verdict again`), and it had to be
+separate: the pre-change loop fataled on the first unexpected kind, so no before-run had ever
+reached that check. Each control is one exact `sed` on a named line, run in a scratch copy of the
+package (`GOWORK=off`), the source restored with `cp` from the workspace and `cmp` showing
+nothing, so `jj diff --stat` never lists the mutated file.
 
 ## How to run the mutation check in place
 

@@ -7,7 +7,8 @@ export interface SchemaNode<E> {
 }
 
 export interface SchemaApi<E extends SchemaNode<E>> {
-  string(opts?: { min?: number; max?: number }): E;
+  /** `maxHint` follows the over-cap message after "; ", saying what to send instead. */
+  string(opts?: { min?: number; max?: number; maxHint?: string }): E;
   number(opts?: { int?: boolean; min?: number; max?: number }): E;
   boolean(): E;
   enum(values: readonly [string, ...string[]]): E;
@@ -60,9 +61,11 @@ export function zodSchemaApi(zod: unknown): SchemaApi<z.ZodType> {
       if (opts.min !== undefined) schema = schema.min(opts.min);
       if (opts.max !== undefined) {
         const max = opts.max;
+        const hint = opts.maxHint === undefined ? "" : `; ${opts.maxHint}`;
         schema = schema.max(max, {
           error: (issue) =>
-            overCapMessage(typeof issue.input === "string" ? issue.input.length : max + 1, max),
+            overCapMessage(typeof issue.input === "string" ? issue.input.length : max + 1, max) +
+            hint,
         });
       }
       return schema;

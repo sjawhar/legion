@@ -1,6 +1,6 @@
 go 1.26.8
 
 use (
-	./packages/daemon-go
+	./packages/daemon
 	./packages/envoy
 )

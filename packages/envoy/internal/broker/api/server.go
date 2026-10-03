@@ -15,25 +15,21 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/sjawhar/envoy/internal/broker/approvers"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
 type Deps struct {
 	PublicURL string
-	// UIOrigin is BROKER_UI_ORIGIN — Dispatch's origin, the WebAuthn rpId's host, embedded in
-	// every ceremony's PublicKeyCredential*Options this package builds.
-	UIOrigin string
 	// UIToken is BROKER_UI_TOKEN: the shared bearer uiAuth compares against (constant-time),
-	// authenticating Dispatch's server, never a human.
+	// authenticating Dispatch's server, which vouches for the approver login it sends.
 	UIToken      string
 	Enroll       *enroll.Service
 	Machine      *requests.Machine
 	MachineLogin *machine.Service
-	Approvers    *approvers.Service
 	Proof        *proof.Verifier
 	// LauncherLimits bounds POST /v1/launcher-credentials; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
@@ -122,7 +118,8 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 
 // proofSubject verifies r's Proof header and returns who it authenticates, unwrapped: authLauncher
 // and authProof each translate a failure into their own vocabulary (LAUNCHER_INVALID vs
-// PROOF_INVALID, contract v9's Authentication §1/§2), so this reports only the raw error.
+// PROOF_INVALID, Authentication items 1 and 2 of the shared broker contract at
+// dispatch://AGENTC-393/artifact/plan-overview-md), so this reports only the raw error.
 func (s *server) proofSubject(r *http.Request) (proof.Subject, error) {
 	return s.deps.Proof.Verify(r.Context(), r.Header.Get("Proof"), r.Method, s.deps.PublicURL+r.URL.Path, time.Now())
 }
@@ -184,6 +181,17 @@ func pathRecordID(w http.ResponseWriter, r *http.Request, name, code string) (st
 	return id, true
 }
 
+// requireApprover refuses an approver login that canonicalizes to nothing with 400
+// APPROVER_REQUIRED: every UI route names the human it acts for, whether a decision's or a
+// revoke's approver field or a list's ?approver= query.
+func requireApprover(w http.ResponseWriter, login string) bool {
+	if record.CanonicalLogin(login) == "" {
+		writeError(w, http.StatusBadRequest, "APPROVER_REQUIRED", "approver is required")
+		return false
+	}
+	return true
+}
+
 func writeError(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -204,10 +212,25 @@ func writeUnavailable(w http.ResponseWriter, code, op string, err error) {
 	writeError(w, http.StatusServiceUnavailable, code, op+" failed: a dependency the broker needs is unavailable")
 }
 
+// writeJSON answers status with v, which is one of this package's named response types: the
+// broker's generated HTTP reference (cmd/broker-refgen) documents each route's answer
+// from that type's fields and refuses a value it cannot name.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// stateResponse is what a denial, a cancel or a revoke answers.
+type stateResponse struct {
+	// The state the call left the request, record or grant in: "denied", "cancelled" or "revoked".
+	State string `json:"state"`
+}
+
+// healthResponse is GET /healthz's answer while the broker can reach Postgres.
+type healthResponse struct {
+	// "ok".
+	Status string `json:"status"`
 }
 
 func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
@@ -215,20 +238,7 @@ func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 		writeUnavailable(w, "DATABASE_UNAVAILABLE", "ping Postgres", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// isAssertionError reports whether err is a WebAuthn assertion failure the caller should see as
-// 403 ASSERTION_INVALID: a bad signature, wrong challenge, revoked or tombstoned key, wrong login,
-// replayed counter, or (finishEndorse only) an invalid endorsement assertion. The reason string is
-// safe to echo — approvers never puts key material in these errors.
-func isAssertionError(err error) bool {
-	return errors.Is(err, approvers.ErrAssertionInvalid) ||
-		errors.Is(err, approvers.ErrKeyNotFound) ||
-		errors.Is(err, approvers.ErrKeyNotLive) ||
-		errors.Is(err, approvers.ErrWrongLogin) ||
-		errors.Is(err, approvers.ErrCounterReplay) ||
-		errors.Is(err, approvers.ErrEndorsementInvalid)
+	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
 }
 
 // strPtr is nil for "" and &s otherwise, for an optional wire field that is null rather than "".

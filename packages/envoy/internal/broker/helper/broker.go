@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"slices"
@@ -24,30 +25,45 @@ import (
 )
 
 // noCredentialMsg is the exact instruction returned whenever the helper has no machine
-// credential to authenticate the launcher routes with: never having logged in, and having had
-// its credential cleared by a broker 401 LAUNCHER_INVALID (clearOnInvalid). It never
-// auto-relogins; a login is a human ceremony.
+// credential to authenticate the launcher routes with: never having logged in, and having dropped
+// its credential (drop), because the broker refused it with 401 LAUNCHER_INVALID (clearOnInvalid)
+// or it reached the expiry the broker named (watchExpiry). It never auto-relogins; a login is a
+// human ceremony.
 const noCredentialMsg = "no machine credential; run: agent-secrets launcher login"
 
 var errNoCredential = errors.New(noCredentialMsg)
 
 // machineCredential is the helper's launcher identity, existing only in memory: the private key
 // never touches disk, and id is the launcher credential the broker minted once a human approved
-// the machine login that installed this.
+// the machine login that installed this. expiresAt is when the broker said it expires (zero when
+// the broker did not say); the broker has no renewal, so past it only a new machine login a human
+// approves gives the helper a credential again. gone closes when the helper stops holding it.
 type machineCredential struct {
-	key *ecdsa.PrivateKey
-	id  string
+	key       *ecdsa.PrivateKey
+	id        string
+	expiresAt time.Time
+	gone      chan struct{}
 }
 
-// loginState is a machine login in flight or settled: the human-facing confirmation code, the
-// opaque id the helper polls the broker with, and its current state. "expired" is both a pending
-// login nobody approved in time and an issued one whose credential the broker has since refused
-// (clearOnInvalid; Refused says it was the second): either way the helper holds no credential
-// from it. The token stays "expired" for the second too, since the dotfiles launcher gate
-// matches the state words.
+// loginState is the machine login as login-status reports it: the most recent login's
+// human-facing confirmation code, the opaque id the helper polls the broker with, and its state,
+// beside whether the helper holds a launcher credential and when that credential expires. Those
+// are separate facts, since a re-login that is denied, expires unapproved or is still pending
+// leaves the credential an earlier login installed in place, and the helper keeps enrolling
+// sessions with it. Dropped is why the helper dropped the credential it held (dropRefused or
+// dropExpired), set while no login has been recorded since, so the helper holds none; Refused is
+// Dropped != "", the wire's login_refused. State then reads "expired" whatever the most recent
+// login's was, unless that login is still pending. "expired" is the word the dotfiles launcher
+// gate matches and the one an older client prints its refusal line for, and an older client must
+// never read "issued" for a credential the helper no longer holds. A login pending at the drop
+// that then settles is recorded after it, so it reports its own outcome, which `launcher login`
+// prints. "expired" is otherwise a pending login nobody approved in time.
 type loginState struct {
-	Code, PendingID, State string // State: pending|issued|denied|expired
-	Refused                bool   // State is "expired" because the broker refused its issued credential
+	Code, PendingID, State string    // the most recent login; State: pending|issued|denied|expired
+	CredentialHeld         bool      // the helper holds a launcher credential, whichever login installed it
+	CredentialExpiresAt    time.Time // when the held credential expires; zero while none is held or the broker did not say
+	Refused                bool      // Dropped != ""
+	Dropped                string    // why the helper dropped the credential it held, while no login has been recorded since
 }
 
 // Broker is the helper's view of the secrets broker: the launcher routes (Enroll, Revoke)
@@ -57,10 +73,28 @@ type Broker struct {
 	URL          string
 	OperatorFile string // login_hint source; read per login, as before
 	HTTP         *http.Client
+	// Log records every change of the launcher credential: a machine login installing one, the
+	// warning a day before it expires, and the helper dropping it, when the broker refuses it or
+	// it reaches its expiry. Its lines carry the credential id, its expiry, the operator the login
+	// was signed with (its login_hint) and the broker's refusal code, which are identifiers, never
+	// a proof, a request object or key material. Nil logs nothing.
+	Log *slog.Logger
 
 	cred    atomic.Pointer[machineCredential]
 	loginMu sync.Mutex                 // one login at a time
-	login   atomic.Pointer[loginState] // pending login: code, pendingID, state
+	login   atomic.Pointer[loginState] // most recent login: code, pendingID, state
+	// stateMu is held by every write of cred, login and dropped, and by LoginStatus while it reads
+	// the three, so login-status never pairs one moment's login with another's credential, and a
+	// drop is recorded with the clear that caused it. cred and login stay atomics so a reader of
+	// only one (HasCredential, launcherProof, Login's pending check) takes no lock.
+	stateMu sync.Mutex
+	dropped string // why drop cleared cred (dropRefused, dropExpired); "" once a login is recorded since; guarded by stateMu
+	// testClearHook, when set, runs in drop between clearing the credential and recording why.
+	// It exists only so a test can read login-status there; no production caller sets it.
+	testClearHook func()
+	// expiryWarning is how long before the credential's expiry the helper warns that it needs a
+	// new machine login; zero means a day. Only tests shorten it.
+	expiryWarning time.Duration
 
 	installedMu sync.Mutex
 	installed   chan struct{} // closed, then replaced, each time a credential is installed
@@ -103,13 +137,14 @@ func (b *Broker) Operator() string {
 	return strings.TrimSpace(string(data))
 }
 
-// launcherCredentialsRequest is POST /v1/launcher-credentials's exact contract v9 request shape
-// (handlers_launcher.go's machineLoginBody): a signed request object under "request".
+// launcherCredentialsRequest is POST /v1/launcher-credentials's exact request shape in the shared
+// broker contract (dispatch://AGENTC-393/artifact/plan-overview-md; handlers_launcher.go's
+// machineLoginBody): a signed request object under "request".
 type launcherCredentialsRequest struct {
 	Request string `json:"request"`
 }
 
-// launcherCredentialsResponse is that route's exact contract v9 response shape
+// launcherCredentialsResponse is that route's exact response shape in the shared broker contract
 // (handlers_launcher.go's machineLoginResponse): the opaque pending id and the human-facing
 // confirmation code under "code".
 type launcherCredentialsResponse struct {
@@ -118,11 +153,13 @@ type launcherCredentialsResponse struct {
 }
 
 // launcherCredentialPollResponse is GET /v1/launcher-credentials/{pending}'s reply: CredentialID
-// is present only once State is "issued" — the credential is bound to the key that logged in, so
-// the broker never has a bearer token to send back.
+// and ExpiresAt are present only once State is "issued" — the credential is bound to the key that
+// logged in, so the broker never has a bearer token to send back. A broker from before expires_at
+// leaves ExpiresAt nil.
 type launcherCredentialPollResponse struct {
-	State        string `json:"state"`
-	CredentialID string `json:"credential_id,omitempty"`
+	State        string     `json:"state"`
+	CredentialID string     `json:"credential_id,omitempty"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 }
 
 // Login starts (or reports the running) machine login: a fresh key, signed as a
@@ -166,26 +203,56 @@ func (b *Broker) Login(ctx context.Context, hostname string) (string, error) {
 	if out.PendingID == "" || out.Code == "" {
 		return "", fmt.Errorf("broker returned no pending_id/code")
 	}
-	b.login.Store(&loginState{Code: out.Code, PendingID: out.PendingID, State: "pending"})
-	go b.pollLogin(key, out.PendingID, out.Code)
+	b.recordLogin(&loginState{Code: out.Code, PendingID: out.PendingID, State: "pending"})
+	go b.pollLogin(key, out.PendingID, out.Code, operator)
 	return out.Code, nil
 }
 
-// LoginStatus reports the current (or most recently settled) machine login; the zero value means
-// none has ever run. A login whose credential clearOnInvalid has since cleared reads "expired",
-// with Refused set: the credential is the one source of whether an issued login still holds, and
-// only clearOnInvalid ever clears it (pollLogin installs the credential before it records
-// "issued").
+// LoginStatus reports the most recent machine login, current or settled, whether the helper holds
+// a launcher credential and when that credential expires; the zero value means no login has ever
+// run. A login that did not issue says nothing about the credential an earlier one installed:
+// CredentialHeld does. Once the helper has dropped the credential (drop: the broker refused it,
+// or it reached its expiry), and until a login is recorded (one starts, or one pending at the
+// drop settles), every state but pending reads "expired", refused and why it was dropped; an
+// issued login is among them, since only drop ever clears a credential an issued login installed.
+// The login, the credential and the drop are read under stateMu, so the answer is all three of
+// one moment.
 func (b *Broker) LoginStatus() loginState {
-	ls := b.login.Load()
+	b.stateMu.Lock()
+	ls, cred, dropped := b.login.Load(), b.cred.Load(), b.dropped
+	b.stateMu.Unlock()
 	if ls == nil {
 		return loginState{}
 	}
 	out := *ls
-	if out.State == "issued" && b.cred.Load() == nil {
-		out.State, out.Refused = "expired", true
+	out.CredentialHeld = cred != nil
+	if cred != nil {
+		out.CredentialExpiresAt = cred.expiresAt
+	}
+	if !out.CredentialHeld && dropped != "" {
+		out.Refused, out.Dropped = true, dropped
+		if out.State != "pending" {
+			out.State = "expired"
+		}
 	}
 	return out
+}
+
+// noCredentialReason says why the helper holds no launcher credential, for the error lines that
+// say a session cannot enroll: NoCredentialReason of this moment's login-status.
+func (b *Broker) noCredentialReason() string {
+	ls := b.LoginStatus()
+	return NoCredentialReason(ls.State, ls.Refused, ls.Dropped)
+}
+
+// recordLogin records ls as the current machine login. Whether the login starts or settles, its
+// state is newer than any drop recorded before it, so the same write ends that record and the
+// login reports its own state.
+func (b *Broker) recordLogin(ls *loginState) {
+	b.stateMu.Lock()
+	defer b.stateMu.Unlock()
+	b.login.Store(ls)
+	b.dropped = ""
 }
 
 // HasCredential reports whether the helper holds a launcher credential, the one thing every
@@ -206,10 +273,19 @@ func (b *Broker) CredentialInstalled() <-chan struct{} {
 	return b.installed
 }
 
-// installCredential makes cred the helper's launcher credential, then wakes every waiter on
-// CredentialInstalled.
-func (b *Broker) installCredential(cred *machineCredential) {
-	b.cred.Store(cred)
+// installCredential makes cred the helper's launcher credential and issued the login that minted
+// it, in one write under stateMu that also ends any record of a dropped credential, then wakes
+// every waiter on CredentialInstalled. A credential it replaces is gone from then on, so its
+// expiry watch (watchExpiry) says nothing more about it.
+func (b *Broker) installCredential(cred *machineCredential, issued *loginState) {
+	b.stateMu.Lock()
+	old := b.cred.Swap(cred)
+	b.login.Store(issued)
+	b.dropped = ""
+	b.stateMu.Unlock()
+	if old != nil {
+		close(old.gone)
+	}
 	b.installedMu.Lock()
 	defer b.installedMu.Unlock()
 	if b.installed != nil {
@@ -219,20 +295,36 @@ func (b *Broker) installCredential(cred *machineCredential) {
 }
 
 // pollLogin polls a pending machine login until a human decides it, backing off from 2s to 10s
-// between attempts. On "issued" it installs the credential (key and id only — never written to
-// disk); on "denied" or "expired" it records the terminal state and leaves cred untouched.
-func (b *Broker) pollLogin(key *ecdsa.PrivateKey, pendingID, code string) {
+// between attempts. On "issued" it installs the credential (key, id and expiry — never written to
+// disk), logs it with operator, the login_hint the login was signed with, whatever the operator
+// file says by then, and watches its expiry (watchExpiry); a broker that does not say when the
+// credential expires gets a warning that the helper cannot warn before it does. On "denied" or
+// "expired" it records the terminal state and leaves cred untouched.
+func (b *Broker) pollLogin(key *ecdsa.PrivateKey, pendingID, code, operator string) {
 	ctx := context.Background()
 	delay := 2 * time.Second
 	for {
-		if state, credentialID, ok := b.readLoginStatus(ctx, pendingID); ok {
-			switch state {
+		if out, ok := b.readLoginStatus(ctx, pendingID); ok {
+			switch out.State {
 			case "issued":
-				b.installCredential(&machineCredential{key: key, id: credentialID})
-				b.login.Store(&loginState{Code: code, PendingID: pendingID, State: "issued"})
+				cred := &machineCredential{key: key, id: out.CredentialID, gone: make(chan struct{})}
+				if out.ExpiresAt != nil {
+					cred.expiresAt = out.ExpiresAt.UTC()
+				}
+				b.installCredential(cred, &loginState{Code: code, PendingID: pendingID, State: "issued"})
+				attrs := []any{"credential_id", cred.id, "operator", operator}
+				if !cred.expiresAt.IsZero() {
+					attrs = append(attrs, "expires_at", cred.expiresAt.Format(time.RFC3339))
+				}
+				b.logger().Info("machine login issued; the helper holds a launcher credential", attrs...)
+				if cred.expiresAt.IsZero() {
+					b.logger().Warn("the broker did not say when the launcher credential expires, so the helper cannot warn before it does", "credential_id", cred.id)
+				} else {
+					go b.watchExpiry(cred)
+				}
 				return
 			case "denied", "expired":
-				b.login.Store(&loginState{Code: code, PendingID: pendingID, State: state})
+				b.recordLogin(&loginState{Code: code, PendingID: pendingID, State: out.State})
 				return
 			}
 		}
@@ -246,22 +338,46 @@ func (b *Broker) pollLogin(key *ecdsa.PrivateKey, pendingID, code string) {
 	}
 }
 
+// watchExpiry warns a day (expiryWarning) before cred expires, at once when less than that is
+// left, and drops cred when it reaches its expiry (dropExpired), as a broker refusal would: the
+// broker mints no renewal, so from then on no session can enroll until a human approves a new
+// machine login. It ends early, silently, once the helper stops holding cred (a refusal, or a
+// newer login).
+func (b *Broker) watchExpiry(cred *machineCredential) {
+	lead := b.expiryWarning
+	if lead == 0 {
+		lead = 24 * time.Hour
+	}
+	select {
+	case <-time.After(time.Until(cred.expiresAt.Add(-lead))):
+		b.logger().Warn("the launcher credential expires soon; the broker has no renewal, so before then run: agent-secrets launcher login, and have a human approve it",
+			"credential_id", cred.id, "expires_at", cred.expiresAt.Format(time.RFC3339), "in", time.Until(cred.expiresAt).Round(time.Second))
+	case <-cred.gone:
+		return
+	}
+	select {
+	case <-time.After(time.Until(cred.expiresAt)):
+		b.drop(cred, dropExpired, "expires_at", cred.expiresAt.Format(time.RFC3339))
+	case <-cred.gone:
+	}
+}
+
 // readLoginStatus polls the pending login once. ok is false on any transport or protocol error
 // (a transient broker outage), so pollLogin just backs off and tries again.
-func (b *Broker) readLoginStatus(ctx context.Context, pendingID string) (state, credentialID string, ok bool) {
+func (b *Broker) readLoginStatus(ctx context.Context, pendingID string) (launcherCredentialPollResponse, bool) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.URL+"/v1/launcher-credentials/"+pendingID, nil)
 	if err != nil {
-		return "", "", false
+		return launcherCredentialPollResponse{}, false
 	}
 	var out launcherCredentialPollResponse
 	if err := b.do(req, []int{http.StatusOK}, &out); err != nil {
-		return "", "", false
+		return launcherCredentialPollResponse{}, false
 	}
-	return out.State, out.CredentialID, true
+	return out, true
 }
 
-// enrollBody is POST /v1/enrollments's contract v9 shape (the v8 "approver" field is gone: the
-// broker's rules pick a request's approver, never the enrollment).
+// enrollBody is POST /v1/enrollments's shape in the shared broker contract (the v8 "approver"
+// field is gone: the broker's rules pick a request's approver, never the enrollment).
 type enrollBody struct {
 	Kind       string  `json:"kind"`
 	RuntimeID  string  `json:"runtime_id"`
@@ -288,22 +404,58 @@ func (b *Broker) launcherProof(method, url string) (string, *machineCredential, 
 	return compact, cred, err
 }
 
-// clearOnInvalid clears the machine credential and reports it missing whenever err is the
-// broker's 401 LAUNCHER_INVALID. The broker answers that for any launcher proof it rejects: an
-// expired or revoked credential, and also a proof it cannot verify, such as one signed outside
-// its clock-skew window or for a URL other than its own (an AGENT_SECRETS_URL that does not match
-// the broker's public URL). It never auto-relogins. cred is the credential the refused call was
-// signed with, and only that one is cleared: a refusal that arrives after another login has
-// installed a new credential leaves the new one alone. With the credential gone, LoginStatus
-// reads the login that issued it as "expired" and refused, so login-status — the probe every
-// launcher decides on — stops reporting a credential the helper no longer holds.
+// clearOnInvalid drops the machine credential (dropRefused) and reports it missing whenever err
+// is the broker's 401 LAUNCHER_INVALID. The broker answers that for any launcher proof it
+// rejects: an expired or revoked credential, and also a proof it cannot verify, such as one
+// signed outside its clock-skew window or for a URL other than its own (an AGENT_SECRETS_URL that
+// does not match the broker's public URL). It never auto-relogins. cred is the credential the
+// refused call was signed with, and only that one is dropped. A refusal of a credential a newer
+// login has already replaced drops nothing and is returned as it came: the helper holds a
+// credential, and the caller's retry, which that login woke, uses it at once.
 func (b *Broker) clearOnInvalid(cred *machineCredential, err error) error {
 	var be *BrokerError
 	if !errors.As(err, &be) || be.Status != http.StatusUnauthorized || be.Code != "LAUNCHER_INVALID" {
 		return err
 	}
-	b.cred.CompareAndSwap(cred, nil)
+	if !b.drop(cred, dropRefused, "code", be.Code) && b.HasCredential() {
+		return err
+	}
 	return errNoCredential
+}
+
+// drop stops holding cred, if the helper still does, records why, logs at ERROR that it did,
+// naming why and the credential (with attrs), and reports whether it did: a refusal or an expiry
+// that arrives after another login has installed a new credential leaves the new one alone and
+// says nothing. The clear and the record of why are one write under stateMu, so no LoginStatus
+// reads a credential gone without why: until a login is recorded, it reports the credential
+// dropped, whatever the most recent login's state, and a login recorded meanwhile ends that
+// record after it, never before. login-status — the probe every launcher decides on — then stops
+// reporting a credential the helper no longer holds.
+func (b *Broker) drop(cred *machineCredential, why string, attrs ...any) bool {
+	b.stateMu.Lock()
+	cleared := b.cred.CompareAndSwap(cred, nil)
+	if cleared {
+		if b.testClearHook != nil {
+			b.testClearHook()
+		}
+		b.dropped = why
+	}
+	b.stateMu.Unlock()
+	if !cleared {
+		return false
+	}
+	close(cred.gone)
+	b.logger().Error(why+"; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)",
+		append([]any{"credential_id", cred.id}, attrs...)...)
+	return true
+}
+
+// logger is b.Log, or a logger that writes nowhere when there is none.
+func (b *Broker) logger() *slog.Logger {
+	if b.Log == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return b.Log
 }
 
 // Enroll registers the session's key as kind host. 201 is a new enrollment; 200 is the live one
