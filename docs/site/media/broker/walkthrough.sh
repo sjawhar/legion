@@ -6,7 +6,7 @@
 # docs/site/media/broker/walkthrough/raw/, then stops the rig. Takes rig.sh's input, DATABASE_URL.
 # Needs asciinema and tmux (the terminal sections) and ffmpeg and ffprobe (each browser section's
 # check of its own recording) beside rig.sh's tools, checked before the rig starts. The cut, the
-# narration and the final video are that directory's build.py and narrate.py. Like screenshots.sh,
+# narration and the final video are that directory's build.py and narrate.ts. Like screenshots.sh,
 # it links packages/dispatch's node_modules here so the spec resolves @playwright/test.
 set -euo pipefail
 

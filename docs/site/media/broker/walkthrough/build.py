@@ -4,7 +4,7 @@
   raw/*.cast, raw/*.webm   footage, one file per section (docs/site/media/broker/walkthrough.record.ts)
   raw/sections.json        each section's wall-clock length and its marks: named on-screen events
                            in the file's own seconds
-  narration/<id>.mp3       one file per narration part (narrate.py)
+  narration/<id>.mp3       one file per narration part (narrate.ts)
   edl.py                   the cut: each clip a source and a window between two marks (each plus an
                            offset), and the narration parts laid at marks inside it
 
@@ -162,7 +162,7 @@ def check(clips: list[Clip]) -> tuple[list[Resolved], list[str]]:
         for part, offset in r.narration:
             mp3 = NARRATION / f"{part}.mp3"
             if not mp3.exists():
-                problems.append(f"{clip.id}: no narration {mp3.name} (run narrate.py)")
+                problems.append(f"{clip.id}: no narration {mp3.name} (run narrate.ts)")
                 continue
             spoken = duration(mp3)
             if offset < cursor:

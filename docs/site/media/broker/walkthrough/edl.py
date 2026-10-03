@@ -33,7 +33,7 @@ class Clip(NamedTuple):
     narration: tuple[tuple[str, At], ...] = ()
 
 
-# The narration parts in speaking order; narrate.py sends each with its neighbours' text. Names are
+# The narration parts in speaking order; narrate.ts sends each with its neighbours' text. Names are
 # written as they are said: DEMO_API_KEY as "the demo API key".
 NARRATION: dict[str, str] = {
     "open": "This command just got a key that a person approved.",
