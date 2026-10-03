@@ -13731,6 +13731,7 @@ function serviceSubjectLabel(subject) {
   }
   return subject;
 }
+var ISSUE_TITLE_MAX = 1000;
 var MAX_ISSUE_PAGE_LIMIT = 250;
 var DEFAULT_ISSUE_PAGE_LIMIT = 50;
 var ASK_TURNS = ["human", "agent"];
@@ -14162,7 +14163,7 @@ var dispatchToolSpecs = [
     description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch_search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       project: z2.string().describe("Project key for the new issue."),
-      title: z2.string().describe("Concise issue title."),
+      title: z2.string({ max: ISSUE_TITLE_MAX }).describe("Concise issue title, at most 1,000 characters."),
       parent: z2.string().describe("Optional parent issue.").optional(),
       external: z2.string().describe("Optional external issue reference.").optional(),
       force: z2.boolean().describe("Create even though POSSIBLE_DUPLICATE listed similar issues; pass it only after reading them.").optional(),
@@ -14185,7 +14186,7 @@ var dispatchToolSpecs = [
       issue: z2.string().describe(ISSUE_REFERENCE),
       status: z2.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
       reason: z2.string({ max: 2000 }).describe("Required with status done, and only with it: why the issue is closing, at most 2,000 characters. Posted on the issue as a message before it closes.").optional(),
-      title: z2.string({ min: 1 }).describe("Replacement title.").optional(),
+      title: z2.string({ min: 1, max: ISSUE_TITLE_MAX }).describe("Replacement title, at most 1,000 characters.").optional(),
       labels: z2.array(z2.string({ min: 1, max: 40 }), { max: 20 }).describe("Replacement label set, at most 20 labels of up to 40 characters; replaces every existing label.").optional(),
       priority: z2.number({ int: true, min: 0, max: 3 }).nullable().optional().describe("Coarse priority: 0 is P0 (highest) through 3 is P3 (lowest); null clears it."),
       external_links: z2.array(z2.string({ min: 1 })).describe("URLs to link; merged into the issue's existing external links by URL.").optional(),

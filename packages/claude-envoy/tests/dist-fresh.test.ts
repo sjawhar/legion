@@ -165,7 +165,7 @@ test("the dependency guard permits runtime builtin module specifiers", async () 
 
 test("the dependency guard rejects nonbuiltin literal module specifiers", async () => {
   const specifiers = [
-    { source: 'import.meta.require("node:sqlite")', path: "node:sqlite" },
+    { source: 'import.meta.require("node:never-a-runtime-builtin")', path: "node:never-a-runtime-builtin" },
     {
       source: 'import.meta.require("workspace:@legion/contracts")',
       path: "workspace:@legion/contracts",

@@ -75,7 +75,7 @@ const routeHint =
   "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly. It is where messages go, not who is working the issue — that is the claim.";
 
 /** Refusals of a title save that the same title meets every time. */
-const titleRefusals: Record<string, true> = { CAP_EXCEEDED: true, ISSUE_CLOSED: true };
+const titleRefusals = new Set(["CAP_EXCEEDED", "ISSUE_CLOSED"]);
 
 export function IssueHeader({
   documentArtifact,
@@ -295,7 +295,7 @@ export function IssueHeader({
     updateIssue.variables?.title !== undefined &&
     updateIssue.error instanceof ApiError &&
     updateIssue.error.code !== undefined &&
-    titleRefusals[updateIssue.error.code] === true
+    titleRefusals.has(updateIssue.error.code)
       ? updateIssue.error.message
       : null;
   const routeLabel = `Messages default to ${drafts.route === "" ? "no route" : drafts.route}`;

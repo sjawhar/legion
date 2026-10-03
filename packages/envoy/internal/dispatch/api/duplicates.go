@@ -23,12 +23,10 @@ const duplicateHeadlineOptions = "StartSel=" + markStart + ", StopSel=" + markEn
 // own lexemes are the parent's.
 //
 // A candidate's headline marks the words its title shares with the new one: its query is the shared
-// lexemes. Before 0069 the query was every lexeme of the new title less the parent's, which marks
-// the same words with one exception: to_tsquery reads a hyphenated lexeme as a phrase of its parts
-// as well (`legion-resolv` is 'legion-resolv' <-> 'legion' <-> 'resolv'), and ts_headline marks a
-// word matching any of them, so a part the parent's lexemes removed was marked in a candidate that
-// held it alone. Beside parent `Legion`, the new title `legion-resolve launch window` marked
-// `legion` in the candidate `launch window legion`; it now marks `launch` and `window`.
+// lexemes, not the new title's. to_tsquery reads a hyphenated lexeme as a phrase of its parts as
+// well (`legion-resolv` is 'legion-resolv' <-> 'legion' <-> 'resolv'), and ts_headline marks a word
+// matching any of them, so a query of the new title's lexemes would mark a part the parent's lexemes
+// removed.
 const duplicateQuery = `
 with parent as (select coalesce((select title_lexemes from issues where key = $3), '{}') as lexemes),
 new_title as (
