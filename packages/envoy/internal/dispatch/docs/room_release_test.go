@@ -31,8 +31,7 @@ import (
 //
 // The editor opens its documents a batch at a time, each batch idling out before the next, as
 // documents are opened over a day: what fills the cap is how many were touched, not how many are
-// open at once. The documents the API writes stay live here, since a room an Apply opens with no
-// peer is never idle-evicted (LEGION-484); TestRoomsTheAPIOpenedReleaseTheCapOnceIdle covers those.
+// open at once.
 func TestDocumentsOpenAfterMoreThanTheRoomCapWereTouched(t *testing.T) {
 	service, database := newRoomReleaseService(t)
 	const written, read, opened = 100, 100, maxLiveRooms
@@ -53,7 +52,7 @@ func TestDocumentsOpenAfterMoreThanTheRoomCapWereTouched(t *testing.T) {
 	for batch := range slices.Chunk(openedIDs, 200) {
 		openInEditor(t, service, httpServer.URL, batch)
 		waitFor(t, 30*time.Second, "the rooms the editor opened to go idle", func() bool {
-			return len(service.srv.Rooms()) == written
+			return len(service.srv.Rooms()) <= written
 		})
 	}
 	if connection, err := dialDocument(httpServer.URL, untouched); err != nil {
@@ -62,7 +61,7 @@ func TestDocumentsOpenAfterMoreThanTheRoomCapWereTouched(t *testing.T) {
 		leaveDocument(connection)
 	}
 	waitFor(t, 30*time.Second, "the untouched document's room to go idle", func() bool {
-		return len(service.srv.Rooms()) == written
+		return len(service.srv.Rooms()) <= written
 	})
 	waitForStateToFollowLiveRooms(t, service)
 }

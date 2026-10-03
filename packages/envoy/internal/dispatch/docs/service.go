@@ -1663,11 +1663,16 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			if closed && changed {
 				state.gen++
 				s.stopSettleTimer(state.settle)
-				// A closed issue's documents settle nothing, so the authors waiting for this
-				// document's settlement no longer hold its state; its pending-settlement row
-				// settles it once the issue reopens (RunSettlementResumption) or the room loads.
-				clear(state.pending)
-				state.unsettled = false
+				credit := state.settlementCreditLocked()
+				// The room's state is held until its unsettled authors reach the row that leaves
+				// its settlement owed. That row is also where a restart finds them after reopen.
+				if err := s.persistSettlementCredit(ctx, room, credit); err != nil {
+					slog.Error("dispatch: record closing document settlement authors", "room", room, "error", err)
+				} else {
+					clear(state.pending)
+					state.lastActor = nil
+					state.unsettled = false
+				}
 			}
 			s.unlockState(room, state)
 		}
