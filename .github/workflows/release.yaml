@@ -330,8 +330,10 @@ jobs:
     if: needs.changes.outputs.envoy_plugin == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
-    # npm's provenance OIDC token (`npm publish --provenance`). The tag push and version-bump
-    # commit use the deploy key, not either scope.
+    # the OIDC token npm trusted publishing exchanges for the publish credential (the registry
+    # records `trustedPublisher: github` for this package; no NPM_TOKEN is set) and that also signs
+    # provenance (`npm publish --provenance`). The tag push and version-bump commit use the deploy
+    # key, not either scope.
     permissions:
       contents: write
       id-token: write
@@ -441,8 +443,10 @@ jobs:
       (needs.changes.outputs.pi_envoy == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
-    # npm's provenance OIDC token (`npm publish --provenance`). The tag push and version-bump
-    # commit use the deploy key, not either scope.
+    # the OIDC token npm trusted publishing exchanges for the publish credential (the registry
+    # records `trustedPublisher: github` for this package; no NPM_TOKEN is set) and that also signs
+    # provenance (`npm publish --provenance`). The tag push and version-bump commit use the deploy
+    # key, not either scope.
     permissions:
       contents: write
       id-token: write
