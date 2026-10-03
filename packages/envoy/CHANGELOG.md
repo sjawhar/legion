@@ -155,15 +155,32 @@
   attributes it restores) as the tree it had read before its database work, so an edit made in
   between was reverted in the live document for every connected browser, and could reach the
   stored document half applied. Each repair is now read and written in one transaction on the
-  document as it stands. A repair settlement wrote into the room is committed even when the
-  document moved after the write; before, it was dropped from the store while the room and its
-  browsers kept it.
+  document as it stands, and so is each stamp `envoy-dispatch backfill-block-ids` writes. The
+  version a repairing settlement writes is the document after its repairs, so it holds such an
+  edit and credits the edit's author, whose own settlement then writes no second version. A
+  repair settlement wrote into the room is committed even when the document moved after the
+  write; before, it was dropped from the store while the room and its browsers kept it. A
+  settlement whose room was closed and loaded again during its database work (its last browser
+  left) writes nothing into the reloaded room, whose own settlement makes the repair, and logs
+  `dispatch: document settlement wrote nothing into a replaced room` at INFO.
 - A settlement no longer leaves a suppression slot queued that nothing releases (LEGION-479). A
   stamp that found the ids already repaired once it read the document kept its slot, and the
   room's persistence worker waited on that slot at the room's next update, so the room stopped
   storing updates. A settlement that both stamps ids and repairs an ask block held its two updates
   with one slot that matched neither, so both were stored twice and the slot stayed queued. Each
   update now has a slot of its own, and every path a repair takes releases its slot.
+- A document settlement whose room closed while its repair committed (its last browser left, its
+  issue closed, or the server shut down) no longer hangs for good (LEGION-479). ygo then stores
+  the repair's update on the settlement's own goroutine once the room's persistence worker has
+  exited, and neither wait there ended: the store waited for the settlement to release that
+  update's suppression slot, which it does only after the store returns, and the worker's exit
+  compaction waited for the room's lock, which the settlement held. Until the server restarted
+  the document did not settle and none of its later updates were stored, since every update a
+  document stores takes that lock. The store now discards the repair's own update without waiting
+  once its room has left the server, and the settlement fails the room so it reloads; the room
+  worker's compaction skips a room whose lock is held, except when it evicts a failed room. The
+  same slot wait held `envoy-dispatch backfill-block-ids` for good at a document whose room closed
+  under its stamp.
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds
