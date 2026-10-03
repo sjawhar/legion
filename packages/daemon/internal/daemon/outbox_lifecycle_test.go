@@ -411,7 +411,7 @@ func TestACIRedSendBackInterruptsTheTestersTurnBeforeTheImplementerStarts(t *tes
 	putOutboxIssue(t, pool, records, issue)
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: issue.Key, Repo: "acme/widgets", Number: 86, Branch: "legion/LEGION-208", HeadSHA: "sha-1",
-			HeadUpdatedAt: time.Now(), HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
+			HeadUpdatedAt: time.Now(), Failing: []string{}, CheckRuns: []record.AttemptRun{}})
 	}); err != nil {
 		t.Fatalf("seed the pull request: %v", err)
 	}
