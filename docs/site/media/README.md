@@ -7,7 +7,7 @@ everything needed to record them again.
 
 | File | What it is |
 | --- | --- |
-| `harness.ts` | Boots Dispatch the way its e2e suite does (`packages/dispatch/e2e/run-server.sh` with the fake Envoy and fake GitHub, each browser signed in at the server's dev sign-in route), seeds example data, and checks a page is ready and clean before a capture. |
+| `harness.ts` | Boots Dispatch the way its e2e suite does (`packages/dispatch/e2e/run-server.sh` with the fake Envoy, fake GitHub and fake secrets broker, each browser signed in at the server's dev sign-in route), seeds example data, and checks a page is ready and clean before a capture. |
 | `shot-runner.ts` | Takes a set of declared screenshots against the harness. |
 | `shots.config.ts` | The Dispatch set. |
 | `legion/` | The Legion section's set (`shots.config.ts`), and the example issues its screenshots and its walkthrough follow through Legion (`journey.ts`). |
@@ -30,9 +30,10 @@ bun install
 The first command installs the workspace, the second builds the dashboard the harness serves and
 the browser it is captured in. You also need Go, `psql`, and a Postgres database the run may
 truncate, named by `DATABASE_URL`.
-The harness listens on 8786, 9086 and 9087 (`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`,
-`FAKE_GITHUB_PORT` move them) and refuses to start if one is taken. Every row it writes is example
-data; nothing here reaches a real Dispatch, Envoy or GitHub.
+The harness listens on 8786, 9086, 9087 and 9088 (`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`,
+`FAKE_GITHUB_PORT` and `FAKE_BROKER_PORT` move them) and refuses to start if one is taken. Every
+row it writes is example data; nothing here reaches a real Dispatch, Envoy, GitHub or secrets
+broker.
 
 ## Screenshots
 

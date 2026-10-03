@@ -756,7 +756,8 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("AgentSecretsURL = %q", boot.AgentSecretsURL)
 			}
 			refusedWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example/v1", "DISPATCH_AGENT_SECRETS_TOKEN": "t"}, "DISPATCH_AGENT_SECRETS_URL")
-			// The broker the router relays credential requests to; without one it has none.
+			// The broker the router relays credential requests to; without one it has none, and the
+			// pending list answers null.
 			t.Run("router", func(t *testing.T) {
 				if got := brokerReceived(t, "ui-token"); !strings.HasPrefix(got, "GET /v1/pending?approver=alice ") {
 					t.Errorf("the broker DISPATCH_AGENT_SECRETS_URL names received %q, want alice's pending list", got)
@@ -764,8 +765,8 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests?approver=me", nil), "alice")
 				response := httptest.NewRecorder()
 				routerFor(t, resolveWith(t, nil), routes.AppContextOptions{}).ServeHTTP(response, request)
-				if response.Code != http.StatusNotFound || errorCode(response) != "FEATURE_OFF" {
-					t.Errorf("unset: GET /api/v1/credential-requests answered %d %s, want 404 FEATURE_OFF", response.Code, response.Body.String())
+				if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != "null" {
+					t.Errorf("unset: GET /api/v1/credential-requests answered %d %s, want 200 null", response.Code, response.Body.String())
 				}
 			})
 		},
