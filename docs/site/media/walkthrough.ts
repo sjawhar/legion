@@ -145,7 +145,7 @@ async function recordBrowserSection<Seeded>(
   try {
     await section.open(page, seeded);
     await waitForSettled(page);
-    await assertScreenClean(page, errors);
+    await assertScreenClean(page, errors, section.allowEmpty);
     const frames: ScreencastFrame[] = [];
     if (raw !== undefined) {
       const first = Promise.withResolvers<void>();
@@ -174,7 +174,7 @@ async function recordBrowserSection<Seeded>(
       await page.screencast.stop();
       writeRecording(frames, startedAt - LEAD_MS, stoppedAt, raw);
     }
-    await assertScreenClean(page, errors);
+    await assertScreenClean(page, errors, section.allowEmpty);
     await section.finish?.(page, seeded);
     return { action, cues, frames: frames.length };
   } finally {
@@ -472,5 +472,10 @@ run("ffmpeg", [
 ]);
 writeFileSync(join(VIDEOS, `${name}.vtt`), captions.join("\n"));
 const poster = join(VIDEOS, `${name}.jpg`);
-run("ffmpeg", ["-y", "-v", "error", "-i", video, "-frames:v", "1", "-q:v", "3", poster]);
+// The last frame is the one an `-update` writer is left holding after the final half-second.
+const posterFrame =
+  walkthrough.poster === "last"
+    ? ["-sseof", "-0.5", "-i", video, "-update", "1"]
+    : ["-i", video, "-frames:v", "1"];
+run("ffmpeg", ["-y", "-v", "error", ...posterFrame, "-q:v", "3", poster]);
 console.log(`${relative(REPO, video)}: ${duration(video).toFixed(2)} s — ${walkthrough.title}`);

@@ -43,10 +43,14 @@ unreadable in the browser refuses nothing it is carried through unchanged by. Fo
 
 ```md
 :::ask{urgency="high" multiple="false"}
-Should we ship the migration?
+Today's release is blocked by a database migration. The maintenance window closes in two hours;
+whether production data needs an index rebuild is unknown. How should we complete the migration?
+Recommendation: rehearse on a production snapshot, then apply in the window, because it finds the
+unknown cost before production while keeping today's release possible.
 
-- Ship: Release the verified change.
-- Hold: Wait for another review.
+- Apply now: Meets today's release, but recovery may be slower if the index rebuild is needed.
+- Rehearse then apply: Costs rehearsal time, but exposes the rebuild and rollback cost before production.
+- Defer the release: Avoids migration risk today, but leaves the release and its fixes unavailable.
 :::
 ```
 
@@ -157,13 +161,21 @@ is refused, with nothing sent, while that version holds a decision block open, a
 names each block and its ask. An answer or a `dispatch_resolve_ask` closes the ask at once but
 reaches a version only when the document settles, about two seconds later, or with your next
 `dispatch_doc_edit`: fold the answer into the text (or, for a waiver, write the human's decision
-in) and then request. A block written in the last few seconds counts as open before Dispatch has
-opened its ask. A repeat at the same version returns the open request unchanged. A new version
-retracts an open request for an older one, and its `ask.resolved` reaches you: request again for
-the new version once its blocks are settled. The answer reaches you as `artifact.approved` or
-`artifact.changes_requested` with the pinned `version`; `changes_requested` carries the reason,
-which is your next piece of work. `dispatch_read` and `dispatch_doc_read` show the document's
-approval state; `stale` means it was approved and then edited.
+in) before you request. A block written in the last few seconds counts as open before Dispatch has
+opened its ask. A document holds one open request. A new version moves it to that version, keeping
+its thread and summary, and leaves it waiting on you, as a human's reply in its thread does; a move
+your own edit made sends you no event, and `dispatch_read` and `dispatch_doc_read` show it as
+`Approval: awaiting, waiting on agent`. Call again when "Approval of a spec" in `skill://dispatch`
+allows: that hands the same request back to the human, reworded first when `summary` is new. Your
+own reply in its thread hands it back too, with no call and the summary it already holds, unless
+you post it with `reply_to_ask` and `turn: "agent"` (`reply_to` carries no turn, so its reply takes
+the default, `human`) or a new version has moved the request since your last
+`dispatch_request_approval`. While it waits on the human, a call with the same `summary` changes
+nothing, and one with a different `summary` is refused, since it would rewrite the card they are
+reading. The answer reaches you as `artifact.approved` or `artifact.changes_requested` with the
+pinned `version` and closes the request, so the next call opens a new one; `changes_requested`
+carries the reason, which is your next piece of work. Those reads show the document's approval
+state; `stale` means it was approved and then edited.
 
 ## A document that is reloading
 

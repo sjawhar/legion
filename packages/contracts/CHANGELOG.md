@@ -4,6 +4,9 @@
 
 ### Changed
 
+- `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary
+  and no question, and an approval is requested only once the human has agreed to every point in
+  the document (LEGION-475).
 - Added `AskApproval.requested_version`. An open approval ask now follows a document's latest
   version in the same row, and `requested_version < version` marks the interval while the agent
   is revising before handing that row back to a human (LEGION-470).
@@ -37,6 +40,8 @@
 
 ### Added
 
+- `UserAgentStateInput.read_replies`: the ids of a session's own replies to mark read, those
+  alone, for a view that shows only some of a session's replies (LEGION-485).
 - `DISPATCH_TEXT_REFERENCES`: markdown bodies with the `dispatch://` references each one cites,
   read against `https://dispatch.test` or the row's `origin`. The dashboard's
   `composerReferences` and the Go reader `text.Extract`, through its JSON copy, are both tested
