@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stage 2's gate for the Go coordinator: supervision on tmux, proven against the real things. The
-# Go daemon launches a real Oh My Pi — the pinned build (packages/daemon/src/daemon/omp-pin.ts)
+# Go daemon launches a real Oh My Pi — the pinned build (.omp-pin)
 # with this checkout's plugin in an isolated OMP profile — in panes of its private tmux server,
 # against a real Envoy listener and NATS on the host and a real Postgres. Every gate behaviour is
 # one named check that prints what it observed; the first check that does not hold ends the run
@@ -258,7 +258,7 @@ export TMUX_TMPDIR=$work/tmux   # so are the daemons' private tmux servers
 # The daemon receives the ordinary operator PATH, including any OMP wrapper it holds. It must
 # resolve the configured tool's executable itself; this proof checks the OMP child is that pinned
 # binary, rather than repairing PATH before the daemon sees it.
-pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
+pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 omp_bin=$(mise where "$pin")/bin
 [ -x "$omp_bin/omp" ] || fail "mise has no omp executable for $pin under $omp_bin"
@@ -271,7 +271,7 @@ profile_omp() { HOME="$omp_home" OMP_PROFILE="$profile" "$omp_bin/omp" "$@"; }
 port=$(bash "$root/scripts/e2e/lib/free-port.sh") || fail "no free port for the daemon"
 deadline_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port") || fail "no free port for the second daemon"
 envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port") || fail "no free port for the Envoy listener"
-(cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
+(cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
 stage_role_prompts "$root" "$work"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 # The binary under proof, checkable after the run: the source it was built from, what a changed
@@ -312,8 +312,8 @@ envoy_role() { curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$envoy_
 # The branch plugin, packed as the release packs it, into this run's own OMP profile.
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
-want_contract=$(jq -r .legion.goDaemonApiVersion "$root/packages/pi-envoy/package.json")
-echo "plugin: $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile (goDaemonApiVersion $want_contract)"
+want_contract=$(jq -r .legion.daemonApiVersion "$root/packages/pi-envoy/package.json")
+echo "plugin: $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile (daemonApiVersion $want_contract)"
 
 (umask 077 && printf 'stage2-operator-%s\n' "$project" >"$work/operator-token")
 cat >"$work/legion.yaml" <<EOF
@@ -345,9 +345,9 @@ EOF
 begin gate-refuses-another-contract
 cp -p "$work/plugin/package.json" "$work/manifest.orig"
 bad_contract=$((want_contract + 1))
-jq --argjson v "$bad_contract" '.legion.goDaemonApiVersion = $v' "$work/manifest.orig" >"$work/plugin/package.json"
-note "the installed manifest now declares goDaemonApiVersion $bad_contract (the checkout's is $want_contract)"
-expect_refusal contract "speaks Go daemon API contract $bad_contract; this daemon requires $want_contract"
+jq --argjson v "$bad_contract" '.legion.daemonApiVersion = $v' "$work/manifest.orig" >"$work/plugin/package.json"
+note "the installed manifest now declares daemonApiVersion $bad_contract (the checkout's is $want_contract)"
+expect_refusal contract "speaks daemon API contract $bad_contract; this daemon requires $want_contract"
 cp -p "$work/manifest.orig" "$work/plugin/package.json"
 cmp -s "$work/manifest.orig" "$work/plugin/package.json" || fail "the installed manifest was not restored"
 pass
@@ -409,7 +409,7 @@ expected_omp=$(readlink -f "$omp_bin/omp")
 jq -R -e --arg binary "$expected_omp" '
   fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes" and (.invocation | contains($binary)))
 ' "$daemon_log" >/dev/null || fail "the daemon did not log the pinned OMP binary $expected_omp for its boot probes and panes"
-note "$(jq -R -c 'fromjson? | select(.msg | startswith("boot gate")) | {msg, version, goDaemonApiVersion}' "$daemon_log" | sed -n 1p)"
+note "$(jq -R -c 'fromjson? | select(.msg | startswith("boot gate")) | {msg, version, daemonApiVersion}' "$daemon_log" | sed -n 1p)"
 note "$(jq -R -c 'fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes") | {msg, invocation}' "$daemon_log" | sed -n 1p)"
 c1=$(claims spawn --json --tree S2-1 --issue S2-1 --role architect --prompt-file "$work/architect.md" | jq -r .token)
 until_true 240 "claim $c1 to be ready" claim_is "$c1" '.state == "ready"'

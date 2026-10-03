@@ -449,7 +449,7 @@ func TestDevSignInNeverUsesAStoredGitHubToken(t *testing.T) {
 
 	// Without the flag, alice's stored pair is what the proxy uses.
 	handler, users := build(t, false)
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", 0, "signing-key"))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", 0, "signing-key", true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}

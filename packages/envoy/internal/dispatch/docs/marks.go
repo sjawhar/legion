@@ -144,30 +144,34 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 		return pmdoc.Range{}, err
 	}
 	if err := pmdoc.MarkRange(txn, fragment, range_, spec.pmMark()); err != nil {
-		return pmdoc.Range{}, err
+		return pmdoc.Range{}, documentSchemaError(err)
 	}
 	return range_, nil
 }
 
 // VerifyMark returns what a browser-written mark anchors to, now or after its next document
-// update.
+// update. It subscribes to the room's updates inside the Apply that loads and holds the room: a
+// room looked up again once that Apply returned can have been evicted in between.
 func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error) {
-	if err := s.srv.Apply(ctx, artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {}); err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+	updates := make(chan struct{}, 1)
+	var unsubscribe func()
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		if s.afterReadWarm != nil {
+			s.afterReadWarm(artifactID)
+		}
+		unsubscribe = doc.OnUpdate(func(_ []byte, _ any) {
+			select {
+			case updates <- struct{}{}:
+			default:
+			}
+		})
+	})
+	if unsubscribe != nil {
+		defer unsubscribe()
+	}
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return Anchored{}, err
 	}
-	doc := s.srv.GetDoc(artifactID)
-	if doc == nil {
-		return Anchored{}, errors.New("warm live document did not retain room")
-	}
-
-	updates := make(chan struct{}, 1)
-	unsubscribe := doc.OnUpdate(func(_ []byte, _ any) {
-		select {
-		case updates <- struct{}{}:
-		default:
-		}
-	})
-	defer unsubscribe()
 
 	timer := time.NewTimer(s.markWait)
 	defer timer.Stop()
@@ -290,7 +294,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if !splice {
 			var unmarkErr error
 			transact(func(txn *crdt.Transaction) {
-				unmarkErr = pmdoc.Unmark(txn, fragment, string(MarkSuggestion), id)
+				unmarkErr = documentSchemaError(pmdoc.Unmark(txn, fragment, string(MarkSuggestion), id))
 			})
 			if unmarkErr != nil {
 				return unmarkErr
@@ -859,24 +863,32 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 	if len(expired) == 0 {
 		return
 	}
+	if err := s.unmarkExpired(room, expired); err != nil {
+		slog.Error("dispatch: sweep unrecorded marks", "room", room, "error", err)
+	}
+}
 
+// unmarkExpired removes from room's live document each of expired that it still holds.
+func (s *Service) unmarkExpired(room string, expired []pmdoc.MarkRef) error {
 	var sweepErr error
-	err = s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+	err := s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		transact, release := s.serviceTransact(transact, nil)
 		defer release()
 		fragment := doc.GetXmlFragment(fragmentName)
-		fresh, readErr := treeOf(doc)
-		if readErr != nil {
-			sweepErr = readErr
-			return
-		}
+		// The tree is read inside the transaction that unmarks it, under the document's lock: a
+		// walk of the live tree outside one takes no lock and can read a peer's write halfway.
 		transact(func(txn *crdt.Transaction) {
+			fresh, readErr := treeOfTransaction(txn, fragment)
+			if readErr != nil {
+				sweepErr = readErr
+				return
+			}
 			for _, mark := range expired {
 				if _, _, found := pmdoc.FindMark(fresh, mark.Type, mark.ID); !found {
 					continue
 				}
 				if err := pmdoc.Unmark(txn, fragment, mark.Type, mark.ID); err != nil {
-					sweepErr = err
+					sweepErr = documentSchemaError(err)
 					return
 				}
 			}
@@ -885,7 +897,5 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		sweepErr = err
 	}
-	if sweepErr != nil {
-		slog.Error("dispatch: sweep unrecorded marks", "room", room, "error", sweepErr)
-	}
+	return sweepErr
 }

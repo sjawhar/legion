@@ -51,9 +51,13 @@ var (
 // proof.Verifier's own retention margin.
 const jtiRetentionMargin = time.Minute
 
+// SecretDecision is how the rules decided one name of a request.
 type SecretDecision struct {
-	Name     string `json:"name"`
+	// The secret's name.
+	Name string `json:"name"`
+	// "automatic", "approval" or "deny".
 	Decision string `json:"decision"`
+	// "inject" or "proxy".
 	Delivery string `json:"delivery"`
 	Source   string `json:"-"`
 }
@@ -120,7 +124,9 @@ func (e enrollmentRow) requester() rules.Requester {
 // name their own approver — that's the rules' job), evaluates the rules, and for a request that
 // needs approval writes the request row and its credential-request record in one transaction, the
 // same advisory-lock coalescing createPending has always used to serialize identical requests
-// from one enrollment.
+// from one enrollment. Each write transaction first locks the enrollment live
+// (lockLiveEnrollment), so no request or grant it writes lands on an enrollment that ended after
+// Create first read it; such an enrollment is pgx.ErrNoRows, as one that had ended before.
 func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sessionID string) (Request, error) {
 	enr, err := m.enrollment(ctx, enrollmentID)
 	if err != nil {
@@ -176,6 +182,9 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 		return Request{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockLiveEnrollment(ctx, tx, enrollmentID); err != nil {
+		return Request{}, err
+	}
 	if err := m.insertRequest(ctx, tx, r); err != nil {
 		return Request{}, err
 	}
@@ -283,12 +292,11 @@ func (m *Machine) createPending(ctx context.Context, enr enrollmentRow, r newReq
 		return Request{}, err
 	}
 	defer tx.Rollback(ctx)
-	lockKey, err := json.Marshal([]any{r.enrollmentID, sorted})
-	if err != nil {
+	if err := lockIdenticalPending(ctx, tx, r.enrollmentID, sorted); err != nil {
 		return Request{}, err
 	}
-	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, string(lockKey)); err != nil {
-		return Request{}, fmt.Errorf("lock identical pending requests: %w", err)
+	if err := lockLiveEnrollment(ctx, tx, r.enrollmentID); err != nil {
+		return Request{}, err
 	}
 	existingID, err := matchingRequest(ctx, tx, `select r.id, array_agg(s.name) from requests r join request_secrets s on s.request_id=r.id
 		where r.enrollment_id=$1 and r.state='pending' group by r.id`, r.enrollmentID, sorted)
@@ -328,9 +336,22 @@ func (m *Machine) createPending(ctx context.Context, enr enrollmentRow, r newReq
 	return Request{ID: r.id, State: "pending", Secrets: r.decisions, RecordID: &rid}, nil
 }
 
+// lockIdenticalPending takes the advisory lock createPending serializes identical pending requests
+// from one enrollment on, keyed by the enrollment and its sorted names, until tx ends.
+func lockIdenticalPending(ctx context.Context, tx pgx.Tx, enrollmentID string, sorted []string) error {
+	key, err := json.Marshal([]any{enrollmentID, sorted})
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, string(key)); err != nil {
+		return fmt.Errorf("lock identical pending requests: %w", err)
+	}
+	return nil
+}
+
 // Cancel ends a still-pending request the requesting session no longer wants, writing the
 // transition, its audit row, and — when the request has a credential-request record — the
-// record's cancelled event, all in one transaction.
+// record's cancelled event, all in one transaction (store.EndPendingRequests).
 func (m *Machine) Cancel(ctx context.Context, id, enrollmentID string) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -338,8 +359,7 @@ func (m *Machine) Cancel(ctx context.Context, id, enrollmentID string) error {
 	}
 	defer tx.Rollback(ctx)
 	var owner, state string
-	var recordID *string
-	if err := tx.QueryRow(ctx, `select enrollment_id, state, record_id from requests where id=$1 for update`, id).Scan(&owner, &state, &recordID); err != nil {
+	if err := tx.QueryRow(ctx, `select enrollment_id, state from requests where id=$1 for update`, id).Scan(&owner, &state); err != nil {
 		return err
 	}
 	if owner != enrollmentID {
@@ -348,26 +368,13 @@ func (m *Machine) Cancel(ctx context.Context, id, enrollmentID string) error {
 	if state != "pending" {
 		return ErrTerminal
 	}
-	const detail = "cancelled by the requesting session"
-	if _, err := tx.Exec(ctx, `update requests set state='cancelled', decided_at=now(), decided_by=$2, decision_detail=$3 where id=$1 and state='pending'`, id, "session:"+enrollmentID, detail); err != nil {
+	actor := "session:" + enrollmentID
+	if _, err := store.EndPendingRequests(ctx, tx, store.RequestByID, id, store.RequestEnd{
+		State: "cancelled", Actor: actor, DecidedBy: &actor, Detail: "cancelled by the requesting session",
+	}); err != nil {
 		return err
-	}
-	if err := audit(ctx, tx, "request.cancelled", enrollmentID, id, nil, "session:"+enrollmentID, auditDetail{}); err != nil {
-		return err
-	}
-	if recordID != nil {
-		if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, actor, detail) values ($1,'cancelled',$2,$3)`,
-			*recordID, "session:"+enrollmentID, detail); err != nil {
-			return err
-		}
 	}
 	return tx.Commit(ctx)
-}
-
-// expiredRequest is one row a sweep's own transaction moved from pending to expired: enough to
-// wake its owner (Sweeper's own job) without re-reading the request afterward.
-type expiredRequest struct {
-	id, enrollmentID, recordID string
 }
 
 // ExpirePending expires every pending request past its deadline, writing the state transition,
@@ -380,38 +387,17 @@ func (m *Machine) ExpirePending(ctx context.Context, now time.Time) (int, error)
 // expirePending is ExpirePending's shared implementation: it returns the rows it moved to
 // 'expired' so Sweeper (this package's own Tick) can wake each one's owner once the transaction
 // has actually committed.
-func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]expiredRequest, error) {
+func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]store.EndedRequest, error) {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	const detail = "no answer before the request expired"
-	rows, err := tx.Query(ctx, `update requests set state='expired', decided_at=$1, decision_detail=$2
-		where state='pending' and pending_expires_at < $1 returning id, enrollment_id, record_id`, now, detail)
+	expired, err := store.EndPendingRequests(ctx, tx, store.RequestsPastDeadline, now, store.RequestEnd{
+		State: "expired", Actor: "broker", DecidedAt: &now, Detail: "no answer before the request expired",
+	})
 	if err != nil {
 		return nil, err
-	}
-	var expired []expiredRequest
-	for rows.Next() {
-		var r expiredRequest
-		if err := rows.Scan(&r.id, &r.enrollmentID, &r.recordID); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		expired = append(expired, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	rows.Close()
-	for _, r := range expired {
-		if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, actor) values ('request.expired',$1,$2,'broker')`, r.enrollmentID, r.id); err != nil {
-			return nil, err
-		}
-		if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, actor, detail) values ($1,'expired','broker',$2)`, r.recordID, detail); err != nil {
-			return nil, err
-		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
@@ -629,6 +615,17 @@ func (m *Machine) enrollment(ctx context.Context, id string) (enrollmentRow, err
 		where id=$1 and revoked_at is null and lease_expires_at > now()`, id).
 		Scan(&e.ID, &e.Kind, &e.Operator, &e.Thumbprint, &e.RuntimeID, &e.Slot, &e.Subject)
 	return e, err
+}
+
+// lockLiveEnrollment takes enrollment id's row lock for share inside tx while the enrollment is
+// live (not revoked, lease not lapsed); pgx.ErrNoRows when it is not. Taken before tx writes a
+// request or grant row, the order ApplyDecision takes them in, it keeps endEnrollment off the row
+// until tx commits: EndLapsed skips the locked row and Revoke waits for it, and either then
+// cancels what tx wrote. An enrollment ended while tx waited for the lock is no longer live once
+// Postgres rechecks the row, so tx writes nothing on it.
+func lockLiveEnrollment(ctx context.Context, tx pgx.Tx, id string) error {
+	var one int
+	return tx.QueryRow(ctx, `select 1 from enrollments where id=$1 and revoked_at is null and lease_expires_at > now() for share`, id).Scan(&one)
 }
 
 // matchingRequest runs query (whose rows are a request id and that request's secret names, with

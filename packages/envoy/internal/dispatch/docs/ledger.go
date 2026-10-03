@@ -34,6 +34,9 @@ type Ledger struct {
 	live     map[string]*liveWrite
 	order    []string
 	versions []ledgerVersion
+	// rebuilds are the documents this transaction rebuilds (RebuildDocument), whose rooms refuse
+	// loads until it ends, committed or not.
+	rebuilds []string
 }
 
 type ledgerVersion struct {
@@ -112,7 +115,11 @@ func (l *Ledger) publishEvents() {
 // commit is Commit up to the publish. Another transaction can run between the two, and tests
 // call them apart to hold that window open.
 func (l *Ledger) commit(ctx context.Context) error {
-	if err := l.tx.Commit(ctx); err != nil {
+	err := l.tx.Commit(ctx)
+	// The transaction has ended whichever way the commit went, so a rebuild's room reads the
+	// history the commit left from here.
+	l.endRebuilds()
+	if err != nil {
 		l.fail(err)
 		return err
 	}
@@ -125,7 +132,8 @@ func (l *Ledger) commit(ctx context.Context) error {
 }
 
 // Discard drops what a transaction that did not commit left behind: its live writes, which no
-// room ever saw, and the author captures of the versions it wrote. After Commit it does nothing.
+// room ever saw, the author captures of the versions it wrote, and the rooms its rebuilds held.
+// After Commit it does nothing.
 func (l *Ledger) Discard() {
 	for _, artifactID := range l.order {
 		l.service.finishLiveWrite(l.live[artifactID])
@@ -134,6 +142,18 @@ func (l *Ledger) Discard() {
 		l.service.discardPendingVersion(written.artifactID, written.version)
 	}
 	l.versions = nil
+	l.endRebuilds()
+}
+
+func (l *Ledger) holdRebuild(artifactID string) {
+	l.rebuilds = append(l.rebuilds, artifactID)
+}
+
+func (l *Ledger) endRebuilds() {
+	for _, artifactID := range l.rebuilds {
+		l.service.rebuilding.Delete(artifactID)
+	}
+	l.rebuilds = nil
 }
 
 func (l *Ledger) recordVersion(artifactID string, version model.Version) {
@@ -150,8 +170,9 @@ func (l *Ledger) liveWriteFor(artifactID string) *liveWrite {
 // LostOps reports which operations of this transaction's write to artifactID the live document
 // no longer held once the write was published, which the caller reads after Commit. The second
 // return is false when no verdict was reached - the transaction wrote nothing to that document,
-// or its publish failed and the room is reloading - which the caller reports as undetermined
-// rather than as survival (LEGION-269).
+// its publish failed and the room is reloading, or the room holds a tree past the schema's depth
+// bound, which no read can serve - which the caller reports as undetermined rather than as
+// survival (LEGION-269).
 func (l *Ledger) LostOps(artifactID string) ([]int, bool) {
 	write := l.liveWriteFor(artifactID)
 	if write == nil || !write.lostVerdict {
