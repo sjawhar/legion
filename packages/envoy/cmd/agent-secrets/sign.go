@@ -11,7 +11,6 @@ package main
 import (
 	"crypto/ecdsa"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -27,8 +26,7 @@ func cmdSign(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets sign: unexpected argument %q\n", positional[0])
 		return exitUsageError
 	}
-	flags := flag.NewFlagSet("agent-secrets sign", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newFlagSet("sign", stderr)
 	method := flags.String("method", "", "HTTP method of the call")
 	url := flags.String("url", "", "absolute URL of the call")
 	enrollment := flags.String("enrollment", "", "sign for this enrollment id instead of this process's own (file mode only)")

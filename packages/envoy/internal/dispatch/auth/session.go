@@ -55,29 +55,15 @@ func NewSigningKey() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-// LoadSigningKey returns DISPATCH_SIGNING_KEY when set, otherwise falls
-// back to LoadOrCreateSigningKey(path). The env-var path is the production
-// shape (key sourced from a secrets manager and injected into the
-// container env) — the file path is the local-dev shape.
-//
-// Whichever source wins, the resulting key MUST be stable across deploys
-// or every dsession cookie invalidates whenever a container rolls.
-func LoadSigningKey(path string) (string, error) {
-	if key := os.Getenv("DISPATCH_SIGNING_KEY"); key != "" {
-		return key, nil
-	}
-	return LoadOrCreateSigningKey(path)
-}
-
 func sign(payload, key string) string {
 	mac := hmac.New(sha256.New, []byte(key))
 	mac.Write([]byte(payload))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// IssueSessionCookie returns a Set-Cookie header value for a 30-day session.
-// When env DISPATCH_INSECURE_COOKIE is unset, the Secure flag is added.
-func IssueSessionCookie(login string, generation int64, signingKey string) string {
+// IssueSessionCookie returns a Set-Cookie header value for a 30-day session, Secure when secure
+// is true (cmd/dispatch: DISPATCH_INSECURE_COOKIE unset).
+func IssueSessionCookie(login string, generation int64, signingKey string, secure bool) string {
 	expiry := time.Now().Add(time.Duration(sessionMaxAgeSeconds) * time.Second).UnixMilli()
 	payload := fmt.Sprintf("%s.%d.%d", login, generation, expiry)
 	value := fmt.Sprintf("%s.%s", payload, sign(payload, signingKey))
@@ -88,15 +74,15 @@ func IssueSessionCookie(login string, generation int64, signingKey string) strin
 		"SameSite=Strict",
 		fmt.Sprintf("Max-Age=%d", sessionMaxAgeSeconds),
 	}
-	if os.Getenv("DISPATCH_INSECURE_COOKIE") == "" {
+	if secure {
 		attrs = append(attrs, "Secure")
 	}
 	return strings.Join(attrs, "; ")
 }
 
 // ClearSessionCookie returns a Set-Cookie header value that immediately
-// invalidates the dsession cookie.
-func ClearSessionCookie() string {
+// invalidates the dsession cookie, Secure when secure is true.
+func ClearSessionCookie(secure bool) string {
 	attrs := []string{
 		fmt.Sprintf("%s=", sessionCookieName),
 		"HttpOnly",
@@ -104,7 +90,7 @@ func ClearSessionCookie() string {
 		"SameSite=Strict",
 		"Max-Age=0",
 	}
-	if os.Getenv("DISPATCH_INSECURE_COOKIE") == "" {
+	if secure {
 		attrs = append(attrs, "Secure")
 	}
 	return strings.Join(attrs, "; ")

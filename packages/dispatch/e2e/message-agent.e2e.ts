@@ -44,7 +44,7 @@ async function postPayload(page: Page): Promise<Record<string, unknown>> {
 }
 
 test.beforeEach(async () => {
-  await Promise.all([resetDatabase(), setLiveSessions([])]);
+  await resetDatabase();
 });
 
 test("the unified composer offers live roles and sessions and posts canonical mention targets", async ({

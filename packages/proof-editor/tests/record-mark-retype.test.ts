@@ -106,26 +106,36 @@ test("retypeMark refuses, changing nothing, a mark the document does not hold an
   });
 });
 
-test("retypeMark refuses a kind whose mark another record already holds over part of the text", async () => {
+test("a retype onto text another record's mark of the new kind covers goes through and leaves that mark whole", async () => {
   await withMarksEditor(SENTENCE, ({ view }) => {
-    // Bob's recorded comment covers "quick brown"; Alice asks about "brown" inside it.
+    // Bob's recorded comment covers "quick brown"; Alice asks about "brown" inside it, then
+    // switches her ask to a comment, a suggestion and back to an ask.
+    const brown = { from: 11, to: 16 };
     const bob = comment(view, "quick brown", "bob", "", RANGE);
-    const alice = createAskMark(view, { from: 11, to: 16 }, BY);
+    const alice = createAskMark(view, brown, BY);
     if (alice === null) throw new Error("the ask mark was not written");
-    const before = marksInDoc(view);
-    expect(before).toEqual([
+    const bobsSpans = [
       expect.objectContaining({ type: "proofComment", id: bob.id, from: 5, to: 11 }),
       expect.objectContaining({ type: "proofComment", id: bob.id, from: 11, to: 16 }),
-      expect.objectContaining({ type: "dispatchAsk", id: alice.id, from: 11, to: 16 }),
-    ]);
-    // A comment of Alice's over "brown" would cut "brown" out of Bob's comment: refused, and
-    // Bob's spans are exactly as they were.
-    expect(retypeMark(view, alice.id, "comment", BY)).toEqual({ refused: "overlaps" });
-    expect(marksInDoc(view)).toEqual(before);
-    // A suggestion over the same text displaces no comment, so it goes through; and back to an
-    // ask, leaving Bob's comment whole.
-    const suggest = retypeMark(view, alice.id, "suggest", BY);
+    ];
+    const bobs = () => marksInDoc(view).filter((mark) => mark.id === bob.id);
+    expect(bobs()).toEqual(bobsSpans);
+
+    // Alice's comment over "brown" sits inside Bob's rather than cutting "brown" out of it.
+    const asComment = retypeMark(view, alice.id, "comment", BY);
+    if ("refused" in asComment) {
+      throw new Error(`the comment retype was refused: ${asComment.refused}`);
+    }
+    expect(asComment.quote).toBe("brown");
+    expect(findRecordMark(view.state.doc, asComment.markId)).toEqual({
+      range: brown,
+      type: "proofComment",
+    });
+    expect(bobs()).toEqual(bobsSpans);
+
+    const suggest = retypeMark(view, asComment.markId, "suggest", BY);
     if ("refused" in suggest) throw new Error(`the suggest retype was refused: ${suggest.refused}`);
+    expect(bobs()).toEqual(bobsSpans);
     const back = retypeMark(view, suggest.markId, "ask", BY);
     if ("refused" in back) throw new Error(`the ask retype was refused: ${back.refused}`);
     expect(marksInDoc(view)).toEqual([
@@ -134,13 +144,6 @@ test("retypeMark refuses a kind whose mark another record already holds over par
       expect.objectContaining({ type: "dispatchAsk", id: back.markId, from: 11, to: 16 }),
     ]);
     expect(findRecordMark(view.state.doc, bob.id)).toEqual({ range: RANGE, type: "proofComment" });
-    // The control for the refusal: the creator itself does cut Bob's anchor when asked to write
-    // a comment over "brown" - a mark type excludes itself (LEGION-458).
-    comment(view, "brown", BY, "", { from: 11, to: 16 });
-    expect(findRecordMark(view.state.doc, bob.id)).toEqual({
-      range: { from: 5, to: 11 },
-      type: "proofComment",
-    });
   });
 });
 
@@ -225,16 +228,20 @@ test("a retype keeps a mark that starts on an inline image whole", async () => {
   });
 });
 
-test("retypeMark refuses a kind whose mark another record holds on an inline image in the range", async () => {
+test("a retype over an inline image another record's mark of the new kind holds leaves that mark on the image", async () => {
   await withMarksEditor("The quick ![pic](/p.png) brown fox", ({ view }) => {
-    // Bob's recorded comment covers only the image; a comment of Alice's over "quick [image]
-    // brown" would cut it off the image.
+    // Bob's recorded comment covers only the image; Alice's ask over "quick [image] brown"
+    // becomes a comment over the image beside his.
     const image = imagePosition(view);
     const bob = comment(view, "\n", "bob", "", { from: image, to: image + 1 });
     const alice = createAskMark(view, { from: 5, to: wordEnd(view, "brown") }, BY);
     if (alice === null) throw new Error("the ask mark was not written");
-    expect(retypeMark(view, alice.id, "comment", BY)).toEqual({ refused: "overlaps" });
+    const asComment = retypeMark(view, alice.id, "comment", BY);
+    if ("refused" in asComment) {
+      throw new Error(`the comment retype was refused: ${asComment.refused}`);
+    }
     expect(recordMarksOnInline(view)).toContain(`image:proofComment#${bob.id}`);
+    expect(recordMarksOnInline(view)).toContain(`image:proofComment#${asComment.markId}`);
   });
 });
 

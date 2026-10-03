@@ -232,6 +232,23 @@ func TestUploadArtifactJSONRejectsOversizedContent(t *testing.T) {
 	}
 }
 
+// A markdown document is bounded at 1 MiB, the bound an issue's spec and every edit already have
+// (maxJSONRequestBytes), and three times the largest document ever stored; a binary artifact keeps
+// 25 MiB (LEGION-465, D6).
+func TestUploadRefusesAMarkdownDocumentOverOneMiB(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	over := []byte(strings.Repeat("word ", (maxDocumentMarkdownBytes/5)+1))
+	response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "big.md"}, "big.md", "text/markdown", over, "alice")
+	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(response.Body.String(), "1 MiB") {
+		t.Fatalf("markdown over 1 MiB: status=%d body=%s, want 413 CAP_EXCEEDED naming 1 MiB", response.Code, response.Body.String())
+	}
+	blob := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "big.bin"}, "big.bin", "application/octet-stream", over, "alice")
+	if blob.Code != http.StatusCreated {
+		t.Fatalf("binary of the same size: status=%d body=%s, want 201", blob.Code, blob.Body.String())
+	}
+}
+
 func TestArtifactRoutesResolveUUIDsAndIssueScopedSlugs(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)

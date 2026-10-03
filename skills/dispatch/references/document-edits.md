@@ -182,9 +182,10 @@ was written: re-read the document and decide again, as with `PRECONDITION_FAILED
 `lost_ops` names operations means the version was written and the live document already lacks what
 those operations wrote, because the deletion landed after the version: re-read before building on
 it. `lost_ops: []` is the ordinary outcome, and a result that says it could not confirm the edit
-survived means the room is reloading — re-read. An operation that only removes text (`delete`,
-`delete_row`, `delete_column`, a `replace` that shortens) is never reported lost: a concurrent
-deletion cannot undo a removal.
+survived means the room is reloading or holds a tree too deep to read — re-read, and a read that
+answers `DOC_SCHEMA` says which. An operation that only removes text (`delete`, `delete_row`,
+`delete_column`, a `replace` that shortens) is never reported lost: a concurrent deletion cannot
+undo a removal.
 
 `retype` turns the paragraph or typed block with `block` into the named typed `type` in place. It keeps the
 block id, keeps a typed block's body, and uses `attributes` for client-owned typed attributes. Use it when

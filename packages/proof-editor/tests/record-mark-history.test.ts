@@ -80,7 +80,7 @@ test("beside a recorded suggestion the composer's writes still leave no undo ste
     // A recorded suggestion: the bar wrote its mark with no replacement, and the server projects
     // the replacement and its own time into the marks map, which the browser reads without
     // touching the document. Upstream's creators then restamp that mark's attributes on every
-    // later mark write: a removal and an addition of the same mark that are no displacement.
+    // later mark write: a removal and an addition of the same mark, which take nothing from it.
     const suggestion = suggestReplace(view, "quick", "bob", "", { from: 5, to: 10 });
     if (suggestion === null) throw new Error("the suggestion was not written");
     handle.applyRemoteMarks(
@@ -110,21 +110,19 @@ test("beside a recorded suggestion the composer's writes still leave no undo ste
   });
 });
 
-test("a bar action that cuts into the open composer's own mark, which the margin then removes, leaves no undo step", async () => {
-  await withMarksEditor(SENTENCE, ({ depths, handle, press, view }) => {
+test("a bar action over the open composer's own mark, which the margin then removes, leaves no undo step", async () => {
+  await withMarksEditor(SENTENCE, ({ depths, press, view }) => {
     // The reader comments on "quick brown", then refines the selection to "brown" before closing
-    // that composer: the second comment cuts into the first composer's mark, the margin removes
-    // the rest of it and the second composer takes over, as `composeForMark` does.
+    // that composer: the second comment sits inside the first composer's mark (LEGION-458), the
+    // margin removes the first and the second composer takes over, as `composeForMark` does.
     const first = comment(view, "quick brown", BY, "", RANGE);
-    handle.setComposerMark(first.id);
     const second = comment(view, "brown", BY, "", BROWN);
+    expect(spansOf(view, first.id)).toEqual([RANGE]);
     removeRecordMark(view, first.id);
-    handle.setComposerMark(second.id);
     expect(spansOf(view, second.id)).toEqual([BROWN]);
     expect(depths()).toEqual(NOTHING_RECORDED);
     // Cancelled, as Escape does.
     removeRecordMark(view, second.id);
-    handle.setComposerMark(null);
     press("Mod-z");
     press("Mod-z");
     press("Mod-Shift-z");
@@ -132,20 +130,19 @@ test("a bar action that cuts into the open composer's own mark, which the margin
   });
 });
 
-test("a bar Comment that cuts into another record's mark keeps its undo step", async () => {
+test("a bar Comment over text another record's comment covers leaves that comment whole and is no undo step", async () => {
   await withMarksEditor(SENTENCE, ({ depths, press, view }) => {
-    // Bob's recorded comment covers "quick brown"; Alice's bar Comment over "brown" cuts it out
-    // of Bob's comment (LEGION-458). That creation removes a mark no composer of hers holds, so it
-    // is the reader's edit: one undo restores Bob's span, as on main.
+    // Bob's recorded comment covers "quick brown"; Alice's bar Comment over "brown" sits inside
+    // it rather than cutting "brown" out of it (LEGION-458), so the creation removes nothing and
+    // is the composer's own write, which undo does not take back.
     const bob = comment(view, "quick brown", "bob", "", RANGE);
     const alice = comment(view, "brown", BY, "", BROWN);
-    expect(spansOf(view, bob.id)).toEqual([{ from: 5, to: 11 }]);
-    // Both managers hold the step: the positive control for every `yjs: 0` above, which would
-    // also read 0 if y-prosemirror's UndoManager had stopped recording.
-    expect(depths()).toEqual({ history: 1, yjs: 1 });
+    expect(spansOf(view, bob.id)).toEqual([RANGE]);
+    expect(spansOf(view, alice.id)).toEqual([BROWN]);
+    expect(depths()).toEqual(NOTHING_RECORDED);
     press("Mod-z");
     expect(spansOf(view, bob.id)).toEqual([RANGE]);
-    expect(spansOf(view, alice.id)).toEqual([]);
+    expect(spansOf(view, alice.id)).toEqual([BROWN]);
   });
 });
 
@@ -176,7 +173,8 @@ test("the reader's own edits stay undoable", async () => {
   await withMarksEditor(SENTENCE, ({ depths, press, view }) => {
     view.dispatch(view.state.tr.insertText("!", 20, 20));
     expect(view.state.doc.textContent).toBe("The quick brown fox!");
-    // Both managers record the reader's own edit (the positive control, as above).
+    // Both managers record the reader's own edit: the positive control for every `yjs: 0` above,
+    // which would also read 0 if y-prosemirror's UndoManager had stopped recording.
     expect(depths()).toEqual({ history: 1, yjs: 1 });
     press("Mod-z");
     expect(view.state.doc.textContent).toBe("The quick brown fox");

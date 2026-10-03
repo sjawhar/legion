@@ -13979,6 +13979,9 @@ function claimHolds(claim, titles) {
   return titles.has(claim.actor.id) ? "holds" : "lapsed";
 }
 // ../contracts/src/dispatch-href.ts
+function hasControlCharacter(value) {
+  return /\p{Cc}/u.test(value);
+}
 function itemFromSearch(search) {
   const params = new URLSearchParams(search);
   const ask = params.get("ask");
@@ -13997,6 +14000,9 @@ function itemFromSearch(search) {
   try {
     id = decodeURIComponent(raw);
   } catch {
+    return null;
+  }
+  if (hasControlCharacter(id)) {
     return null;
   }
   return ask === null ? { id, kind: "comment" } : { id, kind: "ask" };
@@ -14060,6 +14066,8 @@ function dispatchToolSchema(spec, z2, opts) {
 }
 var ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch_issue with external creates a native issue.";
 var OWNER_REFERENCE = "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
+var ASK_QUESTION_CONTRACT = "The question carries the problem the reader recognises and why it matters now, what constrains " + "the answer, and the recommendation with its reason. It asks how to solve the problem or which " + "outcome is wanted; never enumerate choices in the question.";
+var ASK_OPTIONS_CONTRACT = "Options carry the genuinely different approaches. Each option has a label, and its description " + "says what that approach costs.";
 function documentOwnerValidation(requireArtifact, alwaysRequireArtifact = false) {
   return {
     check: (value) => {
@@ -14207,18 +14215,31 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_ask",
-    example: { issue: "DSP-1", question: "Ship this?" },
-    description: "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " + "use dispatch_message instead. A to-do a human must complete is a question phrased as that to-do, with the options you want (for example Done / Can't). " + "Anything you are blocked on a human for, including a credential or grant to renew, an approval, or a decision, is an ask, never a message. " + "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} ` + `characters and has at most 8 options. ${OWNER_REFERENCE}`,
+    example: {
+      issue: "DSP-1",
+      question: "The release cannot pass its review gate because the revised plan is unreviewed. " + "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+      options: [
+        {
+          label: "Review the revised plan",
+          description: "Delays release for review but keeps the release gate."
+        },
+        {
+          label: "Release without review",
+          description: "Ships sooner but bypasses the review gate."
+        }
+      ]
+    },
+    description: "Open a durable, answerable decision on an issue or project document. Do not use it for a " + "status update or discussion; use dispatch_message instead. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything you are blocked on a human for, including a credential or grant to renew, an " + "approval, or a decision, is an ask, never a message. " + "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters ` + `and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Project document artifact id, slug, or filename.").optional(),
       ref: z2.string().describe("Optional dispatch:// reference (issue, document, message, or ask); appended to the question and rendered as a link.").optional(),
-      question: z2.string({ max: ASK_QUESTION_MAX }).describe(`Decision question, at most ${ASK_QUESTION_MAX} characters.`),
+      question: z2.string({ max: ASK_QUESTION_MAX }).describe(`${ASK_QUESTION_CONTRACT} At most ${ASK_QUESTION_MAX} characters.`),
       options: z2.array(z2.object({
         label: z2.string().describe("Selectable option label."),
-        description: z2.string().describe("Optional option context.").optional()
-      }), { max: 8 }).describe("Up to 8 choices, each an object { label, description? } (never a bare string).").optional(),
+        description: z2.string().optional().describe("What this option costs.")
+      }), { max: 8 }).optional().describe(`${ASK_OPTIONS_CONTRACT} Up to 8 objects { label, description? }.`),
       multiple: z2.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z2.enum(ASK_URGENCIES).describe("Optional decision urgency.").optional(),
       anchor: z2.object({
@@ -14233,16 +14254,26 @@ var dispatchToolSpecs = [
     name: "dispatch_edit_ask",
     example: {
       ask: "01234567-0000-4000-8000-000000000001",
-      question: "Ship the revised plan?"
+      question: "The release cannot pass its review gate because the revised plan is unreviewed. " + "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+      options: [
+        {
+          label: "Review the revised plan",
+          description: "Delays release for review but keeps the release gate."
+        },
+        {
+          label: "Release without review",
+          description: "Ships sooner but bypasses the review gate."
+        }
+      ]
     },
-    description: "Edit an open question in place. Use it to correct or refine the same decision; retract the " + "old ask and open a new one when the decision itself changes. Previous text remains in the " + "event log. Only the asking session can edit it; answered or resolved asks cannot be edited. " + "An ask that lives as an `ask` block in a document is written in the document too, changing " + "only the fields you name - pass urgency alone and the question's wording, formatting, links " + "and comment anchors are untouched - so the edit writes a document version and closes a " + "spec's design gate until that version is " + "approved; text the block cannot carry back unchanged is refused, naming the field - an " + 'option label containing ": ", the separator between a label and its description, is one ' + "example.",
+    description: "Edit an open question in place. Use it to correct or refine the same decision; retract the " + "old ask and open a new one when the decision itself changes. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " Previous text remains in the event log. Only the asking session can edit it; answered or " + "resolved asks cannot be edited. An ask that lives as an `ask` block in a document is written " + "in the document too, changing only the fields you name - pass urgency alone and the " + "question's wording, formatting, links and comment anchors are untouched - so the edit " + "writes a document version and closes a spec's design gate until that version is approved; " + "text the block cannot carry back unchanged is refused, naming the field - an option label " + 'containing ": ", the separator between a label and its description, is one example.',
     arguments: (z2) => ({
       ask: z2.string().describe("Ask id (uuid); an 8+ hex prefix unique among this session's own open asks works too."),
-      question: z2.string({ max: ASK_QUESTION_MAX }).describe(`Replacement decision question, at most ${ASK_QUESTION_MAX} characters.`).optional(),
+      question: z2.string({ max: ASK_QUESTION_MAX }).optional().describe(`${ASK_QUESTION_CONTRACT} Replaces the ask's question; at most ${ASK_QUESTION_MAX} characters.`),
       options: z2.array(z2.object({
         label: z2.string().describe("Selectable option label."),
-        description: z2.string().describe("Optional option context.").optional()
-      }), { max: 8 }).describe("Replacement choices, at most 8.").optional(),
+        description: z2.string().optional().describe("What this option costs.")
+      }), { max: 8 }).optional().describe(`${ASK_OPTIONS_CONTRACT} Replaces the ask's options; up to 8 objects { label, description? }.`),
       multiple: z2.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z2.enum(ASK_URGENCIES).describe("Replacement decision urgency.").optional()
     }),
@@ -14390,13 +14421,13 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_request_approval",
-    example: { issue: "DSP-1", summary: "Proposes a live sync in place of the nightly export." },
-    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. A later version makes an approval stale, " + "and writing it retracts an open request for an older version; request again for the new " + "one. A repeat at the version an open request names returns that request unchanged. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
+    example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
+    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. A later version carries the same open " + "request forward and leaves it waiting on you; once the revision is complete and the human " + "has agreed to every point in it, call this again to hand that request back. The request " + "carries nothing new. A call while it already waits on the human hands nothing back: the " + "same summary changes nothing, and a different one is refused, since it would rewrite the " + "card the human is reading. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Project document artifact id, slug, or filename; primary document by default for an issue.").optional(),
-      summary: z2.string({ min: 1 }).describe("The proposals in this version the human hasn't already agreed to, in one to three sentences.")
+      summary: z2.string({ min: 1 }).describe("What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question. Request approval only once the human has agreed to every point in the document.")
     }),
     validation: documentOwnerValidation(true)
   },
@@ -14404,7 +14435,7 @@ var dispatchToolSpecs = [
     name: "dispatch_artifact",
     example: { issue: "DSP-1", name: "design.md", content: `# Design
 ` },
-    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
+    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch_doc_edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key for an unlinked document.").optional(),
@@ -14424,7 +14455,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair) or `INTERNAL`. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + OWNER_REFERENCE,
+    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -14457,7 +14488,7 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_issues",
-    example: { project: "AGENTC", limit: 250, offset: 250 },
+    example: { project: "PROJ", limit: 250, offset: 250 },
     description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
     arguments: (z2) => ({
       project: z2.string().describe("Project key to list issues from."),
@@ -14550,168 +14581,6 @@ function dedupeKeyNamesItsEvent(envelope) {
       return false;
   }
 }
-// ../contracts/src/handoff-schema.ts
-var HANDOFF_SCHEMA_VERSION = 1;
-var HANDOFF_PHASES = ["architect", "plan", "implement", "test", "review"];
-var PLAN_REVIEW_MAX_ROUNDS = 3;
-var PLAN_REVIEW_VERDICTS = ["approved", "rejected", "failed"];
-var isoTimestamp = exports_external.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
-var handoffPhase = exports_external.enum(HANDOFF_PHASES);
-var nonEmpty = exports_external.string().trim().min(1);
-var proofSchema = exports_external.object({
-  criterion: nonEmpty,
-  surface: nonEmpty,
-  command: nonEmpty,
-  observed: nonEmpty,
-  headSha: nonEmpty,
-  negativeControl: nonEmpty
-}).passthrough();
-var routingHintsSchema = exports_external.object({
-  skipArchitect: exports_external.boolean().optional(),
-  complexity: exports_external.enum(["trivial", "small", "medium", "large"]).optional(),
-  estimatedImplementers: exports_external.number().optional()
-}).passthrough().optional();
-var baseHandoffSchema = exports_external.object({
-  schemaVersion: exports_external.literal(HANDOFF_SCHEMA_VERSION),
-  phase: handoffPhase,
-  completed: isoTimestamp,
-  learningsInjected: exports_external.array(exports_external.string()).optional(),
-  learningsHelpful: exports_external.array(exports_external.string()).optional()
-}).passthrough();
-var architectSchema = baseHandoffSchema.extend({
-  phase: exports_external.literal("architect"),
-  scope: exports_external.enum(["trivial", "small", "medium", "large"]).optional(),
-  components: exports_external.array(exports_external.string()).optional(),
-  subIssues: exports_external.array(exports_external.string()).optional(),
-  routingHints: routingHintsSchema,
-  concerns: exports_external.array(exports_external.string()).optional()
-});
-var requiredSkillsSchema = exports_external.object({
-  implement: exports_external.array(exports_external.string()).optional(),
-  test: exports_external.array(exports_external.string()).optional(),
-  review: exports_external.array(exports_external.string()).optional()
-}).passthrough().optional();
-var gapAnalysisSchema = exports_external.object({
-  findings: exports_external.array(exports_external.object({ finding: exports_external.string(), answer: exports_external.string() }).passthrough()).optional(),
-  error: exports_external.string().optional()
-}).passthrough().optional();
-var planReviewSchema = exports_external.object({
-  verdict: exports_external.enum(PLAN_REVIEW_VERDICTS),
-  rounds: exports_external.number(),
-  remainingIssues: exports_external.array(exports_external.object({ issue: exports_external.string(), evidence: exports_external.string() }).passthrough()).optional(),
-  error: exports_external.string().optional()
-}).passthrough().optional();
-var planSchema = baseHandoffSchema.extend({
-  phase: exports_external.literal("plan"),
-  taskCount: exports_external.number().optional(),
-  independentTasks: exports_external.number().optional(),
-  routingHints: routingHintsSchema,
-  concerns: exports_external.array(exports_external.string()).optional(),
-  workflowRecommendation: exports_external.string().optional(),
-  requiredSkills: requiredSkillsSchema,
-  gapAnalysis: gapAnalysisSchema,
-  planReview: planReviewSchema
-});
-var implementSchema = baseHandoffSchema.extend({
-  phase: exports_external.literal("implement"),
-  filesChanged: exports_external.array(exports_external.string()).optional(),
-  proof: exports_external.array(proofSchema).min(1),
-  trickyParts: exports_external.array(exports_external.string()).optional(),
-  deviations: exports_external.array(exports_external.string()).optional(),
-  openQuestions: exports_external.array(exports_external.string()).optional(),
-  subPlanningNeeded: exports_external.boolean().optional(),
-  discoveredComplexity: exports_external.array(exports_external.string()).optional(),
-  suggestedSubWorkers: exports_external.number().optional()
-});
-var testSchema = baseHandoffSchema.extend({
-  phase: exports_external.literal("test"),
-  passed: exports_external.number().optional(),
-  failed: exports_external.number().optional(),
-  failures: exports_external.array(exports_external.object({ criterion: exports_external.string(), evidence: exports_external.string() }).passthrough()).optional(),
-  implementerProof: exports_external.object({ verdict: exports_external.enum(["verified", "rejected"]), how: nonEmpty }).passthrough(),
-  proof: exports_external.array(proofSchema).min(1).optional(),
-  documentationFeedback: exports_external.string().optional(),
-  observations: exports_external.array(exports_external.string()).optional()
-}).refine((handoff) => (handoff.failures?.length ?? 0) > 0 || (handoff.failed ?? 0) > 0 || (handoff.proof?.length ?? 0) > 0, {
-  path: ["proof"],
-  message: "a passing test handoff needs the tester's own production-like proof"
-}).refine((handoff) => (handoff.failed ?? 0) === 0 || (handoff.failures?.length ?? 0) > 0, {
-  path: ["failures"],
-  message: "a test handoff that reports failed > 0 records at least one failure"
-}).refine((handoff) => handoff.implementerProof.verdict !== "rejected" || (handoff.failures?.length ?? 0) > 0, {
-  path: ["failures"],
-  message: "a rejected implementer proof is a recorded failure"
-});
-var reviewSchema = baseHandoffSchema.extend({
-  phase: exports_external.literal("review"),
-  critical: exports_external.number().optional(),
-  important: exports_external.number().optional(),
-  minor: exports_external.number().optional(),
-  verdict: exports_external.enum(["approved", "changes_requested"]).optional(),
-  keyFindings: exports_external.array(exports_external.object({ severity: exports_external.string(), file: exports_external.string(), description: exports_external.string() }).passthrough()).optional()
-});
-var nonEmptySkillList = exports_external.array(nonEmpty).min(1);
-var recorded = (shape, whatToRecord) => exports_external.object(shape, {
-  error: (issue2) => issue2.input === undefined ? `missing \u2014 record ${whatToRecord}` : undefined
-}).passthrough();
-var gapAnalysisWriteSchema = recorded({
-  findings: exports_external.array(exports_external.object({ finding: nonEmpty, answer: nonEmpty }).passthrough()).optional(),
-  error: nonEmpty.optional()
-}, "the gap analyst's `findings`, each with how the plan answers it (`[]` when it found none), or its failed call's `error`").refine((analysis) => analysis.findings === undefined !== (analysis.error === undefined), {
-  message: "record exactly one of `findings` or the failed call's `error`"
-});
-var planReviewWriteSchema = recorded({
-  verdict: exports_external.enum(PLAN_REVIEW_VERDICTS),
-  rounds: exports_external.number().int().min(1).max(PLAN_REVIEW_MAX_ROUNDS),
-  remainingIssues: exports_external.array(exports_external.object({ issue: nonEmpty, evidence: nonEmpty }).passthrough()).optional(),
-  error: nonEmpty.optional()
-}, "the plan review's `verdict` and `rounds`, with `remainingIssues` when it was rejected or `error` when a review's call failed").superRefine((review, ctx) => {
-  const remaining = review.remainingIssues?.length ?? 0;
-  if (review.verdict === "rejected" && remaining === 0) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["remainingIssues"],
-      message: "a rejected review records the blocking issues its last round named"
-    });
-  }
-  if (review.verdict === "rejected" && review.rounds < PLAN_REVIEW_MAX_ROUNDS) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["rounds"],
-      message: `a review still rejecting after ${review.rounds} of ${PLAN_REVIEW_MAX_ROUNDS} rounds is revised and reviewed again, not recorded`
-    });
-  }
-  if (review.verdict === "approved" && remaining > 0) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["remainingIssues"],
-      message: "an approved review leaves no blocking issue standing"
-    });
-  }
-  if (review.verdict === "failed" !== (review.error !== undefined)) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["error"],
-      message: "a failed review records its call's error, and only a failed review does"
-    });
-  }
-});
-var planWriteSchema = planSchema.extend({
-  requiredSkills: exports_external.object({
-    implement: nonEmptySkillList,
-    test: nonEmptySkillList,
-    review: nonEmptySkillList
-  }).passthrough(),
-  gapAnalysis: gapAnalysisWriteSchema,
-  planReview: planReviewWriteSchema
-});
-var phaseHandoffSchema = exports_external.discriminatedUnion("phase", [
-  architectSchema,
-  planSchema,
-  implementSchema,
-  testSchema,
-  reviewSchema
-]);
 // ../contracts/src/subject.ts
 var AGENT_TOPIC_PREFIX = "notifications.agent.";
 var ROLE_TOPIC_PREFIX = "notifications.role.";
@@ -14727,283 +14596,6 @@ function dispatchDocumentSubject(project, slug, type) {
 function agentSubject(session) {
   return `${AGENT_TOPIC_PREFIX}${session}`;
 }
-
-// ../contracts/src/legion-roles.ts
-var LEGION_ROLES = [
-  "architect",
-  "planner",
-  "implementer",
-  "tester",
-  "reviewer",
-  "merger"
-];
-
-// ../contracts/src/legion-daemon-api.ts
-var nonEmptyString = exports_external.string().min(1);
-var appLogin = exports_external.string().regex(/^[^[\]]+\[bot\]$/);
-var legionRole = exports_external.enum(LEGION_ROLES);
-var requiredUnknown = exports_external.unknown().refine((value) => value !== undefined, {
-  message: "Required"
-});
-var architectCapability = exports_external.strictObject({
-  tree: nonEmptyString,
-  sessionId: nonEmptyString,
-  secret: nonEmptyString
-});
-var controllerIssue = exports_external.strictObject({
-  secret: nonEmptyString,
-  issue: nonEmptyString
-});
-var TREE_STATUSES = ["queued", "active", "lingering", "dead", "launch-failed", "closed"];
-var stateTmuxLocator = exports_external.strictObject({
-  runtime: exports_external.literal("tmux"),
-  tmuxSession: nonEmptyString,
-  tmuxWindowId: nonEmptyString,
-  tmuxPaneId: nonEmptyString.optional()
-});
-var stateK8sLocator = exports_external.strictObject({
-  runtime: exports_external.literal("kubernetes"),
-  namespace: nonEmptyString,
-  podName: nonEmptyString,
-  podUid: nonEmptyString,
-  pvcName: nonEmptyString
-});
-var stateLocator = exports_external.discriminatedUnion("runtime", [stateTmuxLocator, stateK8sLocator]);
-var stateTreeLocator = exports_external.discriminatedUnion("runtime", [
-  stateTmuxLocator.extend({ ompSessionFile: nonEmptyString.optional() }),
-  stateK8sLocator.extend({ ompSessionFile: nonEmptyString.optional() })
-]);
-var stateExternalControllerLocator = exports_external.strictObject({
-  runtime: exports_external.literal("kubernetes"),
-  external: exports_external.literal(true),
-  sessionId: nonEmptyString,
-  registeredAt: exports_external.number().int().nonnegative()
-});
-var stateIssue = exports_external.strictObject({
-  key: nonEmptyString,
-  title: exports_external.string(),
-  status: exports_external.enum(ISSUE_STATUSES).optional(),
-  children: exports_external.array(nonEmptyString),
-  parent: nonEmptyString.optional(),
-  lastAppliedSeq: exports_external.number().int().nonnegative().optional()
-});
-var stateWorkspaceLost = exports_external.strictObject({
-  at: nonEmptyString,
-  generation: exports_external.number().int().nonnegative(),
-  fromRef: nonEmptyString,
-  previousSessionId: nonEmptyString.optional()
-});
-var stateTree = exports_external.strictObject({
-  status: exports_external.enum(TREE_STATUSES),
-  generation: exports_external.number().int().nonnegative(),
-  launchFailures: exports_external.number().int().nonnegative(),
-  readyConfirmedAt: exports_external.number().optional(),
-  locator: stateTreeLocator.optional(),
-  workspaceLost: stateWorkspaceLost.optional()
-});
-var stateGate = exports_external.strictObject({
-  artifactId: nonEmptyString,
-  latestVersion: exports_external.number().int().positive(),
-  approvedVersion: exports_external.number().int().positive().optional()
-});
-var stateRole = exports_external.strictObject({
-  role: nonEmptyString,
-  issue: nonEmptyString.optional(),
-  generation: exports_external.number().int().nonnegative().optional(),
-  sessionId: nonEmptyString.optional(),
-  readyConfirmedAt: exports_external.number().optional(),
-  launchFailures: exports_external.number().int().nonnegative().optional(),
-  locator: stateLocator.optional(),
-  workspaceLost: stateWorkspaceLost.optional()
-});
-var stateQueuedWorkerIdentity = {
-  roleToken: nonEmptyString,
-  issue: nonEmptyString,
-  role: nonEmptyString
-};
-var stateQueuedWorker = exports_external.union([
-  exports_external.strictObject(stateQueuedWorkerIdentity),
-  exports_external.strictObject({
-    ...stateQueuedWorkerIdentity,
-    kind: exports_external.enum(["assignment", "catchup"]),
-    queuedAt: nonEmptyString
-  })
-]);
-var LegionDaemonApi = {
-  State: {
-    response: exports_external.strictObject({
-      project: nonEmptyString,
-      version: exports_external.number().int(),
-      issues: exports_external.record(exports_external.string(), stateIssue),
-      trees: exports_external.record(exports_external.string(), stateTree),
-      admission: exports_external.strictObject({
-        cap: exports_external.number().int().nonnegative(),
-        active: exports_external.array(nonEmptyString),
-        queue: exports_external.array(nonEmptyString)
-      }),
-      gates: exports_external.record(exports_external.string(), stateGate),
-      controllerLocator: exports_external.union([stateTreeLocator, stateExternalControllerLocator]).optional(),
-      roles: exports_external.record(exports_external.string(), stateRole),
-      controllerPendingNotices: exports_external.number().int().nonnegative(),
-      pendingStatusWrites: exports_external.array(nonEmptyString),
-      workerAdmission: exports_external.strictObject({ queue: exports_external.array(stateQueuedWorker) })
-    })
-  },
-  ControllerReady: {
-    request: exports_external.strictObject({
-      secret: nonEmptyString,
-      sessionId: nonEmptyString,
-      ompSessionFile: nonEmptyString.optional(),
-      pluginVersion: nonEmptyString
-    }),
-    response: exports_external.object({})
-  },
-  ControllerSecret: {
-    request: exports_external.strictObject({}),
-    response: exports_external.object({ secret: nonEmptyString })
-  },
-  ProcessStarted: {
-    request: exports_external.strictObject({
-      tree: nonEmptyString,
-      generation: exports_external.number().int(),
-      rootSessionId: nonEmptyString,
-      agentId: nonEmptyString,
-      bootToken: nonEmptyString,
-      ompSessionFile: nonEmptyString,
-      pluginVersion: nonEmptyString
-    }),
-    response: exports_external.object({
-      roleTokens: exports_external.record(exports_external.string(), exports_external.string()),
-      controlSubject: nonEmptyString,
-      gates: exports_external.object({
-        design: exports_external.enum(["root-issues", "off"])
-      }).optional(),
-      secret: nonEmptyString
-    })
-  },
-  ProcessReady: {
-    request: architectCapability.extend({ generation: exports_external.number().int() }),
-    response: exports_external.object({})
-  },
-  ProcessExit: {
-    request: architectCapability.extend({ generation: exports_external.number().int() }),
-    response: exports_external.object({})
-  },
-  WaveRelease: {
-    request: architectCapability.extend({ issues: exports_external.array(nonEmptyString).optional() }),
-    response: exports_external.object({ released: exports_external.array(nonEmptyString) })
-  },
-  Escalate: {
-    request: architectCapability.extend({
-      kind: exports_external.enum(["re-file", "capacity", "cross-tree"]),
-      context: requiredUnknown
-    }),
-    response: exports_external.object({})
-  },
-  ProvisioningCredential: {
-    request: architectCapability.extend({ issue: nonEmptyString }),
-    response: exports_external.object({ token: nonEmptyString })
-  },
-  WorkerStarted: {
-    request: exports_external.strictObject({
-      tree: nonEmptyString,
-      issue: nonEmptyString,
-      role: legionRole,
-      bootToken: nonEmptyString,
-      sessionId: nonEmptyString,
-      agentId: nonEmptyString,
-      ompSessionFile: nonEmptyString,
-      pluginVersion: nonEmptyString
-    }),
-    response: exports_external.object({
-      roleToken: nonEmptyString,
-      secret: nonEmptyString,
-      gitName: nonEmptyString,
-      gitEmail: nonEmptyString
-    })
-  },
-  WorkerReady: {
-    request: exports_external.strictObject({
-      tree: nonEmptyString,
-      issue: nonEmptyString,
-      role: legionRole,
-      sessionId: nonEmptyString,
-      generation: exports_external.number().int().nonnegative(),
-      secret: nonEmptyString
-    }),
-    response: exports_external.object({})
-  },
-  PhaseComplete: {
-    request: exports_external.strictObject({
-      grantId: nonEmptyString,
-      summary: nonEmptyString
-    }),
-    response: exports_external.object({})
-  },
-  SpawnWorker: {
-    request: architectCapability.extend({
-      issue: nonEmptyString,
-      role: legionRole,
-      task: nonEmptyString,
-      requestId: exports_external.uuid()
-    }),
-    response: exports_external.object({
-      status: exports_external.enum(["spawned", "resumed", "queued"]),
-      roleToken: nonEmptyString
-    })
-  },
-  WorkerSession: {
-    request: exports_external.strictObject({
-      sessionId: nonEmptyString,
-      recoveryToken: nonEmptyString
-    }),
-    response: exports_external.object({
-      tree: nonEmptyString,
-      issue: nonEmptyString,
-      role: legionRole,
-      secret: nonEmptyString
-    })
-  },
-  IssueStatus: {
-    request: controllerIssue.extend({
-      status: exports_external.enum(ISSUE_STATUSES),
-      tree: nonEmptyString.optional(),
-      sessionId: nonEmptyString.optional()
-    }),
-    response: exports_external.object({})
-  },
-  GatesRegister: {
-    request: architectCapability.extend({
-      issue: nonEmptyString,
-      artifactId: exports_external.uuid(),
-      version: exports_external.number().int().positive()
-    }),
-    response: exports_external.object({})
-  },
-  Grant: {
-    request: exports_external.union([
-      exports_external.strictObject({
-        sessionId: nonEmptyString,
-        secret: nonEmptyString,
-        tree: nonEmptyString,
-        issue: nonEmptyString
-      }),
-      exports_external.strictObject({ sessionId: nonEmptyString, secret: nonEmptyString })
-    ]),
-    response: exports_external.object({ grantId: nonEmptyString, expiresAt: nonEmptyString })
-  },
-  GitHubToken: {
-    request: exports_external.strictObject({ grantId: nonEmptyString }),
-    response: exports_external.object({
-      token: nonEmptyString,
-      appLogin: exports_external.string().endsWith("[bot]"),
-      legionAppLogins: exports_external.object({ implement: appLogin, review: appLogin }).optional()
-    })
-  },
-  GitCredential: {
-    request: exports_external.strictObject({ grantId: nonEmptyString })
-  }
-};
 // ../contracts/src/repo.ts
 function canonicalRepo(owner, repo) {
   return `${owner.trim().toLowerCase()}/${repo.trim().toLowerCase().replace(/\.git$/, "")}`;
@@ -15381,7 +14973,8 @@ class DispatchClient {
     return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
   }
   async requestApproval(artifactID, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
+    const answer = await this.#jsonAnswer("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
+    return { ...answer.payload, recorded: answer.status === 201 };
   }
   async editAsk(id, input) {
     return this.#json("PATCH", ["api", "v1", "asks", id], input);
@@ -15526,6 +15119,9 @@ class DispatchClient {
     }
   }
   async#json(method, path2, body, query) {
+    return (await this.#jsonAnswer(method, path2, body, query)).payload;
+  }
+  async#jsonAnswer(method, path2, body, query) {
     const headers = {
       Accept: "application/json",
       Authorization: `Bearer ${this.token}`
@@ -15539,7 +15135,7 @@ class DispatchClient {
       signal: this.#signal,
       ...body === undefined ? {} : { body: JSON.stringify(body) }
     });
-    return this.#response(method, url2, response);
+    return { status: response.status, payload: await this.#response(method, url2, response) };
   }
   async#form(method, path2, body) {
     const url2 = this.#url(path2);
@@ -16404,12 +16000,14 @@ function approvalLine(artifact) {
   if (approval === undefined || approval.state === "draft")
     return;
   switch (approval.state) {
-    case "awaiting":
-      return `Approval: awaiting (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
+    case "awaiting": {
+      const turn = approval.waiting_on === undefined ? "" : `, waiting on ${approval.waiting_on}`;
+      return `Approval: awaiting${turn} (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
+    }
     case "approved":
       return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
     case "stale":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}) - request approval again`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}) - request approval again once the human has agreed to every point in this version`;
     case "changes_requested":
       return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
   }
@@ -16545,6 +16143,7 @@ function eventHead(event) {
     case "ask.opened":
     case "ask.anchor_refreshed":
     case "ask.edited":
+    case "ask.handed_back":
     case "ask.resolved":
       return textHead(event.payload.question);
     case "ask.answered":
@@ -16771,9 +16370,9 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
     return;
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
   throw new Error([
-    `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would retract this request.`,
+    `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
     ...open.map((line) => `- ${line}`),
-    "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit and request approval again. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason), write their decision into the text with dispatch_doc_edit, and request approval again."
+    "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason) and write their decision into the text with dispatch_doc_edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human."
   ].join(`
 `));
 }
@@ -16809,17 +16408,19 @@ async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
   ].join(`
 `));
 }
-function refusalWithCode(error48, suffix = "") {
+function refusalWithCode(error48, ...clauses) {
+  const suffix = clauses.filter((clause) => clause !== "").join("; ");
+  const joined = suffix === "" ? "" : `; ${suffix}`;
   if (error48 instanceof DispatchGatewayError) {
     let told = error48.message;
-    if (suffix !== "") {
-      told = error48.mayHaveReachedDispatch ? `${error48.answer}${suffix}` : `${error48.answer}, so ${error48.advice}${suffix}`;
+    if (joined !== "") {
+      told = error48.mayHaveReachedDispatch ? `${error48.answer}${joined}` : `${error48.answer}, so ${error48.advice}${joined}`;
     }
     return new DispatchGatewayError(error48.status, error48.answer, error48.advice, `${error48.code}: ${told}`);
   }
   if (!(error48 instanceof DispatchServiceError))
     return error48;
-  return new DispatchServiceError(error48.code, error48.status, `${error48.code}: ${error48.message}${suffix}`, error48.candidates, error48.current, error48.mismatches);
+  return new DispatchServiceError(error48.code, error48.status, `${error48.code}: ${error48.message}${joined}`, error48.candidates, error48.current, error48.mismatches);
 }
 function dispatchAnswered(error48, status) {
   return error48 instanceof DispatchServiceError && error48.fromDispatch && error48.status === status;
@@ -17005,7 +16606,7 @@ async function executeDispatchTool(input) {
         } catch (error48) {
           const told = writeMayHaveLanded(error48) ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "the reason was not posted, so the close was not sent";
           if (error48 instanceof DispatchServiceError)
-            throw refusalWithCode(error48, `; ${told}`);
+            throw refusalWithCode(error48, told);
           throw withAccount(error48, told);
         }
       }
@@ -17025,14 +16626,14 @@ async function executeDispatchTool(input) {
           actor
         });
       } catch (error48) {
-        const taken = dispatchAnswered(error48, 500) && newLinks.length > 0 ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
+        const taken = dispatchAnswered(error48, 500) && newLinks.length > 0 ? `one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
         if (closingNote === undefined)
           throw refusalWithCode(error48, taken);
         const posted = `the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
         const fix = error48 instanceof DispatchGatewayError && error48.transient ? "" : "fix what refused the close, then ";
         const landed = writeMayHaveLanded(error48) ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again` : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
         if (error48 instanceof DispatchServiceError)
-          throw refusalWithCode(error48, `${taken}; ${landed}`);
+          throw refusalWithCode(error48, taken, landed);
         throw withAccount(error48, landed);
       }
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
@@ -17290,7 +16891,7 @@ ${followsAsk(askOwner)}`,
         replyToOwnAsk: replyToAsk !== undefined && (comment.advice?.your_open_asks?.some((ask) => ask.id === replyToAsk) ?? false)
       });
       if (replyToAsk !== undefined) {
-        const askState = comment.turn === null ? "" : `; ask now waiting on ${comment.turn}`;
+        const askState = comment.ask_waiting_on === undefined ? "" : `; ask now waiting on ${comment.ask_waiting_on}`;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner2)}`,
@@ -17301,7 +16902,7 @@ ${followsAsk(askOwner)}`,
             ...commentDetails,
             ask: replyToAsk,
             follows: { ask: replyToAsk },
-            ...comment.turn === null ? {} : { ask_waiting_on: comment.turn },
+            ...comment.ask_waiting_on === undefined ? {} : { ask_waiting_on: comment.ask_waiting_on },
             ...comment.advice === undefined ? {} : { advice: comment.advice }
           }
         };
@@ -17405,7 +17006,7 @@ ${followsAsk(askOwner)}`,
       const unchangedOps = edited.unchanged_ops ?? [];
       const unchangedText = unchangedOps.length === 0 ? "" : `; ${unchangedOps.length === 1 ? "operation" : "operations"} ${unchangedOps.join(", ")} changed nothing`;
       const lostOps = edited.lost_ops;
-      const lostText = lostOps === undefined || lostOps !== null && lostOps.length === 0 ? "" : lostOps === null ? "; could not confirm this edit survived, because the live document is being reloaded \u2014 re-read it" : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote \u2014 re-read the document`;
+      const lostText = lostOps === undefined || lostOps !== null && lostOps.length === 0 ? "" : lostOps === null ? "; could not confirm this edit survived, because the live document is being reloaded or holds a tree too deep to read \u2014 re-read it" : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote \u2014 re-read the document`;
       const applied = `${head}${unchangedText}${lostText}`;
       const adviceLines = renderAdvice(input.tool, resolvedTopic(resolved).label, edited.advice, {});
       const tokenTrailer = edited.token === undefined ? [] : [`Document token: ${edited.token}`];
@@ -17465,7 +17066,7 @@ ${trailer.join(`
       });
       if (result.ask === null) {
         return {
-          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version.`,
+          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version, once the human has agreed to every point in it.`,
           details: {
             ...resolved.owner.kind === "project" ? documentResultDetails(resolved.artifact) : { issue: resolved.issue?.key },
             artifact: resolved.artifact.id,
@@ -17474,8 +17075,9 @@ ${trailer.join(`
         };
       }
       const details = await followedAskDetails(client, result.ask, resolved.artifact);
+      const outcome = result.recorded ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).` : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you.`;
       return {
-        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
+        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and an edit after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version }
       };
     }

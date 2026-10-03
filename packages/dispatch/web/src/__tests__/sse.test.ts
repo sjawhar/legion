@@ -25,6 +25,7 @@ function mainAppendDocumentKey(keys: (readonly unknown[])[], event: Event): void
   switch (event.type) {
     case "ask.opened":
     case "ask.edited":
+    case "ask.handed_back":
     case "ask.answered":
     case "ask.resolved":
     case "ask.anchor_refreshed":
@@ -248,10 +249,15 @@ function mainEventQueryKeys(event: Event, signedInLogin?: string): (readonly unk
     event.type === "ask.answered" ||
     event.type === "ask.resolved" ||
     event.type === "ask.edited" ||
+    event.type === "ask.handed_back" ||
     event.type === "ask.anchor_refreshed"
   ) {
     keys.push(["asks", event.issue_key]);
-    if (event.type !== "ask.edited" && event.type !== "ask.anchor_refreshed") {
+    if (
+      event.type !== "ask.edited" &&
+      event.type !== "ask.handed_back" &&
+      event.type !== "ask.anchor_refreshed"
+    ) {
       keys.push(projectsQuery().queryKey);
     }
     mainAppendDocumentKey(keys, event);
@@ -403,6 +409,11 @@ const eventsByType: Record<EventType, readonly Event[]> = {
   "ask.edited": [
     event("ask.edited", { id: "ask-1", anchor: null }),
     event("ask.edited", { id: "ask-1", anchor: null }, documentOwner),
+  ],
+  // A hand-back moves an approval card between the Inbox's sections and changes no text.
+  "ask.handed_back": [
+    event("ask.handed_back", { id: "ask-1", anchor: null }),
+    event("ask.handed_back", { id: "ask-1", anchor: null }, documentOwner),
   ],
   "ask.answered": [
     event("ask.answered", { id: "ask-1", anchor: null }),

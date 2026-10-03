@@ -3,9 +3,9 @@ import type {
   Actor,
   Advised,
   Agent,
+  ApprovalRequestResponse,
   ArchitectureSource,
   Artifact,
-  ArtifactApproval,
   ArtifactBlock,
   ArtifactReferences,
   ArtifactText,
@@ -15,6 +15,7 @@ import type {
   AskRead,
   Comment,
   CommentRead,
+  CommentWriteResponse,
   CreateArtifactInput,
   CreateAskInput,
   CreateCommentInput,
@@ -487,28 +488,30 @@ export class DispatchClient {
   }
 
   /**
-   * Opens an approval ask for a document at its latest version, its question the document, the
-   * version and `summary`. An open ask at that version is returned unchanged; one naming an older
-   * version is retracted and replaced. When that version is already approved, `ask` is null and
-   * `approval` carries the standing approval.
+   * Requests approval of a document at its latest settled version, its question the document, the
+   * version and `summary`. A document holds one open request: this opens it, rewords it with a new
+   * summary, or hands it back to the human when a new version or a thread reply left it waiting on
+   * the agent. `recorded` is whether this call did any of that (Dispatch's 201); false (its 200)
+   * means the open request already stood as asked, waiting on the human, or the version is already
+   * approved, when `ask` is null and `approval` carries the standing approval.
    */
   async requestApproval(
     artifactID: string,
     input: { actor: Actor; summary: string }
-  ): Promise<{
-    ask: Ask | null;
-    artifact_id: string;
-    version: number;
-    approval: ArtifactApproval;
-  }> {
-    return this.#json("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
+  ): Promise<ApprovalRequestResponse & { recorded: boolean }> {
+    const answer = await this.#jsonAnswer<ApprovalRequestResponse>(
+      "POST",
+      ["api", "v1", "artifacts", artifactID, "approval-requests"],
+      input
+    );
+    return { ...answer.payload, recorded: answer.status === 201 };
   }
 
   async editAsk(id: string, input: EditAskInput): Promise<Ask> {
     return this.#json("PATCH", ["api", "v1", "asks", id], input);
   }
 
-  async comment(issue: string, input: CreateCommentInput): Promise<Advised<Comment>> {
+  async comment(issue: string, input: CreateCommentInput): Promise<Advised<CommentWriteResponse>> {
     return this.#json(
       "POST",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"],
@@ -561,7 +564,10 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "artifacts", id, "comments"]);
   }
 
-  async artifactComment(id: string, input: CreateCommentInput): Promise<Advised<Comment>> {
+  async artifactComment(
+    id: string,
+    input: CreateCommentInput
+  ): Promise<Advised<CommentWriteResponse>> {
     return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], input);
   }
 
@@ -768,6 +774,16 @@ export class DispatchClient {
     body?: unknown,
     query?: object
   ): Promise<T> {
+    return (await this.#jsonAnswer<T>(method, path, body, query)).payload;
+  }
+
+  /** `#json` with the status Dispatch answered, for a route whose status says what it did. */
+  async #jsonAnswer<T>(
+    method: string,
+    path: readonly string[],
+    body?: unknown,
+    query?: object
+  ): Promise<{ readonly status: number; readonly payload: T }> {
     const headers: Record<string, string> = {
       Accept: "application/json",
       Authorization: `Bearer ${this.token}`,
@@ -780,7 +796,7 @@ export class DispatchClient {
       signal: this.#signal,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    return this.#response<T>(method, url, response);
+    return { status: response.status, payload: await this.#response<T>(method, url, response) };
   }
 
   async #form<T>(method: string, path: readonly string[], body: FormData): Promise<T> {

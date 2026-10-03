@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strconv"
 	"strings"
@@ -14,9 +15,10 @@ import (
 
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
-	"github.com/reearth/ygo/encoding"
 	ygsync "github.com/reearth/ygo/sync"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
@@ -66,9 +68,20 @@ type syncedPeer struct {
 	answers chan []byte
 }
 
-// syncedPeerLocal tags the peer's own transactions. It must remain non-zero sized because ygo
-// compares origins by interface equality.
-type syncedPeerLocal struct{ _ byte }
+// connectBrowserPeer connects alice's browser to artifactID's room, through a document server of
+// its own over documentService.
+func connectBrowserPeer(t *testing.T, documentService *docs.Service, artifactID string) *syncedPeer {
+	t.Helper()
+	sockets := &servedSockets{finished: make(map[string]chan struct{})}
+	server := httptest.NewServer(sockets.serve(documentService.ServeHTTP))
+	t.Cleanup(server.Close)
+	peer := &syncedPeer{
+		wsURL: "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID, sockets: sockets,
+		headers: http.Header{"X-Dispatch-User": []string{"alice"}}, artifactID: artifactID, doc: crdt.New(),
+	}
+	peer.connect(t)
+	return peer
+}
 
 func (p *syncedPeer) connect(t *testing.T) {
 	t.Helper()
@@ -94,49 +107,18 @@ func (p *syncedPeer) connect(t *testing.T) {
 // updates the room lacks, and hands barrier the content of each sync step 2 it applies.
 func (p *syncedPeer) read(connection *gws.Conn, done chan<- struct{}, answers chan<- []byte) {
 	defer close(done)
-	for {
-		_, message, err := connection.ReadMessage()
-		if err != nil {
-			return
+	docstest.Drain(connection, p.doc, func(syncMessage []byte) error {
+		return p.write(connection, syncMessage)
+	}, func(content []byte) {
+		select {
+		case answers <- content:
+		default:
 		}
-		decoder := encoding.NewDecoder(message)
-		if _, err := decoder.ReadVarString(); err != nil {
-			return
-		}
-		if kind, err := decoder.ReadVarUint(); err != nil || kind != 0 {
-			continue
-		}
-		payload := decoder.RemainingBytes()
-		kind, content, err := ygsync.ReadSyncMessage(payload)
-		if err != nil {
-			return
-		}
-		reply, err := ygsync.ApplySyncMessage(p.doc, payload, nil)
-		if err != nil {
-			return
-		}
-		if kind == ygsync.MsgSyncStep1 && reply != nil {
-			if p.write(connection, reply) != nil {
-				return
-			}
-		}
-		if kind == ygsync.MsgSyncStep2 {
-			select {
-			case answers <- content:
-			default:
-			}
-		}
-	}
+	})
 }
 
 func (p *syncedPeer) write(connection *gws.Conn, syncMessage []byte) error {
-	frame := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
-		encoder.WriteVarString(p.artifactID)
-		encoder.WriteVarUint(0) // Hocuspocus sync message.
-	})
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return connection.WriteMessage(gws.BinaryMessage, append(frame, syncMessage...))
+	return docstest.WriteFrame(&p.mu, connection, p.artifactID, syncMessage)
 }
 
 // barrier returns once the room holds everything the peer sent and has answered a request sent
@@ -189,19 +171,26 @@ func (p *syncedPeer) roomHolds(t *testing.T, state []byte) bool {
 
 func (p *syncedPeer) reconnect(t *testing.T) {
 	t.Helper()
+	// A browser's reconnect reaches a server that has let its old connection go, and with it the
+	// room that connection emptied. A dial before then races that teardown, and the server can
+	// drop the new connection in the window.
+	p.closeAndWait(t)
+	p.connect(t)
+}
+
+// closeAndWait closes the peer's connection and returns once the document server has let it go,
+// which is after the room's eviction and last-peer settlement when the peer was the room's last.
+func (p *syncedPeer) closeAndWait(t *testing.T) {
+	t.Helper()
 	p.mu.Lock()
 	socketID := p.socketID
 	p.mu.Unlock()
 	p.close()
-	// A browser's reconnect reaches a server that has let its old connection go, and with it the
-	// room that connection emptied. A dial before then races that teardown, and the server can
-	// drop the new connection in the window.
 	select {
 	case <-p.sockets.done(socketID):
-	case <-time.After(10 * time.Second):
-		t.Fatal("the document server did not let go of the browser's closed connection")
+	case <-time.After(30 * time.Second):
+		t.Fatal("the document server did not let go of the browser peer's closed connection")
 	}
-	p.connect(t)
 }
 
 func (p *syncedPeer) close() {
@@ -219,29 +208,30 @@ func (p *syncedPeer) close() {
 // produced, as a keystroke does.
 func (p *syncedPeer) edit(t *testing.T, change func(*pmdoc.Node) error) {
 	t.Helper()
-	fragment := p.doc.GetXmlFragment("prosemirror")
-	origin := &syncedPeerLocal{}
-	var update []byte
-	unsubscribe := p.doc.OnUpdate(func(encoded []byte, updateOrigin any) {
-		if updateOrigin == origin {
-			update = append([]byte(nil), encoded...)
-		}
-	})
-	var editErr error
-	p.doc.Transact(func(txn *crdt.Transaction) {
+	p.transact(t, func(txn *crdt.Transaction, fragment *crdt.YXmlFragment) error {
 		tree, err := pmdoc.ReadInTransaction(txn, fragment)
 		if err != nil {
-			editErr = err
-			return
+			return err
 		}
-		if editErr = change(tree); editErr != nil {
-			return
+		if err := change(tree); err != nil {
+			return err
 		}
-		editErr = pmdoc.Update(txn, fragment, tree)
-	}, origin)
-	unsubscribe()
-	if editErr != nil || update == nil {
-		t.Fatalf("browser peer edit: update=%d bytes err=%v", len(update), editErr)
+		return pmdoc.Update(txn, fragment, tree)
+	})
+}
+
+// transact runs change on the peer's live fragment in one local transaction and sends the update
+// it produced. A change that writes the fragment itself rather than through pmdoc.Update can write
+// what no server route would, as a crafted client can.
+func (p *syncedPeer) transact(t *testing.T, change func(*crdt.Transaction, *crdt.YXmlFragment) error) {
+	t.Helper()
+	fragment := p.doc.GetXmlFragment("prosemirror")
+	var changeErr error
+	update := docstest.Transact(p.doc, func(txn *crdt.Transaction) {
+		changeErr = change(txn, fragment)
+	})
+	if changeErr != nil || update == nil {
+		t.Fatalf("browser peer edit: update=%d bytes err=%v", len(update), changeErr)
 	}
 	p.mu.Lock()
 	connection := p.connection
