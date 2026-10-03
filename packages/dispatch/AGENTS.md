@@ -64,7 +64,10 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   where the reader finds them. A thread card's own inline reply lives in its thread, not the tab,
   so it names its send beneath theirs (`threadReplySendKey`): every Reply holds while it is out,
   and so does its thread - Collapse thread, and on a phone Back and Escape - until the server
-  answers or the send's deadline passes. Nothing the reader did not do closes a composer under a
+  answers or the send's deadline passes. A comment's Reply that another composer answers - the
+  docked one, or on a phone the thread view's own - hides the card's reply composer rather than
+  unmounting it (`hideReplyComposer` on `ThreadCard`), so a draft or refusal it holds is there
+  again once that reply ends. Nothing the reader did not do closes a composer under a
   send either. A comment whose thread the reader has open - inline, full-screen, or answered by
   the phone thread composer - stays in the list whoever resolves it, until they close the thread
   (the tab owns which threads are open). Resolving a comment, or accepting or rejecting its

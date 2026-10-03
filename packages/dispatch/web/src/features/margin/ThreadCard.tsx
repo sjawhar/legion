@@ -78,7 +78,9 @@ export interface ThreadCardProps {
   artifactSlug: string | undefined;
   className?: string;
   composerClassName?: string;
-  /** A docked Conversation reply owns composition, so this card keeps the reply thread visible. */
+  /** Another composer answers this thread - the Conversation's docked composer, or a phone
+   *  thread's own - so the card's reply composer stays mounted, hidden, keeping its draft and a
+   *  refusal for when that reply ends. */
   hideReplyComposer?: boolean;
   expanded: boolean;
   hovered: boolean;
@@ -421,24 +423,26 @@ export function ThreadCard({
             )}
             {/* Mounted on a closed issue too, where the composer shows only a reply of its own
                 still out or its refusal (`closed`), and otherwise renders nothing, its frame with
-                it. */}
-            {terminalSuggestion || hideReplyComposer ? null : (
-              <MentionComposer
-                closed={isClosed}
-                frame={composerClassName}
-                inline
-                kind="comment"
-                mutationKey={replyMutationKey}
-                onCancelReply={onToggle}
-                onClose={onToggle}
-                onSent={() => {}}
-                owner={
-                  owner.kind === "issue"
-                    ? { issueKey: owner.key, kind: "issue" }
-                    : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
-                }
-                replyTo={{ author: "", excerpt: "", id: root.id, parentKind: "comment" }}
-              />
+                it. `contents`, so the composer's own box is the one laid out. */}
+            {terminalSuggestion ? null : (
+              <div className="contents" hidden={hideReplyComposer}>
+                <MentionComposer
+                  closed={isClosed}
+                  frame={composerClassName}
+                  inline
+                  kind="comment"
+                  mutationKey={replyMutationKey}
+                  onCancelReply={onToggle}
+                  onClose={onToggle}
+                  onSent={() => {}}
+                  owner={
+                    owner.kind === "issue"
+                      ? { issueKey: owner.key, kind: "issue" }
+                      : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
+                  }
+                  replyTo={{ author: "", excerpt: "", id: root.id, parentKind: "comment" }}
+                />
+              </div>
             )}
           </>
         ) : (

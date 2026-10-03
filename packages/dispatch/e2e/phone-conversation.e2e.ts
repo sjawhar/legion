@@ -328,6 +328,45 @@ test("on a phone, a thread's own reply holds Back and Escape while it is out, an
   }
 });
 
+// A comment's Reply on a phone answers in the thread by the thread view's own composer, which
+// takes the place of the card's reply composer. The card's composer stays mounted, hidden, so a
+// refusal it holds - the draft it handed back and the reason - is there again once that reply ends.
+test("on a phone, a thread's Reply over its card's refused reply keeps that draft and refusal for after", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Reply over a refused reply" });
+  const earlier = await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = await openThread(page, earlier.id);
+    const form = thread.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Card reply");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+
+    await thread.getByRole("button", { exact: true, name: "Reply" }).click();
+    const threadForm = thread.getByRole("form", { name: "Comment composer" });
+    await expect(threadForm.getByText(/^Replying to .+ — Earlier comment$/)).toBeVisible();
+    await expect(field).toHaveCount(0);
+    await threadForm.getByRole("button", { name: "Cancel reply" }).click();
+
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(field).toHaveValue("Card reply");
+    await expect(field).toBeEnabled();
+  } finally {
+    await alice.close();
+  }
+});
+
 // A send from the thread view keeps it open past the phone layout: while that send is out the
 // view stays full-screen at any width, with its card's reply composer - the draft, the send and
 // that send's refusal - until the reader leaves it with Back.
