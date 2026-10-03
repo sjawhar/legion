@@ -28,8 +28,7 @@ func signedCookie(login string, generation, expiry int64, key string) string {
 }
 
 func TestIssueAndVerifySessionCookie(t *testing.T) {
-	t.Setenv("DISPATCH_INSECURE_COOKIE", "")
-	setCookie := IssueSessionCookie("sjawhar", 7, "signing-key")
+	setCookie := IssueSessionCookie("sjawhar", 7, "signing-key", true)
 	for _, frag := range []string{"dsession=", "HttpOnly", "Path=/", "SameSite=Strict", "Max-Age=2592000", "Secure"} {
 		if !strings.Contains(setCookie, frag) {
 			t.Errorf("set-cookie %q missing fragment %q", setCookie, frag)
@@ -42,16 +41,14 @@ func TestIssueAndVerifySessionCookie(t *testing.T) {
 }
 
 func TestIssueSessionCookieInsecureFlag(t *testing.T) {
-	t.Setenv("DISPATCH_INSECURE_COOKIE", "1")
-	setCookie := IssueSessionCookie("sjawhar", 0, "signing-key")
+	setCookie := IssueSessionCookie("sjawhar", 0, "signing-key", false)
 	if strings.Contains(setCookie, "Secure") {
 		t.Errorf("insecure mode should omit Secure: %q", setCookie)
 	}
 }
 
 func TestVerifySessionRejectsTamperedCookie(t *testing.T) {
-	t.Setenv("DISPATCH_INSECURE_COOKIE", "1")
-	value := cookieValue(t, IssueSessionCookie("sjawhar", 0, "signing-key"))
+	value := cookieValue(t, IssueSessionCookie("sjawhar", 0, "signing-key", false))
 	tampered := value[:len(value)-1] + "a"
 	if value[len(value)-1] == 'a' {
 		tampered = value[:len(value)-1] + "b"

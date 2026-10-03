@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
-	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -89,11 +88,16 @@ func WithTimeout(timeout time.Duration) Option {
 	return func(c *Client) { c.httpClient.Timeout = timeout }
 }
 
+// WithToken sets the bearer every listener call sends (cmd/dispatch: ENVOY_TOKEN). Without it, or
+// with an empty token, a call sends no Authorization header.
+func WithToken(token string) Option {
+	return func(c *Client) { c.apiToken = token }
+}
+
 // New returns a client for an Envoy listener's HTTP control API.
 func New(baseURL string, options ...Option) *Client {
 	client := &Client{
-		baseURL:  strings.TrimSuffix(baseURL, "/"),
-		apiToken: os.Getenv("ENVOY_TOKEN"),
+		baseURL: strings.TrimSuffix(baseURL, "/"),
 		httpClient: &http.Client{
 			Timeout: defaultTimeout,
 		},

@@ -25,7 +25,7 @@ events to the right session.
 | Webhook config         | `internal/webhook/config.go`                     | ENVOY_WEBHOOKS parsing, startup validation         |
 | Listener behavior      | `cmd/listener/main.go`                    | subscribe/match/deliver flow                       |
 | NATS client            | `internal/bus/nats.go`, `internal/bus/recovery.go` | connect, subscribe and publish; reconnect, recovery and the reconnect hooks |
-| NATS credential        | `internal/bus/nkey.go`                    | every bus connection's nkey user: `NATS_NKEY_SEED_FILE` (wins) or `NATS_NKEY_SEED`; unusable refuses, neither set connects without one |
+| NATS credential        | `internal/bus/nkey.go`                    | every bus connection's nkey user: `NATS_NKEY_SEED_FILE` (wins) or `NATS_NKEY_SEED`; unusable refuses, neither set connects without one. `Connect` and `ConnectOwningStream` read these and `ENVOY_ALLOW_REMOTE_NATS` from the process environment, or from the lookup `bus.WithEnvironment` hands them; `Dial` from the lookup its caller passes. envoy-dispatch hands both its settings table |
 | Stream definition      | `internal/bus/stream.go`                  | `ENVOY_NOTIFICATIONS` subjects, retention and duplicate window, and their reconciliation at start |
 | Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
 | Interest storage       | `internal/store/kv.go`                    | JetStream KV subscriptions                         |
@@ -33,6 +33,7 @@ events to the right session.
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
+| Dispatch settings | `cmd/dispatch/settings.go` | the one table of every Dispatch setting envoy-dispatch reads (the libraries it links read `HOME`, libpq's `PG*` and Go's own variables themselves); `envoy-dispatch settings` prints it, and a test fails on any other environment read under `cmd/dispatch` or `internal/dispatch` |
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`) |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
@@ -40,9 +41,34 @@ events to the right session.
 
 Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
 and `EnsureBlockIDs` repairs legacy or duplicate IDs before agent updates are written. Document
-settlement is two-phase: it first applies `EnsureBlockIDs` in one Yjs transaction and persists that
-captured update in the same Postgres transaction as any resulting version and event, then renders
-and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
+settlement is two-phase: it first writes its repairs into the room (`EnsureBlockIDs`, then the
+server-owned attributes of each ask block it reconciled) and persists the updates they captured in
+the same Postgres transaction as any resulting version and event, then renders and compares
+canonical markdown. Each repair is read and written in one Yjs transaction, which holds the
+document's lock, so it is computed against the document as it stands: the tree settlement
+reconciled was read before its database work, and writing that tree would revert an edit a peer
+made since (LEGION-479). Each repair's update is held from the room's own persistence by a
+suppression slot of its own (`applySuppressed`; ygo's persistence worker is handed each update on
+its own), and every path releases it: a slot nothing finishes holds the worker at the room's next
+update. A repair reports whether its transaction wrote anything; one that wrote nothing still
+committed that transaction, and ygo hands the worker an update for it too (the document's delete
+set), so its slot is finished with that update and the worker takes it rather than storing it. A
+settlement that wrote into the room renders its version from the document as it stands after the
+repairs (`lockedTreeOf`), so a peer's edit made since its read is in that version too, and credits
+that edit's author, whose own settlement then writes no version. It takes the authors with that
+tree, so an edit made while the version renders is credited on the version its own settlement
+writes, not on this one. A settlement that wrote into the room commits what it wrote even when the
+document moved after its read, since the room and its browsers hold it; one that wrote nothing
+leaves a moved document to the settlement the move scheduled. A repair is written only into the
+document the settlement read (`applySuppressed`): one whose room was evicted and reloaded since is
+refused and retried, and one whose room left the server while its transaction committed is given
+up and fails the room, its update discarded without waiting for its slot, since ygo then stores it
+on the committing goroutine itself (`persistStranded`). The room worker's compaction, except a
+failed room's eviction, skips a room whose lock another holder has (`compactIfIdle`), so a
+settlement holding the lock does not wait for that worker's exit. Two cases still hang until the
+server restarts (LEGION-498): a room that fails while a settlement commits into it, and a second
+writer committing into a room while it retires under a repair's commit.
+`envoy-dispatch backfill-block-ids` runs the same stamp through `applySuppressed` across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
 The closer's timer lives in memory, so the database says which documents still owe it: every
@@ -1602,19 +1628,41 @@ exits 0 and prints `issued`, and stderr names the most recent login and its code
 (`credential_held` beside `login_state`, the most recent login's state, which `launcher login`'s
 own poll reads). A helper from before that field reports only the most recent login, so there a
 denied re-login still reads `denied` and exits 1 until the helper restarts on a release that
-carries it. With no credential held, login-status exits 1 and prints the most recent login's state
-(`pending`, `denied`, `expired`, or `none` before any login), except once the broker refuses the
-held credential (401 `LAUNCHER_INVALID`, which it answers for an expired or revoked credential and
-for any launcher proof it cannot verify, such as clock skew or an `AGENT_SECRETS_URL` that is not
-the broker's public URL): from then until a login starts or settles, the helper reports every state
-but `pending` as `expired` (`login_state`), the word the dotfiles launcher gate matches, so an older
-client exits 1 on it too, and stderr says the broker refused it when the helper reports that
-(`login_refused`); a helper from before that field gets the plain "the last machine login is
-expired". A re-login pending at the refusal reports its own outcome once it settles, so its
+carries it. While a credential is held, login-status's last stderr line says when it expires and
+how long that is from now (`credential_expires_at`, from the `expires_at` the broker's issued poll
+carries); the broker has no renewal, so a new machine login a human approves must replace it before
+then, and a helper or broker from before that field gets a line saying the expiry is unknown.
+With no credential held, login-status exits 1 and prints the most recent login's state
+(`pending`, `denied`, `expired`, or `none` before any login), except once the helper drops the
+held credential, because the broker refuses it (401 `LAUNCHER_INVALID`, which it answers for an
+expired or revoked credential and for any launcher proof it cannot verify, such as clock skew or
+an `AGENT_SECRETS_URL` that is not the broker's public URL) or because it reaches the expiry the
+broker named: from then until a login starts or settles, the helper reports every state but
+`pending` as `expired` (`login_state`), the word the dotfiles launcher gate matches, so an older
+client exits 1 on it too, with `login_refused` and the cause (`credential_dropped`). Stderr says
+why the helper holds no credential in the words its journal uses for the same state
+(`helper.NoCredentialReason`): a login awaiting approval, the cause it dropped the credential for,
+a broker refusal on a helper from before `credential_dropped` (which sets `login_refused` only for
+one), a denied login, a login that expired before anyone approved it, or no login since the
+helper started. A re-login pending at the drop reports its own outcome once it settles, so its
 `launcher login` prints `denied` for a denial. The helper logs every change of the credential:
-`machine login issued` (credential id, and the operator the login was signed with) when a login
-installs one, and `launcher credential refused; cleared` (credential id, the broker's code) when a
-refusal clears it.
+`machine login issued` (credential id, its `expires_at`, and the operator the login was signed
+with) when a login installs one, a WARN that it expires soon a day before its expiry (at once when
+less is left), and one ERROR when it drops it, `<cause>; cleared: no session can enroll until a
+human approves a new machine login`, the cause being `the launcher credential reached its expiry`
+(with the expiry) or `the broker refused the launcher credential (…)` (with the broker's code); a
+broker that names no expiry gets a WARN that the helper cannot warn ahead. A refusal of a
+credential a newer login has already replaced drops nothing, and the enrollment it failed retries
+at once with the new one after the ordinary `enroll failed; retrying` WARN. While it holds none,
+every enrollment attempt, a session's or an `enroll-box`'s (and every revoke a re-pinned or lapsed
+session needs before it enrolls), logs at ERROR `session cannot enroll` with that `why`; an
+attempt that failed for want of a credential a login has installed since logs the WARN instead.
+SIGINT or SIGTERM, from systemd or anything else, stops the helper with exit 0 after a WARN
+`agent-secrets-helper stopping on a signal` naming the signal, how many sessions it had
+registered (`sessions`) and whether it held a launcher credential (`launcher_credential`); the
+dotfiles unit restarts it unless systemd itself stopped it (`Restart=always`). The helper writes
+these lines to stderr as slog text, so journald stores the ERROR lines at priority 6 (info), and
+`journalctl -p err` does not list them.
 `agent-secrets --version` and `agent-secrets-helper --version` print the release tag the release
 job stamps in (`internal/buildversion`), `devel` for any other build, and the helper's startup
 line (`agent-secrets-helper listening`) carries the same version.
@@ -1814,8 +1862,9 @@ credential no decision names. Approving a login whose key already holds a live l
 under another record (a machine that signed two logins with one key) is `409
 KEY_HOLDS_LIVE_CREDENTIAL`, and that record stays pending. `Read` (the machine's own
 poll, `GET /v1/launcher-credentials/{pending}`) answers only the record's state and, once issued,
-the minted credential's id — no token is ever returned; the credential is usable only with proofs
-signed by the key the request object embedded.
+the minted credential's id and `expires_at` — no token is ever returned; the credential is usable
+only with proofs signed by the key the request object embedded. The broker has no renewal route:
+past `expires_at` the machine logs in again, with a new key, a new code and a new human approval.
 
 `internal/broker/enroll.Service.AuthenticateLauncher` is `proof.Verifier`'s `LookupLauncher` hook: a
 launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials` row and then

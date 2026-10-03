@@ -30,6 +30,9 @@ type machineLoginResponse struct {
 type machineLoginStateResponse struct {
 	// Once the login is approved, the minted machine credential's id; absent before then.
 	CredentialID string `json:"credential_id,omitempty"`
+	// Once the login is approved, the moment the minted credential expires; absent before then.
+	// Renewing it takes a new machine login a human approves.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	// "pending", "issued" (approved), "denied" or "expired".
 	State string `json:"state"`
 }
@@ -65,7 +68,7 @@ func (s *server) machineLogin(w http.ResponseWriter, r *http.Request) {
 // minted credential is usable only with proofs signed by the key the request object embedded.
 func (s *server) readMachineLogin(w http.ResponseWriter, r *http.Request) {
 	pendingID := r.PathValue("pending")
-	state, credentialID, err := s.deps.MachineLogin.Read(r.Context(), pendingID)
+	state, credentialID, expiresAt, err := s.deps.MachineLogin.Read(r.Context(), pendingID)
 	switch {
 	case errors.Is(err, machine.ErrNotFound):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such pending machine login")
@@ -74,5 +77,9 @@ func (s *server) readMachineLogin(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, "read machine login", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, machineLoginStateResponse{CredentialID: credentialID, State: state})
+	resp := machineLoginStateResponse{CredentialID: credentialID, State: state}
+	if state == "issued" {
+		resp.ExpiresAt = new(expiresAt.UTC())
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
