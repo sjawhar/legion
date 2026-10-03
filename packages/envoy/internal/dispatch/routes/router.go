@@ -459,7 +459,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	if normalized == "/favicon.ico" {
 		faviconPath := filepath.Join(r.ctx.WebDistDir, "favicon.svg")
 		if info, err := os.Stat(faviconPath); err == nil && !info.IsDir() {
-			serveFile(w, req, faviconPath, "")
+			serveFile(w, req, faviconPath)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -472,9 +472,12 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		case filepath.Ext(candidate) == ".html":
 			servePage(w, req, candidate)
 		case isReservedPath(normalized, assetRoots):
-			serveFile(w, req, candidate, assetCacheControl)
+			// A 304 keeps it, and net/http drops it from an error it answers instead (a file
+			// removed after its stat), so a failure is never kept for an asset's year.
+			w.Header().Set("Cache-Control", assetCacheControl)
+			serveFile(w, req, candidate)
 		default:
-			serveFile(w, req, candidate, "")
+			serveFile(w, req, candidate)
 		}
 		return
 	}
@@ -486,12 +489,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	indexPath := filepath.Join(r.ctx.WebDistDir, "index.html")
-	if _, err := os.Stat(indexPath); err != nil {
-		writeError(w, http.StatusNotFound, "dashboard build not found")
-		return
-	}
-	servePage(w, req, indexPath)
+	servePage(w, req, filepath.Join(r.ctx.WebDistDir, "index.html"))
 }
 
 // isBrowserRoute reports whether an unmatched, non-static path should fall
@@ -533,7 +531,7 @@ func isReservedPath(normalized string, roots []string) bool {
 func servePage(w http.ResponseWriter, req *http.Request, path string) {
 	page, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		writeError(w, http.StatusNotFound, "not found")
+		writeError(w, http.StatusNotFound, "dashboard build not found")
 		return
 	}
 	if err != nil {
@@ -547,14 +545,8 @@ func servePage(w http.ResponseWriter, req *http.Request, path string) {
 	http.ServeContent(w, req, path, time.Time{}, bytes.NewReader(page))
 }
 
-// serveFile serves path with its Content-Type and, when cacheControl is not empty, that
-// Cache-Control, which a 304 carries too. net/http drops Cache-Control from an error it answers
-// instead (a file removed after its stat), so a failure is never kept for an asset's year.
-func serveFile(w http.ResponseWriter, req *http.Request, path, cacheControl string) {
+func serveFile(w http.ResponseWriter, req *http.Request, path string) {
 	w.Header().Set("Content-Type", contentType(path))
-	if cacheControl != "" {
-		w.Header().Set("Cache-Control", cacheControl)
-	}
 	http.ServeFile(w, req, path)
 }
 

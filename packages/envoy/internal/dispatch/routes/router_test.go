@@ -642,7 +642,6 @@ func TestStaticHandlerCacheControl(t *testing.T) {
 			}
 		})
 	}
-
 }
 
 // The servers behind one load balancer can hold different builds, and a page's file time says
