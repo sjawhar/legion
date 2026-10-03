@@ -17,6 +17,7 @@ on:
       - "packages/dispatch/package.json"
       - "packages/workspace/package.json"
       - "packages/envoy/internal/dispatch/pmdoc/gen/package.json"
+      - "docs/site/package.json"
       - "packages/daemon/**"
       - "packages/daemon-go/**"
       - "go.work"
@@ -97,6 +98,7 @@ jobs:
               - 'packages/dispatch/package.json'
               - 'packages/workspace/package.json'
               - 'packages/envoy/internal/dispatch/pmdoc/gen/package.json'
+              - 'docs/site/package.json'
               - '.dockerignore'
               - '.github/workflows/worker-image.yaml'
 

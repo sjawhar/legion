@@ -30,7 +30,7 @@ symptoms:
 
 The Dispatch dashboard's browser suite (`cd packages/dispatch && bun run e2e`) is the package's
 own integration harness: the Playwright config starts the fake Envoy (`e2e/fake-envoy.ts`) and the
-real Go server (`e2e/run-server.sh` → `go run ./cmd/dispatch`) itself, against a Postgres the
+real Go server (`e2e/run-server.sh`, which builds `./cmd/dispatch` and execs the binary) itself, against a Postgres the
 developer supplies. It is allowed as a worker's local proof. Three things about running it from a
 Legion pane on a shared box cost LEGION-94 an evening; none of them exists in CI.
 
@@ -59,17 +59,22 @@ production Envoy, not the fake.
 
 Closed in the harness, not in the operator's habits (LEGION-154):
 `run-server.sh` requires the one destructive-write input (`DATABASE_URL`) and
-resolves the concrete Go binary with the caller's toolchain before it isolates
-the server process. It then reads the harness ports, unsets every
+builds the server with the caller's `go`, in the caller's environment, before it
+isolates the server process. It then reads the harness ports, unsets every
 inherited `DISPATCH_*`, `ENVOY_*` and `NATS_*` variable, and supplies the
 server's configuration in full: `ENVOY_URL` built from `FAKE_ENVOY_PORT`, fake
-GitHub and dashboard origins, and fresh App and signing keys. The server runs
+GitHub and dashboard origins, and a fresh App key, with no cookie signing key: the server
+generates one for its own process under `DISPATCH_DEV_SIGNIN`. The server runs
 with no caller Home or XDG directory, so
 `~/.config/opencode/envoy.json` and
 `~/.local/share/dispatch/{app.json,signing-key}` cannot participate. The fake
-Envoy is the only Envoy this harness is ever meant to talk to
-(with `PLAYWRIGHT_BASE_URL` exported, which is what `bun run e2e:deployed` expects and does not
-set itself, no server starts and no port is probed).
+Envoy is the only Envoy this harness is ever meant to talk to. With `PLAYWRIGHT_BASE_URL` exported,
+which `bun run e2e:deployed` expects and does not set itself, no Dispatch server or fake GitHub
+starts; Playwright still starts the fake Envoy on `FAKE_ENVOY_PORT` and the plain-HTTP proxy on
+`PLAIN_HTTP_PORT`, and `deploy/compose/dispatch.acceptance.compose.yml` derives the acceptance
+server's Envoy URL from the fake Envoy port. Before any row, `e2e/preflight.ts` puts a session in
+the fake and refuses the run unless the server's `GET /api/v1/agents` lists it, so a server
+reading any other Envoy cannot pass rows against the wrong sessions.
 
 Proof: with `ENVOY_URL=http://127.0.0.1:1` exported, the pre-fix script
 answers `GET /api/v1/agents` with `dial tcp 127.0.0.1:1: connect: connection
@@ -82,14 +87,16 @@ a harness failure. What can: the ports and the explicitly named database below.
 
 ## 2. On a shared box, own the ports and the database
 
-The server and fake-listener defaults — Go server on `8777`, fake Envoy on
-`9021`, fake GitHub on `9022` — are shared by every agent running the suite on
-the box. The database is deliberately not a default: `e2e/seed.ts` truncates it
+The server and listener defaults — Go server on `8777`, fake Envoy on
+`9021`, fake GitHub on `9022`, plain-HTTP proxy on `9023` — are shared by every agent running the
+suite on the box. The database is deliberately not a default: `e2e/seed.ts` truncates it
 before every scenario, so each run must name its own isolated database.
 
-Sharing a port is no longer silent: before any web server starts, the Playwright config probes all
-three and fails the run naming every taken port beside its own variable, so a run can no longer
-truncate the database behind another lane's server. Sharing a database still is silent — nothing
+Sharing a port is no longer silent: before any web server starts, the Playwright config probes
+the ports it starts (all four locally, `FAKE_ENVOY_PORT` and `PLAIN_HTTP_PORT` for a deployed run)
+and fails naming
+every taken port beside its own variable, so a local run can no longer truncate the database behind
+another lane's server. Sharing a database still is silent — nothing
 probes it — so name your own. `packages/dispatch/AGENTS.md`'s end-to-end section is where that
 rule is written out: the message, the remedies, what a bad or duplicated port does, and which
 invocations skip the probe.
@@ -97,21 +104,20 @@ invocations skip the probe.
 ```sh
 docker exec dispatch-pg createdb -U postgres dispatch_<issue>      # once
 DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
-DISPATCH_E2E_PORT=87NN FAKE_ENVOY_PORT=90NN FAKE_GITHUB_PORT=91NN \
+DISPATCH_E2E_PORT=87NN FAKE_ENVOY_PORT=90NN FAKE_GITHUB_PORT=91NN PLAIN_HTTP_PORT=92NN \
   bun run e2e
 ```
 
-`DATABASE_URL` is read by the server script and by `e2e/seed.ts`. The three ports are resolved for
-the whole TypeScript suite by `e2e/harness-ports.ts`, whose eight importers are
-`e2e/playwright.config.ts`, `e2e/api.ts`, `e2e/agents.ts`, `e2e/agent-tokens.e2e.ts`,
-`e2e/failed-room.e2e.ts`, `e2e/fake-envoy.ts`, `e2e/fake-github.ts` and
-`e2e/fake-github-helpers.ts` — `e2e/seed.ts` is not one of them; it reaches the server through
-`e2e/api.ts`. So those variables move the whole harness together. Start nothing else: the
-container from `packages/envoy/scripts/dev-postgres.sh` and what the Playwright config starts are
-the harness.
+`DATABASE_URL` is read by the server script and by `e2e/seed.ts`. The four ports are resolved for
+the whole TypeScript suite by `e2e/harness-ports.ts`, the only TypeScript module that reads them
+from the environment; every other module, `e2e/seed.ts` included, reaches a harness server through
+it or through `e2e/api.ts`. So those variables move the whole harness together. Start nothing else:
+the container from `packages/envoy/scripts/dev-postgres.sh` and what the Playwright config starts
+are the harness.
 
-To run the suite repeatedly against a harness you started yourself — `run-server.sh` and the two
-fakes, left listening on your ports — set `DISPATCH_E2E_REUSE_SERVERS=1` (see AGENTS.md for the
+To run the suite repeatedly against a harness you started yourself — `run-server.sh`, the two
+fakes and the plain-HTTP proxy, left listening on your ports — set `DISPATCH_E2E_REUSE_SERVERS=1`
+(see AGENTS.md for the
 value rule).
 
 ## 3. Test output goes to `testInfo.outputPath()`, never a fixed `/tmp` name

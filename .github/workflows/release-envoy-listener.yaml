@@ -23,6 +23,7 @@ on:
       - "packages/envoy-plugin/package.json"
       - "packages/claude-envoy/package.json"
       - "packages/workspace/package.json"
+      - "docs/site/package.json"
       - ".dockerignore"
       - ".github/workflows/release-envoy-listener.yaml"
   workflow_dispatch:

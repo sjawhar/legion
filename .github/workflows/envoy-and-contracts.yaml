@@ -34,6 +34,7 @@ on:
       - ".dockerignore"
       - "packages/daemon/package.json"
       - "packages/workspace/package.json"
+      - "docs/site/package.json"
   pull_request:
     paths:
       - "packages/envoy/**"
@@ -64,6 +65,7 @@ on:
       - ".dockerignore"
       - "packages/daemon/package.json"
       - "packages/workspace/package.json"
+      - "docs/site/package.json"
   merge_group:
     types: [checks_requested]
 
@@ -129,6 +131,7 @@ jobs:
               - 'packages/envoy-plugin/package.json'
               - 'packages/claude-envoy/package.json'
               - 'packages/workspace/package.json'
+              - 'docs/site/package.json'
               - '.dockerignore'
               - '.github/workflows/envoy-and-contracts.yaml'
               # The job also COMPILES TestSmoke, in workspace mode, so the workspace files and
