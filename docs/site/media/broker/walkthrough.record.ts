@@ -1,0 +1,614 @@
+// docs/site/media/broker/walkthrough.record.ts
+//
+// Records the raw footage of the broker walkthrough against the rig (rig.sh), one file per
+// section:
+//
+//   t1-login.cast       the agent machine starts a machine login and prints its code
+//   b1-machine.webm     the operator types the code in Dispatch and approves it
+//   t2-session.cast     the login has returned; a session registers with the helper
+//   t3-request.cast     the session asks for DEMO_API_KEY; the request waits for approval
+//   t4-ran.cast         recorded around b2: the waiting command receives the key as the request is
+//                       approved, and runs; then the request's status names who decided it
+//   b2-approve.webm     the request in the Inbox, its record, the approval
+//   b3-grants.webm      from the approved record to Settings, where the grant is listed
+//
+// A take records every section, in this order: each depends on the one before it (the browser
+// types the code the terminal printed, the session needs the login the browser approved, the
+// browser approves the request the terminal made, and the terminal records through that
+// approval), so no section can be recorded alone.
+//
+// Terminal sections are asciinema casts of one persistent shell on the agent machine (a private
+// tmux server, started without the user's tmux configuration, which can draw the real hostname
+// into a pane border; each cast attaches a client to it, and the shell is typed into with
+// send-keys); browser sections are Playwright recordings at the viewport's size, each ending on a
+// result it holds and then finds in its own recording's last frames.
+//
+// Each section marks its on-screen events by name as they happen (`mark("code")` once the login
+// code is on screen), and sections.json records each mark in its file's own seconds: a cast's
+// event time, a browser recording's timestamp. The walkthrough's cut (walkthrough/edl.py) places
+// every clip and narration part at a mark plus an offset, so a new take re-times the cut itself.
+// sections.json also records each section's wall-clock length, the capture-rate check the build
+// compares file durations against, and how closely each browser section's last frames match its
+// result. Output goes to WALKTHROUGH_RAW_DIR, default docs/site/media/broker/walkthrough/raw.
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+
+import { type Browser, expect, type Locator, type Page, test } from "@playwright/test";
+
+import { signIn } from "../../../../packages/dispatch/e2e/users";
+import { agentHost, dispatch, machineLoginPath, operator, printed, reason, rigState } from "./flow";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const rawDir = process.env.WALKTHROUGH_RAW_DIR ?? join(here, "walkthrough/raw");
+/** Every file a take writes into rawDir: its sections' footage, sections.json, and the scratch
+ *  directory Playwright records into. */
+const takeFiles = [
+  "t1-login.cast",
+  "b1-machine.webm",
+  "t2-session.cast",
+  "t3-request.cast",
+  "b2-approve.webm",
+  "t4-ran.cast",
+  "b3-grants.webm",
+  "sections.json",
+  ".video",
+];
+const cols = 80;
+const rows = 20;
+const tmuxSocket = "legion-docs-broker-walkthrough";
+const shell = "agent";
+
+interface Section {
+  file: string;
+  /** A terminal section's span, or a browser page's whole life: from its creation to the end of
+   *  its context's close. Playwright records a page from its first frame to its close, so the
+   *  file is at most this long. */
+  wallSeconds: number;
+  /** A browser section's scripted actions alone, which its file must at least cover. */
+  actSeconds?: number;
+  /** A browser section's result as its recording shows it: the structural similarity of the
+   *  result's region in the file's last frame, and in the frame resultOnCameraSeconds before it,
+   *  to the page's own screenshot of that region (1 is identical). */
+  resultSimilarityAtEnd?: number;
+  resultSimilarityBeforeEnd?: number;
+  /** The section's on-screen events by name, in seconds into its file. */
+  marks: Record<string, number>;
+}
+const sections: Section[] = [];
+
+/** Notes that a named on-screen event has just happened in the section being recorded. */
+type Mark = (name: string) => void;
+
+/** A section's marks as they happen, in wall-clock milliseconds; `seconds` converts them to the
+ *  file's own seconds once its wall-clock time zero is known. */
+function marker(file: string): { mark: Mark; seconds: (zeroMs: number) => Record<string, number> } {
+  const wall = new Map<string, number>();
+  return {
+    mark: (name) => {
+      if (wall.has(name)) throw new Error(`${file}: the mark ${name} is set twice`);
+      wall.set(name, Date.now());
+    },
+    seconds: (zeroMs) =>
+      Object.fromEntries(
+        [...wall].map(([name, at]) => [name, Math.round(at - zeroMs) / 1000] as const)
+      ),
+  };
+}
+
+function tmux(...args: string[]): string {
+  return execFileSync("tmux", ["-L", tmuxSocket, "-f", "/dev/null", ...args], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function screen(): string {
+  return tmux("capture-pane", "-p", "-J", "-t", shell);
+}
+
+/** Polls the agent's terminal until `pattern` shows, often enough that a mark set on its return
+ *  lands within a tenth of a second of the event. */
+async function waitForScreen(
+  pattern: RegExp,
+  what: string,
+  timeoutMs = 90_000
+): Promise<RegExpMatchArray> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const match = screen().match(pattern);
+    if (match !== null) return match;
+    await sleep(100);
+  }
+  throw new Error(`the agent's terminal never showed ${what}:\n${screen()}`);
+}
+
+/** Types text into the agent's shell a character at a time, at a person's pace. */
+async function type(text: string): Promise<void> {
+  for (const character of text) {
+    tmux("send-keys", "-t", shell, "-l", character);
+    await sleep(38 + Math.floor(Math.random() * 30));
+  }
+}
+
+async function enter(): Promise<void> {
+  await sleep(350);
+  tmux("send-keys", "-t", shell, "Enter");
+}
+
+/** The time of a cast's last event, in its own seconds. */
+function castEnd(cast: string): number {
+  const lines = readFileSync(cast, "utf8").trimEnd().split("\n");
+  if (lines.length < 2) throw new Error(`${cast} recorded no event`);
+  return Number(JSON.parse(lines[lines.length - 1])[0]);
+}
+
+/** Records one terminal section: an asciinema cast of a client attached to the agent's shell
+ *  while `act` runs, ended by detaching that client. The detached client's farewell line is the
+ *  cast's last event, so the detach is where the cast's clock meets the wall clock: a mark lies
+ *  as far before the cast's end as it did before the detach. */
+async function terminalSection(file: string, act: (mark: Mark) => Promise<void>): Promise<void> {
+  const cast = join(rawDir, file);
+  const recorder = `rec-${file.replace(/\W/g, "-")}`;
+  const marks = marker(file);
+  const started = Date.now();
+  tmux(
+    "new-session",
+    "-d",
+    "-s",
+    recorder,
+    "-x",
+    String(cols),
+    "-y",
+    String(rows),
+    "env",
+    "-u",
+    "TMUX",
+    "asciinema",
+    "rec",
+    "--overwrite",
+    "--quiet",
+    "--cols",
+    String(cols),
+    "--rows",
+    String(rows),
+    "--command",
+    `tmux -L ${tmuxSocket} attach -t ${shell}`,
+    cast
+  );
+  await waitForAttached();
+  await sleep(1_200);
+  await act(marks.mark);
+  const detached = Date.now();
+  tmux("detach-client", "-s", shell);
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline && hasSession(recorder)) await sleep(100);
+  if (hasSession(recorder)) throw new Error(`${file}: the recorder never exited`);
+  sections.push({
+    file,
+    marks: marks.seconds(detached - castEnd(cast) * 1000),
+    wallSeconds: (Date.now() - started) / 1000,
+  });
+}
+
+function hasSession(name: string): boolean {
+  try {
+    tmux("has-session", "-t", name);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Waits for the recorder's client to attach to the agent's shell. */
+async function waitForAttached(): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    if (tmux("list-clients", "-t", shell, "-F", "#{client_name}").trim() !== "") return;
+    await sleep(100);
+  }
+  throw new Error("the agent's shell never gained its recording client");
+}
+
+/** A pointer drawn into the page, since a headless browser's recording shows none: it follows the
+ *  mouse, pulses on a click, and starts each new page where the last one left it, so a viewer sees
+ *  what is clicked. */
+const pointer = `
+  addEventListener("DOMContentLoaded", () => {
+    const saved = JSON.parse(sessionStorage.getItem("walkthrough-pointer") ?? "[640,360]");
+    let x = saved[0], y = saved[1];
+    const dot = document.createElement("div");
+    const place = (scale) => { dot.style.transform = "translate(" + x + "px," + y + "px) scale(" + scale + ")"; };
+    dot.style.cssText = "position:fixed;left:0;top:0;width:22px;height:22px;margin:-11px 0 0 -11px;" +
+      "border-radius:50%;background:rgba(37,99,235,.35);border:2px solid rgba(37,99,235,.9);" +
+      "pointer-events:none;z-index:2147483647;transition:transform .12s ease-out";
+    place(1);
+    document.body.appendChild(dot);
+    addEventListener("mousemove", (e) => { x = e.clientX; y = e.clientY; place(1);
+      sessionStorage.setItem("walkthrough-pointer", JSON.stringify([x, y])); }, true);
+    addEventListener("mousedown", () => place(0.7), true);
+    addEventListener("mouseup", () => place(1), true);
+  });
+`;
+
+const viewport = { height: 720, width: 1280 };
+
+/** How long a browser section holds on its result, how much of the end of its recording must show
+ *  that result, and how alike the two must be. Under load, the browser's frames reach Playwright's
+ *  recording a second or two after the page shows them, and the frames still in flight when the
+ *  page closes never arrive: a take whose page held a result for 2.5 s ended on the click before
+ *  it, though the assertion on the page passed. So the hold outlasts that lag, and the recording
+ *  itself is checked. Measured on one take: the result's box scored 0.985-0.997 once the result was
+ *  on screen, 0.04-0.70 before it appeared, and 0.88-0.91 with the pointer resting inside it. */
+const resultHoldMs = 5_000;
+const resultOnCameraSeconds = 2.5;
+const resultMinSimilarity = 0.95;
+
+interface ResultFrame {
+  clip: { height: number; width: number; x: number; y: number };
+  reference: string;
+}
+
+/** Holds a page on its result: asserts the result is on screen (inside the viewport, not merely in
+ *  the DOM) and marks it `result`, measures the tight box around its text and fails unless that box
+ *  is a real one inside the viewport, moves the pointer off it as a reader would, screenshots the
+ *  viewport as the frame the recording must end on, then waits out resultHoldMs. The box is
+ *  measured on the element the check saw: an element replaced since (a locator that matched what
+ *  the result replaces) measures as an empty box at the corner, where a comparison would find the
+ *  corner's own pixels alike and pass. The screenshot is never clipped: Chromium renders a clipped
+ *  one at the clip's size, and the recording shows that render as frames of the clip on grey. */
+async function holdOnResult(
+  page: Page,
+  result: Locator,
+  reference: string,
+  mark: Mark
+): Promise<ResultFrame> {
+  await expect(result).toBeVisible();
+  await expect(result).toBeInViewport({ ratio: 1 });
+  mark("result");
+  const text = await result.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const { x, y, width, height } = range.getBoundingClientRect();
+    return { connected: element.isConnected, height, width, x, y };
+  });
+  if (
+    !text.connected ||
+    text.width <= 0 ||
+    text.height <= 0 ||
+    text.x < 0 ||
+    text.y < 0 ||
+    text.x + text.width > viewport.width ||
+    text.y + text.height > viewport.height
+  ) {
+    throw new Error(
+      `the result's text measures ${JSON.stringify(text)}, not a box inside the ` +
+        `${viewport.width}x${viewport.height} viewport: ${result}`
+    );
+  }
+  await page.mouse.move(text.x + Math.min(text.width / 2, 120), text.y + text.height + 48, {
+    steps: 12,
+  });
+  await sleep(400);
+  // A box inside the viewport, a few pixels around the text, where the comparison looks.
+  const x = Math.max(0, Math.floor(text.x) - 4);
+  const y = Math.max(0, Math.floor(text.y) - 4);
+  const clip = {
+    height: Math.min(viewport.height - y, Math.ceil(text.height) + 8),
+    width: Math.min(viewport.width - x, Math.ceil(text.width) + 8),
+    x,
+    y,
+  };
+  await page.screenshot({ path: reference });
+  await sleep(resultHoldMs);
+  return { clip, reference };
+}
+
+/** The structural similarity (ffmpeg's ssim, 1 is identical) between the frame of `video` at
+ *  `at` seconds and the page's screenshot, both cropped to the result's box, in gray: the
+ *  recording's chroma is subsampled, and cropping it would snap the box to even pixels, a 1-pixel
+ *  shift that scores small text as unlike itself. */
+function similarity(video: string, at: number, result: ResultFrame): number {
+  const box = `crop=${result.clip.width}:${result.clip.height}:${result.clip.x}:${result.clip.y}`;
+  const run = spawnSync(
+    "ffmpeg",
+    [
+      "-nostats",
+      "-ss",
+      at.toFixed(3),
+      "-i",
+      video,
+      "-i",
+      result.reference,
+      "-lavfi",
+      `[0:v]format=gray,${box}[seen];[1:v]format=gray,${box}[shown];[seen][shown]ssim`,
+      "-frames:v",
+      "1",
+      "-f",
+      "null",
+      "-",
+    ],
+    { encoding: "utf8" }
+  );
+  const all = run.stderr.match(/SSIM .*All:([0-9.]+)/);
+  if (run.status !== 0 || all === null) {
+    throw new Error(`ffmpeg could not compare ${video} at ${at}s:\n${run.stderr}`);
+  }
+  return Number(all[1]);
+}
+
+/** Records one browser section: a fresh signed-in context whose recording is saved as `file`, at
+ *  the viewport's size (Playwright records a page at its CSS size whatever the device scale, and
+ *  pads a larger video with grey). `act` ends by passing the section's result to `hold`
+ *  (holdOnResult), and the saved file fails the section unless its last resultOnCameraSeconds
+ *  show that result. It notes two wall-clock lengths the file's duration must fall between: the
+ *  actions alone, and the page's whole life (a slow close adds a still tail, which the cut drops).
+ *  The recording starts with the page, so a mark lies as far into the file as it came after the
+ *  page's creation. */
+async function browserSection(
+  browser: Browser,
+  file: string,
+  baseURL: string,
+  act: (page: Page, hold: (result: Locator) => Promise<void>, mark: Mark) => Promise<void>
+): Promise<void> {
+  const context = await browser.newContext({
+    baseURL,
+    recordVideo: { dir: join(rawDir, ".video"), size: viewport },
+    viewport,
+  });
+  await signIn(context, operator);
+  await context.addInitScript(pointer);
+  const marks = marker(file);
+  const created = Date.now();
+  const page = await context.newPage();
+  // Where the drawn pointer starts, so the first move sweeps from it rather than from the corner.
+  await page.mouse.move(viewport.width / 2, viewport.height / 2);
+  const acting = Date.now();
+  let result: ResultFrame | undefined;
+  await act(
+    page,
+    async (locator) => {
+      if (result !== undefined) throw new Error(`${file}: a section holds on one result, its last`);
+      result = await holdOnResult(
+        page,
+        locator,
+        join(rawDir, ".video", `${file}.result.png`),
+        marks.mark
+      );
+    },
+    marks.mark
+  );
+  if (result === undefined) throw new Error(`${file}: the section never held on its result`);
+  const actSeconds = (Date.now() - acting) / 1000;
+  await context.close();
+  const wallSeconds = (Date.now() - created) / 1000;
+  const video = join(rawDir, file);
+  await page.video()?.saveAs(video);
+  const length = Number(
+    execFileSync(
+      "ffprobe",
+      ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", video],
+      { encoding: "utf8" }
+    ).trim()
+  );
+  const resultSimilarityAtEnd = similarity(video, length - 0.1, result);
+  const resultSimilarityBeforeEnd = similarity(video, length - resultOnCameraSeconds, result);
+  sections.push({
+    actSeconds,
+    file,
+    marks: marks.seconds(created),
+    resultSimilarityAtEnd,
+    resultSimilarityBeforeEnd,
+    wallSeconds,
+  });
+  if (Math.min(resultSimilarityAtEnd, resultSimilarityBeforeEnd) < resultMinSimilarity) {
+    throw new Error(
+      `${file}: its last ${resultOnCameraSeconds}s do not show the result the page showed ` +
+        `(similarity ${resultSimilarityBeforeEnd}, then ${resultSimilarityAtEnd}; need ` +
+        `${resultMinSimilarity}); the page's frame is ${result.reference}; re-record it`
+    );
+  }
+}
+
+/** Moves the pointer to a locator's centre in visible steps. */
+async function pointAt(page: Page, locator: Locator): Promise<void> {
+  const box = await locator.boundingBox();
+  if (box === null) throw new Error("pointAt: the target has no box");
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 25 });
+}
+
+/** Moves the pointer to a locator's centre in visible steps, then clicks it. */
+async function clickVisibly(page: Page, locator: Locator): Promise<void> {
+  await pointAt(page, locator);
+  await sleep(400);
+  await page.mouse.down();
+  await sleep(90);
+  await page.mouse.up();
+}
+
+test("record the broker walkthrough's raw footage", async ({ browser }) => {
+  test.setTimeout(900_000);
+  const rig = rigState();
+  // A new take replaces the files a take writes and nothing else, whatever WALKTHROUGH_RAW_DIR names.
+  for (const file of takeFiles) rmSync(join(rawDir, file), { force: true, recursive: true });
+  mkdirSync(rawDir, { recursive: true });
+
+  // One persistent shell on the agent machine, which every terminal section attaches to.
+  tmux(
+    "new-session",
+    "-d",
+    "-s",
+    shell,
+    "-x",
+    String(cols),
+    "-y",
+    String(rows),
+    rig.agentExec,
+    "bash"
+  );
+  tmux("set-option", "-g", "status", "off");
+  await waitForScreen(new RegExp(`${agentHost}:~/demo[#$] $`, "m"), "its prompt");
+  tmux("send-keys", "-t", shell, "clear", "Enter");
+  await sleep(500);
+
+  try {
+    // T1: the machine login prints its code.
+    let code = "";
+    await terminalSection("t1-login.cast", async (mark) => {
+      mark("typing");
+      await type("agent-secrets launcher login");
+      await enter();
+      code = (await waitForScreen(printed.loginCode, "a login code"))[1];
+      mark("code");
+      await waitForScreen(
+        /approve only if the code matches this terminal/,
+        "where to enter the code"
+      );
+      await sleep(2_500);
+    });
+
+    // B1: the operator enters the code and approves the machine.
+    await browserSection(browser, "b1-machine.webm", rig.dispatchUrl, async (page, hold, mark) => {
+      await page.goto(machineLoginPath);
+      await expect(dispatch.machineLoginHeading(page)).toBeVisible();
+      mark("page");
+      await sleep(1_200);
+      const field = dispatch.codeField(page);
+      await clickVisibly(page, field);
+      mark("typing");
+      await field.pressSequentially(code, { delay: 140 });
+      await sleep(500);
+      await clickVisibly(page, dispatch.lookUp(page));
+      await expect(dispatch.machineLoginRecord(page)).toBeVisible();
+      mark("record");
+      await sleep(3_500);
+      await clickVisibly(page, dispatch.approve(page));
+      mark("approve");
+      await hold(dispatch.machineLoginApproved(page));
+    });
+
+    // T2: the login returned; a session registers with the helper and reads its enrollment.
+    await waitForScreen(
+      new RegExp(
+        `approve only if the code matches this terminal\\n(?:.*\\n)*?${agentHost}:~/demo[#$] $`,
+        "m"
+      ),
+      "the login returning"
+    );
+    await terminalSection("t2-session.cast", async (mark) => {
+      mark("status-typing");
+      await type("agent-secrets launcher login-status");
+      await enter();
+      await waitForScreen(/^issued$/m, "issued");
+      mark("issued");
+      await sleep(1_500);
+      mark("register-typing");
+      await type("agent-secrets register --wait 10 --exec -- bash");
+      await enter();
+      await sleep(1_500);
+      mark("self-typing");
+      await type("agent-secrets self");
+      await enter();
+      await waitForScreen(new RegExp(`operator: ${operator}`), "the session's operator");
+      mark("self");
+      // Long enough for the line that names the enrollment `self` printed.
+      await sleep(6_500);
+    });
+
+    // T3: the session asks for DEMO_API_KEY; the request waits on a person.
+    tmux("send-keys", "-t", shell, "clear", "Enter");
+    await sleep(500);
+    let recordId = "";
+    let requestId = "";
+    await terminalSection("t3-request.cast", async (mark) => {
+      mark("typing");
+      await type(`agent-secrets DEMO_API_KEY --reason "${reason}" -- ./check-demo-key.sh`);
+      await enter();
+      requestId = (await waitForScreen(printed.requestWaiting, "the pending request"))[1];
+      recordId = (await waitForScreen(printed.recordLink, "the record link"))[1];
+      mark("waiting");
+      await sleep(3_000);
+    });
+
+    // T4, around B2: the terminal records while the operator finds the request in the Inbox, reads
+    // its record and approves it, so the cast shows the waiting command receive the key and run.
+    // Then the request's status names who decided it.
+    await terminalSection("t4-ran.cast", async (markTerminal) => {
+      let keyShownAt = 0;
+      const keyShown = waitForScreen(printed.keyReached, "the command's output", 180_000).then(
+        () => {
+          keyShownAt = Date.now();
+          markTerminal("key");
+        }
+      );
+      // B2: the request in the Inbox, its record, and the approval.
+      await browserSection(
+        browser,
+        "b2-approve.webm",
+        rig.dispatchUrl,
+        async (page, hold, mark) => {
+          await page.goto("/");
+          const row = dispatch.inboxRequest(page);
+          await expect(row).toBeVisible();
+          mark("inbox");
+          await sleep(2_500);
+          await clickVisibly(page, row);
+          await expect(dispatch.requestReason(page)).toBeVisible();
+          mark("record");
+          // Long enough to say what the page shows before the pointer moves to Approve.
+          await sleep(6_000);
+          await clickVisibly(page, dispatch.approve(page));
+          mark("approve");
+          markTerminal("approve");
+          await hold(dispatch.requestApproved(page));
+        }
+      );
+      await keyShown;
+      // The command's output alone on screen long enough for the video to open on it.
+      await sleep(Math.max(0, keyShownAt + 4_500 - Date.now()));
+      markTerminal("status-typing");
+      await type("agent-secrets status ");
+      // The word typed, the request id not yet begun: where the cut jumps the id's typing.
+      markTerminal("status-word");
+      await type(requestId);
+      markTerminal("status-typed");
+      await enter();
+      await waitForScreen(new RegExp(`decided_by: ${operator}`), "who decided");
+      markTerminal("decided");
+      await sleep(3_500);
+    });
+
+    // B3: from the approved record to Settings, where the grant is listed with its approver.
+    await browserSection(browser, "b3-grants.webm", rig.dispatchUrl, async (page, hold, mark) => {
+      await page.goto(`/credentials/${recordId}`);
+      await expect(dispatch.requestApproved(page)).toBeVisible();
+      mark("record");
+      await sleep(1_500);
+      await clickVisibly(page, dispatch.settings(page));
+      mark("settings");
+      const grants = dispatch.liveGrants(page);
+      await expect(grants.getByText("DEMO_API_KEY")).toBeVisible();
+      mark("grants");
+      await sleep(1_000);
+      await grants.evaluate((section) =>
+        section.scrollIntoView({ behavior: "smooth", block: "start" })
+      );
+      const grantRow = grants.getByRole("row", { name: /DEMO_API_KEY/ });
+      await expect(grantRow).toBeInViewport({ ratio: 1 });
+      mark("row");
+      await sleep(1_000);
+      await pointAt(page, grants.getByRole("cell", { name: operator, exact: true }));
+      await sleep(2_000);
+      mark("revoke");
+      await pointAt(page, grants.getByRole("button", { name: "Revoke" }));
+      await sleep(3_000);
+      await hold(grantRow);
+    });
+    rmSync(join(rawDir, ".video"), { force: true, recursive: true });
+  } finally {
+    tmux("kill-server");
+    writeFileSync(join(rawDir, "sections.json"), `${JSON.stringify(sections, null, 2)}\n`);
+  }
+});
