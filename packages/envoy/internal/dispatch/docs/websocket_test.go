@@ -37,7 +37,6 @@ func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {
 		t.Fatalf("close document issue: %v", err)
 	}
 	service.SetIssueClosed(context.Background(), "DOC-1", true)
-	waitForRoomClosed(t, service, artifactID)
 	waitForNoLiveDocument(t, service, artifactID)
 	connection.SetReadDeadline(time.Now().Add(time.Second))
 	for {

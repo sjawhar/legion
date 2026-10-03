@@ -552,6 +552,7 @@ func (s *Service) creditContentChange(room string, origin any) {
 		if actor, credited := value.(*model.Actor); credited && actor != nil {
 			state.pending[actorKey(*actor)] = *actor
 			state.lastActor = new(*actor)
+			state.unsettled = true
 		}
 		return
 	}
@@ -570,6 +571,7 @@ func (s *Service) creditContentChange(room string, origin any) {
 		sole = nil
 	}
 	state.lastActor = sole
+	state.unsettled = true
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits
