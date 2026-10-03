@@ -79,7 +79,7 @@ func (p *PgVersioned) AppendUpdateWithClass(ctx context.Context, room string, up
 }
 
 func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
+	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		return 0, err
 	}
 	var version persistence.Version
@@ -104,7 +104,7 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 // AppendUpdateTx appends an already validated V1 update inside tx, recording whether it changes
 // the document's content: settlement versions a document only past a content update.
 func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
+	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		// ygo refuses an update declaring more than maxUpdateItems items with the same error it
 		// gives a malformed one. The server encoded this update itself, so when its header
 		// declares more than the cap, the cap is the cause and the document is the caller's to

@@ -199,7 +199,10 @@
   document's state, each copy of its room and its stored history alike, used ygo's default queue
   of 100,000 items parked behind one whose parent it cannot place yet, which such a state
   overruns; each, and the room's own load, now decodes with a queue as long as one update can
-  carry (LEGION-469).
+  carry. The store's check of each update it appends decoded the update alone at the same
+  default, so a browser update of more than 100,000 items written against blocks the document
+  already held failed the room and lost the edit; that check now takes the same queue
+  (LEGION-469).
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds

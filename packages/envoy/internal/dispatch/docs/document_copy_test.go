@@ -4,10 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/reearth/ygo/crdt"
+	ygsync "github.com/reearth/ygo/sync"
+
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // A browser whose client id is lower than the server's writes many blocks into a paragraph the
@@ -155,6 +161,112 @@ func TestAStoredHistoryLoadsWhatItsRoomParksForOneClient(t *testing.T) {
 		}
 		if after.Version != before.Version || !bytes.Equal(after.Update, before.Update) {
 			t.Fatalf("the refused rebuild moved the history from version %d (%d bytes) to version %d (%d bytes)", before.Version, len(before.Update), after.Version, len(after.Update))
+		}
+	})
+}
+
+// browserUpdateBlocks is how many paragraphs, each with its block id, the browser of
+// TestTheStoreTakesOneBrowserUpdateItsRoomTook sends in one update: two items each, 150,000 in
+// all, past ygo's default pending queue of 100,000.
+const browserUpdateBlocks = 75_000
+
+// A browser sends, in one update, paragraphs written ahead of one the document already holds, each
+// with its block id. The room holds that paragraph and applies the update. The store's check of an
+// update it appends decodes the update alone, where the first paragraph's neighbour is missing, so
+// ygo defers it and parks every later item of the update behind it; at ygo's default queue that
+// check refused the update once 100,000 were parked, which failed the room and dropped the edit.
+// The store takes it, the room keeps it, and so does the room loaded again from the store; a
+// transaction's append takes the same update.
+func TestTheStoreTakesOneBrowserUpdateItsRoomTook(t *testing.T) {
+	service, artifactID := newTestService(t)
+	// Settlement is not under test, and its stamp would race the reads below.
+	service.settle = time.Hour
+	ctx := context.Background()
+	seedServiceText(t, service, artifactID, "before")
+	persist := NewPgVersioned(service.store)
+	seeded, err := persist.Load(ctx, artifactID)
+	if err != nil {
+		t.Fatalf("load the seeded document: %v", err)
+	}
+	browser := crdt.New()
+	if err := crdt.ApplyUpdateV1(browser, seeded.Update, nil); err != nil {
+		t.Fatalf("open the document in the browser: %v", err)
+	}
+	fragment := browser.GetXmlFragment(fragmentName)
+	before := browser.StateVector()
+	browser.Transact(func(txn *crdt.Transaction) {
+		// Prepended, since ygo walks a fragment's children from its start to find an insert
+		// position; the first lands ahead of the seeded paragraph and leans on it.
+		for block := range browserUpdateBlocks {
+			paragraph := crdt.NewYXmlElement("paragraph")
+			fragment.InsertElement(txn, 0, paragraph)
+			paragraph.SetAttribute(txn, pmdoc.BlockIDAttr, "browser-"+strconv.Itoa(block))
+		}
+	})
+	update := crdt.EncodeStateAsUpdateV1(browser, before)
+	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err == nil {
+		t.Fatal("ygo's default pending queue took the browser's update; this test no longer reaches the queue")
+	}
+	want, err := renderDocument(browser)
+	if err != nil {
+		t.Fatalf("render the browser's document: %v", err)
+	}
+
+	t.Run("a room stores it and keeps it", func(t *testing.T) {
+		httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+		t.Cleanup(httpServer.Close)
+		peer := newDeepPeer(t, httpServer.URL, artifactID)
+		waitFor(t, 10*time.Second, "the peer's room to open", func() bool {
+			return service.srv.GetDoc(artifactID) != nil
+		})
+		state := service.room(artifactID)
+		head, err := persist.Head(ctx, artifactID)
+		if err != nil {
+			t.Fatalf("read the document's head: %v", err)
+		}
+		peer.write(t, ygsync.EncodeUpdate(update))
+		// The store holds the update once a version past head declares its items: the peer's
+		// answer to the room's sync step 1, an empty update, can move the head first.
+		stored := func() bool {
+			versions, err := persist.ListVersions(ctx, artifactID)
+			if err != nil {
+				return false
+			}
+			for _, version := range versions {
+				if version.Version <= head {
+					return false
+				}
+				got, _, ok, err := persist.GetUpdate(ctx, artifactID, version.Version)
+				if items, counted := updateItems(got); err == nil && ok && counted && items == 2*browserUpdateBlocks {
+					return true
+				}
+			}
+			return false
+		}
+		waitFor(t, time.Minute, "the room to store the browser's update or fail", func() bool {
+			return state.failure() != nil || stored()
+		})
+		if err := state.failure(); err != nil {
+			t.Fatalf("the browser's update failed the room: %v", err)
+		}
+		if text, err := service.Text(ctx, artifactID); err != nil || text != want {
+			t.Fatalf("the room renders %d bytes (%v), want the browser's %d", len(text), err, len(want))
+		}
+		if err := service.Evict(ctx, artifactID); err != nil {
+			t.Fatalf("evict the room: %v", err)
+		}
+		if text, err := service.Text(ctx, artifactID); err != nil || text != want {
+			t.Fatalf("the stored history renders %d bytes (%v), want the browser's %d", len(text), err, len(want))
+		}
+	})
+	t.Run("a transaction appends it", func(t *testing.T) {
+		tx, err := service.store.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin the append: %v", err)
+		}
+		defer tx.Rollback(ctx)
+		if _, err := persist.AppendUpdateTx(ctx, tx, artifactID, update, true); err != nil {
+			t.Fatalf("append the browser's update in a transaction: %v", err)
 		}
 	})
 }

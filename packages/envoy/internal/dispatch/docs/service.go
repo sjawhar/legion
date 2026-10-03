@@ -429,7 +429,8 @@ func New(deps Deps) *Service {
 	// more items than that after one ygo had to defer (LEGION-502), and the document reads as one
 	// whose history cannot load, which offers its rebuild. The queue is maxUpdateItems because ygo
 	// refuses any one update declaring more items than that, so no load of a stored history can
-	// park past it. It is also the most a room's peers can park in it, about ten times ygo's default.
+	// park past it. It is also the most a room's peers can park in it, about ten times ygo's
+	// default; bounding what one peer's update can do to a room is LEGION-487.
 	srv.MaxPendingItems = maxUpdateItems
 	// A room whose last peer leaves stays resident until it has been idle for roomIdleTimeout.
 	// Eager eviction, ygo's default, evicts the room the moment its last peer leaves, even while
