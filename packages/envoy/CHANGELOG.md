@@ -194,22 +194,33 @@
   autolink 2, a piece of inline syntax, a mark or a line of text 1); past that a write is `413
   CAP_EXCEEDED`, refused while goldmark parses, naming the line where the markdown passes the limit
   or, where the parse stopped first, the line it stopped reading at; a quote is matched by its text
-  alone. This repository's own markdown weighs 44 to 100 elements a kibibyte, so prose passes to
-  the 1 MiB cap and a table-dense document to about 650 KiB.
+  alone. This repository's own markdown weighs 1.5 to 429 elements a kibibyte, so prose passes to
+  the 1 MiB cap and the densest of its documents, a comparison matrix of 379 a kibibyte, to about
+  173 KiB. A paragraph of link reference definitions, which goldmark took time quadratic in its lines
+  to read (a mebibyte of them took a minute to refuse), is read only as far as its first 1,024 lines.
 - A write may no longer grow a stored document past what one upload may hold, measured as an
   upload is measured. Thirty-two 900 KB inserts of prose, each within both limits, grew one document
-  to 29.5 MB, on which a one-word edit then held a gigabyte; and a few dozen thousand headings'
-  worth left one the server could not load (500 on the next write, 503 on every read). An upload,
-  an edit batch or an accepted suggestion is now weighed by the markdown it leaves the document
-  storing (what `GET .../text` answers), with an upload's own measures: it is `413 CAP_EXCEEDED`
-  when that is longer than 1 MiB and longer than the document's was, or makes more than 65,536
-  elements and more than the document's did, counted as an upload's parse counts them (front matter
-  apart). One that keeps or lowers both passes, so an over-limit document can still be trimmed or
-  split, and any document a write leaves can be uploaded again from its own text. A spec or new
-  document whose stored markdown is past either limit is refused the same way, as is a write that
-  would leave a live document parking more than 90,000 of the 100,000 items ygo waits on while it
-  loads one (any write that would leave it unloadable at all is refused). Browser edits over the
-  websocket are applied before any check and are not bounded by this (LEGION-487).
+  to 29.5 MB, on which a one-word edit then held a gigabyte; a few dozen thousand headings' worth
+  left one the server could not load (500 on the next write, 503 on every read); and thirty-two
+  edits of an ask's options (`PATCH /api/v1/asks/{id}`) grew one to 28.8 MB, on which a one-word
+  edit was killed at the production task's 1,024 MiB. No write opts in to the bound: every write a
+  caller makes - an upload, an edit batch, an accepted or rejected suggestion, an ask's edited text,
+  its answer (`POST /api/v1/asks/{id}/answer`) or resolution, a comment's anchor mark and its margin
+  record - runs in a transaction it must join (an unjoined one is refused), and is weighed by the
+  markdown it leaves the document storing (what `GET .../text` answers), with an upload's own
+  measures: it is `413 CAP_EXCEEDED` when that is longer than 1 MiB and longer than the document's
+  was, or makes more than 65,536 elements and more than the document's did, counted as an upload's
+  parse counts them (front matter apart). One that keeps or lowers both passes, so an over-limit
+  document can still be trimmed or split, and any document a write leaves can be uploaded again from
+  its own text. A spec or new document whose stored markdown is past either limit is refused the
+  same way, as is a write that would leave a live document parking more than 90,000 of the 100,000
+  items ygo waits on while it loads one (any write that would leave it unloadable at all is
+  refused). Browser edits over the websocket are applied before any check and are not bounded by
+  this (LEGION-487). Nor is a document's stored history: every update a write appends is kept with
+  the content later writes delete, and a cold load builds all of it, so repeated uploads of a
+  version or replies to one comment, whose margin record each reply rewrites whole, still grow what
+  a load costs (500 replies of 2,000 characters left 257 MB stored and a one-word edit holding
+  1,842 MiB) until LEGION-496 folds that history.
 
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work

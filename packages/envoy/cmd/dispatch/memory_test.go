@@ -74,6 +74,9 @@ func TestEveryUploadAtTheCapStaysWithinTheMemoryBound(t *testing.T) {
 					if peak > requestMemoryBound {
 						t.Errorf("upload of %s (%s) held %d MiB above idle, want at most %d MiB", shape.name, mode, peak>>20, requestMemoryBound>>20)
 					}
+					if within, bounded := capShapeAnswersWithin[shape.name]; bounded && upload.elapsed > within {
+						t.Errorf("upload of %s (%s) answered in %s, want at most %s", shape.name, mode, upload.elapsed, within)
+					}
 				})
 			}
 		})
@@ -287,10 +290,6 @@ func TestAWriteCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 	} {
 		t.Run(shape.name, func(t *testing.T) {
 			insert := map[string]any{"op": "insert", "after": shape.after, "markdown": shape.chunk}
-			refusedWithAdvice := func(answer response) bool {
-				return answer.status == http.StatusRequestEntityTooLarge && strings.Contains(string(answer.body), `"code":"CAP_EXCEEDED"`) &&
-					strings.Contains(string(answer.body), "shorten the change, or split the document")
-			}
 			server := memory.start(t)
 			issue := server.createIssue(t, "Growth by "+shape.name, shape.spec)
 			refused := false
@@ -351,6 +350,121 @@ func TestAWriteCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 				t.Errorf("an upload of the document's own %d-byte text answered %d %.300s, want 201", len(text), upload.status, upload.body)
 			}
 		})
+	}
+}
+
+// refusedWithAdvice reports whether answer is a write's growth refused: 413 CAP_EXCEEDED, saying
+// what to do.
+func refusedWithAdvice(answer response) bool {
+	return answer.status == http.StatusRequestEntityTooLarge && strings.Contains(string(answer.body), `"code":"CAP_EXCEEDED"`) &&
+		strings.Contains(string(answer.body), "shorten the change, or split the document")
+}
+
+// An ask's text and its answer are written into its block, so they grow a document as an edit
+// does, and are held to what one upload may hold on a real Dispatch process as an edit is: edits of
+// the asks of one document, each giving an option a 900 KB description, and answers of 900 KB to
+// them, are taken until one would leave the document's markdown past 1 MiB, which is refused with
+// 413 CAP_EXCEEDED, and so is every one after it. The document still reads, and a one-word edit on
+// a server that has not loaded it holds at most the bound. Before the bound reached these routes,
+// thirty-two such edits grew one document to 28.8 MB, on which a one-word edit held 1,204 MiB, and
+// under the production task's 1,024 MiB the server was killed.
+func TestAskEditsAndAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
+	memory := newMemoryHarness(t)
+	const asks = 32
+	var spec strings.Builder
+	spec.WriteString("Before sentinel.\n")
+	for index := range asks {
+		fmt.Fprintf(&spec, "\n:::ask{#ask-%d urgency=\"med\" multiple=\"false\" state=\"open\"}\nQuestion %d?\n:::\n", index, index)
+	}
+	prose := strings.Repeat("word ", 180_000)
+	for _, route := range []struct {
+		name, method, path string
+		body               map[string]any
+	}{
+		{"PATCH /api/v1/asks/{id}", http.MethodPatch, "", map[string]any{"options": []map[string]string{{"label": "A", "description": prose}}}},
+		{"POST /api/v1/asks/{id}/answer", http.MethodPost, "/answer", map[string]any{"text": prose, "expected_edited_at": nil}},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			body, err := json.Marshal(route.body)
+			if err != nil {
+				t.Fatalf("encode the write: %v", err)
+			}
+			server := memory.start(t)
+			issue := server.createIssue(t, "Ask growth by "+route.name, spec.String())
+			refused := false
+			for index, askID := range server.blockAsks(t, issue.Key, asks) {
+				var answer response
+				peak := server.peakAboveIdle(t, func() {
+					answer = server.send(t, route.method, "/api/v1/asks/"+askID+route.path, "application/json", bytes.NewReader(body), http.Header{"X-Dispatch-User": {"alice"}})
+				})
+				t.Logf("write %d: %d, %d MiB above idle with what earlier writes left: %.200s", index+1, answer.status, peak>>20, answer.body)
+				switch {
+				case answer.status == http.StatusOK && !refused:
+				case refusedWithAdvice(answer):
+					refused = true
+				default:
+					t.Errorf("write %d answered %d %.300s, want 200 until one is refused with 413 CAP_EXCEEDED saying to shorten the change, and 413 after it", index+1, answer.status, answer.body)
+				}
+			}
+			if !refused {
+				t.Errorf("all %d writes were taken, want the document's growth refused", asks)
+			}
+			server.get(t, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks")
+			text := server.text(t, issue.PrimaryArtifactID)
+			server.stop(t)
+			if len(text) > documentCap {
+				t.Errorf("the document's markdown is %d bytes, past the %d-byte cap", len(text), documentCap)
+			}
+			cold := memory.start(t)
+			var answer response
+			peak := cold.peakAboveIdle(t, func() {
+				answer = cold.edit(t, issue.PrimaryArtifactID, map[string]any{"op": "replace", "find": "sentinel", "with": "marker"})
+			})
+			cold.stop(t)
+			t.Logf("%s: a one-word edit of the %d-byte document answered %d, %d MiB above idle: %.200s", route.name, len(text), answer.status, peak>>20, answer.body)
+			if answer.status != http.StatusOK {
+				t.Errorf("a one-word edit answered %d %.300s, want 200", answer.status, answer.body)
+			}
+			if peak > requestMemoryBound {
+				t.Errorf("a one-word edit of the %d-byte document held %d MiB above idle, want at most %d MiB", len(text), peak>>20, requestMemoryBound>>20)
+			}
+		})
+	}
+}
+
+// blockAsks are the ids of the asks settlement indexes from the blocks ask-0 to ask-<count-1> of
+// the issue's spec, in that order, once it has indexed every one.
+func (p *dispatchProcess) blockAsks(t *testing.T, issueKey string, count int) []string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		answer := p.send(t, http.MethodGet, "/api/v1/issues/"+issueKey+"/asks?state=all", "", nil, http.Header{"X-Dispatch-User": {"alice"}})
+		var asks []struct {
+			ID      string  `json:"id"`
+			BlockID *string `json:"block_id"`
+		}
+		if answer.status != http.StatusOK || json.Unmarshal(answer.body, &asks) != nil {
+			t.Fatalf("list the issue's asks: status %d body %.300s", answer.status, answer.body)
+		}
+		byBlock := map[string]string{}
+		for _, ask := range asks {
+			if ask.BlockID != nil {
+				byBlock[*ask.BlockID] = ask.ID
+			}
+		}
+		ids := make([]string, 0, count)
+		for index := range count {
+			if id, found := byBlock[fmt.Sprintf("ask-%d", index)]; found {
+				ids = append(ids, id)
+			}
+		}
+		if len(ids) == count {
+			return ids
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("settlement indexed %d of the spec's %d asks", len(ids), count)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -434,12 +548,18 @@ type memoryShape struct {
 	markdown func() string
 }
 
+// capShapeAnswersWithin is how long the upload of a cap shape that once took far longer may take
+// to answer, by the shape's name.
+var capShapeAnswersWithin = map[string]time.Duration{"link reference definitions": 10 * time.Second}
+
 // capShapes are the shapes LEGION-481 names, each exactly at the 1 MiB cap: the ones LEGION-465's
 // pull requests (#1670, #1669) found quadratic or deep, a table of a mebibyte of cells, and the
 // node-heavy tables and links #1669's review measured. 1 MiB of bare `>` nests a quote per byte:
 // main's parse ran 14 minutes into a stack overflow that took the server down, and #1669's depth
 // bound refuses it as soon as it nests past 100. Flat list items, empty or not, are where the
-// guard has to close a list to stop, and hard breaks weigh as blocks.
+// guard has to close a list to stop, and hard breaks weigh as blocks. A paragraph of link
+// reference definitions cost goldmark time quadratic in its lines: a mebibyte of them took a
+// minute to refuse, so it answers within ten seconds.
 func capShapes() []memoryShape {
 	repeated := func(unit string) func() string { return func() string { return fill(unit) } }
 	return []memoryShape{
@@ -487,6 +607,7 @@ func capShapes() []memoryShape {
 		{"hard breaks of two spaces", repeated("a  \n")},
 		{"hard breaks of a backslash", repeated("a\\\n")},
 		{"1 MiB of bare >", repeated(">")},
+		{"link reference definitions", repeated("[a]: b\n")},
 	}
 }
 
@@ -502,8 +623,9 @@ type admittedShape struct {
 }
 
 // heaviestAdmittedShapes are the heaviest documents of the shapes that cost the most memory per
-// element - italic spans, delimiter runs, table cells, headings, list items and hard breaks - that
-// the element limit admits, each found by the parser the server writes with.
+// element - italic spans, delimiter runs, table cells, headings, list items, hard breaks and inline
+// HTML, the heaviest of all to store - that the element limit admits, each found by the parser the
+// server writes with.
 func heaviestAdmittedShapes(t *testing.T) []admittedShape {
 	t.Helper()
 	repeated := func(unit string) func(int) string {
@@ -525,6 +647,7 @@ func heaviestAdmittedShapes(t *testing.T) []admittedShape {
 		{"list items", repeated("- a\n")},
 		{"hard breaks of two spaces", repeated("a  \n")},
 		{"hard breaks of a backslash", repeated("a\\\n")},
+		{"HTML spans", repeated("<b>a</b>")},
 	} {
 		shapes = append(shapes, admittedShape{name: shape.name, markdown: heaviestAdmitted(t, shape.build)})
 	}
