@@ -866,7 +866,8 @@ func TestDecisionsTakeOnlyTheApproversLogin(t *testing.T) {
 // /v1/credential-requests/{id} against the record of a request cancelled with no terminal event on
 // the record, which an enrollment that ended before the broker wrote that event left behind: the
 // list leaves it out and its read says cancelled, at the time its request was, while a pending
-// request's record and a pending machine login are both still listed.
+// request's record and a pending machine login are both still listed and a denied machine login
+// is not.
 func TestRecordCancelledWithNoEventLeavesThePendingList(t *testing.T) {
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
@@ -888,13 +889,22 @@ func TestRecordCancelledWithNoEventLeavesThePendingList(t *testing.T) {
 		t.Fatalf("cancel the request with no record event: %v", err)
 	}
 	pending := create("still waiting")
-	_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
-		map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, "example-host-devbox")})
-	code := decode[struct {
-		Code string `json:"code"`
-	}](t, body).Code
-	_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
-	login := decode[wireRecord](t, body).RecordID
+	machineLogin := func(host string) (recordID, code string) {
+		t.Helper()
+		_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
+			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, host)})
+		code = decode[struct {
+			Code string `json:"code"`
+		}](t, body).Code
+		_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+		return decode[wireRecord](t, body).RecordID, code
+	}
+	login, _ := machineLogin("example-host-devbox")
+	denied, deniedCode := machineLogin("example-host-denied")
+	if status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+denied+"/deny",
+		map[string]any{"approver": testApprover, "code": deniedCode}); status != http.StatusOK {
+		t.Fatalf("deny the second machine login = %d: %s", status, body)
+	}
 
 	status, body := ts.ui(t, http.MethodGet, "/v1/pending?approver="+testApprover, nil)
 	if status != http.StatusOK {

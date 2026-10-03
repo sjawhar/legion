@@ -232,11 +232,12 @@ type PendingSummary struct {
 }
 
 // PendingForApprover lists every still-pending credential-request record — of either kind — that
-// names approver, newest first: GET /v1/pending's exact contract. An agent_secret record is
-// pending while its request is: every writer of a terminal event moves the request out of
-// 'pending' in the same transaction, and a request an ended enrollment cancelled before
-// endEnrollment wrote that event carries none, so the request row is the truth. A machine login has
-// no request row and is pending while it carries no terminal decision event, matching
+// names approver, newest first: GET /v1/pending's exact contract. The rule for pending, which
+// ReadRecord applies too: an agent_secret record is pending while its request is. Every writer
+// moves the request out of 'pending' together with the record's terminal event
+// (store.EndPendingRequests, ApplyDecision), but a request an ended enrollment cancelled before
+// endEnrollment wrote that event carries none, so the request row is the truth. A machine login
+// has no request row and is pending while it carries no terminal decision event, matching
 // credential_request_decision's own partial index.
 func (m *Machine) PendingForApprover(ctx context.Context, approver string) ([]PendingSummary, error) {
 	rows, err := m.Store.Pool.Query(ctx, `select cr.id, cr.kind, cr.body, cr.created_at from credential_requests cr
@@ -320,8 +321,9 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 	if err != nil {
 		return RecordDetail{}, err
 	}
+	agentSecret := kind == "agent_secret"
 	var enr *record.Enrollment
-	if kind != "launcher_credential" {
+	if agentSecret {
 		e := body.Enrollment
 		enr = &e
 	}
@@ -338,15 +340,19 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 		Identifiers: identifiers, Service: service, Reason: obj.Reason, LifetimeSeconds: body.LifetimeSeconds,
 		RulesVersion: body.RulesVersion, ExpiresAt: expiresAt, RequestedAt: createdAt,
 	}
+	// Whether the record is still pending follows PendingForApprover's rule: an agent_secret record
+	// by its request's state, a machine login by its terminal event. A decided record's terminal
+	// event names the decision; a request an ended enrollment cancelled before endEnrollment wrote
+	// that event has none, and its request row stands in for it.
 	var event, credID string
 	var decidedAt time.Time
-	err = m.Store.Pool.QueryRow(ctx, `select event, at, coalesce(credential_id,'') from credential_request_events
-		where record_id=$1 and event = any($2)`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID)
-	if errors.Is(err, pgx.ErrNoRows) && kind == "agent_secret" {
-		// A request an ended enrollment cancelled before endEnrollment wrote the cancelled event
-		// left its record with no terminal event; its request row says it was cancelled, and when.
-		event = "cancelled"
-		err = m.Store.Pool.QueryRow(ctx, `select decided_at from requests where record_id=$1 and state='cancelled'`, recordID).Scan(&decidedAt)
+	if agentSecret {
+		err = m.Store.Pool.QueryRow(ctx, `select coalesce(ev.event, r.state), coalesce(ev.at, r.decided_at), coalesce(ev.credential_id, '')
+			from requests r left join credential_request_events ev on ev.record_id=r.record_id and ev.event = any($2)
+			where r.record_id=$1 and r.state <> 'pending'`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID)
+	} else {
+		err = m.Store.Pool.QueryRow(ctx, `select event, at, coalesce(credential_id,'') from credential_request_events
+			where record_id=$1 and event = any($2)`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID)
 	}
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):

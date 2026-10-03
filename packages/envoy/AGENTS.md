@@ -1737,7 +1737,13 @@ nothing pending, the request and, if granted, its grant are written with no reco
 needing approval writes the request row and a `credential_requests` record together, in one
 transaction serialized by an advisory lock keyed on the enrollment and the sorted name set, so an
 identical concurrent request coalesces onto the same record (`coalesced: true`) instead of writing
-a second one. `ApplyDecision` decides a pending record on the deciding human's login — approve
+a second one. Each of those write transactions first locks the requesting enrollment `for share`
+while it is live, before any request or grant row, so a request racing the sweep or a revoke
+writes nothing on an enrollment that ended after `Create` first read it (`401 PROOF_INVALID`, as
+for one that had ended before). A pending request leaves `pending` without a human only through
+`store.EndPendingRequests` (the session's cancel, the sweeper's expiry, an enrollment's end): one
+statement moves the request rows and writes each one's audit row and its record's terminal event.
+`ApplyDecision` decides a pending record on the deciding human's login — approve
 mints the grant while the requesting enrollment is still live, deny denies it — re-deriving the
 record's id, refusing any login but the record's approver whatever the record's state
 (`record.ErrNotApprover`, `403 NOT_APPROVER`), re-verifying its embedded request object, and
@@ -1748,9 +1754,10 @@ nothing) — but a record past its expiry, whether the sweeper has recorded it e
 answers with a message saying it expired before its approver acted (`requests.ErrExpired`), never
 that it was decided. An `agent_secret` record is pending while its request is: `GET /v1/pending`
 (`PendingForApprover`) lists it only then, and `GET /v1/credential-requests/{id}` (`ReadRecord`)
-reads a record whose request was cancelled as `cancelled` even when the record carries no
-cancelled event, the shape an ended enrollment's requests had before `endEnrollment` wrote one; a
-machine login is pending while it carries no terminal event. `Values` releases a
+reads it as pending only then; a decided record's terminal event names the decision, and a request
+cancelled with no cancelled event on its record, the shape an ended enrollment's requests had
+before `endEnrollment` wrote one, reads as `cancelled` from its request row. A machine login is
+pending while it carries no terminal event. `Values` releases a
 live grant's inject-delivery values, re-checking the enrollment, the
 grant, its whole approval chain (`VerifyChain`), and — when the rules changed since the grant was
 decided — that the current rules still allow every granted name (`stillAllowed`: a name the rules no

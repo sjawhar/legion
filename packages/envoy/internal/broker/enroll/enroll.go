@@ -298,10 +298,10 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 
 // endEnrollment ends enrollment id inside tx: it is marked revoked, every live grant under it is
 // revoked, and every request still pending under it is cancelled — an approval must never land
-// on a session that has ended — with one audit row per cancelled request, a cancelled event on
-// each one's credential-request record (so no approver's pending list keeps showing it), and one
-// kind row for the enrollment. It reports how many grants it revoked and requests it cancelled.
-// The caller holds the enrollment row's lock.
+// on a session that has ended — with its audit row and its record's cancelled event
+// (store.EndPendingRequests, so no approver's pending list keeps showing it), and one kind row
+// for the enrollment. It reports how many grants it revoked and requests it cancelled. The caller
+// holds the enrollment row's lock.
 func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason string) (grantsRevoked int64, requestsCancelled int, err error) {
 	if _, err := tx.Exec(ctx, `update enrollments set revoked_at=now() where id=$1`, id); err != nil {
 		return 0, 0, err
@@ -311,34 +311,11 @@ func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason strin
 		return 0, 0, err
 	}
 	detail := "the requesting enrollment ended: " + reason
-	rows, err := tx.Query(ctx, `update requests set state='cancelled', decided_at=now(), decided_by=$2, decision_detail=$3
-		where enrollment_id=$1 and state='pending' returning id, record_id`, id, actor, detail)
-	if err != nil {
-		return 0, 0, err
-	}
-	type cancelledRequest struct {
-		id       string
-		recordID *string
-	}
-	cancelled, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (cancelledRequest, error) {
-		var c cancelledRequest
-		err := row.Scan(&c.id, &c.recordID)
-		return c, err
+	cancelled, err := store.EndPendingRequests(ctx, tx, store.RequestsOfEnrollment, id, store.RequestEnd{
+		State: "cancelled", Actor: actor, DecidedBy: &actor, Detail: detail, AuditDetail: map[string]any{"reason": detail},
 	})
 	if err != nil {
 		return 0, 0, err
-	}
-	for _, c := range cancelled {
-		if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, actor, detail) values ('request.cancelled',$1,$2,$3, jsonb_build_object('reason',$4::text))`,
-			id, c.id, actor, detail); err != nil {
-			return 0, 0, err
-		}
-		if c.recordID != nil {
-			if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, actor, detail) values ($1,'cancelled',$2,$3)`,
-				*c.recordID, actor, detail); err != nil {
-				return 0, 0, err
-			}
-		}
 	}
 	if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ($1,$2,$3, jsonb_build_object('reason',$4::text))`, kind, id, actor, reason); err != nil {
 		return 0, 0, err

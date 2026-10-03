@@ -56,7 +56,7 @@ func (s *Sweeper) Tick(ctx context.Context) {
 	}
 	for _, r := range expired {
 		if s.Wake != nil {
-			s.Wake(ctx, r.enrollmentID, r.id, "expired")
+			s.Wake(ctx, r.EnrollmentID, r.ID, "expired")
 		}
 	}
 	if err := s.MachineLogins.ExpirePending(ctx, now); err != nil {

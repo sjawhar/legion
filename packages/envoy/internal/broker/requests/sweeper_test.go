@@ -3,9 +3,12 @@ package requests
 import (
 	"context"
 	"crypto/ecdsa"
+	"errors"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
@@ -118,9 +121,10 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 
 // TestSweeperEndsLapsedEnrollments pins that one Tick ends an enrollment whose lease has lapsed,
 // as a launcher's revoke ends one: its live grant is revoked, its pending request is cancelled and
-// its record closed, so the approver's pending list (GET /v1/pending) stops offering it. An
-// enrollment still within its lease keeps its grant and its pending request, and a second Tick
-// changes nothing.
+// its record closed, so the approver's pending list (GET /v1/pending) stops offering it. That
+// request is past its own deadline too, and is still cancelled rather than expired, with no wake:
+// Tick ends lapsed enrollments before it expires requests. An enrollment still within its lease
+// keeps its grant and its pending request, and a second Tick changes nothing.
 func TestSweeperEndsLapsedEnrollments(t *testing.T) {
 	m, gone, goneKey, approver := newFixture(t)
 	ctx := context.Background()
@@ -143,9 +147,19 @@ func TestSweeperEndsLapsedEnrollments(t *testing.T) {
 	if _, err := m.Store.Pool.Exec(ctx, `update enrollments set lease_expires_at = now() - interval '1 second' where id=$1`, gone); err != nil {
 		t.Fatalf("lapse the lease: %v", err)
 	}
+	if _, err := m.Store.Pool.Exec(ctx, `update requests set pending_expires_at = now() - interval '1 second' where id=$1`, goneSession.pendingID); err != nil {
+		t.Fatalf("pass the lapsed session's request deadline: %v", err)
+	}
 
-	sweeper := &Sweeper{Enrollments: &enroll.Service{Store: m.Store}, Machine: m, MachineLogins: &machine.Service{Store: m.Store}, Interval: time.Hour}
+	var woken []wakeCall
+	sweeper := &Sweeper{Enrollments: &enroll.Service{Store: m.Store}, Machine: m, MachineLogins: &machine.Service{Store: m.Store}, Interval: time.Hour,
+		Wake: func(_ context.Context, enrollmentID, requestID, state string) {
+			woken = append(woken, wakeCall{enrollmentID, requestID, state})
+		}}
 	sweeper.Tick(ctx)
+	if len(woken) != 0 {
+		t.Fatalf("Tick woke %+v; a request its ended enrollment cancelled wakes no one", woken)
+	}
 
 	var revoked bool
 	var expiredAudits int
@@ -196,5 +210,169 @@ func TestSweeperEndsLapsedEnrollments(t *testing.T) {
 	sweeper.Tick(ctx)
 	if after := snapshot(); after != before {
 		t.Fatalf("a second Tick changed audit/events/live grants/live enrollments from %v to %v", before, after)
+	}
+}
+
+// endedState reads what an enrollment holds: whether it has ended, its pending requests, and its
+// live grants.
+func endedState(t *testing.T, m *Machine, enrollmentID string) (ended bool, pending, liveGrants int) {
+	t.Helper()
+	if err := m.Store.Pool.QueryRow(context.Background(), `select revoked_at is not null,
+		(select count(*) from requests where enrollment_id=$1 and state='pending'),
+		(select count(*) from grants where enrollment_id=$1 and revoked_at is null)
+		from enrollments where id=$1`, enrollmentID).Scan(&ended, &pending, &liveGrants); err != nil {
+		t.Fatalf("read enrollment %s: %v", enrollmentID, err)
+	}
+	return ended, pending, liveGrants
+}
+
+// TestCreateWritesNothingOnAnEnrollmentTheSweepEnded is a request racing the lapse sweep, one step
+// at a time: Create reads the enrollment live, its lease then lapses and a Tick ends it, and only
+// then does Create write. Create refuses as not live (pgx.ErrNoRows), for a request that needs
+// approval and for an automatic grant alike, and the ended enrollment holds no pending request
+// and no live grant.
+func TestCreateWritesNothingOnAnEnrollmentTheSweepEnded(t *testing.T) {
+	for _, name := range []string{"DEEL_API_KEY", "AUTO_TOKEN"} {
+		t.Run(name, func(t *testing.T) {
+			m, enr, key, _ := newFixture(t)
+			ctx := context.Background()
+			sweeper := &Sweeper{Enrollments: &enroll.Service{Store: m.Store}, Machine: m, MachineLogins: &machine.Service{Store: m.Store}, Interval: time.Hour}
+			replay := m.Replay
+			// Create calls Replay after it reads the enrollment and before it writes.
+			m.Replay = func(ctx context.Context, jti string, expires time.Time) (bool, error) {
+				if _, err := m.Store.Pool.Exec(ctx, `update enrollments set lease_expires_at = now() - interval '1 second' where id=$1`, enr); err != nil {
+					return false, err
+				}
+				sweeper.Tick(ctx)
+				return replay(ctx, jti, expires)
+			}
+			req, err := m.Create(ctx, enr, signRequest(t, m, key, "racing the sweep", name), "")
+			if !errors.Is(err, pgx.ErrNoRows) {
+				t.Fatalf("Create after the sweep ended its enrollment = %+v, %v; want pgx.ErrNoRows", req, err)
+			}
+			if ended, pending, liveGrants := endedState(t, m, enr); !ended || pending != 0 || liveGrants != 0 {
+				t.Fatalf("enrollment ended=%v with %d pending requests and %d live grants; want ended with none", ended, pending, liveGrants)
+			}
+		})
+	}
+}
+
+// TestCreateWaitsOutTheSweepItRaces is the same race with the two transactions overlapping, the
+// interleaving the review's probe hit: Create's write transaction begins while the lease is still
+// ahead, the lease lapses, the sweep locks the enrollment and is held part-way through ending it,
+// and Create's write reaches the enrollment while the sweep holds it. Create waits for the sweep
+// and, once the sweep commits, refuses as not live rather than committing a pending request on
+// the enrollment the sweep ended.
+func TestCreateWaitsOutTheSweepItRaces(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx := context.Background()
+	granted, err := m.Create(ctx, enr, signRequest(t, m, key, "a grant the sweep revokes", "AUTO_TOKEN"), "")
+	if err != nil || granted.GrantID == nil {
+		t.Fatalf("Create(AUTO_TOKEN) = %+v, %v, want a grant", granted, err)
+	}
+	// The lock holders and the watcher each get a connection of their own, outside the pool Create
+	// and the sweep draw on.
+	connect := func() *pgx.Conn {
+		t.Helper()
+		conn, err := pgx.ConnectConfig(ctx, m.Store.Pool.Config().ConnConfig)
+		if err != nil {
+			t.Fatalf("connect: %v", err)
+		}
+		t.Cleanup(func() { conn.Close(context.Background()) })
+		return conn
+	}
+	watch := connect()
+	// waitBlockedBy waits until a backend waits on a lock holder holds and returns its pid; what
+	// finishing (done) before it ever waits fails the test.
+	waitBlockedBy := func(holder int32, done <-chan struct{}, what string) int32 {
+		t.Helper()
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+			var waiter int32
+			err := watch.QueryRow(ctx, `select pid from pg_stat_activity where $1 = any(pg_blocking_pids(pid))`, holder).Scan(&waiter)
+			if err == nil {
+				return waiter
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				t.Fatalf("watch the locks: %v", err)
+			}
+			select {
+			case <-done:
+				t.Fatalf("%s finished without waiting on the lock", what)
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+		t.Fatalf("%s never waited on the lock", what)
+		return 0
+	}
+
+	// Create's write transaction begins and waits on the advisory lock createPending takes first.
+	advisory := connect()
+	holdAdvisory, err := advisory.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := lockIdenticalPending(ctx, holdAdvisory, enr, []string{"DEEL_API_KEY"}); err != nil {
+		t.Fatalf("hold the advisory lock: %v", err)
+	}
+	var lease time.Time
+	if err := m.Store.Pool.QueryRow(ctx, `update enrollments set lease_expires_at = now() + interval '1500 milliseconds' where id=$1
+		returning lease_expires_at`, enr).Scan(&lease); err != nil {
+		t.Fatalf("shorten the lease: %v", err)
+	}
+	signed := signRequest(t, m, key, "racing the sweep", "DEEL_API_KEY")
+	createDone := make(chan struct{})
+	var created Request
+	var createErr error
+	go func() {
+		defer close(createDone)
+		created, createErr = m.Create(ctx, enr, signed, "")
+	}()
+	createPID := waitBlockedBy(int32(advisory.PgConn().PID()), createDone, "Create")
+
+	// The lease lapses; the sweep locks the enrollment, marks it ended, and waits on the grant row
+	// held here.
+	for lapsed := false; !lapsed; time.Sleep(10 * time.Millisecond) {
+		if err := watch.QueryRow(ctx, `select $1 <= now()`, lease).Scan(&lapsed); err != nil {
+			t.Fatalf("read the clock: %v", err)
+		}
+	}
+	grantHolder := connect()
+	holdGrant, err := grantHolder.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := holdGrant.Exec(ctx, `select 1 from grants where id=$1 for update`, *granted.GrantID); err != nil {
+		t.Fatalf("hold the grant row: %v", err)
+	}
+	sweepDone := make(chan struct{})
+	var ended []enroll.LapsedEnrollment
+	var sweepErr error
+	go func() {
+		defer close(sweepDone)
+		ended, sweepErr = (&enroll.Service{Store: m.Store}).EndLapsed(ctx)
+	}()
+	sweepPID := waitBlockedBy(int32(grantHolder.PgConn().PID()), sweepDone, "the sweep")
+
+	// Create's write goes on and reaches the enrollment the sweep holds; then the sweep commits.
+	if err := holdAdvisory.Rollback(ctx); err != nil {
+		t.Fatalf("release the advisory lock: %v", err)
+	}
+	if waiter := waitBlockedBy(sweepPID, createDone, "Create's write"); waiter != createPID {
+		t.Fatalf("backend %d waits on the sweep; want Create's, %d", waiter, createPID)
+	}
+	if err := holdGrant.Rollback(ctx); err != nil {
+		t.Fatalf("release the grant row: %v", err)
+	}
+	<-sweepDone
+	<-createDone
+
+	if sweepErr != nil || len(ended) != 1 || ended[0].ID != enr {
+		t.Fatalf("EndLapsed = %+v, %v; want it to end %s", ended, sweepErr, enr)
+	}
+	if !errors.Is(createErr, pgx.ErrNoRows) {
+		t.Fatalf("Create racing the sweep = %+v, %v; want pgx.ErrNoRows", created, createErr)
+	}
+	if gone, pending, liveGrants := endedState(t, m, enr); !gone || pending != 0 || liveGrants != 0 {
+		t.Fatalf("enrollment ended=%v with %d pending requests and %d live grants; want ended with none", gone, pending, liveGrants)
 	}
 }
