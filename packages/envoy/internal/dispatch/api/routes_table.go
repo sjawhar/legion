@@ -1,7 +1,9 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 
@@ -126,8 +128,8 @@ func (s *server) routes() []apiRoute {
 		{http.MethodDelete, "/api/v1/artifacts/{id}/subscribers/{session_id}", authHuman, "Unsubscribe a session from a document.", s.unsubscribeArtifactSession},
 		{http.MethodGet, "/api/v1/artifacts/{id}", authAny, "Read a document's metadata and current version.", s.getArtifact},
 		{http.MethodGet, "/api/v1/artifacts/{id}/reviews", authAny, "List a document's approval reviews.", s.listArtifactReviews},
-		{http.MethodPost, "/api/v1/artifacts/{id}/reviews", authHuman, "Approve or request changes on a document's latest settled version; answers the approval ask open at that version, and retracts one naming an older version.", s.createArtifactReview},
-		{http.MethodPost, "/api/v1/artifacts/{id}/approval-requests", authAny, "Open the approval ask for a document's latest version, with an optional summary; a repeated request returns the ask open at that version and replaces a stale one, which names an older version.", s.requestArtifactApproval},
+		{http.MethodPost, "/api/v1/artifacts/{id}/reviews", authHuman, "Approve or request changes on a document's latest settled version; answers the open approval ask when present, preserving its thread.", s.createArtifactReview},
+		{http.MethodPost, "/api/v1/artifacts/{id}/approval-requests", authAny, "Open an approval ask for a document's latest version, with an optional summary. An open ask follows later versions and waits on its agent until this route hands the same row back to a human.", s.requestArtifactApproval},
 		{http.MethodGet, "/api/v1/artifacts/{id}/blocks", authAny, "A document's blocks with markdown ranges, tokens, and reference counts.", s.getArtifactBlocks},
 		{http.MethodGet, "/api/v1/artifacts/{id}/blocks/{block_id}", authAny, "Where one block stands in a document: its path from the top-level block down (type, id, child index), and for a table block, row or cell the table's id, the row index (0 is the header), the cell's column index, the text of the header cell drawn above it and the row's cells; 404 TARGET_NOT_FOUND for an id the live document does not hold.", s.getArtifactBlockPath},
 		{http.MethodGet, "/api/v1/artifacts/{id}/text", authAny, "A document's canonical markdown and whole-document token.", s.getArtifactText},
@@ -191,6 +193,18 @@ func routeIndexEntries(routes []apiRoute) []routeIndexEntry {
 	return entries
 }
 
+// routeIndexBody is the body GET /api/v1 answers.
+func routeIndexBody(entries []routeIndexEntry) map[string]any {
+	return map[string]any{"routes": entries, "docs": routeIndexDocs}
+}
+
 func (s *server) getRouteIndex(w http.ResponseWriter, _ *http.Request) {
-	WriteJSON(w, http.StatusOK, map[string]any{"routes": s.routeIndex, "docs": routeIndexDocs})
+	WriteJSON(w, http.StatusOK, routeIndexBody(s.routeIndex))
+}
+
+// WriteRouteIndex writes the body GET /api/v1 answers on a server without test hooks, read
+// from the table alone: no database, no listener. `envoy-dispatch routes` prints it, and the
+// docs site's API reference is generated from that output.
+func WriteRouteIndex(w io.Writer) error {
+	return json.NewEncoder(w).Encode(routeIndexBody(routeIndexEntries((&server{}).routes())))
 }

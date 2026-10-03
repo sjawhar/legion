@@ -14066,6 +14066,8 @@ function dispatchToolSchema(spec, z2, opts) {
 }
 var ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch_issue with external creates a native issue.";
 var OWNER_REFERENCE = "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
+var ASK_QUESTION_CONTRACT = "The question carries the problem the reader recognises and why it matters now, what constrains " + "the answer, and the recommendation with its reason. It asks how to solve the problem or which " + "outcome is wanted; never enumerate choices in the question.";
+var ASK_OPTIONS_CONTRACT = "Options carry the genuinely different approaches. Each option has a label, and its description " + "says what that approach costs.";
 function documentOwnerValidation(requireArtifact, alwaysRequireArtifact = false) {
   return {
     check: (value) => {
@@ -14213,18 +14215,31 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_ask",
-    example: { issue: "DSP-1", question: "Ship this?" },
-    description: "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " + "use dispatch_message instead. A to-do a human must complete is a question phrased as that to-do, with the options you want (for example Done / Can't). " + "Anything you are blocked on a human for, including a credential or grant to renew, an approval, or a decision, is an ask, never a message. " + "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} ` + `characters and has at most 8 options. ${OWNER_REFERENCE}`,
+    example: {
+      issue: "DSP-1",
+      question: "The release cannot pass its review gate because the revised plan is unreviewed. " + "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+      options: [
+        {
+          label: "Review the revised plan",
+          description: "Delays release for review but keeps the release gate."
+        },
+        {
+          label: "Release without review",
+          description: "Ships sooner but bypasses the review gate."
+        }
+      ]
+    },
+    description: "Open a durable, answerable decision on an issue or project document. Do not use it for a " + "status update or discussion; use dispatch_message instead. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything you are blocked on a human for, including a credential or grant to renew, an " + "approval, or a decision, is an ask, never a message. " + "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters ` + `and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Project document artifact id, slug, or filename.").optional(),
       ref: z2.string().describe("Optional dispatch:// reference (issue, document, message, or ask); appended to the question and rendered as a link.").optional(),
-      question: z2.string({ max: ASK_QUESTION_MAX }).describe(`Decision question, at most ${ASK_QUESTION_MAX} characters.`),
+      question: z2.string({ max: ASK_QUESTION_MAX }).describe(`${ASK_QUESTION_CONTRACT} At most ${ASK_QUESTION_MAX} characters.`),
       options: z2.array(z2.object({
         label: z2.string().describe("Selectable option label."),
-        description: z2.string().describe("Optional option context.").optional()
-      }), { max: 8 }).describe("Up to 8 choices, each an object { label, description? } (never a bare string).").optional(),
+        description: z2.string().optional().describe("What this option costs.")
+      }), { max: 8 }).optional().describe(`${ASK_OPTIONS_CONTRACT} Up to 8 objects { label, description? }.`),
       multiple: z2.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z2.enum(ASK_URGENCIES).describe("Optional decision urgency.").optional(),
       anchor: z2.object({
@@ -14239,16 +14254,26 @@ var dispatchToolSpecs = [
     name: "dispatch_edit_ask",
     example: {
       ask: "01234567-0000-4000-8000-000000000001",
-      question: "Ship the revised plan?"
+      question: "The release cannot pass its review gate because the revised plan is unreviewed. " + "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
+      options: [
+        {
+          label: "Review the revised plan",
+          description: "Delays release for review but keeps the release gate."
+        },
+        {
+          label: "Release without review",
+          description: "Ships sooner but bypasses the review gate."
+        }
+      ]
     },
-    description: "Edit an open question in place. Use it to correct or refine the same decision; retract the " + "old ask and open a new one when the decision itself changes. Previous text remains in the " + "event log. Only the asking session can edit it; answered or resolved asks cannot be edited. " + "An ask that lives as an `ask` block in a document is written in the document too, changing " + "only the fields you name - pass urgency alone and the question's wording, formatting, links " + "and comment anchors are untouched - so the edit writes a document version and closes a " + "spec's design gate until that version is " + "approved; text the block cannot carry back unchanged is refused, naming the field - an " + 'option label containing ": ", the separator between a label and its description, is one ' + "example.",
+    description: "Edit an open question in place. Use it to correct or refine the same decision; retract the " + "old ask and open a new one when the decision itself changes. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " Previous text remains in the event log. Only the asking session can edit it; answered or " + "resolved asks cannot be edited. An ask that lives as an `ask` block in a document is written " + "in the document too, changing only the fields you name - pass urgency alone and the " + "question's wording, formatting, links and comment anchors are untouched - so the edit " + "writes a document version and closes a spec's design gate until that version is approved; " + "text the block cannot carry back unchanged is refused, naming the field - an option label " + 'containing ": ", the separator between a label and its description, is one example.',
     arguments: (z2) => ({
       ask: z2.string().describe("Ask id (uuid); an 8+ hex prefix unique among this session's own open asks works too."),
-      question: z2.string({ max: ASK_QUESTION_MAX }).describe(`Replacement decision question, at most ${ASK_QUESTION_MAX} characters.`).optional(),
+      question: z2.string({ max: ASK_QUESTION_MAX }).optional().describe(`${ASK_QUESTION_CONTRACT} Replaces the ask's question; at most ${ASK_QUESTION_MAX} characters.`),
       options: z2.array(z2.object({
         label: z2.string().describe("Selectable option label."),
-        description: z2.string().describe("Optional option context.").optional()
-      }), { max: 8 }).describe("Replacement choices, at most 8.").optional(),
+        description: z2.string().optional().describe("What this option costs.")
+      }), { max: 8 }).optional().describe(`${ASK_OPTIONS_CONTRACT} Replaces the ask's options; up to 8 objects { label, description? }.`),
       multiple: z2.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z2.enum(ASK_URGENCIES).describe("Replacement decision urgency.").optional()
     }),
@@ -14396,13 +14421,13 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_request_approval",
-    example: { issue: "DSP-1", summary: "Proposes a live sync in place of the nightly export." },
-    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. A later version makes an approval stale, " + "and writing it retracts an open request for an older version; request again for the new " + "one. A repeat at the version an open request names returns that request unchanged. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
+    example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
+    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. A later version carries the same open " + "request forward and leaves it waiting on you; once the revision is complete and the human " + "has agreed to every point in it, call this again to hand that request back. The request " + "carries nothing new. A call while it already waits on the human hands nothing back: the " + "same summary changes nothing, and a different one is refused, since it would rewrite the " + "card the human is reading. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Project document artifact id, slug, or filename; primary document by default for an issue.").optional(),
-      summary: z2.string({ min: 1 }).describe("The proposals in this version the human hasn't already agreed to, in one to three sentences.")
+      summary: z2.string({ min: 1 }).describe("What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question. Request approval only once the human has agreed to every point in the document.")
     }),
     validation: documentOwnerValidation(true)
   },
@@ -15387,7 +15412,8 @@ class DispatchClient {
     return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
   }
   async requestApproval(artifactID, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
+    const answer = await this.#jsonAnswer("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
+    return { ...answer.payload, recorded: answer.status === 201 };
   }
   async editAsk(id, input) {
     return this.#json("PATCH", ["api", "v1", "asks", id], input);
@@ -15532,6 +15558,9 @@ class DispatchClient {
     }
   }
   async#json(method, path2, body, query) {
+    return (await this.#jsonAnswer(method, path2, body, query)).payload;
+  }
+  async#jsonAnswer(method, path2, body, query) {
     const headers = {
       Accept: "application/json",
       Authorization: `Bearer ${this.token}`
@@ -15545,7 +15574,7 @@ class DispatchClient {
       signal: this.#signal,
       ...body === undefined ? {} : { body: JSON.stringify(body) }
     });
-    return this.#response(method, url2, response);
+    return { status: response.status, payload: await this.#response(method, url2, response) };
   }
   async#form(method, path2, body) {
     const url2 = this.#url(path2);
@@ -16410,12 +16439,14 @@ function approvalLine(artifact) {
   if (approval === undefined || approval.state === "draft")
     return;
   switch (approval.state) {
-    case "awaiting":
-      return `Approval: awaiting (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
+    case "awaiting": {
+      const turn = approval.waiting_on === undefined ? "" : `, waiting on ${approval.waiting_on}`;
+      return `Approval: awaiting${turn} (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
+    }
     case "approved":
       return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
     case "stale":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}) - request approval again`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}) - request approval again once the human has agreed to every point in this version`;
     case "changes_requested":
       return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
   }
@@ -16551,6 +16582,7 @@ function eventHead(event) {
     case "ask.opened":
     case "ask.anchor_refreshed":
     case "ask.edited":
+    case "ask.handed_back":
     case "ask.resolved":
       return textHead(event.payload.question);
     case "ask.answered":
@@ -16777,9 +16809,9 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
     return;
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
   throw new Error([
-    `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would retract this request.`,
+    `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
     ...open.map((line) => `- ${line}`),
-    "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit and request approval again. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason), write their decision into the text with dispatch_doc_edit, and request approval again."
+    "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason) and write their decision into the text with dispatch_doc_edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human."
   ].join(`
 `));
 }
@@ -17298,7 +17330,7 @@ ${followsAsk(askOwner)}`,
         replyToOwnAsk: replyToAsk !== undefined && (comment.advice?.your_open_asks?.some((ask) => ask.id === replyToAsk) ?? false)
       });
       if (replyToAsk !== undefined) {
-        const askState = comment.turn === null ? "" : `; ask now waiting on ${comment.turn}`;
+        const askState = comment.ask_waiting_on === undefined ? "" : `; ask now waiting on ${comment.ask_waiting_on}`;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner2)}`,
@@ -17309,7 +17341,7 @@ ${followsAsk(askOwner)}`,
             ...commentDetails,
             ask: replyToAsk,
             follows: { ask: replyToAsk },
-            ...comment.turn === null ? {} : { ask_waiting_on: comment.turn },
+            ...comment.ask_waiting_on === undefined ? {} : { ask_waiting_on: comment.ask_waiting_on },
             ...comment.advice === undefined ? {} : { advice: comment.advice }
           }
         };
@@ -17413,7 +17445,7 @@ ${followsAsk(askOwner)}`,
       const unchangedOps = edited.unchanged_ops ?? [];
       const unchangedText = unchangedOps.length === 0 ? "" : `; ${unchangedOps.length === 1 ? "operation" : "operations"} ${unchangedOps.join(", ")} changed nothing`;
       const lostOps = edited.lost_ops;
-      const lostText = lostOps === undefined || lostOps !== null && lostOps.length === 0 ? "" : lostOps === null ? "; could not confirm this edit survived, because the live document is being reloaded \u2014 re-read it" : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote \u2014 re-read the document`;
+      const lostText = lostOps === undefined || lostOps !== null && lostOps.length === 0 ? "" : lostOps === null ? "; could not confirm this edit survived, because the live document is being reloaded or holds a tree too deep to read \u2014 re-read it" : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote \u2014 re-read the document`;
       const applied = `${head}${unchangedText}${lostText}`;
       const adviceLines = renderAdvice(input.tool, resolvedTopic(resolved).label, edited.advice, {});
       const tokenTrailer = edited.token === undefined ? [] : [`Document token: ${edited.token}`];
@@ -17473,7 +17505,7 @@ ${trailer.join(`
       });
       if (result.ask === null) {
         return {
-          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version.`,
+          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version, once the human has agreed to every point in it.`,
           details: {
             ...resolved.owner.kind === "project" ? documentResultDetails(resolved.artifact) : { issue: resolved.issue?.key },
             artifact: resolved.artifact.id,
@@ -17482,8 +17514,9 @@ ${trailer.join(`
         };
       }
       const details = await followedAskDetails(client, result.ask, resolved.artifact);
+      const outcome = result.recorded ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).` : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you.`;
       return {
-        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
+        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and an edit after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version }
       };
     }

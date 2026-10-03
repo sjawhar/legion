@@ -412,7 +412,7 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		return intake.Result{}, err
 	}
 	pr := record.PullRequest{Issue: issue.Key, Repo: fact.Repo, Number: fact.Number, Branch: fact.Branch, HeadSHA: fact.HeadSHA,
-		HeadUpdatedAt: fact.UpdatedAt, HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}, State: record.PullRequestOpen}
+		HeadUpdatedAt: fact.UpdatedAt, Failing: []string{}, State: record.PullRequestOpen}
 	recorded, err := e.store.PullRequest(ctx, tx, issue.Key)
 	if err != nil {
 		return intake.Result{}, err
@@ -458,7 +458,7 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
 		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
 	}
-	pr.HeadUpdatedAt, pr.HeadUpdatedAtSource = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt), "webhook"
+	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}

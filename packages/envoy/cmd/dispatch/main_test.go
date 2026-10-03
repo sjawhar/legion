@@ -312,7 +312,7 @@ func TestResolveBootConfigRequiresBothOIDCVariables(t *testing.T) {
 		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
 		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
 	}
-	env := func(overrides map[string]string) func(string) string {
+	env := func(overrides map[string]string) settingValues {
 		values := map[string]string{}
 		for key, value := range base {
 			values[key] = value
@@ -616,8 +616,13 @@ func pumpUntilBlackholed(dst, src net.Conn, blackholed *atomic.Bool, done chan<-
 	}
 }
 
-func envGetter(values map[string]string) func(string) string {
-	return func(key string) string { return values[key] }
+// envGetter is what the settings table reads from an environment holding exactly values: a key
+// present is set, even when its value is empty.
+func envGetter(values map[string]string) settingValues {
+	return readSettings(func(key string) (string, bool) {
+		value, set := values[key]
+		return value, set
+	})
 }
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
@@ -729,7 +734,7 @@ func TestRebuildRefsRefusesWithoutServerURL(t *testing.T) {
 // otherwise apply the very migrations the census was to inspect.
 func TestRunSubcommandRefusesAnUnknownSubcommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := runSubcommand(context.Background(), []string{"cenus"}, func(string) string { return "" }, &stdout, &stderr)
+	code := runSubcommand(context.Background(), []string{"cenus"}, envGetter(nil), &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("exit %d, want 2", code)
 	}
@@ -791,7 +796,7 @@ func TestCensusSubcommandExitsOneWhenAPendingMigrationsCensusCountsRows(t *testi
 	if _, err := database.Pool.Exec(ctx, `
 		alter table asks drop constraint asks_approval_kind_check;
 		delete from schema_migrations where version >= 53;
-		-- The template already applied 0064, which dropped users; a database at 52 still has it.
+		-- The template already applied 0067, which dropped users; a database at 52 still has it.
 		create table users (login text primary key);
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
@@ -831,7 +836,7 @@ func TestWriteRebuildRefsReport(t *testing.T) {
 // devSignInEnvironment is a boot environment the dev sign-in fence accepts, with overrides
 // applied; an override of "" leaves that variable empty, which resolveBootConfig reads as unset.
 // With the flag overridden off it is a production cookie server, so it carries the sign-in.
-func devSignInEnvironment(overrides map[string]string) func(string) string {
+func devSignInEnvironment(overrides map[string]string) settingValues {
 	values := map[string]string{
 		"DATABASE_URL":         "postgres://postgres:x@127.0.0.1:5432/dispatch_e2e?sslmode=disable",
 		"DISPATCH_AGENT_TOKEN": "x",
@@ -1078,8 +1083,7 @@ func TestDevSignInRefusesAnAppJSONKeyWhateverTheBase(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"clientId":"Iv1.file","pem":"app private key"}`), 0o600); err != nil {
 		t.Fatalf("write app.json: %v", err)
 	}
-	t.Setenv("DISPATCH_APP_CLIENT_ID", "")
-	app, source, err := loadAppCredentials(dataDir)
+	app, source, err := loadAppCredentials(envGetter(nil), dataDir)
 	if err != nil || app == nil {
 		t.Fatalf("loadAppCredentials from app.json: %+v, %v", app, err)
 	}
@@ -1093,9 +1097,10 @@ func TestDevSignInRefusesAnAppJSONKeyWhateverTheBase(t *testing.T) {
 		t.Errorf("a key in app.json without the flag: %v, want accepted", err)
 	}
 
-	t.Setenv("DISPATCH_APP_CLIENT_ID", "Iv1.env")
-	t.Setenv("DISPATCH_APP_PEM_B64", base64.StdEncoding.EncodeToString([]byte("throwaway key")))
-	app, source, err = loadAppCredentials(dataDir)
+	app, source, err = loadAppCredentials(envGetter(map[string]string{
+		"DISPATCH_APP_CLIENT_ID": "Iv1.env",
+		"DISPATCH_APP_PEM_B64":   base64.StdEncoding.EncodeToString([]byte("throwaway key")),
+	}), dataDir)
 	if err != nil || app == nil {
 		t.Fatalf("loadAppCredentials from the environment: %+v, %v", app, err)
 	}

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { createIssue, createProject } from "./api";
+import { baseUrl, createIssue, createProject, sessionCookieName } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -39,43 +39,34 @@ test("a transient whoami failure shows a retry banner and keeps the app, not the
   await context.close();
 });
 
-test("signing out returns to the sign-in page", async ({ browser }, testInfo) => {
+test("signing out revokes the session on the server and returns to the sign-in page", async ({
+  browser,
+}, testInfo) => {
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-
   await page.goto("/");
   if (testInfo.project.name === "iphone") {
     await page.getByRole("button", { name: "Open navigation" }).click();
   }
   await expect(page.getByText("Signed in as alice")).toBeVisible();
-
-  // This harness authenticates through test-only header identity rather than the session
-  // cookie /auth/logout clears, so nothing server-side makes a later whoami actually
-  // fail. Simulate the real-world post-logout state deterministically: once the logout
-  // request has been seen, every subsequent whoami call is answered as unauthenticated,
-  // proving the app reaches sign-in from the resetQueries-triggered refetch alone (no
-  // page reload).
-  let loggedOut = false;
-  await page.route("**/auth/whoami", async (route) => {
-    if (loggedOut) {
-      await route.fulfill({
-        body: JSON.stringify({ error: "unauthorized" }),
-        contentType: "application/json",
-        status: 401,
-      });
-      return;
-    }
-    await route.continue();
-  });
-  await page.route("**/auth/logout", async (route) => {
-    loggedOut = true;
-    await route.continue();
-  });
+  const session = (await context.cookies()).find((cookie) => cookie.name === sessionCookieName);
+  if (session === undefined) {
+    throw new Error(`no ${sessionCookieName} cookie after sign-in`);
+  }
+  const whoami = () =>
+    fetch(new URL("/auth/whoami", baseUrl), {
+      headers: { Cookie: `${sessionCookieName}=${session.value}` },
+    });
+  // The copy authenticates on its own before Sign out, so its refusal afterwards is the logout's.
+  expect((await whoami()).status).toBe(200);
 
   await page.getByRole("button", { name: "Sign out" }).click();
-
   await expect(page.getByRole("link", { name: "Sign in with Google" })).toBeVisible();
 
+  // /auth/logout clears the browser's cookie, which alone would make the next whoami 401. The
+  // check that cannot pass for that reason: a copy of the cookie the browser held, replayed after
+  // Sign out, is refused because logout advanced alice's session generation on the server.
+  expect((await whoami()).status).toBe(401);
   await context.close();
 });
 

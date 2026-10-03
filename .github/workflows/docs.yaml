@@ -1,0 +1,114 @@
+name: Docs
+
+# Builds the documentation site (docs/site) on every pull request that could change it, and
+# publishes it to GitHub Pages (https://sjawhar.github.io/legion/) on every push to main. The site's
+# reference pages are generated from packages/ and skills/ at build time, so those paths rebuild it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/site/**"
+      - "packages/**"
+      - "skills/**"
+      - ".github/workflows/docs.yaml"
+  pull_request:
+    paths:
+      - "docs/site/**"
+      - "packages/**"
+      - "skills/**"
+      - ".github/workflows/docs.yaml"
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # The screenshots step boots Dispatch on the e2e harness, which needs a database it may
+    # truncate.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-bun
+      # Astro runs on Node.js (22.12 or newer).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      # docs/site/scripts/build-binaries.sh builds the Go binaries the reference generators run, and
+      # the screenshots step builds the Dispatch server; both modules name the same Go.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/daemon-go/go.mod
+          cache-dependency-path: |
+            packages/daemon-go/go.sum
+            packages/envoy/go.sum
+      - run: bun install --frozen-lockfile
+      - name: Lint the docs site
+        run: bun run lint
+        working-directory: docs/site
+      - name: Typecheck the docs site
+        run: bun run typecheck
+        working-directory: docs/site
+      # The pages' screenshots are made, not committed (docs/site/media/README.md): Dispatch on
+      # the e2e harness, seeded with example data, captured in Chromium.
+      - name: Build the Dispatch dashboard the screenshots show
+        run: bun run build:web
+        working-directory: packages/dispatch
+      - name: Install Playwright Chromium
+        # The runner image's chrome-stable apt source intermittently fails `apt-get update`, which
+        # takes `--with-deps` down with it; Chrome itself is preinstalled, so the source goes.
+        run: |
+          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
+          bunx playwright install --with-deps chromium
+        working-directory: docs/site
+      - name: Take the screenshots
+        run: bun run docs:media
+        env:
+          DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-failed-shots-${{ github.run_attempt }}
+          path: docs/site/media/.work/failed-shots
+          if-no-files-found: ignore
+      # Generates the reference pages, then builds the site; starlight-links-validator fails it on a
+      # broken internal link.
+      - name: Build the docs site
+        run: bun run docs:build
+      - if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs/site/dist
+
+  deploy:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    # One deployment at a time, and a queued one is never cancelled half-way.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v6
+      - id: deployment
+        uses: actions/deploy-pages@v5

@@ -149,6 +149,35 @@ test("a primary artifact sorts first regardless of upload order", async () => {
   }
 });
 
+test("artifacts saved in the same second list newest first by time, not by the timestamp strings", async () => {
+  // As text `…00.12Z` sorts after `…00.123456Z`, the later time.
+  const savedAt = (id: string, createdAt: string): Artifact => ({
+    ...artifact,
+    id: `artifact-${id}`,
+    name: `${id}.png`,
+    slug: `${id}-png`,
+    versions: artifact.versions
+      .slice(0, 1)
+      .map((version) => ({ ...version, created_at: createdAt })),
+  });
+  const { getIssueReferences, listArtifacts, view } = renderTab([
+    savedAt("earlier", "2026-09-09T01:00:00.12Z"),
+    savedAt("later", "2026-09-09T01:00:00.123456Z"),
+  ]);
+
+  try {
+    await screen.findByTestId("artifact-later-png");
+    expect(screen.getAllByRole("listitem").map((row) => row.getAttribute("data-testid"))).toEqual([
+      "artifact-later-png",
+      "artifact-earlier-png",
+    ]);
+  } finally {
+    view.unmount();
+    listArtifacts.mockRestore();
+    getIssueReferences.mockRestore();
+  }
+});
+
 test("the filter input narrows rows by name and kind", async () => {
   const notes: Artifact = {
     ...artifact,

@@ -1128,9 +1128,9 @@ grant_mtime() { stat -c %.9Y "$1" 2>/dev/null || printf 'none\n'; }
 grant_changed() { [ "$(grant_mtime "$1")" != "$2" ]; }
 begin ready-cap-refused-at-the-boundary
 merger_omp=$(omp_descendant "$(claim_pane_pid "$root1" merger)") || fail "$root1's merger pane has no OMP process"
-# Under the Go daemon the pane's exec environment names no LEGION_GRANT_FILE: the plugin sets it in
-# its own process.env after registration (pi-envoy src/legion/go-bootstrap.ts), as
-# <LEGION_STATE_DIR>/secrets/<claim token>-grant, which /proc/<pid>/environ never shows.
+# The pane's LEGION_GRANT_FILE is <LEGION_STATE_DIR>/secrets/<claim token>-grant, the file the
+# daemon names on the pane and the plugin writes a grant into before each bash command (pi-envoy
+# extensions/legion.ts).
 merger_state=$(pane_value "$merger_omp" LEGION_STATE_DIR)
 merger_ws=$(readlink "/proc/$merger_omp/cwd")
 [ -n "$merger_state" ] || fail "$root1's merger pane names no LEGION_STATE_DIR"

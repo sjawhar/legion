@@ -81,12 +81,23 @@ func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 	}
 	tree, err := pmdoc.Read(doc.GetXmlFragment(fragmentName))
 	if err != nil {
-		if errors.Is(err, pmdoc.ErrSchema) {
-			return nil, fmt.Errorf("%w: %v", ErrDocSchema, err)
-		}
-		return nil, err
+		return nil, docSchema(err)
 	}
 	return tree, nil
+}
+
+// lockedTreeOf reads doc's tree from a copy of its state taken under the document's lock, so the
+// tree is the document as it stood at one moment. It opens no transaction on doc, since ygo hands
+// the room's persistence an update for every transaction it commits, even one that only reads.
+func lockedTreeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
+	if doc == nil {
+		return nil, errDocUnloaded
+	}
+	copied := crdt.New()
+	if err := crdt.ApplyUpdateV1(copied, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
+		return nil, fmt.Errorf("copy live document: %w", err)
+	}
+	return treeOf(copied)
 }
 
 func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmdoc.Node, error) {
@@ -95,32 +106,54 @@ func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmd
 	}
 	tree, err := pmdoc.ReadInTransaction(txn, fragment)
 	if err != nil {
-		if errors.Is(err, pmdoc.ErrSchema) {
-			return nil, fmt.Errorf("%w: %v", ErrDocSchema, err)
-		}
-		return nil, err
+		return nil, docSchema(err)
 	}
 	return tree, nil
+}
+
+// rewriteLive rewrites doc's tree in one transaction tagged with origin. edit is handed the tree as
+// it stands, read inside that transaction, which holds the document's lock, and reports whether it
+// changed the tree; only a changed tree is written. A repair computed on a tree read before the
+// transaction and written back would revert whatever another writer wrote after that read
+// (LEGION-479). It returns the tree as the transaction left it and whether edit changed it.
+func rewriteLive(doc *crdt.Doc, origin any, edit func(live *pmdoc.Node) bool) (*pmdoc.Node, bool, error) {
+	fragment := doc.GetXmlFragment(fragmentName)
+	var live *pmdoc.Node
+	changed := false
+	err := doc.TransactE(func(transaction *crdt.Transaction) error {
+		var readErr error
+		if live, readErr = treeOfTransaction(transaction, fragment); readErr != nil {
+			return readErr
+		}
+		if changed = edit(live); !changed {
+			return nil
+		}
+		return pmdoc.Update(transaction, fragment, live)
+	}, origin)
+	if err != nil {
+		return nil, false, err
+	}
+	return live, changed, nil
 }
 
 func renderTree(tree *pmdoc.Node) (string, error) {
 	markdown, err := pmdoc.Render(tree)
 	if err != nil {
-		if errors.Is(err, pmdoc.ErrSchema) {
-			return "", fmt.Errorf("%w: %v", ErrDocSchema, err)
-		}
-		return "", err
+		return "", docSchema(err)
 	}
 	return markdown, nil
 }
 
-// renderDocument is what doc renders now, or the error that stopped it being read or rendered.
-func renderDocument(doc *crdt.Doc) (string, error) {
-	tree, err := treeOf(doc)
-	if err != nil {
-		return "", err
+// docSchema is err with pmdoc's refusal of what a live document holds (pmdoc.ErrSchema) told as
+// that document outside the schema (ErrDocSchema), which the API serves as DOC_SCHEMA: neither the
+// caller's input nor an internal fault. Every read and walk of a live tree through pmdoc tells its
+// refusal this way, including a walk inside a write's transaction, which a peer can have deepened
+// past the schema's depth bound since the write read the tree.
+func docSchema(err error) error {
+	if errors.Is(err, pmdoc.ErrSchema) {
+		return fmt.Errorf("%w: %v", ErrDocSchema, err)
 	}
-	return renderTree(tree)
+	return err
 }
 
 // closureChangedMarkdown reports whether a document closure that produced after changed the

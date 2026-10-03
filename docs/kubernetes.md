@@ -65,15 +65,15 @@ The daemon refuses to serve unless its OMP exposes `pi.agents` and actually load
 `session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — so a build whose OMP or
 plugin is broken fails instead of publishing. Its final step runs the Go `legion version`, requiring the
 commit the workflow built, then the Go `legion probe-image`: the same three probes, run by the Go
-daemon's own code (`packages/daemon-go/internal/daemon/bootgate.go`), with the plugin held to the Go
-daemon API contract (`legion.goDaemonApiVersion`) and every task agent and skill Legion's prompts
+daemon's own code (`packages/daemon-go/internal/daemon/bootgate.go`), with the plugin held to the
+daemon API contract (`legion.daemonApiVersion`) and every task agent and skill Legion's prompts
 name (`task(agent="…")`, `skill://…`) resolved by name through the same launch (the plugin ships
 `oracle`, `deep-worker`, `thermonuclear-deep-review` and `thermonuclear-code-quality`, and the
 planner's `plan-gap-analyst` and `plan-reviewer`, in `agents/`, and the pair's rubrics and
 `ce-simplify-code` with Legion's other skills in `dist/skills`). The build has none of
 the operator's model configuration, so it leaves those agents' models unresolved
 (`--skip-agent-models`), printing
-`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped go-daemon-api-version=<N>`. The Go daemon's Agent Sandbox runtime runs the Go command in a probe
+`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped daemon-api-version=<N>`. The Go daemon's Agent Sandbox runtime runs the Go command in a probe
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
 boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
 tool resolves a subagent's (`packages/daemon-go/internal/runtime/sandbox/probe.go`). To run them yourself:
@@ -375,10 +375,11 @@ Legion holds no model route. `pod` is the operator's: `env`, `volumes` (each a `
 `config_map` or `projected` source), `volume_mounts` and `service_account`, added to every pod, the
 image probe's included, and refused where they name a path or variable of Legion's own or the
 worker image's. `provider_keys` names keys of the providers Secret, which every pod mounts, those
-keys alone, for the shim to export. `deploy/kubernetes/operator-route/` is one operator's: the
+keys alone, for the shim to export. `deploy/kubernetes/operator-route/` is an example of one: the
 Hawk model gateway, keyed by a projected ServiceAccount token, with a `models.yml`, a settings
-overlay, and the pod that mounts them; the Stage 4a and 4b proofs run on it, each with its own copy
-of its ConfigMap.
+overlay, and the pod that mounts them; the operator keeps their own copies of the two files in a
+directory of their own ([Operator configuration](#operator-configuration)), and the Stage 4a and 4b
+proofs run on the example, each with its own copy of its ConfigMap.
 
 Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
@@ -719,7 +720,7 @@ worker image's; and the top-level `provider_keys` maps each variable Oh My Pi re
 providers Secret, of which every pod then mounts those keys alone, for the shim to export.
 Legion holds no model route: everything a pod's Oh My Pi needs to reach a model — a `models.yml`,
 a settings overlay in `PI_CONFIG_FILES`, a token — is the operator's, through `pod` and
-`provider_keys`. `deploy/kubernetes/operator-route/` is one such operator's (the Go live
+`provider_keys`. `deploy/kubernetes/operator-route/` is an example of one (the Go live
 harnesses': the Hawk model gateway, keyed by a projected ServiceAccount token). [Operator
 configuration](#operator-configuration) is what an operator gives it.
 
@@ -827,18 +828,23 @@ claim's pod and the image probe's.
   collides with Legion's own is refused at load, naming both: a variable the runtime, the worker
   image's `ENV` or every launch sets, a volume name Legion uses, or a mount at, under or above a path
   Legion mounts, the image owns, or a tool runs from. `legion start --check-config` runs the same
-  check. [`deploy/kubernetes/operator-route/`](../deploy/kubernetes/operator-route/README.md) is a
-  complete one, the one the Go live harnesses run on: a `models.yml` and a settings overlay from a
+  check. [`deploy/kubernetes/operator-route/`](../deploy/kubernetes/operator-route/README.md) is an
+  example of one, the one the Go live harnesses run on: a `models.yml` and a settings overlay from a
   ConfigMap, and a mounted token its key command reads. Its README lists what an operator supplies
-  and how `pod` and `provider_keys` compose; its `apply.sh` creates the ConfigMap. Both files are
-  mounted by `subPath`, which the kubelet never refreshes, so a changed ConfigMap reaches only pods
-  created after the change.
+  and how `pod` and `provider_keys` compose.
+- **Each role's model** is the operator's: the `models.yml` and `overlay.yml` they keep in a
+  directory of their own (for example `~/.local/state/legion-model-config`), which
+  `deploy/kubernetes/operator-route/apply.sh --context <kube context> <directory>` writes into the
+  ConfigMap `legion-operator-route` in namespace `legion`, its only writer. To change a role's
+  model, edit its line under `modelRoles` in that `overlay.yml` and run the same command again.
+  Pods started after that use it; a running pod keeps the files it started with until it restarts,
+  since both are mounted by `subPath`, which the kubelet never refreshes.
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
   (AGENTC-393 Plan C), so an agent in a pod runs `agent-secrets <SECRET> -- <command>` and gets only
   that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback
-  address); `operator` is the login that approves this daemon's own machine logins on the Dispatch
-  credential page — there is no launcher-token file and no manual CLI step. The daemon runs its own
-  login at boot, on a background context, and logs the confirmation code exactly once:
+  address); `operator` is the email of the person who approves this daemon's own machine logins on
+  the Dispatch credential page — there is no launcher-token file and no manual CLI step. The daemon
+  runs its own login at boot, on a background context, and logs the confirmation code exactly once:
   `agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page (approver:
   <operator>); pod enrollment is held until approved`. The same code and the login's current status
   ("none", "pending", "issued", "denied", or "expired") are on `GET /legion/v1/state`'s
@@ -1230,12 +1236,15 @@ keeping nothing until the daemon has answered, the command:
    running `legion` executable), a missing or blank instructions file, and an Oh My Pi invocation that
    does not resolve;
 2. probes that Oh My Pi as the controller will run it, with `omp models`, which starts no session, and
-   refuses a pi-legion-envoy it does not load, or one speaking another Go daemon API contract;
-3. asks `POST /legion/v1/controller/secret` with the operator token as `Authorization: Bearer`. The
-   daemon compares it in constant time and mints a fresh controller capability, which replaces the
-   previous one and its registration and ends every controller grant: the last start wins. The
-   answer also carries the daemon's `gates.design`, and an answer without `root-issues` or `off`
-   is refused with a request to upgrade the daemon;
+   refuses a pi-legion-envoy it does not load, or one speaking another daemon API contract;
+3. asks `POST /legion/v1/controller/secret` with the operator token as `Authorization: Bearer` and
+   the contract step 2 held the plugin to (`{"pluginContract": <N>}`). The daemon compares the token
+   in constant time, then refuses a contract that is not its own with 409, naming both, before it
+   mints anything, so a `legion` and a daemon from different releases never cut the running
+   controller off. Otherwise it mints a fresh controller capability, which replaces the previous
+   one and its registration and ends every controller grant: the last start wins. The answer also
+   carries the daemon's `gates.design`, and an answer without `root-issues` or `off` is refused
+   with a request to upgrade the daemon;
 4. writes the secret 0600 under the local state directory (`state_dir`, by default
    `$XDG_STATE_HOME/legion/<project>-controller`), beside the `gh` shim, the `legion` launcher and the
    deployment instructions;
@@ -1243,7 +1252,7 @@ keeping nothing until the daemon has answered, the command:
    `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line
    and the deployment instructions, a start message as Oh My Pi's first prompt so the controller's first turn runs its start
    procedure with nothing typed, no `--resume`, no `--mode rpc`) with the controller's environment
-   (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_API=go`, `LEGION_DAEMON_URL`,
+   (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`,
    `LEGION_PROJECT`, `LEGION_STATE_DIR`, its grant and secret files, the Envoy and Dispatch
    endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top
    of the operator's own environment, less `NATS_DAEMON_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED_FILE`

@@ -384,8 +384,8 @@ export function replyWith(envelope: DeliveryEnvelope): ReplyHint | undefined {
 }
 
 // Dispatch event payloads follow the wire contract: issue.* carries the Issue,
-// ask.opened/anchor_refreshed/answered/resolved the Ask, ask.edited the edited Ask plus its prior
-// fields and editor, message.created the Message, comment.*/suggestion.* the Comment plus
+// ask.opened/anchor_refreshed/handed_back/answered/resolved the Ask, ask.edited the edited Ask plus
+// its prior fields and editor, message.created the Message, comment.*/suggestion.* the Comment plus
 // artifact_name, artifact.created {artifact}, artifact.version {artifact_id, name, version, diff?},
 // and child.status {child_key, from, to}.
 // Bus frames are untrusted, so each schema below declares exactly the fields
@@ -403,6 +403,7 @@ const DISPATCH_PAYLOAD_SCHEMAS: Readonly<Record<string, z.ZodType>> = {
   "ask.opened": AskPayloadSchema,
   "ask.anchor_refreshed": AskPayloadSchema,
   "ask.edited": AskEditedPayloadSchema,
+  "ask.handed_back": AskPayloadSchema,
   "ask.answered": AskPayloadSchema,
   "ask.resolved": AskPayloadSchema,
   "comment.created": CommentPayloadSchema,

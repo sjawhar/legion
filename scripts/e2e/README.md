@@ -176,7 +176,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 
 | check | what it does and requires |
 | :--- | :--- |
-| `gate-refuses-another-contract` | edits the installed (unpacked) manifest to declare the next `goDaemonApiVersion`; `legion start` refuses naming both numbers; the manifest is put back byte for byte |
+| `gate-refuses-another-contract` | edits the installed (unpacked) manifest to declare the next `daemonApiVersion`; `legion start` refuses naming both numbers; the manifest is put back byte for byte |
 | `gate-refuses-a-disabled-plugin` | `omp plugin disable`; `legion start` refuses with "installed but not loaded by omp"; `omp plugin enable` |
 | `gate-refuses-a-missing-skill` | the installed plugin's `dist/skills/thermonuclear-deep-review` moved aside; `legion start` refuses with "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md, roles/core/reviewer.md)", the agent definition and the reviewer's role prompt that load it; the rubric put back |
 | `gate-refuses-a-skill-only-the-role-prompts-load` | the installed plugin's `dist/skills/legion-controller` moved aside, a skill only `roles/controller-root.md` loads; `legion start` refuses with "finds no skill legion-controller (loaded by roles/controller-root.md)", which only a gate reading the daemon's roles directory can say; the skill put back |
@@ -456,8 +456,8 @@ Every pod carries the operator route's pod,
 own loader (`config.ReadPodFile`): ServiceAccount `legion-worker`, one projected token for
 the model gateway's audience, and a ConfigMap holding the route's `models.yml` (anthropic through
 the operator's model gateway, `LEGION_E2E_MODEL_GATEWAY_URL`, keyed by that token) and
-`overlay.yml` (every role Legion's prompts reach, `enabledModels` holding each session to the
-gateway's aliases, and each provider a pod could reach without the gateway disabled). Legion holds
+`overlay.yml` (every role Legion's prompts reach, `enabledModels` holding each session to
+anthropic, and each provider a pod could reach without the gateway disabled). Legion holds
 none of it. Before the harness runs, the script creates the run's own copy of that ConfigMap as the
 operator, `legion-operator-route-<project>`, labelled with the run's project, its `models.yml` with
 `LEGION_E2E_MODEL_GATEWAY_URL` put in place of the route's `${MODEL_BASE_URL}`
@@ -481,7 +481,7 @@ with the providers Secret mounted, as a deployment with `provider_keys` does.
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
 | `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker (AGENTC-393) the run enrolls pods with — the **production** broker (Plan D), never a development slot (below) |
-| `LEGION_E2E_AGENT_SECRETS_OPERATOR` | unset | the login this run's machine login is approved by — the harness starts a `legion-daemon` machine login and prints `STAGE4A: approve machine login code XXXX-XXXX on the Dispatch credential page as <operator>`, the stage is devbox-attended so the operator enters the code and clicks Approve, signed in to Dispatch as that login, during the run (polled up to 10 minutes; a timeout, denial, or expiry blocks the `secrets-*` checks with that reason, never fails the stage); distinct from the daemon's own production credential |
+| `LEGION_E2E_AGENT_SECRETS_OPERATOR` | unset | the email of the person this run's machine login is approved by — the harness starts a `legion-daemon` machine login and prints `STAGE4A: approve machine login code XXXX-XXXX on the Dispatch credential page as <operator>`, the stage is devbox-attended so the operator enters the code and clicks Approve, signed in to Dispatch as that person, during the run (polled up to 10 minutes; a timeout, denial, or expiry blocks the `secrets-*` checks with that reason, never fails the stage); distinct from the daemon's own production credential |
 | `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256` | unset | the `sha256sum` of the dummy value Sami seeded into the production broker's secret store for rule `LEGION_E2E_AUTO` (pod, automatic, inject) — the harness never sees the value itself, only its hash |
 | `LEGION_E2E_AGENT_SECRETS_BIN` | `$work/agent-secrets` (built by the script; not read from the environment) | the checkout's `agent-secrets` CLI (`packages/envoy/cmd/agent-secrets`), run directly from the devbox for the `secrets-old-uid-and-revocation` check's before/after-revocation reads |
 
@@ -526,7 +526,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `identity` | refuses to start unless the runtime context is set and authenticates as someone other than the operator; a SelfSubjectReview shows the assumed `…legion-daemon` role in group `legion-daemon`; `list secrets -n legion` is 403; a SelfSubjectRulesReview (`can-i --list`) in every namespace finds no grant beyond the plan's; access reviews, which reach EKS's webhook authorizer that a rules review cannot enumerate, deny every kind of impersonation, `serviceaccounts/token`, pod create and exec, secret list and create, PVC get, nodes, RBAC create/update/patch/escalate/bind, and Sandboxes outside `legion`, beside two positive controls |
 | `installed` | `CheckInstalled` with production's `InstallRef` passes under the `resourceNames` grants |
 | `boot-refusal-negative` | `CheckInstalled` naming `legion-no-such-controller` refuses, naming that Deployment and the 403 the `resourceNames` grant answers, without blaming the CRD |
-| `image-probe` | `ProbeImage` on the image under test, with the daemon's own probe command (`--role-references` with the checkout's role prompts' references, and `--provider-env-dir`, the run having a provider key), its probe pod carrying the operator's pod, passes; its log confirms `go-daemon-api-version` equal to the daemon's contract and `agent-models=resolved` (every task agent the prompts dispatch resolved its model under the operator's pod), and the probe Sandbox is deleted |
+| `image-probe` | `ProbeImage` on the image under test, with the daemon's own probe command (`--role-references` with the checkout's role prompts' references, and `--provider-env-dir`, the run having a provider key), its probe pod carrying the operator's pod, passes; its log confirms `daemon-api-version` equal to the daemon's contract and `agent-models=resolved` (every task agent the prompts dispatch resolved its model under the operator's pod), and the probe Sandbox is deleted |
 | `image-probe-negative` | with `modelRoles.oracle` removed from the run's ConfigMap, `ProbeImage` on the same image is refused naming `task agent oracle` and `role oracle is not configured`; the ConfigMap is restored before the check ends, so every later check boots on it |
 | `root-ready` | Spawn of the root: its Sandbox Ready, the returned incarnation the pod's uid, the init log (`pods/log`) carrying `workspace-init: /legion/workspaces/sjawhar/legion-smoke/s4a-1 on legion/S4A-1`, and a hello registered at generation 1 with that generation's token |
 | `gvisor` | `uname -r` in the root pod is gVisor's emulated kernel (`…-gvisor`), not the node's, and the pod's `runtimeClassName` is `gvisor` |
@@ -642,19 +642,23 @@ the smoke file goes) to the human. `admitted-issue-cap` prints `SKIPPED`, and `s
 to 12 hours for a human to answer the architect's decision block and approve the spec in Dispatch.
 It then fails unless the architect's approval request at the approved version carries a summary
 after `Approve spec.md (version N)?`, a human answered at least one of the spec's decision blocks,
-and no approval request on the spec, retracted ones included, was early by either of two rules
+and no approval request on the spec was early by either of two rules
 ([`lib/design-gate-verdict.jq`](lib/design-gate-verdict.jq), tested by `bun test scripts/e2e/lib`).
-The version rule judges every request: the version it named must hold none of the spec's blocks
-open, read from the version itself by the block ids of the spec's block asks, because Dispatch
-indexes a block as an ask only when it settles the document, after the edit that wrote it. The
-answer-time rule judges a request no human answered: it must not come before a human answered one
-of the spec's blocks, which catches a request made while the choice was still prose or sent in
+The version rule judges every hand-back: the version its event records in `requested_version` must
+hold none of the spec's blocks open, read from the version itself by the block ids of the spec's
+block asks, because Dispatch indexes a block as an ask only when it settles the document, after
+the edit that wrote it. An approval row follows versions in place, so `ask.opened` records its
+first hand-back and each `ask.handed_back` a later one; an `ask.edited` only rewords the request.
+The answer-time rule judges a hand-back no human answered: it must not come before a human answered
+one of the spec's blocks, which catches a request made while the choice was still prose or sent in
 parallel with the edit that wrote the block. A request the human answered is left to the version
 rule, so the flow `legion-architect` prescribes after Request changes (the revision raises a block,
-the human answers it, the architect requests again) passes; the trade-off is that a premature
-request the human answered with Request changes no longer fails the run, since the human caught it.
-It keeps the issue's asks as `<issue>-asks.json`, each requested version as
-`<issue>-spec-v<N>.json`, and the verdict as `<issue>-gate-verdict.json`.
+the human answers it, and the architect requests approval again, which opens a new request since
+Request changes answered the old one) passes; the trade-off is that a
+premature request the human answered with Request changes no longer fails the run, since the human
+caught it. It keeps the issue's asks as `<issue>-asks.json`, approval events as
+`<issue>-events.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as
+`<issue>-gate-verdict.json`.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.
@@ -758,7 +762,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `completion-closed` | each phase worker of tree 1 — planner, implementer, tester, reviewer — is suspended once its phase ends, and its saved session answers every `handoff_complete` call of the legion tool, holds one success for each assignment it completed, and records the phase stall `closed` after that call, with no phase-stall follow-up after its last success: the 4b.13b acceptance's stall check (`stage3-4b13b-acceptance.sh`'s `pane-rule-phase-worker-and-stall`), which a suspension that stops the worker inside the call fails (LEGION-283). The sessions and each verdict are kept as `completion-<role>.jsonl` and `completion-<role>-verdict.json`. Its control: the planner's session cut at its `handoff_complete` call, the transcript such a suspension leaves, is refused |
 | `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name, and one run of each completed. A run completes by the task-result block the reviewer received, whether by async delivery or a hub wait or jobs snapshot, saying `completed`. With no block, the subagent's own session beside the reviewer's must end in an accepted yield. Every turn of that session runs on the fixture overlay's `review` target: the task executor runs a subagent on its parent's model, silently, when the subagent's own does not resolve. A refusal (`Unknown agent`, `No model selected`) in a task result or in a run that did not complete fails with its text. tree-moved keeps the reviewer's session and the subagents' sessions as the pair settles, reading the tree volume, not the daemon |
 | `first-turns` | every role on tree 1 completed a first turn in its pod |
-| `token-rotation` | a pod's projected operator token (`/var/run/operator/token`, 3600 s, renewed by the kubelet at 80 %) is renewed: the token in the file was issued (its `iat`) after the pod started, in the same pod by uid. An exec that does not answer is never a token. A model turn after the renewal still runs on the gateway's aliases |
+| `token-rotation` | a pod's projected operator token (`/var/run/operator/token`, 3600 s, renewed by the kubelet at 80 %) is renewed: the token in the file was issued (its `iat`) after the pod started, in the same pod by uid. An exec that does not answer is never a token. A model turn after the renewal still runs on a model the operator fixture's `overlay.yml` gives a role |
 | `idle-suspend` | a finished worker's Sandbox is Suspended with its pod gone and the tree volume bound |
 | `kill-pod-resume` | once the merger's pod is running, a killed merger pod is relaunched on its session |
 | `fence` | a pod the controller recreates on its own is never adopted. Once the relaunch's boot token is in the Secret, the replaced generation's token is refused, and the daemon logs `worker-stream: rejected hello (stale worker generation)` |

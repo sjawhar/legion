@@ -125,7 +125,6 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		Store:            database,
 		Identity:         headerIdentity(database),
 		AgentToken:       "agent-token",
-		RepoProjectsRaw:  "owner/repo=TEST",
 		DefaultProject:   options.defaultProject,
 		ServerURL:        "https://dispatch.example",
 		Docs:             documentService,
@@ -1727,7 +1726,7 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: cookieIdentity, AgentToken: "agent-token",
-		RepoProjectsRaw: "owner/repo=TEST", Docs: documentService, Events: broker,
+		Docs: documentService, Events: broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -1738,7 +1737,7 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("establish alice's session: %v", err)
 	}
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice@d.example", generation, "signing-key"))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice@d.example", generation, "signing-key", true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}
@@ -2005,13 +2004,12 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 	})
 	seedPeople(t, database, "alice", "bob")
 	deps, err := NewDeps(DepsInput{
-		Store:           database,
-		Identity:        headerIdentity(database),
-		AgentToken:      "agent-token",
-		RepoProjectsRaw: "owner/repo=TEST",
-		ServerURL:       "https://dispatch.example",
-		Docs:            documentService,
-		Events:          broker,
+		Store:      database,
+		Identity:   headerIdentity(database),
+		AgentToken: "agent-token",
+		ServerURL:  "https://dispatch.example",
+		Docs:       documentService,
+		Events:     broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

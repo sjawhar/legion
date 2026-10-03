@@ -7,22 +7,20 @@ state in Postgres.
 
 ## Required configuration
 
+Every Dispatch setting the server and its subcommands read is a row of one table,
+`cmd/dispatch/settings.go`: `main` reads each row once, every reader takes its value from that
+read, and a test fails on any other environment read in `cmd/dispatch` or `internal/dispatch`.
+`envoy-dispatch settings` prints the table (name, `_FILE` form, default, whether it is required,
+and a one-line description) without a database or a listener, and the docs site's Dispatch
+configuration reference is generated from it: those are where every setting is listed. The rows
+below add only what a setting's one line cannot say.
+
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | Postgres connection string. Dispatch applies embedded migrations before serving. The pool size is fixed in code (`store.sharedPoolSize`), so a connection string carrying `pool_max_conns` is refused at startup; remove the parameter. |
-| `DISPATCH_SERVER_URL` | Public browser origin. When set, overrides `dispatch.serverUrl` from merged `envoy.json`. |
-| `NATS_URLS` | Comma-separated NATS URLs. When set, overrides `natsUrls` from merged `envoy.json`. |
 | `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. |
-| `DISPATCH_AGENT_TOKEN` | Shared bearer fallback for devbox agents. Personal tokens minted in Settings are the normal agent credential. |
-| `DISPATCH_SIGNIN_ISSUER` | OpenID Connect issuer of the shared sign-in pool. Cookie identity requires all four `DISPATCH_SIGNIN_*` settings; setting some of them refuses the boot, naming the missing ones. The authorization and token endpoints come from the issuer's discovery document, read at boot. |
-| `DISPATCH_SIGNIN_CLIENT_ID` | The pool's app client for Dispatch, which lists `<DISPATCH_SERVER_URL>/auth/callback` as a callback URL. |
-| `DISPATCH_SIGNIN_CLIENT_SECRET` | That app client's secret. |
-| `DISPATCH_SIGNIN_GROUP` | The pool group (`cognito:groups`) a person must be in to sign in, and to stay signed in: membership is confirmed at least hourly. |
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount `POST /api/v1/events/_test/disconnect`, which closes every open SSE connection, and `POST /api/v1/artifacts/_test/quiesce`, which closes every live document and waits for the settlements in flight. Test/e2e only — leave unset in every real deployment. |
 | `DISPATCH_DEV_SIGNIN` | Set to `1` to mount `GET /auth/_dev/signin?login=<email>&next=<path>`, which signs any person in by the email it names, with no sign-in pool, so a browser or test harness can be signed in to a local instance. Boot refuses it unless identity is `cookie`, no `DISPATCH_SIGNIN_*` setting is set, the listen address is a loopback IP literal, the dashboard origin (`DISPATCH_SERVER_URL` or `dispatch.serverUrl`) names `127.0.0.1`, `[::1]` or `localhost`, every `DATABASE_URL` host is loopback or a unix socket, `DISPATCH_SIGNING_KEY` is unset, `ENVOY_ALLOW_REMOTE_NATS=1` is not set while NATS is on, `DISPATCH_AGENT_SECRETS_URL`, when set, names a loopback host, `ENVOY_URL` names a loopback host, and a loaded GitHub App private key comes from `DISPATCH_APP_PEM_B64` with `DISPATCH_GITHUB_API_BASE` naming a loopback host, never from the `pem` in `app.json`, where a developer keeps the real App's key: a signed-in session can have the App probe and import any repository it is installed on, and read GitHub through the App's proxy. That key must be a throwaway, as `packages/dispatch/e2e/run-server.sh` generates one, since every App call hands a signed App JWT to whatever listens at that base. While it is on every request must carry the dashboard origin as its `Host` (else `421 HOST_MISMATCH`). The session cookie is signed with a key generated for that process alone, so it is worthless on any other server; what a signed-in session writes to the database is not. It can mint a `dsp_` personal agent token, and its sign-out advances the person's session generation, and every server on the same database honours those rows. Give a dev-sign-in server a database no other server uses: the loopback check makes that likely, not certain, since a loopback address can be a tunnel to another machine's database or a database a second local server also runs on. Any value other than `1` or unset is refused. |
-| `ENVOY_URL` | Base URL of the Envoy listener (`GET /v1/sessions`) behind `GET /api/v1/agents`; defaults to `http://127.0.0.1:9020`. Must name a loopback host with `DISPATCH_DEV_SIGNIN=1`. |
-| `DISPATCH_OIDC_ISSUER` | OIDC issuer whose projected service-account tokens authenticate as agents. Set with `DISPATCH_OIDC_AUDIENCE` or not at all. |
-| `DISPATCH_OIDC_AUDIENCE` | Audience those tokens must carry (`dispatch`). Set with `DISPATCH_OIDC_ISSUER` or not at all. |
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries. Existing dashboard mappings take
@@ -30,10 +28,6 @@ precedence over this seed. Dispatch resolves every external issue through the
 stored mapping, then falls back to `DISPATCH_DEFAULT_PROJECT` when configured.
 An unmapped external repository without a default project is rejected. An issue
 created through the default also gets a `repo:owner/name` label.
-
-`DISPATCH_SERVER_URL`, when set, overrides `dispatch.serverUrl` in merged
-`envoy.json`. It must be an absolute `http` or `https` URL with no path.
-`NATS_URLS`, when set, overrides `natsUrls` with its comma-separated values.
 
 `DISPATCH_SERVER_URL` IS the sign-in callback origin. It must equal the URL
 humans type into their browser, and the sign-in pool's app client must list
@@ -58,15 +52,15 @@ body, and every actor it writes carries `service`, the token's verified subject
 the body. A JWT the verifier rejects is `401 OIDC_TOKEN_INVALID` naming the
 reason class; it is never retried as a personal token.
 
-GitHub App credentials come either from these environment variables or from
-`~/.local/share/dispatch/app.json`; environment variables take precedence:
+GitHub App credentials come either from the `DISPATCH_APP_*` variables or from
+`~/.local/share/dispatch/app.json`; the variables take precedence. Two of them
+carry rules beyond their row:
 
 | Variable | Purpose |
 | --- | --- |
-| `DISPATCH_APP_CLIENT_ID` | GitHub App client ID, which the App's JWT names. |
+
 | `DISPATCH_APP_PEM_B64` | Base64-encoded GitHub App private key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
 | `DISPATCH_GITHUB_API_BASE` | GitHub API origin override for App calls (tests and e2e point it at a fake); empty means `https://api.github.com`. With `DISPATCH_DEV_SIGNIN=1` and an App private key loaded, it must name `127.0.0.1`, `[::1]` or `localhost`. That checks the host, not what listens there: every App call hands a signed App JWT to whatever owns the port, so the key must be a throwaway. |
-| `DISPATCH_SIGNING_KEY` | Stable HMAC key for cookie sessions. Must be unset with `DISPATCH_DEV_SIGNIN=1`. |
 
 When no GitHub App credentials are configured, the server still starts, but
 the GitHub proxy answers `503 GITHUB_TOKEN_UNAVAILABLE`, and saving a project's
@@ -272,6 +266,28 @@ records the settlement it owes, which the settlement deletes when it commits. A 
 server's minute-by-minute resumption arm the settlement a row names, so one a shutdown cuts short
 still runs. It creates a table and touches no row; its census answers `0`.
 
+Migrations `0064`–`0066` let an approval request follow its document's versions. `0064` backfills
+`requested_version` into every approval ask from its `version`, rebuilds `asks_approval_kind_check`
+to require it, and adds the nullable `asks.handed_back_reply_id` and an insert trigger that gives
+an older binary's approval row the same value; it locks `asks` alone. `0065` sets
+`comments.created_at`'s default to `clock_timestamp()`, so a comment is stamped when its insert
+runs, after the owner row every comment insert takes, and an ask's newest reply is the one that
+committed last; it locks `comments` alone. `0066` adds `handed_back_reply_id`'s foreign key to
+`comments`, which takes `SHARE ROW EXCLUSIVE` on both tables, as adding any foreign key does: a
+write waits behind it, a read does not. In one migration, the column's key held `asks`
+`ACCESS EXCLUSIVE` while it waited for `comments`, and a comment write that went on to read `asks`
+deadlocked with it. A comment write that goes on to write `asks` (accepting a suggestion, or an
+edit under a comment's anchor, whose version moves the approval request) can still close a cycle
+with `0066` while it waits for `comments`, and under the five-second bound either side could lose
+it: Postgres checks a waiter once, `deadlock_timeout` (1 s by default) after it starts to wait, so
+a write that closes the cycle within that second fails `0066` and one that closes it later is
+itself the victim, answered `500`. `0066` therefore sets its own `lock_timeout` of 500 ms, shorter
+than `deadlock_timeout`: it gives up first (`55P03`, nothing applied), the write finishes, and the
+next boot applies it; the cost is that a comment write holding `comments` past half a second fails
+that boot too, and so does an autovacuum of either table where `deadlock_timeout` is not shorter,
+which the census refuses (below). Every census answers `0`: 0053's check guarantees every approval
+ask a `version` to backfill from, and the other two change no row.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -345,7 +361,10 @@ census like every later one. It refuses:
   that session has waited `deadlock_timeout`, so an autovacuum passes at any age, with the grant or
   without (to a role without it, autovacuum is the holder that runs as no role), except an
   anti-wraparound vacuum, which Postgres does not cancel, or one on a server whose
-  `deadlock_timeout` is not shorter than the migration's five-second lock timeout. Postgres marks a
+  `deadlock_timeout` is not shorter than a lock timeout the migration waits under: the runner's five
+  seconds, or the one its own `SET LOCAL lock_timeout` sets, which Postgres reads in a savepoint of
+  the census's (a value it refuses there refuses the migration). `0066` sets 500 ms, so an
+  autovacuum on `asks` or `comments` refuses it at the default one second. Postgres marks a
   vacuum anti-wraparound when it launches it, in its activity, which only a role with
   `pg_read_all_stats` can read, and which Postgres records only with `track_activities` on; where
   the census cannot read it, it refuses every vacuum of a table past its freeze age
@@ -469,7 +488,9 @@ the Postgres `postgres` database for a non-default local port.
 
 `GET /api/v1` (no credential) is the authoritative list: every mounted `/api/v1` route with its
 `method`, `path`, `auth` (`public`, `any`, `human`, or `bearer`), and `description`, sorted by path
-then method. The table below is a summary. An unknown path under `/api`, `/v1`, `/auth`, `/ws`,
+then method. `envoy-dispatch routes` prints the same body from the table alone, with no database
+or listener and never a test hook; the docs site's HTTP API reference is generated from it. The
+table below is a summary. An unknown path under `/api`, `/v1`, `/auth`, `/ws`,
 or `/healthz` is a JSON 404 `{"code":"NOT_FOUND","error":"no route for GET
 /v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell; a missing file
 under `/assets` stays `404 {"error":"not found"}`.
@@ -509,7 +530,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/issues/{key}/asks?state=` | GET | cookie, trusted header, or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
 | `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask and its reply thread. |
 | `/api/v1/asks/{id}` | PATCH | cookie, trusted header, or bearer | Edit one or more of `question`, `options`, `multiple`, or `urgency` on an open ask. A bearer caller must be the asking session; a human may edit any open ask. The response records `edited_at` and emits `ask.edited` with the current ask, prior mutable fields, and `edited_by`. Anchors are selected when the ask is created and cannot be changed by this route. On a block ask the `:::ask` block is written in the same transaction and the row takes the block's parsed values, so the edit versions the document once and no settlement reverts it. Only the named fields are written: `urgency`/`multiple` alone go through the attribute path and leave the body's nodes, marks and inner block ids untouched, so an untouched question keeps its formatting, links and comment anchors; naming `question` or `options` replaces that part with the markdown pipeline's own parse, and anchors inside the replaced text move as for any document edit. A field named but unchanged is not rewritten, so an idempotent retry of the whole ask writes nothing, versions nothing, keeps every anchor and returns 200. Text the block cannot carry back unchanged — an option label containing `": "`, the separator between a label and its description, is one example — is `400 ASK_BLOCK_TEXT` naming the field, with nothing written. |
-| `/api/v1/asks/{id}/answer` | POST | cookie or trusted header | Answer an open ask. Every new version retracts the approval asks naming an older one, so only one an older server left open can name an older version than the document's latest settled one; answering it is `409 APPROVAL_ASK_STALE`, since the review would pin a version its question never named; review that version from the document header instead, which retracts the old ask. |
+| `/api/v1/asks/{id}/answer` | POST | cookie or trusted header | Answer an open ask. An approval ask is moved to each document version before the human sees it, and an `ASK_EDITED` response means the question changed after the human reviewed it, so they reload and answer the moved request. |
 | `/api/v1/asks/{id}/resolve` | POST | cookie, trusted header, or bearer | Retract or self-resolve an open ask with a recorded reason. On a block ask the block's `state` is written with it. A reason beginning `removed from the document in version`, which marks a retraction settlement wrote and would have the retract undone when the block returns, is `400 INVALID_RESOLUTION`. |
 | `/api/v1/issues/{key}/comments?artifact=` | GET | cookie, trusted header, or bearer | List comments, optionally limited to an artifact ID. |
 | `/api/v1/issues/{key}/comments` | POST | cookie, trusted header, or bearer | Create a comment, root-level reply, or suggestion. An anchored comment uses the same quote-or-mark-ID shape as an ask; replies inherit their root's anchor and send none. |
@@ -527,7 +548,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | cookie, trusted header, or bearer | Read a document version or download a blob. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions` | POST | cookie, trusted header, or bearer | Create a named live-document version. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/edits` | POST | cookie, trusted header, or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
-| `/api/v1/artifacts/{id}/approval-requests` | POST | cookie, trusted header, or bearer | Ask a human to approve a document's latest settled version. The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`; past the ask cap is `400 CAP_EXCEEDED` naming `summary`). A repeat returns the ask open at that version unchanged. Every write of a new version retracts the open ask, naming the new version, in the name of the version's writer when the version credits exactly one and as `document-settlement` when it credits several or none; a request that finds one an older server left open retracts it in the requester's name and opens one at the latest version. |
+| `/api/v1/artifacts/{id}/approval-requests` | POST | cookie, trusted header, or bearer | Ask a human to approve a document's latest settled version. The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`; past the ask cap at the longest version a request can reach, ten digits, is `400 CAP_EXCEEDED` naming `summary`). One open approval row follows every document version in place, rewording its question and emitting `ask.edited`; while its `requested_version` is below the new version it waits on the agent. Only the move that takes it from the human notifies; a later move while it already waits on the agent is `quiet: true`, `notify: false`, and reaches no follower. Calling this route again while the row waits on the agent - moved, or a thread reply newer than its last hand-back holds the turn - hands it back to the human: a summary that changes its question rewords it first (`ask.edited`; an omitted summary keeps its prior one), then `requested_version` becomes the latest version and `ask.handed_back` is emitted, leaving `edited_at` as it was. While the row waits on the human, the same summary or none is a repeat that answers `200` with no event, and a different one is `409 APPROVAL_WAITS_ON_HUMAN` and changes nothing, since it would rewrite the card the human is reading. It answers `201` when it wrote anything, with the document's `approval` as the call left it (`waiting_on` while awaiting). |
 | `/api/v1/artifacts/{id}/asks?state=` | GET, POST | cookie, trusted header, or bearer | List or create asks on an unlinked document. |
 | `/api/v1/artifacts/{id}/comments` | GET, POST | cookie, trusted header, or bearer | List or create comments and suggestions on an unlinked document. |
 | `/api/v1/artifacts/{id}/events` | GET | cookie, trusted header, or bearer | Read an unlinked document's events. |
@@ -584,8 +605,8 @@ table's width is rejected as `TABLE_WIDTH`; blank cells there are dropped.
 | `409 ANCHOR_MISSING` | A browser submitted a `mark_id` that the server did not observe in the live tree. |
 | `409 ANCHOR_ORPHANED` | An operation needs a mark whose anchored text has been deleted. |
 | `400 INVALID_ANCHOR` | An anchor must provide exactly one of a nonempty `quote` or nonempty `mark_id`, with its document artifact. |
-| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding text in a cell past its delimiter row's width, which a pipe inside code or a link that is not backslash-escaped makes. Malformed edit replacements report `INVALID_OP`. |
-| `500 DOC_SCHEMA` | The live tree contains a node or mark outside the Proof schema and cannot be rendered safely. |
+| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding text in a cell past its delimiter row's width, which a pipe inside code or a link that is not backslash-escaped makes. A Markdown document nests at most 100 blocks (quotes, lists and their items, typed blocks, and footnote definitions), and one textblock's inline markdown at most 100 marks (emphasis, strong, strikethrough, links, images, and code); deeper content is refused naming the line. An accepted suggestion whose blocks nest within that bound but land deep enough that the document would nest past it is `INVALID_OP` on `replace_with`, naming how many blocks the result nests. Malformed edit replacements report `INVALID_OP`. |
+| `500 DOC_SCHEMA` | The live tree contains a node or mark outside the Proof schema and cannot be rendered safely, such as a node more than 1,000 levels below the document or an attribute value nesting more than 100 arrays and objects. Settlement writes no version of such a tree, and its reads answer this code. The document's room stays live only while a peer holds it: once the last peer leaves, the room is evicted and every later load refuses the tree, so the document websocket's upgrade answers `500`, and edits and uploads to the document answer `DOC_SCHEMA` too. No route repairs such a document (LEGION-469). |
 
 ## Comment errors
 

@@ -35,7 +35,7 @@ func TestAPullRequestFinishingOutsideAwaitingMergeTellsTheArchitectOnce(t *testi
 			pool := migratedPool(t)
 			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head",
-				Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
+				Failing: []string{}, CheckRuns: []record.AttemptRun{}})
 			for _, id := range []string{"finished", "redelivered"} {
 				if _, err := intake.ApplyFact(context.Background(), pool, "github", id, tc.fact, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
 					t.Fatalf("ApplyFact %s: %v", id, err)
@@ -136,7 +136,7 @@ func TestAnIssueReachingAwaitingMergeWithItsPullRequestMergedMovesToProductionCh
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4, ApprovedVersion: new(4)})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestMerged, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head",
-		Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
+		Failing: []string{}, CheckRuns: []record.AttemptRun{}})
 
 	result, err := intake.ApplyFact(context.Background(), pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"}, readyEngine("merge-queue"), admissionStub{})
 	if err != nil || result.Refusal != nil {

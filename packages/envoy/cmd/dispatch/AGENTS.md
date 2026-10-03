@@ -21,6 +21,25 @@ database has not applied, read-only, run before the service rolls (README
 "Pre-deploy census"); `runSubcommand` refuses an argument it does not know with
 exit 2 instead of serving, since serving migrates.
 
+Every Dispatch setting `cmd/dispatch` reads is a row of the settings table
+(`cmd/dispatch/settings.go`): `main` reads every row once (`processSettings`),
+`resolveBootConfig` and the subcommands take their values from that read
+(`settingValues`, which panics on a name the table does not list), and each
+reader in `internal/dispatch` is handed its value — a parameter, an option
+(`routes.AppContextOptions.InsecureCookie`/`EnvoyToken`, `envoy.WithToken`),
+or the table's lookup (`config.Load`'s environment, `auth.LoadAppFromEnv`) —
+as are the NATS connects `cmd/dispatch` makes through `internal/bus`
+(`bus.WithEnvironment`, `bus.Dial`'s environment). A new setting is a new row,
+never an `os.Getenv`: `TestNoReaderBypassesTheSettingsTable` fails on any other
+environment read under `cmd/dispatch` or `internal/dispatch`, and on a dot import
+of `os` or `syscall`, whose bare `Getenv` it could not tell from a local
+function; `TestEverySettingReachesItsReader` fails until the row has a case that
+hands it to its reader. `envoy-dispatch settings` prints the table, and the docs
+site's configuration reference (`docs/site/generators/dispatch-config.ts`) is
+generated from it. A variable a release stopped reading leaves the table for
+`removedSettings`, beside it, with what replaced it: the table reads it too, and
+`resolveBootConfig` refuses to start while it is set.
+
 `dispatchHandler` mounts the one `GET /healthz` the process serves on its own
 mux, above the dashboard router, and the probe reads the database through
 `store.Pool.Healthy` — a one-connection pool nothing else uses, under
@@ -129,7 +148,7 @@ write identity errors with `identity.WriteError`.
   `DISPATCH_IDENTITY_HEADER_TRUSTED=1` and refuses any `DISPATCH_SIGNIN_*`
   setting, so it cannot share a deployment with Google sign-in.
 - `DISPATCH_ALLOWED_LOGINS` and `DISPATCH_APP_CLIENT_SECRET` are refused at
-  boot as removed settings, naming what replaced them.
+  boot as removed settings (`removedSettings`), naming what replaced them.
 - `DISPATCH_DEV_SIGNIN=1` mounts `GET /auth/_dev/signin?login=<email>&next=<path>`
   (`routes/devsignin.go`, which holds everything that can mint a cookie without
   the sign-in pool), which records the lowercased person and issues the cookie
@@ -260,7 +279,7 @@ the table says human only.
 | `/api/v1/issues/{key}/asks?state=` | GET | user or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
 | `/api/v1/asks/{id}` | GET | user or bearer | Read an ask. It carries `anchor_block`, where the anchor's block stands (its path, and in a table the row, column and header), when the live document holds it. When Dispatch cannot read the anchor's document the read still answers, without `anchor_block` and with `anchor_block_error`, the code the API answers that error with elsewhere: `DOC_SERVICE_UNAVAILABLE` (its room or store could not be reached), `DOC_SCHEMA` (its live tree is outside the schema) or `INTERNAL`. |
 | `/api/v1/asks/{id}` | PATCH | user or bearer | Edit one or more of `question`, `options`, `multiple`, or `urgency` while the ask is open. A bearer caller must be the asking session; a human may edit any open ask. The response has nullable `edited_at`; `ask.edited` records the full current ask, prior mutable fields, and `edited_by`. Ask anchors cannot be changed by this route. On a block ask the `:::ask` block is written in the same transaction and the row takes the block's parsed values, so the edit versions the document once and no settlement reverts it. Only the named fields are written: `urgency`/`multiple` alone go through the attribute path and leave the body's nodes, marks and inner block ids untouched, while naming `question` or `options` replaces that part with the markdown pipeline's own parse. A field named but unchanged is not rewritten, so an idempotent retry of the whole ask writes nothing, versions nothing, keeps every anchor and returns 200. Text the block cannot carry unchanged is `400 ASK_BLOCK_TEXT` naming the field, with nothing written. |
-| `/api/v1/asks/{id}/answer` | POST | human only | Answer an open ask. Every new version retracts the approval asks naming an older one, so only one an older server left open can name an older version than the document's latest settled one; answering it is `409 APPROVAL_ASK_STALE`, since the review would pin a version its question never named; review that version from the document header instead, which retracts the old ask. |
+| `/api/v1/asks/{id}/answer` | POST | human only | Answer an open ask. An approval ask is moved to each document version before the human sees it, and an `ASK_EDITED` response means the question changed after the human reviewed it, so they reload and answer the moved request. |
 | `/api/v1/asks/{id}/resolve` | POST | user or bearer | Retract or self-resolve an open ask with a recorded reason. On a block ask the block's `state` is written with it, so no later settlement reopens it or credits the repair to whoever next edits the document. A reason beginning `removed from the document in version`, which marks a retraction settlement wrote, is `400 INVALID_RESOLUTION`. |
 | `/api/v1/issues/{key}/comments` | GET, POST | user or bearer | List or create comments and suggestions. |
 | `/api/v1/comments/{id}` | GET | user or bearer | Read a comment and its reply chain. It carries `anchor_block`, where the anchor's block stands (its path, and in a table the row, column and header), when the live document holds it. When Dispatch cannot read the anchor's document the read still answers, without `anchor_block` and with `anchor_block_error`, the code the API answers that error with elsewhere: `DOC_SERVICE_UNAVAILABLE` (its room or store could not be reached), `DOC_SCHEMA` (its live tree is outside the schema) or `INTERNAL`. |
@@ -281,7 +300,7 @@ the table says human only.
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | user or bearer | Read a document version or download a blob. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions` | POST | user or bearer | Create a named live-document version. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/edits` | POST | user or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
-| `/api/v1/artifacts/{id}/approval-requests` | POST | user or bearer | Ask a human to approve a document's latest settled version. The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`; past the ask cap is `400 CAP_EXCEEDED` naming `summary`). A repeat returns the ask open at that version unchanged. Every write of a new version retracts the open ask, naming the new version, in the name of the version's writer when the version credits exactly one and as `document-settlement` when it credits several or none; a request that finds one an older server left open retracts it in the requester's name and opens one at the latest version. |
+| `/api/v1/artifacts/{id}/approval-requests` | POST | user or bearer | Ask a human to approve a document's latest settled version. The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`; past the ask cap at the longest version a request can reach, ten digits, is `400 CAP_EXCEEDED` naming `summary`). One open approval row follows every document version in place, rewording its question and emitting `ask.edited`; while its `requested_version` is below the new version it waits on the agent. Only the move that takes it from the human notifies; a later move while it already waits on the agent is `quiet: true`, `notify: false`, and reaches no follower. Calling this route again while the row waits on the agent - moved, or a thread reply newer than its last hand-back holds the turn - hands it back to the human: a summary that changes its question rewords it first (`ask.edited`; an omitted summary keeps its prior one), then `requested_version` becomes the latest version and `ask.handed_back` is emitted, leaving `edited_at` as it was. While the row waits on the human, the same summary or none is a repeat that answers `200` with no event, and a different one is `409 APPROVAL_WAITS_ON_HUMAN` and changes nothing, since it would rewrite the card the human is reading. It answers `201` when it wrote anything, with the document's `approval` as the call left it (`waiting_on` while awaiting). |
 | `/api/v1/artifacts/{id}/asks?state=` | GET, POST | user or bearer | List or create asks on an unlinked document. |
 | `/api/v1/artifacts/{id}/comments` | GET, POST | user or bearer | List or create comments and suggestions on an unlinked document. |
 | `/api/v1/artifacts/{id}/events` | GET | user or bearer | Read an unlinked document's events. |

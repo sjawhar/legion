@@ -41,6 +41,8 @@ import (
 const (
 	// defaultListenPort is the port when DISPATCH_PORT is unset; listenAddress joins it to the host.
 	defaultListenPort = "8766"
+	// defaultEnvoyURL is the Envoy listener when ENVOY_URL is unset: this machine's.
+	defaultEnvoyURL   = "http://127.0.0.1:9020"
 	shutdownTimout    = 5 * time.Second
 	readHeaderTimeout = 10 * time.Second
 	idleTimeout       = 2 * time.Minute
@@ -83,20 +85,31 @@ type bootConfig struct {
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
 	// fence; the signing key is then per process.
 	DevSignIn bool
+	// WebDist is DISPATCH_WEB_DIST: the dashboard directory to serve, or empty to find it from
+	// the binary (defaultWebDistDir).
+	WebDist string
+	// SigningKey is DISPATCH_SIGNING_KEY: the session cookie key, or empty to keep one in the
+	// data dir (sessionSigningKey).
+	SigningKey string
+	// InsecureCookie (DISPATCH_INSECURE_COOKIE set to anything) drops Secure from every cookie.
+	InsecureCookie bool
+	// EnvoyToken is ENVOY_TOKEN, the bearer every Envoy listener call sends.
+	EnvoyToken string
 }
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	env := processSettings()
 	if len(os.Args) > 1 {
-		os.Exit(runSubcommand(context.Background(), os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
+		os.Exit(runSubcommand(context.Background(), os.Args[1:], env, os.Stdout, os.Stderr))
 	}
-	boot, err := resolveBootConfig(os.Getenv)
+	boot, err := resolveBootConfig(env)
 	if err != nil {
 		slog.Error("dispatch: resolve boot config", "error", err)
 		os.Exit(1)
 	}
 
-	envoyConfig, err := config.Load(config.LoadOptions{})
+	envoyConfig, err := loadEnvoyConfig(env, config.LoadOptions{})
 	if err != nil {
 		slog.Error("dispatch: load envoy config", "error", err)
 		os.Exit(1)
@@ -112,7 +125,7 @@ func main() {
 		slog.Error("dispatch: resolve data dir", "error", err)
 		os.Exit(1)
 	}
-	appCfg, appSource, err := loadAppCredentials(dataDir)
+	appCfg, appSource, err := loadAppCredentials(env, dataDir)
 	if err != nil {
 		slog.Error("dispatch: load app credentials", "error", err)
 		os.Exit(1)
@@ -137,7 +150,7 @@ func main() {
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.NatsURLs)
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.NatsURLs, bus.WithEnvironment(env.lookup))
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -158,7 +171,7 @@ func main() {
 			slog.Info("dispatch: agent conversation relay off: it needs NATS")
 		}
 	} else {
-		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.NatsURLs)
+		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.NatsURLs, env.lookup)
 		if err != nil {
 			slog.Error("dispatch: connect the agent conversation relay", "error", err)
 			os.Exit(1)
@@ -187,18 +200,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	webDistDir, err := defaultWebDistDir()
+	webDistDir, err := defaultWebDistDir(boot.WebDist)
 	if err != nil {
 		slog.Error("dispatch: resolve web dist dir", "error", err)
 		os.Exit(1)
 	}
 
-	var signingKey string
-	if boot.DevSignIn {
-		signingKey, err = auth.NewSigningKey()
-	} else {
-		signingKey, err = auth.LoadSigningKey(filepath.Join(dataDir, "signing-key"))
-	}
+	signingKey, err := sessionSigningKey(boot, dataDir)
 	if err != nil {
 		slog.Error("dispatch: load signing key", "error", err)
 		os.Exit(1)
@@ -207,27 +215,18 @@ func main() {
 	people := store.NewPgPeopleStore(database.Pool)
 	sessions := store.NewPgSessionStore(database.Pool)
 
-	var signIn *oidc.CodeFlow
-	if boot.SignInIssuer != "" {
-		signIn, err = oidc.DiscoverCodeFlow(ctx, boot.SignInIssuer, boot.SignInClientID, boot.SignInClientSecret, oidc.DiscoveryTimeout)
-		if err != nil {
-			slog.Error("dispatch: discover the sign-in issuer", "error", err)
-			os.Exit(1)
-		}
+	signIn, err := discoverSignIn(ctx, boot)
+	if err != nil {
+		slog.Error("dispatch: discover the sign-in issuer", "error", err)
+		os.Exit(1)
+	}
+	if signIn != nil {
 		slog.Info("dispatch: signing people in through the sign-in pool", "issuer", boot.SignInIssuer, "client_id", boot.SignInClientID, "group", boot.SignInGroup)
 	}
-
-	var requestIdentity identity.Identity
-	if boot.IdentityHeader == "" {
-		cookieIdentity := identity.CookieIdentity{SigningKey: signingKey, Sessions: sessions}
-		if signIn != nil {
-			cookieIdentity.Membership = &identity.Membership{People: people, Sessions: sessions, SignIn: signIn, Group: boot.SignInGroup}
-		}
-		requestIdentity = cookieIdentity
-	} else {
+	if boot.IdentityHeader != "" {
 		slog.Warn("dispatch: using test/local header identity", "header", boot.IdentityHeader)
-		requestIdentity = identity.HeaderIdentity{Header: boot.IdentityHeader, People: people}
 	}
+	requestIdentity := requestIdentityFor(boot, signingKey, people, sessions, signIn)
 
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
@@ -247,35 +246,22 @@ func main() {
 		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
 	}
 
-	appCtx, err := routes.BuildAppContext(routes.AppContextOptions{
+	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
 		SigningKey:  signingKey,
 		WebDistDir:  webDistDir,
 		People:      people,
 		Sessions:    sessions,
 		Identity:    requestIdentity,
 		SignIn:      signIn,
-		SignInGroup: boot.SignInGroup,
-
-		Store:          database,
-		AgentToken:     boot.AgentToken,
-		RepoProjects:   boot.RepoProjects,
-		DefaultProject: boot.DefaultProject,
-		ServerURL:      serverURL,
-		EnvoyURL:       boot.EnvoyURL,
-		Docs:           documentService,
-		Events:         broker,
-		App:            appCfg,
-		GitHubAPIBase:  boot.GitHubAPIBase,
-		OIDC:           serviceTokens,
-		AgentStream:    agentStream,
-		Lifetime:       ctx,
-
-		AgentSecretsURL:   boot.AgentSecretsURL,
-		AgentSecretsToken: boot.AgentSecretsToken,
-
-		TestHooksEnabled: boot.TestHooksEnabled,
-		DevSignIn:        boot.DevSignIn,
-	})
+		Store:       database,
+		ServerURL:   serverURL,
+		Docs:        documentService,
+		Events:      broker,
+		App:         appCfg,
+		OIDC:        serviceTokens,
+		AgentStream: agentStream,
+		Lifetime:    ctx,
+	}))
 
 	if err != nil {
 		slog.Error("dispatch: build app context", "error", err)
@@ -357,13 +343,14 @@ func defaultDataDir() (string, error) {
 	return filepath.Join(home, ".local", "share", "dispatch"), nil
 }
 
-// defaultWebDistDir resolves the SPA build directory relative to the running
-// binary. The binary lives at packages/envoy/dispatch (when built locally) or
-// is installed elsewhere; we walk up to find packages/dispatch/web/dist.
-func defaultWebDistDir() (string, error) {
-	// First try $DISPATCH_WEB_DIST.
-	if env := os.Getenv("DISPATCH_WEB_DIST"); env != "" {
-		return env, nil
+// defaultWebDistDir resolves the SPA build directory: configured (DISPATCH_WEB_DIST) when it is
+// not empty, otherwise relative to the running binary. The binary lives at packages/envoy/dispatch
+// (when built locally) or is installed elsewhere; we walk up to find packages/dispatch/web/dist.
+func defaultWebDistDir(configured string) (string, error) {
+	// The configured directory is made absolute and clean like every path below, so a value
+	// spelled through `..` names the same directory the static handler joins requests under.
+	if configured != "" {
+		return filepath.Abs(configured)
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -414,10 +401,10 @@ func (s appCredentialSource) String() string {
 	return "env"
 }
 
-// loadAppCredentials returns the App and where it came from. The environment wins over the file;
-// either may be absent, which returns a nil App.
-func loadAppCredentials(dataDir string) (*auth.AppConfig, appCredentialSource, error) {
-	if cfg, err := auth.LoadAppFromEnv(); err != nil {
+// loadAppCredentials returns the App and where it came from. The environment (the DISPATCH_APP_*
+// rows of the settings table) wins over the file; either may be absent, which returns a nil App.
+func loadAppCredentials(env settingValues, dataDir string) (*auth.AppConfig, appCredentialSource, error) {
+	if cfg, err := auth.LoadAppFromEnv(env.get); err != nil {
 		return nil, appCredentialSource{}, fmt.Errorf("load app from env: %w", err)
 	} else if cfg != nil {
 		return cfg, appCredentialSource{}, nil
@@ -433,31 +420,34 @@ func loadAppCredentials(dataDir string) (*auth.AppConfig, appCredentialSource, e
 	return cfg, appCredentialSource{Path: path}, nil
 }
 
-// removedVariables are the settings a release removed. A deployment that still sets one carries
-// configuration this binary would silently ignore, so boot refuses it and names what replaced it.
-var removedVariables = []struct{ name, replacement string }{
-	{"DISPATCH_ALLOWED_LOGINS", "people sign in with Google Workspace; DISPATCH_SIGNIN_GROUP names the group they must be in"},
-	{"DISPATCH_APP_CLIENT_SECRET", "nobody signs in through the GitHub App; its JWT needs only DISPATCH_APP_CLIENT_ID and DISPATCH_APP_PEM_B64"},
-}
-
-func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
-	for _, removed := range removedVariables {
-		if getenv(removed.name) != "" {
-			return bootConfig{}, fmt.Errorf("%s is no longer read and must be unset: %s", removed.name, removed.replacement)
+// resolveBootConfig is the server's configuration from what the settings table read (env),
+// checked before anything connects. It holds the settings main hands on as values; three groups
+// reach their readers from env instead, through the table's lookup: the GitHub App credentials
+// (loadAppCredentials), the envoy.json overrides (loadEnvoyConfig) and NATS's reach and nkey (the
+// bus connects). A new setting goes wherever its reader takes it, and always into the table.
+// A variable a release removed (removedSettings) refuses startup before anything else is read.
+func resolveBootConfig(env settingValues) (bootConfig, error) {
+	for _, removed := range removedSettings {
+		if env.get(removed.Name) != "" {
+			return bootConfig{}, fmt.Errorf("%s is no longer read and must be unset: %s", removed.Name, removed.Replacement)
 		}
 	}
 	boot := bootConfig{
-		DatabaseURL:        strings.TrimSpace(getenv("DATABASE_URL")),
-		AgentToken:         strings.TrimSpace(getenv("DISPATCH_AGENT_TOKEN")),
-		RepoProjects:       strings.TrimSpace(getenv("DISPATCH_REPO_PROJECTS")),
-		DefaultProject:     strings.TrimSpace(getenv("DISPATCH_DEFAULT_PROJECT")),
-		GitHubAPIBase:      strings.TrimSpace(getenv("DISPATCH_GITHUB_API_BASE")),
-		SignInIssuer:       strings.TrimSpace(getenv("DISPATCH_SIGNIN_ISSUER")),
-		SignInClientID:     strings.TrimSpace(getenv("DISPATCH_SIGNIN_CLIENT_ID")),
-		SignInClientSecret: strings.TrimSpace(getenv("DISPATCH_SIGNIN_CLIENT_SECRET")),
-		SignInGroup:        strings.TrimSpace(getenv("DISPATCH_SIGNIN_GROUP")),
-		NATSDisabled:       getenv("DISPATCH_NATS_DISABLED") == "1",
-		TestHooksEnabled:   getenv("DISPATCH_TEST_HOOKS") == "1",
+		DatabaseURL:        strings.TrimSpace(env.get("DATABASE_URL")),
+		AgentToken:         strings.TrimSpace(env.get("DISPATCH_AGENT_TOKEN")),
+		RepoProjects:       strings.TrimSpace(env.get("DISPATCH_REPO_PROJECTS")),
+		DefaultProject:     strings.TrimSpace(env.get("DISPATCH_DEFAULT_PROJECT")),
+		GitHubAPIBase:      strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")),
+		SignInIssuer:       strings.TrimSpace(env.get("DISPATCH_SIGNIN_ISSUER")),
+		SignInClientID:     strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_ID")),
+		SignInClientSecret: strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_SECRET")),
+		SignInGroup:        strings.TrimSpace(env.get("DISPATCH_SIGNIN_GROUP")),
+		NATSDisabled:       env.get("DISPATCH_NATS_DISABLED") == "1",
+		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
+		WebDist:            env.get("DISPATCH_WEB_DIST"),
+		SigningKey:         env.get("DISPATCH_SIGNING_KEY"),
+		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
+		EnvoyToken:         env.get("ENVOY_TOKEN"),
 	}
 	if boot.DatabaseURL == "" {
 		return bootConfig{}, errors.New("DATABASE_URL required")
@@ -465,12 +455,12 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 	if boot.AgentToken == "" {
 		return bootConfig{}, errors.New("DISPATCH_AGENT_TOKEN required")
 	}
-	listenAddr, err := listenAddress(getenv)
+	listenAddr, err := listenAddress(env)
 	if err != nil {
 		return bootConfig{}, err
 	}
 	boot.ListenAddr = listenAddr
-	identityMode := strings.TrimSpace(getenv("DISPATCH_IDENTITY"))
+	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	signInSettings := []struct{ name, value string }{
 		{"DISPATCH_SIGNIN_ISSUER", boot.SignInIssuer},
 		{"DISPATCH_SIGNIN_CLIENT_ID", boot.SignInClientID},
@@ -492,7 +482,7 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		return bootConfig{}, fmt.Errorf("Google sign-in needs all four of DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and DISPATCH_SIGNIN_GROUP: %s set, %s missing", strings.Join(set, ", "), strings.Join(missing, ", "))
 	}
 	var devSignIn bool
-	switch flag := getenv("DISPATCH_DEV_SIGNIN"); flag {
+	switch flag := env.get("DISPATCH_DEV_SIGNIN"); flag {
 	case "":
 	case "1":
 		devSignIn = true
@@ -510,15 +500,15 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		if boot.IdentityHeader == "" {
 			return bootConfig{}, errors.New("DISPATCH_IDENTITY header name required")
 		}
-		if getenv("DISPATCH_IDENTITY_HEADER_TRUSTED") != "1" {
+		if env.get("DISPATCH_IDENTITY_HEADER_TRUSTED") != "1" {
 			return bootConfig{}, errors.New("DISPATCH_IDENTITY_HEADER_TRUSTED=1 required: header identity is only for tests and local harnesses")
 		}
 	default:
 		return bootConfig{}, fmt.Errorf("DISPATCH_IDENTITY=%q (expected cookie or header:<Header-Name>)", mode)
 	}
-	envoyURL := strings.TrimSpace(getenv("ENVOY_URL"))
+	envoyURL := strings.TrimSpace(env.get("ENVOY_URL"))
 	if envoyURL == "" {
-		envoyURL = "http://127.0.0.1:9020"
+		envoyURL = defaultEnvoyURL
 	}
 	parsed, err := url.Parse(envoyURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
@@ -529,20 +519,20 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 	// The pair's both-or-neither rule lives in internal/oidc so the listener
 	// applies the same one; oidc.New stays out of this function, which reads
 	// the environment and returns errors and nothing else.
-	boot.OIDCIssuer, boot.OIDCAudience, err = oidc.ConfigFromEnv(getenv,
+	boot.OIDCIssuer, boot.OIDCAudience, err = oidc.ConfigFromEnv(env.get,
 		"DISPATCH_OIDC_ISSUER", "DISPATCH_OIDC_AUDIENCE")
 	if err != nil {
 		return bootConfig{}, err
 	}
 
-	agentSecretsURL := strings.TrimSuffix(strings.TrimSpace(getenv("DISPATCH_AGENT_SECRETS_URL")), "/")
+	agentSecretsURL := strings.TrimSuffix(strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_URL")), "/")
 	if agentSecretsURL != "" {
 		parsed, err := url.Parse(agentSecretsURL)
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Path != "" {
 			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", agentSecretsURL)
 		}
 		boot.AgentSecretsURL = agentSecretsURL
-		boot.AgentSecretsToken, err = agentSecretsToken(getenv)
+		boot.AgentSecretsToken, err = agentSecretsToken(env)
 		if err != nil {
 			return bootConfig{}, err
 		}
@@ -552,7 +542,7 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 	}
 
 	if devSignIn {
-		if err := devSignInFence(boot, getenv); err != nil {
+		if err := devSignInFence(boot, env); err != nil {
 			return bootConfig{}, err
 		}
 		boot.DevSignIn = true
@@ -565,7 +555,7 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 // process must listen, keep its data and reach the services that act on a human's word (NATS, the
 // secrets broker, the Envoy listener that delivers mentions and messages, GitHub as the App) on
 // this machine alone, and sign its cookies with a key no other process holds.
-func devSignInFence(boot bootConfig, getenv func(string) string) error {
+func devSignInFence(boot bootConfig, env settingValues) error {
 	if boot.IdentityHeader != "" {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
 	}
@@ -573,15 +563,15 @@ func devSignInFence(boot bootConfig, getenv func(string) string) error {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 signs people in without the sign-in pool, so DISPATCH_SIGNIN_* must be unset: a loopback server holds no sign-in client secret")
 	}
 	if !routes.LoopbackHostPort(boot.ListenAddr) {
-		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q (listen address %q) must be 127.0.0.1 or [::1]", getenv("DISPATCH_LISTEN_HOST"), boot.ListenAddr)
+		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q (listen address %q) must be 127.0.0.1 or [::1]", env.get("DISPATCH_LISTEN_HOST"), boot.ListenAddr)
 	}
 	if err := loopbackDatabase(boot.DatabaseURL); err != nil {
 		return err
 	}
-	if getenv("DISPATCH_SIGNING_KEY") != "" {
+	if boot.SigningKey != "" {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 signs cookies with a key generated for this process; unset DISPATCH_SIGNING_KEY")
 	}
-	if !boot.NATSDisabled && getenv(bus.AllowRemoteEnvVar) == "1" {
+	if !boot.NATSDisabled && env.get(bus.AllowRemoteEnvVar) == "1" {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 publishes to this machine's NATS only: unset %s, or set DISPATCH_NATS_DISABLED=1", bus.AllowRemoteEnvVar)
 	}
 	if boot.AgentSecretsURL != "" {
@@ -649,8 +639,8 @@ func loopbackDatabase(databaseURL string) error {
 // DISPATCH_AGENT_SECRETS_TOKEN_FILE (trimmed contents) ahead of
 // DISPATCH_AGENT_SECRETS_TOKEN; a set-but-unreadable or blank file is an error naming both,
 // never a silent fallback to the bare variable.
-func agentSecretsToken(getenv func(string) string) (string, error) {
-	if path := strings.TrimSpace(getenv("DISPATCH_AGENT_SECRETS_TOKEN_FILE")); path != "" {
+func agentSecretsToken(env settingValues) (string, error) {
+	if path := strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_TOKEN_FILE")); path != "" {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return "", fmt.Errorf("DISPATCH_AGENT_SECRETS_TOKEN_FILE names %s, which could not be read: %w", path, err)
@@ -661,7 +651,70 @@ func agentSecretsToken(getenv func(string) string) (string, error) {
 		}
 		return value, nil
 	}
-	return strings.TrimSpace(getenv("DISPATCH_AGENT_SECRETS_TOKEN")), nil
+	return strings.TrimSpace(env.get("DISPATCH_AGENT_SECRETS_TOKEN")), nil
+}
+
+// sessionSigningKey is the key session cookies are signed with: one generated for this process
+// under dev sign-in, otherwise DISPATCH_SIGNING_KEY when it is set (a deployment's, from its
+// secrets manager), otherwise the data dir's signing-key file, created on first start (a local
+// run's). Outside dev sign-in the key must stay the same across deploys, or every dsession cookie
+// is invalidated whenever a container rolls.
+func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
+	if boot.DevSignIn {
+		return auth.NewSigningKey()
+	}
+	if boot.SigningKey != "" {
+		return boot.SigningKey, nil
+	}
+	return auth.LoadOrCreateSigningKey(filepath.Join(dataDir, "signing-key"))
+}
+
+// discoverSignIn is the sign-in pool's code flow for boot's DISPATCH_SIGNIN_* settings, its
+// endpoints read from the issuer's discovery document; nil when boot configures no sign-in
+// (header identity, or dev sign-in).
+func discoverSignIn(ctx context.Context, boot bootConfig) (*oidc.CodeFlow, error) {
+	if boot.SignInIssuer == "" {
+		return nil, nil
+	}
+	return oidc.DiscoverCodeFlow(ctx, boot.SignInIssuer, boot.SignInClientID, boot.SignInClientSecret, oidc.DiscoveryTimeout)
+}
+
+// requestIdentityFor is how a browser request names its person under boot: a header-identity
+// server takes the header's email; a cookie server verifies its signed session cookie and, with
+// sign-in configured, confirms at least hourly that the person is still in DISPATCH_SIGNIN_GROUP.
+func requestIdentityFor(boot bootConfig, signingKey string, people auth.PeopleStore, sessions auth.SessionStore, signIn *oidc.CodeFlow) identity.Identity {
+	if boot.IdentityHeader != "" {
+		return identity.HeaderIdentity{Header: boot.IdentityHeader, People: people}
+	}
+	cookieIdentity := identity.CookieIdentity{SigningKey: signingKey, Sessions: sessions}
+	if signIn != nil {
+		cookieIdentity.Membership = &identity.Membership{People: people, Sessions: sessions, SignIn: signIn, Group: boot.SignInGroup}
+	}
+	return cookieIdentity
+}
+
+// appContextOptions is what main hands routes.BuildAppContext: built, what main made from the
+// configuration, with every setting the router takes from boot filled in. The settings tests build
+// the router through it, so dropping any hand-off here fails a case.
+func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.AppContextOptions {
+	built.SignInGroup = boot.SignInGroup
+	built.AgentToken = boot.AgentToken
+	built.DefaultProject = boot.DefaultProject
+	built.InsecureCookie = boot.InsecureCookie
+	built.EnvoyURL = boot.EnvoyURL
+	built.EnvoyToken = boot.EnvoyToken
+	built.GitHubAPIBase = boot.GitHubAPIBase
+	built.AgentSecretsURL = boot.AgentSecretsURL
+	built.AgentSecretsToken = boot.AgentSecretsToken
+	built.TestHooksEnabled = boot.TestHooksEnabled
+	built.DevSignIn = boot.DevSignIn
+	return built
+}
+
+// loadEnvoyConfig is envoy.json as Dispatch reads it: the files config.Load finds, under the
+// DISPATCH_SERVER_URL and NATS_URLS rows of the settings table.
+func loadEnvoyConfig(env settingValues, options config.LoadOptions) (*config.EnvoyConfig, error) {
+	return config.Load(env.lookup, options)
 }
 
 // validateDefaultProject confirms DISPATCH_DEFAULT_PROJECT names a project
@@ -779,16 +832,16 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, commit string
 	}
 }
 
-// listenAddress builds the listen address from DISPATCH_LISTEN_HOST and DISPATCH_PORT (8766
-// when unset). An empty host binds every interface (the containerized production default);
-// local compose deployments set 127.0.0.1. An IPv6 host may be written with or without brackets:
-// one pair comes off here and JoinHostPort puts it back.
-func listenAddress(getenv func(string) string) (string, error) {
-	host := strings.TrimSpace(getenv("DISPATCH_LISTEN_HOST"))
+// listenAddress builds the listen address from DISPATCH_LISTEN_HOST and DISPATCH_PORT
+// (defaultListenPort when unset). An empty host binds every interface (the containerized
+// production default); local compose deployments set 127.0.0.1. An IPv6 host may be written with
+// or without brackets: one pair comes off here and JoinHostPort puts it back.
+func listenAddress(env settingValues) (string, error) {
+	host := strings.TrimSpace(env.get("DISPATCH_LISTEN_HOST"))
 	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
 		host = host[1 : len(host)-1]
 	}
-	port := strings.TrimSpace(getenv("DISPATCH_PORT"))
+	port := strings.TrimSpace(env.get("DISPATCH_PORT"))
 	if port == "" {
 		port = defaultListenPort
 	} else {
@@ -804,29 +857,43 @@ func listenAddress(getenv func(string) string) (string, error) {
 }
 
 // subcommand is an argument envoy-dispatch takes in place of serving. run gets the arguments
-// after the name.
+// after the name and what the settings table read.
 type subcommand struct {
 	name string
-	run  func(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int
+	run  func(ctx context.Context, args []string, env settingValues, stdout, stderr io.Writer) int
 }
 
 // subcommands are every argument envoy-dispatch takes in place of serving: runSubcommand both
 // dispatches on this table and names it, in this order, when it refuses an argument.
 var subcommands = []subcommand{
-	{"backfill-block-ids", func(ctx context.Context, _ []string, getenv func(string) string, stdout, _ io.Writer) int {
-		return backfillBlockIDs(ctx, getenv("DATABASE_URL"), stdout)
+	{"backfill-block-ids", func(ctx context.Context, _ []string, env settingValues, stdout, _ io.Writer) int {
+		return backfillBlockIDs(ctx, env.get("DATABASE_URL"), stdout)
 	}},
-	{"backfill-anchor-blocks", func(ctx context.Context, _ []string, getenv func(string) string, stdout, _ io.Writer) int {
-		return backfillAnchorBlocks(ctx, getenv("DATABASE_URL"), stdout)
+	{"backfill-anchor-blocks", func(ctx context.Context, _ []string, env settingValues, stdout, _ io.Writer) int {
+		return backfillAnchorBlocks(ctx, env.get("DATABASE_URL"), stdout)
 	}},
-	{"rebuild-refs", func(ctx context.Context, _ []string, getenv func(string) string, stdout, _ io.Writer) int {
-		return rebuildRefs(ctx, getenv("DATABASE_URL"), loadServerURL(), stdout)
+	{"rebuild-refs", func(ctx context.Context, _ []string, env settingValues, stdout, _ io.Writer) int {
+		return rebuildRefs(ctx, env.get("DATABASE_URL"), loadServerURL(env), stdout)
 	}},
-	{"redeliver-webhooks", func(ctx context.Context, args []string, _ func(string) string, stdout, _ io.Writer) int {
-		return redeliverWebhooks(ctx, args, stdout)
+	{"redeliver-webhooks", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
+		return redeliverWebhooks(ctx, args, env, stdout)
 	}},
-	{"census", func(ctx context.Context, _ []string, getenv func(string) string, stdout, stderr io.Writer) int {
-		return census(ctx, getenv("DATABASE_URL"), stdout, stderr)
+	{"census", func(ctx context.Context, _ []string, env settingValues, stdout, stderr io.Writer) int {
+		return census(ctx, env.get("DATABASE_URL"), stdout, stderr)
+	}},
+	{"settings", func(_ context.Context, _ []string, _ settingValues, stdout, stderr io.Writer) int {
+		if err := writeSettings(stdout); err != nil {
+			fmt.Fprintf(stderr, "settings: %v\n", err)
+			return 1
+		}
+		return 0
+	}},
+	{"routes", func(_ context.Context, _ []string, _ settingValues, stdout, stderr io.Writer) int {
+		if err := api.WriteRouteIndex(stdout); err != nil {
+			fmt.Fprintf(stderr, "routes: %v\n", err)
+			return 1
+		}
+		return 0
 	}},
 }
 
@@ -835,11 +902,11 @@ var subcommands = []subcommand{
 // database at boot, so a deployment running `envoy-dispatch census` on an image that predates
 // the subcommand must get a refusal, never a boot that applies the migrations the census was to
 // inspect.
-func runSubcommand(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+func runSubcommand(ctx context.Context, args []string, env settingValues, stdout, stderr io.Writer) int {
 	names := make([]string, len(subcommands))
 	for i, sub := range subcommands {
 		if sub.name == args[0] {
-			return sub.run(ctx, args[1:], getenv, stdout, stderr)
+			return sub.run(ctx, args[1:], env, stdout, stderr)
 		}
 		names[i] = sub.name
 	}
@@ -920,8 +987,8 @@ func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer
 
 // loadServerURL resolves the dashboard origin exactly as the server does, for a subcommand
 // that parses reference text.
-func loadServerURL() string {
-	envoyConfig, err := config.Load(config.LoadOptions{})
+func loadServerURL(env settingValues) string {
+	envoyConfig, err := loadEnvoyConfig(env, config.LoadOptions{})
 	if err != nil {
 		slog.Error("dispatch: load envoy config", "error", err)
 		os.Exit(1)

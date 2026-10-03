@@ -144,7 +144,7 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 		return pmdoc.Range{}, err
 	}
 	if err := pmdoc.MarkRange(txn, fragment, range_, spec.pmMark()); err != nil {
-		return pmdoc.Range{}, err
+		return pmdoc.Range{}, docSchema(err)
 	}
 	return range_, nil
 }
@@ -290,7 +290,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if !splice {
 			var unmarkErr error
 			transact(func(txn *crdt.Transaction) {
-				unmarkErr = pmdoc.Unmark(txn, fragment, string(MarkSuggestion), id)
+				unmarkErr = docSchema(pmdoc.Unmark(txn, fragment, string(MarkSuggestion), id))
 			})
 			if unmarkErr != nil {
 				return unmarkErr
@@ -814,7 +814,7 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 		slog.Error("dispatch: list recorded marks for sweep", "room", room, "error", err)
 		return
 	}
-	now := time.Now()
+	now := s.now()
 	seen := make(map[pmdoc.MarkRef]struct{})
 	var expired []pmdoc.MarkRef
 	var next time.Duration
@@ -859,9 +859,15 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 	if len(expired) == 0 {
 		return
 	}
+	if err := s.unmarkExpired(room, expired); err != nil {
+		slog.Error("dispatch: sweep unrecorded marks", "room", room, "error", err)
+	}
+}
 
+// unmarkExpired removes from room's live document each of expired that it still holds.
+func (s *Service) unmarkExpired(room string, expired []pmdoc.MarkRef) error {
 	var sweepErr error
-	err = s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+	err := s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
 		transact, release := s.serviceTransact(transact, nil)
 		defer release()
 		fragment := doc.GetXmlFragment(fragmentName)
@@ -876,7 +882,7 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 					continue
 				}
 				if err := pmdoc.Unmark(txn, fragment, mark.Type, mark.ID); err != nil {
-					sweepErr = err
+					sweepErr = docSchema(err)
 					return
 				}
 			}
@@ -885,7 +891,5 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		sweepErr = err
 	}
-	if sweepErr != nil {
-		slog.Error("dispatch: sweep unrecorded marks", "room", room, "error", sweepErr)
-	}
+	return sweepErr
 }

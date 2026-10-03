@@ -1157,17 +1157,21 @@ function toolActor(origin: DispatchOrigin, input: ExecuteDispatchToolInput): Act
   };
 }
 
-/** One line describing a document's approval, or undefined for a draft nobody has asked about. */
+/** One line describing a document's approval, or undefined for a draft nobody has asked about. An
+ *  awaiting approval says whom its request waits on: the agent once a version moved it, the
+ *  agent's own revision included, which sends that agent no event. */
 function approvalLine(artifact: Pick<Artifact, "approval">): string | undefined {
   const approval = artifact.approval;
   if (approval === undefined || approval.state === "draft") return undefined;
   switch (approval.state) {
-    case "awaiting":
-      return `Approval: awaiting (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
+    case "awaiting": {
+      const turn = approval.waiting_on === undefined ? "" : `, waiting on ${approval.waiting_on}`;
+      return `Approval: awaiting${turn} (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
+    }
     case "approved":
       return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
     case "stale":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}) - request approval again`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}) - request approval again once the human has agreed to every point in this version`;
     case "changes_requested":
       return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
   }
@@ -1393,6 +1397,7 @@ function eventHead(event: Event): string | undefined {
     case "ask.opened":
     case "ask.anchor_refreshed":
     case "ask.edited":
+    case "ask.handed_back":
     case "ask.resolved":
       return textHead(event.payload.question);
     case "ask.answered":
@@ -1655,15 +1660,15 @@ async function blockAsks(
 
 /**
  * Refuses an approval request while the document holds an open decision block. A request names
- * the latest version, and a new version retracts it, so a request over a block the human has yet
- * to answer goes stale the moment they answer it. The live document's `ask` blocks are judged by
- * the latest version, the one the request would name: a block that version shows open counts as
- * open even when its ask is already answered or closed, since that answer reaches a version only
- * when the document settles, about two seconds later, or with the next edit (the agent's fold of
- * the answer into the text). A block not yet in that version counts as open too. A block removed
- * from the document is not judged here; `refuseRemovingOpenDecisionBlocks` keeps one whose ask is
- * open in it. A document already approved at its latest version is left to the server, which
- * answers with that approval.
+ * the latest version, and a new version moves it to that version and leaves it waiting on its
+ * agent, so a request over a block the human has yet to answer leaves their turn the moment they
+ * answer it. The live document's `ask` blocks are judged by the latest version, the one the
+ * request would name: a block that version shows open counts as open even when its ask is already
+ * answered or closed, since that answer reaches a version only when the document settles, about
+ * two seconds later, or with the next edit (the agent's fold of the answer into the text). A block
+ * not yet in that version counts as open too. A block removed from the document is not judged
+ * here; `refuseRemovingOpenDecisionBlocks` keeps one whose ask is open in it. A document already
+ * approved at its latest version is left to the server, which answers with that approval.
  */
 async function refuseOpenDecisionBlocks(
   client: DispatchClient,
@@ -1711,9 +1716,9 @@ async function refuseOpenDecisionBlocks(
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
   throw new Error(
     [
-      `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would retract this request.`,
+      `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
       ...open.map((line) => `- ${line}`),
-      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit and request approval again. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason), write their decision into the text with dispatch_doc_edit, and request approval again.",
+      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason) and write their decision into the text with dispatch_doc_edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human.",
     ].join("\n")
   );
 }
@@ -2481,9 +2486,12 @@ export async function executeDispatchTool(
           (comment.advice?.your_open_asks?.some((ask) => ask.id === replyToAsk) ?? false),
       });
       if (replyToAsk !== undefined) {
-        // The server records turn only on a reply to an open ask, so a non-null turn is exactly
-        // "the ask is open and now waits on <turn>"; a reply under a closed ask reports no state.
-        const askState = comment.turn === null ? "" : `; ask now waiting on ${comment.turn}`;
+        // The server answers whom the ask waits on now that this comment is its newest reply. It
+        // differs from this comment's turn for an agent reply on a moved approval request.
+        const askState =
+          comment.ask_waiting_on === undefined
+            ? ""
+            : `; ask now waiting on ${comment.ask_waiting_on}`;
         return {
           text: [
             `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner)}`,
@@ -2493,7 +2501,9 @@ export async function executeDispatchTool(
             ...commentDetails,
             ask: replyToAsk,
             follows: { ask: replyToAsk },
-            ...(comment.turn === null ? {} : { ask_waiting_on: comment.turn }),
+            ...(comment.ask_waiting_on === undefined
+              ? {}
+              : { ask_waiting_on: comment.ask_waiting_on }),
             ...(comment.advice === undefined ? {} : { advice: comment.advice }),
           },
         };
@@ -2642,13 +2652,15 @@ export async function executeDispatchTool(
       // A change the live document no longer carries: a browser deletion that landed after this
       // edit's version was rendered and before it reached the room, which is past undoing, so the
       // version records text the live document does not have (LEGION-269). `null` is a check that
-      // reached no verdict; an older server omits the field and reads as it always did.
+      // reached no verdict - the room is reloading, or holds a tree past the schema's depth bound,
+      // which a re-read answers DOC_SCHEMA for; an older server omits the field and reads as it
+      // always did.
       const lostOps = edited.lost_ops;
       const lostText =
         lostOps === undefined || (lostOps !== null && lostOps.length === 0)
           ? ""
           : lostOps === null
-            ? "; could not confirm this edit survived, because the live document is being reloaded — re-read it"
+            ? "; could not confirm this edit survived, because the live document is being reloaded or holds a tree too deep to read — re-read it"
             : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote — re-read the document`;
       const applied = `${head}${unchangedText}${lostText}`;
       const adviceLines = renderAdvice(
@@ -2733,7 +2745,7 @@ export async function executeDispatchTool(
       });
       if (result.ask === null) {
         return {
-          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version.`,
+          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version, once the human has agreed to every point in it.`,
           details: {
             ...(resolved.owner.kind === "project"
               ? documentResultDetails(resolved.artifact)
@@ -2744,8 +2756,13 @@ export async function executeDispatchTool(
         };
       }
       const details = await followedAskDetails(client, result.ask, resolved.artifact);
+      // A call that opened, reworded or handed back the request says so; one that found it already
+      // waiting on the human says nothing changed, so a retry never reads as a fresh hand-back.
+      const outcome = result.recorded
+        ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).`
+        : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you.`;
       return {
-        text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
+        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and an edit after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
       };
     }

@@ -4340,8 +4340,8 @@ describe("envoy OMP extension", () => {
   });
 
   test("a regain hook that never settles does not block the next heartbeat tick's registration", async () => {
-    // The hook is legion.ts's daemon round-trip (/controller/ready drains held notices and forces
-    // a resync), which this side cannot bound. The heartbeat's healing latch must release once
+    // The hook is legion.ts's daemon round-trip (`claims/ready`, retried on a 5xx or a transport
+    // failure), which this side cannot bound. The heartbeat's healing latch must release once
     // registration and the claim are settled, or a stuck hook would stop re-registration and
     // let the session's registry entry lapse.
     const role = "legion-controller";

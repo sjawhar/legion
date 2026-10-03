@@ -332,7 +332,7 @@ func (h *harness) register(bootToken, session string) *httptest.ResponseRecorder
 	h.t.Helper()
 	return h.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: bootToken, SessionID: session, OmpSessionFile: "/sessions/" + session + ".jsonl",
-		AgentID: "agent-" + session, PluginContract: GoDaemonAPIVersion,
+		AgentID: "agent-" + session, PluginContract: DaemonAPIVersion,
 	}, nil)
 }
 

@@ -69,9 +69,8 @@ their own machine, and you are that foreground OMP session. The command fetched 
 secret from the daemon with the operator's token, wrote it to a 0600 file under `LEGION_STATE_DIR`
 (`~/.local/state/legion/<project>-controller` by default) beside the `gh` shim and the `legion`
 launcher, and started you with `LEGION_CONTROLLER=1` and the same environment a tmux controller pane
-carries, so nothing changes in how you handle wakes. Under the TypeScript daemon the extension
-claims the role and calls `/controller/ready` exactly as under tmux; under the Go daemon
-(`LEGION_DAEMON_API=go` in your environment) it registers on `/legion/v1/claims/register` with the
+carries, so nothing changes in how you handle wakes. The extension registers on
+`/legion/v1/claims/register` with the
 secret, claims the role, then subscribes to `notifications.legion.<project>.controller`, where the
 Go daemon publishes the rows marked from the Go daemon in the wake routing table. The daemon records
 you as `controllerLocator: {runtime, external: true, sessionId, registeredAt}`, `runtime` being the

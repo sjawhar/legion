@@ -26,6 +26,8 @@ export function eventDescription(event: Event): string {
       return `Ask answered: ${event.payload.question}`;
     case "ask.edited":
       return `Ask edited: ${event.payload.question}`;
+    case "ask.handed_back":
+      return `Ask handed back: ${event.payload.question}`;
     case "comment.resolved":
       return "Comment resolved";
     case "comment.reopened":

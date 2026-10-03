@@ -83,13 +83,12 @@ func newCorpusSearchHandler(t *testing.T, databaseURL string) http.Handler {
 		}
 	})
 	deps, err := NewDeps(DepsInput{
-		Store:           database,
-		Identity:        headerIdentity(database),
-		AgentToken:      "agent-token",
-		RepoProjectsRaw: "owner/repo=TEST",
-		ServerURL:       "https://dispatch.example",
-		Docs:            documentService,
-		Events:          broker,
+		Store:      database,
+		Identity:   headerIdentity(database),
+		AgentToken: "agent-token",
+		ServerURL:  "https://dispatch.example",
+		Docs:       documentService,
+		Events:     broker,
 	})
 	if err != nil {
 		t.Fatalf("create corpus API dependencies: %v", err)

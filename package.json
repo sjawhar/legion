@@ -9,6 +9,11 @@
   "type": "module",
   "description": "Autonomous development swarm using Oh My Pi agents",
   "private": true,
+  "scripts": {
+    "docs:dev": "cd docs/site && bun run dev",
+    "docs:build": "cd docs/site && bun run build",
+    "docs:media": "bun docs/site/media/shots.ts"
+  },
   "workspaces": [
     "packages/contracts",
     "packages/envoy-client",
@@ -19,7 +24,8 @@
     "packages/proof-editor",
     "packages/dispatch",
     "packages/workspace",
-    "packages/envoy/internal/dispatch/pmdoc/gen"
+    "packages/envoy/internal/dispatch/pmdoc/gen",
+    "docs/site"
   ],
   "dependencies": {
     "@toon-format/toon": "^4.1.1",

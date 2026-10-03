@@ -29,9 +29,6 @@ const session = {
 };
 test.beforeEach(async () => {
   await resetDatabase();
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([]);
-  }
 });
 
 test("ask cards show urgency accents and copy their session ID, title, and tmux target", async ({
@@ -335,9 +332,9 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
     { options: [{ label: "Ship" }, { label: "Hold" }], question: "Newest ask" },
     session
   );
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([{ session_id: "e2e-session", title: "e2e-session-title" }]);
-    await setInterests([
+  await Promise.all([
+    setLiveSessions([{ session_id: "e2e-session", title: "e2e-session-title" }]),
+    setInterests([
       {
         session_id: "e2e-session",
         topics: [
@@ -345,8 +342,8 @@ test("inbox shows current asks and answers issue asks in the margin", async ({
           `notifications.dispatch.issue.${firstIssue.key}.>`,
         ],
       },
-    ]);
-  }
+    ]),
+  ]);
   await expect
     .poll(async () =>
       (await getIssueEvents(firstIssue.key)).some((event) => event.actor.id === "e2e-session")
