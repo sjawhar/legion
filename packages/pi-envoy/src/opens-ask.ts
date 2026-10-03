@@ -1,64 +1,35 @@
-import type { EditOp } from "@legion/contracts";
 import { asObject } from "@legion/envoy-client/dispatch-execute";
 import type { ToolResultEvent } from "./pi-types";
 
-/**
- * An `ask` block's opener: `:::ask{` at the start of a line, after nothing but spaces or tabs, as the
- * server reads an opener only on a line of its own. It is matched one line at a time, so a long
- * blank run is read once.
- */
-const ASK_BLOCK_OPENER = /^[ \t]*:::ask\{/u;
-
-/** A code fence line: up to three spaces, three or more backticks or tildes, then the rest. */
-const CODE_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/u;
-
-/**
- * Whether markdown holds an `ask` block's opener outside fenced code, which the server stores as
- * text. A fence opens on a line of three or more backticks (with no backtick after them) or tildes,
- * and closes on a line of nothing but the same character at least as many times; an unclosed fence
- * runs to the end.
- */
-function opensAskBlock(markdown: string): boolean {
-  let fence: string | undefined;
-  for (const line of markdown.split(/\r\n|\r|\n/u)) {
-    const [, marker, rest = ""] = CODE_FENCE.exec(line) ?? [];
-    if (fence === undefined) {
-      if (marker !== undefined && !(marker.startsWith("`") && rest.includes("`"))) fence = marker;
-      else if (ASK_BLOCK_OPENER.test(line)) return true;
-    } else if (
-      marker !== undefined &&
-      marker[0] === fence[0] &&
-      marker.length >= fence.length &&
-      rest.trim() === ""
-    ) {
-      fence = undefined;
-    }
-  }
-  return false;
+/** The count a write's advice reports under key, 0 when it reports none. */
+function adviceCount(details: unknown, key: "decision_blocks" | "decision_blocks_added"): number {
+  const count = asObject(asObject(details)?.advice)?.[key];
+  return typeof count === "number" ? count : 0;
 }
 
 /**
  * Whether a successful call opened the ask itself, so the run-end nudge has nothing to say:
  * `dispatch_ask`, `dispatch_request_approval`, a `dispatch_issue` or `dispatch_artifact` whose
- * stored document holds a decision block, or a `dispatch_doc_edit` that writes one, by inserting an
- * `ask` block outside fenced code or by retyping a block into one. The server counts every block in
- * a stored document (`advice.decision_blocks`), answered ones included, so re-uploading a document
- * whose blocks are all answered reads as opening one and that stop goes without a reminder: no
- * result tells the two apart.
+ * stored document holds a decision block (`advice.decision_blocks`), or a `dispatch_doc_edit` that
+ * added one (`advice.decision_blocks_added`). Both counts are the server's own reading of the
+ * document, so an opener quoted in code counts nothing and one in a blockquote or a list item
+ * counts. Both count answered blocks too - every block in a stored document, and a block an edit
+ * writes back under an answered ask's id - so re-uploading a document whose blocks are all answered
+ * reads as opening one and that stop goes without a reminder: no result tells the two apart.
  */
-export function opensAsk({ toolName, input, details }: ToolResultEvent): boolean {
-  if (toolName === "dispatch_ask" || toolName === "dispatch_request_approval") return true;
-  if (toolName === "dispatch_issue" || toolName === "dispatch_artifact") {
-    const blocks = asObject(asObject(details)?.advice)?.decision_blocks;
-    return typeof blocks === "number" && blocks > 0;
+export function opensAsk({ toolName, details }: ToolResultEvent): boolean {
+  switch (toolName) {
+    case "dispatch_ask":
+    case "dispatch_request_approval":
+      return true;
+    case "dispatch_issue":
+    case "dispatch_artifact":
+      return adviceCount(details, "decision_blocks") > 0;
+    case "dispatch_doc_edit":
+      return adviceCount(details, "decision_blocks_added") > 0;
+    default:
+      return false;
   }
-  if (toolName !== "dispatch_doc_edit" || !Array.isArray(input.ops)) return false;
-  // A successful edit's operations passed the tool's schema.
-  return (input.ops as readonly EditOp[]).some(
-    ({ op, markdown, type }) =>
-      (op === "insert" && markdown !== undefined && opensAskBlock(markdown)) ||
-      (op === "retype" && type === "ask")
-  );
 }
 
 /**

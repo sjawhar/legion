@@ -2108,73 +2108,51 @@ describe("envoy OMP extension", () => {
     expect(session.asked).toEqual([]);
   });
 
-  test("a decision block written through dispatch_doc_edit spends the check, unlike a plain edit", async () => {
+  // Whether a document edit opened an ask is the server's reading of the document it wrote
+  // (`advice.decision_blocks_added`), never a reading of the operations' markdown here: whether an
+  // opener is a block depends on where it lands, as code or inside a blockquote or a list item.
+  test("a dispatch_doc_edit spends the check exactly when the server reports a decision block it added", async () => {
     // The query creates a fresh extension module with isolated module-level awareness state.
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-document-block");
     const session = await bootAskNudge(envoyExtension, "ses_nudge_document_block", () => ({}));
-
-    await session.userTurn();
-    await session.toolResult({
-      toolName: "dispatch_doc_edit",
-      toolCallId: "call-block",
-      input: {
-        ops: [
-          {
-            op: "insert",
-            markdown:
-              '## Rollout\n\n:::ask{#deployment urgency="high"}\nWhich deployment window?\n:::',
-          },
-        ],
-      },
-      details: {},
-      isError: false,
-    });
-    await session.stop();
-    expect(session.fixture.deliveries).toEqual([]);
-
-    await session.userTurn();
-    await session.toolResult({
-      toolName: "dispatch_doc_edit",
-      toolCallId: "call-plain-edit",
-      input: { ops: [{ op: "insert", markdown: "A plain revision." }] },
-      details: {},
-      isError: false,
-    });
-    await session.stop();
-    expect(session.fixture.deliveries).toEqual([
-      expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
-    ]);
-  });
-
-  test("an ask block's opener inside fenced code opens no ask, and one after the fence does", async () => {
-    // The server stores a fenced opener as text, so an inserted example of the syntax holds no
-    // decision block and the stop still owes its check.
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-fenced-opener");
-    const session = await bootAskNudge(envoyExtension, "ses_nudge_fenced_opener", () => ({}));
-    const insert = (toolCallId: string, markdown: string) =>
-      session.toolResult({
+    const editThenStop = async (
+      markdown: string,
+      advice: Record<string, unknown> | undefined
+    ): Promise<void> => {
+      await session.userTurn();
+      await session.toolResult({
         toolName: "dispatch_doc_edit",
-        toolCallId,
-        input: { ops: [{ op: "insert", markdown }] },
-        details: {},
+        toolCallId: `call-${markdown.length}`,
+        input: { issue: "DSP-1", ops: [{ op: "insert", markdown, after: "end" }] },
+        details: advice === undefined ? { issue: "DSP-1" } : { issue: "DSP-1", advice },
         isError: false,
       });
+      await session.stop();
+    };
 
-    await session.userTurn();
-    await insert("call-example", "Example:\n\n```md\n:::ask{#example}\nWhich?\n:::\n```");
-    await session.stop();
+    // A block in a blockquote, which the server reads as one: the agent asked, so no check runs.
+    await editThenStop("> :::ask{#window}\n> Which deployment window?\n> :::", {
+      issue_status: "in_progress",
+      decision_blocks_added: 1,
+    });
+    expect(session.asked).toEqual([]);
+    expect(session.fixture.deliveries).toEqual([]);
+
+    // An example fenced four columns into a nested list item, which the server holds as code: the
+    // stop checks, and the agent waiting with nothing asked gets the reminder.
+    await editThenStop(
+      "- Format notes:\n  - Example:\n\n    ```md\n    :::ask{#example}\n    Which?\n    :::\n    ```",
+      { issue_status: "in_progress", decision_blocks_added: 0 }
+    );
+    expect(session.asked).toHaveLength(1);
     expect(session.fixture.deliveries).toEqual([
       expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
     ]);
 
-    // A tilde fence closes on a longer run of tildes; the block after it is a real one.
-    await session.userTurn();
-    await insert(
-      "call-example-then-block",
-      "~~~md\n:::ask{#example}\n:::\n~~~~\n\n:::ask{#window}\nWhich deployment window?\n:::"
-    );
-    await session.stop();
-    expect(session.fixture.deliveries).toHaveLength(1);
+    // A Dispatch server predating the count reports none, so the stop still checks.
+    await editThenStop(":::ask{#region}\nWhich region?\n:::", undefined);
+    expect(session.asked).toHaveLength(2);
+    expect(session.fixture.deliveries).toHaveLength(2);
   });
 
   test("a tool-device write to a Dispatch device owes no check after the call it ran", async () => {
@@ -2182,8 +2160,8 @@ describe("envoy OMP extension", () => {
     // arguments) twice: as the tool, then as the `write` (measured on 18.4.9).
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-tool-device");
     const session = await bootAskNudge(envoyExtension, "ses_nudge_tool_device", () => ({}));
-    const report = (tool: string, input: Record<string, unknown>) =>
-      session.toolResult({ toolName: tool, toolCallId: tool, input, details: {}, isError: false });
+    const report = (tool: string, input: Record<string, unknown>, details = {}) =>
+      session.toolResult({ toolName: tool, toolCallId: tool, input, details, isError: false });
     const deviceWrite = (tool: string, input: Record<string, unknown>) =>
       session.toolResult({
         toolName: "write",
@@ -2192,18 +2170,26 @@ describe("envoy OMP extension", () => {
         details: { xdev: { tool, mode: "execute" } },
         isError: false,
       });
-    const device = async (tool: string, input: Record<string, unknown>): Promise<void> => {
-      await report(tool, input);
+    const device = async (
+      tool: string,
+      input: Record<string, unknown>,
+      details: Record<string, unknown> = {}
+    ): Promise<void> => {
+      await report(tool, input, details);
       await deviceWrite(tool, input);
     };
     const ask = { issue: "DSP-1", question: "Rotate the token?" };
 
     await session.userTurn();
-    await device("dispatch_doc_edit", {
-      issue: "DSP-1",
-      artifact: "spec",
-      ops: [{ op: "insert", markdown: ":::ask{#window}\nWhich deployment window?\n:::" }],
-    });
+    await device(
+      "dispatch_doc_edit",
+      {
+        issue: "DSP-1",
+        artifact: "spec",
+        ops: [{ op: "insert", markdown: ":::ask{#window}\nWhich deployment window?\n:::" }],
+      },
+      { issue: "DSP-1", advice: { decision_blocks_added: 1 } }
+    );
     await session.stop();
     await session.userTurn();
     await device("dispatch_ask", ask);
@@ -2276,36 +2262,6 @@ describe("envoy OMP extension", () => {
     }
   });
 
-  test("a retype into an ask block spends the check, unlike a retype into another type", async () => {
-    // The query creates a fresh extension module with isolated module-level awareness state.
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-document-retype");
-    const session = await bootAskNudge(envoyExtension, "ses_nudge_document_retype", () => ({}));
-
-    await session.userTurn();
-    await session.toolResult({
-      toolName: "dispatch_doc_edit",
-      toolCallId: "call-retype-ask",
-      input: { ops: [{ op: "retype", block: "para-1", type: "ask" }] },
-      details: {},
-      isError: false,
-    });
-    await session.stop();
-    expect(session.fixture.deliveries).toEqual([]);
-
-    await session.userTurn();
-    await session.toolResult({
-      toolName: "dispatch_doc_edit",
-      toolCallId: "call-retype-callout",
-      input: { ops: [{ op: "retype", block: "para-2", type: "callout" }] },
-      details: {},
-      isError: false,
-    });
-    await session.stop();
-    expect(session.fixture.deliveries).toEqual([
-      expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
-    ]);
-  });
-
   test("a document written through dispatch_issue or dispatch_artifact spends the check only when it holds a decision block", async () => {
     // The query creates a fresh extension module with isolated module-level awareness state.
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-document-upload");
@@ -2342,29 +2298,6 @@ describe("envoy OMP extension", () => {
       details: { issue: "DSP-1", advice: { decision_blocks: 0 } },
       isError: false,
     });
-    await session.stop();
-    expect(session.fixture.deliveries).toEqual([
-      expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
-    ]);
-  });
-
-  test("an inserted run of blank lines is read in linear time and opens no ask", async () => {
-    // The query creates a fresh extension module with isolated module-level awareness state.
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-blank-run");
-    const session = await bootAskNudge(envoyExtension, "ses_nudge_blank_run", () => ({}));
-
-    await session.userTurn();
-    const startedAt = performance.now();
-    await session.toolResult({
-      toolName: "dispatch_doc_edit",
-      toolCallId: "call-blank-run",
-      input: { ops: [{ op: "insert", markdown: `${"\n".repeat(200_000)}A plain revision.` }] },
-      details: {},
-      isError: false,
-    });
-    // A pattern whose leading whitespace crosses lines rescans the run from each line start: tens
-    // of seconds for this one, inside the session's tool_result handler.
-    expect(performance.now() - startedAt).toBeLessThan(1_000);
     await session.stop();
     expect(session.fixture.deliveries).toEqual([
       expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),

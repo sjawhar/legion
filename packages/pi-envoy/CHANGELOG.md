@@ -81,13 +81,14 @@
   when the revision is complete, never after each edit, that `Approve` and `Request changes` close
   it, and that a new version of a Legion root spec closes its armed design gate (LEGION-470).
 - The run-end nudge offers a decision block in the document a question concerns, or `dispatch_ask`
-  for a to-do. A `dispatch_doc_edit` that inserts an ask block or retypes a block into one spends
-  the nudge's check, as `dispatch_ask` does, and so does a `dispatch_issue` or `dispatch_artifact`
-  whose stored document the server counted a decision block in (answered blocks too, so a
-  re-upload of a document whose blocks are all answered spends it). An inserted opener is read on
-  its own line, so a long run of blank lines no longer stalls the session for seconds, and an
-  opener inside fenced code, which the server stores as text, opens nothing, so an example of the
-  syntax leaves the check owed.
+  for a to-do. A `dispatch_doc_edit` whose result reports a decision block the edit added
+  (`advice.decision_blocks_added`) spends the nudge's check, as `dispatch_ask` does, and so does a
+  `dispatch_issue` or `dispatch_artifact` whose stored document the server counted a decision block
+  in (answered blocks too, so a re-upload of a document whose blocks are all answered spends it).
+  Both counts are the Dispatch server's own reading of the document, so an example of the syntax in
+  code leaves the check owed wherever it is fenced or indented, and a block in a blockquote or a
+  list item spends it; the extension reads no markdown itself. An edit result from a server that
+  does not report the count spends nothing.
 
 ### Fixed
 
