@@ -453,6 +453,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			s.recordSuppressedCommit(repair.slot, doc, update)
 			return
 		}
+		if s.beforeObserveUpdate != nil {
+			s.beforeObserveUpdate(room)
+		}
 		replica.mu.Lock()
 		replica.catchUp(room, doc)
 		contentChanged := s.updateChangesMarkdown(room, replica.doc)
@@ -460,6 +463,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		s.recordUpdateClass(room, update, contentChanged, true)
 		if contentChanged {
 			s.creditContentChange(room, origin)
+			if s.afterCreditUpdate != nil {
+				s.afterCreditUpdate(room)
+			}
 		}
 		s.scheduleSettle(room)
 	})
@@ -552,7 +558,7 @@ func (s *Service) creditContentChange(room string, origin any) {
 	defer state.mu.Unlock()
 	if service {
 		if actor, credited := value.(*model.Actor); credited && actor != nil {
-			state.pending[actorKey(*actor)] = *actor
+			state.creditAuthor(*actor)
 			state.lastActor = new(*actor)
 		}
 		return
@@ -561,7 +567,7 @@ func (s *Service) creditContentChange(room string, origin any) {
 	ambiguous := false
 	for _, actor := range state.connected {
 		key := actorKey(actor)
-		state.pending[key] = actor
+		state.creditAuthor(actor)
 		if sole == nil {
 			sole = new(actor)
 		} else if key != actorKey(*sole) {

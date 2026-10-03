@@ -433,6 +433,56 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 	}
 }
 
+// An author pending when a transaction's named version takes its authors who edits again in a
+// browser before the transaction commits is credited on the named version, which holds the first
+// edit, and on the version that holds the second. While the transaction holds the document's
+// writer slot the second edit's observer arms no settlement, so the version's commit met the
+// author's newer credit under the key it had taken (LEGION-503). The transaction's own write is
+// credited on the named version alone.
+func TestNamedVersionKeepsTheCreditOfAnEditItsAuthorMakesBeforeItCommits(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+	editAsPeer(t, service, artifactID, replaceRun("First.", "First, bob."))
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin edit transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "replace", Find: "Second.", With: "Second, agent."}}, agent, nil); err != nil {
+		t.Fatalf("apply the agent's edit: %v", err)
+	}
+	named, err := service.NamedVersion(joined, artifactID, "checkpoint", agent)
+	if err != nil {
+		t.Fatalf("name the version: %v", err)
+	}
+	if want := []model.Actor{agent, bob}; !reflect.DeepEqual(named.Version.Authors, want) {
+		t.Fatalf("named version authors = %#v, want %#v", named.Version.Authors, want)
+	}
+	editAsPeer(t, service, artifactID, replaceRun("First, bob.", "First, bob again."))
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit edit transaction: %v", err)
+	}
+
+	settleCurrentGeneration(t, service, artifactID)
+	requireLatestVersionMarkdown(t, service, artifactID, "First, bob again.\n\nSecond, agent.\n")
+	latest := latestVersionNumber(t, service, artifactID)
+	if latest != named.Version.Number+1 {
+		t.Fatalf("latest version = %d, want %d, the one holding bob's second edit", latest, named.Version.Number+1)
+	}
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{bob}) {
+		t.Fatalf("version %d authors = %#v, want bob alone, whose second edit is all it adds", latest, authors)
+	}
+}
+
 func TestColdSnapshotCapturesFirstEditAfterWarm(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")

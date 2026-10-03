@@ -257,6 +257,20 @@
   Two cases still hang until the server restarts, tracked as LEGION-498: a room that fails while
   the settlement commits into it, whose eviction waits for the room's lock on purpose, and a
   second writer committing into the room while it retires under the repair's commit.
+- A document version no longer drops the credit of an edit it does not hold (LEGION-503). A
+  version's commit released its authors by key, so an author already pending when the version
+  took its authors who edited again before it committed lost the second edit's credit too, and the
+  version holding that edit credited nobody for it: a settlement's commit did so when the edit
+  landed while its update observer was between crediting and arming its settlement, and a named
+  version's or snapshot's commit whenever the edit landed while the transaction held the writer
+  slot. An edit a version's tree held before its update observer had credited it (ygo runs the
+  observer once the edit's transaction has released the document, and observers wait for each
+  other's renders) was credited on no version: the edit's own settlement found the document
+  versioned, wrote none, and released the author. Each pending author now carries the change it
+  credits, a version's commit releases only the entries it took, and a settlement that writes no
+  version releases nothing, so the next version credits such an author. That includes an author
+  whose edits came to nothing, typed and undone before a settlement. An upload's version records
+  that it credits its uploader, who is not credited again on the next version.
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds

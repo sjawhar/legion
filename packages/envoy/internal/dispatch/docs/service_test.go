@@ -935,7 +935,7 @@ func pendingAuthors(service *Service, artifactID string) []model.Actor {
 	state := service.room(artifactID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	return actorSlice(state.pending)
+	return actorSlice(state.takeAuthors().authors)
 }
 
 // setHeadingID returns a live edit that gives every heading id, as the editor's heading plugin
@@ -2376,7 +2376,7 @@ func (s *blockingFirstAppendStore) AppendUpdateWithClass(ctx context.Context, ro
 func (s *Service) recordActor(room string, actor model.Actor) {
 	state := s.room(room)
 	state.mu.Lock()
-	state.pending[actorKey(actor)] = actor
+	state.creditAuthor(actor)
 	state.lastActor = new(actor)
 	state.mu.Unlock()
 }

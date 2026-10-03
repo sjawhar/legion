@@ -198,6 +198,154 @@ func TestSettlementRepairCreditsNoAuthorOfAnEditMadeWhileItsVersionRenders(t *te
 	}
 }
 
+// An author already pending when a settlement takes its authors who edits again before it commits
+// is credited on both versions: the settlement's, which holds the first edit, and the one the
+// second edit's own settlement writes. The second edit's update observer credits the author under
+// the same key before it arms that edit's settlement, and the settlement's commit releases only
+// the entry it took, not that newer one (LEGION-503).
+func TestSettlementKeepsTheCreditOfAnEditItsAuthorMakesBeforeItCommits(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+	editAsPeer(t, service, artifactID, replaceRun("First.", "First, edited."))
+
+	credited := make(chan struct{})
+	proceed := make(chan struct{})
+	let := sync.OnceFunc(func() { close(proceed) })
+	t.Cleanup(let)
+	var holding atomic.Bool
+	service.afterCreditUpdate = func(room string) {
+		if room == artifactID && holding.CompareAndSwap(true, false) {
+			close(credited)
+			<-proceed
+		}
+	}
+	applied := make(chan error, 1)
+	var edited atomic.Bool
+	service.afterSettleReconcile = func(room string) {
+		if room != artifactID || !edited.CompareAndSwap(false, true) {
+			return
+		}
+		// bob edits again once the settlement has taken its authors. His edit's observer, which
+		// runs on the goroutine applying it, is held once it has credited him.
+		live, _, update := peerEdit(t, service, artifactID, replaceRun("Second.", "Second, edited."))
+		holding.Store(true)
+		go func() { applied <- crdt.ApplyUpdateV1(live, update, "peer") }()
+		select {
+		case <-credited:
+		case <-time.After(5 * time.Second):
+			t.Error("the second edit's observer never credited its author")
+		}
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if !edited.Load() {
+		t.Fatal("settlement never reached the window between its authors and its commit")
+	}
+	requireLatestVersionMarkdown(t, service, artifactID, "First, edited.\n\nSecond.\n")
+	first := latestVersionNumber(t, service, artifactID)
+	if authors := latestVersionAuthors(t, service, artifactID); !slices.Contains(authors, bob) {
+		t.Fatalf("version %d authors = %#v, want bob, whose first edit it holds", first, authors)
+	}
+
+	let()
+	select {
+	case err := <-applied:
+		if err != nil {
+			t.Fatalf("apply the second edit: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second edit never finished applying")
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	requireLatestVersionMarkdown(t, service, artifactID, "First, edited.\n\nSecond, edited.\n")
+	second := latestVersionNumber(t, service, artifactID)
+	if second != first+1 {
+		t.Fatalf("latest version = %d, want %d, the second edit's own", second, first+1)
+	}
+	if authors := latestVersionAuthors(t, service, artifactID); !slices.Contains(authors, bob) {
+		t.Fatalf("version %d authors = %#v, want bob, whose second edit it holds", second, authors)
+	}
+}
+
+// ygo runs a room's update observer, which credits an edit to its authors, only once the edit's
+// transaction has released the document, so a settlement can version an edit the room holds before
+// its observer has credited it. That version credits the edit to no one, and the edit's own
+// settlement finds the document already versioned and writes none. The author stays pending and is
+// credited on the next version, which holds the edit too (LEGION-503).
+func TestAnEditVersionedBeforeItsObserverCreditsItIsCreditedOnTheNextVersion(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	ctx := context.Background()
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := service.ReplaceText(ctx, artifactID, "First, alice.\n\nSecond.\n", alice); err != nil {
+		t.Fatalf("alice's edit: %v", err)
+	}
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+
+	held := make(chan struct{})
+	proceed := make(chan struct{})
+	let := sync.OnceFunc(func() { close(proceed) })
+	t.Cleanup(let)
+	var holding atomic.Bool
+	service.beforeObserveUpdate = func(room string) {
+		if room == artifactID && holding.CompareAndSwap(true, false) {
+			close(held)
+			<-proceed
+		}
+	}
+	live, _, update := peerEdit(t, service, artifactID, replaceRun("Second.", "Second, bob."))
+	holding.Store(true)
+	applied := make(chan error, 1)
+	go func() { applied <- crdt.ApplyUpdateV1(live, update, "peer") }()
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("bob's edit never reached its observer")
+	}
+
+	// The room holds bob's edit, and its observer has not credited him: the settlement versions
+	// the edit and credits alice alone.
+	settleCurrentGeneration(t, service, artifactID)
+	const both = "First, alice.\n\nSecond, bob.\n"
+	requireLatestVersionMarkdown(t, service, artifactID, both)
+	versioned := latestVersionNumber(t, service, artifactID)
+	if authors := latestVersionAuthors(t, service, artifactID); !slices.Equal(authors, []model.Actor{alice}) {
+		t.Fatalf("version %d authors = %#v, want alice alone: bob's observer had not credited him", versioned, authors)
+	}
+
+	let()
+	select {
+	case err := <-applied:
+		if err != nil {
+			t.Fatalf("apply bob's edit: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("bob's edit never finished applying")
+	}
+	// bob's edit's own settlement finds the document versioned and writes no version.
+	settleCurrentGeneration(t, service, artifactID)
+	if latest := latestVersionNumber(t, service, artifactID); latest != versioned {
+		t.Fatalf("latest version = %d, want %d, which already holds bob's edit", latest, versioned)
+	}
+
+	carol := model.Actor{Kind: "user", ID: "carol"}
+	if _, err := service.ReplaceText(ctx, artifactID, both+"\nThird, carol.\n", carol); err != nil {
+		t.Fatalf("carol's edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	requireLatestVersionMarkdown(t, service, artifactID, both+"\nThird, carol.\n")
+	if authors := latestVersionAuthors(t, service, artifactID); !slices.Contains(authors, bob) {
+		t.Fatalf("version %d authors = %#v, want bob, whose edit it holds and no version had credited",
+			latestVersionNumber(t, service, artifactID), authors)
+	}
+}
+
 // latestVersionAuthors is the authors the document's latest version credits.
 func latestVersionAuthors(t *testing.T, service *Service, artifactID string) []model.Actor {
 	t.Helper()
@@ -692,6 +840,18 @@ func requireNoSuppressedSlots(t *testing.T, service *Service, room, when string)
 // returns that browser's document.
 func editAsPeer(t *testing.T, service *Service, artifactID string, edit func(*pmdoc.Node) *pmdoc.Node) *crdt.Doc {
 	t.Helper()
+	room, peer, update := peerEdit(t, service, artifactID, edit)
+	if err := crdt.ApplyUpdateV1(room, update, "peer"); err != nil {
+		t.Fatalf("apply the peer's edit to the room: %v", err)
+	}
+	return peer
+}
+
+// peerEdit makes a tree change as a browser makes one, in a document of its own with a client id
+// of its own, synced from the room. It returns the room, that browser's document, and the update
+// that carries the change to the room, which the caller applies as a peer's.
+func peerEdit(t *testing.T, service *Service, artifactID string, edit func(*pmdoc.Node) *pmdoc.Node) (*crdt.Doc, *crdt.Doc, []byte) {
+	t.Helper()
 	room := service.srv.GetDoc(artifactID)
 	if room == nil {
 		t.Fatal("document room is not resident")
@@ -711,8 +871,5 @@ func editAsPeer(t *testing.T, service *Service, artifactID string, edit func(*pm
 			t.Errorf("edit peer document: %v", err)
 		}
 	})
-	if err := crdt.ApplyUpdateV1(room, crdt.EncodeStateAsUpdateV1(peer, synced), "peer"); err != nil {
-		t.Fatalf("apply the peer's edit to the room: %v", err)
-	}
-	return peer
+	return room, peer, crdt.EncodeStateAsUpdateV1(peer, synced)
 }

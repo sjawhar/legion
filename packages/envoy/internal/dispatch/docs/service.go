@@ -108,6 +108,14 @@ type Service struct {
 	// its version is rendered from, and before it renders it. Nil outside tests; tests use it to
 	// edit the room while the version renders.
 	afterSettleVersionRead func(room string)
+	// beforeObserveUpdate runs in a room's update observer, which ygo runs once the update's
+	// transaction has released the document, before the observer classifies the update and
+	// credits its authors. Nil outside tests; tests use it to hold an edit the room already holds
+	// before its author is credited.
+	beforeObserveUpdate func(room string)
+	// afterCreditUpdate runs in a room's update observer after it has credited a content change
+	// and before it arms the room's settlement. Nil outside tests; tests use it to hold that window.
+	afterCreditUpdate func(room string)
 	// afterBackfillRead runs after the block-id backfill has read a document that needs stamping
 	// and before it stamps it. Nil outside tests; tests use it to edit the room in that window.
 	afterBackfillRead func(room string)
@@ -159,13 +167,15 @@ type Service struct {
 type roomState struct {
 	mu        sync.Mutex
 	connected map[uint64]model.Actor
-	pending   map[string]model.Actor
+	// pending holds the authors of content changes no committed version has credited, each with
+	// the change it credits; credits numbers those changes, the latest last (see authors.go).
+	pending map[string]pendingAuthor
+	credits uint64
 	// lastActor is the most recent edit's source: the actor of a service mutation, or the sole
 	// connected peer of a browser edit. Version writes clear `pending`, so a settlement that
 	// runs after an edit's own version was committed would otherwise attribute the block asks
 	// it indexes to nobody.
-	lastActor       *model.Actor
-	pendingVersions map[int]versionPending
+	lastActor *model.Actor
 	// contentMarkdown is the live document's rendered markdown when the room's update observer
 	// last saw it change, nil until the room loads.
 	contentMarkdown *string
@@ -984,22 +994,19 @@ func stampBlockIDs(doc *crdt.Doc, origin any) (*pmdoc.Node, int, error) {
 	return stamped, minted, err
 }
 
-// settlementAuthors copies state's pending authors, which a settlement's version credits, and names
+// settlementAuthors takes state's pending authors, which a settlement's version credits, and names
 // the actor its events carry: the first of those authors, or else the room's latest editor. The
 // caller holds state.mu.
-func settlementAuthors(state *roomState) (map[string]model.Actor, []model.Actor, model.Actor) {
-	pending := make(map[string]model.Actor, len(state.pending))
-	for key, actor := range state.pending {
-		pending[key] = actor
-	}
-	authors := actorSlice(pending)
+func settlementAuthors(state *roomState) (authorCapture, []model.Actor, model.Actor) {
+	capture := state.takeAuthors()
+	authors := actorSlice(capture.authors)
 	actor := model.Actor{}
 	if len(authors) > 0 {
 		actor = authors[0]
 	} else if state.lastActor != nil {
 		actor = *state.lastActor
 	}
-	return pending, authors, actor
+	return capture, authors, actor
 }
 
 func (s *Service) settleRoom(room string, generation uint64) {
@@ -1248,7 +1255,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		finishSlots()
 		return
 	}
-	pending, authors, eventActor := settlementAuthors(state)
+	capture, authors, eventActor := settlementAuthors(state)
 	state.mu.Unlock()
 	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, reconciled, eventActor)
 	if err != nil {
@@ -1306,9 +1313,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		// credited on this version, which lacks it, rather than on the version its own settlement
 		// writes. ygo runs the update observer that credits an edit after the edit's transaction
 		// releases the document, so an edit this tree holds that its observer has not yet credited
-		// is not credited here; its author stays pending for a later version.
+		// is not credited here. Its author's entry is credited after this take, so this version's
+		// commit leaves it pending, and so does the edit's own settlement, which writes no version:
+		// the next version, which holds the edit too, credits them (authors.go).
 		state.mu.Lock()
-		pending, authors, eventActor = settlementAuthors(state)
+		capture, authors, eventActor = settlementAuthors(state)
 		state.mu.Unlock()
 		if s.afterSettleVersionRead != nil {
 			s.afterSettleVersionRead(room)
@@ -1423,17 +1432,19 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		return
 	}
 	finishSlots()
-	// This release runs before the publish below, the order Ledger.Commit keeps for every other
-	// version write, so a subscriber acting on this version's artifact.version event acts after
-	// it. Publishing first would let that subscriber's write be credited to these authors again.
 	state.mu.Lock()
 	if state.gen == generation {
 		state.settleFailures = 0
-		for key := range pending {
-			delete(state.pending, key)
-		}
 	}
 	state.mu.Unlock()
+	// This release runs before the publish below, the order Ledger.Commit keeps for every other
+	// version write, so a subscriber acting on this version's artifact.version event acts after
+	// it. Publishing first would let that subscriber's write be credited to these authors again. A
+	// settlement that wrote no version releases nothing: the version it found can hold an edit
+	// whose author was credited only after that version took its authors (authors.go).
+	if versioning {
+		capture.release()
+	}
 	for _, event := range published {
 		s.events.Publish(event)
 	}
@@ -1887,10 +1898,9 @@ func (s *Service) issueOpen(ctx context.Context, q Queryer, artifactID string) (
 
 func (s *Service) room(name string) *roomState {
 	value, _ := s.rooms.LoadOrStore(name, &roomState{
-		connected:       make(map[uint64]model.Actor),
-		pending:         make(map[string]model.Actor),
-		pendingVersions: make(map[int]versionPending),
-		unrecorded:      make(map[pmdoc.MarkRef]time.Time),
+		connected:  make(map[uint64]model.Actor),
+		pending:    make(map[string]pendingAuthor),
+		unrecorded: make(map[pmdoc.MarkRef]time.Time),
 	})
 	return value.(*roomState)
 }
