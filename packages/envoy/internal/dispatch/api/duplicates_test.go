@@ -232,10 +232,9 @@ func TestCreateIssueOrdersDuplicateCandidates(t *testing.T) {
 	}
 }
 
-// duplicateQueryOnMain is the duplicate check main ran before migration 0069 stored each title's
-// lexemes, verbatim: every title's, the parent's included, built from its text on each creation, and
-// a headline query of every lexeme of the new title less the parent's.
-const duplicateQueryOnMain = `
+// duplicateQueryFromTitles parses every stored title and parent from their title text, rather than
+// the stored lexemes 0069 introduced.
+const duplicateQueryFromTitles = `
 with parent as (select coalesce((select title from issues where key = $3), '') as title),
 new_title as (
   select array(select unnest(tsvector_to_array(to_tsvector('english', search_text($2))))
@@ -263,14 +262,12 @@ select key, title, status, shared,
 `
 
 // The duplicate check reads every stored title's lexemes from issues.title_lexemes, which the issues
-// trigger writes on every insert and retitle, and answers what main's check answered when it built
-// them from the titles: the same candidates in the same order, with the same shared counts. Its
-// snippets are main's but for one change (duplicateQuery): with a parent, a word main marked only
-// because it is a part of a hyphenated word of the new title, and a word of the parent, is no
-// longer marked. The titles share words with each other and with their own keys (DUP-12's key
-// holds `dup` and `12`), repeat a stem, hold the parent's words, a hyphenated word, an underscore
-// run search_text breaks, accented letters, or only stop words, and some were retitled after they
-// were created.
+// trigger writes on every insert and retitle, and answers what the from-titles query answers:
+// the same candidates in the same order, with the same shared counts. Its snippets differ only when
+// a parent contains a word that is also a part of a hyphenated word of the new title. The titles
+// share words with each other and with their own keys (DUP-12's key holds `dup` and `12`), repeat a
+// stem, hold the parent's words, a hyphenated word, an underscore run search_text breaks, accented
+// letters, or only stop words, and some were retitled after they were created.
 func TestDuplicateCheckFromStoredLexemesMatchesTheCheckFromTitles(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
@@ -349,8 +346,8 @@ func TestDuplicateCheckFromStoredLexemesMatchesTheCheckFromTitles(t *testing.T) 
 	if err := database.Pool.QueryRow(ctx, `select title_lexemes from issues where key = 'DUP-1'`).Scan(&parentLexemes); err != nil {
 		t.Fatalf("read DUP-1's lexemes: %v", err)
 	}
-	// Beside the parent, main marked `dispatch`, a part of the probe's `dispatch-search` and a word of
-	// the parent's, in this candidate; the check marks the two words the titles share.
+	// Beside the parent, the from-titles query marked `dispatch`, a part of the probe's
+	// `dispatch-search` and a word of the parent's, in this candidate; the check marks shared words.
 	const hyphenProbe, hyphenCandidate = "dispatch-search launch window", "Launch window dispatch"
 	answered, full, parentMatters, pinned := 0, 0, false, false
 	for _, probe := range probes {
@@ -360,9 +357,9 @@ func TestDuplicateCheckFromStoredLexemesMatchesTheCheckFromTitles(t *testing.T) 
 			if err != nil {
 				t.Fatalf("duplicate check of %q under parent %q: %v", probe, parent, err)
 			}
-			want := duplicateCandidatesOnMain(t, ctx, database.Pool, probe, parent)
+			want := duplicateCandidatesFromTitles(t, ctx, database.Pool, probe, parent)
 			if len(got) != len(want) {
-				t.Errorf("%q under parent %q:\n stored lexemes %#v\n main           %#v", probe, parent, got, want)
+				t.Errorf("%q under parent %q:\n stored lexemes %#v\n from titles   %#v", probe, parent, got, want)
 				continue
 			}
 			for n := range want {
@@ -370,12 +367,12 @@ func TestDuplicateCheckFromStoredLexemesMatchesTheCheckFromTitles(t *testing.T) 
 					pinned = true
 					if got[n].Snippet != "<mark>Launch</mark> <mark>window</mark> dispatch" ||
 						want[n].Snippet != "<mark>Launch</mark> <mark>window</mark> <mark>dispatch</mark>" {
-						t.Errorf("%q under parent %q, %s: snippet %q, main's %q", probe, parent, want[n].Key, got[n].Snippet, want[n].Snippet)
+						t.Errorf("%q under parent %q, %s: snippet %q, from-titles %q", probe, parent, want[n].Key, got[n].Snippet, want[n].Snippet)
 					}
 				}
 				if got[n].Snippet != want[n].Snippet {
 					if parent == "" {
-						t.Errorf("%q, no parent, %s: snippet %q, main's %q", probe, want[n].Key, got[n].Snippet, want[n].Snippet)
+						t.Errorf("%q, no parent, %s: snippet %q, from-titles %q", probe, want[n].Key, got[n].Snippet, want[n].Snippet)
 					} else {
 						unmarkedPartsOfTheParent(t, ctx, database.Pool, parentLexemes, got[n].Snippet, want[n].Snippet)
 					}
@@ -383,7 +380,7 @@ func TestDuplicateCheckFromStoredLexemesMatchesTheCheckFromTitles(t *testing.T) 
 				got[n].Snippet, want[n].Snippet = "", ""
 			}
 			if !reflect.DeepEqual(got, want) {
-				t.Errorf("%q under parent %q:\n stored lexemes %#v\n main           %#v", probe, parent, got, want)
+				t.Errorf("%q under parent %q:\n stored lexemes %#v\n from titles   %#v", probe, parent, got, want)
 			}
 			if len(want) > 0 {
 				answered++
@@ -404,22 +401,22 @@ func TestDuplicateCheckFromStoredLexemesMatchesTheCheckFromTitles(t *testing.T) 
 	}
 }
 
-// unmarkedPartsOfTheParent fails t unless snippet is main's with some words unmarked, each of which
-// holds only the parent's lexemes: the one way duplicateQuery's headline differs from main's.
-func unmarkedPartsOfTheParent(t *testing.T, ctx context.Context, q queryer, parent []string, snippet, mains string) {
+// unmarkedPartsOfTheParent fails t unless snippet is the from-titles result with some words
+// unmarked, each of which holds only the parent's lexemes.
+func unmarkedPartsOfTheParent(t *testing.T, ctx context.Context, q queryer, parent []string, snippet, fromTitles string) {
 	t.Helper()
 	text, marked := snippetMarks(snippet)
-	mainText, mainMarked := snippetMarks(mains)
-	if text != mainText {
-		t.Errorf("snippet %q reads %q, main's %q reads %q", snippet, text, mains, mainText)
+	fromTitlesText, fromTitlesMarked := snippetMarks(fromTitles)
+	if text != fromTitlesText {
+		t.Errorf("snippet %q reads %q, from-titles %q reads %q", snippet, text, fromTitles, fromTitlesText)
 		return
 	}
 	for at, word := range marked {
-		if mainMarked[at] != word {
-			t.Errorf("snippet %q marks %q, which main's %q does not", snippet, word, mains)
+		if fromTitlesMarked[at] != word {
+			t.Errorf("snippet %q marks %q, which from-titles %q does not", snippet, word, fromTitles)
 		}
 	}
-	for at, word := range mainMarked {
+	for at, word := range fromTitlesMarked {
 		if marked[at] == word {
 			continue
 		}
@@ -428,7 +425,7 @@ func unmarkedPartsOfTheParent(t *testing.T, ctx context.Context, q queryer, pare
 			t.Fatalf("read the lexemes of %q: %v", word, err)
 		}
 		if !parents {
-			t.Errorf("snippet %q leaves %q unmarked, which main's %q marks and the parent's lexemes do not hold", snippet, word, mains)
+			t.Errorf("snippet %q leaves %q unmarked, which from-titles %q marks and the parent's lexemes do not hold", snippet, word, fromTitles)
 		}
 	}
 }
@@ -452,17 +449,17 @@ func snippetMarks(snippet string) (string, map[int]string) {
 	}
 }
 
-// duplicateCandidatesOnMain runs duplicateQueryOnMain and reads its rows as duplicateCandidates
-// reads the check's.
-func duplicateCandidatesOnMain(t *testing.T, ctx context.Context, q queryer, title, parentKey string) []model.DuplicateCandidate {
+// duplicateCandidatesFromTitles runs duplicateQueryFromTitles and reads its rows as
+// duplicateCandidates reads the check's.
+func duplicateCandidatesFromTitles(t *testing.T, ctx context.Context, q queryer, title, parentKey string) []model.DuplicateCandidate {
 	t.Helper()
-	rows, err := q.Query(ctx, duplicateQueryOnMain, "DUP", title, parentKey, duplicateHeadlineOptions)
+	rows, err := q.Query(ctx, duplicateQueryFromTitles, "DUP", title, parentKey, duplicateHeadlineOptions)
 	if err != nil {
-		t.Fatalf("main's duplicate check of %q: %v", title, err)
+		t.Fatalf("from-titles duplicate check of %q: %v", title, err)
 	}
 	candidates, err := scanDuplicateCandidates(rows)
 	if err != nil {
-		t.Fatalf("read main's duplicate check of %q: %v", title, err)
+		t.Fatalf("read from-titles duplicate check of %q: %v", title, err)
 	}
 	return candidates
 }

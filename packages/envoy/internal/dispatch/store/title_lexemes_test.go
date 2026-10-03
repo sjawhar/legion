@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store/searchtest"
 )
@@ -135,7 +134,7 @@ func TestMigrate0070WaitsForAReparentWithoutDeadlockingIt(t *testing.T) {
 
 	migrated := make(chan error, 1)
 	go func() { migrated <- store.Migrate(ctx) }()
-	waitForSessionBlockedBy(t, store, reparent.Conn().PgConn().PID())
+	waitForQueuedLock(t, store, "issues", "ExclusiveLock")
 	if err := lock("CORE-9"); err != nil {
 		t.Fatalf("lock CORE-9 while 0070 waited for the reparent: %v", err)
 	}
@@ -147,29 +146,6 @@ func TestMigrate0070WaitsForAReparentWithoutDeadlockingIt(t *testing.T) {
 	}
 	if err := <-migrated; err != nil {
 		t.Fatalf("0070 failed while a reparent held an issue's row: %v", err)
-	}
-}
-
-// waitForSessionBlockedBy waits until some session waits for a lock pid holds. It fails t after
-// 20 s.
-func waitForSessionBlockedBy(t *testing.T, store *Store, pid uint32) {
-	t.Helper()
-	ctx := context.Background()
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		var blocked bool
-		if err := store.Pool.QueryRow(ctx, `
-			select exists(select 1 from pg_stat_activity where $1 = any(pg_blocking_pids(pid)))
-		`, int32(pid)).Scan(&blocked); err != nil {
-			t.Fatalf("read pg_stat_activity: %v", err)
-		}
-		if blocked {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("no session was seen waiting for backend %d", pid)
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 
