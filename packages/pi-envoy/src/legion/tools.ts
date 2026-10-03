@@ -1,8 +1,8 @@
 import {
-  LEGION_GO_WORKFLOW_PHASES,
-  LegionGoGateRegisterRequest,
-  type LegionGoState,
-} from "@legion/contracts/legion-go-api";
+  LEGION_WORKFLOW_PHASES,
+  LegionGateRegisterRequest,
+  type LegionState,
+} from "@legion/contracts/legion-api";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
 import { toolFailure, toolSuccess } from "../tool-result";
 import type { LegionDaemonClient } from "./daemon-client";
@@ -79,7 +79,7 @@ function toolSchema(pi: PiApi): unknown {
       .optional(),
     version: z.number().optional(),
     issues: z.array(z.string()).optional(),
-    to: z.enum(LEGION_GO_WORKFLOW_PHASES).optional(),
+    to: z.enum(LEGION_WORKFLOW_PHASES).optional(),
     reason: z.string().optional(),
     decision: z.enum(["retry", "escalate"]).optional(),
     ...handoffSchemaFields(z),
@@ -118,7 +118,7 @@ async function grantFor(daemon: LegionDaemonClient, session: LegionToolSession):
   ).grantId;
 }
 
-function recordFrom(state: LegionGoState, issue: string): Readonly<Record<string, unknown>> {
+function recordFrom(state: LegionState, issue: string): Readonly<Record<string, unknown>> {
   const record = state.issues[issue];
   if (record === undefined) throw new Error(`The daemon has no record for ${issue}`);
   return record;
@@ -195,7 +195,7 @@ export function createLegionTool(deps: {
             // references the Dispatch tools accept, is looked up first, so the architect's first
             // call names the document however it knows it.
             const reference = requiredString(parameters, operation, "artifactId");
-            const isId = LegionGoGateRegisterRequest.shape.artifactId.safeParse(reference).success;
+            const isId = LegionGateRegisterRequest.shape.artifactId.safeParse(reference).success;
             const artifactId = isId ? reference : await resolveDocument(issue, reference);
             const grantId = await grantFor(client, active);
             await client.gateRegister({ grantId, issue, artifactId, version });
@@ -217,7 +217,7 @@ export function createLegionTool(deps: {
                 parameters,
                 operation,
                 "to"
-              ) as (typeof LEGION_GO_WORKFLOW_PHASES)[number],
+              ) as (typeof LEGION_WORKFLOW_PHASES)[number],
               reason: requiredString(parameters, operation, "reason"),
             });
             return jsonSuccess({});

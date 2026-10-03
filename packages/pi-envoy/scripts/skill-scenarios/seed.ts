@@ -90,8 +90,8 @@ if (command === "project") {
       content: [
         "| issue | proposed components | why |",
         "| --- | --- | --- |",
-        "| Go refactor: state store | daemon-go | changes the coordinator's store |",
-        "| Go refactor: pod runtime | daemon-go, worker-image | changes the sandbox runtime |",
+        "| Go refactor: state store | daemon | changes the coordinator's store |",
+        "| Go refactor: pod runtime | daemon, worker-image | changes the sandbox runtime |",
         "| Roadmap: hiring pipeline | none (not architectural) | hiring process work |",
         "| Roadmap: search ranking | dispatch-server | changes search |",
       ].join("\n"),
