@@ -18,8 +18,8 @@ var (
 	ErrNotMember = errors.New("not a member of the group that may use Dispatch")
 )
 
-// emailShape is an address with one @ and a dotted domain, the shape agent-c's identity_email
-// accepts from a federated username.
+// emailShape is an address with one @ and a dotted domain, the shape the deployment repository's
+// identity_email accepts from a federated username.
 var emailShape = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 
 // Person names the person a verified sign-in pool ID token signs in, and checks they may use
