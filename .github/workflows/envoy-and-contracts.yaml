@@ -27,11 +27,15 @@ on:
       - ".omp-pin"
       - ".github/actions/install-omp/**"
       # The envoy-smoke job builds packages/envoy/docker/Dockerfile, so this list owes every
-      # file that build reads: the three below are the ones the entries above do not already
+      # file that build reads: the six below are the ones the entries above do not already
       # cover. .github/scripts/check-image-trigger-paths.sh fails the build when one is missing.
+      # The notices scripts also write what the packed plugins and binaries below ship.
       - ".github/workflows/envoy-and-contracts.yaml"
       - ".dockerignore"
       - "docs/site/package.json"
+      - "scripts/third-party-notices.ts"
+      - "scripts/go-third-party-notices.sh"
+      - "scripts/assemble-third-party-notices.sh"
   pull_request:
     paths:
       - "packages/envoy/**"
@@ -53,10 +57,13 @@ on:
       - "go.work.sum"
       - ".omp-pin"
       - ".github/actions/install-omp/**"
-      # Same three the push list owes, for the same build.
+      # Same six the push list owes, for the same build.
       - ".github/workflows/envoy-and-contracts.yaml"
       - ".dockerignore"
       - "docs/site/package.json"
+      - "scripts/third-party-notices.ts"
+      - "scripts/go-third-party-notices.sh"
+      - "scripts/assemble-third-party-notices.sh"
   merge_group:
     types: [checks_requested]
 
@@ -102,6 +109,8 @@ jobs:
               # Its bun run gen:go step imports contracts' zod schemas.
               - 'package.json'
               - 'bun.lock'
+              # Its pack step writes each archive's notices.
+              - 'scripts/go-third-party-notices.sh'
             # Every file packages/envoy/docker/Dockerfile builds from, so the envoy-smoke job
             # runs whenever the image it smokes changes. `envoy` is deliberately not widened to
             # this: that would run the whole Go suite on every Dispatch pull request.
@@ -130,6 +139,9 @@ jobs:
               - 'go.work.sum'
               - 'packages/daemon/go.mod'
               - 'packages/daemon/go.sum'
+              - 'scripts/third-party-notices.ts'
+              - 'scripts/go-third-party-notices.sh'
+              - 'scripts/assemble-third-party-notices.sh'
             # The local acceptance run drives the Go listener and renders every frame with the
             # shared TypeScript renderer, so a change to either side, or to the contracts both
             # read, must run it.
@@ -147,18 +159,24 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              # Its pack step writes dist/THIRD_PARTY_NOTICES.
+              - 'scripts/third-party-notices.ts'
             claude_plugin:
               - 'packages/claude-envoy/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              # check-dist rebuilds the committed dist/THIRD_PARTY_NOTICES.
+              - 'scripts/third-party-notices.ts'
             pi_envoy:
               - 'packages/pi-envoy/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              # Its pack step writes dist/THIRD_PARTY_NOTICES.
+              - 'scripts/third-party-notices.ts'
               # The skills pi-envoy ships, which src/skills-guard.test.ts checks.
               - 'skills/**'
               # The Oh My Pi pin the real-binary tests run (extensions/legion-phase-stall-omp.test.ts,
@@ -183,6 +201,8 @@ jobs:
               - 'patches/**'
               - 'package.json'
               - 'bun.lock'
+              # The SPA build writes dist/THIRD_PARTY_NOTICES.txt.
+              - 'scripts/third-party-notices.ts'
 
   contracts:
     needs: changes
@@ -222,8 +242,12 @@ jobs:
       - name: Test envoy plugin
         run: bun run test
         working-directory: packages/envoy-plugin
+      # prepack.sh writes dist/THIRD_PARTY_NOTICES, failing the pack on a bundled package whose
+      # license cannot be determined; the listing shows the tarball ships it.
       - name: Pack envoy plugin
-        run: bun pm pack --destination ../../out/pr-artifacts
+        run: |
+          bun pm pack --destination ../../out/pr-artifacts
+          tar tzf ../../out/pr-artifacts/*.tgz | grep -x package/dist/THIRD_PARTY_NOTICES
         working-directory: packages/envoy-plugin
       - uses: actions/upload-artifact@v4
         with:
@@ -292,6 +316,20 @@ jobs:
       - name: Build pi-envoy
         run: bun run build
         working-directory: packages/pi-envoy
+      # The release's pack (release.yaml's pi_envoy job): the manifest pointed at the bundles, then
+      # prepack.sh, which writes dist/THIRD_PARTY_NOTICES and fails the pack on a bundled package
+      # whose license cannot be determined; the listing shows the tarball ships it.
+      - name: Pack pi-envoy
+        run: |
+          jq '.omp.extensions = ["dist/envoy.js","dist/legion.js"]' package.json > "$RUNNER_TEMP/package.json"
+          mv "$RUNNER_TEMP/package.json" package.json
+          bun pm pack --destination ../../out/pr-artifacts
+          tar tzf ../../out/pr-artifacts/*.tgz | grep -x package/dist/THIRD_PARTY_NOTICES
+        working-directory: packages/pi-envoy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pi-legion-envoy-pr
+          path: out/pr-artifacts/*.tgz
 
   dispatch:
     needs: changes
@@ -335,8 +373,12 @@ jobs:
       - name: Test dispatch dashboard
         run: bun run test
         working-directory: packages/dispatch
+      # The build writes dist/THIRD_PARTY_NOTICES.txt, failing on a bundled package whose license
+      # cannot be determined; the listing shows the build shipped it.
       - name: Build dispatch dashboard
-        run: bun run build:web
+        run: |
+          bun run build:web
+          ls -l web/dist/THIRD_PARTY_NOTICES.txt
         working-directory: packages/dispatch
       - name: Check dispatch dashboard CSS classes
         run: bun run check:classes
@@ -466,14 +508,17 @@ jobs:
       - name: Build envoy services
         run: go build ./cmd/dispatch ./cmd/listener
         working-directory: packages/envoy
+      # The release's archives (release-envoy-listener.yaml), THIRD_PARTY_NOTICES included.
       - name: Pack envoy binaries
         run: |
-          mkdir -p ../../out/pr-artifacts/envoy-amd64
-          GOOS=linux GOARCH=amd64 go build -buildvcs=false -o ../../out/pr-artifacts/envoy-amd64/envoy-listener ./cmd/listener
-          tar czf ../../out/pr-artifacts/legion-envoy-amd64.tar.gz -C ../../out/pr-artifacts/envoy-amd64 envoy-listener
-          mkdir -p ../../out/pr-artifacts/envoy-arm64
-          GOOS=linux GOARCH=arm64 go build -buildvcs=false -o ../../out/pr-artifacts/envoy-arm64/envoy-listener ./cmd/listener
-          tar czf ../../out/pr-artifacts/legion-envoy-arm64.tar.gz -C ../../out/pr-artifacts/envoy-arm64 envoy-listener
+          for arch in amd64 arm64; do
+            out="../../out/pr-artifacts/envoy-$arch"
+            mkdir -p "$out"
+            GOOS=linux GOARCH=$arch go build -buildvcs=false -o "$out/envoy-listener" ./cmd/listener
+            GOOS=linux GOARCH=$arch ../../scripts/go-third-party-notices.sh "$out/THIRD_PARTY_NOTICES" ./cmd/listener
+            tar czf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz" -C "$out" envoy-listener THIRD_PARTY_NOTICES
+            tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
+          done
         working-directory: packages/envoy
       - uses: actions/upload-artifact@v4
         with:
@@ -546,6 +591,12 @@ jobs:
           file: packages/envoy/docker/Dockerfile
           load: true
           tags: ${{ env.ENVOY_SMOKE_IMAGE }}
+      # The image's notices (packages/envoy/docker/Dockerfile): the build fails when a license cannot
+      # be determined, and the listing shows the image ships both files.
+      - name: List the image's third-party notices
+        run: >-
+          docker run --rm --entrypoint ls "$ENVOY_SMOKE_IMAGE" -l
+          /usr/share/doc/legion/THIRD_PARTY_NOTICES /srv/dispatch-web/THIRD_PARTY_NOTICES.txt
       # 5m bounds only what the test does: pull NATS, start both containers behind the test's
       # own 60 s health wait, and assert. This job has measured 1.82 s, 3.16 s and 1.88 s (the
       # last in run 36508580490), and 2.2–20.7 s across four runs on a devbox at load average
