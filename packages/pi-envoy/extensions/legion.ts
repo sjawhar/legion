@@ -1,49 +1,21 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { GrantResponse, LegionRole } from "@legion/contracts";
-import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import type { GrantResponse } from "@legion/contracts";
 import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { messageFor } from "@legion/envoy-client/errors";
-import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
 import { logger } from "@oh-my-pi/pi-utils";
-import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
-import pkg from "../package.json";
 import { matchInjectedUserTurn } from "../src/dispatch-user-turn";
+import { createClaimSession } from "../src/legion/claim-session";
 import {
   classifySession,
-  generation,
   type LegionSessionKind,
   requiredEnvironment,
-  requiredSecret,
 } from "../src/legion/classify";
-import {
-  handleLegionControlDirective,
-  type LegionControlDirective,
-  parseControlDirective,
-} from "../src/legion/control";
-import {
-  createControllerSession,
-  typescriptControllerDaemon,
-} from "../src/legion/controller-session";
-import {
-  createLegionDaemonClient,
-  LegionDaemonApiError,
-  type LegionDaemonClient,
-} from "../src/legion/daemon-client";
-import {
-  bootstrapGoClaim,
-  type GoClaimCapability,
-  goControllerDaemon,
-} from "../src/legion/go-bootstrap";
-import {
-  createLegionGoDaemonClient,
-  type LegionGoDaemonClient,
-} from "../src/legion/go-daemon-client";
-import { createGoLegionTool } from "../src/legion/go-tools";
+import { createControllerSession } from "../src/legion/controller-session";
+import { createLegionDaemonClient, type LegionDaemonClient } from "../src/legion/daemon-client";
 import { writeMintedGrant } from "../src/legion/grant-file";
-import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
 import {
   assistantText,
   inboundKind,
@@ -53,11 +25,6 @@ import {
   restorePhaseStall,
   stepPhaseStall,
 } from "../src/legion/phase-stall";
-import {
-  claimEnvoyRole,
-  onEnvoyRoleRegained,
-  type RoleRegainReason,
-} from "../src/legion/role-claim-bridge";
 import { applySessionTitle, legionSessionTitle } from "../src/legion/session-title";
 import { createLegionTool } from "../src/legion/tools";
 import type {
@@ -67,19 +34,7 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
 } from "../src/pi-types";
-import { recordBootstrappedSession, subagentSessionCheck } from "../src/subagent-session";
-
-interface LegionCapability {
-  readonly kind: "root-architect" | "phase-worker";
-  readonly sessionID: string;
-  readonly tree: string;
-  readonly issue: string;
-  readonly role: LegionRole;
-  readonly roleToken: string;
-  readonly secret: string;
-}
-
-type SessionCapability = LegionCapability | GoClaimCapability;
+import { subagentSessionCheck } from "../src/subagent-session";
 
 // Fatal bootstrap failures call this instead of `process.exit` directly, so a
 // test can substitute a throwing stand-in without killing the test runner.
@@ -88,79 +43,6 @@ let exitProcess: (code: number) => never = (code) => process.exit(code) as never
 export function setLegionBootstrapExitForTests(hook: (code: number) => never): void {
   exitProcess = hook;
 }
-
-/** The daemon's answer at `/process/started` or `/worker/started`: every response failure is
- * written to stderr with its route, status, and response body so an operator can inspect a pod's
- * `kubectl logs` instead of waiting for the watchdog. A 4xx cannot succeed on retry, so the
- * process exits and lets the daemon count its launch failure; 5xx and transport errors remain
- * propagated for the existing daemon retry path. */
-function exitOnRegistrationRefusal(
-  route: "process/started" | "worker/started",
-  error: unknown
-): never {
-  if (error instanceof LegionDaemonApiError) {
-    console.error(`[legion] ${route} registration failed (${error.status}): ${error.responseBody}`);
-    if (error.status >= 400 && error.status < 500) exitProcess(1);
-  }
-  throw error;
-}
-
-// Bounds retries of the transient `/process/ready` and `/worker/ready` bootstrap requests.
-const READY_RETRY_ATTEMPTS = 3;
-const READY_RETRY_DELAY_MS = 1_000;
-
-function isNetworkOrTimeoutError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  if (error.name === "NetworkError" || error.name === "TimeoutError") return true;
-
-  const code = "code" in error && typeof error.code === "string" ? error.code : undefined;
-  return (
-    code === "ConnectionRefused" ||
-    code === "ConnectionTimeout" ||
-    code === "EAI_AGAIN" ||
-    code === "ECONNREFUSED" ||
-    code === "ECONNRESET" ||
-    code === "EHOSTUNREACH" ||
-    code === "ENETUNREACH" ||
-    code === "ENOTFOUND" ||
-    code === "ETIMEDOUT" ||
-    (error instanceof TypeError &&
-      (error.message === "Failed to fetch" || error.message === "fetch failed"))
-  );
-}
-
-/**
- * Calls a role's `/process/ready` or `/worker/ready` daemon request. The daemon acknowledges
- * this request before dialing back into this process's shim socket, so retry only errors that can
- * resolve on their own: daemon 5xx responses and network or timeout failures, up to a bounded
- * number of attempts. A definitive 4xx (401/403 or any other) propagates immediately, and an
- * exhausted retry budget propagates too -- both reach the enclosing bootstrap catch, which exits
- * the process so the daemon respawns a fresh attempt.
- */
-const callReadyWithRetry = async (label: string, call: () => Promise<void>): Promise<void> => {
-  for (let attempt = 1; attempt <= READY_RETRY_ATTEMPTS; attempt++) {
-    try {
-      await call();
-      return;
-    } catch (error) {
-      const retryable =
-        error instanceof LegionDaemonApiError
-          ? error.status >= 500 && error.status < 600
-          : isNetworkOrTimeoutError(error);
-      if (!retryable) throw error;
-      if (attempt === READY_RETRY_ATTEMPTS) {
-        console.error(`[legion] ${label} failed after ${attempt} attempts: ${messageFor(error)}`);
-        throw error;
-      }
-      console.error(
-        `[legion] ${label} failed (attempt ${attempt}/${READY_RETRY_ATTEMPTS}), retrying: ${messageFor(error)}`
-      );
-      const retryDelay = Promise.withResolvers<void>();
-      setTimeout(retryDelay.resolve, READY_RETRY_DELAY_MS);
-      await retryDelay.promise;
-    }
-  }
-};
 
 /** A `pr://` or `issue://` URL anywhere Oh My Pi's path pipeline finds one: alone, inside one pair
  * of outer double quotes (which it strips), or as one entry of a list split on `;`, `,`, or
@@ -369,8 +251,7 @@ const JJ_LOG_REWRITE: PaneRule = {
 // A worker completes its phase with the `legion` tool's `handoff_complete`
 // (src/legion/handoff-actions.ts), and the phase stall (src/legion/phase-stall.ts) closes only on
 // that call: the same command run from the pane's shell would complete the phase where the stall
-// cannot see it, draw a follow-up asking the worker to complete again, and on the TypeScript
-// daemon's no-holder path could hand the architect the same completion twice. Only `complete` is
+// cannot see it and draw a follow-up asking the worker to complete again. Only `complete` is
 // refused: `legion handoff write` and `read` from the shell leave no phase open, and the shell can
 // pipe a handoff too large for one argv string to `legion handoff write` on stdin. `legion`,
 // `handoff` and `complete` separated only by whitespace, quotes, and argv-list punctuation, so
@@ -457,11 +338,10 @@ function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): s
   return undefined;
 }
 
-// Read by the daemon's startup probe (packages/daemon/src/daemon/index.ts,
-// verifyLegionPluginLoaded) to prove this extension actually loaded from an
-// ambient installed-plugin discovery -- not just that a manifest file exists,
-// which stays true even when the plugin is disabled or unregistered in OMP's
-// own plugin registry.
+// Read by the daemon's boot gate (packages/daemon-go/internal/daemon/bootgate.go) to prove this
+// extension actually loaded from an ambient installed-plugin discovery -- not just that a
+// manifest file exists, which stays true even when the plugin is disabled or unregistered in
+// OMP's own plugin registry.
 const LEGION_LOADED_MARKER = Symbol.for("legion.pi-envoy.legion-loaded");
 
 /** Code-mutation tools blocked for an architect session (root or sub-architect) and a reviewer
@@ -490,16 +370,6 @@ export default function legionExtension(pi: PiApi): void {
   const instance = randomUUID().slice(0, 8);
   logger.debug("extension instance loaded", { extension: import.meta.url, instance });
   (globalThis as Record<symbol, unknown>)[LEGION_LOADED_MARKER] = import.meta.url;
-  const defaults = envoyDefaultsFromEnvironment(process.env);
-  let controlConnection: NatsConnection | undefined;
-  let controlSubscription: Subscription | undefined;
-  const controlCodec = StringCodec();
-
-  // A Legion root or phase-worker session boots as its own OMP process and
-  // holds exactly one role for its whole lifetime, so its identity lives in
-  // plain closure state.
-  let capability: SessionCapability | undefined;
-  let bootstrap: Promise<void> | undefined;
 
   // Gates session_start, tool_call and the session-change re-claim below, one call per hook; its
   // settled answer is kept, so it runs once per session, not once per tool call.
@@ -510,16 +380,15 @@ export default function legionExtension(pi: PiApi): void {
   let paneRules: readonly PaneRule[] | undefined;
 
   // The phase-stall check (src/legion/phase-stall.ts). It runs only in a session holding a
-  // phase-worker capability for its own id with a phase role, so never in an architect (a root,
-  // and a sub-architect, which boots as a phase worker with role architect), the controller (whose
-  // claim lives in controllerSession), a session with no Legion environment, or a `task` subagent
-  // (whose instance returns at checkSubagentSession before any capability exists). Restored from
-  // the transcript at session_start and appended to it on every change.
+  // claim for its own id with a phase role, so never in an architect (a root or a sub-architect),
+  // the controller (whose claim lives in controllerSession), a session with no Legion environment,
+  // or a `task` subagent (whose instance returns at checkSubagentSession before any capability
+  // exists). Restored from the transcript at session_start and appended to it on every change.
   let phaseStall: PhaseStall = "closed";
-  const phaseWorkerSession = (context: SessionContext): boolean =>
-    capability !== undefined &&
-    capability.sessionID === context.sessionManager.getSessionId() &&
-    capability.role !== "architect";
+  const phaseWorkerSession = (context: SessionContext): boolean => {
+    const role = claimSession.capability(context.sessionManager.getSessionId())?.role;
+    return role !== undefined && role !== "architect";
+  };
   const advancePhaseStall = (input: PhaseStallInput): string | undefined => {
     const step = stepPhaseStall(phaseStall, input);
     if (step.state !== phaseStall) {
@@ -529,348 +398,24 @@ export default function legionExtension(pi: PiApi): void {
     return step.followUp;
   };
 
-  // One client for the session's whole life: its recovery record (the newest recovered secret
-  // and the recovery in flight) is what lets two requests refused together share one
-  // /worker-session round trip instead of racing each other's secret (LEGION-73). Every
-  // capability-bearing call — the legion tool, the bash grant hook, process/ready re-runs, the
-  // exit report — goes through this same instance.
   let daemonClient: LegionDaemonClient | undefined;
   const roleDaemon = (): LegionDaemonClient => {
     daemonClient ??= createLegionDaemonClient(
-      requiredEnvironment(process.env, "LEGION_DAEMON_URL"),
-      fetch,
-      {
-        recoveryToken: (sessionId) => {
-          // A worker's boot token (read again from `LEGION_BOOT_TOKEN_FILE` here — the daemon keeps
-          // that file for as long as the pane's locator lives) is its recovery token exactly like
-          // the root's: it is single-use to redeem the initial capability, but the daemon accepts it
-          // again on /worker-session to reissue a secret it has since forgotten (e.g. after a daemon
-          // restart).
-          if (capability !== undefined && sessionId === capability.sessionID) {
-            return requiredSecret(process.env, "LEGION_BOOT_TOKEN");
-          }
-          throw new Error(`Legion session ${sessionId} has no persisted recovery token`);
-        },
-        onRecovered: (sessionId, recovered) => {
-          if (capability === undefined || sessionId !== capability.sessionID) {
-            throw new Error(`Legion session ${sessionId} has no persisted recovery token`);
-          }
-          if (
-            recovered.tree !== capability.tree ||
-            recovered.issue !== capability.issue ||
-            recovered.role !== capability.role
-          ) {
-            throw new Error("Daemon recovered a capability for a different Legion role");
-          }
-          capability = { ...capability, secret: recovered.secret };
-        },
-      }
+      requiredEnvironment(process.env, "LEGION_DAEMON_URL")
     );
     return daemonClient;
   };
 
-  let goDaemonClient: LegionGoDaemonClient | undefined;
-  const goRoleDaemon = (): LegionGoDaemonClient => {
-    goDaemonClient ??= createLegionGoDaemonClient(
-      requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-    );
-    return goDaemonClient;
-  };
-
-  /**
-   * Re-runs a role's daemon ready call after the Envoy heartbeat re-established this session as
-   * the role's live holder (`reassertRole` in envoy.ts). Whatever the daemon published to the
-   * role meanwhile got a 404 "no holder", and recovery differs by kind:
-   *  - controller: the daemon queued each notice in `controllerPendingNotices` and only
-   *    `/controller/ready` drains them (and forces a resync) -- the same call the boot handshake
-   *    and `/legion-claim-controller` make, so re-run it (index.ts `onControllerReady`).
-   *  - root architect: the daemon's no-holder recovery (`onUndeliverable` -> `resumeWorker`) is
-   *    a no-op for the root's claim (no worker locator to resume), so nothing replays the missed
-   *    wake; `/process/ready` re-emits the overseer catch-up (`onTreeReady`), so re-run it. A
-   *    stale generation 409s, which `callReadyWithRetry` propagates without retrying.
-   *  - phase worker (sub-architect included): `resumeWorker` -> `spawnWorker` already prompts or
-   *    queues a state-derived catch-up on the live worker's own socket, and `/worker/ready` is a
-   *    no-op once the boot is confirmed. No listener is registered for it.
-   * The listener is registered only by the two paths that establish an identity
-   * (`controllerSession.claim`, `bootstrapRoot`), never at extension setup: OMP binds every
-   * factory again for each in-process `task` subagent, and an identity-less instance writing the
-   * bridge's single slot would replace the holder's listener. Never throws: after a definitive
-   * 4xx or an exhausted retry budget the daemon's held work stays undelivered until the listener
-   * loses the claim again or the process boots afresh.
-   */
-  const rerunReadyAfterRegain = async (
-    endpoint: "controller/ready" | "process/ready",
-    role: string,
-    reason: RoleRegainReason,
-    call: () => Promise<void>
-  ): Promise<void> => {
-    try {
-      await callReadyWithRetry(`${endpoint} after role regain`, call);
-      console.error(`[legion] re-ran ${endpoint} after role ${role} was ${reason}`);
-    } catch (error) {
-      console.error(
-        `[legion] ${endpoint} after role ${role} was ${reason} failed; the daemon's held work stays undelivered until the next regain or boot: ${messageFor(error)}`
-      );
-    }
-  };
-
-  const typescriptController = typescriptControllerDaemon(rerunReadyAfterRegain, pkg.version);
-  const goController = goControllerDaemon(goRoleDaemon, persistedTranscript);
-  const controllerSession = createControllerSession(
-    async (context) => {
-      const persisted = await persistedTranscript(context);
-      // The daemon pane's own transcript, which persistedTranscript has just put on disk: record it
-      // so the controller's own `task` subagents are recognised even when the transcript is not a
-      // file on disk. A hand-started takeover never reaches here.
-      recordBootstrappedSession(persisted.sessionFile);
-      return persisted;
-    },
-    () => (process.env.LEGION_DAEMON_API === "go" ? goController : typescriptController)
-  );
-
-  const reclaimArchitect = async (): Promise<void> => {
-    if (capability === undefined || capability.kind !== "root-architect") {
-      throw new Error("Legion root architect is not available for reclamation");
-    }
-    await claimEnvoyRole(capability.sessionID, capability.roleToken);
-  };
-
-  const startControlSubscription = async (sessionID: string): Promise<void> => {
-    const subject = process.env.LEGION_CONTROL_SUBJECT;
-    if (!subject || controlSubscription) return;
-    if (defaults.natsUrls.length === 0) {
-      throw new Error("ENVOY_NATS_URL is required for Legion control directives");
-    }
-    const connection = await connect({
-      servers: [...defaults.natsUrls],
-      name: `legion-control-${sessionID}`,
-      ...natsAuthOptions(process.env),
-      reconnect: true,
-      maxReconnectAttempts: -1,
-      reconnectTimeWait: 2_000,
-    });
-    const subscription = connection.subscribe(subject);
-    controlConnection = connection;
-    controlSubscription = subscription;
-    void (async () => {
-      for await (const message of subscription) {
-        const reply = message.reply;
-        let directive: LegionControlDirective;
-        try {
-          directive = parseControlDirective(controlCodec.decode(message.data));
-        } catch (error) {
-          if (reply) {
-            connection.publish(
-              reply,
-              controlCodec.encode(
-                JSON.stringify({
-                  type: "nack",
-                  error: messageFor(error),
-                })
-              )
-            );
-          }
-          continue;
-        }
-        await handleLegionControlDirective(directive, {
-          reclaimArchitect,
-          acknowledge: () => {
-            if (reply)
-              connection.publish(reply, controlCodec.encode(JSON.stringify({ type: "ack" })));
-          },
-          reject: (error) => {
-            if (reply)
-              connection.publish(
-                reply,
-                controlCodec.encode(JSON.stringify({ type: "nack", error }))
-              );
-          },
-        });
-      }
-    })();
-  };
-
-  const bootstrapRoot = async (context: SessionContext, tree: string): Promise<void> => {
-    const sessionID = context.sessionManager.getSessionId();
-    if (capability !== undefined && capability.sessionID !== sessionID) return;
-    if (bootstrap) return bootstrap;
-
-    const bootToken = requiredSecret(process.env, "LEGION_BOOT_TOKEN");
-
-    bootstrap = (async () => {
-      const { sessionFile, agentId } = await persistedTranscript(context);
-      recordBootstrappedSession(sessionFile);
-
-      const started = await (async () => {
-        try {
-          return await createLegionDaemonClient(
-            requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-          ).processStarted({
-            tree,
-            generation: generation(process.env),
-            bootToken,
-            rootSessionId: sessionID,
-            agentId,
-            ompSessionFile: sessionFile,
-            pluginVersion: pkg.version,
-          });
-        } catch (error) {
-          exitOnRegistrationRefusal("process/started", error);
-        }
-      })();
-      const roleToken = started.roleTokens.architect;
-      if (!roleToken) throw new Error("Legion daemon did not return an architect role token");
-
-      try {
-        await exportJjSessionAttribution(
-          sessionFile,
-          requiredEnvironment(process.env, "LEGION_STATE_DIR")
-        );
-        capability = {
-          kind: "root-architect",
-          sessionID,
-          tree,
-          issue: tree,
-          role: "architect",
-          roleToken,
-          secret: started.secret,
-        };
-        await claimEnvoyRole(sessionID, roleToken, context);
-        await startControlSubscription(sessionID);
-        await callReadyWithRetry("root process/ready", () =>
-          roleDaemon().processReady({
-            tree,
-            sessionId: sessionID,
-            secret: started.secret,
-            generation: generation(process.env),
-          })
-        );
-        onEnvoyRoleRegained(async (role, reason) => {
-          if (role !== roleToken || capability === undefined) return;
-          // Read live: `roleDaemon()`'s recovery may have swapped in a reissued secret since boot.
-          const { secret } = capability;
-          await rerunReadyAfterRegain("process/ready", role, reason, () =>
-            roleDaemon().processReady({
-              tree,
-              sessionId: sessionID,
-              secret,
-              generation: generation(process.env),
-            })
-          );
-        });
-        registerLegionTool();
-        await activateLegionTool();
-      } catch (error) {
-        if (
-          error instanceof LegionDaemonApiError &&
-          (error.status === 401 || error.status === 403)
-        ) {
-          console.error(
-            `[legion] root bootstrap authorization failed after process/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
-          );
-        } else {
-          console.error(
-            `[legion] root bootstrap failed after process/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
-          );
-        }
-        exitProcess(1);
-      }
-    })();
-    try {
-      await bootstrap;
-    } catch (error) {
-      bootstrap = undefined;
-      throw error;
-    }
-  };
-
-  const bootstrapWorker = async (
-    context: SessionContext,
-    role: LegionRole,
-    tree: string,
-    issue: string
-  ): Promise<void> => {
-    const sessionID = context.sessionManager.getSessionId();
-    if (capability !== undefined && capability.sessionID !== sessionID) return;
-    if (bootstrap) return bootstrap;
-
-    const bootToken = requiredSecret(process.env, "LEGION_BOOT_TOKEN");
-
-    bootstrap = (async () => {
-      const { sessionFile, agentId } = await persistedTranscript(context);
-      recordBootstrappedSession(sessionFile);
-
-      const started = await (async () => {
-        try {
-          return await createLegionDaemonClient(
-            requiredEnvironment(process.env, "LEGION_DAEMON_URL")
-          ).workerStarted({
-            tree,
-            issue,
-            role,
-            bootToken,
-            sessionId: sessionID,
-            agentId,
-            ompSessionFile: sessionFile,
-            pluginVersion: pkg.version,
-          });
-        } catch (error) {
-          exitOnRegistrationRefusal("worker/started", error);
-        }
-      })();
-
-      try {
-        await exportJjSessionAttribution(
-          sessionFile,
-          requiredEnvironment(process.env, "LEGION_STATE_DIR")
-        );
-        capability = {
-          kind: "phase-worker",
-          sessionID,
-          tree,
-          issue,
-          role,
-          roleToken: started.roleToken,
-          secret: started.secret,
-        };
-        await claimEnvoyRole(sessionID, started.roleToken, context);
-        // Every worker gets the tool: a phase worker its handoff actions, a sub-architect those and
-        // the architect operations.
-        registerLegionTool();
-        await activateLegionTool();
-        await callReadyWithRetry("worker/ready", () =>
-          roleDaemon().workerReady({
-            tree,
-            issue,
-            role,
-            sessionId: sessionID,
-            secret: started.secret,
-            generation: generation(process.env),
-          })
-        );
-      } catch (error) {
-        if (
-          error instanceof LegionDaemonApiError &&
-          (error.status === 401 || error.status === 403)
-        ) {
-          console.error(
-            `[legion] worker bootstrap authorization failed after worker/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
-          );
-        } else {
-          console.error(
-            `[legion] worker bootstrap failed after worker/started registered a role; exiting so the daemon respawns a fresh attempt: ${messageFor(error)}`
-          );
-        }
-        exitProcess(1);
-      }
-    })();
-    try {
-      await bootstrap;
-    } catch (error) {
-      bootstrap = undefined;
-      throw error;
-    }
-  };
+  // A root architect's or phase worker's claim, and the operator-launched controller's.
+  const claimSession = createClaimSession({
+    daemon: roleDaemon,
+    persistedTranscript,
+    exitProcess: (code) => exitProcess(code),
+  });
+  const controllerSession = createControllerSession({
+    daemon: roleDaemon,
+    persistedTranscript,
+  });
 
   /**
    * Names the session by its Legion identity (`src/legion/session-title.ts`), so every Dispatch
@@ -892,50 +437,17 @@ export default function legionExtension(pi: PiApi): void {
     // A worker the daemon relaunched with --resume keeps its phase: its next turn may start from
     // an Envoy notice rather than a new assignment, and must find the phase still open.
     phaseStall = restorePhaseStall(context.sessionManager.getBranch?.() ?? []);
-    if (process.env.LEGION_DAEMON_API === "go") {
-      // The operator-launched controller registers through the controller session and carries no
-      // Go `legion` tool: its operations are an architect's and a worker's.
-      if (classifySession(process.env).kind === "controller") {
-        await controllerSession.handleSessionStart(context);
-        return;
-      }
-      await bootstrapGoClaim(context, {
-        capability: () => capability,
-        setCapability: (next) => {
-          capability = next;
-        },
-        bootstrap: () => bootstrap,
-        setBootstrap: (next) => {
-          bootstrap = next;
-        },
-        daemon: goRoleDaemon,
-        exitProcess,
-        persistedTranscript,
-        recordBootstrappedSession,
-      });
-      registerGoTools();
-      await activateLegionTool();
+    const { kind } = classifySession(process.env);
+    if (kind === "not-legion") return;
+    // The operator-launched controller registers through the controller session and carries no
+    // `legion` tool: its operations are an architect's and a worker's.
+    if (kind === "controller") {
+      await controllerSession.handleSessionStart(context);
       return;
     }
-    const classification = classifySession(process.env);
-    switch (classification.kind) {
-      case "controller":
-        await controllerSession.handleSessionStart(context);
-        return;
-      case "phase-worker":
-        await bootstrapWorker(
-          context,
-          classification.role,
-          classification.tree,
-          classification.issue
-        );
-        return;
-      case "root-architect":
-        await bootstrapRoot(context, classification.tree);
-        return;
-      case "not-legion":
-        return;
-    }
+    await claimSession.bootstrap(context);
+    registerLegionTool();
+    await activateLegionTool();
   });
 
   // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree
@@ -970,16 +482,16 @@ export default function legionExtension(pi: PiApi): void {
     if (refusal !== undefined) return { block: true, reason: refusal };
     // No other gate applies to a subagent's own tool calls: the parent session's gate, running
     // in the parent's own module instance, already governs the parent's `task` call that spawned
-    // it (see the architect `task` block above and isSubagentSession).
+    // it (see the architect `task` block below and isSubagentSession).
     if (await checkSubagentSession(context)) return undefined;
     const sessionID = context.sessionManager.getSessionId();
-    const active = capability?.sessionID === sessionID ? capability : undefined;
+    const active = claimSession.capability(sessionID);
     // A `write` to an `xd://<tool>` path is OMP's tool-device invocation convention (e.g. the
     // nine Dispatch tools), not a file mutation. Short-circuit it out of every mutation gate
     // below so the architect/reviewer/merger role checks apply only to real file writes.
     const isToolDevice = isToolDeviceInvocation(toolCall);
-    // `role === "architect"` covers both kinds: the root architect and a sub-architect (a
-    // phase worker with role "architect") both delegate all code work to phase workers.
+    // `role === "architect"` covers a root architect and a sub-architect alike: both delegate all
+    // code work to phase workers.
     if (
       active?.role === "architect" &&
       !isToolDevice &&
@@ -988,36 +500,33 @@ export default function legionExtension(pi: PiApi): void {
     ) {
       return { block: true, reason: "the architect delegates all code work to phase workers" };
     }
-    // The architect spawns further Legion work only through `spawn_worker`: Legion runs one
-    // agent per process, and an in-process `task` subagent would inherit the architect's Legion
-    // environment and clash with its own daemon-registered role (see isSubagentSession).
+    // The architect's work reaches other agents only as child issues and the phase workers the
+    // daemon runs: Legion runs one agent per process, and an in-process `task` subagent would
+    // inherit the architect's Legion environment and clash with its own daemon-registered role
+    // (see isSubagentSession).
     if (active?.role === "architect" && toolCall.toolName === "task") {
       return {
         block: true,
         reason:
-          "the architect delegates only through spawn_worker; Legion runs one agent per process",
+          "the architect delegates only through child issues and the daemon's phase workers; Legion runs one agent per process",
       };
     }
-    // Only a phase-worker session (never the root or sub-architect kinds above) is further
-    // restricted by role below.
-    if (active?.kind === "phase-worker") {
-      if (
-        active.role === "reviewer" &&
-        !isToolDevice &&
-        CODE_MUTATION_TOOLS.includes(toolCall.toolName)
-      ) {
-        return {
-          block: true,
-          reason: "the reviewer edits nothing except the final .legion/ cleanup commit via bash",
-        };
-      }
-      if (
-        active.role === "merger" &&
-        !isToolDevice &&
-        MERGER_BLOCKED_TOOLS.includes(toolCall.toolName)
-      ) {
-        return { block: true, reason: "the merger only verifies and reports" };
-      }
+    if (
+      active?.role === "reviewer" &&
+      !isToolDevice &&
+      CODE_MUTATION_TOOLS.includes(toolCall.toolName)
+    ) {
+      return {
+        block: true,
+        reason: "the reviewer edits nothing except the final .legion/ cleanup commit via bash",
+      };
+    }
+    if (
+      active?.role === "merger" &&
+      !isToolDevice &&
+      MERGER_BLOCKED_TOOLS.includes(toolCall.toolName)
+    ) {
+      return { block: true, reason: "the merger only verifies and reports" };
     }
     if (!needsGrant(toolCall)) return undefined;
     // The shared wrapper mints through the caller's client, then writes the grant to the pane's
@@ -1031,14 +540,13 @@ export default function legionExtension(pi: PiApi): void {
     // operator's own export) is the same absence.
     if (active === undefined) {
       // A claimed controller session mints a controller grant (`/grants` `{sessionId, secret}`,
-      // authenticated by the controller capability) and is wrapped exactly like a worker. The
-      // client is recovery-less: no recovery token exists for the controller.
+      // authenticated by its registration's secret) and is wrapped exactly like a worker.
       if (controllerSession.isClaimedSession(sessionID)) {
         return wrapWithGrant(() => controllerSession.mintGrant(sessionID));
       }
       // A worker (root or phase) whose own boot handshake has not completed yet has no
       // capability to mint a grant with, so it is blocked. A controller that has not yet
-      // claimed (the daemon also sets LEGION_ROLE=controller on its process) is not: nothing
+      // claimed (`legion controller start` also sets LEGION_ROLE=controller) is not: nothing
       // here can mint for it until `controllerSession.claim` runs, and a wrong secret is what blocks it.
       if (process.env.LEGION_ROLE !== undefined && process.env.LEGION_CONTROLLER !== "1") {
         return {
@@ -1049,19 +557,12 @@ export default function legionExtension(pi: PiApi): void {
       return undefined;
     }
     return wrapWithGrant(() =>
-      process.env.LEGION_DAEMON_API === "go"
-        ? goRoleDaemon().grant({
-            tree: active.tree,
-            issue: active.issue,
-            sessionId: sessionID,
-            secret: active.secret,
-          })
-        : roleDaemon().grant({
-            tree: active.tree,
-            issue: active.issue,
-            sessionId: sessionID,
-            secret: active.secret,
-          })
+      roleDaemon().grant({
+        tree: active.tree,
+        issue: active.issue,
+        sessionId: sessionID,
+        secret: active.secret,
+      })
     );
   });
 
@@ -1092,54 +593,6 @@ export default function legionExtension(pi: PiApi): void {
     return followUp === undefined ? undefined : { continue: true, additionalContext: followUp };
   });
 
-  pi.on("session_shutdown", async (_event, context) => {
-    const sessionID = context.sessionManager.getSessionId();
-    if (
-      capability === undefined ||
-      capability.kind !== "root-architect" ||
-      capability.sessionID !== sessionID
-    ) {
-      return;
-    }
-    try {
-      await roleDaemon().processExit({
-        tree: capability.tree,
-        generation: generation(process.env),
-        sessionId: sessionID,
-        secret: capability.secret,
-      });
-    } finally {
-      controlSubscription?.unsubscribe();
-      controlSubscription = undefined;
-      await controlConnection?.close();
-      controlConnection = undefined;
-    }
-  });
-
-  /** This session's TypeScript-daemon role, for the `legion` tool; the tool gates each operation by
-   * it. */
-  const toolSession = (
-    context: SessionContext
-  ): {
-    kind: "root-architect" | "phase-worker";
-    tree: string;
-    issue: string;
-    role: LegionRole;
-    secret: string;
-  } => {
-    const sessionID = context.sessionManager.getSessionId();
-    if (capability === undefined || capability.sessionID !== sessionID) {
-      throw new Error("legion is available only to this session's registered Legion role");
-    }
-    return {
-      kind: capability.kind,
-      tree: capability.tree,
-      issue: capability.issue,
-      role: capability.role,
-      secret: capability.secret,
-    };
-  };
-
   const onPhaseCompleted = (context: SessionContext): void => {
     if (phaseWorkerSession(context)) advancePhaseStall({ kind: "handoff-complete" });
   };
@@ -1154,22 +607,14 @@ export default function legionExtension(pi: PiApi): void {
   const registerLegionTool = (): void => {
     if (legionToolRegistered) return;
     legionToolRegistered = true;
-    pi.registerTool(createLegionTool({ pi, roleDaemon, session: toolSession, onPhaseCompleted }));
-  };
-
-  let goToolsRegistered = false;
-  const registerGoTools = (): void => {
-    if (goToolsRegistered) return;
-    goToolsRegistered = true;
     pi.registerTool(
-      createGoLegionTool({
+      createLegionTool({
         pi,
-        daemon: goRoleDaemon,
+        daemon: roleDaemon,
         session: (context) => {
-          const sessionID = context.sessionManager.getSessionId();
-          const active = capability;
-          if (active === undefined || active.sessionID !== sessionID) {
-            throw new Error("Go Legion tool is available only to this session's registered claim");
+          const active = claimSession.capability(context.sessionManager.getSessionId());
+          if (active === undefined) {
+            throw new Error("legion is available only to this session's registered claim");
           }
           return {
             kind: active.role === "architect" ? "architect" : "phase-worker",
@@ -1205,10 +650,9 @@ export default function legionExtension(pi: PiApi): void {
 
   pi.registerCommand("legion-claim-controller", {
     description: "Claim the Legion controller role and register daemon authority for this session",
-    // Inside the daemon pane (the `LEGION_CONTROLLER` marker) this is the manual override for a
-    // lost claim, and the pane's own transcript is the right resume target. From a hand-started
-    // session it is an interactive takeover: the role and recorded session id move to this session,
-    // while the daemon pane's recorded transcript does not (see `controllerSession.claim`).
+    // Inside the controller's own session (the `LEGION_CONTROLLER` marker) this is the manual
+    // override for a lost claim. From a hand-started session it is an interactive takeover: the
+    // role and recorded session id move to this session (see `controllerSession.claim`).
     handler: async (_args, context) => controllerSession.claim(context),
   });
 }

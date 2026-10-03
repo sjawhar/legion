@@ -259,7 +259,7 @@ func (r *liveRig) checkBootRefusal() error {
 }
 
 // image-probe: the probe Sandbox, carrying the operator's pod, passes on the stage image, confirms
-// the Go daemon API contract, and resolved the model of every task agent the prompts dispatch.
+// the daemon API contract, and resolved the model of every task agent the prompts dispatch.
 func (r *liveRig) checkImageProbe() error {
 	if err := r.startRuntimeOnce(); err != nil {
 		return err
@@ -281,11 +281,11 @@ func (r *liveRig) checkImageProbe() error {
 		return errors.New("ProbeImage returned nil without logging a pass")
 	}
 	contract, ok := bootprobe.ConfirmedContract(passed["log"])
-	if !ok || contract != api.GoDaemonAPIVersion {
-		return fmt.Errorf("the probe log confirms contract %d (found %t), want %d: %s", contract, ok, api.GoDaemonAPIVersion, passed["log"])
+	if !ok || contract != api.DaemonAPIVersion {
+		return fmt.Errorf("the probe log confirms contract %d (found %t), want %d: %s", contract, ok, api.DaemonAPIVersion, passed["log"])
 	}
 	note("runtime", "probe Sandbox %s passed: %s", passed["sandbox"], lastLine(passed["log"], bootprobe.OKPrefix))
-	note("runtime", "go-daemon-api-version=%d parsed, the daemon's contract", contract)
+	note("runtime", "daemon-api-version=%d parsed, the daemon's contract", contract)
 	if models := bootprobe.AgentModels(passed["log"]); models != bootprobe.AgentModelsResolved {
 		return fmt.Errorf("the probe log says agent-models=%q, want %q: %s", models, bootprobe.AgentModelsResolved, passed["log"])
 	}
@@ -375,7 +375,7 @@ func (r *liveRig) imageProbe() (ImageProbe, error) {
 		return ImageProbe{}, err
 	}
 	p := ImageProbe{
-		Contract: api.GoDaemonAPIVersion, Budget: 10 * time.Minute, RoleReferences: references,
+		Contract: api.DaemonAPIVersion, Budget: 10 * time.Minute, RoleReferences: references,
 		Retry: bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3},
 	}
 	command := r.rt.probeManifest("probe", p, time.Now()).Spec.PodTemplate.Spec.Containers[0].Command

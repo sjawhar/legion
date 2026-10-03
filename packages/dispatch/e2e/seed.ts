@@ -50,13 +50,9 @@ export async function setCreatedAt(
   id: string,
   iso: string
 ): Promise<void> {
-  await execFileAsync("psql", [
-    databaseUrl(),
-    "-v",
-    "ON_ERROR_STOP=1",
-    "-c",
-    `UPDATE ${table} SET created_at = ${sqlLiteral(iso)}::timestamptz WHERE id = ${sqlLiteral(id)}::uuid`,
-  ]);
+  await sql(
+    `UPDATE ${table} SET created_at = ${sqlLiteral(iso)}::timestamptz WHERE id = ${sqlLiteral(id)}::uuid`
+  );
 }
 
 /** Stamps a verified service token's subject on a seeded comment's author. The API seeder posts

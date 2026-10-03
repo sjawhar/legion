@@ -57,10 +57,10 @@ const schemas: Record<string, z.ZodType> = {
   "root-close.json": LegionGoEmptyResponse,
   "child-park.json": LegionGoEmptyResponse,
   "child-rerun.json": LegionGoEmptyResponse,
-  // No route answers this one: it is the contract number the Go daemon's boot gate requires of the
+  // No route answers this one: it is the contract number the daemon's boot gate requires of the
   // installed plugin (`internal/api/version.go`), and the plugin's own test pins its manifest's
-  // `legion.goDaemonApiVersion` to it.
-  "version.json": z.strictObject({ goDaemonApiVersion: z.number().int().positive() }),
+  // `legion.daemonApiVersion` to it.
+  "version.json": z.strictObject({ daemonApiVersion: z.number().int().positive() }),
 };
 
 function fixture(name: string): unknown {

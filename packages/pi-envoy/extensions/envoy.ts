@@ -374,9 +374,9 @@ export default function envoyExtension(pi: PiApi): void {
   let claimedRoleTopic: string | undefined;
   // The session id `claimedRoleTopic` was claimed under (endOutgoingRole).
   let claimedRoleSessionID: string | undefined;
-  // Notice subjects this session takes only while it holds `claimedRoleTopic` (the Go controller's
-  // topic, go-bootstrap.ts). They are never registered with the listener, so a resumed process
-  // cannot recover them: the role's claim is their only source, and `endRole` closes them.
+  // Notice subjects this session takes only while it holds `claimedRoleTopic` (the controller's
+  // topic, controller-session.ts). They are never registered with the listener, so a resumed
+  // process cannot recover them: the role's claim is their only source, and `endRole` closes them.
   const roleNoticeSubjects = new Set<string>();
   // Counts role ends, so a role-bound subscription still opening when its role ended can tell
   // (subscribeUnlessRoleEnds).
@@ -1051,7 +1051,7 @@ export default function envoyExtension(pi: PiApi): void {
     const regained = legionRoleClaimBridge().regained;
     if (regained === undefined) return;
     // Detached from the heartbeat chain: the hook is a daemon round-trip this side cannot bound
-    // (`/controller/ready` drains held notices and runs a forced resync), and the chain's
+    // (`claims/ready`, retried on a 5xx or a transport failure), and the chain's
     // `healing` latch must release as soon as registration and the claim are settled, or the
     // next tick could never register. `Promise.resolve().then` also catches a synchronous throw.
     void Promise.resolve()
