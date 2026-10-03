@@ -6,10 +6,13 @@
 package routes
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html"
@@ -421,6 +424,19 @@ func (r *router) proxyConfigForUser(w http.ResponseWriter, user *auth.User) (*gi
 // that must be answered as one.
 var serverRoots = []string{"/api", "/v1", "/auth", "/ws", "/healthz"}
 
+// assetRoots hold Vite's content-hashed build output: a file there never changes under its name,
+// because a changed file is written under a new one.
+var assetRoots = []string{"/assets"}
+
+const (
+	// pageCacheControl makes a browser revalidate a page before it runs it. A page names the
+	// hashed assets of the build that wrote it, and one kept by heuristic freshness from a
+	// Last-Modified would, after a deploy, ask for assets the server no longer has.
+	pageCacheControl = "no-cache"
+	// assetCacheControl lets a browser keep a hashed asset for a year without asking.
+	assetCacheControl = "public, max-age=31536000, immutable"
+)
+
 func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	requestedPath := req.URL.Path
 	// A rooted clean holds no `..`, so every path joined under the dist directory below stays in it.
@@ -443,7 +459,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	if normalized == "/favicon.ico" {
 		faviconPath := filepath.Join(r.ctx.WebDistDir, "favicon.svg")
 		if info, err := os.Stat(faviconPath); err == nil && !info.IsDir() {
-			serveFile(w, req, faviconPath)
+			serveFile(w, req, faviconPath, "")
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -452,7 +468,14 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	candidate := filepath.Join(r.ctx.WebDistDir, normalized)
 	info, err := os.Stat(candidate)
 	if err == nil && !info.IsDir() {
-		serveFile(w, req, candidate)
+		switch {
+		case filepath.Ext(candidate) == ".html":
+			servePage(w, req, candidate)
+		case isReservedPath(normalized, assetRoots):
+			serveFile(w, req, candidate, assetCacheControl)
+		default:
+			serveFile(w, req, candidate, "")
+		}
 		return
 	}
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -468,7 +491,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusNotFound, "dashboard build not found")
 		return
 	}
-	serveFile(w, req, indexPath)
+	servePage(w, req, indexPath)
 }
 
 // isBrowserRoute reports whether an unmatched, non-static path should fall
@@ -477,7 +500,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 // anything that looks like a missing static asset must stay a real 404
 // instead, so asset clients never get an HTML body where they expected a file.
 func isBrowserRoute(normalized string) bool {
-	if isReservedPath(normalized, []string{"/assets"}) {
+	if isReservedPath(normalized, assetRoots) {
 		return false
 	}
 	// Issue routes carry user-controlled segments (artifact slugs, ask/comment
@@ -501,8 +524,37 @@ func isReservedPath(normalized string, roots []string) bool {
 	return false
 }
 
-func serveFile(w http.ResponseWriter, req *http.Request, path string) {
+// servePage serves an HTML page that the browser must revalidate, validated by its content and
+// never by its modification time. The servers behind one load balancer can hold different builds
+// whose pages' times say nothing about which build wrote them (a rollback serves the older file),
+// so a revalidation answered by If-Modified-Since could keep one build's page in front of another
+// build's assets. The page carries an ETag of its bytes and no Last-Modified, so a browser holding
+// another build's page, or one cached before this, gets the page this server has.
+func servePage(w http.ResponseWriter, req *http.Request, path string) {
+	page, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read failed")
+		return
+	}
+	sum := sha256.Sum256(page)
 	w.Header().Set("Content-Type", contentType(path))
+	w.Header().Set("Cache-Control", pageCacheControl)
+	w.Header().Set("ETag", `"`+hex.EncodeToString(sum[:16])+`"`)
+	http.ServeContent(w, req, path, time.Time{}, bytes.NewReader(page))
+}
+
+// serveFile serves path with its Content-Type and, when cacheControl is not empty, that
+// Cache-Control, which a 304 carries too. net/http drops Cache-Control from an error it answers
+// instead (a file removed after its stat), so a failure is never kept for an asset's year.
+func serveFile(w http.ResponseWriter, req *http.Request, path, cacheControl string) {
+	w.Header().Set("Content-Type", contentType(path))
+	if cacheControl != "" {
+		w.Header().Set("Cache-Control", cacheControl)
+	}
 	http.ServeFile(w, req, path)
 }
 
