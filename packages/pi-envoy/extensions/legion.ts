@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { GrantResponse } from "@legion/contracts";
+import type { LegionGrant } from "@legion/contracts/legion-api";
 import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
@@ -63,7 +63,7 @@ function needsGrant({ toolName, input }: ToolCallEvent): boolean {
 }
 
 async function wrapWithGrant(
-  mint: () => Promise<GrantResponse>
+  mint: () => Promise<LegionGrant>
 ): Promise<ToolCallEventResult | undefined> {
   try {
     await writeMintedGrant(async () => (await mint()).grantId);
@@ -338,7 +338,7 @@ function paneRuleRefusal(toolCall: ToolCallEvent, rules: readonly PaneRule[]): s
   return undefined;
 }
 
-// Read by the daemon's boot gate (packages/daemon-go/internal/daemon/bootgate.go) to prove this
+// Read by the daemon's boot gate (packages/daemon/internal/daemon/bootgate.go) to prove this
 // extension actually loaded from an ambient installed-plugin discovery -- not just that a
 // manifest file exists, which stays true even when the plugin is disabled or unregistered in
 // OMP's own plugin registry.

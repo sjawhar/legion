@@ -43,9 +43,22 @@
 - `itemFromSearch` answers `null` for an item id that decodes to a control character, as the
   Dispatch server's reference reader names nothing for one (LEGION-463). No item has such an id,
   and a NUL in one failed the write that cited it.
+- `AnchorPosition.anchor_block_error` can be `DOCUMENT_UNLOADABLE`: the anchor's document has a
+  stored history that cannot load, the state a rebuild from its latest saved version repairs, which
+  the API answers `409 DOCUMENT_UNLOADABLE` where it answered `503 DOC_SERVICE_UNAVAILABLE`.
+  `dispatch_read`'s description names it (LEGION-469).
 
 ### Added
 
+- `ArtifactRebuildReport`, the answer of `POST /api/v1/artifacts/{id}/rebuild`: what the rebuild
+  removed, the head it wrote, the validation error the history failed with, and `source_version`,
+  the version the rebuilt document holds (its latest saved version, or the version supplied
+  markdown wrote) (LEGION-469).
+- `DOCUMENT_SCHEMA_CLOSE_CODE` (`4409`) and `DOCUMENT_SCHEMA_CLOSE_REASON` (`"DOC_SCHEMA"`), the
+  close the document websocket refuses a room outside the Proof schema with, before any sync.
+  `gen:go` generates them into Go as `contracts.DocumentSchemaCloseCode` and
+  `contracts.DocumentSchemaCloseReason`, so the server's close and the dashboard's reading of it
+  cannot drift apart (LEGION-469).
 - `UserAgentStateInput.read_replies`: the ids of a session's own replies to mark read, those
   alone, for a view that shows only some of a session's replies (LEGION-485).
 - `DISPATCH_TEXT_REFERENCES`: markdown bodies with the `dispatch://` references each one cites,
@@ -120,3 +133,8 @@
 
 - Removed `HandoffMessage`, `validateHandoffMessage`, and `MESSAGES_DIR_NAME`: the `legion handoff message|messages` commands they served are gone, and nothing else read `.legion/messages/`.
 - Removed `legionNoticeSubject`: the Go daemon publishes no notice on an issue's topic any more, and its one caller, `legionControllerNoticeSubject`, now builds the controller topic itself.
+- Removed the handoff schema: `validatePhaseHandoff`, `describePhaseHandoffProblems`,
+  `describePhaseHandoffWriteProblems`, `isHandoffPhase`, the phase handoff interfaces,
+  `PHASE_FILE_NAMES`, `LEGION_DIR_NAME`, `HANDOFF_SCHEMA_VERSION`, `PLAN_REVIEW_MAX_ROUNDS` and
+  `PLAN_REVIEW_VERDICTS`. The Go `legion handoff write` holds each phase's handoff to the same
+  rules and names every field at fault; `HANDOFF_PHASES`, the `legion` tool's phase words, stays.

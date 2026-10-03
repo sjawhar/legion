@@ -52,9 +52,9 @@ jobs:
       # the screenshots step builds the Dispatch server; both modules name the same Go.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: packages/daemon-go/go.mod
+          go-version-file: packages/daemon/go.mod
           cache-dependency-path: |
-            packages/daemon-go/go.sum
+            packages/daemon/go.sum
             packages/envoy/go.sum
       - run: bun install --frozen-lockfile
       - name: Lint the docs site

@@ -508,7 +508,8 @@ type AnchorPosition struct {
 	// the document, or the document could not be read, which AnchorBlockError then names.
 	AnchorBlock *BlockPath `json:"anchor_block,omitempty"`
 	// AnchorBlockError is why AnchorBlock is absent when the document could not be read: the code
-	// the API answers that error with elsewhere (DOC_SERVICE_UNAVAILABLE, DOC_SCHEMA, INTERNAL);
+	// the API answers that error with elsewhere (DOC_SERVICE_UNAVAILABLE, DOC_SCHEMA,
+	// DOCUMENT_UNLOADABLE, INTERNAL);
 	// empty otherwise.
 	AnchorBlockError string `json:"anchor_block_error,omitempty"`
 }

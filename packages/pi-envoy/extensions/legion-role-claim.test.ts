@@ -1,6 +1,17 @@
 import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { agentSubject, roleToken } from "@legion/contracts";
 import type { ZodNumberProperty } from "../src/pi-types";
+
+/** The daemon's golden registration answer (`packages/daemon/internal/api`), so a field the daemon
+ * adds to it reaches the stub below. */
+const registered: Record<string, unknown> = JSON.parse(
+  readFileSync(
+    path.resolve(import.meta.dir, "../../contracts/fixtures/daemon-api/register.json"),
+    "utf8"
+  )
+);
 
 // @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
 const { nkeyAuthenticator, nkeys } = await import("nats");
@@ -99,6 +110,7 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
     const url = new URL(input.toString());
     if (url.pathname === "/legion/v1/claims/register") {
       return Response.json({
+        ...registered,
         claimToken: role,
         tree,
         issue: tree,

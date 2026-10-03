@@ -149,8 +149,8 @@ Then park. Do not release a wave or spawn a Legion role until a later delivered 
 the primary document), request approval again as above (the answer closed the last request, so
 this opens a new one), and stay parked. Approval is pinned to the spec version: editing the root
 spec after approval closes the gate again with no wake (you made the edit, or the
-`artifact.version` event on your issue tells you), and under the Go daemon every merger's `READY`
-in the tree is refused until a human approves the latest version. Request approval again as
+`artifact.version` event on your issue tells you), and every merger's `READY` in the tree is
+refused until a human approves the latest version. Request approval again as
 above, and release no new wave and spawn no new role until the next `design-approved` arrives —
 work already in flight continues. Later waves, re-scopes, and integration-failure children that
 leave the root spec untouched need no new approval, and a child issue's spec is never gated: the

@@ -31,11 +31,11 @@ export interface UploadResult {
 export async function uploadFile(
   owner: ArtifactOwner,
   file: File,
-  options: { summary?: string } = {}
+  options: { name?: string; summary?: string } = {}
 ): Promise<UploadResult> {
   return api.uploadArtifact(owner, {
     file,
-    name: file.name || "artifact",
+    name: options.name ?? (file.name || "artifact"),
     summary: options.summary,
   });
 }
@@ -75,11 +75,13 @@ export interface ArtifactUpload {
  * The one artifact upload: a picked or dropped file either uploads at once (`immediate`, the
  * project Documents list) or is staged until `confirm` (the Artifacts tab's row, whose summary
  * field appears once there is something to summarize and whose "Cancel" discards the pick).
- * Success invalidates the owner's artifact list and, for an issue, the issue itself.
+ * `name` uploads every file under that document name, replacing that document, rather than under
+ * the picked file's own name. Success invalidates the owner's artifact list and, for an issue, the
+ * issue itself.
  */
 export function useArtifactUpload(
   owner: ArtifactOwner,
-  { immediate = false }: { immediate?: boolean } = {}
+  { immediate = false, name }: { immediate?: boolean; name?: string } = {}
 ): ArtifactUpload {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -88,10 +90,14 @@ export function useArtifactUpload(
   const [isDragging, setIsDragging] = useState(false);
   const upload = useMutation({
     mutationFn: (file: File) =>
-      uploadFile(owner, file, { summary: summary.trim() === "" ? undefined : summary.trim() }),
-    onSuccess: () => {
+      uploadFile(owner, file, {
+        name,
+        summary: summary.trim() === "" ? undefined : summary.trim(),
+      }),
+    onSuccess: (result) => {
       setPendingFile(null);
       setSummary("");
+      void queryClient.invalidateQueries({ queryKey: ["artifact", result.artifact.id] });
       if ("issue" in owner) {
         void queryClient.invalidateQueries({ queryKey: ["artifacts", owner.issue] });
         void queryClient.invalidateQueries({ queryKey: ["issue", owner.issue] });

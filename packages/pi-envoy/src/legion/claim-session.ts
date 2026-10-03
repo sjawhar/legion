@@ -143,7 +143,7 @@ export function createClaimSession(deps: {
         secret: claim.secret,
       };
       // The claim's role topic is where the daemon sends every notice for an architect (the
-      // notice executor, packages/daemon-go/internal/daemon/outbox.go): no issue topic carries one,
+      // notice executor, packages/daemon/internal/daemon/outbox.go): no issue topic carries one,
       // so no claim subscribes to one.
       await claimEnvoyRole(sessionID, claim.claimToken, context);
       await callReadyWithRetry("claims/ready", () => daemon.ready(ready));

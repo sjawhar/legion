@@ -5,7 +5,6 @@ import { api, apiErrorMessage } from "../../api/client";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
-  card,
   dangerText,
   hoverToDangerText,
   secondaryButtonBorder,
@@ -20,6 +19,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import { settingsTableWrapper } from "../settings/classes";
 import { credentialGrantsQuery } from "./grants";
 
 /**
@@ -61,7 +61,7 @@ export function GrantsSection(): ReactNode {
         </div>
       ) : null}
       {grants.isSuccess ? (
-        <div className={`mt-6 overflow-x-auto rounded-xl border ${card}`}>
+        <div className={settingsTableWrapper}>
           <table className="w-full text-left text-sm">
             <thead className={`border-b ${textSecondaryOnSurface}`}>
               <tr>
