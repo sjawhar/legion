@@ -143,7 +143,5 @@ func (p *deepPeer) write(t *testing.T, syncMessage []byte) {
 
 // sendFrame writes one framed sync message, one writer at a time.
 func (p *deepPeer) sendFrame(syncMessage []byte) error {
-	p.writes.Lock()
-	defer p.writes.Unlock()
-	return p.connection.WriteMessage(gws.BinaryMessage, docstest.Frame(p.artifactID, syncMessage))
+	return docstest.WriteFrame(&p.writes, p.connection, p.artifactID, syncMessage)
 }

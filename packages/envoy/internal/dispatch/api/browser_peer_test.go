@@ -118,9 +118,7 @@ func (p *syncedPeer) read(connection *gws.Conn, done chan<- struct{}, answers ch
 }
 
 func (p *syncedPeer) write(connection *gws.Conn, syncMessage []byte) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return connection.WriteMessage(gws.BinaryMessage, docstest.Frame(p.artifactID, syncMessage))
+	return docstest.WriteFrame(&p.mu, connection, p.artifactID, syncMessage)
 }
 
 // barrier returns once the room holds everything the peer sent and has answered a request sent

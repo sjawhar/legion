@@ -5,19 +5,25 @@
 package docstest
 
 import (
+	"sync"
+
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
 	ygsync "github.com/reearth/ygo/sync"
 )
 
-// Frame wraps a sync message as Hocuspocus carries it: the document's name, then the sync kind.
-func Frame(artifactID string, syncMessage []byte) []byte {
-	header := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+// WriteFrame writes syncMessage to connection as Hocuspocus carries it - the document's name, then
+// the sync kind - holding writes while it writes: gorilla/websocket panics on two writes at once,
+// and a peer's Drain answers the room's sync step 1 while its test sends.
+func WriteFrame(writes *sync.Mutex, connection *gws.Conn, artifactID string, syncMessage []byte) error {
+	frame := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
 		encoder.WriteVarString(artifactID)
 		encoder.WriteVarUint(0)
 	})
-	return append(header, syncMessage...)
+	writes.Lock()
+	defer writes.Unlock()
+	return connection.WriteMessage(gws.BinaryMessage, append(frame, syncMessage...))
 }
 
 // Drain applies every sync frame the room sends and answers its sync step 1 until the connection
