@@ -290,9 +290,7 @@ func randomSuffix(t *testing.T) string {
 func testJetStream(t *testing.T) jetstream.JetStream {
 	t.Helper()
 	js := testnats.JetStream(t)
-	if _, err := js.CreateStream(t.Context(), jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}}); err != nil {
-		t.Fatalf("create notification stream: %v", err)
-	}
+	testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
 	return js
 }
 
