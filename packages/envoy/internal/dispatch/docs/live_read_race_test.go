@@ -25,12 +25,13 @@ import (
 // tree takes no lock (YXmlFragment.Children), so a read that walks it beside a peer's update reads
 // that update halfway - a torn tree, or the process's death on a concurrent map read and write -
 // and under -race it is a data race. Each read below runs over and over while a peer types into
-// the document, and must take the document's lock for its read or read a copy taken under it.
+// the document, until enough of its runs have overlapped one of the peer's updates (overlapping),
+// and must take the document's lock for its read or read a copy taken under it. A walk of the tree
+// meets a lock at each text it reads (YXmlText.ToDelta) and none in a run of rules, so the document
+// holds one long enough that a keystroke lands inside the walk.
 func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
-	const (
-		readFor = 500 * time.Millisecond
-		seeded  = "# Heading\n\nbefore\n\nafter\n"
-	)
+	rules := func(count int) string { return strings.Repeat("***\n\n", count) }
+	seeded := "# Heading\n\n" + rules(200) + "before\n\nafter\n"
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	reads := []struct {
 		name string
@@ -62,7 +63,6 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 			return allowing(err, ErrAnchorMissing)
 		}},
 		{"browser mark", func(ctx context.Context, service *Service, artifactID, _ string) error {
-			service.markWait = 10 * time.Millisecond
 			_, err := service.VerifyMark(ctx, artifactID, MarkComment, "absent")
 			return allowing(err, ErrAnchorMissing)
 		}},
@@ -91,25 +91,6 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 			_, err = service.SnapshotVersion(joined, artifactID, alice)
 			return err
 		}},
-		{"published edit", func(ctx context.Context, service *Service, artifactID, _ string) error {
-			tx, err := service.store.Pool.Begin(ctx)
-			if err != nil {
-				return err
-			}
-			defer tx.Rollback(ctx)
-			joined, ledger := service.Join(ctx, tx)
-			defer ledger.Discard()
-			if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{
-				{Op: "insert", After: "end", Markdown: "agent\n"},
-			}, alice, nil); err != nil {
-				return err
-			}
-			// Publishing the committed write reads the room back for the text it wrote.
-			return ledger.Commit(ctx)
-		}},
-		{"unrecorded mark sweep", func(_ context.Context, service *Service, artifactID, _ string) error {
-			return service.unmarkExpired(artifactID, []pmdoc.MarkRef{{Type: string(MarkComment), ID: "absent"}})
-		}},
 		{"block id backfill", func(ctx context.Context, service *Service, artifactID, _ string) error {
 			return service.backfillBlockIDs(ctx, artifactID).Err
 		}},
@@ -117,32 +98,98 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 	for _, test := range reads {
 		t.Run(test.name, func(t *testing.T) {
 			service, artifactID, serverURL := newPeeredService(t, seeded)
+			service.markWait = 10 * time.Millisecond
 			headingID := firstBlockID(t, service, artifactID)
-			typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)
+			peer := typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)
 			ctx := context.Background()
-			for deadline := time.Now().Add(readFor); time.Now().Before(deadline); {
+			overlapping(t, func() bool {
+				before := peerApplied(service, artifactID, peer)
 				if err := test.read(ctx, service, artifactID, headingID); err != nil {
 					t.Fatalf("read the live document: %v", err)
 				}
-			}
+				return peerApplied(service, artifactID, peer) > before
+			})
 		})
 	}
 
+	// The unrecorded-mark sweep reads inside the transaction that unmarks, which holds the
+	// document's lock, so none of the peer's updates lands while it reads: it runs for a fixed time
+	// rather than until its runs have overlapped one.
+	t.Run("unrecorded mark sweep", func(t *testing.T) {
+		service, artifactID, serverURL := newPeeredService(t, seeded)
+		typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)
+		for deadline := time.Now().Add(500 * time.Millisecond); time.Now().Before(deadline); {
+			if err := service.unmarkExpired(artifactID, []pmdoc.MarkRef{{Type: string(MarkComment), ID: "absent"}}); err != nil {
+				t.Fatalf("sweep the live document: %v", err)
+			}
+		}
+	})
+
+	// A published write reads the room back for the text it wrote (recordPublishedLoss), once per
+	// write. One write is committed and published, then its read-back runs over and over: a whole
+	// write per read would leave too few reads beside the peer's updates to meet one.
+	t.Run("published edit", func(t *testing.T) {
+		service, artifactID, serverURL := newPeeredService(t, seeded)
+		peer := typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)
+		ctx := context.Background()
+		tx, err := service.store.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		joined, ledger := service.Join(ctx, tx)
+		defer ledger.Discard()
+		if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{
+			{Op: "insert", After: "end", Markdown: "agent\n"},
+		}, alice, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := ledger.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		write := ledger.liveWriteFor(artifactID)
+		if write == nil || !write.lostVerdict || len(write.lost) != 0 {
+			t.Fatalf("the published write's read-back = %+v, want nothing lost", write)
+		}
+		overlapping(t, func() bool {
+			before := peerApplied(service, artifactID, peer)
+			write.lostVerdict = false
+			service.recordPublishedLoss(write)
+			if !write.lostVerdict || len(write.lost) != 0 {
+				t.Fatalf("the published write's read-back = lost %v, verdict %t; want nothing lost", write.lost, write.lostVerdict)
+			}
+			return peerApplied(service, artifactID, peer) > before
+		})
+	})
+
 	// Settlement reads the room only once every update it has seen is durable, so it runs beside a
-	// peer that pauses between keystrokes long enough for that. A walk of the tree meets a lock at
-	// each text it reads (YXmlText.ToDelta) and none in a run of rules, so the document leads with
-	// one long enough that a keystroke lands inside the walk. The peer deletes each paragraph it
-	// types, so settlement also meets a block its read counted to stamp that is gone when it stamps.
+	// peer that pauses between keystrokes long enough for that, and only a settlement that read the
+	// room counts, overlapping when the peer's update reached the room between the settlement's
+	// lock and the end of its read (afterSettleLock, afterSettleRead). Its document leads with a
+	// longer run of rules, since the database work around its read leaves the walk a smaller share
+	// of each run. The peer deletes each paragraph it types, so settlement also meets a block its
+	// read counted to stamp that is gone when it stamps.
 	t.Run("settlement", func(t *testing.T) {
-		service, artifactID, serverURL := newPeeredService(t, strings.Repeat("***\n\n", 500)+seeded)
-		typeIntoDocument(t, service, serverURL, artifactID, 20*time.Millisecond)
-		for deadline := time.Now().Add(readFor); time.Now().Before(deadline); {
+		service, artifactID, serverURL := newPeeredService(t, rules(2_000)+seeded)
+		// The hooks are set before the peer types, since a settlement can run on a timer from then.
+		var peer atomic.Value
+		var locked, read atomic.Uint64
+		applied := func() uint64 {
+			client, _ := peer.Load().(crdt.ClientID)
+			return peerApplied(service, artifactID, client)
+		}
+		service.afterSettleLock = func(string) { locked.Store(applied()) }
+		service.afterSettleRead = func(string) { read.Store(applied()) }
+		peer.Store(typeIntoDocument(t, service, serverURL, artifactID, 20*time.Millisecond))
+		overlapping(t, func() bool {
 			state := service.room(artifactID)
 			state.mu.Lock()
 			generation := state.gen
 			state.mu.Unlock()
+			read.Store(0)
 			service.settleRoom(artifactID, generation)
-		}
+			return read.Load() > locked.Load()
+		})
 	})
 
 	// The room's own update observer renders the room after each update, while another peer's
@@ -151,8 +198,42 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 		service, artifactID, serverURL := newPeeredService(t, seeded)
 		typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)
 		typeIntoDocument(t, service, serverURL, artifactID, 2*time.Millisecond)
-		time.Sleep(readFor)
+		time.Sleep(500 * time.Millisecond)
 	})
+}
+
+// overlapping runs read, which reports whether its run overlapped a peer's update, until
+// overlapsWanted runs have, failing the test if that takes past overlapDeadline. Under -race a
+// walk of the live tree is reported only when an update lands while it walks, and a read whose
+// runs are slow - a database round trip each, or a settlement's transaction - would meet few of
+// them in a fixed time.
+func overlapping(t *testing.T, read func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(overlapDeadline)
+	runs := 0
+	for overlapped := 0; overlapped < overlapsWanted; runs++ {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of %d runs overlapped a peer's update in %s, want %d", overlapped, runs, overlapDeadline, overlapsWanted)
+		}
+		if read() {
+			overlapped++
+		}
+	}
+	t.Logf("%d runs, %d of them beside a peer's update", runs, overlapsWanted)
+}
+
+const (
+	overlapsWanted  = 50
+	overlapDeadline = time.Minute
+)
+
+// peerApplied is how much of peer's typing the room has applied: its clock for the peer.
+func peerApplied(service *Service, artifactID string, peer crdt.ClientID) uint64 {
+	room := service.srv.GetDoc(artifactID)
+	if room == nil {
+		return 0
+	}
+	return room.StateVector().Clock(peer)
 }
 
 // newPeeredService is a document service holding markdown, with settlement left to the test, and
@@ -183,9 +264,9 @@ var typists sync.Map
 // paragraph inserted at the start, a word typed into it, the paragraph deleted, each its own
 // update - round after round until the test ends, waiting a random time up to gap between
 // updates so a read's start does not fall into step with them, and never running further ahead of
-// the room than keepUp allows. It returns once the peer has sent its first update and the room is
-// resident.
-func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID string, gap time.Duration) {
+// the room than keepUp allows. It returns, once the peer has sent its first update and the room is
+// resident, the peer's client id.
+func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID string, gap time.Duration) crdt.ClientID {
 	t.Helper()
 	peer := newDeepPeer(t, serverURL, artifactID)
 	fragment := peer.doc.GetXmlFragment(fragmentName)
@@ -275,6 +356,7 @@ func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID stri
 	waitFor(t, 10*time.Second, "the room to load", func() bool {
 		return service.srv.GetDoc(artifactID) != nil
 	})
+	return peer.doc.ClientID()
 }
 
 // A typing peer runs at most typingLead clocks of its own ahead of what the room has applied, and
