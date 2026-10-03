@@ -449,8 +449,8 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 
 // acceptedComment is the accept route's response: the comment, plus whether the live document
 // already lacks the text the accept wrote. It is null when the check reached no verdict - the
-// publish failed and the room is reloading - which is not the same statement as false, exactly as
-// an edit's lost_ops distinguishes them.
+// publish failed and the room is reloading, or the room holds a tree too deep to read - which is
+// not the same statement as false, exactly as an edit's lost_ops distinguishes them.
 type acceptedComment struct {
 	model.Comment
 	Lost *bool `json:"lost"`

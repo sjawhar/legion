@@ -1,14 +1,16 @@
 #!/usr/bin/env bun
 /**
  * A stand-in for the Legion daemon that serves exactly the routes a phase worker and the
- * `legion` command-line tool hit while a shell command runs: the worker boot handshake, grant
+ * `legion` command-line tool hit while a shell command runs: the worker's claim registration
+ * (`claims/register`, `claims/ready`, the daemon's claim routes the plugin boots through), grant
  * minting, and the three grant redemptions (git credential, GitHub token, phase completion).
  *
- * Request and response shapes come from `LegionDaemonApi` in `@legion/contracts`, and the grant
- * rule mirrors `CapabilityService.resolveGrant` in the real daemon
- * (`packages/daemon/src/daemon/api/auth.ts`): a grant lives for 60 seconds and redeems any number
- * of times while it lives; an unknown or expired grant id answers 403
- * `{"error":"Invalid or expired grant"}`. Nothing is single-use.
+ * The grant request is the plugin's (`LegionGoGrantRequest` in `@legion/contracts/legion-go-api`,
+ * the shape the daemon's grant route takes); the redemption shapes come from `LegionDaemonApi` in
+ * `@legion/contracts`, which the rig's `legion` command-line tool speaks. The grant rule mirrors
+ * the real daemon's: a grant lives for 60 seconds and redeems any number of times while it lives;
+ * an unknown or expired grant id answers 403 `{"error":"Invalid or expired grant"}`. Nothing is
+ * single-use.
  *
  * Every request appends one JSON line to the log file: `{at, path, status, grantId?, sessionId?,
  * mintedGrantId?}`. The rig driver (`run.ts`) reads that log to count grant mints per shell
@@ -22,6 +24,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 import { isLegionRole, LegionDaemonApi, roleToken } from "@legion/contracts";
+import { LegionGoGrantRequest } from "@legion/contracts/legion-go-api";
 
 const GRANT_TTL_MS = 60_000;
 /** Encoded exactly as the daemon encodes it (`legion-<project>-<key>-<role>`, lower-cased),
@@ -84,31 +87,29 @@ function resolveGrant(grantId: string): Response | undefined {
 
 function handle(path: string, body: unknown): { response: Response; mintedGrantId?: string } {
   switch (path) {
-    case "/legion/v1/worker/started": {
-      const parsed = LegionDaemonApi.WorkerStarted.request.safeParse(body);
-      if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
-      if (parsed.data.bootToken !== expectedBootToken) {
+    case "/legion/v1/claims/register": {
+      if (stringField(body, "bootToken") !== expectedBootToken) {
         return { response: forbidden("Invalid boot token") };
       }
       return {
         response: json(200, {
-          roleToken: ROLE_TOKEN,
+          claimToken: ROLE_TOKEN,
+          tree: issue,
+          issue,
+          role,
+          generation: 1,
           secret: SESSION_SECRET,
-          gitName: "Rig Worker",
-          gitEmail: "rig@example.invalid",
         }),
       };
     }
-    case "/legion/v1/worker/ready": {
-      const parsed = LegionDaemonApi.WorkerReady.request.safeParse(body);
-      if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
-      if (parsed.data.secret !== SESSION_SECRET) {
+    case "/legion/v1/claims/ready": {
+      if (stringField(body, "secret") !== SESSION_SECRET) {
         return { response: forbidden("Invalid session secret") };
       }
-      return { response: json(200, {}) };
+      return { response: new Response(null, { status: 204 }) };
     }
     case "/legion/v1/grants": {
-      const parsed = LegionDaemonApi.Grant.request.safeParse(body);
+      const parsed = LegionGoGrantRequest.safeParse(body);
       if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
       if (parsed.data.secret !== SESSION_SECRET) {
         return { response: forbidden("Invalid session secret") };

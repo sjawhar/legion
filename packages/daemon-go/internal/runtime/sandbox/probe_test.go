@@ -277,19 +277,16 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 		want  []string
 	}{
 		{"a Failed pod", func(g *probeRig) {
-			g.fails("legion probe-image: pi-legion-envoy at /home/legion/.omp/… speaks Go daemon API contract 2; this daemon requires 3")
-		}, []string{"worker image sha256:" + testDigestHex + " failed its probe", "pod " + probeSandboxName + " Failed", "exit code 1", "speaks Go daemon API contract 2"}},
+			g.fails("legion probe-image: pi-legion-envoy at /home/legion/.omp/… speaks daemon API contract 2; this daemon requires 3")
+		}, []string{"worker image sha256:" + testDigestHex + " failed its probe", "pod " + probeSandboxName + " Failed", "exit code 1", "speaks daemon API contract 2"}},
 		{"no OK line", func(g *probeRig) { g.succeeds("hello") },
 			[]string{"Succeeded without printing probe-image: OK", "hello"}},
-		{"the TypeScript CLI's OK line", func(g *probeRig) {
-			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=8")
-		}, []string{"without confirming Go daemon API contract 3 (its legion CLI predates the check)"}},
 		{"a CLI that predates the session-storage probe", func(g *probeRig) { g.succeeds("probe-image: OK (/opt/omp/bin/omp)") },
-			[]string{"without confirming Go daemon API contract 3 (its legion CLI predates the check)"}},
+			[]string{"without confirming daemon API contract 3 (its legion CLI predates the check)"}},
 		{"another contract", func(g *probeRig) { g.succeeds(okLine(2)) },
-			[]string{"confirmed Go daemon API contract 2, this daemon requires 3"}},
+			[]string{"confirmed daemon API contract 2, this daemon requires 3"}},
 		{"a CLI that predates the agent-model check", func(g *probeRig) {
-			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=3")
+			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=3")
 		}, []string{"without resolving the prompt-named agents' models (its OK line's agent-models mark: none, where the daemon's probe requires resolved)"}},
 		{"a CLI that predates a flag the probe passes", func(g *probeRig) {
 			g.fails("flag provided but not defined: -role-references\nUsage of legion probe-image:")
@@ -648,7 +645,7 @@ func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
 				t.Fatal(err)
 			}
 			command := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, RoleReferences: testRoleReferences}, time.Now()).Spec.PodTemplate.Spec.Containers[0].Command
-			base := []string{opts.Tools.Legion, "probe-image", "--go-daemon-api-version", "3", "--plugin-root", legionPlugin, "--pod-safety"}
+			base := []string{opts.Tools.Legion, "probe-image", "--daemon-api-version", "3", "--plugin-root", legionPlugin, "--pod-safety"}
 			if want := append(base, testCase.want...); !slices.Equal(command, want) {
 				t.Errorf("the probe's command = %q, want %q", command, want)
 			}

@@ -64,6 +64,14 @@ type commentEventThread struct {
 	ThreadRootID string
 }
 
+// commentWriteResponse is what a route that posts a comment answers: the comment row, and for a
+// reply to an open ask whom that ask waits on now that the reply is its newest
+// (commentEventThread.AskWaitingOn, under the same name the comment's event carries it).
+type commentWriteResponse struct {
+	model.Comment
+	AskWaitingOn string `json:"ask_waiting_on,omitempty"`
+}
+
 // commentEventPayload builds the payload of every comment.* event. It takes what the write moved
 // in the reference graph — an empty ReferenceChanges on a transition that writes no body — so a
 // producer whose comment text can cite something cannot append an event that stays silent.

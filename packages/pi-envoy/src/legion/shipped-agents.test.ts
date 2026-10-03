@@ -46,7 +46,7 @@ test.each(agents)("%s declares its model only as role aliases", (file) => {
 // rubric again, so a name that drifted would leave the review without it — in either direction:
 // an autoload a deleted body no longer names leaves nothing "already in context" to skip re-reading,
 // and a body that names a skill:// its frontmatter no longer autoloads is never actually in context.
-// The Go daemon's boot gate resolves a skill only from a `skill://<name>` token
+// The daemon's boot gate resolves a skill only from a `skill://<name>` token
 // (packages/daemon-go/internal/promptrefs, whose name pattern this repeats), so the set of names
 // autoloaded must equal the set the body names, not merely contain it.
 test.each(agents)("%s autoloads exactly the skill:// names its body already has", (file) => {

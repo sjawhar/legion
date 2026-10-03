@@ -65,15 +65,15 @@ The daemon refuses to serve unless its OMP exposes `pi.agents` and actually load
 `session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — so a build whose OMP or
 plugin is broken fails instead of publishing. Its final step runs the Go `legion version`, requiring the
 commit the workflow built, then the Go `legion probe-image`: the same three probes, run by the Go
-daemon's own code (`packages/daemon-go/internal/daemon/bootgate.go`), with the plugin held to the Go
-daemon API contract (`legion.goDaemonApiVersion`) and every task agent and skill Legion's prompts
+daemon's own code (`packages/daemon-go/internal/daemon/bootgate.go`), with the plugin held to the
+daemon API contract (`legion.daemonApiVersion`) and every task agent and skill Legion's prompts
 name (`task(agent="…")`, `skill://…`) resolved by name through the same launch (the plugin ships
 `oracle`, `deep-worker`, `thermonuclear-deep-review` and `thermonuclear-code-quality`, and the
 planner's `plan-gap-analyst` and `plan-reviewer`, in `agents/`, and the pair's rubrics and
 `ce-simplify-code` with Legion's other skills in `dist/skills`). The build has none of
 the operator's model configuration, so it leaves those agents' models unresolved
 (`--skip-agent-models`), printing
-`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped go-daemon-api-version=<N>`. The Go daemon's Agent Sandbox runtime runs the Go command in a probe
+`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped daemon-api-version=<N>`. The Go daemon's Agent Sandbox runtime runs the Go command in a probe
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
 boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
 tool resolves a subagent's (`packages/daemon-go/internal/runtime/sandbox/probe.go`). To run them yourself:
@@ -1236,12 +1236,15 @@ keeping nothing until the daemon has answered, the command:
    running `legion` executable), a missing or blank instructions file, and an Oh My Pi invocation that
    does not resolve;
 2. probes that Oh My Pi as the controller will run it, with `omp models`, which starts no session, and
-   refuses a pi-legion-envoy it does not load, or one speaking another Go daemon API contract;
-3. asks `POST /legion/v1/controller/secret` with the operator token as `Authorization: Bearer`. The
-   daemon compares it in constant time and mints a fresh controller capability, which replaces the
-   previous one and its registration and ends every controller grant: the last start wins. The
-   answer also carries the daemon's `gates.design`, and an answer without `root-issues` or `off`
-   is refused with a request to upgrade the daemon;
+   refuses a pi-legion-envoy it does not load, or one speaking another daemon API contract;
+3. asks `POST /legion/v1/controller/secret` with the operator token as `Authorization: Bearer` and
+   the contract step 2 held the plugin to (`{"pluginContract": <N>}`). The daemon compares the token
+   in constant time, then refuses a contract that is not its own with 409, naming both, before it
+   mints anything, so a `legion` and a daemon from different releases never cut the running
+   controller off. Otherwise it mints a fresh controller capability, which replaces the previous
+   one and its registration and ends every controller grant: the last start wins. The answer also
+   carries the daemon's `gates.design`, and an answer without `root-issues` or `off` is refused
+   with a request to upgrade the daemon;
 4. writes the secret 0600 under the local state directory (`state_dir`, by default
    `$XDG_STATE_HOME/legion/<project>-controller`), beside the `gh` shim, the `legion` launcher and the
    deployment instructions;
@@ -1249,7 +1252,7 @@ keeping nothing until the daemon has answered, the command:
    `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line
    and the deployment instructions, a start message as Oh My Pi's first prompt so the controller's first turn runs its start
    procedure with nothing typed, no `--resume`, no `--mode rpc`) with the controller's environment
-   (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_API=go`, `LEGION_DAEMON_URL`,
+   (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`,
    `LEGION_PROJECT`, `LEGION_STATE_DIR`, its grant and secret files, the Envoy and Dispatch
    endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top
    of the operator's own environment, less `NATS_DAEMON_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED_FILE`

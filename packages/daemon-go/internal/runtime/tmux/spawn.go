@@ -44,7 +44,7 @@ func treeName(issue string) string {
 // panePairs sets (TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime), which the shared validator
 // refuses in a spec's Env and as a secret's pointer.
 var runtimeOwned = map[string]bool{
-	"LEGION_DAEMON_API": true, "LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
+	"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
 	"GIT_TERMINAL_PROMPT": true, "LEGION_GRANT_FILE": true, "XDG_CONFIG_HOME": true,
@@ -155,16 +155,15 @@ type paneInputs struct {
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
-// shipped set, ProcessManager.launchWorker's env, processes.ts, LEGION_DAEMON_API=go, which picks
-// the plugin's Go client, PI_SHELL_PREFIX, which keeps this daemon's gh and legion first in the
-// agent's bash tool, and LEGION_GRANT_FILE, runtime.GrantFile), the four XDG base directories
+// identity, daemon, state, workspace, Envoy, Dispatch and tool variables, PI_SHELL_PREFIX, which
+// keeps this daemon's gh and legion first in the agent's bash tool, and LEGION_GRANT_FILE,
+// runtime.GrantFile), the four XDG base directories
 // under `<state_dir>/home`, the spec's own variables sorted, then a `<NAME>_FILE` pointer per
 // secret file. PATH is never among them — tmux would replace it (LEGION-91) — and neither is any
 // secret's value.
 func panePairs(spec runtime.SpawnSpec, in paneInputs, files []runtime.SecretFile) []string {
 	var pairs []string
 	add := func(name, value string) { pairs = append(pairs, "-e", name+"="+value) }
-	add("LEGION_DAEMON_API", "go")
 	add("LEGION_TREE", spec.Tree)
 	add("LEGION_ISSUE", spec.Issue)
 	add("LEGION_ROLE", string(spec.Role))

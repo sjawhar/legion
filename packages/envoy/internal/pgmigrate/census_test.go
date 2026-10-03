@@ -182,15 +182,16 @@ func TestSessionStringSaysWhatPostgresHides(t *testing.T) {
 	}
 }
 
-// A lock holder refuses the migration when it would hold up the migration's lock past
-// LockTimeout: a transaction open at least the bound, measured unrounded, or one whose age the
-// census cannot see. An autovacuum worker does not, however long it has run, because Postgres
-// cancels it once the migration has waited deadlock_timeout for its lock - unless it is an
+// A lock holder refuses the migration when it would hold up the migration's lock past the
+// lock_timeout it waits under: a transaction open at least the bound, measured unrounded, or one
+// whose age the census cannot see. An autovacuum worker does not, however long it has run, because
+// Postgres cancels it once the migration has waited deadlock_timeout for its lock - unless it is an
 // anti-wraparound vacuum, which Postgres does not cancel, or deadlock_timeout is not shorter than
-// LockTimeout, so the migration gives up first. Whether a vacuum is anti-wraparound is its
-// activity's to say: Postgres marks it so when it launches it, so a vacuum launched before its
-// table passed its freeze age is not, and only where the activity says nothing - hidden from the
-// census's role, or not tracked - does the census take the table's age for it.
+// the migration's lock_timeout, so the migration gives up first. Whether a vacuum is
+// anti-wraparound is its activity's to say: Postgres marks it so when it launches it, so a vacuum
+// launched before its table passed its freeze age is not, and only where the activity says
+// nothing - hidden from the census's role, or not tracked - does the census take the table's age
+// for it.
 func TestAHolderRefusesOnlyWhatWouldHoldTheMigrationPastItsLockTimeout(t *testing.T) {
 	young, old := 5*time.Second, 2*time.Hour
 	short, past := 59500*time.Millisecond, 60500*time.Millisecond
@@ -213,7 +214,7 @@ func TestAHolderRefusesOnlyWhatWouldHoldTheMigrationPastItsLockTimeout(t *testin
 		// which says nothing about why it was launched, even to a role that may read it.
 		"an untracked vacuum of a table past its freeze age": {holder: untracked, pastFreezeAge: true, cancellation: true, want: "holds a lock on things, which is past its freeze age, so it may be an anti-wraparound autovacuum, which Postgres does not cancel for the migration's lock; Postgres records no activity for it with track_activities off, so the census cannot read which"},
 		"an untracked vacuum of a table short of it":         {holder: untracked, cancellation: true},
-		"an autovacuum outlasting the lock timeout":          {holder: hidden, want: "deadlock_timeout is not shorter than"},
+		"an autovacuum outlasting the lock timeout":          {holder: hidden, want: "deadlock_timeout is not shorter than the migration's lock_timeout of 500ms"},
 		"a session whose age Postgres hides":                 {holder: lockHolder{Session: Session{PID: 79, User: "other"}}, cancellation: true, want: "Postgres hides its transaction's age from the census's role, so the census cannot rule out a transaction older than 1m0s; granting that role pg_read_all_stats lets the census read the age"},
 		"a session Postgres does not track":                  {holder: lockHolder{Session: Session{PID: 82, User: "dispatch", State: "disabled"}}, cancellation: true, want: "Postgres records no transaction start for it with track_activities off, so the census cannot rule out a transaction older than 1m0s"},
 		"an old transaction":                                 {holder: lockHolder{Session: Session{PID: 80, User: "dispatch", XactAge: &old}}, cancellation: true, want: "has held a lock on things for 2h0m0s, longer than 1m0s"},
@@ -221,9 +222,29 @@ func TestAHolderRefusesOnlyWhatWouldHoldTheMigrationPastItsLockTimeout(t *testin
 		"a transaction half a second short of the bound":     {holder: lockHolder{Session: Session{PID: 83, User: "dispatch", XactAge: &short}}, cancellation: true},
 		"a transaction half a second past the bound":         {holder: lockHolder{Session: Session{PID: 84, User: "dispatch", XactAge: &past}}, cancellation: true, want: "transaction open 1m0.5s) has held a lock on things for 1m0.5s, longer than 1m0s"},
 	} {
-		got := holderRefusal(tc.holder, "things", tc.pastFreezeAge, tc.cancellation, time.Minute)
+		got := holderRefusal(tc.holder, "things", tc.pastFreezeAge, lockBound{setting: "500ms", cancelsAutovacuum: tc.cancellation}, time.Minute)
 		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
 			t.Errorf("%s: holderRefusal = %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+// The census judges a migration's lock holders by every lock_timeout its statements wait under:
+// Exec's LockTimeout until the migration sets its own, then each value it sets, as Postgres would
+// read it. A SET in a comment or a literal sets nothing.
+func TestMigrationLockTimeoutsReadsEveryBoundAMigrationWaitsUnder(t *testing.T) {
+	for sql, want := range map[string][]string{
+		"alter table asks add column note text;":                                                       {lockTimeoutSetting},
+		"-- why\nset local lock_timeout = '500ms';\n\nalter table asks add constraint c check (true);": {"500ms"},
+		"SET LOCK_TIMEOUT TO 750;\nalter table asks add column note text":                              {"750"},
+		"alter table a add column b text; set lock_timeout = '2s'; alter table c add column d text;":   {lockTimeoutSetting, "2s"},
+		"set session lock_timeout = 'it''s'; set local lock_timeout = default;":                        {"it's", "default"},
+		"/* set local lock_timeout = '1ms'; */ select 'set lock_timeout = ''1ms'''; ":                  {lockTimeoutSetting},
+		"set local statement_timeout = '1s'; alter table a add column b text":                          {lockTimeoutSetting},
+		"": {lockTimeoutSetting},
+	} {
+		if got := migrationLockTimeouts(sql); !slices.Equal(got, want) {
+			t.Errorf("migrationLockTimeouts(%q) = %q, want %q", sql, got, want)
 		}
 	}
 }

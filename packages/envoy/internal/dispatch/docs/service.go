@@ -101,6 +101,11 @@ type Service struct {
 	// the publish decides whether to fail that room. Nil outside tests; tests use it to let the
 	// refused room's recovery finish in that window.
 	afterPublishRefused func(room string)
+	// inServiceTransaction runs first in every transaction a service mutation makes through
+	// Server.Apply (serviceTransact). Nil outside tests; tests use it to change the live document
+	// between the mutation's read of it and its write, where a peer's update can land: Apply runs
+	// the mutation outside the document's lock and takes the lock for each transaction alone.
+	inServiceTransaction func(txn *crdt.Transaction)
 	// now is the clock the unrecorded-mark sweep ages marks by (sweepUnrecordedMarks).
 	now      func() time.Time
 	settleWG sync.WaitGroup

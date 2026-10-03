@@ -922,10 +922,12 @@ type textLocation struct {
 }
 
 func yTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
-	doc, err := yFragmentShape(frag)
+	var texts []yTextNode
+	children, err := yFragmentShapeChildren(frag, "", 1, &texts)
 	if err != nil {
 		return nil, err
 	}
+	doc := &Node{Type: "doc", Children: children}
 	var locations []textLocation
 	walk(doc, func(node *Node, _ []int, pos, end int) bool {
 		if node.Type == "text" {
@@ -934,10 +936,6 @@ func yTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 		return true
 	})
 
-	var texts []yTextNode
-	if err := collectYTexts(frag, "", &texts); err != nil {
-		return nil, err
-	}
 	ranges := make([]yTextRange, 0, len(texts))
 	location := 0
 	for _, current := range texts {
@@ -973,40 +971,21 @@ func yTextRanges(frag *crdt.YXmlFragment) ([]yTextRange, error) {
 	return ranges, nil
 }
 
-func collectYTexts(frag *crdt.YXmlFragment, textblock string, out *[]yTextNode) error {
-	for _, child := range frag.Children() {
-		switch current := child.(type) {
-		case *crdt.YXmlText:
-			*out = append(*out, yTextNode{text: current, textblock: textblock})
-		case *crdt.YXmlElement:
-			next := textblock
-			switch current.NodeName {
-			case "paragraph", "heading", "code_block":
-				next = current.NodeName
-			}
-			if err := collectYTexts(&current.YXmlFragment, next, out); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("%w: unexpected Yjs child %T", ErrSchema, child)
-		}
-	}
-	return nil
-}
-
-func yFragmentShape(frag *crdt.YXmlFragment) (*Node, error) {
-	children, err := yFragmentShapeChildren(frag)
-	if err != nil {
-		return nil, err
-	}
-	return &Node{Type: "doc", Children: children}, nil
-}
-
-func yFragmentShapeChildren(frag *crdt.YXmlFragment) ([]*Node, error) {
+// yFragmentShapeChildren is the shape of frag's children, which stand depth levels below the
+// document, and appends each Yjs text among them to texts with the textblock holding it. It
+// refuses a node past MaxTreeDepth as Read does: an element, or a text holding anything, which Read
+// makes a text node of.
+func yFragmentShapeChildren(frag *crdt.YXmlFragment, textblock string, depth int, texts *[]yTextNode) ([]*Node, error) {
 	var children []*Node
 	for _, child := range frag.Children() {
 		switch current := child.(type) {
 		case *crdt.YXmlText:
+			if current.Len() > 0 {
+				if err := treeDepthError(depth); err != nil {
+					return nil, err
+				}
+			}
+			*texts = append(*texts, yTextNode{text: current, textblock: textblock})
 			delta, err := yTextDeltaInTransaction(current)
 			if err != nil {
 				return nil, err
@@ -1019,7 +998,15 @@ func yFragmentShapeChildren(frag *crdt.YXmlFragment) ([]*Node, error) {
 				children = append(children, &Node{Type: "text", Text: value})
 			}
 		case *crdt.YXmlElement:
-			grandchildren, err := yFragmentShapeChildren(&current.YXmlFragment)
+			if err := treeDepthError(depth); err != nil {
+				return nil, err
+			}
+			inner := textblock
+			switch current.NodeName {
+			case "paragraph", "heading", "code_block":
+				inner = current.NodeName
+			}
+			grandchildren, err := yFragmentShapeChildren(&current.YXmlFragment, inner, depth+1, texts)
 			if err != nil {
 				return nil, err
 			}
