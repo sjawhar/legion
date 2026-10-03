@@ -323,15 +323,19 @@ test("a document link followed while the page before it is still downloading its
     // The first page's document transport is still downloading when the reader follows the next
     // link. WebKit cancels that download as the navigation starts (Firefox cancels a real one too,
     // though not one Playwright holds), and the page must not answer the failed chunk by
-    // reloading itself over the navigation.
-    const transport = /\/assets\/yjs-[^/]+\.js$/u;
+    // reloading itself over the navigation. The route holds the first page's download alone and
+    // stays in place until the navigation: removing a route continues the requests it holds, so
+    // an unrouted download could finish, or not, before the link is followed.
     const held: Route[] = [];
-    await page.route(transport, (route) => {
-      held.push(route);
-    });
+    await page.route(
+      /\/assets\/yjs-[^/]+\.js$/u,
+      (route) => {
+        held.push(route);
+      },
+      { times: 1 }
+    );
     await page.goto(`/issues/${issue.key}/spec?comment=${comments[0].id}`);
-    await expect.poll(() => held.length).toBeGreaterThan(0);
-    await page.unroute(transport);
+    await expect.poll(() => held.length).toBe(1);
 
     const link = `/issues/${issue.key}/artifacts/${secondarySlug}?comment=${comments[1].id}`;
     await page.goto(link);
