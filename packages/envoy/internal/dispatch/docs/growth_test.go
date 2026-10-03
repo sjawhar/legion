@@ -176,3 +176,103 @@ func seedByWriter(t *testing.T, service *Service, artifactID string, client crdt
 		t.Fatal(err)
 	}
 }
+
+// A write may not leave a live document that would not load again with room to spare. ygo parks
+// the items of a writer it reads before one they build on, and refuses a load that parks more than
+// 100,000: the document is then unreadable and unwritable. A transaction's writes take the id after
+// every writer the document holds, so what parks is a browser's writes - here client 1's version
+// of headings over a first version by client 2^32-1, which a load reads first and parks whole. On
+// a document parking 98,316 items, a write that grows it is refused, and one that leaves its
+// rendering as it was is taken, so it can still be trimmed; one that changes only an ask's state
+// is taken too, however its rendering's length moves. On one parking 102,012, which would not load,
+// every write is refused, its rendering unchanged or not.
+func TestAWriteMayNotLeaveADocumentThatWouldNotLoad(t *testing.T) {
+	parks := parkingDocument(t, 16_384)
+	fails := parkingDocument(t, 17_000)
+	stateOnly := func() bool { return true }
+	for _, test := range []struct {
+		name    string
+		write   growth
+		refused bool
+	}{
+		{"a write that grows a document parking 98,316 items", growth{fork: parks, before: "a\n", after: "a\n\nb\n"}, true},
+		{"a write that leaves the rendering of a document parking 98,316 items as it was", growth{fork: parks, before: "a\n", after: "a\n"}, false},
+		{"a change of an ask's state that lengthens a document parking 98,316 items", growth{fork: parks, before: "a\n", after: "a b\n", serverState: stateOnly}, false},
+		{"a write that leaves the rendering of a document parking 102,012 items as it was", growth{fork: fails, before: "a\n", after: "a\n"}, true},
+		{"a change of an ask's state on a document parking 102,012 items", growth{fork: fails, before: "a\n", after: "a b\n", serverState: stateOnly}, true},
+	} {
+		err := refuseGrowth(test.write)
+		if refused := errors.Is(err, ErrDocumentTooLarge) && strings.Contains(err.Error(), "load again"); refused != test.refused || (err != nil && !refused) {
+			t.Errorf("%s: %v, want refused %t for what a load would park", test.name, err, test.refused)
+		}
+	}
+}
+
+// parkingDocument is a live document a load parks the headings of: a first version written by
+// client 2^32-1, the highest id a browser can draw, and a version of headings headings over it
+// written by client 1, which a load reads first and so parks whole, six items a heading.
+func parkingDocument(t *testing.T, headings int) *crdt.Doc {
+	t.Helper()
+	write := func(doc *crdt.Doc, tree *pmdoc.Node) {
+		fragment := doc.GetXmlFragment(fragmentName)
+		if err := doc.TransactE(func(txn *crdt.Transaction) error { return pmdoc.Update(txn, fragment, tree) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parse := func(markdown string) *pmdoc.Node {
+		tree, err := pmdoc.Parse(markdown)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tree
+	}
+	first := crdt.New(crdt.WithClientID(math.MaxUint32))
+	write(first, parse("One line.\n"))
+	browser := crdt.New(crdt.WithClientID(1))
+	if err := crdt.ApplyUpdateV1(browser, crdt.EncodeStateAsUpdateV1(first, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	// One parse makes at most the 16,384 headings one upload may hold, so more are parsed apart.
+	version := parse(strings.Repeat("# a\n", min(headings, 16_384)))
+	if headings > 16_384 {
+		version.Children = append(version.Children, parse(strings.Repeat("# a\n", headings-16_384)).Children...)
+	}
+	write(browser, version)
+	return browser
+}
+
+// An ask's state, who answered it and when, and which of its own options were chosen are what the
+// server knows of the ask's text rather than text a caller writes, so the asks of a document
+// already past what one upload may hold - stored before the bound, or grown by a browser - can
+// still be answered with a choice and resolved, though each makes the document's markdown longer.
+// An answer's own words are caller text: on such a document an answer that would lengthen it is
+// refused as any write that would is, and the ask stays open.
+func TestTheAsksOfADocumentPastTheBoundCanStillBeAnsweredAndResolved(t *testing.T) {
+	service, _ := newTestService(t)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	ask := func(id string) string {
+		return fmt.Sprintf(":::ask{#%s urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n\n- Yes: now\n- No: later\n:::\n", id)
+	}
+	artifactID := createDocument(t, service.store, "One line.\n")
+	seedByWriter(t, service, artifactID, 1, strings.Repeat("word ", 230_000)+"\n\n"+ask("chosen")+"\n"+ask("resolved")+"\n"+ask("worded"))
+	answered := map[string]any{"state": "answered", "answered_by": "alice", "answered_at": "2026-10-03T00:00:00Z", "selected": []string{"Yes"}}
+	if err := joinedSetBlockAttributes(service, artifactID, "chosen", answered, alice); err != nil {
+		t.Fatalf("answering an ask with a choice on a document past the bound: %v", err)
+	}
+	if err := joinedSetBlockAttributes(service, artifactID, "resolved", map[string]any{"state": "resolved"}, alice); err != nil {
+		t.Fatalf("resolving an ask on a document past the bound: %v", err)
+	}
+	answered["answer"] = "Ship it now."
+	if err := joinedSetBlockAttributes(service, artifactID, "worded", answered, alice); !errors.Is(err, ErrDocumentTooLarge) || !strings.HasPrefix(err.Error(), "document too large to store: ") {
+		t.Fatalf("answering an ask in words on a document past the bound: %v, want it refused as too large to store, as the refusal words it", err)
+	}
+	markdown, err := service.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`{#chosen urgency="med" multiple="false" state="answered"`, `{#resolved urgency="med" multiple="false" state="resolved"}`, `{#worded urgency="med" multiple="false" state="open"}`} {
+		if !strings.Contains(markdown, want) {
+			t.Errorf("the %d-byte document holds no %s", len(markdown), want)
+		}
+	}
+}

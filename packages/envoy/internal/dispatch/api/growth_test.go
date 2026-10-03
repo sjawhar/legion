@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -80,6 +81,34 @@ func TestASpecOfFrontMatterAndTheMostHeadingsIsTaken(t *testing.T) {
 	}
 }
 
+// A new document is stored as its rendering, which can run longer than the markdown sent - the
+// renderer writes a blank line between two headings - so the rendering is measured as well: one
+// upload of exactly 1 MiB of 16,384 headings, which would be stored as 1,064,959 bytes, is refused
+// with 413 CAP_EXCEEDED naming the cap and creates nothing, where the same headings two bytes
+// shorter, whose rendering fits, are stored.
+func TestANewDocumentWhoseRenderingPassesTheCapIsRefused(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	headings := func(width int) []byte {
+		return []byte(strings.Repeat("# "+strings.Repeat("a", width-3)+"\n", 16_384))
+	}
+	upload := func(name string, markdown []byte) *httptest.ResponseRecorder {
+		return multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": name}, "body.md", "text/markdown", markdown, "alice")
+	}
+	if markdown := headings(64); len(markdown) != 1<<20 {
+		t.Fatalf("the headings are %d bytes, want exactly 1 MiB", len(markdown))
+	}
+	if response := upload("long.md", headings(64)); !refusedTooLarge(t, response) || !strings.Contains(response.Body.String(), "a markdown document is at most 1 MiB (1048576 bytes), and this change would make the document's markdown 1064959 bytes") {
+		t.Fatalf("a new document whose rendering passes 1 MiB: status=%d body=%.400s, want 413 CAP_EXCEEDED naming the cap and the rendering's 1,064,959 bytes", response.Code, response.Body.String())
+	}
+	if listing := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/artifacts", nil, "alice"); strings.Contains(listing.Body.String(), "long.md") {
+		t.Fatalf("the refused document left an artifact behind: %.300s", listing.Body.String())
+	}
+	if response := upload("short.md", headings(62)); response.Code != http.StatusCreated {
+		t.Fatalf("a new document whose rendering fits: status=%d body=%.400s, want 201", response.Code, response.Body.String())
+	}
+}
+
 // An accepted suggestion adds the caller's text as an edit does: on a document that weighs what one
 // document may hold, an accept that would make it heavier is refused with 413 CAP_EXCEEDED, saying
 // to shorten the change, and the document keeps its text.
@@ -147,9 +176,8 @@ func TestAskEditsAndAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testin
 				if response.Code == http.StatusOK && refused == 0 {
 					continue
 				}
-				if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) ||
-					!strings.Contains(response.Body.String(), "shorten the change, or split the document") {
-					t.Fatalf("write %d: status=%d body=%.500s, want 200 until one is refused with 413 CAP_EXCEEDED saying to shorten the change, and 413 after it", index+1, response.Code, response.Body.String())
+				if !refusedTooLarge(t, response) || !strings.Contains(response.Body.String(), "shorten the change, or split the document") {
+					t.Fatalf("write %d: status=%d body=%.500s, want 200 until one is refused with 413 CAP_EXCEEDED saying to shorten the change, as the document service words it, and 413 after it", index+1, response.Code, response.Body.String())
 				}
 				if ask := readBlockAsk(t, handler, askID); !route.kept(ask) {
 					t.Fatalf("the ask after its refused write = %#v, want it as it was", ask)
@@ -243,6 +271,21 @@ func TestSuggestionsCannotGrowADocumentsMarginPastWhatItMayHold(t *testing.T) {
 			}
 		}
 	}
+}
+
+// refusedTooLarge reports whether response is a write refused as too large to store: 413
+// CAP_EXCEEDED whose message is the refusal as the document service words it, opening "document too
+// large to store", with none of a route's or a service method's own prose before it.
+func refusedTooLarge(t *testing.T, response *httptest.ResponseRecorder) bool {
+	t.Helper()
+	if response.Code != http.StatusRequestEntityTooLarge {
+		return false
+	}
+	var body struct{ Code, Error string }
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode the refusal %.300s: %v", response.Body.String(), err)
+	}
+	return body.Code == "CAP_EXCEEDED" && strings.HasPrefix(body.Error, "document too large to store: ")
 }
 
 // An answer is stored on its ask as well as in its block, and when a deleted block returns to the

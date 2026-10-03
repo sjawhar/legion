@@ -123,7 +123,9 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if err != nil {
 		return err
 	}
-	if err := refuseGrowth(growth{fork: fork, before: beforeMarkdown, after: markdown, margin: margin}); err != nil {
+	if err := refuseGrowth(growth{fork: fork, before: beforeMarkdown, after: markdown, margin: margin, serverState: func() bool {
+		return tree.EqualOutsideServerState(before)
+	}}); err != nil {
 		return err
 	}
 	update, err := mergeUpdates(updates)
@@ -296,6 +298,9 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		return canonical, nil
 	}
 	if err != nil {
+		if isTooLarge(err) {
+			return "", err
+		}
 		return "", fmt.Errorf("replace live document: %w", err)
 	}
 	return canonical, nil
@@ -911,6 +916,9 @@ func (s *Service) SetBlockAttributes(
 	// Setting attributes a block already carries writes nothing, which the live path reports as
 	// ErrNoChanges; the block holds what the caller asked for, so that is success.
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		if isTooLarge(err) {
+			return err
+		}
 		return fmt.Errorf("set live block attributes: %w", err)
 	}
 	return nil

@@ -51,11 +51,19 @@ type growth struct {
 	before, after string
 	// margin is the margin records the write changed, or nil for a new document, which has none.
 	margin *marginWatch
+	// serverState reports whether the write changed the document's tree only in the state the
+	// server keeps on its typed blocks, an answer's text apart (pmdoc.EqualOutsideServerState),
+	// or is nil for a new document. Such a write is weighed as one that left the rendering as it
+	// was, so an ask on a document already past the bound can still be answered with a choice,
+	// resolved or retracted, while an answer's own words are measured as any caller text is.
+	serverState func() bool
 }
 
 // refuseGrowth is the refusal of the write g describes, or nil. Its rendering is weighed by
 // weighRendering. A rendering the write left as it was - an anchor mark, a margin record, an
-// attribute no rendering carries - is not measured again.
+// attribute no rendering carries - is not measured again, and one that changed only the server's
+// state of a typed block (serverState) is taken whatever the measures say of it, and counts as no
+// growth to the trial load.
 func refuseGrowth(g growth) error {
 	if err := g.margin.refusal(); err != nil {
 		return err
@@ -67,6 +75,15 @@ func refuseGrowth(g growth) error {
 		return refuseUnloadable(g.fork, func() bool { return false })
 	}
 	grew, err := weighRendering(g.before, g.after)
+	if g.serverState != nil {
+		serverState := sync.OnceValue(g.serverState)
+		if err != nil && serverState() {
+			err, grew = nil, func() bool { return false }
+		} else if err == nil {
+			measured := grew
+			grew = func() bool { return !serverState() && measured() }
+		}
+	}
 	if err != nil {
 		return err
 	}

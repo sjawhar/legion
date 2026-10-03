@@ -129,7 +129,7 @@ func (s *Service) SetAskBlockText(
 	// path reports as ErrNoChanges. It is the same ask the caller asked for, so it succeeds.
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		var unrepresentable *ErrAskBlockUnrepresentable
-		if errors.As(err, &unrepresentable) {
+		if errors.As(err, &unrepresentable) || isTooLarge(err) {
 			return AskBlockText{}, err
 		}
 		return AskBlockText{}, fmt.Errorf("write ask block text: %w", err)

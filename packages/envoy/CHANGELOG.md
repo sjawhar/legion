@@ -213,7 +213,11 @@
   was, or makes more than 65,536 elements and more than the document's did, counted as an upload's
   parse counts them (front matter apart). One that keeps or lowers both passes, so an over-limit
   document can still be trimmed or split, and any document a write leaves can be uploaded again from
-  its own text. A spec or new document whose stored markdown is past either limit is refused the
+  its own text. An ask's state, who answered it and when, and the options chosen are the server's,
+  not text a caller writes, so the asks of an over-limit document can still be answered with a
+  choice and resolved; an answer's own words are weighed. Each refusal's message is the bound's own,
+  opening `document too large to store`, on every route. A spec or new document whose stored
+  markdown (its rendering, which can run longer than what was sent) is past either limit is refused the
   same way, as is a write that would leave a live document parking more than 90,000 of the 100,000
   items ygo waits on while it loads one (any write that would leave it unloadable at all is
   refused). ygo loads a document writer by writer in order of their client ids and parks what a

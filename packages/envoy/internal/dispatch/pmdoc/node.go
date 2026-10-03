@@ -414,19 +414,42 @@ func isInlineNodeType(typeName string) bool {
 
 // Equal compares document content and structure while ignoring block identity.
 func (n *Node) Equal(o *Node) bool {
-	return equalNode(n, o, false)
+	return equalNode(n, o, func(_ string, a, b Attrs) bool { return nodeAttrsEqual(a, b, false) })
 }
 
 // EqualWithBlockIDs compares document content, structure, and block identity.
 func (n *Node) EqualWithBlockIDs(o *Node) bool {
-	return equalNode(n, o, true)
+	return equalNode(n, o, func(_ string, a, b Attrs) bool { return attrsEqual(a, b) })
 }
 
-func equalNode(n, o *Node, includeBlockIDs bool) bool {
+// EqualOutsideServerState compares document content, structure and block identity as
+// EqualWithBlockIDs does, but for the attributes of a typed block that the server keeps (the
+// schema's server attributes) other than an ask's answer: an ask's state, who answered it and when,
+// which of its own options were chosen, and whether it reads. No caller writes those, they say
+// what the server knows about the block's own text, and each is a word or a timestamp beside it.
+// An answer is server state too, but its text is the answerer's, so it counts.
+func (n *Node) EqualOutsideServerState(o *Node) bool {
+	return equalNode(n, o, attrsEqualOutsideServerState)
+}
+
+// answerAttr is the server attribute of an ask that holds caller text: the answer's own words.
+const answerAttr = "answer"
+
+func attrsEqualOutsideServerState(nodeType string, a, b Attrs) bool {
+	typ, typed := typedBlock(nodeType)
+	if !typed {
+		return attrsEqual(a, b)
+	}
+	return attrsEqualBut(a, b, func(name string) bool { return name != answerAttr && typ.Attributes[name].Server })
+}
+
+// equalNode compares n and o, their content and structure, holding each node's attributes to
+// attrs, which is given the node's type.
+func equalNode(n, o *Node, attrs func(nodeType string, a, b Attrs) bool) bool {
 	if n == nil || o == nil {
 		return n == o
 	}
-	if n.Type != o.Type || n.Text != o.Text || !nodeAttrsEqual(n.Attrs, o.Attrs, includeBlockIDs) || len(n.Marks) != len(o.Marks) || len(n.Children) != len(o.Children) {
+	if n.Type != o.Type || n.Text != o.Text || !attrs(n.Type, n.Attrs, o.Attrs) || len(n.Marks) != len(o.Marks) || len(n.Children) != len(o.Children) {
 		return false
 	}
 	for i := range n.Marks {
@@ -435,7 +458,7 @@ func equalNode(n, o *Node, includeBlockIDs bool) bool {
 		}
 	}
 	for i := range n.Children {
-		if !equalNode(n.Children[i], o.Children[i], includeBlockIDs) {
+		if !equalNode(n.Children[i], o.Children[i], attrs) {
 			return false
 		}
 	}
@@ -446,8 +469,18 @@ func nodeAttrsEqual(a, b Attrs, includeBlockIDs bool) bool {
 	if includeBlockIDs {
 		return attrsEqual(a, b)
 	}
+	return attrsEqualBut(a, b, func(name string) bool { return name == BlockIDAttr })
+}
+
+// attrsEqual treats nil and empty as equal and compares values by JSON semantics.
+func attrsEqual(a, b Attrs) bool {
+	return attrsEqualBut(a, b, func(string) bool { return false })
+}
+
+// attrsEqualBut is attrsEqual over the attributes ignored does not name.
+func attrsEqualBut(a, b Attrs, ignored func(name string) bool) bool {
 	for key, av := range a {
-		if key == BlockIDAttr {
+		if ignored(key) {
 			continue
 		}
 		bv, ok := b[key]
@@ -462,30 +495,9 @@ func nodeAttrsEqual(a, b Attrs, includeBlockIDs bool) bool {
 		}
 	}
 	for key, bv := range b {
-		if key != BlockIDAttr {
-			if _, ok := a[key]; !ok && bv != nil {
-				return false
-			}
+		if ignored(key) {
+			continue
 		}
-	}
-	return true
-}
-
-// attrsEqual treats nil and empty as equal and compares values by JSON semantics.
-func attrsEqual(a, b Attrs) bool {
-	for key, av := range a {
-		bv, ok := b[key]
-		if !ok {
-			if av == nil {
-				continue
-			}
-			return false
-		}
-		if !reflect.DeepEqual(normalizeJSON(av), normalizeJSON(bv)) {
-			return false
-		}
-	}
-	for key, bv := range b {
 		if _, ok := a[key]; !ok && bv != nil {
 			return false
 		}
