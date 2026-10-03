@@ -39,8 +39,9 @@ func OpenApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.
 // the actor whose edit moved the request: the caller knows it even when the version credits more
 // than one author. A zero mover is SettlementActor. The row and its thread stay open;
 // requested_version records that the agent must hand it back before a human sees it in Waiting on
-// you again. Only the move that takes the request from the human wakes anyone; a later one, while
-// it already waits on its agent, is quiet (RewriteApprovalAsk).
+// you again. Only the first move since the request was opened or handed back wakes anyone, even
+// when a thread reply already left it waiting on its agent; a later one, while requested_version is
+// already below the version it named, is quiet (RewriteApprovalAsk).
 func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string) ([]model.Event, error) {
 	ask, err := OpenApprovalAsk(ctx, tx, artifactID)
 	if err != nil {
@@ -66,9 +67,10 @@ func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 // RewriteApprovalAsk rewords one open approval row to name version with summary, indexes its new
 // question, stamps edited_at, and records its ask.edited event. A document version move and a
 // request with a new summary both reword; neither hands the request back, so requested_version
-// stays as it was. A move of a request that already waits on its agent, requested_version below the
-// version it named, is recorded quiet (model.AskEditEventPayload.Quiet): it changes only that
-// version, so like a human's unnamed version it wakes nobody.
+// stays as it was. A move of a request that an earlier version already moved since it was opened
+// or handed back, requested_version below the version it named, is recorded quiet
+// (model.AskEditEventPayload.Quiet): it changes only that version, so like a human's unnamed version
+// it wakes nobody.
 func RewriteApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,
