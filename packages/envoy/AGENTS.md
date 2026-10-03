@@ -906,9 +906,9 @@ message threads), `followed_by` (`ask_followers`). Artifact targets are addresse
 artifact sources by uuid; each arm has the index its `to`/`from` predicate needs. `GET
 /api/v1/references?to=|from=` reads the view without loading document rooms. `envoy-dispatch
 rebuild-refs` reparses every source and reconciles the index (the text is the truth), deleting
-edges whose source no longer exists, and refuses to run without `dispatch.server_url`; run
-`envoy-dispatch backfill-reference-excerpts` before serving so document rows receive their stored
-excerpts.
+edges whose source no longer exists, and refuses to run without `dispatch.server_url`. Document
+rows that lack a stored excerpt fall back to the live document until the server's boot-time
+backfill, or `envoy-dispatch backfill-reference-excerpts`, fills them.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
