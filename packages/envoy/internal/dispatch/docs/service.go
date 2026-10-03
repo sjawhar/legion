@@ -211,11 +211,29 @@ type suppressSlot struct {
 	canceled  bool
 	discarded bool
 	consumed  bool
+	// committedTo and committed are the document a repair's transaction committed into and the
+	// update it committed (recordSuppressedCommit), set before ygo hands that update to the room's
+	// persistence.
+	committedTo *crdt.Doc
+	committed   []byte
 }
 
-// identityClosureOrigin identifies a server-owned identity repair transaction.
-// It must remain non-zero sized because Ygo compares origins by interface equality.
-type identityClosureOrigin struct{ _ byte }
+// identityClosureOrigin identifies a server-owned repair transaction - settlement's, or the
+// block-id backfill's - and carries the suppression slot its update is held from the room's
+// persistence by. Being non-zero sized also keeps each origin distinct, since ygo compares origins
+// by interface equality.
+type identityClosureOrigin struct{ slot *suppressSlot }
+
+// recordSuppressedCommit records on slot the update its repair transaction committed and the
+// document it committed it into. The room's update observer runs it (onLoadDocument) on the
+// committing goroutine before ygo's own persistence observer, which the room registers after
+// OnLoadDocument, so the slot holds both before either path to the store is handed the update.
+func (s *Service) recordSuppressedCommit(slot *suppressSlot, doc *crdt.Doc, update []byte) {
+	s.suppressMu.Lock()
+	defer s.suppressMu.Unlock()
+	slot.committedTo = doc
+	slot.committed = append([]byte(nil), update...)
+}
 
 func (s *Service) prepareSuppressedPersistence(room string) *suppressSlot {
 	slot := &suppressSlot{ready: make(chan struct{})}
@@ -254,8 +272,9 @@ func (s *Service) applyCaptured(ctx context.Context, room string, origin any, mu
 }
 
 // errRoomReplaced is a repair refused because the room no longer holds the document its caller
-// read: the room was evicted - its last browser left, or it was closed - and the write would load a
-// replacement from the store.
+// read - the room was evicted, its last browser having left or a CloseRoom having closed it, and
+// the write would load a replacement from the store - or given up because the room left the
+// server while the repair's transaction committed into it.
 var errRoomReplaced = errors.New("document room was replaced")
 
 // applySuppressed writes one repair - settlement's, or the block-id backfill's - into room's live
@@ -274,15 +293,21 @@ var errRoomReplaced = errors.New("document room was replaced")
 //
 // A repair is written only into want, the document its caller read, when want is not nil: one
 // written into a replacement the room loaded since would be versioned from want, which never got
-// it. It is refused, writing nothing, with errRoomReplaced.
+// it. It is refused, writing nothing, with errRoomReplaced. A room can also retire under the
+// repair's transaction, between Server.Apply finding it and the commit: the commit's update then
+// reaches the store's adapter on this goroutine, which consumeSuppressedPersistence answers by
+// discarding it, so a repair whose room is gone once it has written returns its slot with
+// errRoomReplaced, and its caller fails the room as for any write it gives up.
 func (s *Service) applySuppressed(ctx context.Context, room string, want *crdt.Doc, mutate func(doc *crdt.Doc, origin any) (bool, error)) (*suppressSlot, []byte, error) {
 	slot := s.prepareSuppressedPersistence(room)
-	origin := &identityClosureOrigin{}
+	origin := &identityClosureOrigin{slot: slot}
+	var written *crdt.Doc
 	wrote := false
 	updates, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
 		if want != nil && doc != want {
 			return errRoomReplaced
 		}
+		written = doc
 		var mutateErr error
 		wrote, mutateErr = mutate(doc, origin)
 		return mutateErr
@@ -294,14 +319,14 @@ func (s *Service) applySuppressed(ctx context.Context, room string, want *crdt.D
 	if err == nil && len(updates) > 1 {
 		err = fmt.Errorf("a repair wrote %d updates, want one", len(updates))
 	}
-	if err != nil {
-		return slot, updates[0], err
-	}
-	if !wrote {
+	if err == nil && !wrote {
 		s.finishSuppressedPersistence(slot, updates[0])
 		return nil, nil, nil
 	}
-	return slot, updates[0], nil
+	if err == nil && s.srv.GetDoc(room) != written {
+		err = errRoomReplaced
+	}
+	return slot, updates[0], err
 }
 
 func (s *Service) finishSuppressedPersistence(slot *suppressSlot, update []byte) {
@@ -349,7 +374,30 @@ func (s *Service) consumeSuppressedPersistence(room string, update []byte) bool 
 		}
 		slot := slots[0]
 		ready := slot.ready
+		committedTo := slot.committedTo
+		own := committedTo != nil && bytes.Equal(slot.committed, update)
 		s.suppressMu.Unlock()
+
+		// A repair's update committed into a room whose persistence worker has retired reaches
+		// this adapter on the repair's own goroutine, inside its commit (ygo's persistStranded),
+		// and a room retires only once it has left the server. Waiting there for the slot, which
+		// that goroutine finishes or discards once its commit returns, would never end. The repair
+		// finds its room gone and gives the write up (applySuppressed), so its update is
+		// discarded here instead.
+		if own && s.srv.GetDoc(room) != committedTo {
+			s.suppressMu.Lock()
+			if current := s.suppressed[room]; len(current) > 0 && current[0] == slot && !slot.consumed {
+				if !slot.canceled && slot.update == nil {
+					slot.canceled = true
+					close(slot.ready)
+				}
+				s.consumeHeadSlotLocked(room)
+				s.suppressMu.Unlock()
+				return true
+			}
+			s.suppressMu.Unlock()
+			continue
+		}
 
 		<-ready
 
@@ -360,13 +408,7 @@ func (s *Service) consumeSuppressedPersistence(room string, update []byte) bool 
 			continue
 		}
 		if slot.canceled {
-			slot.consumed = true
-			slots = slots[1:]
-			if len(slots) == 0 {
-				delete(s.suppressed, room)
-			} else {
-				s.suppressed[room] = slots
-			}
+			s.consumeHeadSlotLocked(room)
 			discarded := slot.discarded
 			s.suppressMu.Unlock()
 			return discarded
@@ -375,16 +417,22 @@ func (s *Service) consumeSuppressedPersistence(room string, update []byte) bool 
 			s.suppressMu.Unlock()
 			return false
 		}
-		slot.consumed = true
-		slots = slots[1:]
-		if len(slots) == 0 {
-			delete(s.suppressed, room)
-		} else {
-			s.suppressed[room] = slots
-		}
+		s.consumeHeadSlotLocked(room)
 		s.suppressMu.Unlock()
 		return true
 	}
+}
+
+// consumeHeadSlotLocked marks room's first suppression slot consumed and removes it. The caller
+// holds suppressMu.
+func (s *Service) consumeHeadSlotLocked(room string) {
+	slots := s.suppressed[room]
+	slots[0].consumed = true
+	if len(slots) == 1 {
+		delete(s.suppressed, room)
+		return
+	}
+	s.suppressed[room] = slots[1:]
 }
 
 func (s *Service) cancelSuppressedPersistence(room string, slot *suppressSlot) {
@@ -876,6 +924,24 @@ func stampBlockIDs(doc *crdt.Doc, origin any) (*pmdoc.Node, int, error) {
 	return stamped, minted, err
 }
 
+// settlementAuthors copies state's pending authors, which a settlement's version credits, and names
+// the actor its events carry: the first of those authors, or else the room's latest editor. The
+// caller holds state.mu.
+func settlementAuthors(state *roomState) (map[string]model.Actor, []model.Actor, model.Actor) {
+	pending := make(map[string]model.Actor, len(state.pending))
+	for key, actor := range state.pending {
+		pending[key] = actor
+	}
+	authors := actorSlice(pending)
+	actor := model.Actor{}
+	if len(authors) > 0 {
+		actor = authors[0]
+	} else if state.lastActor != nil {
+		actor = *state.lastActor
+	}
+	return pending, authors, actor
+}
+
 func (s *Service) settleRoom(room string, generation uint64) {
 	s.settleRoomWithin(context.Background(), room, generation)
 }
@@ -1113,19 +1179,8 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		finishSlots()
 		return
 	}
-	pending := make(map[string]model.Actor, len(state.pending))
-	for key, actor := range state.pending {
-		pending[key] = actor
-	}
-	lastActor := state.lastActor
+	pending, authors, eventActor := settlementAuthors(state)
 	state.mu.Unlock()
-	authors := actorSlice(pending)
-	eventActor := model.Actor{}
-	if len(authors) > 0 {
-		eventActor = authors[0]
-	} else if lastActor != nil {
-		eventActor = *lastActor
-	}
 	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, tree, eventActor)
 	if err != nil {
 		abandon(err)
@@ -1197,6 +1252,12 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		state.mu.Unlock()
 		s.discardSuppressedPersistence(room, slots...)
 		return
+	}
+	// That version holds the edits made since the authors were taken above, so it is credited to
+	// their authors too: they are taken again here. An edit's own settlement finds the document
+	// already versioned and writes no version to credit them on.
+	if len(slots) > 0 {
+		pending, authors, eventActor = settlementAuthors(state)
 	}
 	state.mu.Unlock()
 
