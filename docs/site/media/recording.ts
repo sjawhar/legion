@@ -49,6 +49,10 @@ export interface Walkthrough<Seeded> {
   readonly sections: readonly (BrowserSection<Seeded> | CastSection)[];
   /** Respellings the narrator needs (`{ jj: "jay-jay" }`); captions keep the written words. */
   readonly pronounce?: Readonly<Record<string, string>>;
+  /** The frame the poster is taken from: the first (the default, where a video opens on its
+   *  payoff) or the `last`, for a terminal recording that opens on an empty prompt and ends on
+   *  its answer. */
+  readonly poster?: "first" | "last";
 }
 
 /** How long the drawn pointer takes to glide to where the mouse moved. */

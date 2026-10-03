@@ -88,7 +88,7 @@ I recommend Server: the second criterion needs the cart on another device, which
   production:
     "Production: on the live storefront, saved a two-item cart as a test shopper, opened it from the account page in a second browser, and saw both items at their quantities. Merge commit 4b7d2a1.",
   signOff:
-    "Signed off. All three acceptance criteria are met; review approved 9c41e07 with no open threads; retro is done; merged as 4b7d2a1; the production record above shows the saved cart opening on a second device.",
+    "Signed off. All three acceptance criteria are met; review approved 9c41e07 with no open threads; retro is done; merged as 4b7d2a1; the production record shows the saved cart opening on a second device.",
 };
 
 export const DELIVERY_DATE: Example = {
@@ -129,7 +129,7 @@ I recommend Carrier: its estimate already counts the warehouse's cut-off time an
   production:
     "Production: on the live storefront, opened checkout with one item as a test shopper and saw a delivery date beside each of the three shipping options. Merge commit 7d03b9e.",
   signOff:
-    "Signed off. Both acceptance criteria are met; review approved 2f8e6c1 with no open threads; retro is done; merged as 7d03b9e; the production record above shows the dates at checkout.",
+    "Signed off. Both acceptance criteria are met; review approved 2f8e6c1 with no open threads; retro is done; merged as 7d03b9e; the production record shows the dates at checkout.",
 };
 
 /** An example issue in Dispatch: its key and its spec document. */
@@ -323,7 +323,7 @@ export async function postDailyReport(
         `Finished:\n${lines.join("\n")}`,
         "Closed without a change: none.",
         "Running: nothing is admitted, and nothing is waiting.",
-        "Slots: 3 of 3 free. This turn's walk found no todo issue to take.",
+        "Slots: 4 of 4 free. This turn's walk found no todo issue to take.",
       ].join("\n\n"),
     },
     CONTROLLER

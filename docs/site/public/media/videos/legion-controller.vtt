@@ -1,12 +1,12 @@
 WEBVTT
 
-00:00:03.200 --> 00:00:05.668
+00:00:02.900 --> 00:00:05.368
 It checks the controller's Oh My Pi,
 
-00:00:05.750 --> 00:00:07.516
+00:00:05.400 --> 00:00:07.166
 then starts it against the daemon.
 
-00:00:07.600 --> 00:00:10.223
+00:00:07.700 --> 00:00:10.323
 The controller opens on its start procedure,
 
 00:00:12.700 --> 00:00:15.885

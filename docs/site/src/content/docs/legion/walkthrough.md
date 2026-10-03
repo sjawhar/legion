@@ -1,13 +1,15 @@
 ---
 title: Walkthrough
-description: One issue going through Legion from handover to production check, as you see it in Dispatch, on GitHub and in the operator's terminal.
+description: One issue going through Legion from handover to production check, as you see it in Dispatch, and an example Legion daemon in the operator's terminal.
 sidebar:
   order: 6
 ---
 
 This page follows one issue through Legion, step by step, and each step names what you see. The
-screenshots, the narrated video and the two terminal recordings show example data: a Storefront
-project in Dispatch and a Legion daemon running on one machine.
+screenshots and the narrated video show example data: a Storefront project in Dispatch. The two
+terminal recordings in [the operator's view](#the-operators-view) show an example daemon:
+`legion status`, `legion state` and `legion claims list`, then the controller starting and
+registering with it.
 
 <video controls preload="metadata" poster="/legion/media/videos/legion-issue-journey.jpg" style="width: 100%" aria-label="Walkthrough: handing an issue to Legion and getting it back ready to merge">
   <source src="/legion/media/videos/legion-issue-journey.mp4" type="video/mp4">
@@ -43,7 +45,7 @@ After approval the daemon starts the planner, then the implementer, which opens 
 then the tester and the reviewer. The issue's status follows: `in_progress`, `testing`,
 `needs_review`, then `retro` once the reviewer approves.
 
-![The issue's Conversation as the phases run: the daemon's status changes, newest first, with the issue now in Retro and its pull request linked.](/legion/media/legion/status-events.png)
+![The issue after the phases ran: Retro in its header beside the pull request link, #42, and its activity newest first: three updates from the Legion daemon's session, one from the implementer, and alice's approval of the spec.](/legion/media/legion/status-events.png)
 
 ## 5. The pull request
 
@@ -70,10 +72,12 @@ to `done`.
 
 ## The operator's view
 
-The same journey from the operator's terminal: the daemon's state and the agents it runs, the
-controller starting, and the controller's daily report.
+An operator's terminal on an example daemon: `legion status`, `legion state` and
+`legion claims list` read it, with one issue's architect running; then `legion controller start`
+starts the project's controller, which registers with that same daemon. Last, the controller's
+daily report in Dispatch.
 
-<video controls preload="metadata" poster="/legion/media/videos/legion-state.jpg" style="width: 100%" aria-label="Terminal recording: legion status, legion state and legion claims list on a running daemon">
+<video controls preload="metadata" poster="/legion/media/videos/legion-state.jpg" style="width: 100%" aria-label="Terminal recording: legion status, legion state and legion claims list on an example daemon">
   <source src="/legion/media/videos/legion-state.mp4" type="video/mp4">
   <track kind="captions" src="/legion/media/videos/legion-state.vtt" srclang="en" label="English" default>
 </video>

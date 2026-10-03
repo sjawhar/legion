@@ -1,8 +1,9 @@
 // The Legion section's screenshots: one example issue's journey through Legion, as Dispatch shows
 // it, written to `docs/site/public/media/legion/<id>.png` and embedded as
-// `![<alt>](/legion/media/legion/<id>.png)`. The seed files the issue and hands it to Legion; each
-// shot's `prepare` then makes the next move the Legion daemon, its agents or the human makes
-// (`journey.ts`), so the shots follow the issue in order, then the controller's daily report.
+// `![<alt>](/legion/media/legion/<id>.png)`. The seed files the walkthrough's two example issues and
+// hands the first to Legion; each shot's `prepare` then makes the next move the Legion daemon, its
+// agents or the human makes (`journey.ts`), so the shots follow the issue in order, then the
+// controller's daily report, which takes the project's next key.
 import type { Page } from "@playwright/test";
 
 import { expect } from "../harness";
@@ -11,6 +12,7 @@ import {
   admit,
   answerDecision,
   approve,
+  DELIVERY_DATE,
   file,
   handOver,
   linkPullRequest,
@@ -34,9 +36,15 @@ interface LegionJourney extends Tracked {
   report?: string;
 }
 
+/** Files both of the walkthrough's issues, so the daily report issue the controller creates takes
+ *  a key no video shows, and hands the first one over. */
 async function seed(): Promise<LegionJourney> {
   await seedProject(["SHOP-1"]);
   const issue = await file(SAVED_CART);
+  const next = await file(DELIVERY_DATE);
+  if (issue.key !== "SHOP-1" || next.key !== "SHOP-2") {
+    throw new Error(`legion shots: the seed made ${issue.key} and ${next.key}`);
+  }
   await handOver(issue);
   return { ...issue };
 }
@@ -48,6 +56,15 @@ const turns = (page: Page) => page.getByRole("list", { name: "Conversation turns
 async function headerOnTop(page: Page): Promise<void> {
   await page.getByTestId("issue-header").evaluate((header) => header.scrollIntoView());
   await expect(page.getByTestId("issue-header")).toBeInViewport({ ratio: 1 });
+}
+
+/** The header's details rail scrolls sideways and lists the issue's links last, so at a desktop
+ *  width the pull request sits past the rail's right edge, where it is still "visible" to a
+ *  check. This scrolls the rail to it and waits for the link to be wholly on screen. */
+async function pullRequestInView(page: Page): Promise<void> {
+  const link = page.getByTestId("issue-header").getByText(`#${SAVED_CART.pullRequest.number}`);
+  await link.scrollIntoViewIfNeeded();
+  await expect(link).toBeInViewport({ ratio: 1 });
 }
 
 const legion: ShotSet<LegionJourney> = {
@@ -121,7 +138,7 @@ const legion: ShotSet<LegionJourney> = {
     },
     {
       id: "status-events",
-      alt: "The issue's Conversation as the phases run: the daemon's status changes, newest first, with the issue now in Retro and its pull request linked.",
+      alt: "The issue after the phases ran: Retro in its header beside the pull request link, #42, and its activity newest first: three updates from the Legion daemon's session, one from the implementer, and alice's approval of the spec.",
       route: conversation,
       viewport: "desktop",
       theme: "light",
@@ -135,7 +152,10 @@ const legion: ShotSet<LegionJourney> = {
         await expect(page.getByTestId("issue-header").getByText("#42")).toBeVisible();
         await expect(turns(page)).toContainText("updated the issue");
       },
-      steps: headerOnTop,
+      steps: async (page) => {
+        await headerOnTop(page);
+        await pullRequestInView(page);
+      },
     },
     {
       id: "pull-request",
@@ -146,6 +166,7 @@ const legion: ShotSet<LegionJourney> = {
       ready: async (page) => {
         await expect(page.getByTestId("issue-header").getByText("#42")).toBeVisible();
       },
+      steps: pullRequestInView,
       element: (page) => page.getByTestId("issue-header"),
     },
     {

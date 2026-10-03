@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
-# Records the Legion walkthrough's two terminal casts, `state.cast` and `controller.cast` beside this
-# file, against a local Go daemon in the shape scripts/e2e/controller-start-tmux.sh builds: this
-# checkout's `legion` on a scratch postgres:16, a NATS server and an Envoy listener of its own, and
-# this checkout's plugin in an Oh My Pi profile under the run's own HOME. Every name on screen is
-# example data: the project is SHOP, its one running claim is the architect of SHOP-2, and the model
-# the agents are configured with is an example provider served by a local listener that accepts
-# each request and never answers, so no agent's turn ends, and none fails, on camera.
+# Records the Legion section's two terminal casts, `state.cast` and `controller.cast` beside this
+# file, which the `legion-state` and `legion-controller` walkthroughs render. Both come from one
+# local Go daemon in the shape scripts/e2e/controller-start-tmux.sh builds: this checkout's `legion`
+# on a scratch postgres:16, a NATS server and an Envoy listener of its own, and this checkout's
+# plugin in an Oh My Pi profile under the run's own HOME. Every name on screen is example data: the
+# project is SHOP, its one running claim is the architect of SHOP-2, and the model the agents are
+# configured with is an example provider served by a local listener that accepts each request and
+# never answers, so no agent's turn ends, and none fails, on camera.
 #
-#   bash docs/site/media/walkthroughs/legion-issue-journey/record-casts.sh [state] [controller]
+#   bash docs/site/media/walkthroughs/legion-operator/record-casts.sh [state] [controller]
 #
-# With no argument it records both. Each cast is typed into a clean shell in tmux at 100x28, the
-# size docs/site/media/README.md names, and recorded with asciinema. Everything the run starts is
-# its own and goes on any exit: its scratch directory, its tmux servers and both containers.
+# With no argument it records both, state first, then the controller registering with that same
+# daemon. Each cast is typed into a clean shell in tmux at 100x28, the size docs/site/media/README.md
+# names, and recorded with asciinema. Everything the run starts is its own and goes on any exit:
+# its scratch directory, its tmux servers and both containers. The daemon, listener and model logs
+# go to an evidence directory outside it, a fresh /tmp directory the run keeps and names on exit.
 set -euo pipefail
 unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE NATS_DAEMON_NKEY_SEED NATS_DAEMON_NKEY_SEED_FILE
+
+check=setup
+note() { echo "   $*"; }
+fail() { echo "FAIL $check: $*" >&2; exit 1; }
+for tool in go docker jq curl tmux bun mise jj asciinema; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../../../.." && pwd)
@@ -24,24 +32,25 @@ for cast in "${casts[@]}"; do
 done
 
 work=$(mktemp -d /tmp/legion-docs-casts.XXXXXX)
-evidence=$work/evidence
+evidence=$(mktemp -d /tmp/legion-docs-casts-evidence.XXXXXX)
 mkdir -p "$evidence/logs" "$work/bin" "$work/xdg" "$work/tmux"
 timeout_hook=
-check=setup
 pg_container=legion-docs-casts-pg-$$
 nats_container=legion-docs-casts-nats-$$
 daemon_pid=
 listener_pid=
 model_pid=
-note() { echo "   $*"; }
-fail() { echo "FAIL $check: $*" >&2; exit 1; }
-# shellcheck source=../../../../../scripts/e2e/lib/rig.sh
+daemon_port=
+envoy_port=
+model_port=
+# shellcheck source-path=SCRIPTDIR source=../../../../../scripts/e2e/lib/rig.sh
 . "$root/scripts/e2e/lib/rig.sh"
-# shellcheck source=../../../../../scripts/e2e/lib/omp-home.sh
+# shellcheck source-path=SCRIPTDIR source=../../../../../scripts/e2e/lib/omp-home.sh
 . "$root/scripts/e2e/lib/omp-home.sh"
-# shellcheck source=../../../../../scripts/e2e/lib/stage-role-prompts.sh
+# shellcheck source-path=SCRIPTDIR source=../../../../../scripts/e2e/lib/stage-role-prompts.sh
 . "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
+# Unconditional: every run removes what it made, whatever it ended on, and keeps its evidence.
 cleanup() {
   set +e
   TMUX_TMPDIR=$work/tmux tmux -L cast kill-server >/dev/null 2>&1
@@ -51,11 +60,12 @@ cleanup() {
   stop_pid "$model_pid"
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
   docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1
-  [ -n "${keep:-}" ] || rm -rf "$work"
+  rm -rf "$work"
+  echo "evidence: $evidence (logs/daemon.log, logs/listener.log, logs/model.log)"
   return 0
 }
 trap cleanup EXIT
-trap 'echo "FAIL $check: line $LINENO exited $?: $BASH_COMMAND" >&2; keep=1; echo "logs kept in $evidence/logs" >&2' ERR
+trap 'echo "FAIL $check: line $LINENO exited $?: $BASH_COMMAND" >&2' ERR
 trap 'exit 130' INT
 trap 'exit 143' TERM
 

@@ -1,9 +1,8 @@
-// Handing an issue to Legion and getting it back merged: a finished issue first, then the next one
-// handed over, its questions and spec approval answered in the Inbox, its status following the
-// phases to READY, and the operator's terminal. Rebuild it with the command in
-// docs/site/media/README.md; the two casts beside it in `legion-issue-journey/` are recorded by
-// `legion-issue-journey/record-casts.sh`. Each narration line was written to its measured clip and
-// starts at the cue it names, once that moment is on screen.
+// Handing an issue to Legion and getting it back ready to merge: a finished issue first, then the
+// next one handed over, its questions and spec approval answered in the Inbox, and its status
+// following the phases to READY. Rebuild it with the command in docs/site/media/README.md. Each
+// narration line was written to its measured clip and starts at the cue it names, once that moment
+// is on screen.
 import type { Page } from "@playwright/test";
 
 import { expect } from "../harness";
@@ -64,7 +63,7 @@ async function openConversation(page: Page, issue: Tracked): Promise<void> {
 const legionIssueJourney: Walkthrough<Seeded> = {
   title: "Hand an issue to Legion",
   seed,
-  pronounce: { READY: "Ready", Todo: "to-do", tmux: "tee-mux" },
+  pronounce: { READY: "Ready", Todo: "to-do" },
   sections: [
     {
       id: "done",
@@ -193,24 +192,27 @@ const legionIssueJourney: Walkthrough<Seeded> = {
     },
     {
       id: "phases",
-      narration: [{ at: "phases", text: "The status follows each phase." }],
+      narration: [{ at: "phases", text: "The status follows each phase, with no click from you." }],
       open: async (page, seeded) => {
         await linkPullRequest(seeded.next, DELIVERY_DATE);
         await page.goto(`/issues/${seeded.next.key}`);
         await expect(header(page).getByText(`#${DELIVERY_DATE.pullRequest.number}`)).toBeVisible();
+        await expect(page.getByRole("heading", { name: "Acceptance criteria" })).toBeVisible();
       },
       act: async (page, seeded, cue) => {
         await linger(page, 0.4);
         const pill = page.getByRole("combobox", { name: "Status" });
-        await highlight(page, pill);
-        // The daemon's status writes as the phases run; the open page hears each one.
+        // The daemon's status writes as the phases run; the open page hears each one. Nothing is
+        // pointed at or ringed: the pointer stays off screen, so no one is seen setting a status.
+        // (The Conversation would show each write as the daemon's activity line, but it follows
+        // its newest turn and scrolls the header, and the status with it, off screen.)
         for (const [index, status] of PHASE_STATUSES.entries()) {
           await setStatus(seeded.next, status);
           await expect(pill).toHaveValue(status);
           if (index === 0) cue("phases");
           await linger(page, 1.1);
         }
-        await linger(page, 0.4);
+        await linger(page, 0.6);
       },
     },
     {
@@ -233,30 +235,6 @@ const legionIssueJourney: Walkthrough<Seeded> = {
         cue("outcome");
         await linger(page, 2.4);
       },
-    },
-    {
-      id: "state",
-      cast: "legion-issue-journey/state.cast",
-      // From `legion state` to the claims list's answer; `legion status` and the detach are cut.
-      window: [3.9, 19.6],
-      narration: [
-        { at: 2.3, text: "From the terminal, legion state reads the daemon;" },
-        { at: 8.3, text: "its JSON shows the architect, ready;" },
-        { at: 11.9, text: "legion claims list shows each claim." },
-      ],
-    },
-    {
-      id: "controller",
-      cast: "legion-issue-journey/controller.cast",
-      // Up to the registered controller's locator; the detach is cut.
-      window: [0.9, 16],
-      narration: [
-        { at: 0.4, text: "Then start the controller." },
-        { at: 3.2, text: "It checks the controller's Oh My Pi," },
-        { at: 5.75, text: "then starts it." },
-        { at: 7.6, text: "The controller opens on its start procedure," },
-        { at: 12.6, text: "and registers with the daemon." },
-      ],
     },
   ],
 };

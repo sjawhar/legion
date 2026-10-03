@@ -88,10 +88,12 @@ so a weak one is re-recorded without touching the rest. Rebuild a video with:
 DATABASE_URL=<database> ELEVENLABS_API_KEY=<key> bun docs/site/media/walkthrough.ts answer-an-ask
 ```
 
-The walkthroughs so far are `answer-an-ask`, `broadcast-and-replies` and `legion-issue-journey`,
-and two made only of that one's casts, `legion-state` and `legion-controller`. A build writes
+The walkthroughs so far are `answer-an-ask`, `broadcast-and-replies`, `legion-issue-journey`, and
+two made only of casts, `legion-state` and `legion-controller`. A build writes
 `docs/site/public/media/videos/<name>.mp4`, captions in `<name>.vtt` from the narration, and a
-poster frame in `<name>.jpg`. Commit all three with the walkthrough file. A page embeds them as:
+poster frame in `<name>.jpg`: the video's first frame, or its last when the walkthrough sets
+`poster: "last"`, as a cast that opens on an empty prompt does. Commit all three with the
+walkthrough file. A page embeds them as:
 
 ```html
 <video controls preload="metadata" poster="/legion/media/videos/answer-an-ask.jpg" src="/legion/media/videos/answer-an-ask.mp4">
@@ -184,9 +186,12 @@ frame, keeps `window` (seconds of the drawn recording, all of it when omitted), 
 the video's frame and narrates it like any other section. An erroring command on screen is a
 re-recording, not a trim. A walkthrough made only of casts needs no harness and no `seed`.
 
-The Legion casts run against a live daemon: `walkthroughs/legion-issue-journey/record-casts.sh`
-builds one on example data, in the shape `scripts/e2e/controller-start-tmux.sh` builds, and
-records both into that directory (it needs Go, Docker, tmux, `jq` and asciinema).
+The Legion casts run against a live daemon: `walkthroughs/legion-operator/record-casts.sh` builds
+one on example data, in the shape `scripts/e2e/controller-start-tmux.sh` builds, and records both
+from it into that directory, `state.cast` first and then `controller.cast`, whose controller
+registers with the daemon the first one read. `legion-state` and `legion-controller` render them.
+It needs Go, Docker, `jq`, curl, tmux, Bun, mise, jj and asciinema, and checks for each before it
+starts.
 
 ### Before you commit a video
 
