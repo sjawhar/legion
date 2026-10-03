@@ -2,7 +2,7 @@
 
 The secrets broker: it enrolls agent sessions, decides their secret requests by its rules or by a
 person's approval in Dispatch, records every request and decision, and releases granted values.
-The broker's documentation, generated reference included, is the "Secrets broker" section of the
+The broker's documentation, generated reference included, is the "Secrets Broker" section of the
 docs site, built from `docs/site/src/content/docs/broker/`.
 
 ## Build

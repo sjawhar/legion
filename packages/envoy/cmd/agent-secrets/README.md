@@ -16,7 +16,7 @@ On a machine that runs agents directly, `agent-secrets-helper` (`../agent-secret
 each session's key and signs for it; in a container or a Kubernetes pod, the session's key lives in
 `AGENT_SECRETS_KEY_DIR`.
 
-The docs site's "Secrets broker" section, built from `docs/site/src/content/docs/broker/`, has the
+The docs site's "Secrets Broker" section, built from `docs/site/src/content/docs/broker/`, has the
 quickstart, the guides and the generated CLI reference.
 
 ## Build
