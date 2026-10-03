@@ -76,6 +76,23 @@ func producedSchemaError(err error) error {
 // than one write may (pmdoc.ErrTooManyElements) is.
 var ErrDocumentTooLarge = errors.New("document too large to store")
 
+// IsTooLarge reports a refusal of a write too large to store: markdown making more elements than
+// one write may (pmdoc.ErrTooManyElements), or a document larger than the server stores
+// (ErrDocumentTooLarge). Every route serves it as 413 CAP_EXCEEDED in its own words, which say
+// what to shorten.
+func IsTooLarge(err error) bool {
+	return errors.Is(err, ErrDocumentTooLarge) || errors.Is(err, pmdoc.ErrTooManyElements)
+}
+
+// wrapUnlessTooLarge is err behind context, which names the write that failed, unless err refuses a
+// write too large to store (IsTooLarge), which reaches its route in the bound's own words.
+func wrapUnlessTooLarge(err error, context string) error {
+	if IsTooLarge(err) {
+		return err
+	}
+	return fmt.Errorf("%s: %w", context, err)
+}
+
 // parseInput parses markdown a caller writes that replaces no live document: a new document's
 // first text, or the empty text a delete splices. Text an insert or an accept writes into a
 // document is parseFragmentInput's.

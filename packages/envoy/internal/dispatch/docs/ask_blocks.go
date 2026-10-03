@@ -803,24 +803,35 @@ func (r *settlementReconciliation) returnAnswersWithRoom(tree *pmdoc.Node, befor
 	}
 	document, was := renderingOf(left), renderingOf(before)
 	for _, index := range answered {
-		rewrite := r.rewrites[index]
-		alone := &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{rewrite.node}}
-		withheld, err := renderTree(alone)
-		setAskServerAttributes(rewrite.node, rewrite.ask, false)
+		rewrite := &r.rewrites[index]
+		grown, err := rewrite.withAnswer(document)
 		if err == nil {
-			var answeredBlock string
-			if answeredBlock, err = renderTree(alone); err == nil {
-				grown := document.longer(len(answeredBlock) - len(withheld))
-				if _, err = weigh(was, grown); err == nil {
-					document = grown
-					returned[index] = true
-					continue
-				}
-			}
+			_, err = weigh(was, grown)
 		}
-		setAskServerAttributes(rewrite.node, rewrite.ask, true)
+		if err != nil {
+			setAskServerAttributes(rewrite.node, rewrite.ask, true)
+			continue
+		}
+		document = grown
+		returned[index] = true
 	}
 	return returned
+}
+
+// withAnswer gives the rewrite's block, its answer left out, the answer back, and is document grown
+// by what that adds to the block's own rendering.
+func (rewrite *serverRewrite) withAnswer(document rendering) (rendering, error) {
+	alone := &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{rewrite.node}}
+	withheld, err := renderTree(alone)
+	setAskServerAttributes(rewrite.node, rewrite.ask, false)
+	if err != nil {
+		return rendering{}, err
+	}
+	answered, err := renderTree(alone)
+	if err != nil {
+		return rendering{}, err
+	}
+	return document.longer(len(answered) - len(withheld)), nil
 }
 
 // without is items but those at the indexes dropped names, in their order, in items' own array.

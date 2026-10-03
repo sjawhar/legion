@@ -128,16 +128,9 @@ func isEditRefusal(err error) bool {
 	return errors.Is(err, pmdoc.ErrTargetNotFound) ||
 		errors.Is(err, pmdoc.ErrTargetSpansBlocks) ||
 		errors.Is(err, pmdoc.ErrTableWidth) ||
-		isTooLarge(err) ||
+		IsTooLarge(err) ||
 		errors.As(err, &invalid) ||
 		errors.As(err, &ambiguous)
-}
-
-// isTooLarge reports a refusal of a write too large to store: markdown making more elements than
-// one write may, or a document larger than the server stores. Its text says what to shorten, so a
-// write path serves it as it stands rather than behind its own prose.
-func isTooLarge(err error) bool {
-	return errors.Is(err, ErrDocumentTooLarge) || errors.Is(err, pmdoc.ErrTooManyElements)
 }
 
 // ErrInvalidPrecondition identifies a malformed optimistic-concurrency guard.

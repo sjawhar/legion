@@ -129,10 +129,10 @@ func (s *Service) SetAskBlockText(
 	// path reports as ErrNoChanges. It is the same ask the caller asked for, so it succeeds.
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		var unrepresentable *ErrAskBlockUnrepresentable
-		if errors.As(err, &unrepresentable) || isTooLarge(err) {
+		if errors.As(err, &unrepresentable) {
 			return AskBlockText{}, err
 		}
-		return AskBlockText{}, fmt.Errorf("write ask block text: %w", err)
+		return AskBlockText{}, wrapUnlessTooLarge(err, "write ask block text")
 	}
 	// stored is set by the closure, which applyLive runs before it can return nil or
 	// ErrNoChanges; a nil here would mean it never ran, which must not read as an empty ask.

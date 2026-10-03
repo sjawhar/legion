@@ -49,8 +49,10 @@ type growth struct {
 	// fork is the transaction's copy of the live document the write leaves, which
 	// refuseUnloadable loads.
 	fork *crdt.Doc
-	// before and after are the document's renderings before the write and after it.
+	// before and after are the document's renderings before the write and after it, and unchanged
+	// whether they are the same.
 	before, after string
+	unchanged     bool
 	// margin is the margin records the write changed, and anchors the actor ids its anchor marks
 	// gained.
 	margin  *marginWatch
@@ -75,7 +77,7 @@ func refuseGrowth(g growth) error {
 	if err := g.anchors.refusal(); err != nil {
 		return err
 	}
-	if g.after == g.before || g.serverState() {
+	if g.unchanged || g.serverState() {
 		return refuseUnloadable(g.fork, func() bool { return false })
 	}
 	grew, err := weighRendering(g.before, g.after)
@@ -122,8 +124,8 @@ func (r rendering) longer(n int) rendering {
 // its bytes is not parsed, and before is measured only when a refusal or grew turns on its elements.
 func weigh(before, after rendering) (grew func() bool, err error) {
 	if after.bytes > pmdoc.MaxDocumentBytes && after.bytes > before.bytes {
-		return nil, fmt.Errorf("%w: a markdown document is at most 1 MiB (%d bytes), and this change would make the document's markdown %d bytes (it was %d); shorten the change, or split the document",
-			ErrDocumentTooLarge, pmdoc.MaxDocumentBytes, after.bytes, before.bytes)
+		return nil, fmt.Errorf("%w: a markdown document is at most %s (%d bytes), and this change would make the document's markdown %d bytes (it was %d); shorten the change, or split the document",
+			ErrDocumentTooLarge, binarySize(pmdoc.MaxDocumentBytes), pmdoc.MaxDocumentBytes, after.bytes, before.bytes)
 	}
 	size := after.size()
 	if size.TooHeavy() && heavier(before.size(), size) {
@@ -135,10 +137,10 @@ func weigh(before, after rendering) (grew func() bool, err error) {
 
 // maxMarginBytes is the most text a document's margin may hold: the records of every comment and
 // suggestion it has had, live in its marks map, which a browser shows beside the document and
-// every load of it builds. That is as much as its markdown may hold (pmdoc.MaxDocumentBytes):
-// thirty-two open suggestions of 900 KB took one cold websocket load of their document to 296 MiB,
-// and sixty-four took four cold reads at once to 1,223 MiB, past the production task's 1,024 MiB.
-const maxMarginBytes = 1 << 20
+// every load of it builds. That is as much as its markdown may hold: thirty-two open suggestions
+// of 900 KB took one cold websocket load of their document to 296 MiB, and sixty-four took four
+// cold reads at once to 1,223 MiB, past the production task's 1,024 MiB.
+const maxMarginBytes = pmdoc.MaxDocumentBytes
 
 // maxMarginRecordBytes is the most text one margin record may hold: a comment's body and its
 // replies, or a suggestion's and the replacement it proposes. A record is written whole every time
@@ -179,8 +181,8 @@ func (w *marginWatch) refusal() error {
 		now, _ := w.marks.Get(key)
 		text, wasText := marginText(now), marginText(was)
 		if text > maxMarginRecordBytes && text > wasText {
-			return fmt.Errorf("%w: a comment's margin record - its body, its replies and its suggestion's replacement - holds at most 256 KiB (%d bytes) of text, and this change would make one hold %d bytes (it held %d); shorten the comment or the suggestion, or start a new thread",
-				ErrDocumentTooLarge, maxMarginRecordBytes, text, wasText)
+			return fmt.Errorf("%w: a comment's margin record - its body, its replies and its suggestion's replacement - holds at most %s (%d bytes) of text, and this change would make one hold %d bytes (it held %d); shorten the comment or the suggestion, or start a new thread",
+				ErrDocumentTooLarge, binarySize(maxMarginRecordBytes), maxMarginRecordBytes, text, wasText)
 		}
 		grew += text - wasText
 	}
@@ -190,8 +192,8 @@ func (w *marginWatch) refusal() error {
 	held := 0
 	w.marks.ForEach(func(_ string, record any) { held += marginText(record) })
 	if held > maxMarginBytes {
-		return fmt.Errorf("%w: a document's margin holds at most 1 MiB (%d bytes) of comment and suggestion text, and this change would make it hold %d bytes (it held %d); shorten the comment or the suggestion. A document keeps every comment it has had, so one whose margin is full takes more once it is split",
-			ErrDocumentTooLarge, maxMarginBytes, held, held-grew)
+		return fmt.Errorf("%w: a document's margin holds at most %s (%d bytes) of comment and suggestion text, and this change would make it hold %d bytes (it held %d); shorten the comment or the suggestion. A document keeps every comment it has had, so one whose margin is full takes more once it is split",
+			ErrDocumentTooLarge, binarySize(maxMarginBytes), maxMarginBytes, held, held-grew)
 	}
 	return nil
 }
@@ -200,8 +202,8 @@ func (w *marginWatch) refusal() error {
 // comment, suggestion and ask carries its id and who made it (MarkSpec), which no rendering carries
 // and every load of the document builds, and an ask's mark has no margin record to weigh it: thirty
 // asks anchored by a session whose id was 200 KB left a 210-byte rendering over six megabytes of
-// live document. It is as much as the margin may hold (maxMarginBytes).
-const maxAnchorBytes = 1 << 20
+// live document. It is as much as the margin may hold.
+const maxAnchorBytes = maxMarginBytes
 
 // anchorWatch is a write's document tree before it and after it, whose anchor marks refusal
 // weighs. before is nil for a write that repairs a tree outside the schema (applyLive), whose marks
@@ -219,22 +221,17 @@ func (w anchorWatch) refusal() error {
 	if held <= was {
 		return nil
 	}
-	return fmt.Errorf("%w: the marks a document's comments, suggestions and asks hold on its text carry at most 1 MiB (%d bytes) of ids and authors, and this change would make them carry %d bytes (they carried %d); anchor fewer, or split the document",
-		ErrDocumentTooLarge, maxAnchorBytes, held, was)
+	return fmt.Errorf("%w: the marks a document's comments, suggestions and asks hold on its text carry at most %s (%d bytes) of ids and authors, and this change would make them carry %d bytes (they carried %d); anchor fewer, or split the document",
+		ErrDocumentTooLarge, binarySize(maxAnchorBytes), maxAnchorBytes, held, was)
 }
 
 // anchorText is the text the anchor marks on tree's text carry: every string in each comment's,
 // suggestion's and ask's mark, counted once however many texts the mark covers. No tree carries
 // none.
 func anchorText(tree *pmdoc.Node) int {
-	if tree == nil {
-		return 0
-	}
 	seen := map[string]bool{}
 	text := 0
-	for stack := []*pmdoc.Node{tree}; len(stack) > 0; {
-		node := stack[len(stack)-1]
-		stack = append(stack[:len(stack)-1], node.Children...)
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
 		for _, mark := range node.Marks {
 			switch MarkKind(mark.Type) {
 			case MarkAsk, MarkComment, MarkSuggestion:
@@ -247,8 +244,21 @@ func anchorText(tree *pmdoc.Node) int {
 				text += textIn(map[string]any(mark.Attrs))
 			}
 		}
-	}
+		return true
+	})
 	return text
+}
+
+// binarySize is bytes as a refusal names a bound: in mebibytes or kibibytes where it is a whole
+// number of them.
+func binarySize(bytes int) string {
+	switch {
+	case bytes%(1<<20) == 0:
+		return fmt.Sprintf("%d MiB", bytes>>20)
+	case bytes%(1<<10) == 0:
+		return fmt.Sprintf("%d KiB", bytes>>10)
+	}
+	return fmt.Sprintf("%d bytes", bytes)
 }
 
 // marginText is how much text a margin record holds: every string in it, at any depth, but the

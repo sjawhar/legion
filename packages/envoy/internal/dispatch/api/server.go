@@ -401,7 +401,7 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		writeError(w, "INVALID_MARKDOWN", http.StatusBadRequest, err.Error())
 		return
 	}
-	if errors.Is(err, docs.ErrDocumentTooLarge) || errors.Is(err, pmdoc.ErrTooManyElements) {
+	if docs.IsTooLarge(err) {
 		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, err.Error())
 		slog.Warn("dispatch: API refused a document too large to store", "error", err)
 		return

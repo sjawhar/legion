@@ -139,12 +139,15 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// write that leaves the rendered markdown alone - an anchor mark, a mark record's projection, an
 	// attribute no rendering carries - changes nothing a version stores.
 	contentChanged, weighedFrom := true, (*pmdoc.Node)(nil)
-	if err := start(); err == nil {
-		contentChanged, weighedFrom = beforeMarkdown != markdown, before
-	} else if !errors.Is(err, ErrDocOutsideSchema) {
+	err = start()
+	if err != nil && !errors.Is(err, ErrDocOutsideSchema) {
 		return err
 	}
-	if err := refuseGrowth(growth{fork: fork, before: beforeMarkdown, after: markdown, margin: margin, anchors: anchorWatch{before: weighedFrom, after: tree}, serverState: func() bool {
+	unchanged := beforeMarkdown == markdown
+	if err == nil {
+		contentChanged, weighedFrom = !unchanged, before
+	}
+	if err := refuseGrowth(growth{fork: fork, before: beforeMarkdown, after: markdown, unchanged: unchanged, margin: margin, anchors: anchorWatch{before: weighedFrom, after: tree}, serverState: func() bool {
 		return weighedFrom != nil && tree.EqualOutsideServerState(weighedFrom)
 	}}); err != nil {
 		return err
@@ -353,10 +356,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		return canonical, nil
 	}
 	if err != nil {
-		if isTooLarge(err) {
-			return "", err
-		}
-		return "", fmt.Errorf("replace live document: %w", err)
+		return "", wrapUnlessTooLarge(err, "replace live document")
 	}
 	return canonical, nil
 }
@@ -997,19 +997,18 @@ func (s *Service) SetBlockAttributes(
 	actor model.Actor,
 ) error {
 	err := s.setBlockAttributes(ctx, artifactID, blockID, attributes, actor)
-	if withheld, withholds := withoutAnswer(attributes); withholds && isTooLarge(err) {
-		slog.Warn("dispatch: an answer is left out of its block", "room", artifactID, "block", blockID, "reason", err)
-		// A refused write appends nothing, and the transaction's next write starts from its fork
-		// as it was (applyLive).
-		err = s.setBlockAttributes(ctx, artifactID, blockID, withheld, actor)
+	if IsTooLarge(err) {
+		if withheld, withholds := withoutAnswer(attributes); withholds {
+			slog.Warn("dispatch: an answer is left out of its block", "room", artifactID, "block", blockID, "reason", err)
+			// A refused write appends nothing, and the transaction's next write starts from its
+			// fork as it was (applyLive).
+			err = s.setBlockAttributes(ctx, artifactID, blockID, withheld, actor)
+		}
 	}
 	// Setting attributes a block already carries writes nothing, which the live path reports as
 	// ErrNoChanges; the block holds what the caller asked for, so that is success.
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-		if isTooLarge(err) {
-			return err
-		}
-		return fmt.Errorf("set live block attributes: %w", err)
+		return wrapUnlessTooLarge(err, "set live block attributes")
 	}
 	return nil
 }
