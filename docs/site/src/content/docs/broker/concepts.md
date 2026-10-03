@@ -62,9 +62,12 @@ approved a **machine login** for it. The login works like a device code:
 4. On approval the broker mints a **launcher credential** bound to the machine's key. It is never a
    token: the machine uses it by signing with that key.
 
-A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. The helper keeps its key in memory
-only, so a helper restart, like an expired credential, means logging the machine in again. A
-machine login nobody decides expires after 15 minutes, a fixed time rather than a setting
+A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`, unless the person who approved it
+revokes it sooner from Dispatch's machine-login page, which also ends every session the machine
+enrolled ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)). A
+Legion daemon's login has no operator and is not listed there. The helper keeps its key in memory
+only, so a helper restart, like an expired or revoked credential, means logging the machine in
+again. A machine login nobody decides expires after 15 minutes, a fixed time rather than a setting
 (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`).
 
 A credential enrolls sessions only for its own operator: an enrollment naming anyone else is refused

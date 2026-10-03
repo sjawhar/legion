@@ -15,6 +15,7 @@ import {
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { CredentialDecisionButtons } from "./CredentialDecisionButtons";
 import { CredentialRecordFacts } from "./CredentialRecordFacts";
+import { MachineLoginsSection, machineLoginsQueryKey } from "./MachineLoginsSection";
 
 /** What the login's decision was, in place of the buttons that decide it: one just made on this
  *  page, or the one a looked-up record already carries. */
@@ -46,13 +47,14 @@ function MachineLoginDecision({
 }
 
 /**
- * The machine-login code-entry page: `agent-secrets launcher login` prints an 8-character code
- * on the machine, and the operator types it here. Ruling 13 of the shared broker contract
+ * The machine-login page: `agent-secrets launcher login` prints an 8-character code on the
+ * machine, and the operator types it here. Ruling 13 of the shared broker contract
  * (dispatch://AGENTC-393/artifact/plan-overview-md): only this code-lookup route selects a
  * `launcher_credential` record, and deciding it sends the same code again, so this is the one
  * place a machine record gets Approve/Deny buttons. A looked-up login already decided shows its
  * decision, and so does one decided here, in their place, as the record page does, so a second
- * click never reaches the broker's already-decided refusal.
+ * click never reaches the broker's already-decided refusal. Below it, the viewer's live machine
+ * logins, each revocable before it expires.
  */
 export function MachineLoginPage(): ReactNode {
   const [code, setCode] = useState("");
@@ -70,7 +72,10 @@ export function MachineLoginPage(): ReactNode {
   const approve = useMutation({
     mutationFn: () => api.approveCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }),
     onSettled: () => submitGuard.release(),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["credential-pending"] }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["credential-pending"] });
+      void queryClient.invalidateQueries({ queryKey: machineLoginsQueryKey });
+    },
   });
   const deny = useMutation({
     mutationFn: () => api.denyCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }),
@@ -153,6 +158,7 @@ export function MachineLoginPage(): ReactNode {
           )}
         </div>
       )}
+      <MachineLoginsSection />
     </section>
   );
 }

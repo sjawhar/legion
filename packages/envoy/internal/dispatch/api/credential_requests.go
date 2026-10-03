@@ -4,9 +4,10 @@
 // require a human caller, require the broker to be configured, resolve or read its input, call
 // the matching agentsecrets.Client method, and forward the broker's exact status and body — the
 // broker decides. The pending list alone answers null rather than 404 FEATURE_OFF without a broker.
-// The one thing Dispatch supplies is who decides: approve, deny and revoke send the
-// login requireHuman resolved, in Dispatch's canonical lowercase form, as the approver, and never
-// forward the browser's body, so nothing a browser sends can name the approver (AGENTC-393).
+// The one thing Dispatch supplies is who acts: approve, deny and revoke send the login
+// requireHuman resolved, in Dispatch's canonical lowercase form, as the approver (as the operator,
+// for a machine login's list and revoke), and never forward the browser's body, so nothing a
+// browser sends can name the person acting.
 package api
 
 import (
@@ -212,5 +213,38 @@ func (s *server) revokeCredentialGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, err := client.RevokeByApprover(r.Context(), r.PathValue("id"), canonicalLogin(actor.ID))
+	relayBrokerResponse(w, body, err)
+}
+
+// --- GET /api/v1/machine-logins, POST .../{id}/revoke ---
+
+// listMachineLogins answers the caller's own live machine logins: Dispatch names the caller as
+// their operator, so no one lists another person's.
+func (s *server) listMachineLogins(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	body, err := client.MachineLogins(r.Context(), canonicalLogin(actor.ID))
+	relayBrokerResponse(w, body, err)
+}
+
+// revokeMachineLogin ends one of the caller's machine logins before it expires, and with it every
+// session that login enrolled: the broker allows it only when the caller is the login's operator.
+// The browser's body carries nothing Dispatch reads.
+func (s *server) revokeMachineLogin(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	client, ok := s.requireAgentSecrets(w)
+	if !ok {
+		return
+	}
+	body, err := client.RevokeMachineLogin(r.Context(), r.PathValue("id"), canonicalLogin(actor.ID))
 	relayBrokerResponse(w, body, err)
 }

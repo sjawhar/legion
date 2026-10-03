@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"testing"
 	"time"
@@ -1055,5 +1056,241 @@ func TestPathValidation(t *testing.T) {
 	werr = decode[wireError](t, body)
 	if werr.Code != "GRANT_ID_INPUT" {
 		t.Fatalf("code = %q, want GRANT_ID_INPUT", werr.Code)
+	}
+}
+
+// wireLauncherCredential is one machine login in GET /v1/launcher-credentials's answer.
+type wireLauncherCredential struct {
+	CredentialID string    `json:"credential_id"`
+	Host         string    `json:"host"`
+	IssuedAt     time.Time `json:"issued_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+}
+
+// machineLogins reads GET /v1/launcher-credentials?operator=<operator>, as Dispatch's server does
+// for its signed-in person.
+func (ts *testServer) machineLogins(t *testing.T, operator string) []wireLauncherCredential {
+	t.Helper()
+	status, body := ts.ui(t, http.MethodGet, "/v1/launcher-credentials?operator="+url.QueryEscape(operator), nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /v1/launcher-credentials?operator=%s = %d: %s", operator, status, body)
+	}
+	return decode[struct {
+		Credentials []wireLauncherCredential `json:"credentials"`
+	}](t, body).Credentials
+}
+
+// enrollBox enrolls a box under launcher credential credentialID, signing the launcher proof with
+// machineKey, and returns the box's enrollment id and its own key.
+func (ts *testServer) enrollBox(t *testing.T, machineKey *ecdsa.PrivateKey, credentialID, runtimeID string) (string, *ecdsa.PrivateKey) {
+	t.Helper()
+	key := newSigningKey(t)
+	thumbprint, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("thumbprint: %v", err)
+	}
+	status, body := ts.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
+		"kind": "box", "runtime_id": runtimeID, "thumbprint": thumbprint,
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("POST /v1/enrollments = %d, want 201: %s", status, body)
+	}
+	return decode[struct {
+		EnrollmentID string `json:"enrollment_id"`
+	}](t, body).EnrollmentID, key
+}
+
+// TestAPersonRevokesTheirOwnMachineLogin drives the machine-login routes Dispatch's page relays to:
+// the person's live machine login is listed with its machine and lifetime; another person, an
+// unknown id, a malformed id and a missing name are refused; and the operator's revoke ends it at
+// once — its session's proofs, its launcher proofs, its grant and its pending request all go, and
+// another person's machine login stays.
+func TestAPersonRevokesTheirOwnMachineLogin(t *testing.T) {
+	ts := newTestServer(t)
+	credentialID, machineKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
+	otherID, _ := ts.mintLauncherCredential(t, "bob@example.com", "example-host-laptop")
+	enrollmentID, sessionKey := ts.enrollBox(t, machineKey, credentialID, "box-"+t.Name())
+	request := func(name string) wireCreateRequestResponse {
+		t.Helper()
+		status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+			map[string]any{"request": signAgentSecretRequest(t, sessionKey, ts.URL, "need it", name), "session_id": nil})
+		if status != http.StatusOK {
+			t.Fatalf("POST /v1/requests (%s) = %d: %s", name, status, body)
+		}
+		return decode[wireCreateRequestResponse](t, body)
+	}
+	if granted := request("WORKER_TOKEN"); granted.State != "granted" || granted.GrantID == nil {
+		t.Fatalf("request WORKER_TOKEN = %+v, want granted at once", granted)
+	}
+	pending := request("DEEL_API_KEY")
+	if pending.State != "pending" || pending.RecordID == nil {
+		t.Fatalf("request DEEL_API_KEY = %+v, want pending on its owner", pending)
+	}
+
+	logins := ts.machineLogins(t, testApprover)
+	if len(logins) != 1 || logins[0].CredentialID != credentialID || logins[0].Host != "example-host-devbox" ||
+		logins[0].ExpiresAt.Sub(logins[0].IssuedAt).Round(time.Minute) != 7*24*time.Hour {
+		t.Fatalf("machine logins of %s = %+v, want the devbox's, issued for a week", testApprover, logins)
+	}
+
+	revokePath := "/v1/launcher-credentials/" + credentialID + "/revoke-by-operator"
+	for _, tc := range []struct {
+		name, path string
+		body       any
+		status     int
+		code       string
+	}{
+		{"by another person", revokePath, map[string]any{"operator": "bob@example.com"}, http.StatusForbidden, "NOT_OPERATOR"},
+		{"naming no one", revokePath, map[string]any{}, http.StatusBadRequest, "OPERATOR_REQUIRED"},
+		{"of an unknown id", "/v1/launcher-credentials/" + uuid.NewString() + "/revoke-by-operator", map[string]any{"operator": testApprover}, http.StatusNotFound, "NOT_FOUND"},
+		{"of a malformed id", "/v1/launcher-credentials/not-a-uuid/revoke-by-operator", map[string]any{"operator": testApprover}, http.StatusBadRequest, "CREDENTIAL_ID_INPUT"},
+	} {
+		status, body := ts.ui(t, http.MethodPost, tc.path, tc.body)
+		if status != tc.status || decode[wireError](t, body).Code != tc.code {
+			t.Fatalf("revoke %s = %d %s, want %d %s", tc.name, status, body, tc.status, tc.code)
+		}
+	}
+	if status, body := ts.req(t, http.MethodPost, revokePath, nil, map[string]any{"operator": testApprover}); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "UI_INVALID" {
+		t.Fatalf("revoke without the UI bearer = %d %s, want 401 UI_INVALID", status, body)
+	}
+	if status, body := ts.ui(t, http.MethodGet, "/v1/launcher-credentials", nil); status != http.StatusBadRequest || decode[wireError](t, body).Code != "OPERATOR_REQUIRED" {
+		t.Fatalf("list naming no one = %d %s, want 400 OPERATOR_REQUIRED", status, body)
+	}
+	if status, body := ts.session(t, sessionKey, enrollmentID, http.MethodGet, "/v1/enrollments/self", nil); status != http.StatusOK {
+		t.Fatalf("GET /v1/enrollments/self after the refused revokes = %d, want 200: %s", status, body)
+	}
+
+	status, body := ts.ui(t, http.MethodPost, revokePath, map[string]any{"operator": testApprover})
+	if status != http.StatusOK || decode[stateBody](t, body).State != "revoked" {
+		t.Fatalf("revoke by its operator = %d %s, want 200 revoked", status, body)
+	}
+
+	if status, body := ts.session(t, sessionKey, enrollmentID, http.MethodGet, "/v1/enrollments/self", nil); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "PROOF_INVALID" {
+		t.Fatalf("GET /v1/enrollments/self after the revoke = %d %s, want 401 PROOF_INVALID", status, body)
+	}
+	sessionKey2 := newSigningKey(t)
+	thumbprint2, err := proof.Thumbprint(&sessionKey2.PublicKey)
+	if err != nil {
+		t.Fatalf("thumbprint: %v", err)
+	}
+	if status, body := ts.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
+		"kind": "box", "runtime_id": "box-after-" + t.Name(), "thumbprint": thumbprint2,
+	}); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "LAUNCHER_INVALID" {
+		t.Fatalf("POST /v1/enrollments after the revoke = %d %s, want 401 LAUNCHER_INVALID", status, body)
+	}
+	_, body = ts.ui(t, http.MethodGet, "/v1/pending?approver="+testApprover, nil)
+	if left := decode[struct {
+		Pending []wirePendingEntry `json:"pending"`
+	}](t, body).Pending; len(left) != 0 {
+		t.Fatalf("pending list after the revoke = %+v, want the session's request gone", left)
+	}
+	_, body = ts.ui(t, http.MethodGet, "/v1/grants?approver="+testApprover, nil)
+	if live := decode[struct {
+		Grants []wireApproverGrant `json:"grants"`
+	}](t, body).Grants; len(live) != 0 {
+		t.Fatalf("live grants after the revoke = %+v, want the session's grant gone", live)
+	}
+	if logins := ts.machineLogins(t, testApprover); len(logins) != 0 {
+		t.Fatalf("machine logins of %s after the revoke = %+v, want none", testApprover, logins)
+	}
+	if logins := ts.machineLogins(t, "bob@example.com"); len(logins) != 1 || logins[0].CredentialID != otherID {
+		t.Fatalf("machine logins of bob@example.com = %+v, want his own, untouched", logins)
+	}
+	if status, body := ts.ui(t, http.MethodPost, revokePath, map[string]any{"operator": testApprover}); status != http.StatusOK {
+		t.Fatalf("revoking it again = %d %s, want 200", status, body)
+	}
+}
+
+// stateBody is a {"state"} answer.
+type stateBody struct {
+	State string `json:"state"`
+}
+
+// TestAnEnrollmentRacingItsMachineLoginsRevokeIsLauncherInvalid: a launcher proof verified just
+// before its machine login's revoke commits does not land an enrollment. The enrollment waits on
+// the credential's row, which the revoke holds (here a transaction holding it as
+// enroll.Service.RevokeCredential does, with revoked_at set), and is answered 401 LAUNCHER_INVALID
+// once the revoke commits, the refusal the helper drops its credential on.
+func TestAnEnrollmentRacingItsMachineLoginsRevokeIsLauncherInvalid(t *testing.T) {
+	ts := newTestServer(t)
+	ctx := context.Background()
+	credentialID, machineKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
+	tx, err := ts.Store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `select 1 from launcher_credentials where id=$1 for no key update`, credentialID); err != nil {
+		t.Fatalf("lock the credential: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `update launcher_credentials set revoked_at=now() where id=$1`, credentialID); err != nil {
+		t.Fatalf("revoke the credential: %v", err)
+	}
+	var holder int
+	if err := tx.QueryRow(ctx, `select pg_backend_pid()`).Scan(&holder); err != nil {
+		t.Fatalf("read the holder's backend: %v", err)
+	}
+
+	sessionKey := newSigningKey(t)
+	thumbprint, err := proof.Thumbprint(&sessionKey.PublicKey)
+	if err != nil {
+		t.Fatalf("thumbprint: %v", err)
+	}
+	launcherProof, err := proof.SignLauncher(machineKey, credentialID, http.MethodPost, ts.URL+"/v1/enrollments", time.Now())
+	if err != nil {
+		t.Fatalf("proof.SignLauncher: %v", err)
+	}
+	payload, err := json.Marshal(map[string]any{"kind": "box", "runtime_id": "box-" + t.Name(), "thumbprint": thumbprint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type answer struct {
+		status int
+		body   []byte
+		err    error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		request, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/enrollments", bytes.NewReader(payload))
+		if err != nil {
+			done <- answer{err: err}
+			return
+		}
+		request.Header.Set("Proof", launcherProof)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			done <- answer{err: err}
+			return
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		done <- answer{response.StatusCode, body, err}
+	}()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := ts.Store.Pool.QueryRow(ctx, `select count(*) from pg_stat_activity where $1 = any(pg_blocking_pids(pid))`, holder).Scan(&waiting); err != nil {
+			t.Fatalf("read lock waiters: %v", err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the enrollment never waited on the credential's row")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the revoke: %v", err)
+	}
+	got := <-done
+	if got.err != nil || got.status != http.StatusUnauthorized || decode[wireError](t, got.body).Code != "LAUNCHER_INVALID" {
+		t.Fatalf("POST /v1/enrollments racing the revoke = %d %s (%v), want 401 LAUNCHER_INVALID", got.status, got.body, got.err)
+	}
+	var n int
+	if err := ts.Store.Pool.QueryRow(ctx, `select count(*) from enrollments where launcher_credential_id=$1`, credentialID).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("enrollments under the revoked credential = %d (%v), want none", n, err)
 	}
 }

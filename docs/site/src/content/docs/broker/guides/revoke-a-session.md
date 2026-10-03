@@ -1,6 +1,6 @@
 ---
 title: Revoke a session or a grant
-description: End a grant from Dispatch or from the session holding it, cancel a pending request, and end a session so nothing it held still works.
+description: End a grant from Dispatch or from the session holding it, cancel a pending request, end a session so nothing it held still works, and end a machine's login.
 sidebar:
   order: 12
 ---
@@ -16,6 +16,8 @@ request. A grant the session got without asking **withholds** its secrets from t
 next request for them is sent to their owner for approval (to anyone signed in, for a shared
 secret), instead of being granted at once; the person's other sessions still get them at once. To
 end every session's access to a secret, [change its tags](#end-every-sessions-access-to-a-secret).
+To end every session a machine started, and stop it starting more, [revoke its machine
+login](#end-a-machines-login).
 
 ## Revoke a grant in Dispatch
 
@@ -92,16 +94,47 @@ in one step, and the approver's Inbox drops them. A session ends in one of two w
   `broker sweeper: ended an enrollment whose lease lapsed`. The
   [configuration reference](/legion/broker/reference/config/) gives both settings' defaults.
 
-## Stop a machine from enrolling sessions
+## End a machine's login
 
-A machine's credential lives only in its helper's memory: stopping the helper stops the machine
-from enrolling new sessions until someone logs it in again, and the credential expires on its own
-after `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. The broker has no route that revokes a launcher
-credential before then.
+A machine login lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from its approval, but the person who
+approved it can end it sooner: for a machine that is lost, compromised or no longer used. Dispatch's
+machine-login page (`/credentials/machine`) lists **Your machine logins**, every machine logged in
+as you, with when its login was issued and when it expires. Click **Revoke** on its row and confirm.
+The broker then, at once:
 
-Neither ends a session already enrolled: a session renews its lease with its own key, never with
-the machine's credential. A host session lapses within `BROKER_LEASE_SECONDS` once the helper
-stops, since the helper is what renews it. A box renews itself (`agent-secrets renew`), so it keeps
-working after the helper stops and after the machine's credential expires: end each box with
-`agent-secrets unenroll --helper --enrollment <id>`, run against a helper logged in as the box's
-operator, or stop its `agent-secrets renew`, after which it lapses within `BROKER_LEASE_SECONDS`.
+- refuses the machine's credential, so the machine enrolls no more sessions; and
+- ends every session the machine enrolled, host sessions and boxes alike, as [ending a
+  session](#end-a-session) does: each one's grants are revoked and its pending requests cancelled,
+  and its next call is refused `PROOF_INVALID`.
+
+Only the login's operator may revoke it; the broker refuses anyone else `NOT_OPERATOR`. A revoked
+login stays revoked: the machine runs `agent-secrets launcher login` again, and its operator approves
+the new code.
+
+```console
+$ curl -s -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" "$AGENT_SECRETS_URL/v1/launcher-credentials?operator=ada@example.com"
+{"credentials":[{"credential_id":"5d2b7f0e-8a41-4c3e-9b6f-0c7e2a9d1f34","host":"example-host-devbox","issued_at":"2026-10-03T09:12:40.512Z","expires_at":"2026-10-10T09:12:40.508Z"}]}
+$ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"operator":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/launcher-credentials/5d2b7f0e-8a41-4c3e-9b6f-0c7e2a9d1f34/revoke-by-operator"
+{"state":"revoked"}
+```
+
+(Those are the calls Dispatch's server makes, as above.)
+
+Nothing tells the machine's helper; it finds out the next time it calls the broker. A session's
+renewal, within a third of `BROKER_LEASE_SECONDS`, is refused; revoking that session's enrollment is
+refused too, and the helper drops the credential and logs at ERROR `the broker refused the launcher
+credential (…); cleared: no session can enroll until a human approves a new machine login`. From
+then `agent-secrets launcher login-status` exits 1:
+
+```console
+$ agent-secrets launcher login-status
+expired
+agent-secrets launcher login-status: the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login
+```
+
+A helper with no session running finds out when it next enrolls one.
+
+Stopping the helper also stops the machine from enrolling sessions, since its credential lives only
+in the helper's memory, but it ends none: a host session lapses within `BROKER_LEASE_SECONDS` once
+the helper stops, since the helper renews it, while a box renews itself (`agent-secrets renew`) and
+keeps working. Revoking the machine login ends both.

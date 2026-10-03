@@ -241,6 +241,13 @@ enrollment's slot under its enrollment, and has a Revoke button that POSTs `{}` 
 `/api/v1/credential-grants/{id}/revoke`; revoking an automatic grant makes that session ask before
 it gets those secrets again.
 
+`MachineLoginsSection.tsx` renders under the code entry on `/credentials/machine`: the viewer's
+live machine logins (`GET /api/v1/machine-logins`, query key `machineLoginsQueryKey`, which an
+approval on the page also invalidates), one row per machine with its host, when it was issued and
+when it expires, and a Revoke button that asks `window.confirm` first and then POSTs `{}` to
+`/api/v1/machine-logins/{id}/revoke`. Revoking ends the machine's login and every session it
+enrolled, so it also invalidates the Live grants list.
+
 `packages/envoy/internal/dispatch/agentsecrets/client.go` is Dispatch's server-side client for the
 broker's UI-bearer API (`DISPATCH_AGENT_SECRETS_URL`/`DISPATCH_AGENT_SECRETS_TOKEN[_FILE]`,
 resolved in `cmd/dispatch/main.go`'s boot config with the repo's usual trimmed-file-wins `_FILE`
@@ -251,15 +258,17 @@ the approving human from the request body on that bearer's word, so Dispatch bui
 body itself. `Approve` and `Deny` take an `agentsecrets.Decision{Approver, Code}`, where `Approver`
 is always `canonicalLogin` of the `requireHuman` caller and `Code` is the only field read from the
 browser's body; any other field the browser sends, an `approver` among them, is dropped.
-`RevokeByApprover` sends only the caller's canonical login. Cookie-authenticated unsafe requests
+`RevokeByApprover` sends only the caller's canonical login, and `MachineLogins` and
+`RevokeMachineLogin` send it as the `operator`. Cookie-authenticated unsafe requests
 must be same-origin (`enforceCookieOrigin` in `packages/envoy/internal/dispatch/routes/router.go`),
 so another site cannot send a decision from a signed-in human's browser.
-`packages/envoy/internal/dispatch/api/credential_requests.go` mounts the seven `human`-auth proxy
+`packages/envoy/internal/dispatch/api/credential_requests.go` mounts the nine `human`-auth proxy
 rows every page above calls:
 `GET /api/v1/credential-requests`, `GET /api/v1/credential-requests/{id}`,
 `POST /api/v1/credential-requests/{id}/approve|deny`,
-`POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-grants`, and
-`POST /api/v1/credential-grants/{id}/revoke`. Every handler requires a human caller first, then a
+`POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-grants`,
+`POST /api/v1/credential-grants/{id}/revoke`, `GET /api/v1/machine-logins` and
+`POST /api/v1/machine-logins/{id}/revoke`. Every handler requires a human caller first, then a
 configured client (`404 FEATURE_OFF` on a nil one), except the pending list, which answers `null`
 without a broker once its input is checked; the two `?approver=` routes accept only the
 literal string `"me"` (`400 APPROVER_ME_ONLY` otherwise) and resolve it to the caller's own
@@ -270,8 +279,11 @@ against a fake broker, and `internal/dispatch/api/contract_test.go` round-trips 
 (`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`): another login refused
 `403 NOT_APPROVER` even when its browser body names the approver, the approver's click accepted
 whatever login its body names, and the value released; a shared secret's request in two people's
-lists and approved by the second; and an automatic grant listed as automatic, revoked, and the same
-session's next request for it waiting on its owner while another session still gets it at once.
+lists and approved by the second; an automatic grant listed as automatic, revoked, and the same
+session's next request for it waiting on its owner while another session still gets it at once;
+and a machine login listed for its operator alone, another person's revoke refused
+`403 NOT_OPERATOR` whatever their body names, and the operator's revoke ending the session it
+enrolled and its launcher proofs.
 
 ## Dark mode
 

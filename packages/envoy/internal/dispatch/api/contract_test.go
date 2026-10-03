@@ -599,3 +599,126 @@ func TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner(t *testing.T) {
 		t.Fatalf("another session's request = %+v, want an automatic grant", elsewhere)
 	}
 }
+
+// approveMachineLogin logs a machine of operator's in as a person does: the machine posts its
+// signed login straight to the broker, and the operator looks its code up and approves it through
+// Dispatch. It returns the launcher credential the approval minted and the machine's key.
+func (rig *contractRig) approveMachineLogin(t *testing.T, operator, host string) (string, *ecdsa.PrivateKey) {
+	t.Helper()
+	machineKey := contractSigningKey(t)
+	compact, err := record.Sign(machineKey, rig.BrokerURL,
+		[]record.AuthorizationDetail{{Type: "launcher_credential", Identifier: host}}, "", operator, time.Now())
+	if err != nil {
+		t.Fatalf("record.Sign: %v", err)
+	}
+	status, body := rig.brokerReq(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
+	var created struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(body, &created); status != http.StatusAccepted || err != nil || created.Code == "" {
+		t.Fatalf("POST /v1/launcher-credentials = %d %s (%v), want a code", status, body, err)
+	}
+	looked := decodeBody[contractRecord](t, dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/machine-lookup",
+		map[string]any{"code": created.Code}, operator))
+	approveResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+looked.RecordID+"/approve",
+		map[string]any{"code": created.Code}, operator)
+	approved := decodeBody[struct {
+		CredentialID *string `json:"credential_id"`
+	}](t, approveResp)
+	if approveResp.Code != http.StatusOK || approved.CredentialID == nil {
+		t.Fatalf("approve the machine login = %d %s, want a credential_id", approveResp.Code, approveResp.Body.String())
+	}
+	return *approved.CredentialID, machineKey
+}
+
+// enrollWithLauncher enrolls a box under credentialID straight on the broker, as the machine's
+// launcher does with a launcher proof signed by machineKey, and answers the status, body and box.
+func (rig *contractRig) enrollWithLauncher(t *testing.T, machineKey *ecdsa.PrivateKey, credentialID, runtimeID string) (int, []byte, contractSession) {
+	t.Helper()
+	key := contractSigningKey(t)
+	thumbprint, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		t.Fatalf("thumbprint: %v", err)
+	}
+	p, err := proof.SignLauncher(machineKey, credentialID, http.MethodPost, rig.BrokerURL+"/v1/enrollments", time.Now())
+	if err != nil {
+		t.Fatalf("proof.SignLauncher: %v", err)
+	}
+	status, body := rig.brokerReq(t, http.MethodPost, "/v1/enrollments", map[string]string{"Proof": p},
+		map[string]any{"kind": "box", "runtime_id": runtimeID, "thumbprint": thumbprint})
+	var enrolled struct {
+		EnrollmentID string `json:"enrollment_id"`
+	}
+	_ = json.Unmarshal(body, &enrolled)
+	return status, body, contractSession{EnrollmentID: enrolled.EnrollmentID, Key: key}
+}
+
+// contractMachineLogin is one row of Dispatch's machine-login list.
+type contractMachineLogin struct {
+	CredentialID string    `json:"credential_id"`
+	Host         string    `json:"host"`
+	IssuedAt     time.Time `json:"issued_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+}
+
+// machineLoginsOf reads login's machine logins through Dispatch.
+func (rig *contractRig) machineLoginsOf(t *testing.T, login string) []contractMachineLogin {
+	t.Helper()
+	resp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/machine-logins", nil, login)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET machine logins as %s = %d: %s", login, resp.Code, resp.Body.String())
+	}
+	return decodeBody[struct {
+		Credentials []contractMachineLogin `json:"credentials"`
+	}](t, resp).Credentials
+}
+
+// TestAPersonRevokesTheirMachineLoginThroughDispatch drives the machine-login page's routes against
+// the real broker: the person who approved their machine's login sees it listed, and nobody else
+// does; another person's revoke is refused whatever their browser's body names; the person's own
+// revoke ends it, and with it the session the machine enrolled, whose grant then releases nothing
+// and whose machine enrolls no one more.
+func TestAPersonRevokesTheirMachineLoginThroughDispatch(t *testing.T) {
+	rig := newContractRig(t)
+	credentialID, machineKey := rig.approveMachineLogin(t, contractApprover, "contract-test-host")
+	status, body, session := rig.enrollWithLauncher(t, machineKey, credentialID, "box-"+t.Name())
+	if status != http.StatusCreated {
+		t.Fatalf("enroll under the machine login = %d: %s", status, body)
+	}
+	auto := rig.request(t, session, "", "AUTO_TOKEN")
+	if auto.State != "granted" || auto.GrantID == nil {
+		t.Fatalf("request = %+v, want an automatic grant", auto)
+	}
+
+	if logins := rig.machineLoginsOf(t, contractApprover); len(logins) != 1 || logins[0].CredentialID != credentialID || logins[0].Host != "contract-test-host" {
+		t.Fatalf("%s's machine logins = %+v, want the one approved for contract-test-host", contractApprover, logins)
+	}
+	if logins := rig.machineLoginsOf(t, contractOther); len(logins) != 0 {
+		t.Fatalf("%s's machine logins = %+v, want none", contractOther, logins)
+	}
+
+	revokePath := "/api/v1/machine-logins/" + credentialID + "/revoke"
+	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, revokePath, map[string]any{"operator": contractApprover}, contractOther)
+	if resp.Code != http.StatusForbidden || decodeBody[contractError](t, resp).Code != "NOT_OPERATOR" {
+		t.Fatalf("revoke as %s = %d %s, want 403 NOT_OPERATOR", contractOther, resp.Code, resp.Body.String())
+	}
+	if status, released := rig.values(t, session, *auto.GrantID); status != http.StatusOK || released["AUTO_TOKEN"] != "auto-v1" {
+		t.Fatalf("values after the refused revoke = %d %v, want AUTO_TOKEN released", status, released)
+	}
+
+	resp = dispatchRequest(t, rig.Dispatch, http.MethodPost, revokePath, map[string]any{}, contractApprover)
+	if resp.Code != http.StatusOK || decodeBody[struct {
+		State string `json:"state"`
+	}](t, resp).State != "revoked" {
+		t.Fatalf("revoke as %s = %d %s, want 200 revoked", contractApprover, resp.Code, resp.Body.String())
+	}
+	if status, _ := rig.values(t, session, *auto.GrantID); status != http.StatusUnauthorized {
+		t.Fatalf("values after the revoke = %d, want 401: the session ended", status)
+	}
+	if status, body, _ := rig.enrollWithLauncher(t, machineKey, credentialID, "box-after-"+t.Name()); status != http.StatusUnauthorized || !strings.Contains(string(body), "LAUNCHER_INVALID") {
+		t.Fatalf("enroll after the revoke = %d %s, want 401 LAUNCHER_INVALID", status, body)
+	}
+	if logins := rig.machineLoginsOf(t, contractApprover); len(logins) != 0 {
+		t.Fatalf("%s's machine logins after the revoke = %+v, want none", contractApprover, logins)
+	}
+}

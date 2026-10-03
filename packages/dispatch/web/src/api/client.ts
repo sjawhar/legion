@@ -48,6 +48,7 @@ import type {
   IssueReferences,
   IssueSummary,
   ListUsersResponse,
+  MachineLoginsResponse,
   Message,
   MessageDelivery,
   MessageRead,
@@ -733,6 +734,22 @@ export class DispatchApiClient {
    *  automatic grant also makes that session ask before it gets those secrets again. */
   async revokeCredentialGrant(grantId: string): Promise<void> {
     await this.response(`/api/v1/credential-grants/${pathSegment(grantId)}/revoke`, {
+      body: JSON.stringify({}),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+  }
+
+  /** `GET /api/v1/machine-logins`: the viewer's live machine logins, the launcher credentials
+   *  whose operator the viewer is. */
+  getMachineLogins(): Promise<MachineLoginsResponse> {
+    return this.json<MachineLoginsResponse>("/api/v1/machine-logins");
+  }
+
+  /** Revoke one of the viewer's machine logins before it expires: Dispatch names the viewer as its
+   *  operator, and every session the login enrolled ends with it. */
+  async revokeMachineLogin(credentialId: string): Promise<void> {
+    await this.response(`/api/v1/machine-logins/${pathSegment(credentialId)}/revoke`, {
       body: JSON.stringify({}),
       headers: { "Content-Type": "application/json" },
       method: "POST",

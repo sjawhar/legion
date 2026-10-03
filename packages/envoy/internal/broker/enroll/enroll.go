@@ -32,6 +32,8 @@ var (
 	ErrPodIdentity      = errors.New("the projected token does not identify this pod")
 	ErrNotLive          = errors.New("enrollment is not live")
 	ErrInvalidSlot      = errors.New("a slot is only for a pod enrollment and must match ^[a-z][a-z0-9-]{0,62}$")
+	ErrNoCredential     = errors.New("no such machine login")
+	ErrNotOperator      = errors.New("only the machine login's operator may revoke it")
 )
 
 type Credential struct {
@@ -39,6 +41,15 @@ type Credential struct {
 	Operator *string
 	Service  *string
 	Host     string
+}
+
+// LiveCredential is one of a person's live machine logins as their machine-login page lists it: a
+// launcher credential whose operator they are, neither revoked nor expired.
+type LiveCredential struct {
+	ID        uuid.UUID
+	Host      string
+	IssuedAt  time.Time
+	ExpiresAt time.Time
 }
 
 type Enrollment struct {
@@ -186,6 +197,8 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 // back (Existing), a different key in a live slot is ErrAlreadyEnrolled, and another slot of the
 // same pod is an enrollment of its own. A slot is valid only on a pod enrollment (ErrInvalidSlot);
 // a pod's runtime id is always the pod UID its projected token proves, whichever slot it enrolls.
+// A credential its operator revoked (RevokeCredential), even after the caller's launcher proof was
+// verified, is ErrUnauthenticated.
 func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (Enrollment, error) {
 	if in.Slot != "" && (in.Kind != "pod" || !record.ValidSlot(in.Slot)) {
 		return Enrollment{}, ErrInvalidSlot
@@ -227,13 +240,24 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 
 // createAttempt makes one insert-then-recover attempt. retry is true when the row that conflicted
 // with our insert no longer blocks a fresh one — it was revoked before the recovery lookup ran, or
-// its lease had lapsed and recovery ended it — in which case Create should try again.
+// its lease had lapsed and recovery ended it — in which case Create should try again. It first
+// takes the credential's row for share, which RevokeCredential's lock waits behind, and refuses a
+// revoked credential (ErrUnauthenticated): an insert either commits before a revoke reads the
+// credential's enrollments, and is ended with them, or finds the credential revoked.
 func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollment) (result Enrollment, retry bool, err error) {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return Enrollment{}, false, err
 	}
 	defer tx.Rollback(ctx)
+	var revoked bool
+	err = tx.QueryRow(ctx, `select revoked_at is not null from launcher_credentials where id=$1 for share`, cred.ID).Scan(&revoked)
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && revoked {
+		return Enrollment{}, false, ErrUnauthenticated
+	}
+	if err != nil {
+		return Enrollment{}, false, err
+	}
 	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, slot, operator, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at)
 		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
 		in.ID, in.Kind, in.RuntimeID, in.Slot, in.Operator, in.Thumbprint, in.SessionID, in.Subject, cred.ID, in.LeaseExpires)
@@ -461,6 +485,79 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 		return ErrNotLive
 	}
 	if _, _, err := endEnrollment(ctx, tx, id, by, "enrollment.revoked", "revoked by its launcher"); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// LiveCredentials lists operator's live machine logins, newest first: every launcher credential
+// whose operator is that person, neither revoked nor expired. A service's credential has no
+// operator and is never among them.
+func (s *Service) LiveCredentials(ctx context.Context, operator string) ([]LiveCredential, error) {
+	rows, err := s.Store.Pool.Query(ctx, `select id, host, created_at, expires_at from launcher_credentials
+		where operator=$1 and revoked_at is null and expires_at > now() order by created_at desc, id`, record.CanonicalLogin(operator))
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (LiveCredential, error) {
+		var c LiveCredential
+		err := row.Scan(&c.ID, &c.Host, &c.IssuedAt, &c.ExpiresAt)
+		return c, err
+	})
+}
+
+// RevokeCredential ends launcher credential id on its operator's word, before it expires: from
+// then on no launcher proof signed with it authenticates (AuthenticateLauncher), and every
+// enrollment it made that has not ended is ended as Revoke ends one (endEnrollment, actor
+// "human:<operator>", an enrollment.revoked audit row), revoking each one's grants and cancelling
+// its pending requests, all in one transaction with one launcher_credential.revoked audit row.
+// operator must be the credential's own (ErrNotOperator; a service's credential has none, so no
+// person revokes one here); an unknown id is ErrNoCredential. Revoking a credential already
+// revoked succeeds and changes nothing. It takes the credential's row before its enrollments' rows,
+// so an enrollment Create is inserting under the credential (which holds the row for share)
+// commits first and is ended here, or waits and finds the credential revoked.
+func (s *Service) RevokeCredential(ctx context.Context, id, operator string) error {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var owner *string
+	var host string
+	var revokedAt *time.Time
+	err = tx.QueryRow(ctx, `select operator, host, revoked_at from launcher_credentials where id=$1 for no key update`, id).Scan(&owner, &host, &revokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNoCredential
+	}
+	if err != nil {
+		return err
+	}
+	person := record.CanonicalLogin(operator)
+	if owner == nil || person == "" || *owner != person {
+		return ErrNotOperator
+	}
+	if revokedAt != nil {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `update launcher_credentials set revoked_at=now() where id=$1`, id); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `select id from enrollments where launcher_credential_id=$1 and revoked_at is null order by id for update`, id)
+	if err != nil {
+		return err
+	}
+	ended, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	actor := "human:" + person
+	for _, enrollment := range ended {
+		if _, _, err := endEnrollment(ctx, tx, enrollment, actor, "enrollment.revoked", "its machine login was revoked"); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `insert into audit (kind, actor, detail) values ('launcher_credential.revoked',$1,
+		jsonb_build_object('credential_id',$2::text,'host',$3::text,'enrollments',coalesce(to_jsonb($4::text[]),'[]'::jsonb)))`, actor, id, host, ended); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

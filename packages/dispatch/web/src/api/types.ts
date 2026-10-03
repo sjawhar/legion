@@ -205,3 +205,16 @@ export interface CredentialGrant {
 export interface CredentialGrantsResponse {
   grants: CredentialGrant[];
 }
+
+/** One of the viewer's live machine logins on `GET /api/v1/machine-logins`: the launcher
+ *  credential a machine login the viewer approved minted for one of their machines, neither
+ *  revoked nor expired. */
+export interface MachineLogin {
+  credential_id: string;
+  host: string;
+  issued_at: string;
+  expires_at: string;
+}
+export interface MachineLoginsResponse {
+  credentials: MachineLogin[];
+}

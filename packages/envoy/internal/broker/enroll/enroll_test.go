@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
@@ -840,5 +842,244 @@ func TestASlotIsRefusedOffAPodAndWhenMalformed(t *testing.T) {
 	var n int
 	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from enrollments`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("enrollments written by refused creates = %d (%v), want none", n, err)
+	}
+}
+
+// insertLiveGrant writes a granted request and its live grant under enrollmentID directly (grant
+// issuance is requests.Machine's), and returns the grant's id.
+func insertLiveGrant(t *testing.T, svc *Service, enrollmentID uuid.UUID) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	requestID, grantID := uuid.New(), uuid.New()
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into requests (id, enrollment_id, reason, state, rules_version, lifetime_seconds)
+		values ($1,$2,'test fixture','granted','v1',3600)`, requestID, enrollmentID); err != nil {
+		t.Fatalf("insert request fixture: %v", err)
+	}
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into grants (id, request_id, enrollment_id, expires_at) values ($1,$2,$3, now() + interval '1 hour')`,
+		grantID, requestID, enrollmentID); err != nil {
+		t.Fatalf("insert grant fixture: %v", err)
+	}
+	return grantID
+}
+
+// liveCredentialIDs is LiveCredentials(operator) reduced to its ids, in its order.
+func liveCredentialIDs(t *testing.T, svc *Service, operator string) []uuid.UUID {
+	t.Helper()
+	creds, err := svc.LiveCredentials(context.Background(), operator)
+	if err != nil {
+		t.Fatalf("LiveCredentials(%s): %v", operator, err)
+	}
+	ids := make([]uuid.UUID, len(creds))
+	for i, c := range creds {
+		ids[i] = c.ID
+	}
+	return ids
+}
+
+// TestRevokingAMachineLoginEndsEverySessionItEnrolled: a person revoking their devbox's machine
+// login ends that credential and every session it enrolled — each session's grant revoked and
+// pending request cancelled in their name — while their other machine's session goes on; the
+// credential leaves their list and enrolls nothing more, and revoking it again changes nothing.
+func TestRevokingAMachineLoginEndsEverySessionItEnrolled(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	devbox := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	laptop := mintCredential(t, svc, str("ada@example.com"), nil, "laptop")
+	host, err := svc.Create(ctx, devbox, Enrollment{Kind: "host", RuntimeID: "host-1", Thumbprint: "tp-host-1"})
+	if err != nil {
+		t.Fatalf("Create(host): %v", err)
+	}
+	box, err := svc.Create(ctx, devbox, Enrollment{Kind: "box", RuntimeID: "box-1", Thumbprint: "tp-box-1"})
+	if err != nil {
+		t.Fatalf("Create(box): %v", err)
+	}
+	other, err := svc.Create(ctx, laptop, Enrollment{Kind: "host", RuntimeID: "host-2", Thumbprint: "tp-host-2"})
+	if err != nil {
+		t.Fatalf("Create(the laptop's host): %v", err)
+	}
+	grant := insertLiveGrant(t, svc, host.ID)
+	pending := insertPendingRequest(t, svc, box.ID)
+	if got := liveCredentialIDs(t, svc, "ada@example.com"); !slices.Equal(got, []uuid.UUID{laptop.ID, devbox.ID}) {
+		t.Fatalf("LiveCredentials before the revoke = %v, want the laptop then the devbox", got)
+	}
+
+	if err := svc.RevokeCredential(ctx, devbox.ID.String(), " Ada@Example.com "); err != nil {
+		t.Fatalf("RevokeCredential by its operator: %v", err)
+	}
+
+	for _, e := range []Enrollment{host, box} {
+		if _, live, err := svc.Lookup(ctx, e.ID.String()); err != nil || live {
+			t.Fatalf("Lookup(%s session) after the revoke = live %v, %v; want ended", e.Kind, live, err)
+		}
+	}
+	if _, live, err := svc.Lookup(ctx, other.ID.String()); err != nil || !live {
+		t.Fatalf("Lookup(the laptop's session) = live %v, %v; want it still live", live, err)
+	}
+	var revokedBy *string
+	if err := svc.Store.Pool.QueryRow(ctx, `select revoked_by from grants where id=$1`, grant).Scan(&revokedBy); err != nil || revokedBy == nil || *revokedBy != "human:ada@example.com" {
+		t.Fatalf("grant revoked_by = %v (%v), want human:ada@example.com", revokedBy, err)
+	}
+	if state, by, audits, event := requestState(t, svc, pending); state != "cancelled" || by != "human:ada@example.com" || audits != 1 || event != "cancelled by human:ada@example.com" {
+		t.Fatalf("pending request after the revoke: state=%s decided_by=%s audit rows=%d record event=%q, want cancelled by human:ada@example.com", state, by, audits, event)
+	}
+	if got := liveCredentialIDs(t, svc, "ada@example.com"); !slices.Equal(got, []uuid.UUID{laptop.ID}) {
+		t.Fatalf("LiveCredentials after the revoke = %v, want the laptop alone", got)
+	}
+	if _, err := svc.Create(ctx, devbox, Enrollment{Kind: "host", RuntimeID: "host-3", Thumbprint: "tp-host-3"}); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("Create under the revoked credential = %v, want ErrUnauthenticated", err)
+	}
+
+	if err := svc.RevokeCredential(ctx, devbox.ID.String(), "ada@example.com"); err != nil {
+		t.Fatalf("RevokeCredential again: %v", err)
+	}
+	var credentialAudits, enrollmentAudits int
+	if err := svc.Store.Pool.QueryRow(ctx, `select (select count(*) from audit where kind='launcher_credential.revoked' and detail->>'credential_id'=$1),
+		(select count(*) from audit where kind='enrollment.revoked' and actor='human:ada@example.com')`, devbox.ID.String()).Scan(&credentialAudits, &enrollmentAudits); err != nil {
+		t.Fatalf("count audit rows: %v", err)
+	}
+	if credentialAudits != 1 || enrollmentAudits != 2 {
+		t.Fatalf("audit rows: %d launcher_credential.revoked, %d enrollment.revoked; want 1 and 2", credentialAudits, enrollmentAudits)
+	}
+}
+
+// TestOnlyAMachineLoginsOperatorRevokesIt: another person, an empty name and a service's credential
+// (which has no operator) are each ErrNotOperator, an unknown id is ErrNoCredential, and none of
+// them ends anything. A person's list holds only their own live credentials, never an expired one.
+func TestOnlyAMachineLoginsOperatorRevokesIt(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	ada := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	bob := mintCredential(t, svc, str("bob@example.com"), nil, "bobs-box")
+	service := mintCredential(t, svc, nil, str("legion-daemon"), "cluster")
+	expired := mintCredential(t, svc, str("ada@example.com"), nil, "old-box")
+	if _, err := svc.Store.Pool.Exec(ctx, `update launcher_credentials set expires_at = now() - interval '1 minute' where id=$1`, expired.ID); err != nil {
+		t.Fatalf("expire a credential: %v", err)
+	}
+	enr, err := svc.Create(ctx, ada, Enrollment{Kind: "host", RuntimeID: "host-ada", Thumbprint: "tp-ada"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got := liveCredentialIDs(t, svc, "ada@example.com"); !slices.Equal(got, []uuid.UUID{ada.ID}) {
+		t.Fatalf("LiveCredentials(ada) = %v, want her live devbox credential alone", got)
+	}
+	if got := liveCredentialIDs(t, svc, "bob@example.com"); !slices.Equal(got, []uuid.UUID{bob.ID}) {
+		t.Fatalf("LiveCredentials(bob) = %v, want his own alone", got)
+	}
+
+	for _, tc := range []struct {
+		name, id, operator string
+		want               error
+	}{
+		{"another person", ada.ID.String(), "bob@example.com", ErrNotOperator},
+		{"no one", ada.ID.String(), "  ", ErrNotOperator},
+		{"a service's credential", service.ID.String(), "ada@example.com", ErrNotOperator},
+		{"an unknown id", uuid.NewString(), "ada@example.com", ErrNoCredential},
+	} {
+		if err := svc.RevokeCredential(ctx, tc.id, tc.operator); !errors.Is(err, tc.want) {
+			t.Fatalf("RevokeCredential(%s) = %v, want %v", tc.name, err, tc.want)
+		}
+	}
+	if _, live, err := svc.Lookup(ctx, enr.ID.String()); err != nil || !live {
+		t.Fatalf("Lookup(ada's session) after the refused revokes = live %v, %v; want live", live, err)
+	}
+	var revoked int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from launcher_credentials where revoked_at is not null`).Scan(&revoked); err != nil || revoked != 0 {
+		t.Fatalf("revoked credentials after the refused revokes = %d (%v), want none", revoked, err)
+	}
+}
+
+// blockedBy waits until another backend of svc's server waits on a lock tx holds.
+func blockedBy(t *testing.T, svc *Service, tx pgx.Tx) {
+	t.Helper()
+	ctx := context.Background()
+	var holder int
+	if err := tx.QueryRow(ctx, `select pg_backend_pid()`).Scan(&holder); err != nil {
+		t.Fatalf("read the holder's backend: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from pg_stat_activity where $1 = any(pg_blocking_pids(pid))`, holder).Scan(&waiting); err != nil {
+			t.Fatalf("read lock waiters: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("nothing waited on the lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestAnEnrollmentRacingARevokeCannotLand pins the lock Create takes on the credential: a revoke
+// committing while Create is enrolling under that credential (here a transaction holding the
+// credential's row as RevokeCredential does, with revoked_at set) leaves Create refused
+// ErrUnauthenticated and no enrollment written, never a session the revoke did not end.
+func TestAnEnrollmentRacingARevokeCannotLand(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	tx, err := svc.Store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `select 1 from launcher_credentials where id=$1 for no key update`, cred.ID); err != nil {
+		t.Fatalf("lock the credential: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `update launcher_credentials set revoked_at=now() where id=$1`, cred.ID); err != nil {
+		t.Fatalf("revoke the credential: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.Create(ctx, cred, Enrollment{Kind: "host", RuntimeID: "host-racing", Thumbprint: "tp-racing"})
+		done <- err
+	}()
+	blockedBy(t, svc, tx)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the revoke: %v", err)
+	}
+	if err := <-done; !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("Create racing the revoke = %v, want ErrUnauthenticated", err)
+	}
+	var n int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from enrollments`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("enrollments after the race = %d (%v), want none", n, err)
+	}
+}
+
+// TestARevokeEndsAnEnrollmentCreatedWhileItWaited pins the other half: RevokeCredential takes the
+// credential's row before it reads the credential's enrollments, so an enrollment being inserted
+// under it (here a transaction holding the row for share, as Create does, with its enrollment
+// written) commits first and is ended by the revoke.
+func TestARevokeEndsAnEnrollmentCreatedWhileItWaited(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
+	tx, err := svc.Store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `select 1 from launcher_credentials where id=$1 for share`, cred.ID); err != nil {
+		t.Fatalf("hold the credential for share: %v", err)
+	}
+	enrollment := uuid.New()
+	if _, err := tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, thumbprint, launcher_credential_id, lease_expires_at)
+		values ($1,'host','host-waited','ada@example.com','tp-waited',$2, now() + interval '1 hour')`, enrollment, cred.ID); err != nil {
+		t.Fatalf("insert the enrollment: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- svc.RevokeCredential(ctx, cred.ID.String(), "ada@example.com") }()
+	blockedBy(t, svc, tx)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the enrollment: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("RevokeCredential: %v", err)
+	}
+	if _, live, err := svc.Lookup(ctx, enrollment.String()); err != nil || live {
+		t.Fatalf("Lookup(the enrollment committed while the revoke waited) = live %v, %v; want ended", live, err)
 	}
 }
