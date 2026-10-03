@@ -154,11 +154,22 @@
   `)_` held about a gigabyte while it was saved, which killed the 1,024 MiB production task
   (LEGION-481): every element the markdown makes costs memory in the parse, the read-back, the
   render and the live document. A caller's markdown - a spec, an uploaded document or version,
-  an edit batch's inserts and replaces - may now make at most 65,536 elements (a block weighs 3, a
-  table cell 4, a piece of inline syntax, a mark or a line of text 1); past that it is `413
-  CAP_EXCEEDED` naming the line, refused while goldmark parses, before it allocates the rest. The
-  heaviest document the limit admits holds under 170 MiB above an idle server to store, settle and
-  read; hand-written markdown weighs 30 to 90 elements a kibibyte.
+  an edit batch's inserts and replaces, the `find` of an edit and the quote of a comment or ask -
+  may now make at most 65,536 elements (a block weighs 3, a table cell 4, a hard line break 3, an
+  autolink 2, a piece of inline syntax, a mark or a line of text 1); past that a write is `413
+  CAP_EXCEEDED` naming the line, refused while goldmark parses, and a quote is matched by its text
+  alone. This repository's own markdown weighs 44 to 100 elements a kibibyte, so prose passes to
+  the 1 MiB cap and a table-dense document to about 650 KiB.
+- A write may no longer grow a stored document past what one upload may hold, extending the 1 MiB
+  upload cap of #1670 to stored documents. Repeated inserts each within the limit grew one document
+  to 29.5 MB, and a few dozen thousand headings' worth left one the server could not load (500 on
+  the next write, 503 on every read). An upload, an edit batch or an accepted suggestion that leaves
+  the document weighing more than 65,536 elements and more than it did is `413 CAP_EXCEEDED`; one
+  that leaves it no heavier passes, so an over-limit document can still be trimmed or split. A
+  write is also refused when the live document it leaves would park more than 90,000 of the
+  100,000 items ygo waits on while it loads a document (any write that would leave it unloadable
+  at all is refused). Browser edits over the websocket are applied before any check and are not
+  bounded by this.
 
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work

@@ -209,7 +209,7 @@ func (p *parseCount) refusal(root ast.Node, source []byte, firstLine int) error 
 		return nil
 	}
 	line := firstLine + bytes.Count(source[:min(p.at, len(source))], []byte("\n"))
-	return fmt.Errorf("%w: this write's markdown makes more than %d elements, passing that at line %d; a block weighs 3 elements, a table cell 4, a hard line break 3, and each piece of inline syntax, mark and line of text 1. Split the document, or upload data as a file of another content type",
+	return fmt.Errorf("%w: this write's markdown makes more than %d elements, passing that at line %d; a block weighs 3 elements, a table cell 4, a hard line break 3, an autolink 2, and each piece of inline syntax, mark and line of text 1. Shorten the change, or split the document; an upload of data rather than prose can go up as a file of another content type",
 		ErrTooManyElements, p.write.limit, line)
 }
 
