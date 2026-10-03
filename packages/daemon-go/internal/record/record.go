@@ -151,23 +151,19 @@ type PullRequest struct {
 	// HeadUpdatedAt is the latest updated_at among the lifecycle observations applied (opened,
 	// reopened, synchronize or closed; one with no clock never lowers it): an older one is a late
 	// redelivery and changes nothing (classify.LateLifecycle).
-	HeadUpdatedAt       time.Time
-	HeadUpdatedAtSource string
-	// CheckedHead is the head whose CI settlement Verdict, Failing, FailingStatuses, CheckRuns,
-	// Generation, Snapshot and Reconciled record: the current head, or a head the current one
-	// replaced through pushes that changed only .legion/ (a handoff push starts no CI of its own,
-	// so the code head's settlement is the head's), or an earlier head whose settlement no longer
-	// counts (classify.HeadVerdict).
+	HeadUpdatedAt time.Time
+	// CheckedHead is the head whose CI settlement Verdict, Failing, CheckRuns, Generation and
+	// Snapshot record: the current head, or a head the current one replaced through pushes that
+	// changed only .legion/ (a handoff push starts no CI of its own, so the code head's settlement
+	// is the head's), or an earlier head whose settlement no longer counts (classify.HeadVerdict).
 	CheckedHead     string
 	Verdict         string
 	Failing         []string
-	FailingStatuses []string
 	FixAttempts     int
 	BlockedAttempts int
 	CheckRuns       []AttemptRun
 	Generation      int64
 	Snapshot        string
-	Reconciled      bool
 	// Pushes are the branch's pushes as they were classified: every push that changed only .legion/
 	// and said which head it replaced, which carry an approval across, and the pushes whose heads
 	// have not arrived yet. A push that may change code is spent once its head arrives.

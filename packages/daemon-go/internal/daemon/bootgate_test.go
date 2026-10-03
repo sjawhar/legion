@@ -346,8 +346,8 @@ func gateUnder(t *testing.T, f fakeOmp, legion string) (pluginGate, *bytes.Buffe
 }
 
 const (
-	contractPrevious = `{"daemonApiVersion":8,"goDaemonApiVersion":2}`
-	contractCurrent  = `{"daemonApiVersion":8,"goDaemonApiVersion":3}`
+	contractPrevious = `{"daemonApiVersion":2}`
+	contractCurrent  = `{"daemonApiVersion":3}`
 )
 
 // A manifest that declares another contract — or none, or one that is not a number — is refused
@@ -356,10 +356,10 @@ func TestTheGateRefusesAPluginOfAnotherContractBeforeRunningOhMyPi(t *testing.T)
 	for _, testCase := range []struct {
 		name, legion, declared string
 	}{
-		{"another number", contractPrevious, "speaks Go daemon API contract 2"},
-		{"no Go contract", `{"daemonApiVersion":8}`, "speaks Go daemon API contract none"},
-		{"no legion member", "", "speaks Go daemon API contract none"},
-		{"a string", `{"goDaemonApiVersion":"1"}`, `speaks Go daemon API contract "1"`},
+		{"another number", contractPrevious, "speaks daemon API contract 2"},
+		{"no contract", `{}`, "speaks daemon API contract none"},
+		{"no legion member", "", "speaks daemon API contract none"},
+		{"a string", `{"daemonApiVersion":"1"}`, `speaks daemon API contract "1"`},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			f := newFakeOmp(t, "yes")
@@ -383,16 +383,19 @@ func TestTheGateRefusesAPluginOfAnotherContractBeforeRunningOhMyPi(t *testing.T)
 	}
 }
 
-func TestTheGateRefusesThePreviousGoPluginContract(t *testing.T) {
+// A plugin released before contract 12 declares this daemon's number under the field the boot gate
+// read then and the TypeScript daemon's 9 under the one it reads now: it is refused, naming the 9,
+// however the old field reads.
+func TestTheGateRefusesAPluginFromBeforeTheRename(t *testing.T) {
 	f := newFakeOmp(t, "yes")
-	gate, _ := gateUnder(t, f, contractPrevious)
+	gate, _ := gateUnder(t, f, `{"daemonApiVersion":9,"goDaemonApiVersion":3}`)
 
 	err := gate.verify(context.Background())
 
 	if err == nil {
-		t.Fatal("the gate passed a plugin declaring the previous Go daemon contract")
+		t.Fatal("the gate passed a plugin that declares this contract only under the field before the rename")
 	}
-	for _, want := range []string{"speaks Go daemon API contract 2", "this daemon requires 3"} {
+	for _, want := range []string{"speaks daemon API contract 9", "this daemon requires 3"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not say %q: %v", want, err)
 		}
@@ -475,7 +478,7 @@ func TestTheLoadProbeRefusesAPluginLoadedFromAnotherRoot(t *testing.T) {
 	}{
 		{"yes-elsewhere", []string{
 			"pi-legion-envoy loads in a pane from ", filepath.Join("elsewhere", "package.json"),
-			"but the manifest this gate held to Go daemon API contract 3 is ",
+			"but the manifest this gate held to daemon API contract 3 is ",
 			"OMP profile gate", "launch prefix",
 		}},
 		{"yes-unowned", []string{"no @sjawhar/pi-legion-envoy package.json above", filepath.Join("unowned", "legion.js")}},
@@ -604,12 +607,12 @@ func TestTheLoadProbeStopsWithTheDaemon(t *testing.T) {
 // before the daemon boots: a refusal records no boot, and a daemon stopped while the gate waits
 // stops cleanly, having served nothing.
 func TestRunGatesThePluginUnderThePaneEnvironmentBeforeItBoots(t *testing.T) {
-	// The daemon holds the plugin to its own GoDaemonAPIVersion.
-	thisDaemons := `{"goDaemonApiVersion":` + strconv.Itoa(api.GoDaemonAPIVersion) + `}`
+	// The daemon holds the plugin to its own DaemonAPIVersion.
+	thisDaemons := `{"daemonApiVersion":` + strconv.Itoa(api.DaemonAPIVersion) + `}`
 	for _, testCase := range []struct {
 		name, legion, step, want string
 	}{
-		{"another contract", `{"goDaemonApiVersion":1}`, "yes", "speaks Go daemon API contract 1"},
+		{"another contract", `{"daemonApiVersion":1}`, "yes", "speaks daemon API contract 1"},
 		{"not loaded", thisDaemons, "no", "is installed but not loaded by omp"},
 		{"stopped while the probe runs", thisDaemons, "hang", ""},
 	} {
@@ -657,7 +660,7 @@ func TestTheTmuxGateAsksForWhatTheRolePromptsName(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("OMP_PROFILE", "gate")
 	writeManifest(t, manifestAt(filepath.Join(home, ".omp", "profiles", "gate")),
-		`{"goDaemonApiVersion":`+strconv.Itoa(api.GoDaemonAPIVersion)+`}`)
+		`{"daemonApiVersion":`+strconv.Itoa(api.DaemonAPIVersion)+`}`)
 	f := newFakeOmp(t, "no")
 	o := fakeRuntime(fake.NewRuntime(), &built{})
 	o.runtime = nil
@@ -706,7 +709,7 @@ esac
 	t.Setenv("PATH", stub+":"+os.Getenv("PATH"))
 	t.Setenv("GEMINI_API_KEY", "the-daemons-own")
 	writeManifest(t, manifestAt(filepath.Join(home, ".omp", "profiles", "gate")),
-		`{"goDaemonApiVersion":`+strconv.Itoa(api.GoDaemonAPIVersion)+`}`)
+		`{"daemonApiVersion":`+strconv.Itoa(api.DaemonAPIVersion)+`}`)
 	f := newFakeOmp(t, "no")
 	o := fakeRuntime(fake.NewRuntime(), &built{})
 	o.runtime = nil
