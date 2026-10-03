@@ -12,6 +12,8 @@ import (
 	"go/token"
 	"io/fs"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,7 +23,11 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
+	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/dispatch/routes"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // storetestImport is the one package under internal/dispatch that reads the process environment
@@ -265,6 +271,22 @@ func envoyJSONHome(t *testing.T) string {
 	return filepath.Dir(filepath.Dir(filepath.Dir(path)))
 }
 
+// routerFor is the router main serves for boot, built through appContextOptions as main builds it,
+// with app as the loaded GitHub App and no database: the requests the cases send never reach one.
+func routerFor(t *testing.T, boot bootConfig, app *auth.AppConfig) http.Handler {
+	t.Helper()
+	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
+		SigningKey: "signing-key",
+		Users:      store.NewPgUserStore(nil),
+		Identity:   identity.CookieIdentity{SigningKey: "signing-key", AllowedLogins: boot.AllowedLogins},
+		App:        app,
+	}))
+	if err != nil {
+		t.Fatalf("build the router: %v", err)
+	}
+	return routes.New(appCtx)
+}
+
 // Every setting reaches its reader through the table, as it resolved before the table existed:
 // each case hands its variable to the reader main hands it to, through the settings read alone,
 // never the process environment, so a reader that reads around the table fails its case.
@@ -414,8 +436,36 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			refusedWith(t, map[string]string{"ENVOY_URL": "listener.example:9020"}, "ENVOY_URL")
 		},
 		"ENVOY_TOKEN": func(t *testing.T) {
-			if boot := resolveWith(t, map[string]string{"ENVOY_TOKEN": "listener-token"}); boot.EnvoyToken != "listener-token" {
-				t.Errorf("EnvoyToken = %q", boot.EnvoyToken)
+			// The bearer the Envoy listener receives when GET /api/v1/agents reads its sessions.
+			sent := func(overrides map[string]string) string {
+				t.Helper()
+				authorization := make(chan string, 1)
+				listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					authorization <- r.Header.Get("Authorization")
+					_, _ = w.Write([]byte("[]"))
+				}))
+				defer listener.Close()
+				overrides["ENVOY_URL"] = listener.URL
+				request := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
+				request.Header.Set("Authorization", "Bearer agent-token")
+				response := httptest.NewRecorder()
+				routerFor(t, resolveWith(t, overrides), nil).ServeHTTP(response, request)
+				if response.Code != http.StatusOK {
+					t.Fatalf("GET /api/v1/agents: %d %s", response.Code, response.Body.String())
+				}
+				select {
+				case got := <-authorization:
+					return got
+				default:
+					t.Fatal("GET /api/v1/agents answered without calling the listener")
+					return ""
+				}
+			}
+			if got := sent(map[string]string{"ENVOY_TOKEN": "listener-token"}); got != "Bearer listener-token" {
+				t.Errorf("ENVOY_TOKEN=listener-token: the listener received Authorization %q", got)
+			}
+			if got := sent(map[string]string{}); got != "" {
+				t.Errorf("unset: the listener received Authorization %q, want none", got)
 			}
 		},
 		"DISPATCH_REPO_PROJECTS": func(t *testing.T) {
@@ -500,9 +550,15 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 		},
 		"DISPATCH_INSECURE_COOKIE": func(t *testing.T) {
+			// The flag as the router's cookies carry it: the state cookie GET /auth/start sets.
+			app := &auth.AppConfig{ClientID: "Iv1.env", ClientSecret: "secret"}
 			for value, insecure := range map[string]bool{"": false, "1": true, "false": true} {
-				if boot := resolveWith(t, map[string]string{"DISPATCH_INSECURE_COOKIE": value}); boot.InsecureCookie != insecure {
-					t.Errorf("DISPATCH_INSECURE_COOKIE=%q: InsecureCookie = %t, want %t", value, boot.InsecureCookie, insecure)
+				response := httptest.NewRecorder()
+				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_INSECURE_COOKIE": value}), app).
+					ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
+				cookies := response.Result().Cookies()
+				if response.Code != http.StatusFound || len(cookies) != 1 || cookies[0].Secure == insecure {
+					t.Errorf("DISPATCH_INSECURE_COOKIE=%q: /auth/start answered %d setting %v, want one state cookie with Secure %t", value, response.Code, cookies, !insecure)
 				}
 			}
 		},

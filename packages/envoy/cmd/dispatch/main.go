@@ -241,36 +241,21 @@ func main() {
 		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
 	}
 
-	appCtx, err := routes.BuildAppContext(routes.AppContextOptions{
-		SigningKey: signingKey,
-		WebDistDir: webDistDir,
-		Users:      users,
-		Sessions:   sessions,
-		Identity:   requestIdentity,
-
-		AllowedLogins:  boot.AllowedLogins,
-		Store:          database,
-		AgentToken:     boot.AgentToken,
-		RepoProjects:   boot.RepoProjects,
-		DefaultProject: boot.DefaultProject,
-		ServerURL:      serverURL,
-		InsecureCookie: boot.InsecureCookie,
-		EnvoyURL:       boot.EnvoyURL,
-		EnvoyToken:     boot.EnvoyToken,
-		Docs:           documentService,
-		Events:         broker,
-		App:            appCfg,
-		GitHubAPIBase:  boot.GitHubAPIBase,
-		OIDC:           serviceTokens,
-		AgentStream:    agentStream,
-		Lifetime:       ctx,
-
-		AgentSecretsURL:   boot.AgentSecretsURL,
-		AgentSecretsToken: boot.AgentSecretsToken,
-
-		TestHooksEnabled: boot.TestHooksEnabled,
-		DevSignIn:        boot.DevSignIn,
-	})
+	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
+		SigningKey:  signingKey,
+		WebDistDir:  webDistDir,
+		Users:       users,
+		Sessions:    sessions,
+		Identity:    requestIdentity,
+		Store:       database,
+		ServerURL:   serverURL,
+		Docs:        documentService,
+		Events:      broker,
+		App:         appCfg,
+		OIDC:        serviceTokens,
+		AgentStream: agentStream,
+		Lifetime:    ctx,
+	}))
 
 	if err != nil {
 		slog.Error("dispatch: build app context", "error", err)
@@ -631,6 +616,26 @@ func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
 		return auth.NewSigningKey()
 	}
 	return auth.LoadSigningKey(boot.SigningKey, filepath.Join(dataDir, "signing-key"))
+}
+
+// appContextOptions is what main hands routes.BuildAppContext: built, what main made from the
+// configuration (the stores, the identity, the signing key, the loaded App and the like), with
+// every setting the router takes from boot filled in. The settings tests build the router through
+// it, so a setting main resolves but never hands the router fails its case.
+func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.AppContextOptions {
+	built.AllowedLogins = boot.AllowedLogins
+	built.AgentToken = boot.AgentToken
+	built.RepoProjects = boot.RepoProjects
+	built.DefaultProject = boot.DefaultProject
+	built.InsecureCookie = boot.InsecureCookie
+	built.EnvoyURL = boot.EnvoyURL
+	built.EnvoyToken = boot.EnvoyToken
+	built.GitHubAPIBase = boot.GitHubAPIBase
+	built.AgentSecretsURL = boot.AgentSecretsURL
+	built.AgentSecretsToken = boot.AgentSecretsToken
+	built.TestHooksEnabled = boot.TestHooksEnabled
+	built.DevSignIn = boot.DevSignIn
+	return built
 }
 
 // loadEnvoyConfig is envoy.json as Dispatch reads it: the files config.Load finds, under the
