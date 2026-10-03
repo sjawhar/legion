@@ -21,6 +21,11 @@ const (
 	requestMemoryBound    = 256 << 20
 	concurrentMemoryBound = 512 << 20
 	documentCap           = 1 << 20
+	// marginEditAllowance is the most a margin filled to its bounds may add to what a cold edit of
+	// its document holds: two cold edits of one heaviest document, with a full margin and without,
+	// differed by -10 to +88 MiB over four runs (the four-column table the most), where a margin of
+	// ninety-six 900 KB suggestions adds over 300 MiB.
+	marginEditAllowance = 128 << 20
 )
 
 // A markdown upload of any shape at the 1 MiB cap holds at most 256 MiB above the server's idle
@@ -460,15 +465,27 @@ func TestReturnedAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T
 	if peak > requestMemoryBound {
 		t.Errorf("the edit returning the blocks and its settlement held %d MiB above idle, want at most %d MiB", peak>>20, requestMemoryBound>>20)
 	}
-	memory.coldPeaks(t, "returned answers", issue.PrimaryArtifactID)
+	memory.coldPeaks(t, "returned answers", issue.PrimaryArtifactID, sentinelEdit)
 }
 
-// coldPeaks reads and edits a document on servers that have not loaded it - its text, a websocket
-// load of its room and a one-word edit of the "sentinel" it holds, each on a fresh server, then
-// four reads of its text at once - and fails the test where one of the first three holds more than
-// the bound above idle. Every peak is logged under name; the four reads at once are logged beside
-// the production task's 1,024 MiB.
-func (h *memoryHarness) coldPeaks(t *testing.T, name, artifactID string) {
+// sentinelEdit is a one-word edit of a document that holds "sentinel".
+var sentinelEdit = map[string]any{"op": "replace", "find": "sentinel", "with": "marker"}
+
+// coldPeaks reads and edits a document on servers that have not loaded it (coldReads, coldEdit)
+// and fails the test where a read or the edit holds more than the bound above idle.
+func (h *memoryHarness) coldPeaks(t *testing.T, name, artifactID string, edit map[string]any) {
+	t.Helper()
+	h.coldReads(t, name, artifactID)
+	if peak := h.coldEdit(t, name, artifactID, edit); peak > requestMemoryBound {
+		t.Errorf("%s: a cold one-word edit held %d MiB above idle, want at most %d MiB", name, peak>>20, requestMemoryBound>>20)
+	}
+}
+
+// coldReads reads a document on servers that have not loaded it - its text and a websocket load of
+// its room, each on a fresh server, then four reads of its text at once - and fails the test where
+// one of the first two holds more than the bound above idle. Every peak is logged under name; the
+// four reads at once are logged beside the production task's 1,024 MiB.
+func (h *memoryHarness) coldReads(t *testing.T, name, artifactID string) {
 	t.Helper()
 	for _, cold := range []struct {
 		name string
@@ -476,11 +493,6 @@ func (h *memoryHarness) coldPeaks(t *testing.T, name, artifactID string) {
 	}{
 		{"text read", func(server *dispatchProcess) { server.get(t, "/api/v1/artifacts/"+artifactID+"/text") }},
 		{"websocket load", func(server *dispatchProcess) { server.loadOverWebsocket(t, artifactID) }},
-		{"one-word edit", func(server *dispatchProcess) {
-			if answer := server.edit(t, artifactID, map[string]any{"op": "replace", "find": "sentinel", "with": "marker"}); answer.status != http.StatusOK {
-				t.Errorf("%s: a one-word edit answered %d %.300s, want 200", name, answer.status, answer.body)
-			}
-		}},
 	} {
 		server := h.start(t)
 		peak := server.peakAboveIdle(t, func() { cold.run(server) })
@@ -510,6 +522,210 @@ func (h *memoryHarness) coldPeaks(t *testing.T, name, artifactID string) {
 	})
 	server.stop(t)
 	t.Logf("%s: four cold text reads at once, %d MiB above idle", name, peak>>20)
+}
+
+// coldEdit sends edit, a one-word edit, to a document on a server that has not loaded it, fails the
+// test unless it is taken, and logs and returns its peak above the server's idle memory.
+func (h *memoryHarness) coldEdit(t *testing.T, name, artifactID string, edit map[string]any) int64 {
+	t.Helper()
+	server := h.start(t)
+	var answer response
+	peak := server.peakAboveIdle(t, func() { answer = server.edit(t, artifactID, edit) })
+	server.stop(t)
+	t.Logf("%s: a cold one-word edit answered %d, %d MiB above idle", name, answer.status, peak>>20)
+	if answer.status != http.StatusOK {
+		t.Errorf("%s: a cold one-word edit answered %d %.300s, want 200", name, answer.status, answer.body)
+	}
+	return peak
+}
+
+// A document's margin - every comment and suggestion record, which every load of the document
+// builds - holds at most 256 KiB of text a record and 1 MiB in all, so on a real Dispatch process
+// no comment, and no cold read or edit of the document it leaves, holds more than the bound: the
+// thirty-two and ninety-six suggestions of 900 KB that main takes, suggestions filling the margin
+// to its bound, and an ordinary workload of comments, suggestions and replies, which is taken
+// whole. On main thirty-two suggestions of 900 KB took a cold websocket load of their document to
+// 296 MiB, and sixty-four took four cold reads at once to 1,223 MiB.
+func TestTheMarginStaysWithinTheMemoryBound(t *testing.T) {
+	memory := newMemoryHarness(t)
+	var spec strings.Builder
+	spec.WriteString("Before sentinel.\n\n")
+	for index := range 100 {
+		fmt.Fprintf(&spec, "q%02dx ", index)
+	}
+	spec.WriteString("\n")
+	suggestion := func(replacement string) func(index int, _ []string) map[string]any {
+		return func(index int, _ []string) map[string]any {
+			return map[string]any{
+				"body":       "a suggestion",
+				"anchor":     map[string]any{"artifact": "spec", "quote": fmt.Sprintf("q%02dx", index)},
+				"suggestion": map[string]string{"replace_with": replacement},
+			}
+		}
+	}
+	sentence := strings.Repeat("A sentence of ordinary length. ", 16)
+	ordinary := func(index int, roots []string) map[string]any {
+		switch {
+		case index%6 == 5:
+			return map[string]any{"body": sentence, "reply_to": roots[len(roots)-1]}
+		case index%3 == 0:
+			return suggestion(sentence)(index, roots)
+		default:
+			return map[string]any{"body": sentence, "anchor": map[string]any{"artifact": "spec", "quote": fmt.Sprintf("q%02dx", index)}}
+		}
+	}
+	for _, shape := range []struct {
+		name     string
+		comments int
+		comment  func(index int, roots []string) map[string]any
+		allTaken bool
+	}{
+		{"32 suggestions of 900 KB", 32, suggestion(strings.Repeat("a", 900_000)), false},
+		{"96 suggestions of 900 KB", 96, suggestion(strings.Repeat("a", 900_000)), false},
+		{"suggestions of 255,000 bytes to the margin's bound", 5, suggestion(strings.Repeat("a", 255_000)), false},
+		{"an ordinary workload", 72, ordinary, true},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			server := memory.start(t)
+			issue := server.createIssue(t, "Margin of "+shape.name, spec.String())
+			var roots []string
+			taken, refused, heaviest := 0, 0, int64(0)
+			for index := range shape.comments {
+				request := shape.comment(index, roots)
+				body, err := json.Marshal(request)
+				if err != nil {
+					t.Fatalf("encode comment %d: %v", index+1, err)
+				}
+				var answer response
+				peak := server.peakAboveIdle(t, func() {
+					answer = server.send(t, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", "application/json", bytes.NewReader(body), http.Header{"X-Dispatch-User": {"alice"}})
+				})
+				heaviest = max(heaviest, peak)
+				switch {
+				case answer.status == http.StatusCreated:
+					taken++
+					var created struct{ ID string }
+					if err := json.Unmarshal(answer.body, &created); err != nil {
+						t.Fatalf("decode comment %d: %v", index+1, err)
+					}
+					if _, reply := request["reply_to"]; !reply {
+						roots = append(roots, created.ID)
+					}
+				case answer.status == http.StatusRequestEntityTooLarge && strings.Contains(string(answer.body), `"code":"CAP_EXCEEDED"`):
+					refused++
+				default:
+					t.Fatalf("comment %d answered %d %.300s, want 201 or 413 CAP_EXCEEDED", index+1, answer.status, answer.body)
+				}
+			}
+			server.stop(t)
+			t.Logf("%s: %d taken, %d refused 413, the heaviest request %d MiB above idle", shape.name, taken, refused, heaviest>>20)
+			if heaviest > requestMemoryBound {
+				t.Errorf("%s: a comment held %d MiB above idle, want at most %d MiB", shape.name, heaviest>>20, requestMemoryBound>>20)
+			}
+			if shape.allTaken && refused > 0 {
+				t.Errorf("%s: %d of %d comments refused, want every one taken", shape.name, refused, shape.comments)
+			}
+			memory.coldPeaks(t, shape.name, issue.PrimaryArtifactID, sentinelEdit)
+		})
+	}
+}
+
+// The heaviest documents the element limit admits, each with suggestions of 255,000 bytes until
+// its margin's bound refuses one - the most a stored document's rendering and its margin can hold
+// together - are each still read and loaded within the bound on a server that has not loaded them,
+// and a full margin adds at most marginEditAllowance to what a cold one-word edit of the document
+// held before it. The edit replaces a word with one as long, so it is weighed whole - its
+// rendering's elements and its trial load - and taken. What the edit holds without a margin is the
+// element limit's own (logged, and over the bound for the densest shapes: tables and inline HTML),
+// which the margin's bounds do not move.
+func TestTheHeaviestDocumentsWithAFullMarginStayWithinTheMemoryBound(t *testing.T) {
+	memory := newMemoryHarness(t)
+	replacement := strings.Repeat("a", 255_000)
+	edit := map[string]any{"op": "replace", "find": "word", "with": "wore", "occurrence": 0}
+	for _, shape := range heaviestAdmittedShapes(t) {
+		t.Run(shape.name, func(t *testing.T) {
+			writer := memory.start(t)
+			upload := writer.upload(t, "json", memory.issue, shape.markdown)
+			if upload.status != http.StatusCreated {
+				t.Fatalf("upload of the heaviest %s the limit admits: status %d body %.300s, want 201", shape.name, upload.status, upload.body)
+			}
+			memory.waitForSettlement(t, upload)
+			writer.stop(t)
+			alone := memory.coldEdit(t, shape.name+" with no margin", upload.artifactID, edit)
+			writer = memory.start(t)
+			taken := 0
+			for {
+				body, err := json.Marshal(map[string]any{
+					"body":       "a suggestion",
+					"anchor":     map[string]any{"artifact": upload.artifactID, "quote": "word", "occurrence": taken},
+					"suggestion": map[string]string{"replace_with": replacement},
+				})
+				if err != nil {
+					t.Fatalf("encode the suggestion: %v", err)
+				}
+				answer := writer.send(t, http.MethodPost, "/api/v1/issues/"+memory.issue+"/comments", "application/json", bytes.NewReader(body), http.Header{"X-Dispatch-User": {"alice"}})
+				if answer.status == http.StatusCreated && taken < 8 {
+					taken++
+					continue
+				}
+				if answer.status != http.StatusRequestEntityTooLarge || !strings.Contains(string(answer.body), "a document's margin holds at most 1 MiB") {
+					t.Fatalf("suggestion %d answered %d %.300s, want 201 until the margin's bound refuses one", taken+1, answer.status, answer.body)
+				}
+				break
+			}
+			writer.stop(t)
+			t.Logf("%s: %d suggestions of %d bytes taken before the margin's bound", shape.name, taken, len(replacement))
+			name := shape.name + " with a full margin"
+			memory.coldReads(t, name, upload.artifactID)
+			if full := memory.coldEdit(t, name, upload.artifactID, edit); full-alone > marginEditAllowance {
+				t.Errorf("%s: a cold one-word edit held %d MiB above idle, %d MiB more than with no margin, want at most %d MiB more", name, full>>20, (full-alone)>>20, marginEditAllowance>>20)
+			}
+		})
+	}
+}
+
+// A new version of 16,384 headings, what one upload may hold, over a first version of one line is
+// taken on every try on a real Dispatch process, and its document then reads on a server that has
+// not loaded it. A transaction's writes take the id after every writer the document holds; under a
+// random id a new version that drew an id below its first version's writer parked every item it
+// wrote, and the load margin refused it on 7 of 12 tries.
+func TestANewVersionAtTheLimitIsTakenOnEveryTry(t *testing.T) {
+	memory := newMemoryHarness(t)
+	const tries = 12
+	headings := strings.Repeat("# a\n", 16_384)
+	server := memory.start(t)
+	var taken []string
+	for try := range tries {
+		name := fmt.Sprintf("near-limit-%d.md", try)
+		first, err := server.tryUploadNamed("multipart", memory.issue, name, "One line.\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first.status != http.StatusCreated {
+			t.Fatalf("try %d: the first version answered %d %.300s, want 201", try+1, first.status, first.body)
+		}
+		memory.waitForSettlement(t, first)
+		version, err := server.tryUploadNamed("multipart", memory.issue, name, headings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("try %d: a new version of 16,384 headings answered %d %.200s", try+1, version.status, version.body)
+		if version.status == http.StatusCreated {
+			taken = append(taken, version.artifactID)
+			memory.waitForSettlement(t, version)
+		}
+	}
+	server.stop(t)
+	t.Logf("%d of %d new versions taken", len(taken), tries)
+	if len(taken) != tries {
+		t.Errorf("%d of %d new versions of 16,384 headings were refused, want every one taken", tries-len(taken), tries)
+	}
+	reader := memory.start(t)
+	for _, artifactID := range taken {
+		if text := reader.text(t, artifactID); strings.Count(text, "# a\n") != 16_384 {
+			t.Errorf("document %s reads back %d bytes, want its 16,384 headings", artifactID, len(text))
+		}
+	}
 }
 
 // blockAsks are the ids of the asks settlement indexes from the blocks ask-0 to ask-<count-1> of
