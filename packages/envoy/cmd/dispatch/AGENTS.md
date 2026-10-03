@@ -133,15 +133,17 @@ write identity errors with `identity.WriteError`.
   `DISPATCH_SIGNIN_CLIENT_SECRET` and `DISPATCH_SIGNIN_GROUP`; setting some of
   them is refused naming the missing ones, and the authorization and token
   endpoints come from the issuer's discovery document, read at boot under
-  `oidc.DiscoveryTimeout`. The callback names the person by the email in the
-  pool username (`<provider>_<email>`, the provider one the ID token's
-  `identities` names; `identity.Person`), never by the `email` claim, which a
-  person can write, and signs in only a member of `DISPATCH_SIGNIN_GROUP`
-  (`cognito:groups`); anyone else gets a 403 page naming them. It records the
-  person in `people` with the pool's refresh token, and `identity.Membership`
-  renews that sign-in at least hourly: a refresh the pool refuses, or one whose
-  ID token no longer puts the person in the group, advances their session
-  generation and forgets the token, ending every session they hold.
+  `oidc.DiscoveryTimeout`. Those boot checks, the discovery and the request
+  identity main builds live in `cmd/dispatch/signin.go`. The callback names
+  the person by the email in the pool username (`<provider>_<email>`, the
+  provider one the ID token's `identities` names; `identity.Person`), never by
+  the `email` claim, which a person can write, and signs in only a member of
+  `DISPATCH_SIGNIN_GROUP` (`cognito:groups`); anyone else gets a 403 page
+  naming them. It records the person in `people` with the pool's refresh
+  token, and `identity.Membership` renews that sign-in at least hourly: a
+  refresh the pool refuses, or one whose ID token no longer puts the person in
+  the group, advances their session generation and forgets the token, ending
+  every session they hold.
 - `DISPATCH_IDENTITY=header:<Header-Name>` is for tests and local harnesses
   only, never for a production Dispatch deployment. It accepts the named
   header's value lowercased and records it in `people`; it requires

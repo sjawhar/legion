@@ -29,7 +29,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -461,25 +460,8 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	}
 	boot.ListenAddr = listenAddr
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
-	signInSettings := []struct{ name, value string }{
-		{"DISPATCH_SIGNIN_ISSUER", boot.SignInIssuer},
-		{"DISPATCH_SIGNIN_CLIENT_ID", boot.SignInClientID},
-		{"DISPATCH_SIGNIN_CLIENT_SECRET", boot.SignInClientSecret},
-		{"DISPATCH_SIGNIN_GROUP", boot.SignInGroup},
-	}
-	var missing, set []string
-	for _, setting := range signInSettings {
-		if setting.value == "" {
-			missing = append(missing, setting.name)
-		} else {
-			set = append(set, setting.name)
-		}
-	}
-	if strings.HasPrefix(identityMode, "header:") && len(set) > 0 {
-		return bootConfig{}, fmt.Errorf("%s must be unset because header identity and Google sign-in cannot share a deployment: header identity is only for tests and local harnesses", strings.Join(set, ", "))
-	}
-	if len(set) > 0 && len(missing) > 0 {
-		return bootConfig{}, fmt.Errorf("Google sign-in needs all four of DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and DISPATCH_SIGNIN_GROUP: %s set, %s missing", strings.Join(set, ", "), strings.Join(missing, ", "))
+	if err := checkSignInSettings(boot, identityMode); err != nil {
+		return bootConfig{}, err
 	}
 	var devSignIn bool
 	switch flag := env.get("DISPATCH_DEV_SIGNIN"); flag {
@@ -492,8 +474,8 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 
 	switch mode := identityMode; {
 	case mode == "" || mode == "cookie":
-		if boot.SignInIssuer == "" && !devSignIn {
-			return bootConfig{}, errors.New("cookie identity signs people in with Google Workspace: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and DISPATCH_SIGNIN_GROUP are required")
+		if err := requireCookieSignIn(boot, devSignIn); err != nil {
+			return bootConfig{}, err
 		}
 	case strings.HasPrefix(mode, "header:"):
 		boot.IdentityHeader = strings.TrimSpace(strings.TrimPrefix(mode, "header:"))
@@ -667,30 +649,6 @@ func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
 		return boot.SigningKey, nil
 	}
 	return auth.LoadOrCreateSigningKey(filepath.Join(dataDir, "signing-key"))
-}
-
-// discoverSignIn is the sign-in pool's code flow for boot's DISPATCH_SIGNIN_* settings, its
-// endpoints read from the issuer's discovery document; nil when boot configures no sign-in
-// (header identity, or dev sign-in).
-func discoverSignIn(ctx context.Context, boot bootConfig) (*oidc.CodeFlow, error) {
-	if boot.SignInIssuer == "" {
-		return nil, nil
-	}
-	return oidc.DiscoverCodeFlow(ctx, boot.SignInIssuer, boot.SignInClientID, boot.SignInClientSecret, oidc.DiscoveryTimeout)
-}
-
-// requestIdentityFor is how a browser request names its person under boot: a header-identity
-// server takes the header's email; a cookie server verifies its signed session cookie and, with
-// sign-in configured, confirms at least hourly that the person is still in DISPATCH_SIGNIN_GROUP.
-func requestIdentityFor(boot bootConfig, signingKey string, people auth.PeopleStore, sessions auth.SessionStore, signIn *oidc.CodeFlow) identity.Identity {
-	if boot.IdentityHeader != "" {
-		return identity.HeaderIdentity{Header: boot.IdentityHeader, People: people}
-	}
-	cookieIdentity := identity.CookieIdentity{SigningKey: signingKey, Sessions: sessions}
-	if signIn != nil {
-		cookieIdentity.Membership = &identity.Membership{People: people, Sessions: sessions, SignIn: signIn, Group: boot.SignInGroup}
-	}
-	return cookieIdentity
 }
 
 // appContextOptions is what main hands routes.BuildAppContext: built, what main made from the
