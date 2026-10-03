@@ -840,6 +840,10 @@ claim's pod and the image probe's.
   with the reason and prints no token. Region, client id, username and both paths are flags in the
   operator's `models.yml`; the [operator route README](../deploy/kubernetes/operator-route/README.md)
   shows the line.
+  Cut over in one step, after agent-c's custom-challenge triggers are live: switch the pod's
+  projected-token audience in `legion.yaml` (it takes effect for pods started after a daemon
+  restart) and the `models.yml` apiKey command (`apply.sh`) together, since a pod with the new
+  audience cannot reach the old `-legion` route and a pod with the old audience cannot sign in.
 - **Each role's model** is the operator's: the `models.yml` and `overlay.yml` they keep in a
   directory of their own (for example `~/.local/state/legion-model-config`), which
   `deploy/kubernetes/operator-route/apply.sh --context <kube context> <directory>` writes into the
