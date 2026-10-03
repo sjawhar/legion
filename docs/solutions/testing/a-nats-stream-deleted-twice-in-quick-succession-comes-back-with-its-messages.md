@@ -115,8 +115,9 @@ helper: each module's `testnats` is an `internal` package the other module canno
 two speak different clients (nats.go's `JetStreamContext` in Envoy, its `jetstream` package in the
 daemon) whose `APIError`s are different types. Against the widened v2.10.29 above, 1,000 resets each
 followed by a bare create failed 73 creates, every one `error creating store for stream`; through
-`CreateStream`'s retry none of 1,000 failed, 89 of them passing on a later attempt. On the stock
-`nats:2.10` the daemon's helper runs, the bare create failed none of 2,000.
+`CreateStream`'s retry none of 1,000 failed, 89 of them passing on a later attempt. The daemon's
+`internal/intake` tests on that server failed 6 of 10 runs before, each on that answer, and none of
+10 after. On the stock `nats:2.10` the daemon's helper runs, the bare create failed none of 2,000.
 
 One test still deletes a name twice, and the double-delete race cannot fail it:
 `internal/kvwatch`'s `TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache` deletes
