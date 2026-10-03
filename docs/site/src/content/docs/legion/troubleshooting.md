@@ -216,9 +216,9 @@ The writes are retried in order; the error at the end of the line is Dispatch's 
 - **`github_app_not_installed: <role> not installed on <owner>`.** Install that GitHub App (the
   implement or the review App) on the repository's owner.
 - **`NATS refused the daemon a permission: its NATS user lacks that grant`** (an error line with
-  the `operation` and `subject`). The daemon's NATS user is missing a grant. A daemon can boot
-  healthy and consume events with one grant missing, so search the log for this line after a NATS
-  change.
+  the `operation` and `subject`). The daemon's NATS user is missing a grant;
+  [Envoy](/legion/dispatch/envoy/) lists the subjects it needs. A daemon can boot healthy and
+  consume events with one grant missing, so search the log for this line after a NATS change.
 - **`agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page (approver:
   <operator>); pod enrollment is held until approved`.** With `runtime.kubernetes.agent_secrets`
   set, the daemon logs in to the [Secrets Broker](/legion/broker/) at boot and waits for the

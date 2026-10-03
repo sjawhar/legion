@@ -33,11 +33,14 @@ the command again. The daemon wakes it when something needs a judgment no tree o
 
 - a new `triage` issue labelled `legion` to admit, park, or leave alone;
 - a free admission slot to fill (see [Admission](#admission-and-the-legion-label));
-- a tree its own architect escalated, or one whose architect ran out of launches;
-- once a day, a report on what Legion finished, closed and is running.
+- a tree its own architect escalated, or one whose architect ran out of launches.
 
-The only statuses the controller sets are `triage`, `icebox`, `backlog` and `todo`. It never reads
-GitHub and never touches a tree's work.
+The daemon also wakes it on a timer, every `controller_wake_interval_seconds` (an hour by
+default), and on its first turn of each UTC day the controller posts a report on what Legion
+finished, closed and is running.
+
+The only statuses the controller sets are `todo`, `backlog` and `icebox` (`triage` is set by
+whoever files an issue). It never reads GitHub and never touches a tree's work.
 
 ## Trees and the architect
 
@@ -70,6 +73,7 @@ comes back, with everything it knew, the next time its role is needed.
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
 | `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue. | implement App |
 | `merging` | merger | Checks the approved head and the required checks, then sends `READY`. | implement App |
+| `awaiting_merge` | none | Waits for a person to merge the pull request. | none |
 | `production_check` | implementer | After the merge, drives the change in production and records what it saw. | implement App |
 
 A failed test, red CI on the head, or a review that requests changes sends the issue back to

@@ -18,10 +18,24 @@ your cluster, from one published worker image.
 | A host for the daemon | Reachable from the pods on two ports: the API (`port`, 13370 by default) and the worker stream (`worker_stream_port`, the API port plus one). |
 | Postgres | One database for the daemon's record (`postgres_dsn`, or `LEGION_POSTGRES_DSN` in its environment). |
 | [Dispatch](/legion/dispatch/) | Its URL and a bearer token for Legion's agents. |
-| The Envoy listener and NATS | The listener's URL and API token, and the NATS URLs. The daemon reads Dispatch's issue events and each repository's GitHub events from Envoy's notification stream on NATS, and reaches agents through the listener. |
-| Two GitHub Apps | An **implement** App (the implementer's and merger's identity) and a **review** App (every other role's), each installed on the owner of every repository Legion works, with its private key. |
+| The Envoy listener and NATS | The listener's URL and API token, and the NATS URLs. The daemon reads Dispatch's issue events and each repository's GitHub events from Envoy's notification stream on NATS, and reaches agents through the listener. [Envoy](/legion/dispatch/envoy/) covers how a repository's webhooks reach the listener and the NATS subjects the daemon's user needs. |
+| Two GitHub Apps | An **implement** App (the implementer's and merger's identity) and a **review** App (every other role's), each installed on the owner of every repository Legion works, with its private key ([below](#the-two-github-apps)). |
 | The worker image | `ghcr.io/sjawhar/legion-worker`, pinned by digest. |
 | A model route | An Oh My Pi provider file and settings overlay, and the credential they read ([below](#the-model-route)). |
+
+## The two GitHub Apps
+
+Create two GitHub Apps and install both on the owner of every repository Legion works. The daemon
+mints each agent's token from its role's App, with the App's whole installation permissions, so the
+Apps' permissions are exactly what Legion's agents can do on GitHub:
+
+| App | Write | Read |
+| --- | --- | --- |
+| **review** (planner, tester, reviewer, architect) | contents, pull requests, checks, actions, issues | metadata, packages |
+| **implement** (implementer, merger) | contents, pull requests, issues, actions, statuses, workflows, repository projects, organization projects | checks, metadata, packages |
+
+The implement App cannot create a check run, and a review never comes from the App that wrote the
+change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds.
 
 ## The cluster
 

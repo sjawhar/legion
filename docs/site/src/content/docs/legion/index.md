@@ -52,8 +52,9 @@ flowchart LR
 - [Troubleshooting](/legion/legion/troubleshooting/): the failures Legion reports, and the command
   that shows each one.
 - [Walkthrough](/legion/legion/walkthrough/): an issue going through Legion, end to end.
-- Reference: the [CLI](/legion/legion/reference/cli/) and the
-  [configuration examples](/legion/legion/reference/config/), both generated from the code when
+- Reference: the [CLI](/legion/legion/reference/cli/), the
+  [configuration examples](/legion/legion/reference/config/) and the
+  [skills](/legion/legion/reference/skills/) Legion's agents load, all generated from the code when
   the site is built.
 
 Legion's agents ask for credentials through the [Secrets Broker](/legion/broker/) when a deployment
