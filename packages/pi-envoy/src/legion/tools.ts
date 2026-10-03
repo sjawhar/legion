@@ -1,5 +1,5 @@
 import {
-  LEGION_WORKFLOW_PHASES,
+  LEGION_PHASE_BACKWARD_TARGETS,
   LegionGateRegisterRequest,
   type LegionState,
 } from "@legion/contracts/legion-api";
@@ -79,7 +79,7 @@ function toolSchema(pi: PiApi): unknown {
       .optional(),
     version: z.number().optional(),
     issues: z.array(z.string()).optional(),
-    to: z.enum(LEGION_WORKFLOW_PHASES).optional(),
+    to: z.enum(LEGION_PHASE_BACKWARD_TARGETS).optional(),
     reason: z.string().optional(),
     decision: z.enum(["retry", "escalate"]).optional(),
     ...handoffSchemaFields(z),
@@ -217,7 +217,7 @@ export function createLegionTool(deps: {
                 parameters,
                 operation,
                 "to"
-              ) as (typeof LEGION_WORKFLOW_PHASES)[number],
+              ) as (typeof LEGION_PHASE_BACKWARD_TARGETS)[number],
               reason: requiredString(parameters, operation, "reason"),
             });
             return jsonSuccess({});

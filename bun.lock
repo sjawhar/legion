@@ -11,8 +11,10 @@
       },
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
+        "@types/bun": "latest",
         "@types/spdx-expression-parse": "3.0.0",
         "spdx-expression-parse": "3.0.1",
+        "typescript": "^5.3.0",
       },
     },
     "docs/site": {
