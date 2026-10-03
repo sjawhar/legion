@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
   type FakeSession,
@@ -9,7 +9,13 @@ import {
   setSessionLive,
   setSessionSendStatus,
 } from "./agents";
-import { createBroadcast, getBroadcast, listBroadcasts, replyToMessageDelivery } from "./api";
+import {
+  createAgentMessage,
+  createBroadcast,
+  getBroadcast,
+  listBroadcasts,
+  replyToMessageDelivery,
+} from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -305,6 +311,125 @@ test("a session that leaves between a refused send and its restore is still in t
     await expect
       .poll(async () => (await getSentMessages()).map((entry) => entry.target_session))
       .toEqual(["planner-session"]);
+  } finally {
+    await alice.close();
+  }
+});
+
+/** A broadcast from alice to `sessions`, each of which has answered its copy, as the
+ *  `dispatch_message` reply does. */
+async function answeredBroadcast(sessions: readonly string[]): Promise<string> {
+  const sent = await createBroadcast({
+    body: "Report status.",
+    delivery: "steer",
+    session_ids: [...sessions],
+  });
+  expect(sent.excluded).toEqual([]);
+  for (const recipient of sent.recipients) {
+    await replyToMessageDelivery(
+      recipient.message.id,
+      { attempt: 1, body: `${recipient.session_id} reporting.` },
+      { id: recipient.session_id, kind: "session" }
+    );
+  }
+  return sent.id;
+}
+
+/** An Agents-page row by the session's title. */
+function agentRow(page: Page, title: string): Locator {
+  return page
+    .getByRole("region", { name: "Agents" })
+    .locator("article")
+    .filter({ has: page.getByRole("heading", { level: 2, name: title }) });
+}
+
+// LEGION-485. The broadcast page shows every recipient's answer, so opening it reads them: the
+// navigation badge and each agent's row drop them, here and on the viewer's other tabs, without
+// the viewer opening every row in turn.
+test("opening a broadcast reads the answers it shows, on the badge, every agent's row and the viewer's other tabs", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the broadcast flow");
+  await setLiveSessions([planner, tester, observer]);
+  const id = await answeredBroadcast(["tester-session", "observer-session", "planner-session"]);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const agents = await alice.newPage();
+    await agents.goto("/agents");
+    await expect(agents.getByText("New replies 3", { exact: true })).toBeVisible();
+    for (const title of ["Tester", "Observer", "Planner"]) {
+      await expect(agentRow(agents, title).getByText("New reply 1", { exact: true })).toBeVisible();
+    }
+
+    const page = await alice.newPage();
+    await page.goto(`/agents/broadcasts/${id}`);
+    const view = page.getByRole("region", { name: "Broadcast" });
+    await expect(view.getByText("3 of 3 answered")).toBeVisible();
+    for (const session of ["tester-session", "observer-session", "planner-session"]) {
+      await expect(view.getByText(`${session} reporting.`)).toBeVisible();
+    }
+    await expect(page.getByText(/^New repl/)).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("broadcast-read.png"), fullPage: true });
+
+    // The other tab hears of each read through `user_agent_state.updated`, with no reload.
+    await expect(agents.getByText(/^New repl/)).toHaveCount(0);
+    for (const title of ["Tester", "Observer", "Planner"]) {
+      await expect(agentRow(agents, title)).toBeVisible();
+    }
+    await agents.screenshot({ path: testInfo.outputPath("agents-after-read.png"), fullPage: true });
+  } finally {
+    await alice.close();
+  }
+});
+
+// The constraint the read mark sets: it is per session and covers every older reply, so moving it
+// through a broadcast answer would also read the session's older answer to another message, which
+// the viewer never saw. Opening the broadcast reads its own answers alone; that older answer, and
+// an answer newer than anything the page shows, both still count.
+test("opening a broadcast leaves unread the answers it does not show, older and newer", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the broadcast flow");
+  await setLiveSessions([planner, tester, observer]);
+  const older = await createAgentMessage(planner.session_id, {
+    body: "Where is the dashboard?",
+    delivery: "aside",
+  });
+  await replyToMessageDelivery(
+    older.id,
+    { attempt: 1, body: "At /dash." },
+    { id: planner.session_id, kind: "session" }
+  );
+  const id = await answeredBroadcast(["tester-session", "observer-session", "planner-session"]);
+  const newer = await createAgentMessage(tester.session_id, {
+    body: "Did the rerun pass?",
+    delivery: "aside",
+  });
+  await replyToMessageDelivery(
+    newer.id,
+    { attempt: 1, body: "Two passed." },
+    { id: tester.session_id, kind: "session" }
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    await expect(page.getByText("New replies 5", { exact: true })).toBeVisible();
+
+    await page.goto(`/agents/broadcasts/${id}`);
+    const view = page.getByRole("region", { name: "Broadcast" });
+    await expect(view.getByText("3 of 3 answered")).toBeVisible();
+    await expect(page.getByText("New replies 2", { exact: true })).toBeVisible();
+
+    await page.goto("/agents");
+    await expect(page.getByText("New replies 2", { exact: true })).toBeVisible();
+    await expect(agentRow(page, "Planner").getByText("New reply 1", { exact: true })).toBeVisible();
+    await expect(agentRow(page, "Tester").getByText("New reply 1", { exact: true })).toBeVisible();
+    await expect(agentRow(page, "Observer")).toBeVisible();
+    await expect(agentRow(page, "Observer").getByText(/^New repl/)).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath("agents-unread-kept.png"), fullPage: true });
   } finally {
     await alice.close();
   }

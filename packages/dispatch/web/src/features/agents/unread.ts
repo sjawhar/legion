@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { api } from "../../api/client";
 import { userAgentStateQuery } from "../../api/queries";
-import type { MessageRead, UserAgentState, UserAgentStates } from "../../api/types";
+import type { Message, MessageRead, UserAgentState, UserAgentStates } from "../../api/types";
 
 /** The badge an unread count wears wherever it shows: the navigation, the compact header, and
  *  the agent's row. */
@@ -78,9 +78,9 @@ export function storeAgentState(
 /**
  * Records that the viewer has read a session's conversation, through the newest reply the
  * session wrote in `exchanges`, whenever the server counts one unread. Call it only where the
- * conversation is on screen: the expanded agent row and the live view. The mark is the reply's
- * own timestamp (the server's clock), so a browser clock that is off cannot leave a reply unread
- * or mark one read before it arrived.
+ * whole conversation is on screen: the expanded agent row and the live view. The mark is the
+ * reply's own timestamp (the server's clock), so a browser clock that is off cannot leave a reply
+ * unread or mark one read before it arrived.
  */
 export function useMarkRepliesRead(
   sessionId: string,
@@ -109,4 +109,39 @@ export function useMarkRepliesRead(
     marked.current = newest;
     mutate(newest);
   }, [mutate, newest, unread]);
+}
+
+/**
+ * Records that the viewer has read the replies `sessionId` wrote among `replies`, by their ids,
+ * whenever the server counts one of the session's replies unread. Call it where a view shows only
+ * some of a session's replies, as the broadcast page shows each recipient's reply to that
+ * broadcast alone: unlike `useMarkRepliesRead`'s mark, which covers every reply up to a moment,
+ * this marks nothing else, so the session's older reply to another message, and any reply after
+ * these, stay unread until a view shows them.
+ */
+export function useMarkShownRepliesRead(sessionId: string, replies: readonly Message[]): void {
+  const queryClient = useQueryClient();
+  const states = useQuery(userAgentStateQuery());
+  const unread = states.data?.[sessionId]?.unread_replies ?? 0;
+  // The same id test as `newestSessionReply`: a session id and a login never collide.
+  const shown = replies
+    .filter((reply) => reply.author.id === sessionId)
+    .map((reply) => reply.id)
+    .join(" ");
+  // The replies this view last sent a mark for, kept and cleared as `useMarkRepliesRead` keeps
+  // its own: sent once per set of replies shown, and again after a write that failed.
+  const marked = useRef<string | undefined>(undefined);
+  const { mutate } = useMutation({
+    mutationFn: (ids: readonly string[]) => api.putAgentState(sessionId, { read_replies: ids }),
+    onError: () => {
+      marked.current = undefined;
+    },
+    onSuccess: (next) => storeAgentState(queryClient, sessionId, next),
+    retry: 2,
+  });
+  useEffect(() => {
+    if (unread === 0 || shown === "" || marked.current === shown) return;
+    marked.current = shown;
+    mutate(shown.split(" "));
+  }, [mutate, shown, unread]);
 }

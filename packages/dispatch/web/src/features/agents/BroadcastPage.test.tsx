@@ -5,7 +5,14 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Agent, BroadcastExclusion, BroadcastRead, MessageDelivery } from "../../api/types";
+import type {
+  Agent,
+  BroadcastExclusion,
+  BroadcastRead,
+  Message,
+  MessageDelivery,
+  UserAgentStates,
+} from "../../api/types";
 
 import { BroadcastPage } from "./BroadcastPage";
 
@@ -65,12 +72,18 @@ function broadcast(deliveries: MessageDelivery[]): BroadcastRead {
   };
 }
 
-function renderBroadcast(read: BroadcastRead, state?: { excluded: readonly BroadcastExclusion[] }) {
+function renderBroadcast(
+  read: BroadcastRead,
+  state?: { excluded: readonly BroadcastExclusion[] },
+  agentState: UserAgentStates = {}
+) {
   const getBroadcast = spyOn(api, "getBroadcast").mockResolvedValue(read);
   const listAgents = spyOn(api, "listAgents").mockResolvedValue(agents);
   const createMessageDelivery = spyOn(api, "createMessageDelivery").mockResolvedValue(
     attempt({ attempt: 2, state: "sent" })
   );
+  const getMyAgentState = spyOn(api, "getMyAgentState").mockResolvedValue(agentState);
+  const putAgentState = spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 });
   const view = render(
     <MemoryRouter initialEntries={[{ pathname: "/agents/broadcasts/broadcast-1", state }]}>
       <QueryClientProvider
@@ -84,7 +97,10 @@ function renderBroadcast(read: BroadcastRead, state?: { excluded: readonly Broad
   );
   return {
     createMessageDelivery,
+    putAgentState,
     restore: () => {
+      putAgentState.mockRestore();
+      getMyAgentState.mockRestore();
       createMessageDelivery.mockRestore();
       listAgents.mockRestore();
       getBroadcast.mockRestore();
@@ -92,6 +108,57 @@ function renderBroadcast(read: BroadcastRead, state?: { excluded: readonly Broad
     view,
   };
 }
+
+function threadMessage(id: string, author: Message["author"], body: string): Message {
+  return {
+    author,
+    body,
+    created_at: new Date().toISOString(),
+    deliveries: [],
+    id,
+    in_reply_to: "message-1",
+    issue_key: null,
+    target: null,
+  };
+}
+
+// The page shows a recipient's whole thread, which holds the viewer's own follow-ups beside the
+// session's answers. The read marks the session's messages alone: the server refuses an id the
+// session did not write, and one such id in the list would leave every answer on the page unread.
+test("opening a broadcast marks the recipient's answers read by id, and only the session's own", async () => {
+  const read = broadcast([attempt({ envelope_id: "e1", state: "sent" })]);
+  const [recipient] = read.recipients;
+  if (recipient === undefined) throw new Error("the fixture has no recipient");
+  const session = { id: "planner-session", kind: "session" } as const;
+  const page = renderBroadcast(
+    {
+      ...read,
+      recipients: [
+        {
+          ...recipient,
+          replies: [
+            threadMessage("answer-1", session, "Standing down."),
+            threadMessage("follow-up", { id: "alice", kind: "user" }, "And the build?"),
+            threadMessage("answer-2", session, "Green."),
+          ],
+        },
+      ],
+    },
+    undefined,
+    { "planner-session": { unread_replies: 2 } }
+  );
+  try {
+    await waitFor(() =>
+      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
+        read_replies: ["answer-1", "answer-2"],
+      })
+    );
+    expect(page.putAgentState).toHaveBeenCalledTimes(1);
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
 
 test("a broadcast page keeps the server exclusion reason as written", async () => {
   const serverExcluded = [
