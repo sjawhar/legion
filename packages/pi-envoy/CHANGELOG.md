@@ -4,6 +4,9 @@
 
 ### Changed
 
+- The role prompts (`roles/`) move into the daemon module, `packages/daemon/internal/prompts/roles`,
+  which the `legion` binary embeds (LEGION-223). The package never shipped them (its `files` is
+  `dist` and `agents`), so a commit that changes only a role prompt no longer cuts a plugin release.
 - Brainstorming happens in the spec (LEGION-475). When a session has Dispatch, the `dispatch`
   skill's "Design changes are brainstormed here" replaces the brainstorming skill's chat questions
   and its spec file: the first version holds only what the conversation has established and every

@@ -16,14 +16,19 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   `/opt/legion/bin/legion` — the `legion` on `PATH` and the image's `ENTRYPOINT` — with the
   `agent-secrets` client beside it at `/opt/legion/bin/agent-secrets`. It links the commit it was built
   from: `docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… version` prints
-  `legion (devel) commit <sha>`;
+  `legion (devel) commit <sha>`. It embeds Legion's role prompts (`packages/daemon/internal/prompts/roles`:
+  phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger
+  composes headless plus its residue; root architect, controller, and sub-architect prompts remain
+  single-file). The daemon snapshots its own into its state directory before a pane can read them and
+  inlines that snapshot into each pod it runs, and `legion probe-image`, given no `--role-references`,
+  resolves the task agents and skills named by the prompts the image's own `legion` embeds
+  (`packages/daemon/cmd/legion/probe_image.go`);
 - `@sjawhar/pi-legion-envoy` packed from that commit's `packages/pi-envoy` (the exact `bun pm pack` steps
   `release.yaml`'s `pi_envoy` job runs) and linked into the isolated OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`);
 - `@bopstack/pi-codegraph` (from npm, pinned) linked into the same OMP profile, backed by the CodeGraph
   CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the `codegraph` tool a tester
-  queries for `affected` tests and a reviewer for `impact`/`callers` blast radius (`packages/pi-envoy/roles/core/tester.md`, `core/reviewer.md`);
-- the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file. The Go daemon resolves and validates its bundle at boot from that override or `role-prompts` beside its own executable, then snapshots it into its state directory before a pane can read it. It inlines that snapshot into each pod it runs, and `legion probe-image` resolves the task agents and skills the configured bundle names when it is given no `--role-references` (`packages/daemon/cmd/legion/probe_image.go`). The role prompts are not part of the packed plugin (its `files` is `dist`), so the image supplies this explicit copy;
+  queries for `affected` tests and a reviewer for `impact`/`callers` blast radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`);
 - OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and
   `git` at `/usr/bin/git` from the `debian:trixie-slim` base — jj's git backend requires git >= 2.42
@@ -383,7 +388,7 @@ Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_ur
 nor the unspecified address. `legion start --check-config` runs all of it without starting the
 daemon, writing a file or running a key command, and then every refusal boot makes from the files
 and the environment before its first write, in boot's words: the operator, Envoy and Dispatch
-bearers' files, the NATS nkey seed, the instructions file, the role prompts, and the runtime's own
+bearers' files, the NATS nkey seed, the instructions file, and the runtime's own
 reads (the kubeconfig and every value's translation; under tmux, the OMP invocation, through `mise
 where` when it names a `mise` tool, and the host's `gh`, `git` and `jj`). What it does not do is
 what boot writes or runs: the state directory, secretsd's provider keys, the plugin gate and the
@@ -1222,9 +1227,7 @@ keeping nothing until the daemon has answered, the command:
 
 1. reads the file and refuses as above, and refuses a blank or unreadable Envoy or Dispatch token
    file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or others, or
-   holds no nkey user seed, a
-   role-prompt directory missing a file (`LEGION_ROLE_PROMPTS_DIR`, or `role-prompts` beside the
-   running `legion` executable), a missing or blank instructions file, and an Oh My Pi invocation that
+   holds no nkey user seed, a missing or blank instructions file, and an Oh My Pi invocation that
    does not resolve;
 2. probes that Oh My Pi as the controller will run it, with `omp models`, which starts no session, and
    refuses a pi-legion-envoy it does not load, or one speaking another daemon API contract;
