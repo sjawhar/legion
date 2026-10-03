@@ -16355,7 +16355,7 @@ async function readUploadedFile(client, resolved, requested) {
   const file2 = await client.fileVersion(artifact.id, number4);
   const of = number4 === latest ? "" : ` of ${latest}`;
   const size = `${file2.bytes.length.toLocaleString("en-US")} bytes`;
-  const details = resolved.owner.kind === "project" ? { project: artifact.project, document: `${artifact.project}/${artifact.slug}` } : { issue: resolved.issue?.key };
+  const details = resolved.owner.kind === "project" ? { project: artifact.project, document: documentLabel(artifact.project, artifact.slug) } : { issue: resolved.issue?.key };
   let text;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(file2.bytes);

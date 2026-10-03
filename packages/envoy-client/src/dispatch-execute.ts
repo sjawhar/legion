@@ -1678,7 +1678,7 @@ async function readUploadedFile(
   const size = `${file.bytes.length.toLocaleString("en-US")} bytes`;
   const details =
     resolved.owner.kind === "project"
-      ? { project: artifact.project, document: `${artifact.project}/${artifact.slug}` }
+      ? { project: artifact.project, document: documentLabel(artifact.project, artifact.slug) }
       : { issue: resolved.issue?.key };
   let text: string;
   try {
