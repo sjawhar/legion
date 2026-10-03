@@ -664,8 +664,11 @@ func (s *Service) documentRooms(ctx context.Context, what, sql string, args ...a
 var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 
 // maxUpdateItems is the most items one V1 document update may carry: ygo's maxV2Items, which it
-// does not export. TestUploadRefusesADocumentTooLargeToStore (api) holds the two together: a
-// document encoding to more than this is refused by ygo and answered as CAP_EXCEEDED with the count.
+// does not export. A document over it is refused by ygo and answered as CAP_EXCEEDED with the count.
+// No write reaches it now: the heaviest document pmdoc's element limit admits encodes to about
+// 131,000 items, and a document that grows by writes meets ygo's pending-item cap first
+// (maxPendingItems, growth.go), which TestRepeatedInsertsCannotGrowADocumentPastWhatItCanStoreAndRead
+// (api) holds.
 const maxUpdateItems = 1 << 20
 
 // updateItems is the number of items a V1 update of one client declares in its header: the

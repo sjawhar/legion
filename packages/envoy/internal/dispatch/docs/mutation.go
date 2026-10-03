@@ -119,6 +119,11 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 	if err != nil {
 		return err
 	}
+	if isGrowthBound(ctx) {
+		if err := refuseUnloadable(fork, before, tree); err != nil {
+			return err
+		}
+	}
 	markdown, err := renderTree(tree)
 	if err != nil {
 		return err
@@ -192,6 +197,9 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if err != nil {
 		return "", err
 	}
+	if err := refuseGrowth(nil, tree); err != nil {
+		return "", err
+	}
 	if err := pmdoc.AskContentError(tree); err != nil {
 		return "", &ErrInvalidAskBlock{Reason: err}
 	}
@@ -222,6 +230,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 // ReplaceText replaces the entire live document tree so connected clients
 // receive document uploads as a regular server-side transaction.
 func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error) {
+	ctx = growthBound(ctx)
 	anchors, err := s.openAnchoredMarks(ctx, s.queryFrom(ctx), artifactID)
 	if err != nil {
 		return "", err
@@ -236,6 +245,11 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		}
 		target, err := parseReplacing(current, markdown)
 		if err != nil {
+			return err
+		}
+		// The upload is weighed as it writes; the anchor marks the document carries onto it below
+		// are the document's own, already in current's weight.
+		if err := refuseGrowth(current, target); err != nil {
 			return err
 		}
 		if err := refuseChangedAsks(current, target, pmdoc.AskContentError, newAskMarkdown()); err != nil {
@@ -701,6 +715,7 @@ func (s *Service) currentToken(ctx context.Context, artifactID string) (string, 
 // and writes the plan inside that transaction, so no live writer can enter the
 // check-to-apply window.
 func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (EditOutcome, error) {
+	ctx = growthBound(ctx)
 	if precondition == nil {
 		return s.applyOpsUnconditional(ctx, artifactID, ops, actor)
 	}

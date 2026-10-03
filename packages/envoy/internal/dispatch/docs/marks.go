@@ -254,9 +254,10 @@ func (s *Service) SuggestionKind(ctx context.Context, artifactID, id string) (st
 	return kind, nil
 }
 
-// AcceptSuggestion applies the replacement for a suggestion mark.
+// AcceptSuggestion applies the replacement for a suggestion mark. It adds the caller's text, so it
+// may not grow the document past what one document may hold (growth.go).
 func (s *Service) AcceptSuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor) error {
-	return s.applySuggestion(context.WithValue(ctx, skippedAnchorRefreshKey{}, id), artifactID, id, replaceWith, actor, true)
+	return s.applySuggestion(growthBound(context.WithValue(ctx, skippedAnchorRefreshKey{}, id)), artifactID, id, replaceWith, actor, true)
 }
 
 // RejectSuggestion removes a suggestion mark and its inserted text when necessary.
@@ -386,6 +387,9 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			return err
 		}
 		if err := refuseMisreadAccept(tree, next, with); err != nil {
+			return err
+		}
+		if err := refuseGrowth(tree, next); err != nil {
 			return err
 		}
 		return write(next)

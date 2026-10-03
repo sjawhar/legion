@@ -120,13 +120,15 @@ func stampOperation(index int, err error) error {
 
 // isEditRefusal reports an error the caller wrote the batch wrong, whose own text is what the
 // route serves. Wrapping one in the service's internal prose would bury the operation index and
-// the anchor the reader needs.
+// the anchor the reader needs. A batch whose markdown, or whose result, is too large to store is
+// one: its refusal says what to shorten.
 func isEditRefusal(err error) bool {
 	var invalid *ErrInvalidOp
 	var ambiguous *ErrAnchorAmbiguous
 	return errors.Is(err, pmdoc.ErrTargetNotFound) ||
 		errors.Is(err, pmdoc.ErrTargetSpansBlocks) ||
 		errors.Is(err, pmdoc.ErrTableWidth) ||
+		errors.Is(err, pmdoc.ErrTooManyElements) ||
 		errors.As(err, &invalid) ||
 		errors.As(err, &ambiguous)
 }
@@ -448,9 +450,12 @@ func applyOperations(tree *pmdoc.Node, ops []model.EditOp) (editBatch, error) {
 // applyOperationsWithValidation applies ops as applyOperations does, running validate before each.
 // The batch is one caller write, so its operations' markdown and table rows spend one table-padding
 // budget; each run of a batch - a conditional one runs to check its anchors and preconditions as
-// well as to apply - takes its own, so no run charges the batch's padding twice.
+// well as to apply - takes its own, so no run charges the batch's padding twice. A batch that leaves
+// the document heavier than one document may hold, and heavier than it was, is refused
+// (refuseGrowth).
 func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validate operationValidator) (editBatch, error) {
 	budget := pmdoc.NewTablePaddingBudget()
+	start := tree
 	before, err := nodeToken(tree)
 	if err != nil {
 		return editBatch{}, err
@@ -505,6 +510,9 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 			}
 		}
 		tree = next
+	}
+	if err := refuseGrowth(start, tree); err != nil {
+		return editBatch{}, err
 	}
 	return editBatch{
 		tree:       tree,

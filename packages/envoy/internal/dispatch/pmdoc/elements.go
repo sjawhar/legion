@@ -111,9 +111,10 @@ func countedElements(pc parser.Context) *parseCount {
 // elementWeight is what one node of goldmark's tree weighs: a table cell four, as the cell, the
 // paragraph and the text the Proof tree makes of it; any other block three, as the Proof block
 // and the attributes it carries in the live document; a line of text ending in a hard break four,
-// its text and the break, which the Proof tree makes a node of its own (hardbreakWeight); and any
-// other inline node one. Each weight is the memory the node costs at its worst, measured through
-// the upload route, in units of an inline node's.
+// its text and the break, which the Proof tree makes a node of its own (hardbreakWeight); an
+// autolink two, the text and the link mark the Proof tree makes of it, where goldmark keeps no text
+// node; and any other inline node one. Each weight is the memory the node costs at its worst,
+// measured through the upload route, in units of an inline node's.
 func elementWeight(node ast.Node) int {
 	switch {
 	case node.Kind() == ast.KindDocument:
@@ -124,6 +125,8 @@ func elementWeight(node ast.Node) int {
 		return 3
 	case node.Kind() == ast.KindText && node.(*ast.Text).HardLineBreak():
 		return 1 + hardbreakWeight
+	case node.Kind() == ast.KindAutoLink:
+		return 2
 	}
 	return 1
 }
@@ -133,6 +136,57 @@ func elementWeight(node ast.Node) int {
 // costs what a block does: weighed as one inline node, the heaviest document of hard breaks the
 // limit admitted held 350 MiB stored, and four cold reads of it at once 1,190 MiB.
 const hardbreakWeight = 3
+
+// MaxDocumentElements is the most a document may weigh (Weight) after a write that makes it
+// heavier: what one write's markdown may make, so no run of writes, each within the limit, grows a
+// document past what one upload of it may hold. A write that leaves a document as heavy as it was,
+// or lighter, is never refused by it, so a document already past it can still be trimmed or split.
+const MaxDocumentElements = maxWriteElements
+
+// Weight is what doc weighs in the elements markdown writing it would make, each node weighed as
+// elementWeight weighs goldmark's: a table cell four, with the paragraph and the text it holds; any
+// other block three; a hard break three; a text one, or none in a code block, whose text goldmark
+// keeps as lines; any other inline node one; and each mark one where its run begins, as the inline
+// syntax that opens it. Anchor marks count as any mark does. A text's line breaks are not counted,
+// and goldmark's text is a line each, so a document weighs at most what its markdown makes.
+func Weight(doc *Node) int {
+	return proofWeight(doc, "")
+}
+
+func proofWeight(node *Node, parent string) int {
+	weight := 0
+	switch {
+	case node.Type == "doc":
+	case node.Type == "table_cell" || node.Type == "table_header":
+		weight = 4
+	case node.Type == "paragraph" && (parent == "table_cell" || parent == "table_header"):
+	case node.Type == "hardbreak":
+		weight = hardbreakWeight
+	case node.Type == "text":
+		if parent != "code_block" {
+			weight = 1
+		}
+	case isInlineNodeType(node.Type):
+		weight = 1
+	default:
+		weight = 3
+	}
+	// A mark run continues across the inline nodes between two texts, which carry none.
+	var running []Mark
+	for _, child := range node.Children {
+		weight += proofWeight(child, node.Type)
+		if child.Type != "text" {
+			continue
+		}
+		for _, mark := range child.Marks {
+			if !containsSameMark(running, mark) {
+				weight++
+			}
+		}
+		running = child.Marks
+	}
+	return weight
+}
 
 // refusal is the refusal of the parse p counts, which made root from source whose first line is
 // firstLine of what the caller wrote, or nil: goldmark passed the guard, or root's elements take the
