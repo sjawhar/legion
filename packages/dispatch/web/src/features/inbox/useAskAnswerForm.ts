@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useId, useState } from "react";
 
-import { ApiError, api } from "../../api/client";
+import { ApiError, api, apiErrorMessage } from "../../api/client";
 import { inboxQuery, projectsQuery } from "../../api/queries";
 import type {
   AnswerAskInput,
@@ -41,8 +41,10 @@ interface AskAnswerFailure {
 
 /**
  * The refusals the same answer is refused with again however often it is sent, and what the card
- * says for each: the ask was answered or closed elsewhere, or its question changed (the card
- * reloads it, so the next answer is to the new wording). Any other failure may pass on a retry.
+ * says for each: the ask was answered or closed elsewhere, its question changed (the card reloads
+ * it, so the next answer is to the new wording), or the answer would make its document larger than
+ * the server stores (the server's reason says what to shorten). Any other failure may pass on a
+ * retry.
  */
 function answerFailure(error: Error): AskAnswerFailure {
   if (error instanceof ApiError) {
@@ -59,6 +61,8 @@ function answerFailure(error: Error): AskAnswerFailure {
           message: "Your answer was not saved, because the question changed.",
           retryable: false,
         };
+      case "CAP_EXCEEDED":
+        return { message: apiErrorMessage(error, "Your answer is too long."), retryable: false };
     }
   }
   return { message: "Could not save your answer.", retryable: true };
