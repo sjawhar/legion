@@ -1,5 +1,6 @@
 import { resetFakeEnvoy } from "./agents";
 import { forgetSessions, quiesceDocuments } from "./api";
+import { resetFakeBroker } from "./fake-broker-helpers";
 import { sql } from "./psql";
 
 const tables = [
@@ -109,10 +110,11 @@ async function resetDatabaseOnce(): Promise<void> {
  * with both running PostgreSQL breaks the cycle by aborting one of them (LEGION-168), which is
  * either a failed reset or a settlement that dies mid-scenario. Quiescing first leaves the
  * server with nothing to run, so the two never overlap. It also clears the fake Envoy, whose
- * process-local subscriptions outlive a database truncate and otherwise match recycled issue keys;
- * that reset waits on nothing in the database, so it runs beside the quiesce and truncate, which
- * keep their order. Both settle before this returns, a failed one included, so a reset that fails
- * never leaves the other running into the next test's.
+ * process-local subscriptions outlive a database truncate and otherwise match recycled issue keys,
+ * and the fake broker, whose seeded credential requests would otherwise reach every later row's
+ * Inbox; those resets wait on nothing in the database, so they run beside the quiesce and truncate,
+ * which keep their order. All settle before this returns, a failed one included, so a reset that
+ * fails never leaves another running into the next test's.
  * The truncate takes `user_sessions` with it, so a session cookie minted before it is refused
  * until its login signs in again: e2e/api.ts forgets its cached ones here, and a browser context
  * signs in after the reset (e2e/users.ts).
@@ -121,6 +123,7 @@ export async function resetDatabase(): Promise<void> {
   const resets = await Promise.allSettled([
     quiesceDocuments().then(resetDatabaseOnce),
     resetFakeEnvoy(),
+    resetFakeBroker(),
   ]);
   for (const reset of resets) if (reset.status === "rejected") throw reset.reason;
   forgetSessions();

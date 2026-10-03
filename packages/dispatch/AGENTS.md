@@ -487,7 +487,9 @@ directory. A caller's environment or `~/.config/opencode/envoy.json` /
 `~/.local/share/dispatch/{app.json,signing-key}` therefore cannot point the
 test server at a live Envoy, dashboard origin or GitHub App (every Legion pane
 exports `ENVOY_URL`). The harness ports stay inputs because the server script reads them too; on
-the TypeScript side `e2e/harness-ports.ts` is the one place they are resolved.
+the TypeScript side `e2e/harness-ports.ts` is the one place they are resolved. The secrets broker
+the server relays credential requests to is `e2e/fake-broker.ts` on `FAKE_BROKER_PORT` (default
+`9024`), with a throwaway UI bearer, so the credential-request feature is on in every local run.
 
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
 layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile
@@ -536,6 +538,12 @@ computed at the helper's module scope ages with every spec the worker runs after
 Agents page folds the session under `Inactive` at 10 minutes. A spec's own module scope is evaluated
 when the worker reaches that spec, which is why `agents.e2e.ts` can pin literal ages for its
 freshness rows.
+`e2e/fake-broker.ts` answers the broker's two UI-bearer reads, `GET /v1/pending?approver=<login>`
+(the requests seeded for that login, in the broker's row shape) and `GET /v1/grants` (always
+empty), and 404 to every other broker route. A row seeds pending requests with
+`setPendingCredentialRequests` (`e2e/fake-broker-helpers.ts`), each naming the login it waits on,
+and `resetDatabase()` clears them with the rest. A deployed target reads its own broker, so
+Playwright starts no fake broker for it, the reset skips it, and a row that seeds one is skipped.
 `e2e/clipboard.ts`'s `recordClipboard(page)` swaps the page's async clipboard for a recorder before
 navigation, so a copy-button test asserts the written value rather than only the `Copied` label.
 `e2e/touch.ts` drives real touch gestures through Chromium's `Input.dispatchTouchEvent`
@@ -582,10 +590,11 @@ port at all, and this paragraph is where the harness-port rule lives — `README
 `docs/solutions` learning point here rather than restating it.
 
 `e2e/harness-ports.ts` resolves `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
-`9021`), `FAKE_GITHUB_PORT` (default `9022`) and `PLAIN_HTTP_PORT` (default `9023`) once for every
-reader in `e2e/`, the Playwright config and the three Bun listeners included. An empty value means
-the default for all four alike, matching `run-server.sh`'s `${VAR:-default}` for the three ports it
-reads; anything that is not a port in canonical decimal is
+`9021`), `FAKE_GITHUB_PORT` (default `9022`), `PLAIN_HTTP_PORT` (default `9023`) and
+`FAKE_BROKER_PORT` (default `9024`) once for every reader in `e2e/`, the Playwright config and the
+four Bun listeners included. An empty value means the default for all five alike, matching
+`run-server.sh`'s `${VAR:-default}` for the four ports it reads; anything that is not a port in
+canonical decimal is
 refused naming its variable (so `1e4`, `8777.0`, `0x2249`, `+8777`, `" 8777"` and a leading-zero
 `08777` are all refused, rather than binding one port while every URL built from the raw string
 points somewhere else, or writing one port two ways). Two variables naming one port are refused
@@ -597,7 +606,7 @@ resolution, those listeners refuse it too, not only the Playwright config.
 `e2e/playwright.config.ts` probes every port it starts before any web server starts and fails the
 run with one message listing every taken port beside its own variable, before a single spec runs.
 One table in the config names each listener, its port's variable and whether a deployed run starts
-it, and both the probe and `webServer` read the started rows: all four ports for a local run, and
+it, and both the probe and `webServer` read the started rows: all five ports for a local run, and
 `FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed run. The refusal names only the variables
 the run probes. Its remedies are
 to stop whatever listens there, or to move a local run to free ports **and its own

@@ -14,13 +14,14 @@ unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE
 # DATABASE_URL is the one required caller input. The harness has no fake
 # Postgres and e2e/seed.ts truncates the named database before every scenario,
 # so silently selecting a shared default would make the destructive write
-# target ambiguous. The three ports are shared harness inputs because the
+# target ambiguous. The four ports are shared harness inputs because the
 # Playwright config and its helpers resolve them too.
 : "${DATABASE_URL:?DATABASE_URL must name an isolated Dispatch e2e database}"
 database_url="$DATABASE_URL"
 e2e_port="${DISPATCH_E2E_PORT:-8777}"
 fake_envoy_port="${FAKE_ENVOY_PORT:-9021}"
 fake_github_port="${FAKE_GITHUB_PORT:-9022}"
+fake_broker_port="${FAKE_BROKER_PORT:-9024}"
 
 mapfile -t inherited < <(compgen -e)
 for name in "${inherited[@]}"; do
@@ -40,7 +41,8 @@ done
 # http://127.0.0.1:$e2e_port: it is the origin the CSRF guard compares writes
 # against, the only Host the router serves under the flag, and the Playwright
 # config's baseURL. The flag also refuses a DATABASE_URL whose host is not
-# loopback or a unix socket.
+# loopback or a unix socket. The secrets broker is e2e/fake-broker.ts, with a
+# throwaway UI bearer, so the credential-request feature is on in every run.
 app_pem_b64="$(openssl genrsa 2048 2>/dev/null | base64 -w0)"
 
 cd "$(dirname "$0")/../../envoy"
@@ -54,6 +56,8 @@ cd "$(dirname "$0")/../../envoy"
 flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
 exec env \
   DATABASE_URL="$database_url" \
+  DISPATCH_AGENT_SECRETS_TOKEN=e2e-broker-token \
+  DISPATCH_AGENT_SECRETS_URL="http://127.0.0.1:$fake_broker_port" \
   DISPATCH_AGENT_TOKEN=e2e-token \
   DISPATCH_ALLOWED_LOGINS=alice,bob \
   DISPATCH_APP_CLIENT_ID=Iv1.e2efake \

@@ -13,6 +13,7 @@ import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 // fails on loopback by design.
 const plainHttpSpecs = /plain-http-(origin|proxy)\.e2e\.ts/;
 const startsOwnServers = !process.env.PLAYWRIGHT_BASE_URL;
+const fakeBroker = fileURLToPath(new URL("./fake-broker.ts", import.meta.url));
 const fakeEnvoy = fileURLToPath(new URL("./fake-envoy.ts", import.meta.url));
 const fakeGithub = fileURLToPath(new URL("./fake-github.ts", import.meta.url));
 const plainHttpProxy = fileURLToPath(new URL("./plain-http-proxy.ts", import.meta.url));
@@ -20,13 +21,14 @@ const runServer = fileURLToPath(new URL("./run-server.sh", import.meta.url));
 
 // Every listener this config can start, with its port beside that port's variable, both from
 // e2e/harness-ports.ts. A deployed run (PLAYWRIGHT_BASE_URL) starts only those marked `deployed`:
-// its Dispatch server is already up, and the fake GitHub serves only a server this run starts. The
-// port probe and `webServer` both read `startedListeners`, so a listener is probed exactly when it
-// is started.
+// its Dispatch server is already up, and the fake GitHub and the fake broker serve only a server
+// this run starts. The port probe and `webServer` both read `startedListeners`, so a listener is
+// probed exactly when it is started.
 const listeners = [
   { ...harnessPorts.fakeEnvoy, command: `bun ${fakeEnvoy}`, deployed: true },
   { ...harnessPorts.plainHttp, command: `bun ${plainHttpProxy}`, deployed: true },
   { ...harnessPorts.fakeGithub, command: `bun ${fakeGithub}`, deployed: false },
+  { ...harnessPorts.fakeBroker, command: `bun ${fakeBroker}`, deployed: false },
   { ...harnessPorts.dispatch, command: `bash ${runServer}`, deployed: false },
 ];
 const startedListeners = startsOwnServers
@@ -34,7 +36,7 @@ const startedListeners = startsOwnServers
   : listeners.filter((listener) => listener.deployed);
 
 // `DISPATCH_E2E_REUSE_SERVERS=1` runs the suite against a harness the caller started and left
-// listening on the four harness ports. Unset or empty starts this run's own servers and refuses a
+// listening on the five harness ports. Unset or empty starts this run's own servers and refuses a
 // port already taken, because reusing a server this run did not start points `e2e/seed.ts`'s
 // truncation at whatever database that server holds — another lane's. Any other value is refused
 // rather than quietly read as "no".

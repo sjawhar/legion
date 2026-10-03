@@ -329,15 +329,15 @@ start_listener() {
   fail "the Envoy listener lost its picked port five times"
 }
 
-# The harness's fake Envoy and GitHub, which run-server.sh names and this rig does not run, are port
-# 1, where nothing listens.
+# The harness's fake Envoy, GitHub and secrets broker, which run-server.sh names and this rig does
+# not run, are port 1, where nothing listens.
 start_dispatch() {
   local attempt offset result
   for attempt in 1 2 3 4 5; do
     pick_port dispatch_port
     offset=$(log_size dispatch)
     DATABASE_URL="postgres://postgres:ci@127.0.0.1:$pg_port/postgres?sslmode=disable" DISPATCH_E2E_PORT=$dispatch_port \
-      FAKE_ENVOY_PORT=1 FAKE_GITHUB_PORT=1 start_process dispatch bash "$root/packages/dispatch/e2e/run-server.sh"
+      FAKE_ENVOY_PORT=1 FAKE_GITHUB_PORT=1 FAKE_BROKER_PORT=1 start_process dispatch bash "$root/packages/dispatch/e2e/run-server.sh"
     result=0
     await_start dispatch "$dispatch_pid" "$offset" 300 "Dispatch to answer /api/v1/whoami" \
       curl -fsS -o /dev/null -H 'Authorization: Bearer e2e-token' "http://127.0.0.1:$dispatch_port/api/v1/whoami" || result=$?

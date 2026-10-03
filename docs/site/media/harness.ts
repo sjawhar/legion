@@ -1,9 +1,9 @@
 // The docs media tooling's shared harness: it boots Dispatch the way the e2e suite does
-// (`packages/dispatch/e2e/playwright.config.ts`: the fake Envoy, the fake GitHub, and
-// `run-server.sh`, which signs a browser in at its dev sign-in route) on ports of its own, seeds
-// example data, opens a signed-in browser context at a docs viewport, and checks a page is ready
-// and clean before it is captured. `shots.ts` and `walkthrough.ts` both run on it, as does any
-// section's own media.
+// (`packages/dispatch/e2e/playwright.config.ts`: the fake Envoy, the fake GitHub, the fake secrets
+// broker, and `run-server.sh`, which signs a browser in at its dev sign-in route) on ports of its
+// own, seeds example data, opens a signed-in browser context at a docs viewport, and checks a page
+// is ready and clean before it is captured. `shots.ts` and `walkthrough.ts` both run on it, as does
+// any section's own media.
 import { type ChildProcess, spawn } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { connect } from "node:net";
@@ -26,10 +26,11 @@ const WEB_DIST = join(REPO, "packages/dispatch/web/dist/index.html");
 export const WORK = join(import.meta.dir, ".work");
 
 // The e2e suite's own port variables, because `run-server.sh` and `e2e/harness-ports.ts` read
-// them. The defaults differ from the suite's (8777, 9021, 9022) so a docs run and an e2e run can
-// share a machine; each still needs its own DATABASE_URL.
+// them. The defaults differ from the suite's (8777, 9021, 9022, 9024) so a docs run and an e2e run
+// can share a machine; each still needs its own DATABASE_URL.
 const PORTS = {
   DISPATCH_E2E_PORT: process.env.DISPATCH_E2E_PORT || "8786",
+  FAKE_BROKER_PORT: process.env.FAKE_BROKER_PORT || "9088",
   FAKE_ENVOY_PORT: process.env.FAKE_ENVOY_PORT || "9086",
   FAKE_GITHUB_PORT: process.env.FAKE_GITHUB_PORT || "9087",
 };
@@ -138,6 +139,7 @@ export async function withHarness<T>(body: (harness: Harness) => Promise<T>): Pr
   const processes = [
     start("fake-envoy", "bun", [join(E2E, "fake-envoy.ts")]),
     start("fake-github", "bun", [join(E2E, "fake-github.ts")]),
+    start("fake-broker", "bun", [join(E2E, "fake-broker.ts")]),
     start("dispatch", "bash", [join(E2E, "run-server.sh")]),
   ];
   const stopAll = () => Promise.all(processes.map((entry) => stop(entry.child)));
@@ -145,9 +147,10 @@ export async function withHarness<T>(body: (harness: Harness) => Promise<T>): Pr
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
   try {
-    const [envoy, github, dispatch] = processes;
+    const [envoy, github, broker, dispatch] = processes;
     await ready(`http://127.0.0.1:${PORTS.FAKE_ENVOY_PORT}/`, envoy);
     await ready(`http://127.0.0.1:${PORTS.FAKE_GITHUB_PORT}/`, github);
+    await ready(`http://127.0.0.1:${PORTS.FAKE_BROKER_PORT}/`, broker);
     await ready(`${baseURL}/healthz`, dispatch);
     const { resetDatabase } = await import("../../../packages/dispatch/e2e/seed");
     return await body({
