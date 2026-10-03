@@ -47,7 +47,7 @@ func readApproval(t *testing.T, handler http.Handler, artifactID string) approva
 
 func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *testing.T) {
 	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
@@ -142,7 +142,7 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 	}
 
 	// A new version makes the approval stale; nothing is emitted for that.
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("revise document: %v", err)
 	}
 	if named := dispatchRequest(t, handler, http.MethodPost,
@@ -524,12 +524,13 @@ func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
 		{"an edit with no summary", time.Hour, func(t *testing.T, doc *document) {
 			edit(t, doc.handler, doc.artifactID, map[string]any{})
 		}, 1, asker, false},
-		{"a live write settlement versions", 20 * time.Millisecond, func(t *testing.T, doc *document) {
-			// A live write that joins no transaction is versioned by settlement alone, so this
-			// retraction is settlement's, and it reaches subscribers once settlement commits.
+		{"a write only settlement versions", 20 * time.Millisecond, func(t *testing.T, doc *document) {
+			// A write whose transaction writes no version is versioned by settlement alone, so
+			// this retraction is settlement's, in the name of the one writer that version credits,
+			// and it reaches subscribers once settlement commits.
 			published, stop := doc.broker.Subscribe()
 			defer stop()
-			if _, err := doc.documentService.ReplaceText(context.Background(), doc.artifactID, "A revised spec", alice); err != nil {
+			if _, err := replaceDocumentText(doc.database, doc.documentService, doc.artifactID, "A revised spec", alice); err != nil {
 				t.Fatalf("revise document: %v", err)
 			}
 			waitForArtifactVersion(t, doc.handler, doc.artifactID, 2)
@@ -549,7 +550,7 @@ func TestANewVersionRetractsTheApprovalAskNamingAnOlderOne(t *testing.T) {
 			}
 		}, 1, alice, true},
 		{"a named version", time.Hour, func(t *testing.T, doc *document) {
-			if _, err := doc.documentService.ReplaceText(context.Background(), doc.artifactID, "A revised spec", alice); err != nil {
+			if _, err := replaceDocumentText(doc.database, doc.documentService, doc.artifactID, "A revised spec", alice); err != nil {
 				t.Fatalf("revise document: %v", err)
 			}
 			if named := dispatchRequest(t, doc.handler, http.MethodPost, "/api/v1/artifacts/"+doc.artifactID+"/versions", map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
@@ -756,7 +757,7 @@ func TestEditedLegacyTableCellPipeDocumentStalesApproval(t *testing.T) {
 	`, issue.PrimaryArtifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
 		t.Fatalf("seed legacy canonical markdown: %v", err)
 	}
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "| header |\n| :--- |\n| `one\\|three` |\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "| header |\n| :--- |\n| `one\\|three` |\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("edit legacy document: %v", err)
 	}
 	if named := dispatchRequest(t, handler, http.MethodPost,

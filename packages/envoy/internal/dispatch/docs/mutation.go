@@ -33,34 +33,6 @@ type versionWrite struct {
 	docUpdateVersion *int64
 }
 
-// applyLive runs mutate against artifactID's live document and credits actor with the content it
-// changes. Outside a transaction it writes the room directly, and the room's update observer
-// credits actor with it (creditContentChange). Joined to a transaction it writes that
-// transaction's fork of the room (see liveWrite), appends the update inside the transaction,
-// and leaves the room and the credit to its ledger's Commit, so a transaction that does not
-// commit never reaches the room, a browser or a version's authors.
-func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) error) error {
-	if s.shuttingDown(artifactID) {
-		return ErrServiceUnavailable
-	}
-	if _, joined := txFromContext(ctx); joined {
-		return s.applyJoined(ctx, artifactID, actor, mutate)
-	}
-	var mutateErr error
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		transact, release := s.serviceTransact(transact, &actor)
-		defer release()
-		// ygo re-panics callback failures after unregistering its update observer; that
-		// unregister needs the same document mutex and masks the originating failure.
-		defer recoverMutation(artifactID, &mutateErr)
-		mutateErr = mutate(doc, transact)
-	})
-	if mutateErr != nil {
-		return mutateErr
-	}
-	return err
-}
-
 // recoverMutation, deferred around a document mutation, turns its panic into *err and logs it.
 func recoverMutation(room string, err *error) {
 	if recovered := recover(); recovered != nil {
@@ -69,12 +41,31 @@ func recoverMutation(room string, err *error) {
 	}
 }
 
-// applyJoined is applyLive run inside the transaction the context's ledger joined. It returns
+// applyLive runs mutate against artifactID's live document inside the transaction the context's
+// ledger joined, and credits actor with the content it changes. Every document write a caller
+// makes runs here - an upload's, an edit's, an accepted or rejected suggestion's, an ask's text
+// and its answer, a comment's anchor and its margin record - so two rules hold for each by
+// structure rather than by its caller remembering them:
+//
+//   - It refuses a context Join did not return (errUnjoined), as SeedText and the version writes
+//     do: an unjoined write would reach no transaction to be weighed and appended in.
+//   - It weighs what the write leaves, and refuses one that would grow the document past what one
+//     upload may hold (refuseGrowth), before anything is appended.
+//
+// It writes the transaction's fork of the room (see liveWrite), appends the update inside the
+// transaction, and leaves the room and the credit to its ledger's Commit, so a transaction that
+// does not commit never reaches the room, a browser or a version's authors. It returns
 // websocket.ErrNoChanges when mutate wrote nothing, as the room's Apply does, and
 // ErrServiceUnavailable when the room its slot is on failed before its append.
-func (s *Service) applyJoined(ctx context.Context, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) error) error {
+func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) error) error {
+	if s.shuttingDown(artifactID) {
+		return ErrServiceUnavailable
+	}
+	tx, joined := txFromContext(ctx)
+	if !joined {
+		return errUnjoined
+	}
 	ledger := ledgerFrom(ctx)
-	tx := ledger.tx
 	write, err := s.joinLiveWrite(ctx, ledger, artifactID)
 	if err != nil {
 		return err
@@ -130,10 +121,8 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 	if err != nil {
 		return err
 	}
-	if isGrowthBound(ctx) {
-		if err := refuseGrowth(fork, beforeMarkdown, markdown); err != nil {
-			return err
-		}
+	if err := refuseGrowth(fork, beforeMarkdown, markdown); err != nil {
+		return err
 	}
 	update, err := mergeUpdates(updates)
 	if err != nil {
@@ -230,7 +219,6 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 // ReplaceText replaces the entire live document tree so connected clients
 // receive document uploads as a regular server-side transaction.
 func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error) {
-	ctx = growthBound(ctx)
 	anchors, err := s.openAnchoredMarks(ctx, s.queryFrom(ctx), artifactID)
 	if err != nil {
 		return "", err
@@ -710,13 +698,12 @@ func (s *Service) currentToken(ctx context.Context, artifactID string) (string, 
 // and writes the plan inside that transaction, so no live writer can enter the
 // check-to-apply window.
 func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (EditOutcome, error) {
-	ctx = growthBound(ctx)
-	if precondition == nil {
-		return s.applyOpsUnconditional(ctx, artifactID, ops, actor)
-	}
 	tx, joined := txFromContext(ctx)
 	if !joined {
-		return EditOutcome{}, &ErrInvalidPrecondition{Reason: "requires an enclosing transaction"}
+		return EditOutcome{}, errUnjoined
+	}
+	if precondition == nil {
+		return s.applyOpsUnconditional(ctx, artifactID, ops, actor)
 	}
 	// The live document's locks, in their order (see liveWrite): its owner row and, unless the
 	// room has failed, its writer slot; then, with the room loaded, its advisory lock, held from
@@ -959,17 +946,17 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 }
 
 // serviceTransact wraps Server.Apply's transact so the room's update observer can tell the
-// service's own transactions from browser peers' edits, and credit the content they change to
-// actor (nil credits no one): the Apply call's origin is registered in serviceOrigins on the
+// service's own repairs - the sweep of marks no row records - from browser peers' edits, and
+// credits their changes to no one: the Apply call's origin is registered in serviceOrigins on the
 // first transaction and forgotten by release. Observers fire before a transaction returns, so
 // release is safe once the Apply callback is done with transact.
-func (s *Service) serviceTransact(transact func(func(*crdt.Transaction)), actor *model.Actor) (wrapped func(func(*crdt.Transaction)), release func()) {
+func (s *Service) serviceTransact(transact func(func(*crdt.Transaction))) (wrapped func(func(*crdt.Transaction)), release func()) {
 	var origin any
 	wrapped = func(inner func(*crdt.Transaction)) {
 		transact(func(txn *crdt.Transaction) {
 			if origin == nil {
 				origin = txn.Origin
-				s.serviceOrigins.Store(origin, actor)
+				s.serviceOrigins.Store(origin, struct{}{})
 			}
 			inner(txn)
 		})

@@ -143,7 +143,7 @@ func countedService(t *testing.T) (*Service, string, *anchorQueryCounter) {
 func seedAnchoredAsk(t *testing.T, service *Service, artifactID, askID, quote, storedQuote string) {
 	t.Helper()
 	alice := model.Actor{Kind: "user", ID: "alice"}
-	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
 		Kind: MarkAsk, ID: askID, By: alice,
 	}, quote, nil); err != nil {
 		t.Fatalf("mark the ask's quote: %v", err)
@@ -289,9 +289,7 @@ func TestANamedVersionRefreshesAnchorsWithNoLiveWriteOfItsOwn(t *testing.T) {
 
 	// The browser rewrites the document, dropping the marked text. Nothing else refreshes the
 	// ask's anchor: the named version's own pass is it.
-	if _, err := service.ReplaceText(context.Background(), artifactID, "the quote is gone", alice); err != nil {
-		t.Fatalf("replace document text: %v", err)
-	}
+	browserReplaceText(t, service, artifactID, "the quote is gone", alice)
 	counter.count.Store(0)
 	if _, err := namedVersion(t, service, artifactID, "rewritten", alice); err != nil {
 		t.Fatalf("write named version: %v", err)

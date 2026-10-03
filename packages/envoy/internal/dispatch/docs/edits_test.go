@@ -23,11 +23,12 @@ func TestApplyOpsEditsLiveDocumentAndSettlesVersion(t *testing.T) {
 	seedServiceText(t, service, artifactID, "one two one")
 	actor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	first := 0
-	applied, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+	applied, err := joinedApplyOps(service, artifactID, []model.EditOp{
 		{Op: "replace", Find: "two", With: "TWO"},
 		{Op: "insert", Markdown: "!", After: "end"},
 		{Op: "delete", Find: "one ", Occurrence: &first},
 	}, actor, nil)
+
 	if err != nil || applied.Applied != 3 || !applied.Changed {
 		t.Fatalf("applied = %#v, %v", applied, err)
 	}
@@ -43,9 +44,10 @@ func TestApplyOpsEditsLiveDocumentAndSettlesVersion(t *testing.T) {
 func TestApplyOpsReportsABatchThatWroteNoUpdatesAsUnchanged(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")
-	result, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+	result, err := joinedApplyOps(service, artifactID, []model.EditOp{
 		{Op: "replace", Find: "before", With: "before"},
 	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+
 	if err != nil {
 		t.Fatalf("no-op edit: %v", err)
 	}
@@ -65,10 +67,11 @@ func TestApplyOpsReportsABatchThatWroteUpdatesAndNoMarkdownAsUnchanged(t *testin
 		t.Fatalf("read blocks: %v", err)
 	}
 	first := 0
-	result, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+	result, err := joinedApplyOps(service, artifactID, []model.EditOp{
 		{Op: "insert", Markdown: "before", After: "end"},
 		{Op: "delete", Find: "before", Occurrence: &first},
 	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+
 	if err != nil {
 		t.Fatalf("round-trip edit: %v", err)
 	}
@@ -92,14 +95,15 @@ func TestApplyOpsReportsABatchThatWroteUpdatesAndNoMarkdownAsUnchanged(t *testin
 func TestApplyOpsReportsAnEditThatOnlyDropsAnAnchorMarkAsChanged(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "Keep anchored words here.")
-	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
 		Kind: MarkComment, ID: "comment-1", By: model.Actor{Kind: "user", ID: "alice"},
 	}, "anchored words", nil); err != nil {
 		t.Fatalf("anchor a comment: %v", err)
 	}
-	result, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+	result, err := joinedApplyOps(service, artifactID, []model.EditOp{
 		{Op: "replace", Find: "Keep anchored words", With: "Keep anchored words"},
 	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+
 	if err != nil {
 		t.Fatalf("replace over the anchor: %v", err)
 	}
@@ -152,9 +156,10 @@ func TestLockTableAnchorRowsRejectsCommentReopenedAfterPrevalidation(t *testing.
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "| Key | Value |\n| --- | --- |\n| delete | row |\n| retain | row |\n")
 	const commentID = "00000000-0000-4000-8000-000000000009"
-	anchored, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+	anchored, err := joinedMarkQuote(service, artifactID, MarkSpec{
 		Kind: MarkComment, ID: commentID, By: model.Actor{Kind: "user", ID: "alice"},
 	}, "delete", nil)
+
 	if err != nil {
 		t.Fatalf("mark table cell: %v", err)
 	}
@@ -316,13 +321,14 @@ func TestSetBlockAttributesWritesTypedBlockState(t *testing.T) {
 	seedServiceText(t, service, artifactID, ":::ask{#ask-1 multiple=\"false\" state=\"open\" urgency=\"med\"}\nShip it?\n:::\n")
 	actor := model.Actor{Kind: "user", ID: "alice"}
 
-	err := service.SetBlockAttributes(context.Background(), artifactID, "ask-1", map[string]any{
+	err := joinedSetBlockAttributes(service, artifactID, "ask-1", map[string]any{
 		"answer":      "Yes.",
 		"answered_at": "2026-09-12T13:20:00Z",
 		"answered_by": "alice",
 		"selected":    []string{"Yes"},
 		"state":       "answered",
 	}, actor)
+
 	if err != nil {
 		t.Fatalf("write ask state: %v", err)
 	}
@@ -332,7 +338,7 @@ func TestSetBlockAttributesWritesTypedBlockState(t *testing.T) {
 func TestApplyOpsRejectsAmbiguousTargetWithoutChangingDocument(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "same same")
-	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "same", With: "changed"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+	_, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "replace", Find: "same", With: "changed"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
 	var ambiguous *ErrAnchorAmbiguous
 	if !errors.As(err, &ambiguous) || ambiguous.Kind != "quote" || ambiguous.Target != "same" {
 		t.Fatalf("ambiguous edit error = %v, want the quote named", err)
@@ -347,7 +353,7 @@ func TestApplyOpsResolvesAgainstDocumentInsideApply(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "# First")
-	if _, err := service.ReplaceText(context.Background(), artifactID, "base", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "base", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("prepare document: %v", err)
 	}
 	entered := make(chan struct{})
@@ -364,7 +370,7 @@ func TestApplyOpsResolvesAgainstDocumentInsideApply(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "insert", Markdown: "!", After: "end"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+		_, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "insert", Markdown: "!", After: "end"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
 		result <- err
 	}()
 	<-entered
@@ -379,11 +385,12 @@ func TestApplyOpsResolvesAgainstDocumentInsideApply(t *testing.T) {
 func TestApplyOpsInsertsAtHeadingsAndEdgesAndReplacesInlineText(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "# Title\n\nBody text.\n")
-	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+	_, err := joinedApplyOps(service, artifactID, []model.EditOp{
 		{Op: "insert", Markdown: "Intro.", After: "heading:Title"},
 		{Op: "replace", Find: "text.", With: "text. more"},
 		{Op: "insert", Markdown: "- item", Before: "start"},
 	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +400,7 @@ func TestApplyOpsInsertsAtHeadingsAndEdgesAndReplacesInlineText(t *testing.T) {
 func TestApplyOpsRejectsMarkdownOutsideProofSchema(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "keep")
-	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "keep", With: "one\n\ntwo"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
+	_, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "replace", Find: "keep", With: "one\n\ntwo"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
 	var invalid *ErrInvalidOp
 	if !errors.As(err, &invalid) || invalid.Field != "with" || !strings.Contains(invalid.Reason, "replace is inline") {
 		t.Fatalf("err = %v", err)
@@ -2293,7 +2300,7 @@ var editingSession = model.Actor{Kind: "session", ID: "session-0123456789abcdef"
 
 func TestApplyOpsMovingAnOpenAskBlockKeepsItsAsk(t *testing.T) {
 	service, artifactID, askID, settle, askEvents := blockAskHarness(t)
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "move", Block: "decision", After: "no drift."}}, editingSession, nil); err != nil {
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "move", Block: "decision", After: "no drift."}}, editingSession, nil); err != nil {
 		t.Fatalf("move ask block: %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "Context ends with no drift.\n\n"+askFixture)
@@ -2318,7 +2325,7 @@ func TestApplyOpsMovingAnAnsweredAskBlockKeepsItsAnswer(t *testing.T) {
 	if _, err := service.store.Pool.Exec(context.Background(), `update asks set state = 'answered', answer = $2 where id = $1`, askID, answerJSON); err != nil {
 		t.Fatalf("answer indexed ask: %v", err)
 	}
-	if err := service.SetBlockAttributes(context.Background(), artifactID, "decision", map[string]any{
+	if err := joinedSetBlockAttributes(service, artifactID, "decision", map[string]any{
 		"state": "answered", "answered_by": "alice", "answered_at": answeredAt.Format(time.RFC3339Nano), "selected": []string{"REST"},
 	}, model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write answered attributes: %v", err)
@@ -2327,7 +2334,7 @@ func TestApplyOpsMovingAnAnsweredAskBlockKeepsItsAnswer(t *testing.T) {
 	waitForDocumentText(t, service, artifactID, answeredAsk+"\nContext ends with no drift.\n")
 	settle()
 
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "move", Block: "decision", After: "no drift."}}, editingSession, nil); err != nil {
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "move", Block: "decision", After: "no drift."}}, editingSession, nil); err != nil {
 		t.Fatalf("move ask block: %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "Context ends with no drift.\n\n"+answeredAsk)
@@ -2341,7 +2348,7 @@ func TestApplyOpsMovingAnAnsweredAskBlockKeepsItsAnswer(t *testing.T) {
 
 	// Deleting the answered block leaves the answered row as the record; a resolved row
 	// carrying an answer is what the asks table forbids, and settlement must not fail on it.
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "delete", Block: "decision"}}, editingSession, nil); err != nil {
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "delete", Block: "decision"}}, editingSession, nil); err != nil {
 		t.Fatalf("delete answered ask block: %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "Context ends with no drift.\n")
@@ -2356,7 +2363,7 @@ func TestApplyOpsMovingAnAnsweredAskBlockKeepsItsAnswer(t *testing.T) {
 
 func TestApplyOpsDeletingAnOpenAskBlockByIDRetractsItsAsk(t *testing.T) {
 	service, artifactID, askID, settle, askEvents := blockAskHarness(t)
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "delete", Block: "decision"}}, editingSession, nil); err != nil {
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "delete", Block: "decision"}}, editingSession, nil); err != nil {
 		t.Fatalf("delete ask block: %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "Context ends with no drift.\n")

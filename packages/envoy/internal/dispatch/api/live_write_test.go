@@ -35,8 +35,15 @@ func TestEditArtifactRollbackNeverReachesTheRoom(t *testing.T) {
 	f.connectPlainSocket(t)
 	responses := f.startFailingEdit(t)
 	waitForBeforeApply(t, f.failure)
-	if _, err := f.docs.ApplyOps(context.Background(), f.issue.PrimaryArtifactID, []model.EditOp{{Op: "replace", Find: "before", With: "before"}}, model.Actor{Kind: "user", ID: "alice"}, nil); err != nil {
-		t.Fatalf("apply live update before transactional edit: %v", err)
+	// A browser's typing reaches the room while the edit's transaction is held - every server
+	// write would wait for that transaction - here a character typed and taken back, which leaves
+	// the text as it was.
+	peer := f.connectPeer(t)
+	for _, text := range []string{"before!", "before"} {
+		peer.edit(t, func(tree *pmdoc.Node) error {
+			tree.Children[0].Children[0].Text = text
+			return nil
+		})
 	}
 	waitForDocumentUpdate(t, f.persistence)
 	f.waitForLockWaiter(t)

@@ -1,7 +1,9 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -101,5 +103,73 @@ func TestAnAcceptCannotGrowADocumentPastWhatOneDocumentMayHold(t *testing.T) {
 	}
 	if text := documentMarkdown(t, handler, issue.PrimaryArtifactID); !strings.HasSuffix(text, "# target\n") {
 		t.Fatalf("the document after the refused accept ends %q, want its own last heading", text[max(0, len(text)-40):])
+	}
+}
+
+// An ask's text and its answer are written into its block, so they are caller text in the
+// document as an edit's is, and editing the asks of one document or answering them cannot grow it
+// past what one upload may hold either: through these routes thirty-two option descriptions of
+// 900 KB grew one document to 28.8 MB, on which a one-word edit then took the server past the
+// production task's 1,024 MiB. The write that would pass the bound is refused with 413
+// CAP_EXCEEDED, saying what to do; the ask keeps its text and stays open, and the document still
+// reads.
+func TestAskEditsAndAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
+	prose := strings.Repeat("word ", 180_000)
+	for _, route := range []struct {
+		name  string
+		write func(handler http.Handler, askID string) *httptest.ResponseRecorder
+		kept  func(ask model.Ask) bool
+	}{
+		{"PATCH /api/v1/asks/{id}", func(handler http.Handler, askID string) *httptest.ResponseRecorder {
+			return dispatchRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+				"options": []map[string]string{{"label": "A", "description": prose}},
+			}, "alice")
+		}, func(ask model.Ask) bool { return ask.State == "open" && len(ask.Options) == 0 }},
+		{"POST /api/v1/asks/{id}/answer", func(handler http.Handler, askID string) *httptest.ResponseRecorder {
+			return dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{"text": prose}, "alice")
+		}, func(ask model.Ask) bool { return ask.State == "open" && ask.Answer == nil }},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			handler, _ := blockAskHandler(t)
+			const asks = 3
+			var spec strings.Builder
+			spec.WriteString("Context\n")
+			for index := range asks {
+				fmt.Fprintf(&spec, "\n:::ask{#ask-%d urgency=\"med\" multiple=\"false\" state=\"open\"}\nQuestion %d?\n:::\n", index, index)
+			}
+			issue := createInteractionIssue(t, handler, "TEST", "Ask growth", spec.String())
+			refused := 0
+			for index := range asks {
+				blockID := fmt.Sprintf("ask-%d", index)
+				awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, blockID, fmt.Sprintf("Question %d?", index))
+				askID := blockAskID(t, handler, issue.Key, blockID)
+				response := route.write(handler, askID)
+				if response.Code == http.StatusOK && refused == 0 {
+					continue
+				}
+				if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) ||
+					!strings.Contains(response.Body.String(), "shorten the change, or split the document") {
+					t.Fatalf("write %d: status=%d body=%.500s, want 200 until one is refused with 413 CAP_EXCEEDED saying to shorten the change, and 413 after it", index+1, response.Code, response.Body.String())
+				}
+				if ask := readBlockAsk(t, handler, askID); !route.kept(ask) {
+					t.Fatalf("the ask after its refused write = %#v, want it as it was", ask)
+				}
+				if refused == 0 {
+					refused = index + 1
+					t.Logf("write %d refused: %.300s", refused, response.Body.String())
+				}
+			}
+			if refused == 0 {
+				t.Fatalf("all %d writes were taken, want the document's growth refused", asks)
+			}
+			for _, read := range []string{"/text", "/blocks"} {
+				if response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+read, nil, "alice"); response.Code != http.StatusOK {
+					t.Fatalf("%s after write %d was refused: status=%d body=%.300s, want 200", read, refused, response.Code, response.Body.String())
+				}
+			}
+			if text := documentMarkdown(t, handler, issue.PrimaryArtifactID); len(text) > 1<<20 {
+				t.Fatalf("the document's markdown is %d bytes, past the 1 MiB one upload may hold", len(text))
+			}
+		})
 	}
 }

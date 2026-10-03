@@ -254,10 +254,9 @@ func (s *Service) SuggestionKind(ctx context.Context, artifactID, id string) (st
 	return kind, nil
 }
 
-// AcceptSuggestion applies the replacement for a suggestion mark. It adds the caller's text, so it
-// may not grow the document past what one document may hold (growth.go).
+// AcceptSuggestion applies the replacement for a suggestion mark.
 func (s *Service) AcceptSuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor) error {
-	return s.applySuggestion(growthBound(context.WithValue(ctx, skippedAnchorRefreshKey{}, id)), artifactID, id, replaceWith, actor, true)
+	return s.applySuggestion(context.WithValue(ctx, skippedAnchorRefreshKey{}, id), artifactID, id, replaceWith, actor, true)
 }
 
 // RejectSuggestion removes a suggestion mark and its inserted text when necessary.
@@ -863,7 +862,7 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 
 	var sweepErr error
 	err = s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		transact, release := s.serviceTransact(transact, nil)
+		transact, release := s.serviceTransact(transact)
 		defer release()
 		fragment := doc.GetXmlFragment(fragmentName)
 		fresh, readErr := treeOf(doc)

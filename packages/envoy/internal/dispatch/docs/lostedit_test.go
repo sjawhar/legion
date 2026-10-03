@@ -339,7 +339,7 @@ func TestAnAcceptedSuggestionIsRefusedWhenAConcurrentChangeRemovesItsText(t *tes
 		t.Run(test.name, func(t *testing.T) {
 			service, artifactID := lostEditService(t)
 			ctx := context.Background()
-			if _, err := service.MarkQuote(ctx, artifactID, MarkSpec{
+			if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
 				Kind: MarkSuggestion, ID: "s1", By: lostEditAgent,
 			}, "Alpha", nil); err != nil {
 				t.Fatalf("mark the suggestion: %v", err)

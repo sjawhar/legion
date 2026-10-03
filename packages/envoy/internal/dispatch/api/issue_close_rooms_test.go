@@ -41,7 +41,7 @@ func TestClosingAnIssueClosesItsRoomsAfterTheClientHangsUp(t *testing.T) {
 	var documentService *docs.Service
 	requestCtx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{
 			Store: database,
 			Identity: identity.HeaderIdentity{
@@ -79,8 +79,8 @@ func TestClosingAnIssueClosesItsRoomsAfterTheClientHangsUp(t *testing.T) {
 	}
 
 	waitForDocumentConnectionClose(t, connection)
-	if _, err := documentService.ReplaceText(
-		context.Background(), issue.PrimaryArtifactID, "after", model.Actor{Kind: "user", ID: "alice"},
+	if _, err := replaceDocumentText(
+		database, documentService, issue.PrimaryArtifactID, "after", model.Actor{Kind: "user", ID: "alice"},
 	); !errors.Is(err, docs.ErrIssueClosed) {
 		t.Fatalf("write to the closed issue's document = %v, want ErrIssueClosed", err)
 	}
