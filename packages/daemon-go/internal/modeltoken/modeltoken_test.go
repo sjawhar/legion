@@ -18,7 +18,6 @@ import (
 type fakeCognito struct {
 	t      *testing.T
 	mu     sync.Mutex
-	calls  []string
 	signIn int
 	refuse bool
 }
@@ -29,9 +28,6 @@ func (f *fakeCognito) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.t.Errorf("decode request: %v", err)
 	}
 	target := strings.TrimPrefix(r.Header.Get("X-Amz-Target"), "AWSCognitoIdentityProviderService.")
-	f.mu.Lock()
-	f.calls = append(f.calls, target)
-	f.mu.Unlock()
 	w.Header().Set("Content-Type", "application/x-amz-json-1.1")
 	if body["ClientId"] != "client-id" {
 		f.t.Errorf("%s ClientId = %#v", target, body["ClientId"])

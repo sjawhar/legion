@@ -83,8 +83,9 @@ func signIn(ctx context.Context, cfg Config, answer string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("Cognito RespondToAuthChallenge: %w", err)
 	}
-	if answered.AuthenticationResult == nil || aws.ToString(answered.AuthenticationResult.AccessToken) == "" {
+	result := answered.AuthenticationResult
+	if result == nil || aws.ToString(result.AccessToken) == "" {
 		return "", errors.New("Cognito answered the custom challenge without an access token")
 	}
-	return aws.ToString(answered.AuthenticationResult.AccessToken), nil
+	return aws.ToString(result.AccessToken), nil
 }
