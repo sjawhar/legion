@@ -76,10 +76,10 @@ change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds.
 Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's plugin, the
 `legion` CLI, the role prompts and a general toolchain (git, jj, gh, Node, uv, the AWS CLI).
 `legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
-is published in each Worker Image workflow run's summary and in the body of each `cli-v<version>`
+is published in each Worker Image workflow run's summary and in the body of each `legion-v<version>`
 GitHub release; for any tag, `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>`
-prints it. Tags are `sha-<the commit's first 12 hex digits>` for every build and `<cli version>` for
-a release.
+prints it. Tags are `sha-<the commit's first 12 hex digits>` for every build and `<legion version>`
+for a release.
 
 If your repositories need more than the image carries, build your own image `FROM` it by digest,
 put the extra commands in `/usr/local/bin` or `/usr/bin`, and pin `runtime.kubernetes.image` to your
@@ -201,14 +201,14 @@ own, so run it under a process supervisor you trust. `legion stop --config legio
 and `legion legions` lists the daemons registered on the machine.
 
 The `legion` binary the daemon runs and the worker image must come from the same commit. The
-image carries that binary at `/opt/legion/go/bin/legion`, its role prompts at `/opt/legion/roles`
+image carries that binary at `/opt/legion/bin/legion`, its role prompts at `/opt/legion/roles`
 and Legion's Oh My Pi plugin at `/opt/legion/pi-legion-envoy`, so you can take all three from the
 image you pinned:
 
 ```sh
 image=ghcr.io/sjawhar/legion-worker@sha256:<digest>
 id=$(docker create --platform linux/amd64 "$image")
-docker cp "$id:/opt/legion/go/bin/legion" ./legion
+docker cp "$id:/opt/legion/bin/legion" ./legion
 docker cp "$id:/opt/legion/roles" ./role-prompts      # the daemon reads role-prompts/ beside its binary
 docker cp "$id:/opt/legion/pi-legion-envoy" ./pi-legion-envoy
 docker rm "$id"

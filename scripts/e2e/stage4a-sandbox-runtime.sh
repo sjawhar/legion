@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage 4a's gate for the Go coordinator: the Agent Sandbox runtime (packages/daemon-go/internal/
+# Stage 4a's gate for the Go coordinator: the Agent Sandbox runtime (packages/daemon/internal/
 # runtime/sandbox) proven on the production cluster, in namespace `legion`, from the devbox. A Go
 # harness (sandbox/live_test.go, build tag e2e) drives the runtime through the Legion daemon's own
 # restricted identity and hosts the worker stream on the devbox's private address; the pods it
@@ -159,7 +159,7 @@ pod=$(<"$operator_route/pod.yml")
 printf '%s\n' "${pod//"$placeholder"/"$gateway_audience"}" >"$work/pod.yml"
 grep -qF "audience: \"$gateway_audience\"" "$work/pod.yml" || fail "the operator route's pod.yml has no token audience $placeholder to fill with the gateway's"
 op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$operator_route/overlay.yml" \
-  --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
+  --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"
 note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $operator_route, label legion.dev/project=$run_label"
 note "operator pod: $work/pod.yml, the operator route's with its token audience from LEGION_E2E_MODEL_GATEWAY_AUDIENCE"
@@ -167,13 +167,13 @@ note "operator pod: $work/pod.yml, the operator route's with its token audience 
 # model route reads: provider_keys hands it to every agent's Oh My Pi, and provider-key checks where
 # it arrives.
 op create secret generic "$providers_secret" --from-literal=stage4a="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" \
-  --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
+  --dry-run=client -o yaml | op label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create Secret $providers_secret"
 note "[operator] Secret $providers_secret: one key, stage4a (a random value no route reads), label legion.dev/project=$run_label"
 pass
 
 begin build
-go -C "$root/packages/daemon-go" test -c -tags e2e -o "$work/stage4a.test" ./internal/runtime/sandbox
+go -C "$root/packages/daemon" test -c -tags e2e -o "$work/stage4a.test" ./internal/runtime/sandbox
 stage_role_prompts "$root" "$work"
 go -C "$root/packages/envoy" build -o "$work/agent-secrets" ./cmd/agent-secrets
 note "built the e2e harness and agent-secrets from the checkout, with role-prompts beside the harness"

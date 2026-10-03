@@ -16,6 +16,7 @@ everything needed to record them again.
 | `recording.ts` | What a walkthrough file declares, and the helpers its browser sections act with: the drawn pointer, `pointTo`, `ring`, `highlight`, `scrollBy` and `linger`. |
 | `walkthrough.ts` | Records, cuts, narrates and assembles one walkthrough into a video. |
 | `walkthroughs/` | One file per video, holding each section's actions and narration; casts beside it in `walkthroughs/<name>/`. |
+| `broker/` | The secrets broker's screenshots and walkthrough, made on a rig of its own (a broker, its client and an example agent machine) that CI does not run, so their output is committed, screenshots included, in `public/media/broker/`. Its walkthrough is built by `broker/walkthrough/build.py` from the cut in `edl.py`, not by `walkthrough.ts`: its terminal casts are recorded live against the rig between its browser sections, since each section acts on what the one before it left. Its browser sections are Playwright's `recordVideo` at 1280x720, which `build.py` renders at 30 fps. This pipeline avoids that recorder for its blur (below); the broker's walkthrough keeps it because the committed footage and the marks the cut is placed at come from it, and changing it needs a new take. Its captions, poster and -16 LUFS narration match this pipeline's. `broker/README.md` says how to run the rig and the screenshots, and `broker/walkthrough/README.md` how to record and build the walkthrough. |
 
 ## Before you run anything
 
