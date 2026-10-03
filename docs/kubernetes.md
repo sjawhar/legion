@@ -832,8 +832,8 @@ claim's pod and the image probe's.
   example of one, the one the Go live harnesses run on: a `models.yml` and a settings overlay from a
   ConfigMap, and a mounted token its key command reads. Its README lists what an operator supplies
   and how `pod` and `provider_keys` compose.
-- **The Legion machine-user sign-in.** `legion model-token` (the Go `legion`, which a worker
-  container's `PATH` resolves) is a model `apiKey` command: it answers Cognito's custom challenge
+- **The Legion machine-user sign-in.** `legion model-token` (in the worker image at
+  `/opt/legion/go/bin/legion`) is a model `apiKey` command: it answers Cognito's custom challenge
   with the pod's projected service-account token (a `projected` `service_account_token` in `pod`,
   with the dedicated audience) and prints the access token. It signs in on every run and keeps no
   token, which suits Oh My Pi re-running the command after a 401: Oh My Pi holds the token for the

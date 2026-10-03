@@ -60,9 +60,9 @@ this one.
 
 ## Signing in as the Legion machine user
 
-A gateway that admits Cognito user tokens takes a token from `legion model-token`, a command of the
-Go `legion`, which a worker container's `PATH` resolves. Oh My Pi runs it as the model `apiKey` and
-runs it again after a 401. It signs in with Cognito's custom authentication (`InitiateAuth` with
+A gateway that admits Cognito user tokens takes a token from `legion model-token`, which the worker
+image carries at `/opt/legion/go/bin/legion`. Oh My Pi runs it as the model `apiKey` and runs it
+again after a 401. It signs in with Cognito's custom authentication (`InitiateAuth` with
 `CUSTOM_AUTH`, then `RespondToAuthChallenge`), answering the challenge with the pod's projected
 service-account token, and prints the access token. It signs in on every run and keeps no token,
 which suits Oh My Pi: Oh My Pi holds the token for the life of its process, so the run after a 401
@@ -73,7 +73,7 @@ on stderr and prints no token.
 Every value is the operator's, passed as flags in their own `models.yml`:
 
 ```yaml
-    apiKey: "!legion model-token --region <pool region> --client-id <app client id> --username <machine user> --service-account-token-file /var/run/operator/token"
+    apiKey: "!/opt/legion/go/bin/legion model-token --region <pool region> --client-id <app client id> --username <machine user> --service-account-token-file /var/run/operator/token"
 ```
 
 The service-account token is the projected token `pod.yml` already mounts at
