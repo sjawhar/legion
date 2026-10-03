@@ -212,10 +212,7 @@ func parseUnstamped(markdown string, firstLine int, readFrontmatter bool, budget
 		firstLine += bytes.Count(source[:rest], []byte("\n"))
 		source = source[rest:]
 	}
-	root, err := blockReader.parse(source, unclosedFrontmatter, budget)
-	if refusal := budget.elements.refusal(root, source, firstLine); refusal != nil {
-		return nil, refusal
-	}
+	root, err := blockReader.parse(source, unclosedFrontmatter, budget, firstLine)
 	if err != nil {
 		return nil, err
 	}
@@ -335,14 +332,14 @@ func readInline(markdown string, inline parser.Parser, budget *TablePaddingBudge
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
 	source := []byte(LineFeeds(markdown))
 	context := parser.NewContext()
+	var count *parseCount
 	if budget != nil {
 		context.Set(tablePaddingBudgetKey, budget)
+		count = budget.elements.countParse(context)
 	}
 	root := withLineStarts(inline, source, context)
-	if budget != nil {
-		if refusal := budget.elements.refusal(root, source, 1); refusal != nil {
-			return nil, refusal
-		}
+	if refusal := count.refusal(root, source, 1); refusal != nil {
+		return nil, refusal
 	}
 	if root.ChildCount() > 1 {
 		return nil, fmt.Errorf("%w: inline markdown forms %d paragraphs", ErrSchema, root.ChildCount())

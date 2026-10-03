@@ -419,7 +419,7 @@ func quotedBy(line, quote string) bool {
 // blockKinds is the kinds of the blocks the parser reads markdown as, in document order.
 func blockKinds(markdown string) []ast.NodeKind {
 	source := []byte(markdown)
-	root, err := blockReader.parse(source, false, readBackPaddingBudget())
+	root, err := blockReader.parse(source, false, readBackPaddingBudget(), 1)
 	if err != nil {
 		return nil
 	}

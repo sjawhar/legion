@@ -32,9 +32,10 @@ const nodeGuard = 2
 // (maxWriteElements). It is not ErrSchema: the markdown is well formed, and too large to store.
 var ErrTooManyElements = errors.New("document too large to store")
 
-// elementCount is what the markdown one caller write sends makes. A write's TablePaddingBudget
-// carries it, so every parse of that write's markdown spends it; a limit of zero counts nothing, as
-// a read-back's does.
+// elementCount is what the markdown one caller write sends makes, across every parse of it. A
+// write's TablePaddingBudget carries it, so every parse of that write's markdown spends it; a limit
+// of zero counts nothing, as a read-back's does. It holds only the write's totals: what one parse
+// tracks while it runs is that parse's parseCount, which goes with the parse.
 type elementCount struct {
 	// limit is the most elements the write may make, and made the elements its parses have made
 	// (refusal).
@@ -45,6 +46,17 @@ type elementCount struct {
 	// (emphasisDelimiters.OnMatch), and every table cell (lazyTableRows). Past nodeGuard*limit the
 	// parse stops making them.
 	nodes int
+}
+
+func newElementCount(limit int) elementCount {
+	return elementCount{limit: limit}
+}
+
+// parseCount is one parse's share of its write's elementCount: the state the counters keep while
+// goldmark reads one source, kept in that parse's context (elementCountKey) so that none of it, the
+// goldmark tree parent points into least of all, outlives the parse on the write's budget.
+type parseCount struct {
+	write *elementCount
 	// at is where in the parsed source the count passed its limit, and -1 while it has not; last
 	// is where the latest inline node was counted, which a mark made while a textblock's
 	// delimiters pair is charged at.
@@ -54,37 +66,43 @@ type elementCount struct {
 	children int
 }
 
-func newElementCount(limit int) elementCount {
-	return elementCount{limit: limit, at: -1}
+// elementCountKey is the context key of a counting parse's parseCount.
+var elementCountKey = parser.NewContextKey()
+
+// countParse starts the count of one parse of the write's markdown in pc, or returns nil for a
+// budget that counts no elements.
+func (c *elementCount) countParse(pc parser.Context) *parseCount {
+	if c.limit == 0 {
+		return nil
+	}
+	count := &parseCount{write: c, at: -1}
+	pc.Set(elementCountKey, count)
+	return count
 }
 
 // charge counts n nodes goldmark made at offset in the parsed source and reports whether the
 // count has passed the guard.
-func (c *elementCount) charge(n, offset int) bool {
-	if c.passed() {
+func (p *parseCount) charge(n, offset int) bool {
+	if p.passed() {
 		return true
 	}
-	c.nodes += n
-	if c.nodes > nodeGuard*c.limit {
-		c.at = offset
+	p.write.nodes += n
+	if p.write.nodes > nodeGuard*p.write.limit {
+		p.at = offset
 		return true
 	}
 	return false
 }
 
-// passed reports whether a counting parse has passed a limit; one that counts nothing never has.
-func (c *elementCount) passed() bool {
-	return c.limit > 0 && c.at >= 0
+// passed reports whether the parse has passed its write's limit.
+func (p *parseCount) passed() bool {
+	return p.at >= 0
 }
 
-// countedElements is the element count of the write a parse belongs to, or nil for a parse that
-// counts none.
-func countedElements(pc parser.Context) *elementCount {
-	budget, _ := pc.Get(tablePaddingBudgetKey).(*TablePaddingBudget)
-	if budget == nil || budget.elements.limit == 0 {
-		return nil
-	}
-	return &budget.elements
+// countedElements is the count of the parse pc belongs to, or nil for a parse that counts none.
+func countedElements(pc parser.Context) *parseCount {
+	count, _ := pc.Get(elementCountKey).(*parseCount)
+	return count
 }
 
 // elementWeight is what one node of goldmark's tree weighs: a table cell four, as the cell, the
@@ -104,29 +122,29 @@ func elementWeight(node ast.Node) int {
 	return 1
 }
 
-// refusal is the refusal of a parse of the write's markdown, which made root from source whose
-// first line is firstLine of what the caller wrote, or nil: goldmark passed the guard, or root's
-// elements take the write past its limit. root is weighed without recursion, so a tree nested as
-// deep as the guard allows costs no stack.
-func (c *elementCount) refusal(root ast.Node, source []byte, firstLine int) error {
-	if c.limit == 0 {
+// refusal is the refusal of the parse p counts, which made root from source whose first line is
+// firstLine of what the caller wrote, or nil: goldmark passed the guard, or root's elements take the
+// write past its limit. root is weighed without recursion, so a tree nested as deep as the guard
+// allows costs no stack. A parse that counts nothing (a nil p) is never refused.
+func (p *parseCount) refusal(root ast.Node, source []byte, firstLine int) error {
+	if p == nil {
 		return nil
 	}
-	if !c.passed() && root != nil {
+	if !p.passed() && root != nil {
 		for node := root; node != nil; node = nextInTree(root, node) {
-			c.made += elementWeight(node)
-			if c.made > c.limit {
-				c.at = nodeOffset(node)
+			p.write.made += elementWeight(node)
+			if p.write.made > p.write.limit {
+				p.at = nodeOffset(node)
 				break
 			}
 		}
 	}
-	if !c.passed() {
+	if !p.passed() {
 		return nil
 	}
-	line := firstLine + bytes.Count(source[:min(c.at, len(source))], []byte("\n"))
+	line := firstLine + bytes.Count(source[:min(p.at, len(source))], []byte("\n"))
 	return fmt.Errorf("%w: this write's markdown makes more than %d elements, passing that at line %d; a block weighs 3 elements, a table cell 4, and each piece of inline syntax, mark and line of text 1. Split the document, or upload data as a file of another content type",
-		ErrTooManyElements, c.limit, line)
+		ErrTooManyElements, p.write.limit, line)
 }
 
 // nextInTree is the node after node in a walk of root's tree in document order.

@@ -31,14 +31,20 @@ func segmentsText(segments *gmtext.Segments, source []byte) string {
 
 // parse parses source. unclosedFrontmatter says source opens a document with a front-matter opener
 // no later line closes, after which no container opens at the document's level
-// (frontmatterAttempt).
-func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budget *TablePaddingBudget) (ast.Node, error) {
+// (frontmatterAttempt). Its tables' short rows are padded, and its elements counted, on budget;
+// firstLine is the number source's first line has in what the caller wrote, which a refusal of
+// those elements names its line from.
+func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budget *TablePaddingBudget, firstLine int) (ast.Node, error) {
 	pc := parser.NewContext()
 	if unclosedFrontmatter {
 		pc.Set(unclosedFrontmatterKey, true)
 	}
 	pc.Set(tablePaddingBudgetKey, budget)
+	count := budget.elements.countParse(pc)
 	root := withLineStarts(reader.md.Parser(), source, pc)
+	if refusal := count.refusal(root, source, firstLine); refusal != nil {
+		return nil, refusal
+	}
 	if err, _ := pc.Get(tablePaddingErrorKey).(error); err != nil {
 		return nil, err
 	}

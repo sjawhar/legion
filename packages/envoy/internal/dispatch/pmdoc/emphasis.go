@@ -117,9 +117,9 @@ func (g strikethroughGuard) Parse(parent ast.Node, block text.Reader, context pa
 // the strong pair is made, the engine leaves as text the `**` the closer has left, where goldmark
 // pairs one of them with the opener's last `*`. Goldmark asks this before it measures a pair, and
 // the rule is the only reader of OriginalLength after a run is scanned, so CanOpenCloser gives
-// both runs their remaining length as that. Each pair it makes is a mark, which count, the write's
-// element count when the parse counts them, is charged for.
-type emphasisDelimiters struct{ count *elementCount }
+// both runs their remaining length as that. Each pair it makes is a mark, which count, the parse's
+// share of its write's element count when the parse counts them, is charged for.
+type emphasisDelimiters struct{ count *parseCount }
 
 func (emphasisDelimiters) IsDelimiter(b byte) bool {
 	return b == '*' || b == '_'
