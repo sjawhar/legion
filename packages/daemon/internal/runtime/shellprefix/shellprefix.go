@@ -19,8 +19,11 @@ import (
 // left it, keeps every other entry in its order, empty ones included, and puts dirs in front, so
 // the agent's plain gh and legion are the runtime's and PATH never grows. It works on PATH with
 // each entry wrapped in its own pair of separators (`:a::b:`), where an entry equal to a dir is
-// exactly one `:dir:` match, in a variable it unsets again. PATH is already exported; every step
-// ends in `&&`, never `;`, because tmux splits its argv at an argument ending in one.
+// exactly one `:dir:` match, in a variable it unsets again. It ends with `hash -r`: Oh My Pi's
+// bash tool runs in brush, which keeps a command it has looked up after PATH changes where bash
+// forgets it, so one earlier `PATH=<dir>:$PATH gh` would otherwise leave every later plain gh
+// running that dir's. PATH is already exported; every step ends in `&&`, never `;`, because tmux
+// splits its argv at an argument ending in one.
 func For(dirs ...string) string {
 	const sep, rest = string(filepath.ListSeparator), "__legion_path"
 	steps := []string{rest + "=" + sep + "${PATH//" + sep + "/" + sep + sep + "}" + sep}
@@ -32,6 +35,7 @@ func For(dirs ...string) string {
 		rest+"=${"+rest+"#"+sep+"}",
 		"PATH="+Literal(strings.Join(dirs, sep))+"${"+rest+":+"+sep+"${"+rest+"%"+sep+"}}",
 		"unset "+rest,
+		"hash -r",
 	)
 	return strings.Join(steps, " && ") + " &&"
 }

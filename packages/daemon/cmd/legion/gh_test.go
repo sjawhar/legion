@@ -14,6 +14,9 @@ func TestGhRefusesEveryMergeShapeBeforeRedeemingAGrant(t *testing.T) {
 		{"--", "api", "repos/o/r/merges"},
 		{"--", "api", "graphql", "-f", "query=mutation { mergePullRequest(input:{}) { clientMutationId } }"},
 		{"--", "api", "graphql", "-F", "query=@/tmp/mutation.graphql"},
+		{"--", "api", "graphql?x=1", "-f", "query=mutation { mergePullRequest(input:{}) { clientMutationId } }"},
+		{"--", "api", "graphql#x", "-f", "query=mutation { enablePullRequestAutoMerge(input:{}) { clientMutationId } }"},
+		{"--", "api", "graphql?x=1", "--input", "/tmp/mutation.json"},
 		{"--", "alias", "set", "m", "pr merge"},
 		{"--", "extension", "install", "merge-helper"},
 	} {

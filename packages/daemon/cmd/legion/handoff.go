@@ -19,11 +19,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
-// handoffPhases are the phase words a handoff is written under, .legion/<phase>.json: the ones the
-// role prompts pass to the legion tool's handoff_write (packages/contracts/src/handoff-schema.ts
-// HANDOFF_PHASES). A pane's role is its claim role, LEGION_ROLE, never one of these.
-var handoffPhases = map[string]bool{"architect": true, "plan": true, "implement": true, "test": true, "review": true}
-
 // handoffCommands is `legion handoff`'s subcommands, the one list of them `legion handoff --help`
 // names.
 var handoffCommands = map[string]command{
@@ -49,11 +44,15 @@ func resolveWorkspace(value string) (string, error) {
 	return os.Getwd()
 }
 
-func validHandoffPhase(value string) bool { return handoffPhases[value] }
+func validHandoffPhase(value string) bool {
+	_, ok := handoffPhases[value]
+	return ok
+}
 
 // runHandoffWrite writes one phase's handoff. The JSON object comes from --data or, when --data is
-// omitted, from stdin, as the TypeScript CLI takes it: one argv string is capped at 128 KiB
-// (Linux's MAX_ARG_STRLEN), and a handoff that accumulates review rounds outgrows it.
+// omitted, from stdin: one argv string is capped at 128 KiB (Linux's MAX_ARG_STRLEN), and a handoff
+// that accumulates review rounds outgrows it. A handoff its phase's rules refuse
+// (handoffWriteProblems) is never written, and the refusal names every field at fault.
 func runHandoffWrite(_ context.Context, args []string, stdout, stderr io.Writer) int {
 	flags, workspaceFlag := handoffFlags("write", "usage: legion handoff write --phase <phase> [--data <json-object>] [--workspace <dir>]", stderr)
 	phase := flags.String("phase", "", "handoff phase (required)")
@@ -86,6 +85,10 @@ func runHandoffWrite(_ context.Context, args []string, stdout, stderr io.Writer)
 	}
 	if len(carried) > 0 {
 		fmt.Fprintf(stderr, "legion handoff write: data carries %s, which this command writes itself (schemaVersion, phase and completed); send only the phase's own fields\n", strings.Join(carried, ", "))
+		return 1
+	}
+	if problems := handoffWriteProblems(*phase, payload); len(problems) > 0 {
+		fmt.Fprintf(stderr, "legion handoff write: Invalid %s handoff: %s\n", *phase, strings.Join(problems, "; "))
 		return 1
 	}
 	workspace, err := resolveWorkspace(*workspaceFlag)

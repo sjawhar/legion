@@ -10,6 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,10 +21,29 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
+// handoffProof is one production-like proof, every field of it non-blank.
+const handoffProof = `{"criterion":"a handoff without proof is refused","surface":"the branch CLI in a scratch workspace",` +
+	`"command":"legion handoff write --phase implement","observed":"exit 1 naming proof",` +
+	`"headSha":"0123456789abcdef0123456789abcdef01234567","negativeControl":"the same payload with its proof: exit 0"}`
+
+// verifiedProof is a tester's verdict on the implementer's proof that holds.
+const verifiedProof = `{"verdict":"verified","how":"re-ran its command at its head"}`
+
+// writableHandoffs are a handoff of each phase its rules accept, as its role prompt has the worker
+// write it.
+var writableHandoffs = map[string]string{
+	"architect": `{"scope":"small","subIssues":[]}`,
+	"plan": `{"requiredSkills":{"implement":["legion-worker"],"test":["legion-worker"],"review":["none: no skill covers a one-line change"]},` +
+		`"gapAnalysis":{"findings":[]},"planReview":{"verdict":"approved","rounds":1}}`,
+	"implement": `{"filesChanged":["x.go"],"proof":[` + handoffProof + `]}`,
+	"test":      `{"passed":3,"failed":0,"implementerProof":` + verifiedProof + `,"proof":[` + handoffProof + `]}`,
+	"review":    `{"verdict":"approved","critical":0}`,
+}
+
 func TestHandoffWriteAndReadPersistInWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	var out, errb bytes.Buffer
-	if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "implement", "--data", `{"filesChanged":["x.go"]}`}, &out, &errb); code != 0 {
+	if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "implement", "--data", writableHandoffs["implement"]}, &out, &errb); code != 0 {
 		t.Fatalf("handoff write = %d: %s", code, errb.String())
 	}
 	if _, err := os.Stat(filepath.Join(workspace, ".legion", "implement.json")); err != nil {
@@ -41,7 +63,7 @@ func TestHandoffWriteReadsAPayloadOverTheArgvCapFromStdin(t *testing.T) {
 	for i := range 2000 {
 		records = append(records, fmt.Sprintf(`{"round":%d,"note":"%s"}`, i, strings.Repeat("r", 80)))
 	}
-	payload := `{"filesChanged":["x.go"],"rounds":[` + strings.Join(records, ",") + `]}`
+	payload := `{"implementerProof":` + verifiedProof + `,"proof":[` + handoffProof + `],"rounds":[` + strings.Join(records, ",") + `]}`
 	if len(payload) <= 128*1024 {
 		t.Fatalf("payload is %d bytes, not over the 128 KiB argv cap", len(payload))
 	}
@@ -91,6 +113,176 @@ func TestHandoffWriteRefusesTheFieldsItWritesNamingEach(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workspace, ".legion")); !os.IsNotExist(err) {
 		t.Fatalf(".legion after the refused write: %v, want none", err)
+	}
+}
+
+// The write refuses a handoff its phase's rules refuse, naming every field at fault so the next
+// write can fix it, and writes nothing. The implementer's proof, the tester's verdict on it and its
+// own proof, and the plan's skills and two checks are the records the next role reads; a declared
+// field of the wrong type would have that role read a value that is not there.
+func TestHandoffWriteRefusesWhatItsPhasesRulesRefuseNamingEachField(t *testing.T) {
+	blankProof := strings.Replace(strings.Replace(handoffProof, `"exit 1 naming proof"`, `"  "`, 1), `,"negativeControl":"the same payload with its proof: exit 0"`, "", 1)
+	plan := func(field, value string) string {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(writableHandoffs["plan"]), &fields); err != nil {
+			t.Fatal(err)
+		}
+		fields[field] = json.RawMessage(value)
+		encoded, err := json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(encoded)
+	}
+	for _, tc := range []struct {
+		name, phase, data string
+		// fields are the fields the refusal names, in its order.
+		fields []string
+	}{
+		{"an implement handoff without proof", "implement", `{"filesChanged":["x.go"]}`, []string{"proof"}},
+		{"an implement handoff whose proof is empty", "implement", `{"proof":[]}`, []string{"proof"}},
+		{"a proof that is a sentence", "implement", `{"proof":["ran it"]}`, []string{"proof.0"}},
+		{"a proof with a blank field and a missing one", "implement", `{"proof":[` + blankProof + `]}`, []string{"proof.0.observed", "proof.0.negativeControl"}},
+		{"a test handoff without a verdict on the implementer's proof", "test", `{"passed":3,"proof":[` + handoffProof + `]}`, []string{"implementerProof"}},
+		{"a verdict outside its options, and a blank how", "test", `{"implementerProof":{"verdict":"maybe","how":" "},"proof":[` + handoffProof + `]}`, []string{"implementerProof.verdict", "implementerProof.how"}},
+		{"a passing test handoff without a proof of the tester's own", "test", `{"passed":3,"implementerProof":` + verifiedProof + `}`, []string{"proof"}},
+		{"failed > 0 without a recorded failure", "test", `{"failed":1,"implementerProof":` + verifiedProof + `,"proof":[` + handoffProof + `]}`, []string{"failures"}},
+		{"a rejected implementer proof without a recorded failure", "test", `{"implementerProof":{"verdict":"rejected","how":"its command exits 2"},"proof":[` + handoffProof + `]}`, []string{"failures"}},
+		{"a plan with none of its three records", "plan", `{"taskCount":3}`, []string{"requiredSkills", "gapAnalysis", "planReview"}},
+		{"a role's empty skill list and another's blank entry", "plan", plan("requiredSkills", `{"implement":[],"test":[" "],"review":["legion-worker"]}`), []string{"requiredSkills.implement", "requiredSkills.test.0"}},
+		{"a skill list left out", "plan", plan("requiredSkills", `{"implement":["legion-worker"]}`), []string{"requiredSkills.test", "requiredSkills.review"}},
+		{"a gap analysis with both findings and an error", "plan", plan("gapAnalysis", `{"findings":[],"error":"timed out"}`), []string{"gapAnalysis"}},
+		{"a gap analysis with neither", "plan", plan("gapAnalysis", `{}`), []string{"gapAnalysis"}},
+		{"a finding with a blank answer", "plan", plan("gapAnalysis", `{"findings":[{"finding":"no acceptance line for the error path","answer":""}]}`), []string{"gapAnalysis.findings.0.answer"}},
+		{"a rejection recorded before the last round, without its issues", "plan", plan("planReview", `{"verdict":"rejected","rounds":1}`), []string{"planReview.remainingIssues", "planReview.rounds"}},
+		{"an approval with an issue standing", "plan", plan("planReview", `{"verdict":"approved","rounds":2,"remainingIssues":[{"issue":"i","evidence":"e"}]}`), []string{"planReview.remainingIssues"}},
+		{"a failed review without its error", "plan", plan("planReview", `{"verdict":"failed","rounds":1}`), []string{"planReview.error"}},
+		{"an approval carrying an error", "plan", plan("planReview", `{"verdict":"approved","rounds":1,"error":"timed out"}`), []string{"planReview.error"}},
+		{"more rounds than a planner runs", "plan", plan("planReview", `{"verdict":"approved","rounds":4}`), []string{"planReview.rounds"}},
+		{"a fractional round count", "plan", plan("planReview", `{"verdict":"rejected","rounds":2.5,"remainingIssues":[{"issue":"i","evidence":"e"}]}`), []string{"planReview.rounds"}},
+		{"a plan's declared field of the wrong type, before its three rules", "plan", `{"taskCount":"3"}`, []string{"taskCount"}},
+		{"a review's declared fields of the wrong type", "review", `{"critical":"1","verdict":"lgtm","keyFindings":[{"severity":"minor"}]}`, []string{"critical", "verdict", "keyFindings.0.file", "keyFindings.0.description"}},
+		{"an architect's scope and routing hints outside their options", "architect", `{"scope":"huge","routingHints":{"skipArchitect":"no"}}`, []string{"scope", "routingHints.skipArchitect"}},
+		{"learnings that are not a list of paths", "review", `{"learningsInjected":"docs/solutions/a.md","learningsHelpful":[1]}`, []string{"learningsInjected", "learningsHelpful.0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", tc.phase, "--data", tc.data}, &out, &errb)
+			refusal, found := strings.CutPrefix(strings.TrimSuffix(errb.String(), "\n"), "legion handoff write: Invalid "+tc.phase+" handoff: ")
+			if code != 1 || !found {
+				t.Fatalf("handoff write --phase %s %s = %d, stderr %q; want an invalid %s handoff refused", tc.phase, tc.data, code, errb.String(), tc.phase)
+			}
+			var named []string
+			for _, problem := range strings.Split(refusal, "; ") {
+				field, _, _ := strings.Cut(problem, ": ")
+				named = append(named, field)
+			}
+			if !slices.Equal(named, tc.fields) {
+				t.Fatalf("refusal %q names %v, want %v", refusal, named, tc.fields)
+			}
+			if _, err := os.Stat(filepath.Join(workspace, ".legion")); !os.IsNotExist(err) {
+				t.Fatalf(".legion after the refused write: %v, want none", err)
+			}
+		})
+	}
+}
+
+// What the rules allow is written as sent, every field the phase does not declare included: a
+// test handoff that records its failure needs no proof of its own, a plan may say no skill fits
+// and record a failed check as its error, and a rejection after the last round is recorded with
+// its issues.
+func TestHandoffWriteWritesWhatItsPhasesRulesAllow(t *testing.T) {
+	cases := map[string][2]string{}
+	for phase, data := range writableHandoffs {
+		cases[phase] = [2]string{phase, data}
+	}
+	failure := `"failures":[{"criterion":"greet trims the name","evidence":"bun greet.ts ' Ada ' prints Hello,  Ada !"}]`
+	cases["a test reporting a failure"] = [2]string{"test", `{"failed":1,` + failure + `,"implementerProof":` + verifiedProof + `}`}
+	cases["a test rejecting the implementer's proof"] = [2]string{"test", `{` + failure + `,"implementerProof":{"verdict":"rejected","how":"its command exits 2"}}`}
+	cases["a plan whose checks failed"] = [2]string{"plan", `{"requiredSkills":{"implement":["none: x"],"test":["none: x"],"review":["none: x"]},` +
+		`"gapAnalysis":{"error":"the analyst timed out"},"planReview":{"verdict":"failed","rounds":2,"error":"the review timed out"}}`}
+	cases["a plan rejected after the last round"] = [2]string{"plan", `{"requiredSkills":{"implement":["a"],"test":["b"],"review":["c"]},` +
+		`"gapAnalysis":{"findings":[{"finding":"no error path","answer":"task 3"}]},"planReview":{"verdict":"rejected","rounds":3,"remainingIssues":[{"issue":"i","evidence":"e"}]}}`}
+	cases["an implement handoff with fields it does not declare"] = [2]string{"implement", `{"proof":[` + handoffProof + `],"rebase2":{"onto":"main"},"summary":"done"}`}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			workspace := t.TempDir()
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", tc[0], "--data", tc[1]}, &out, &errb); code != 0 {
+				t.Fatalf("handoff write --phase %s %s = %d: %s", tc[0], tc[1], code, errb.String())
+			}
+			written, err := os.ReadFile(filepath.Join(workspace, ".legion", tc[0]+".json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got, sent map[string]any
+			if err := json.Unmarshal(written, &got); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tc[1]), &sent); err != nil {
+				t.Fatal(err)
+			}
+			for key, value := range sent {
+				if !reflect.DeepEqual(got[key], value) {
+					t.Fatalf("%s.json %s = %v, want %v as sent", tc[0], key, got[key], value)
+				}
+			}
+			if got["phase"] != tc[0] || got["schemaVersion"] != float64(1) || got["completed"] == nil {
+				t.Fatalf("%s.json = %v, want the phase, schemaVersion 1 and completed the command writes", tc[0], got)
+			}
+		})
+	}
+}
+
+// The planner's role prompt shows each shape of its two plan checks as JSON
+// (packages/pi-envoy/roles/planner.md, "Plan handoff"); a planner that records them as shown is
+// not refused.
+func TestHandoffWriteAcceptsEveryPlanCheckShapeThePlannerPromptShows(t *testing.T) {
+	prompt, err := os.ReadFile(filepath.Join(testRolePromptsDir(t), "planner.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shapes := func(field string) []string {
+		for _, line := range strings.Split(string(prompt), "\n") {
+			if strings.HasPrefix(line, "- `"+field+"`:") {
+				var found []string
+				for _, match := range regexp.MustCompile("`(\\{[^`]*\\})`").FindAllStringSubmatch(line, -1) {
+					found = append(found, strings.NewReplacer("…", "x", ": N", ": 1").Replace(match[1]))
+				}
+				return found
+			}
+		}
+		t.Fatalf("planner.md shows no %s", field)
+		return nil
+	}
+	gapAnalyses, planReviews := shapes("gapAnalysis"), shapes("planReview")
+	var verdicts []string
+	for _, review := range planReviews {
+		var shown struct {
+			Verdict string  `json:"verdict"`
+			Rounds  float64 `json:"rounds"`
+		}
+		if err := json.Unmarshal([]byte(review), &shown); err != nil {
+			t.Fatalf("planner.md's planReview %s: %v", review, err)
+		}
+		verdicts = append(verdicts, shown.Verdict)
+		if shown.Verdict == "rejected" && shown.Rounds != planReviewMaxRounds {
+			t.Fatalf("planner.md records a rejection at round %v, want the last, %d", shown.Rounds, planReviewMaxRounds)
+		}
+	}
+	if len(gapAnalyses) != 2 || !slices.Equal(verdicts, []string{"approved", "rejected", "failed"}) {
+		t.Fatalf("planner.md shows gapAnalysis %v and planReview verdicts %v, want two shapes and approved, rejected, failed", gapAnalyses, verdicts)
+	}
+	skills := `{"implement":["none: x"],"test":["none: x"],"review":["none: x"]}`
+	for _, gapAnalysis := range gapAnalyses {
+		for _, planReview := range planReviews {
+			data := `{"requiredSkills":` + skills + `,"gapAnalysis":` + gapAnalysis + `,"planReview":` + planReview + `}`
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", t.TempDir(), "--phase", "plan", "--data", data}, &out, &errb); code != 0 {
+				t.Fatalf("handoff write --phase plan %s = %d: %s", data, code, errb.String())
+			}
+		}
 	}
 }
 
@@ -342,7 +534,7 @@ func TestHandoffCompleteAcceptsTheHandoffItsRolePromptWrites(t *testing.T) {
 			workspace, jj := handoffRepo(t)
 			t.Chdir(workspace)
 			var out, errb bytes.Buffer
-			if code := run(context.Background(), []string{"legion", "handoff", "write", "--phase", tc.phase, "--data", `{"summary":"done"}`}, &out, &errb); code != 0 {
+			if code := run(context.Background(), []string{"legion", "handoff", "write", "--phase", tc.phase, "--data", writableHandoffs[tc.phase]}, &out, &errb); code != 0 {
 				t.Fatalf("handoff write --phase %s = %d: %s", tc.phase, code, errb.String())
 			}
 			handoffJJ(t, jj, workspace, "commit", "-m", tc.phase+": record handoff")
@@ -382,7 +574,7 @@ func TestHandoffCompleteRefusesWhenOnlyAStaleBaseHandoffIsCommitted(t *testing.T
 	}
 	handoffJJ(t, jj, workspace, "commit", "-m", "feat: the product change")
 	var out, errb bytes.Buffer
-	if code := run(context.Background(), []string{"legion", "handoff", "write", "--phase", "implement", "--data", `{"issue":"THIS-1"}`}, &out, &errb); code != 0 {
+	if code := run(context.Background(), []string{"legion", "handoff", "write", "--phase", "implement", "--data", writableHandoffs["implement"]}, &out, &errb); code != 0 {
 		t.Fatalf("handoff write = %d: %s", code, errb.String())
 	}
 	t.Setenv("LEGION_ROLE", "implementer")
