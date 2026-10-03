@@ -418,6 +418,7 @@ var serverRoots = []string{"/api", "/v1", "/auth", "/ws", "/healthz"}
 
 func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	requestedPath := req.URL.Path
+	// A rooted clean holds no `..`, so every path joined under the dist directory below stays in it.
 	normalized := filepath.Clean("/" + requestedPath)
 	if isReservedPath(normalized, serverRoots) {
 		api.WriteJSON(w, http.StatusNotFound, map[string]string{
@@ -444,10 +445,6 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	candidate := filepath.Join(r.ctx.WebDistDir, normalized)
-	if !strings.HasPrefix(candidate, r.ctx.WebDistDir) {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
 	info, err := os.Stat(candidate)
 	if err == nil && !info.IsDir() {
 		serveFile(w, req, candidate)

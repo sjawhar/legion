@@ -1,4 +1,4 @@
-import { fakeGithubPort } from "./harness-ports";
+import { harnessPorts } from "./harness-ports";
 
 // Minimal GitHub App API for the architecture-source access check and the
 // architecture importer: the installation lookup, the installation-token mint,
@@ -31,7 +31,7 @@ let repos = new Map<string, FakeRepo>();
 
 Bun.serve({
   hostname: "127.0.0.1",
-  port: fakeGithubPort,
+  port: harnessPorts.fakeGithub.port,
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "PUT" && url.pathname === "/__fixture/repos") {
@@ -127,4 +127,4 @@ Bun.serve({
   },
 });
 
-console.log(`fake github listener on 127.0.0.1:${fakeGithubPort}`);
+console.log(`fake github listener on 127.0.0.1:${harnessPorts.fakeGithub.port}`);
