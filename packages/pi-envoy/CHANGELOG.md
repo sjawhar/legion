@@ -10,7 +10,7 @@
   required, bounded `specDepartures` field in `.legion/plan.json`: `[]` means no departure; every
   nonempty record names the spec, plan, evidence and whether the Summary, Acceptance, scope or a
   settled decision changes. `legion handoff write` refuses an omitted, malformed or oversized
-  record. The reviewer reads the plan beside the spec.
+  record, including undeclared nested fields. The reviewer reads the plan beside the spec.
 - The role prompts (`roles/`) move into the daemon module, `packages/daemon/internal/prompts/roles`,
   which the `legion` binary embeds (LEGION-223). The package never shipped them (its `files` is
   `dist` and `agents`), so a commit that changes only a role prompt no longer cuts a plugin release.

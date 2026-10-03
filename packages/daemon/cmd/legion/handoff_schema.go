@@ -221,6 +221,28 @@ func object(fields ...field) rule {
 	}
 }
 
+// strictObject holds a prompt-facing record to exactly its declared fields. Unlike object, it
+// refuses unknown fields so unbounded data cannot hide under a record with explicit size limits.
+func strictObject(fields ...field) rule {
+	declared := make(map[string]struct{}, len(fields))
+	for _, f := range fields {
+		declared[f.key] = struct{}{}
+	}
+	permissive := object(fields...)
+	return func(c *checker, path string, value any, present bool) {
+		permissive(c, path, value, present)
+		fieldsOf, ok := value.(map[string]any)
+		if !ok {
+			return
+		}
+		for key := range fieldsOf {
+			if _, known := declared[key]; !known {
+				c.add(join(path, key), "Invalid input: unknown field")
+			}
+		}
+	}
+}
+
 // refined is r, then across, a rule across the object's fields, once r found every field there.
 func refined(r rule, across func(c *checker, path string, fields map[string]any)) rule {
 	return func(c *checker, path string, value any, present bool) {
@@ -259,12 +281,12 @@ var (
 		field{"observed", nonEmpty}, field{"headSha", nonEmpty}, field{"negativeControl", nonEmpty},
 	)
 	specDepartureText    = boundedNonEmpty(maxSpecDepartureTextBytes)
-	specDepartureOutcome = refined(object(
+	specDepartureOutcome = refined(strictObject(
 		field{"kind", oneOf("unchanged", "changed")},
 		field{"summary", optional(boundedArray(specDepartureText, 1, maxSpecDepartureOutcomeItems))},
 		field{"acceptance", optional(boundedArray(specDepartureText, 1, maxSpecDepartureOutcomeItems))},
 		field{"scope", optional(specDepartureText)},
-		field{"settledDecisions", optional(boundedArray(object(
+		field{"settledDecisions", optional(boundedArray(strictObject(
 			field{"decision", specDepartureText}, field{"detail", specDepartureText},
 		), 1, maxSpecDepartureOutcomeItems))},
 	), func(c *checker, path string, fields map[string]any) {
@@ -282,7 +304,7 @@ var (
 			c.add(path, "a changed outcome names the changed Summary, Acceptance, scope or settled decision")
 		}
 	})
-	specDeparture = object(
+	specDeparture = strictObject(
 		field{"spec", specDepartureText},
 		field{"plan", specDepartureText},
 		field{"evidence", specDepartureText},

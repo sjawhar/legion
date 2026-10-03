@@ -149,6 +149,7 @@ func TestHandoffWriteRefusesWhatItsPhasesRulesRefuseNamingEachField(t *testing.T
 	departure := `{"spec":"the plan polls the uploader","plan":"the plan reads its event channel","evidence":"the measurement covers every required event","outcome":{"kind":"unchanged"}}`
 	tooManyDepartures := `[` + strings.TrimSuffix(strings.Repeat(departure+",", maxSpecDepartures+1), ",") + `]`
 	tooLongDeparture := `{"spec":"` + strings.Repeat("x", maxSpecDepartureTextBytes+1) + `","plan":"the plan reads its event channel","evidence":"the measurement covers every required event","outcome":{"kind":"unchanged"}}`
+	tooLongUnknown := strings.Repeat("x", 5000)
 	for _, tc := range []struct {
 		name, phase, data string
 		// fields are the fields the refusal names, in its order.
@@ -180,6 +181,8 @@ func TestHandoffWriteRefusesWhatItsPhasesRulesRefuseNamingEachField(t *testing.T
 		{"a plan whose departures are an object", "plan", plan("specDepartures", `{"spec":"the plan polls"}`), []string{"specDepartures"}},
 		{"a plan with a malformed departure", "plan", plan("specDepartures", `[{"spec":"","plan":"the plan reads its event channel","evidence":"the measurement covers every required event","outcome":{"kind":"changed"}}]`), []string{"specDepartures.0.spec", "specDepartures.0.outcome"}},
 		{"a plan that marks a changed scope unchanged", "plan", plan("specDepartures", `[{"spec":"the plan changes a child boundary","plan":"the plan moves work to a new child","evidence":"the measured boundary excludes the work","outcome":{"kind":"unchanged","scope":"the child now owns the work"}}]`), []string{"specDepartures.0.outcome.scope"}},
+		{"a plan with an unknown oversized departure field", "plan", plan("specDepartures", `[{"spec":"the plan polls the uploader","plan":"the plan reads its event channel","evidence":"the measurement covers every required event","outcome":{"kind":"unchanged"},"extra":"`+tooLongUnknown+`"}]`), []string{"specDepartures.0.extra"}},
+		{"a plan with an unknown oversized outcome field", "plan", plan("specDepartures", `[{"spec":"the plan polls the uploader","plan":"the plan reads its event channel","evidence":"the measurement covers every required event","outcome":{"kind":"unchanged","extra":"`+tooLongUnknown+`"}}]`), []string{"specDepartures.0.outcome.extra"}},
 		{"a plan with too many departures", "plan", plan("specDepartures", tooManyDepartures), []string{"specDepartures"}},
 		{"a plan with a departure that is too long", "plan", plan("specDepartures", `[`+tooLongDeparture+`]`), []string{"specDepartures.0.spec"}},
 		{"a plan's declared field of the wrong type, before its three rules", "plan", `{"taskCount":"3"}`, []string{"taskCount"}},
