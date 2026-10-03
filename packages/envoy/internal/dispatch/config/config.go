@@ -30,10 +30,15 @@ type EnvoyConfig struct {
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
-// LoadOptions controls where Load looks for config files.
+// LoadOptions controls where Load looks for config files and environment overrides.
 type LoadOptions struct {
 	CWD     string
 	HomeDir string
+	// Environment is where Load reads the DISPATCH_SERVER_URL and NATS_URLS overrides, as
+	// os.LookupEnv answers: a variable that is set overrides the files, even when it is empty.
+	// It is required: envoy-dispatch hands Load its settings table's lookup, and any other
+	// caller says which environment it means.
+	Environment func(string) (string, bool)
 }
 
 var dispatchKnownKeys = map[string]struct{}{
@@ -55,10 +60,13 @@ func (e *InvalidConfigError) Error() string {
 }
 
 // Load reads user and repo config and applies DISPATCH_SERVER_URL and NATS_URLS
-// environment overrides. A missing file is not an error. A file that exists
+// environment overrides from opts.Environment. A missing file is not an error. A file that exists
 // but fails validation (an unrecognized key, a malformed value) stops the load
 // and returns an *InvalidConfigError naming the file and the key.
 func Load(opts LoadOptions) (*EnvoyConfig, error) {
+	if opts.Environment == nil {
+		return nil, errors.New("config: LoadOptions.Environment is required")
+	}
 	cwd := opts.CWD
 	if cwd == "" {
 		var err error
@@ -91,14 +99,14 @@ func Load(opts LoadOptions) (*EnvoyConfig, error) {
 	if repoCfg != nil {
 		merged = mergeConfig(merged, repoCfg)
 	}
-	if err := applyEnvironmentOverrides(merged); err != nil {
+	if err := applyEnvironmentOverrides(merged, opts.Environment); err != nil {
 		return nil, err
 	}
 	return merged, nil
 }
 
-func applyEnvironmentOverrides(cfg *EnvoyConfig) error {
-	if raw, set := os.LookupEnv("DISPATCH_SERVER_URL"); set {
+func applyEnvironmentOverrides(cfg *EnvoyConfig, lookup func(string) (string, bool)) error {
+	if raw, set := lookup("DISPATCH_SERVER_URL"); set {
 		serverURL, err := dispatchServerURL(raw)
 		if err != nil {
 			return fmt.Errorf("DISPATCH_SERVER_URL=%q (expected an absolute http(s) URL without a path)", raw)
@@ -108,7 +116,7 @@ func applyEnvironmentOverrides(cfg *EnvoyConfig) error {
 		}
 		cfg.Dispatch.ServerURL = serverURL
 	}
-	if raw, set := os.LookupEnv("NATS_URLS"); set {
+	if raw, set := lookup("NATS_URLS"); set {
 		natsURLs, err := natsURLs(raw)
 		if err != nil {
 			return fmt.Errorf("NATS_URLS=%q (expected a comma-separated list of NATS URLs)", raw)

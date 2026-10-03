@@ -6,6 +6,14 @@ application state in Postgres.
 
 ## Required configuration
 
+Every environment variable the server and its subcommands read is a row of one table,
+`cmd/dispatch/settings.go`: `main` reads each row once, every reader takes its value from that
+read, and a test fails on any other environment read in `cmd/dispatch` or `internal/dispatch`.
+`envoy-dispatch settings` prints the table (name, `_FILE` form, default, whether it is required,
+and a one-line description) without a database or a listener, and the docs site's Dispatch
+configuration reference is generated from it. The tables below explain the settings that need
+more than a line.
+
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | Postgres connection string. Dispatch applies embedded migrations before serving. The pool size is fixed in code (`store.sharedPoolSize`), so a connection string carrying `pool_max_conns` is refused at startup; remove the parameter. |

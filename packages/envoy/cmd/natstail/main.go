@@ -34,7 +34,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	cfg, err := config.Load(config.LoadOptions{})
+	cfg, err := config.Load(config.LoadOptions{Environment: os.LookupEnv})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "natstail: load envoy config: %v\n", err)
 		os.Exit(1)

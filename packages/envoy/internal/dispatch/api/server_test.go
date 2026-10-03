@@ -1727,7 +1727,7 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("establish alice's session: %v", err)
 	}
-	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", generation, "signing-key"))
+	cookie, err := http.ParseSetCookie(auth.IssueSessionCookie("alice", generation, "signing-key", true))
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}

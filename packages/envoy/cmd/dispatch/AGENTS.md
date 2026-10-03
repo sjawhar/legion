@@ -20,6 +20,20 @@ database has not applied, read-only, run before the service rolls (README
 "Pre-deploy census"); `runSubcommand` refuses an argument it does not know with
 exit 2 instead of serving, since serving migrates.
 
+Every environment variable `cmd/dispatch` reads is a row of the settings table
+(`cmd/dispatch/settings.go`): `main` reads every row once (`processSettings`),
+`resolveBootConfig` and the subcommands take their values from that read
+(`settingValues`, which panics on a name the table does not list), and each
+reader in `internal/dispatch` is handed its value — a parameter, an option
+(`routes.AppContextOptions.InsecureCookie`/`EnvoyToken`, `envoy.WithToken`),
+or the table's lookup (`config.LoadOptions.Environment`, `bus.WithEnvironment`,
+`auth.LoadAppFromEnv`). A new setting is a new row, never an `os.Getenv`:
+`TestNoReaderBypassesTheSettingsTable` fails on any other environment read under
+`cmd/dispatch` or `internal/dispatch`, and `TestEverySettingReachesItsReader`
+fails until the row has a case that hands it to its reader. `envoy-dispatch
+settings` prints the table, and the docs site's configuration reference
+(`docs/site/generators/dispatch-config.ts`) is generated from it.
+
 `dispatchHandler` mounts the one `GET /healthz` the process serves on its own
 mux, above the dashboard router, and the probe reads the database through
 `store.Pool.Healthy` — a one-connection pool nothing else uses, under

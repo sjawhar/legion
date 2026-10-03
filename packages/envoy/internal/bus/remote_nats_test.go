@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -137,6 +138,44 @@ func TestConnectReachesANonLocalNATSWhenTheRunSaysSo(t *testing.T) {
 	after := streamConfig(t, js)
 	if !slices.Equal(after.Subjects, before.Subjects) {
 		t.Fatalf("stream subjects = %v, want the deployed %v", after.Subjects, before.Subjects)
+	}
+}
+
+// A connect handed an environment (WithEnvironment: envoy-dispatch hands its settings table) reads
+// the reach and the credential there and nowhere else, for Connect, ConnectOwningStream and Dial
+// alike. Every case fails before it dials.
+func TestAHandedEnvironmentReplacesTheProcessEnvironment(t *testing.T) {
+	const remote = "nats://nats.example:4222"
+	t.Setenv(bus.AllowRemoteEnvVar, "1")
+	t.Setenv("NATS_NKEY_SEED_FILE", filepath.Join(t.TempDir(), "the process's seed"))
+	handed := func(values map[string]string) bus.ConnectOption {
+		return bus.WithEnvironment(func(key string) (string, bool) {
+			value, set := values[key]
+			return value, set
+		})
+	}
+	connects := map[string]func(bus.ConnectOption) error{
+		"Connect": func(option bus.ConnectOption) error {
+			_, err := bus.Connect([]string{remote}, option)
+			return err
+		},
+		"ConnectOwningStream": func(option bus.ConnectOption) error {
+			_, err := bus.ConnectOwningStream([]string{remote}, option)
+			return err
+		},
+		"Dial": func(option bus.ConnectOption) error {
+			_, err := bus.Dial("handed", []string{remote}, option)
+			return err
+		},
+	}
+	for name, connect := range connects {
+		if err := connect(handed(nil)); !errors.Is(err, bus.ErrRemoteNATS) {
+			t.Errorf("%s with no opt-in handed: %v, want a refusal whatever the process says", name, err)
+		}
+		err := connect(handed(map[string]string{bus.AllowRemoteEnvVar: "1", "NATS_NKEY_SEED": "the handed seed"}))
+		if err == nil || !strings.Contains(err.Error(), "NATS_NKEY_SEED does not hold a valid nkey seed") {
+			t.Errorf("%s with the opt-in and a seed handed: %v, want the handed seed refused", name, err)
+		}
 	}
 }
 

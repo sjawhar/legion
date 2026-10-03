@@ -25,7 +25,7 @@ events to the right session.
 | Webhook config         | `internal/webhook/config.go`                     | ENVOY_WEBHOOKS parsing, startup validation         |
 | Listener behavior      | `cmd/listener/main.go`                    | subscribe/match/deliver flow                       |
 | NATS client            | `internal/bus/nats.go`, `internal/bus/recovery.go` | connect, subscribe and publish; reconnect, recovery and the reconnect hooks |
-| NATS credential        | `internal/bus/nkey.go`                    | every bus connection's nkey user: `NATS_NKEY_SEED_FILE` (wins) or `NATS_NKEY_SEED`; unusable refuses, neither set connects without one |
+| NATS credential        | `internal/bus/nkey.go`                    | every bus connection's nkey user: `NATS_NKEY_SEED_FILE` (wins) or `NATS_NKEY_SEED`; unusable refuses, neither set connects without one. A connect reads these and `ENVOY_ALLOW_REMOTE_NATS` from the process environment, or from the lookup `bus.WithEnvironment` hands it (envoy-dispatch's settings table) |
 | Stream definition      | `internal/bus/stream.go`                  | `ENVOY_NOTIFICATIONS` subjects, retention and duplicate window, and their reconciliation at start |
 | Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
 | Interest storage       | `internal/store/kv.go`                    | JetStream KV subscriptions                         |
@@ -33,6 +33,7 @@ events to the right session.
 | Topic matching         | `internal/routing/match.go`               | wildcard matching                                  |
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
+| Dispatch settings | `cmd/dispatch/settings.go` | the one table of every environment variable envoy-dispatch reads; `envoy-dispatch settings` prints it, and a test fails on any other environment read under `cmd/dispatch` or `internal/dispatch` |
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`) |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |

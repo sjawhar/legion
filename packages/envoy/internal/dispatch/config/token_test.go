@@ -10,7 +10,7 @@ func TestLoadAcceptsDispatchToken(t *testing.T) {
 	mustWrite(t, filepath.Join(home, ".config", "opencode", "envoy.json"), `{
 		"dispatch": {"token": "agent-token"}
 	}`)
-	cfg, err := Load(LoadOptions{CWD: t.TempDir(), HomeDir: home})
+	cfg, err := Load(LoadOptions{CWD: t.TempDir(), HomeDir: home, Environment: environment(nil)})
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestLoadMergesDispatchTokenFromRepoConfig(t *testing.T) {
 	mustWrite(t, filepath.Join(cwd, ".opencode", "envoy.json"), `{
 		"dispatch": {"token": "repo-token"}
 	}`)
-	cfg, err := Load(LoadOptions{CWD: cwd, HomeDir: home})
+	cfg, err := Load(LoadOptions{CWD: cwd, HomeDir: home, Environment: environment(nil)})
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
