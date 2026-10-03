@@ -21,7 +21,9 @@ import {
   expectMark,
   marginCard,
   markSpan,
+  openedThreadCard,
   selectEditorText,
+  setSheet,
 } from "./editor";
 import { resetDatabase, setCommentAuthorService } from "./seed";
 import { asUser } from "./users";
@@ -31,23 +33,6 @@ const session = {
   as: "agent" as const,
 };
 const initialMarkdown = "The quick brown fox";
-
-// On the phone layout the margin is a bottom sheet over the document. Acting on a selection
-// opens it; close it again before selecting another range, as a person would.
-async function setSheet(page: Page, project: string, open: boolean): Promise<void> {
-  if (project !== "iphone") {
-    return;
-  }
-  const sheet = page.getByTestId("margin-sheet");
-  if ((await sheet.getAttribute("data-expanded")) !== String(open)) {
-    if (open) {
-      await page.getByRole("button", { name: /Open review panel/ }).click();
-    } else {
-      await page.mouse.click(1, 1);
-    }
-  }
-  await expect(sheet).toHaveAttribute("data-expanded", String(open));
-}
 
 async function expandedConversationThread(page: Page, rootId: string): Promise<Locator> {
   const turn = page.locator(`[data-turn="comment:${rootId}"]`);
@@ -536,10 +521,7 @@ test("a document mark opens its thread in the margin and stays on the document",
     // Proof's model: the thread opens beside the document (in the phone's Thread dialog on a
     // small viewport); the reader never leaves the document.
     const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    const card =
-      testInfo.project.name === "iphone"
-        ? phoneThread.getByTestId(`margin-comment-${comment.id}`)
-        : marginCard(page, comment.id);
+    const card = openedThreadCard(page, testInfo.project.name, comment.id);
     await expect(card).toHaveAttribute("aria-current", "true");
     await expect(card).toContainText("focus this");
     await expect(card).toContainText("brown");
@@ -863,11 +845,7 @@ test("a comment a verified service token wrote names its service account in the 
     await setSheet(page, testInfo.project.name, true);
     // Only an expanded thread carries the author line under each comment.
     await marginCard(page, comment.id).locator('button[aria-expanded="false"]').click();
-    const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    const thread =
-      (await phoneThread.count()) === 0
-        ? marginCard(page, comment.id)
-        : phoneThread.getByTestId(`margin-comment-${comment.id}`);
+    const thread = openedThreadCard(page, testInfo.project.name, comment.id);
     await expect(thread).toContainText("Implementer (as legion/legion-worker)");
   } finally {
     await alice.close();

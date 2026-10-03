@@ -14,7 +14,7 @@ import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 // "bob" names the session that opened the ask - authenticated over the API with
-// the agent bearer token, not a human X-Dispatch-User login - so its own reply
+// the agent bearer token, not a human's signed-in session - so its own reply
 // (clause 2 below) exercises the same "agent replies live" path a real Legion
 // session would use via dispatch_comment(reply_to_ask).
 const bobSession = {
