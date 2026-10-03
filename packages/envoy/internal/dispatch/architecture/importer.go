@@ -169,7 +169,13 @@ func (i *Importer) Sync(ctx context.Context, project string) (model.Architecture
 	if importErr != nil {
 		return i.failed(ctx, parent, source, importErr)
 	}
-	return i.project(ctx, source, commit, listing.SHA, files, parsed)
+	updated, importErr := i.project(ctx, source, commit, listing.SHA, files, parsed)
+	// A projection PostgreSQL refused is recorded like any other import failure. A source that
+	// moved or was deleted while the sync ran has nothing to record it on.
+	if importErr != nil && !errors.Is(importErr, errSourceMoved) && !errors.Is(importErr, ErrNoSource) {
+		return i.failed(ctx, parent, source, importErr)
+	}
+	return updated, importErr
 }
 
 // failed records importErr on the source row and hands both back: the Sync

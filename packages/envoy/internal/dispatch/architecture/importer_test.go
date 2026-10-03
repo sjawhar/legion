@@ -657,6 +657,72 @@ func TestSyncRejectsBinaryFilesOnTheRow(t *testing.T) {
 	}
 }
 
+// YAML spells U+0000 in plain ASCII ("\0", "\x00", "\u0000"), so a file the byte check passes can
+// still decode to front matter PostgreSQL cannot store. Each decoded string is checked as well, and
+// the problem is named on the row as a binary file's is, not an internal error escaping the
+// projection.
+func TestSyncRejectsAFrontMatterNulOnTheRow(t *testing.T) {
+	ctx := context.Background()
+	for field, matter := range map[string]string{
+		"title":      `title: "Ser\0ver"`,
+		"parent":     `parent: "a\x00pi"`,
+		"depends_on": `depends_on: ["st\u0000ore"]`,
+		"paths":      `paths: ["src/\0x"]`,
+	} {
+		t.Run(field, func(t *testing.T) {
+			files := validFiles()
+			files["server.md"] = "---\n" + matter + "\n---\nThe server.\n"
+			importer, database := newImporterFixture(t, &fakeSource{t: t, files: files})
+			source, err := importer.Sync(ctx, "CORE")
+			if err == nil {
+				t.Fatal("front matter holding a NUL was accepted")
+			}
+			want := "server.md: front matter " + field + " must be valid UTF-8 text without NUL characters"
+			if source.Project == "" || source.LastError == nil || !strings.Contains(*source.LastError, want) {
+				t.Fatalf("row after sync: %+v err=%v, want last_error naming %q", source, err, want)
+			}
+			if got := componentRows(t, database); len(got) != 0 {
+				t.Fatalf("a rejected set was projected: %#v", got)
+			}
+			if got := projectEvents(t, database); len(got) != 1 || !strings.HasPrefix(got[0], "architecture.sync_failed ") {
+				t.Fatalf("events = %#v", got)
+			}
+		})
+	}
+}
+
+// A projection PostgreSQL refuses for any reason is a failure on the row as a model problem is: the
+// source says why the import stopped, one sync_failed event says so, and the previous projection
+// stays, rather than an error that records nothing.
+func TestAProjectionFailureIsRecordedOnTheRow(t *testing.T) {
+	ctx := context.Background()
+	fake := &fakeSource{t: t, files: validFiles()}
+	importer, database := newImporterFixture(t, fake)
+	if _, err := importer.Sync(ctx, "CORE"); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	before := componentRows(t, database)
+	if _, err := database.Pool.Exec(ctx, `alter table components add constraint test_refuses_boom check (title <> 'Boom')`); err != nil {
+		t.Fatalf("add the refusing constraint: %v", err)
+	}
+	fake.commit = "commit-two"
+	fake.files = validFiles()
+	fake.files["server.md"] = "---\ntitle: Boom\n---\nThe server.\n"
+	source, err := importer.Sync(ctx, "CORE")
+	if err == nil {
+		t.Fatal("a projection the database refused reported success")
+	}
+	if source.Project == "" || source.LastError == nil || !strings.Contains(*source.LastError, "project component server") {
+		t.Fatalf("row after sync: %+v err=%v, want last_error naming the refused component", source, err)
+	}
+	if got := componentRows(t, database); !reflect.DeepEqual(got, before) {
+		t.Fatalf("components after the refused projection = %#v, want the previous %#v", got, before)
+	}
+	if got := projectEvents(t, database); len(got) != 2 || !strings.HasPrefix(got[1], "architecture.sync_failed ") {
+		t.Fatalf("events = %#v", got)
+	}
+}
+
 // What one failure writes — last_error, the sync_failed payload, the
 // Settings row — is capped: the first problems and a count of the rest.
 func TestRecordedFailureIsCapped(t *testing.T) {
