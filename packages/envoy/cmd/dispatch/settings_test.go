@@ -415,6 +415,21 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("AgentToken = %q", boot.AgentToken)
 			}
 			refusedWith(t, map[string]string{"DISPATCH_AGENT_TOKEN": ""}, "DISPATCH_AGENT_TOKEN")
+			// The bearer the router takes as the shared token: any other is looked up as a
+			// personal token, which the store does not hold.
+			t.Run("router", func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+				request.Header.Set("Authorization", "Bearer table-token")
+				response := httptest.NewRecorder()
+				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_AGENT_TOKEN": "table-token"}), routes.AppContextOptions{Store: storetest.Open(t)}).ServeHTTP(response, request)
+				var caller struct {
+					Kind  string  `json:"kind"`
+					Owner *string `json:"owner"`
+				}
+				if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &caller) != nil || caller.Kind != "agent" || caller.Owner != nil {
+					t.Errorf("DISPATCH_AGENT_TOKEN=table-token: GET /api/v1/whoami with that bearer answered %d %s, want 200 naming the shared token (an agent with no owner)", response.Code, response.Body.String())
+				}
+			})
 		},
 		"DISPATCH_IDENTITY": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_IDENTITY": "header:X-Dispatch-User"}); boot.IdentityHeader != "X-Dispatch-User" {
@@ -532,7 +547,8 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			refusedWith(t, map[string]string{"ENVOY_URL": "listener.example:9020"}, "ENVOY_URL")
 		},
 		"ENVOY_TOKEN": func(t *testing.T) {
-			// The bearer the Envoy listener receives when GET /api/v1/agents reads its sessions.
+			// The bearer the Envoy listener receives when a signed-in human's GET /api/v1/agents
+			// reads its sessions.
 			sent := func(overrides map[string]string) string {
 				t.Helper()
 				authorization := make(chan string, 1)
@@ -542,8 +558,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				}))
 				defer listener.Close()
 				overrides["ENVOY_URL"] = listener.URL
-				request := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
-				request.Header.Set("Authorization", "Bearer agent-token")
+				request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil), "alice")
 				response := httptest.NewRecorder()
 				routerFor(t, resolveWith(t, overrides), routes.AppContextOptions{}).ServeHTTP(response, request)
 				if response.Code != http.StatusOK {
@@ -815,8 +830,8 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// The routes the flag mounts: the e2e harness's hook that drops every open event stream.
 			t.Run("router", func(t *testing.T) {
 				for value, want := range map[string]int{"1": http.StatusOK, "": http.StatusNotFound} {
-					request := httptest.NewRequest(http.MethodPost, "/api/v1/events/_test/disconnect", nil)
-					request.Header.Set("Authorization", "Bearer agent-token")
+					request := signedIn(t, httptest.NewRequest(http.MethodPost, "/api/v1/events/_test/disconnect", nil), "alice")
+					request.Header.Set("Sec-Fetch-Site", "same-origin")
 					response := httptest.NewRecorder()
 					routerFor(t, resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": value}), routes.AppContextOptions{}).ServeHTTP(response, request)
 					if response.Code != want {
