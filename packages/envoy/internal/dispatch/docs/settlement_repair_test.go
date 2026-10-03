@@ -471,12 +471,10 @@ func TestSettlementThatStampsAndRepairsReleasesItsSlots(t *testing.T) {
 }
 
 // A room that fails while a settlement's repair commits into it - an append of the room fails, or
-// another write gives up - recovers, and its readers' wait for that recovery ends. A failed room's
-// eviction compacts under the document's advisory lock, which the settlement holds until it
-// returns, and the settlement's commit has to reach the room's persistence before it can return:
-// an eviction that retired the room's persistence worker under the commit held the settlement, the
-// settlement held the eviction, and every reader of the document waited until the server
-// restarted (LEGION-498).
+// another write gives up - recovers, and its readers' wait for that recovery ends: the failed
+// room's eviction, which compacts under the document's advisory lock the settlement holds, waits
+// for the repair's commit to reach the room's persistence rather than retiring the room's worker
+// under it (roomServer, LEGION-498).
 func TestARoomThatFailsWhileASettlementCommitsIntoItRecovers(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -489,7 +487,7 @@ func TestARoomThatFailsWhileASettlementCommitsIntoItRecovers(t *testing.T) {
 	// whose exit compaction then waits for the document's lock, or it waits for the commit to reach
 	// the room's persistence first.
 	waitFor(t, 10*time.Second, "the failed room's eviction to retire its worker or wait for the repair's commit", func() bool {
-		return closeWaitsForRepair() || advisoryLockWaits(t, service) > 0
+		return closeWaitsForRepair() || lockWaits(t, context.Background(), service.store, "select pg_advisory_lock(%") > 0
 	})
 	pause.let()
 	select {
@@ -665,21 +663,6 @@ func endRoomLockHolders(t *testing.T, service *Service) {
 // to finish committing into that room (roomServer).
 func closeWaitsForRepair() bool {
 	return goroutinesIn("(*roomServer).CloseRoom", "sync.(*RWMutex).Lock") > 0
-}
-
-// advisoryLockWaits counts the sessions of the test's database waiting for a session-level
-// advisory lock: a room worker's compaction or append waiting for a document's lock.
-func advisoryLockWaits(t *testing.T, service *Service) int {
-	t.Helper()
-	var waiting int
-	if err := service.store.Pool.QueryRow(context.Background(), `
-		select count(*) from pg_stat_activity
-		where datname = current_database() and wait_event_type = 'Lock'
-		  and query like 'select pg_advisory_lock(%'
-	`).Scan(&waiting); err != nil {
-		t.Fatalf("inspect database locks: %v", err)
-	}
-	return waiting
 }
 
 // repairCommitPause holds a room's next repair commit in the room's update observers once armed,
