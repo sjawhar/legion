@@ -3,29 +3,12 @@ package store
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
-)
 
-// distinctWords is n words no two alike, `w000001 w000002 …`, a hundred to a line. Each word is a
-// lexeme of its own, which a search vector holds as its seven bytes and five more (an alignment
-// byte, a position count and a position), so 100,000 of them, 800 KB of text, make 1.2 MB: past
-// the 1,048,575 bytes of lexemes and positions Postgres holds in one tsvector.
-func distinctWords(n int) string {
-	var text strings.Builder
-	for word := 1; word <= n; word++ {
-		fmt.Fprintf(&text, "w%06d", word)
-		if word%100 == 0 {
-			text.WriteString("\n")
-		} else {
-			text.WriteString(" ")
-		}
-	}
-	return text.String()
-}
+	"github.com/sjawhar/envoy/internal/dispatch/store/searchtest"
+)
 
 // A text whose whole search vector would pass Postgres's limit on one tsvector is written, and
 // indexed by the words that open it, in every table search reads (LEGION-505). Before 0068 its
@@ -39,7 +22,7 @@ func TestTextPastTheSearchVectorLimitIsWrittenAndIndexedFromItsOpening(t *testin
 		t.Fatalf("migrate: %v", err)
 	}
 	seedSearchDocument(t, ctx, store)
-	text := distinctWords(100_000)
+	text := searchtest.DistinctWords(100_000, "\n")
 
 	var pgErr *pgconn.PgError
 	if _, err := store.Pool.Exec(ctx, `select to_tsvector('english', $1)`, text); !errors.As(err, &pgErr) || pgErr.Code != "54000" {
@@ -82,6 +65,33 @@ func TestTextPastTheSearchVectorLimitIsWrittenAndIndexedFromItsOpening(t *testin
 	}
 	if !key {
 		t.Error("the issue's vector does not hold its key")
+	}
+}
+
+// A text cut to fit is cut between two words. Postgres's parser reads what is left of a word cut
+// short as a word of its own, so a cut at a character count inside `w050000` indexed a lexeme the
+// text does not hold, and a search for it found the text. `intro ` moves every word off the halves'
+// boundaries, which the fixed width of `w000001 w000002 …` alone would put between two words.
+func TestATextCutToFitIsIndexedByWholeWords(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	var fragments []string
+	var opening bool
+	if err := store.Pool.QueryRow(ctx, `
+		select coalesce(array_agg(lexeme) filter (where lexeme <> 'intro' and lexeme !~ '^w[0-9]{6}$'), '{}'),
+		       bool_or(lexeme = 'w000001')
+		  from unnest(tsvector_to_array(search_vector('', $1))) as lexeme`,
+		"intro "+searchtest.DistinctWords(100_000, "\n")).Scan(&fragments, &opening); err != nil {
+		t.Fatalf("index the text: %v", err)
+	}
+	if len(fragments) != 0 {
+		t.Errorf("the vector holds %q, which are not words of the text", fragments)
+	}
+	if !opening {
+		t.Error("the vector does not hold w000001, the text's first numbered word")
 	}
 }
 

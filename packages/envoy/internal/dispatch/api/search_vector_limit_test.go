@@ -8,24 +8,8 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/store/searchtest"
 )
-
-// distinctWords is n words no two alike, `w000001 w000002 …`, joined by separator, with paragraph
-// after every hundredth. Each word is a lexeme of its own, which a search vector holds as its seven
-// bytes and five more, so 100,000 of them - 800 KB of text, inside every write's 1 MiB bound -
-// make 1.2 MB of lexemes and positions: past the 1,048,575 bytes Postgres holds in one tsvector.
-func distinctWords(n int, paragraph string) string {
-	var text strings.Builder
-	for word := 1; word <= n; word++ {
-		fmt.Fprintf(&text, "w%06d", word)
-		if word%100 == 0 {
-			text.WriteString(paragraph)
-		} else {
-			text.WriteString(" ")
-		}
-	}
-	return text.String()
-}
 
 // A document whose whole search vector would pass Postgres's limit on one tsvector is versioned by
 // the edit that writes its text and by an upload of it, and is found by the words that open it
@@ -36,7 +20,7 @@ func distinctWords(n int, paragraph string) string {
 func TestADocumentPastTheSearchVectorLimitVersionsAndIsFound(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
-	markdown := distinctWords(100_000, "\n\n")
+	markdown := searchtest.DistinctWords(100_000, "\n\n")
 
 	before := len(documentVersions(t, handler, issue.PrimaryArtifactID))
 	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -77,9 +61,9 @@ func TestADocumentPastTheSearchVectorLimitVersionsAndIsFound(t *testing.T) {
 // A title whose whole search vector would pass Postgres's limit on one tsvector is far past
 // contracts.IssueTitleMax, so creating an issue with it, forced or not, and retitling one to it are
 // refused before the duplicate check reads a title: the issue titled with its first word, which
-// that check names as its near-duplicate, goes unnamed. Before 0068 such a creation answered 500
-// (`string is too long for tsvector`); with 0068 alone it was created, and every later creation in
-// its project read its 800 KB in the duplicate check. The store's
+// that check names as its near-duplicate, goes unnamed. Without the cap such a creation answered 500
+// (`string is too long for tsvector`), and with the bounded vector alone it was created, and every
+// later creation in its project read its 800 KB in the duplicate check. The store's
 // TestTextPastTheSearchVectorLimitIsWrittenAndIndexedFromItsOpening writes such a title straight
 // into issues, where the trigger still indexes its opening.
 func TestAnIssueTitlePastTheSearchVectorLimitIsRefused(t *testing.T) {
@@ -96,7 +80,7 @@ func TestAnIssueTitlePastTheSearchVectorLimitIsRefused(t *testing.T) {
 	}](t, first).Key
 
 	// The words end in a space, which the routes trim before they count.
-	title := strings.TrimSpace(distinctWords(100_000, " "))
+	title := strings.TrimSpace(searchtest.DistinctWords(100_000, " "))
 	want := fmt.Sprintf("title is %d characters over the %d-character limit (%d/%d)",
 		len(title)-contracts.IssueTitleMax, contracts.IssueTitleMax, len(title), contracts.IssueTitleMax)
 	refused := func(what string, response *httptest.ResponseRecorder) {
