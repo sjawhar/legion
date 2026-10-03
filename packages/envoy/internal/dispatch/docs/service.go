@@ -1049,7 +1049,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	} else if lastActor != nil {
 		eventActor = *lastActor
 	}
-	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, tree, eventActor)
+	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, tree, beforeMarkdown, eventActor)
 	if err != nil {
 		if stamped > 0 {
 			s.discardSuppressedPersistence(room, slot)

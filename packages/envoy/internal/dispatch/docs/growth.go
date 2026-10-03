@@ -30,8 +30,11 @@ import (
 // A write that leaves the document no bigger and no heavier than it was passes, so a document
 // already past the bound - stored before it, or grown by browser edits, which no server write
 // carries - can still be trimmed or split. Each refusal is ErrDocumentTooLarge, served as 413
-// CAP_EXCEEDED. The writes that do not run through applyLive add no caller text: settlement's
-// repairs, the block-id backfill and the sweep of unrecorded marks. What the bound weighs is the
+// CAP_EXCEEDED. Of the writes that do not run through applyLive, the block-id backfill and the
+// sweep of unrecorded marks add no caller text, and settlement's repairs add one: the answer an
+// ask keeps, which settlement writes back into its block when the block returns to the document.
+// Settlement weighs that as a write is weighed (weighRendering) and withholds the answer's text
+// where it would grow the document past the bound (withholdAnswers). What the bound weighs is the
 // document a write leaves, not the history its store keeps: every update stays stored with the
 // content later writes delete, and a cold load builds all of it, so repeated versions and a
 // comment's margin record, which each reply rewrites whole, still grow what a load costs
@@ -50,12 +53,9 @@ type growth struct {
 	margin *marginWatch
 }
 
-// refuseGrowth is the refusal of the write g describes, or nil. Its rendering is refused past
-// either of an upload's limits when it is bigger than before by that measure: longer than before
-// past pmdoc.MaxDocumentBytes, heavier than before past pmdoc.MaxDocumentElements. A rendering the
-// write left as it was - an anchor mark, a margin record, an attribute no rendering carries - is
-// neither, so it is not measured again. before is measured only when a refusal turns on its
-// elements.
+// refuseGrowth is the refusal of the write g describes, or nil. Its rendering is weighed by
+// weighRendering. A rendering the write left as it was - an anchor mark, a margin record, an
+// attribute no rendering carries - is not measured again.
 func refuseGrowth(g growth) error {
 	if err := g.margin.refusal(); err != nil {
 		return err
@@ -66,20 +66,34 @@ func refuseGrowth(g growth) error {
 		}
 		return refuseUnloadable(g.fork, func() bool { return false })
 	}
-	size := pmdoc.MeasureDocument(g.after)
-	if size.TooLong() && len(g.after) > len(g.before) {
-		return fmt.Errorf("%w: a markdown document is at most 1 MiB (%d bytes), and this change would make the document's markdown %d bytes (it was %d); shorten the change, or split the document",
-			ErrDocumentTooLarge, pmdoc.MaxDocumentBytes, len(g.after), len(g.before))
-	}
-	was := sync.OnceValue(func() pmdoc.DocumentSize { return pmdoc.MeasureDocument(g.before) })
-	if size.TooHeavy() && heavier(was(), size) {
-		return fmt.Errorf("%w: this change would make the document's markdown make %s elements, past the %d one document may hold (it made %s); shorten the change, or split the document",
-			ErrDocumentTooLarge, elements(size), pmdoc.MaxDocumentElements, elements(was()))
+	grew, err := weighRendering(g.before, g.after)
+	if err != nil {
+		return err
 	}
 	if g.fork == nil {
 		return nil
 	}
-	return refuseUnloadable(g.fork, func() bool { return len(g.after) > len(g.before) || heavier(was(), size) })
+	return refuseUnloadable(g.fork, grew)
+}
+
+// weighRendering is the refusal of after, a document's rendering once a write has run, against
+// before, its rendering until then: after is refused past either of an upload's limits when it is
+// bigger than before by that measure - longer than before past pmdoc.MaxDocumentBytes, heavier than
+// before past pmdoc.MaxDocumentElements. Otherwise it gives grew, which reports whether after is
+// bigger than before by either measure. A rendering refused by its bytes is not parsed, and before
+// is measured only when a refusal or grew turns on its elements.
+func weighRendering(before, after string) (grew func() bool, err error) {
+	if len(after) > pmdoc.MaxDocumentBytes && len(after) > len(before) {
+		return nil, fmt.Errorf("%w: a markdown document is at most 1 MiB (%d bytes), and this change would make the document's markdown %d bytes (it was %d); shorten the change, or split the document",
+			ErrDocumentTooLarge, pmdoc.MaxDocumentBytes, len(after), len(before))
+	}
+	size := pmdoc.MeasureDocument(after)
+	was := sync.OnceValue(func() pmdoc.DocumentSize { return pmdoc.MeasureDocument(before) })
+	if size.TooHeavy() && heavier(was(), size) {
+		return nil, fmt.Errorf("%w: this change would make the document's markdown make %s elements, past the %d one document may hold (it made %s); shorten the change, or split the document",
+			ErrDocumentTooLarge, elements(size), pmdoc.MaxDocumentElements, elements(was()))
+	}
+	return func() bool { return len(after) > len(before) || heavier(was(), size) }, nil
 }
 
 // maxMarginBytes is the most text a document's margin may hold: the records of every comment and

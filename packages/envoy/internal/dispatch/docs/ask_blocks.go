@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"time"
@@ -103,12 +104,17 @@ func settlementRetracted(ask model.Ask) bool {
 		strings.HasPrefix(ask.Resolution.Reason, SettlementRetractionReason)
 }
 
+// reconcileAskBlocks makes the asks rows and the ask blocks of tree, the document settlement read,
+// agree. before is the document's rendering as settlement read it ("" where it did not render),
+// which the answers settlement writes back into returning blocks are weighed against
+// (withholdAnswers).
 func (s *Service) reconcileAskBlocks(
 	ctx context.Context,
 	tx pgx.Tx,
 	artifactID string,
 	owner artifactOwner,
 	tree *pmdoc.Node,
+	before string,
 	actor model.Actor,
 ) (settlementReconciliation, error) {
 	blocks, invalidBlocks, err := collectAskBlocksForSettlement(tree)
@@ -121,6 +127,17 @@ func (s *Service) reconcileAskBlocks(
 	}
 
 	reconciled := settlementReconciliation{}
+	var rewrites []serverRewrite
+	answered := false
+	rewrite := func(node *pmdoc.Node, ask model.Ask) bool {
+		found := readAskServerState(node)
+		changed, wroteAnswer := setAskServerAttributes(node, ask, false)
+		if changed {
+			rewrites = append(rewrites, serverRewrite{node: node, ask: ask, found: found, event: -1})
+			answered = answered || wroteAnswer
+		}
+		return changed
+	}
 	for _, invalid := range invalidBlocks {
 		delete(rows, invalid.id)
 		if setAskInvalidAttribute(invalid.node, invalid.reason.Error()) {
@@ -138,6 +155,7 @@ func (s *Service) reconcileAskBlocks(
 			))
 		}
 	}
+	invalidChanged := reconciled.changed
 	for _, block := range blocks {
 		ask, exists := rows[block.id]
 		if !exists {
@@ -152,7 +170,7 @@ func (s *Service) reconcileAskBlocks(
 			reconciled.events = append(reconciled.events, documentAskEvent(
 				owner, artifactID, "ask.opened", actor, model.NewAskEventPayload(ask, changes),
 			))
-			if setAskServerAttributes(block.node, ask) {
+			if rewrite(block.node, ask) {
 				reconciled.changed = true
 			}
 			continue
@@ -212,8 +230,9 @@ func (s *Service) reconcileAskBlocks(
 				model.NewAskEditEventPayload(ask, previous, actor, changes),
 			))
 		}
-		if setAskServerAttributes(block.node, ask) {
+		if rewrite(block.node, ask) {
 			reconciled.changed = true
+			rewrites[len(rewrites)-1].event = len(reconciled.events)
 			reconciled.events = append(reconciled.events, documentAskEvent(
 				owner,
 				artifactID,
@@ -222,6 +241,9 @@ func (s *Service) reconcileAskBlocks(
 				model.BlockRepairedEventPayload{BlockID: block.id, DisturbedBy: actor},
 			))
 		}
+	}
+	if answered {
+		reconciled.withholdAnswers(artifactID, tree, before, rewrites, invalidChanged)
 	}
 
 	for _, ask := range rows {
@@ -561,7 +583,15 @@ func restoreRetractedAsk(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.A
 	return ask, nil
 }
 
-func setAskServerAttributes(node *pmdoc.Node, ask model.Ask) bool {
+// askServerAttributes are the attributes of an ask block the server keeps in agreement with its
+// ask row (setAskServerAttributes).
+var askServerAttributes = [...]string{"state", "answered_by", "answered_at", "selected", "answer", "invalid"}
+
+// setAskServerAttributes makes node's server attributes agree with ask, and reports whether it
+// changed any and whether it wrote an answer's own text: the answer, or the options it selects,
+// which the person answering chose rather than the server. With withholdAnswer it writes neither,
+// and the block keeps the answer and the selection it holds.
+func setAskServerAttributes(node *pmdoc.Node, ask model.Ask, withholdAnswer bool) (changed, answered bool) {
 	desired := pmdoc.Attrs{"state": ask.State}
 	if ask.State == "answered" && ask.Answer != nil {
 		desired["answered_by"] = ask.Answer.User
@@ -571,8 +601,11 @@ func setAskServerAttributes(node *pmdoc.Node, ask model.Ask) bool {
 			desired["answer"] = *ask.Answer.Text
 		}
 	}
-	changed := false
-	for _, name := range []string{"state", "answered_by", "answered_at", "selected", "answer", "invalid"} {
+	for _, name := range askServerAttributes {
+		answer := name == "answer" || name == "selected"
+		if answer && withholdAnswer {
+			continue
+		}
 		want, present := desired[name]
 		got, exists := node.Attrs[name]
 		if present {
@@ -581,6 +614,7 @@ func setAskServerAttributes(node *pmdoc.Node, ask model.Ask) bool {
 			}
 			node.Attrs[name] = want
 			changed = true
+			answered = answered || answer
 			continue
 		}
 		if exists {
@@ -588,7 +622,85 @@ func setAskServerAttributes(node *pmdoc.Node, ask model.Ask) bool {
 			changed = true
 		}
 	}
-	return changed
+	return changed, answered
+}
+
+// askServerState is an ask block's server attributes (askServerAttributes) as it holds them.
+type askServerState [len(askServerAttributes)]struct {
+	value   any
+	present bool
+}
+
+func readAskServerState(node *pmdoc.Node) askServerState {
+	var state askServerState
+	for index, name := range askServerAttributes {
+		state[index].value, state[index].present = node.Attrs[name]
+	}
+	return state
+}
+
+// restore gives node back the server attributes state holds.
+func (state askServerState) restore(node *pmdoc.Node) {
+	for index, name := range askServerAttributes {
+		if state[index].present {
+			node.Attrs[name] = state[index].value
+		} else {
+			delete(node.Attrs, name)
+		}
+	}
+}
+
+// serverRewrite is an ask block whose server attributes settlement rewrote to agree with its ask:
+// the attributes as settlement found them, and the index in the reconciliation's events of the
+// block.repaired the rewrite emitted, or -1 for a new ask's block, whose rewrite emits none.
+type serverRewrite struct {
+	node  *pmdoc.Node
+	ask   model.Ask
+	found askServerState
+	event int
+}
+
+// withholdAnswers keeps the answers settlement wrote back into their blocks out of the document
+// when the document they leave would pass what one upload may hold and be bigger than before, the
+// document's rendering as settlement read it (weighRendering, which weighs a caller's write the
+// same way). An answer is stored on its ask as well as in its block, and a block that leaves the
+// document and returns gets its answer back from the ask, so a returning block is the answer's
+// text arriving without the answer route that weighs it: twenty-four answers of 900 KB, each
+// weighed against a document their deleted blocks had left small, came back in one 1,852-byte edit
+// as a 21.6 MB document. Withheld, each block is rewritten with its answer and selection as it held
+// them, so it still says who answered and when, and the ask keeps the answer; a later settlement of
+// a document with room for it writes it back. block.repaired is kept only for a block the rewrite
+// still changes, and the reconciliation changes the document only if any does or an invalid block
+// was flagged (invalidChanged). A document that does not render cannot be weighed, so its answers
+// are withheld, and the settlement that renders it next fails as it would have.
+func (r *settlementReconciliation) withholdAnswers(artifactID string, tree *pmdoc.Node, before string, rewrites []serverRewrite, invalidChanged bool) {
+	after, err := renderTree(tree)
+	if err == nil {
+		if _, err = weighRendering(before, after); err == nil {
+			return
+		}
+	}
+	slog.Warn("dispatch: settlement withholds restored answers from their blocks", "room", artifactID, "reason", err)
+	r.changed = invalidChanged
+	dropped := map[int]bool{}
+	for _, rewrite := range rewrites {
+		rewrite.found.restore(rewrite.node)
+		if changed, _ := setAskServerAttributes(rewrite.node, rewrite.ask, true); changed {
+			r.changed = true
+		} else if rewrite.event >= 0 {
+			dropped[rewrite.event] = true
+		}
+	}
+	if len(dropped) == 0 {
+		return
+	}
+	kept := r.events[:0]
+	for index, event := range r.events {
+		if !dropped[index] {
+			kept = append(kept, event)
+		}
+	}
+	r.events = kept
 }
 
 func askServerAttributeEqual(got, want any) bool {

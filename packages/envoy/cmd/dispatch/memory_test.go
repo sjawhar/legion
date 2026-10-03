@@ -411,6 +411,107 @@ func TestAskEditsAndAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testin
 	}
 }
 
+// An answer is stored on its ask as well as in its block, and settlement writes it back into a block
+// that returns to the document, so returning blocks cannot grow a document past what one upload may
+// hold on a real Dispatch process either: twenty-four answers of 900 KB, each taken against a
+// document their deleted blocks had left small, then all twenty-four blocks returned in one edit,
+// leave the document within 1 MiB, the edit and its settlement hold at most the bound, and so does
+// each cold read of the document. Before settlement weighed what it writes back, they left a 21.6 MB
+// document whose cold text read held 373 MiB, and four at once over 1,000 MiB.
+func TestReturnedAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
+	memory := newMemoryHarness(t)
+	const asks = 24
+	var spec, blocks strings.Builder
+	spec.WriteString("Before sentinel.\n")
+	for index := range asks {
+		block := fmt.Sprintf("\n:::ask{#ask-%d urgency=\"med\" multiple=\"false\"}\nQuestion %d?\n:::\n", index, index)
+		spec.WriteString(block)
+		blocks.WriteString(block)
+	}
+	body, err := json.Marshal(map[string]any{"text": strings.Repeat("word ", 180_000), "expected_edited_at": nil})
+	if err != nil {
+		t.Fatalf("encode the answer: %v", err)
+	}
+	server := memory.start(t)
+	issue := server.createIssue(t, "Returned answers", spec.String())
+	for index, askID := range server.blockAsks(t, issue.Key, asks) {
+		if answer := server.send(t, http.MethodPost, "/api/v1/asks/"+askID+"/answer", "application/json", bytes.NewReader(body), http.Header{"X-Dispatch-User": {"alice"}}); answer.status != http.StatusOK {
+			t.Fatalf("answer %d: %d %.300s, want 200", index+1, answer.status, answer.body)
+		}
+		if answer := server.edit(t, issue.PrimaryArtifactID, map[string]any{"op": "delete", "block": fmt.Sprintf("ask-%d", index)}); answer.status != http.StatusOK {
+			t.Fatalf("delete block %d: %d %.300s, want 200", index+1, answer.status, answer.body)
+		}
+	}
+	memory.waitForSettled(t, issue.PrimaryArtifactID)
+	var answer response
+	peak := server.peakAboveIdle(t, func() {
+		answer = server.edit(t, issue.PrimaryArtifactID, map[string]any{"op": "insert", "after": "end", "markdown": blocks.String()})
+		memory.waitForSettled(t, issue.PrimaryArtifactID)
+	})
+	text := server.text(t, issue.PrimaryArtifactID)
+	server.stop(t)
+	t.Logf("returning %d answered blocks in one %d-byte edit answered %d and left a %d-byte document, %d MiB above idle with its settlement", asks, blocks.Len(), answer.status, len(text), peak>>20)
+	if answer.status != http.StatusOK {
+		t.Fatalf("the edit returning the blocks answered %d %.300s, want 200", answer.status, answer.body)
+	}
+	if len(text) > documentCap {
+		t.Errorf("returning the blocks left a %d-byte document, past the %d-byte cap", len(text), documentCap)
+	}
+	if peak > requestMemoryBound {
+		t.Errorf("the edit returning the blocks and its settlement held %d MiB above idle, want at most %d MiB", peak>>20, requestMemoryBound>>20)
+	}
+	memory.coldPeaks(t, "returned answers", issue.PrimaryArtifactID)
+}
+
+// coldPeaks reads and edits a document on servers that have not loaded it - its text, a websocket
+// load of its room and a one-word edit of the "sentinel" it holds, each on a fresh server, then
+// four reads of its text at once - and fails the test where one of the first three holds more than
+// the bound above idle. Every peak is logged under name; the four reads at once are logged beside
+// the production task's 1,024 MiB.
+func (h *memoryHarness) coldPeaks(t *testing.T, name, artifactID string) {
+	t.Helper()
+	for _, cold := range []struct {
+		name string
+		run  func(server *dispatchProcess)
+	}{
+		{"text read", func(server *dispatchProcess) { server.get(t, "/api/v1/artifacts/"+artifactID+"/text") }},
+		{"websocket load", func(server *dispatchProcess) { server.loadOverWebsocket(t, artifactID) }},
+		{"one-word edit", func(server *dispatchProcess) {
+			if answer := server.edit(t, artifactID, map[string]any{"op": "replace", "find": "sentinel", "with": "marker"}); answer.status != http.StatusOK {
+				t.Errorf("%s: a one-word edit answered %d %.300s, want 200", name, answer.status, answer.body)
+			}
+		}},
+	} {
+		server := h.start(t)
+		peak := server.peakAboveIdle(t, func() { cold.run(server) })
+		server.stop(t)
+		t.Logf("%s: a cold %s, %d MiB above idle", name, cold.name, peak>>20)
+		if peak > requestMemoryBound {
+			t.Errorf("%s: a cold %s held %d MiB above idle, want at most %d MiB", name, cold.name, peak>>20, requestMemoryBound>>20)
+		}
+	}
+	server := h.start(t)
+	peak := server.peakAboveIdle(t, func() {
+		failures := make([]error, 4)
+		var group sync.WaitGroup
+		for index := range failures {
+			group.Go(func() {
+				answer, err := server.trySend(http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", "", nil, http.Header{"X-Dispatch-User": {"alice"}})
+				if err == nil && answer.status != http.StatusOK {
+					err = fmt.Errorf("read %d: status %d body %.300s", index, answer.status, answer.body)
+				}
+				failures[index] = err
+			})
+		}
+		group.Wait()
+		if err := errors.Join(failures...); err != nil {
+			t.Fatal(err)
+		}
+	})
+	server.stop(t)
+	t.Logf("%s: four cold text reads at once, %d MiB above idle", name, peak>>20)
+}
+
 // blockAsks are the ids of the asks settlement indexes from the blocks ask-0 to ask-<count-1> of
 // the issue's spec, in that order, once it has indexed every one.
 func (p *dispatchProcess) blockAsks(t *testing.T, issueKey string, count int) []string {

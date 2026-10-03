@@ -72,18 +72,23 @@ func newMemoryHarness(t *testing.T) *memoryHarness {
 	return harness
 }
 
-// waitForSettlement waits until the document a stored upload wrote has settled: the settlement
-// that has read every update deletes the document's doc_settlements_pending row as it commits.
+// waitForSettlement waits until the document a stored upload wrote has settled.
 func (h *memoryHarness) waitForSettlement(t *testing.T, upload uploadResult) {
 	t.Helper()
-	if upload.status != http.StatusCreated {
-		return
+	if upload.status == http.StatusCreated {
+		h.waitForSettled(t, upload.artifactID)
 	}
+}
+
+// waitForSettled waits until a document has settled every write it has had: the settlement that
+// has read every update deletes the document's doc_settlements_pending row as it commits.
+func (h *memoryHarness) waitForSettled(t *testing.T, artifactID string) {
+	t.Helper()
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
 		var owed bool
 		if err := h.database.Pool.QueryRow(context.Background(),
-			`select exists(select 1 from doc_settlements_pending where artifact_id = $1)`, upload.artifactID,
+			`select exists(select 1 from doc_settlements_pending where artifact_id = $1)`, artifactID,
 		).Scan(&owed); err != nil {
 			t.Fatalf("read the document's pending settlement: %v", err)
 		}
@@ -91,7 +96,7 @@ func (h *memoryHarness) waitForSettlement(t *testing.T, upload uploadResult) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("document %s never settled", upload.artifactID)
+			t.Fatalf("document %s never settled", artifactID)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

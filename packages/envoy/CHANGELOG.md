@@ -227,7 +227,13 @@
   suggestion, reply or edit that would leave either past its bound and bigger is `413
   CAP_EXCEEDED`, naming the bound and both sizes; a status change (accept, reject, resolve) is not
   text a caller writes and passes. Thirty-two open suggestions of 900 KB took one cold websocket
-  load to 296 MiB, and sixty-four four cold reads at once to 1,223 MiB.
+  load to 296 MiB, and sixty-four four cold reads at once to 1,223 MiB. An answer is stored on its
+  ask as well as in its block, and settlement writes it back into a block that returns to the
+  document: that is weighed the same way, and where the answer would leave the document past
+  either limit and bigger, settlement restores the block's state and who answered, and leaves the
+  answer's text and selection on the ask until the document has room for them. Twenty-four answers
+  of 900 KB returned by one 1,540-byte edit had left a 21.6 MB document whose cold text read held
+  368 MiB.
   Browser edits over the websocket are applied before any check and are not bounded by
   this (LEGION-487). Nor is a document's stored history: every update a write appends is kept with
   the content later writes delete, and a cold load builds all of it, so repeated uploads of a
