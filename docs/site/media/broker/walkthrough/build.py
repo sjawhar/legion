@@ -20,10 +20,11 @@ outside its file, a part starts before its clip, runs past its clip's end or ove
 part, a part has no text or its caption falls outside its clip, or a section's file duration is
 off its wall-clock length (a browser recording outside its actions' and its page's lengths by
 more than 5%, a cast more than 1.5 s shorter than its section or any longer). The clips are
-concatenated into build/walkthrough.mp4, which then fails the build if it holds DEAD_AIR seconds
-or more of silence over a frozen frame; only a video that passes is copied to OUT, the video the
-site publishes, with its captions and its poster (the video's first frame), so a failed build
-leaves all three as they were.
+concatenated into build/walkthrough.mp4, the video copied and the narration normalized to -16 LUFS
+in loudnorm's two passes. The build then fails if that video holds DEAD_AIR seconds or more of
+silence over a frozen frame, or its narration is more than LOUDNESS_SLACK LU off -16 LUFS or peaks
+over -1.5 dBTP; only a video that passes is copied to OUT, the video the site publishes, with its
+captions and its poster (the video's first frame), so a failed build leaves all three as they were.
 
   python3 build.py            # rebuild (renders casts once, into build/) and publish to OUT
   python3 build.py --check    # verify the EDL against the footage and narration, write nothing
@@ -60,6 +61,12 @@ CAST_SLACK = 1.5  # how much shorter a cast may be than its section: the recorde
 DEAD_AIR = 2.0  # seconds of silence over a frozen frame the video may not hold
 # Silence is below SILENCE_DB; a sound shorter than BLIP (a breath, a click) does not end a silence.
 SILENCE_DB, BLIP = -45, 0.3
+# Every docs video's narration loudness (docs/site/media/README.md): -16 LUFS integrated, with a
+# true peak of at most -1.5 dBTP. loudnorm aims the peak AAC_HEADROOM dB lower, since encoding the
+# AAC raises it again. A built video more than LOUDNESS_SLACK LU off LUFS, or peaking over
+# TRUE_PEAK, fails the build.
+LUFS, TRUE_PEAK, LOUDNESS_SLACK, AAC_HEADROOM = -16.0, -1.5, 0.5, 0.5
+LOUDNORM = f"loudnorm=I={LUFS}:TP={TRUE_PEAK - AAC_HEADROOM}:LRA=11"
 
 
 def run(*argv: str) -> str:
@@ -253,6 +260,16 @@ def dead_air(video: Path) -> list[tuple[float, float]]:
     return found
 
 
+def loudness(*source: str) -> dict[str, str]:
+    """loudnorm's measurement of the source's audio, its first pass: among others the integrated
+    loudness (`input_i`, LUFS), the true peak (`input_tp`, dBTP), and what its second pass takes."""
+    log = subprocess.run(
+        ["ffmpeg", "-v", "info", "-nostats", *source, "-vn", "-af", f"{LOUDNORM}:print_format=json", "-f", "null", "-"],
+        check=True, capture_output=True, text=True,
+    ).stderr
+    return json.loads(re.findall(r"\{[^{}]*\}", log)[-1])
+
+
 def vtt_time(seconds: float) -> str:
     ms = round(seconds * 1000)
     return f"{ms // 3_600_000:02d}:{ms // 60_000 % 60:02d}:{ms // 1000 % 60:02d}.{ms % 1000:03d}"
@@ -265,7 +282,6 @@ def vtt(resolved: list[Resolved], starts: list[float]) -> str:
         for begin, end, text in r.captions():
             lines += [f"{vtt_time(start + begin)} --> {vtt_time(start + end)}", text, ""]
     return "\n".join(lines)
-
 
 
 def main() -> int:
@@ -294,18 +310,32 @@ def main() -> int:
     rendered = [render(r, i) for i, r in enumerate(resolved)]
     listing = BUILD / "concat.txt"
     listing.write_text("".join(f"file '{path}'\n" for path in rendered))
-    # The video is copied; the audio is decoded and encoded once more, so no clip's encoder
-    # priming accumulates into drift across the joins.
-    run("ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(listing), "-c:v", "copy",
+    # The video is copied. The audio is decoded and encoded once more, so no clip's encoder priming
+    # accumulates into drift across the joins, and brought to LOUDNORM on the way in loudnorm's two
+    # passes: the first measures the joined narration, the second normalizes it from that.
+    concat = ("-f", "concat", "-safe", "0", "-i", str(listing))
+    measured = loudness(*concat)
+    second = (f"{LOUDNORM}:measured_I={measured['input_i']}:measured_TP={measured['input_tp']}"
+              f":measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}"
+              f":offset={measured['target_offset']}:linear=true")
+    run("ffmpeg", "-y", "-v", "error", *concat, "-c:v", "copy", "-af", f"{second},aresample=44100",
         "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-movflags", "+faststart", str(BUILT))
-    print(f"build.py: wrote {BUILT} ({duration(BUILT):.1f}s)")
+    heard = loudness("-i", str(BUILT))
+    print(f"build.py: wrote {BUILT} ({duration(BUILT):.1f}s), its narration from {measured['input_i']} LUFS"
+          f" (true peak {measured['input_tp']} dBTP) to {heard['input_i']} LUFS ({heard['input_tp']} dBTP)")
+    unchanged = f"build.py: {OUT} and its captions and poster are unchanged"
     dead = dead_air(BUILT)
     if dead:
         print(f"build.py: {BUILT.name} holds silence over a frozen frame for {DEAD_AIR:.0f}s or more at:",
               *(f"{start:.2f}-{end:.2f}s ({end - start:.2f}s)" for start, end in dead), sep="\n  ", file=sys.stderr)
-        print(f"build.py: {OUT} and its captions and poster are unchanged", file=sys.stderr)
+        print(unchanged, file=sys.stderr)
         return 1
     print(f"build.py: no silence of {DEAD_AIR:.0f}s or more over a frozen frame")
+    if abs(float(heard["input_i"]) - LUFS) > LOUDNESS_SLACK or float(heard["input_tp"]) > TRUE_PEAK:
+        print(f"build.py: {BUILT.name}'s narration is at {heard['input_i']} LUFS, true peak {heard['input_tp']} dBTP;"
+              f" it must be {LUFS} LUFS within {LOUDNESS_SLACK} LU, peaking at {TRUE_PEAK} dBTP or under", file=sys.stderr)
+        print(unchanged, file=sys.stderr)
+        return 1
     # The concat starts each clip where the one before it ends: at the clips' rendered lengths, which
     # a frame or an audio packet can take past their spans.
     starts = list(itertools.accumulate(map(duration, rendered[:-1]), initial=0.0))
