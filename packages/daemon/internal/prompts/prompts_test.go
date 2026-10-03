@@ -103,13 +103,10 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 }
 
 // The planner this daemon composes runs the gap analyst before it drafts and the plan reviewer
-// after (LEGION-421), each a task agent the plugin ships in agents/, where Oh My Pi finds it in a
-// pane and in a pod; an agent missing there is one the boot gate refuses by name. Only the shared
-// headless residue dispatches them: the core is also composed with the interactive fragment, whose
-// subagent dispatches nothing, and the Go daemon's own parts leave the checks to the shared text.
-// The boot gate reads the same references (RoleReferences).
-func TestTheComposedPlannerDispatchesItsPlanChecksToShippedAgents(t *testing.T) {
-	plugin := filepath.Join("..", "..", "..", "pi-envoy")
+// after (LEGION-421). Only the shared headless residue dispatches them: the core is also composed
+// with the interactive fragment, whose subagent dispatches nothing, and the Go daemon's own parts
+// leave the checks to the shared text.
+func TestTheComposedPlannerDispatchesItsPlanChecksFromTheHeadlessResidue(t *testing.T) {
 	stateDir := t.TempDir()
 	composer, err := New(stateDir)
 	if err != nil {
@@ -127,9 +124,11 @@ func TestTheComposedPlannerDispatchesItsPlanChecksToShippedAgents(t *testing.T) 
 			t.Fatalf("read %s: %v", path, err)
 		}
 		text.Write(body)
-		if err := dispatched.File(stateDir, path, "state"); err != nil {
-			t.Fatalf("references of %s: %v", path, err)
+		rel, err := filepath.Rel(stateDir, path)
+		if err != nil {
+			t.Fatal(err)
 		}
+		dispatched.Text(filepath.Join("state", rel), body)
 	}
 	gap := strings.Index(text.String(), "`task(agent=\"plan-gap-analyst\")`")
 	review := strings.Index(text.String(), "`task(agent=\"plan-reviewer\")`")
@@ -146,15 +145,6 @@ func TestTheComposedPlannerDispatchesItsPlanChecksToShippedAgents(t *testing.T) 
 		}
 		if !slices.Equal(files, residue) {
 			t.Errorf("task agent %s is dispatched by %q, want the headless residue %q alone", agent, files, residue)
-		}
-		if _, err := os.Stat(filepath.Join(plugin, "agents", agent+".md")); err != nil {
-			t.Errorf("task agent %s, dispatched by %q, is not shipped in the plugin's agents/: %v", agent, files, err)
-		}
-	}
-	gated := RoleReferences()
-	for _, agent := range want {
-		if files := gated[promptrefs.TaskAgents][agent]; !slices.Equal(files, []string{"roles/planner.md"}) {
-			t.Errorf("the boot gate's references name task agent %s from %q, want roles/planner.md", agent, files)
 		}
 	}
 }

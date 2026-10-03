@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -32,16 +31,6 @@ func TestMain(m *testing.M) {
 		main()
 	}
 	os.Exit(m.Run())
-}
-
-// testRolePromptsDir is the role prompts the binary embeds, in this checkout.
-func testRolePromptsDir(t *testing.T) string {
-	t.Helper()
-	_, source, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("locate command test source")
-	}
-	return filepath.Clean(filepath.Join(filepath.Dir(source), "../../internal/prompts/roles"))
 }
 
 // legionState points the registry at a directory of this test's own, so nothing here reads or

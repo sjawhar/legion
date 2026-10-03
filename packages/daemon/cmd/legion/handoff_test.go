@@ -239,7 +239,7 @@ func TestHandoffWriteWritesWhatItsPhasesRulesAllow(t *testing.T) {
 // (internal/prompts/roles/planner.md, "Plan handoff"); a planner that records them as shown is
 // not refused.
 func TestHandoffWriteAcceptsEveryPlanCheckShapeThePlannerPromptShows(t *testing.T) {
-	prompt, err := os.ReadFile(filepath.Join(testRolePromptsDir(t), "planner.md"))
+	prompt, err := os.ReadFile(filepath.Join("..", "..", "internal", "prompts", "roles", "planner.md"))
 	if err != nil {
 		t.Fatal(err)
 	}

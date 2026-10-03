@@ -80,9 +80,6 @@ func TestEveryRoleHasItsPartAndTheMergerHasNoCore(t *testing.T) {
 			t.Errorf("roles/%s.md is blank", role)
 		}
 	}
-	for _, file := range reusableParts {
-		rolePart(t, file)
-	}
 	if _, err := fs.Stat(roleParts, "roles/core/merger.md"); err == nil {
 		t.Error("roles/core/merger.md exists; the merger composes no core")
 	}
@@ -202,8 +199,8 @@ func TestEveryTaskAgentARolePromptDispatchesIsShipped(t *testing.T) {
 	agents := RoleReferences()[promptrefs.TaskAgents]
 	// A reader that finds nothing would pass below while checking nothing.
 	for _, agent := range []string{"plan-gap-analyst", "plan-reviewer"} {
-		if !slices.Contains(agents[agent], "roles/planner.md") {
-			t.Errorf("task agent %s is dispatched by %q, want roles/planner.md among them", agent, agents[agent])
+		if !slices.Equal(agents[agent], []string{"roles/planner.md"}) {
+			t.Errorf("task agent %s is dispatched by %q, want roles/planner.md alone", agent, agents[agent])
 		}
 	}
 	for agent, files := range agents {

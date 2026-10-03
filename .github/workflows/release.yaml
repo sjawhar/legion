@@ -186,10 +186,12 @@ jobs:
           else
             PREV_VERSION="${PREV_TAG#legion-v}"
           fi
-          # The binary embeds its prompts (internal/prompts), so a docs: commit there still releases.
-          # release-bump.sh reads a --patch-path only when it is also one of the paths after --.
+          # The binary embeds its prompts (internal/prompts/roles and go), so a docs: commit there
+          # still releases. release-bump.sh reads a --patch-path only when it is also one of the
+          # paths after --.
           VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" \
-            --patch-path packages/daemon/internal/prompts/ -- packages/daemon/ packages/daemon/internal/prompts/)
+            --patch-path packages/daemon/internal/prompts/roles/ --patch-path packages/daemon/internal/prompts/go/ \
+            -- packages/daemon/ packages/daemon/internal/prompts/roles/ packages/daemon/internal/prompts/go/)
 
           if [ "$VERSION" = "empty" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"

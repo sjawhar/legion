@@ -77,21 +77,6 @@ func (names Names) add(kind Kind, name, file string) {
 	}
 }
 
-// File adds references in one Markdown file. The file is named by its path relative to base under
-// prefix, as Collect names files it walks.
-func (names Names) File(base, path, prefix string) error {
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	rel, err := filepath.Rel(base, path)
-	if err != nil {
-		return err
-	}
-	names.Text(filepath.Join(prefix, rel), body)
-	return nil
-}
-
 // Text adds the references in body, a prompt named file.
 func (names Names) Text(file string, body []byte) {
 	for _, kind := range Kinds {
@@ -102,9 +87,9 @@ func (names Names) Text(file string, body []byte) {
 }
 
 // Collect adds every reference in a Markdown file under dir, each file named by its path relative
-// to base under prefix. dir may be a link to a directory, which the walk follows; filepath.WalkDir
-// alone would report the link and read nothing under it.
-func (names Names) Collect(base, dir, prefix string) error {
+// to base. dir may be a link to a directory, which the walk follows; filepath.WalkDir alone would
+// report the link and read nothing under it.
+func (names Names) Collect(base, dir string) error {
 	under, err := filepath.Rel(base, dir)
 	if err != nil {
 		return err
@@ -117,7 +102,16 @@ func (names Names) Collect(base, dir, prefix string) error {
 		if err != nil || entry.IsDir() || filepath.Ext(path) != ".md" {
 			return err
 		}
-		return names.File(resolved, path, filepath.Join(prefix, under))
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(resolved, path)
+		if err != nil {
+			return err
+		}
+		names.Text(filepath.Join(under, rel), body)
+		return nil
 	})
 }
 

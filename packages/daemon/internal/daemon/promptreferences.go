@@ -48,12 +48,12 @@ func promptReferences(manifest string, skills []string) (promptrefs.Names, error
 	names := promptrefs.New()
 	root := filepath.Dir(manifest)
 	for _, dir := range skills {
-		if err := names.Collect(root, filepath.Join(root, dir), ""); err != nil {
+		if err := names.Collect(root, filepath.Join(root, dir)); err != nil {
 			return names, fmt.Errorf("pi-legion-envoy at %s ships skills in %s, which the gate cannot read: %w", manifest, dir, err)
 		}
 	}
 	// A plugin without agents/ ships no agent definition, so none names anything.
-	if err := names.Collect(root, filepath.Join(root, "agents"), ""); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := names.Collect(root, filepath.Join(root, "agents")); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return names, fmt.Errorf("pi-legion-envoy at %s ships agents in agents/, which the gate cannot read: %w", manifest, err)
 	}
 	return names, nil
