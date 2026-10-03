@@ -333,27 +333,44 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 			return "", false
 		}
 		now := time.Now().UnixMilli()
-		holder, holderErr := cfg.sessions.Get(sessionID)
-		stale := holderErr != nil || holder.UpdatedAt <= 0 || now-holder.UpdatedAt >= int64(session.ClaimStaleAfter/time.Millisecond)
-		if !stale {
-			return sessionID, true
+		stale := func(holder session.SessionEntry, err error) bool {
+			return err != nil || holder.UpdatedAt <= 0 || now-holder.UpdatedAt >= int64(session.ClaimStaleAfter/time.Millisecond)
 		}
-		if holderErr == nil || errors.Is(holderErr, nats.ErrKeyNotFound) {
-			_, superseded, err := releaseExpiredRoleClaim(cfg.registry, role, sessionID, cfg.sessions.TTL())
-			if err != nil {
+		holder, holderErr := cfg.sessions.Get(sessionID)
+		if stale(holder, holderErr) {
+			// The cache trails the session bucket (roleHolderSession says why), so a holder it
+			// misses or holds with an old heartbeat is read again from the bucket before its claim
+			// is released.
+			holder, holderErr = cfg.sessions.Refresh(sessionID)
+			if holderErr != nil && !errors.Is(holderErr, nats.ErrKeyNotFound) {
 				applyDeliveryOutcome(cfg, item, deliveryOutcome{
 					sessionID:    sessionID,
 					metricStatus: "failed",
 					log: func(logger *logging.Logger) {
-						logger.Error("listener expired role claim cleanup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", err.Error()))
+						logger.Error("listener role holder session lookup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", holderErr.Error()))
 					},
 					exceptionReason: "delivery_failed",
 				})
 				return "", false
 			}
-			if superseded {
-				continue
-			}
+		}
+		if !stale(holder, holderErr) {
+			return sessionID, true
+		}
+		_, superseded, err := releaseExpiredRoleClaim(cfg.registry, role, sessionID, cfg.sessions.TTL())
+		if err != nil {
+			applyDeliveryOutcome(cfg, item, deliveryOutcome{
+				sessionID:    sessionID,
+				metricStatus: "failed",
+				log: func(logger *logging.Logger) {
+					logger.Error("listener expired role claim cleanup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", err.Error()))
+				},
+				exceptionReason: "delivery_failed",
+			})
+			return "", false
+		}
+		if superseded {
+			continue
 		}
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,

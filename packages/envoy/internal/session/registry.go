@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
@@ -279,6 +281,37 @@ func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
 		return SessionEntry{}, nats.ErrKeyNotFound
 	}
 	return cs.entry, nil
+}
+
+// Refresh reads sessionID's entry from the session bucket itself rather than the cache, applies it
+// to the cache as the watcher would, and returns it. The cache follows the bucket through a watcher
+// and so trails it: a session another listener registered a moment ago can be in the bucket and not
+// yet here. Get is the read for a caller that refuses or retries when a session is missing; a caller
+// about to take something away from a session because it looks gone (its role claim) asks the bucket
+// here first. It returns nats.ErrKeyNotFound when the bucket holds no live entry: none, a delete
+// marker, one past the bucket's TTL that the server has not yet removed, one the watcher would evict
+// as malformed, or a key no read may name (bus.ErrRefused), which no session of this build can
+// register under. Any other error is a read that did not answer.
+func (r *SessionRegistry) Refresh(sessionID string) (SessionEntry, error) {
+	entry, err := r.watcher.KV().Get(sessionID)
+	if errors.Is(err, bus.ErrRefused) {
+		return SessionEntry{}, fmt.Errorf("%w: %w", nats.ErrKeyNotFound, err)
+	}
+	if err != nil {
+		return SessionEntry{}, err
+	}
+	var item SessionEntry
+	if err := json.Unmarshal(entry.Value(), &item); err != nil {
+		return SessionEntry{}, fmt.Errorf("%w: malformed session entry: %w", nats.ErrKeyNotFound, err)
+	}
+	expiresAt := r.expiryFor(entry.Created(), item.UpdatedAt)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !expiresAt.IsZero() && time.Now().After(expiresAt) {
+		return SessionEntry{}, nats.ErrKeyNotFound
+	}
+	r.cacheSessionLocked(sessionID, item, expiresAt, entry.Revision())
+	return item, nil
 }
 
 // LastSeen returns a recently expired or explicitly removed session's final

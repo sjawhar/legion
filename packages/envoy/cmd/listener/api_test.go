@@ -793,6 +793,127 @@ func TestRoleHolderLapsedResponseDoesNotInventLastSeen(t *testing.T) {
 	}
 }
 
+// trailingListeners opens two listeners' stores on one NATS account: claimant, through which a
+// holder registers and claims a role, and observer, whose session cache stops following the session
+// bucket once it is warm. The stopped watcher stands in for one that has not yet delivered what the
+// claimant just wrote: either way the observer's cache answers from what it last applied, while a
+// role claim is read from the role bucket itself. During a rolling deploy the old task is the
+// observer of every claim the replacement accepts.
+func trailingListeners(t *testing.T) (claimant, observer *listenerDeps) {
+	t.Helper()
+	client := setupPublishTestClient(t)
+	open := func(name string) *listenerDeps {
+		t.Helper()
+		registry, err := store.Open(client.Conn, store.WithReplicas(1))
+		if err != nil {
+			t.Fatalf("open the %s's interest registry: %v", name, err)
+		}
+		sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+		if err != nil {
+			t.Fatalf("open the %s's session registry: %v", name, err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := sessions.WaitForCacheReady(ctx); err != nil {
+			t.Fatalf("warm the %s's session cache: %v", name, err)
+		}
+		return &listenerDeps{client: client, registry: registry, sessions: sessions}
+	}
+	claimant, observer = open("claimant"), open("observer")
+	observer.sessions.StopWatch()
+	return claimant, observer
+}
+
+// claimRole registers sessionID through d and has it claim role, as a session's plugin does.
+func claimRole(t *testing.T, d *listenerDeps, sessionID, role string) {
+	t.Helper()
+	if err := d.sessions.Put(sessionID, session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register %s: %v", sessionID, err)
+	}
+	recorder := httptest.NewRecorder()
+	roleSetHandler(d, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+		strings.NewReader(`{"session_id":"`+sessionID+`","role":"`+role+`"}`)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("%s claims %s: status %d %s", sessionID, role, recorder.Code, recorder.Body.String())
+	}
+}
+
+// A listener's session cache trails the session bucket, so a holder another listener registered and
+// gave a role a moment ago can be in the bucket and not yet in this listener's cache. A lookup there
+// answers that holder. Releasing the claim as lapsed on the cache's word deletes the claim the other
+// listener just wrote, and every later lookup and role message finds the role unclaimed until its
+// holder claims it again. Once the holder has left the bucket, the same lookup still releases it.
+func TestARoleLookupWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testing.T) {
+	claimant, observer := trailingListeners(t)
+	lookup := func(role string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		roleGetHandler(observer).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/"+role, nil))
+		return recorder
+	}
+
+	claimRole(t, claimant, "ses_fresh_holder", "fresh-claim")
+	if answer := lookup("fresh-claim"); answer.Code != http.StatusOK || !strings.Contains(answer.Body.String(), `"holder":"ses_fresh_holder"`) {
+		t.Fatalf("GET /v1/roles/fresh-claim on a listener whose session cache trails the bucket: status %d %s, want 200 naming ses_fresh_holder", answer.Code, answer.Body.String())
+	}
+	if holder, err := claimant.registry.RoleHolder("fresh-claim"); err != nil || holder != "ses_fresh_holder" {
+		t.Fatalf("the fresh claim after the lookup = %q, %v; want ses_fresh_holder's", holder, err)
+	}
+
+	claimRole(t, claimant, "ses_gone_holder", "lapsed-claim")
+	if err := claimant.sessions.Delete("ses_gone_holder"); err != nil {
+		t.Fatalf("end ses_gone_holder's session: %v", err)
+	}
+	if answer := lookup("lapsed-claim"); answer.Code != http.StatusNotFound || !strings.Contains(answer.Body.String(), "claim released") {
+		t.Fatalf("GET /v1/roles/lapsed-claim for a holder gone from the bucket: status %d %s, want 404 releasing the claim", answer.Code, answer.Body.String())
+	}
+	if holder, err := claimant.registry.RoleHolder("lapsed-claim"); err != nil || holder != "" {
+		t.Fatalf("the lapsed claim after the lookup = %q, %v; want it released", holder, err)
+	}
+}
+
+// A soft claim takes a role only from a holder that is gone, and a holder another listener just
+// registered is gone only from this listener's trailing cache, not from the session bucket: the soft
+// claim is refused, naming the live holder.
+func TestASoftClaimWhoseSessionCacheTrailsTheBucketLeavesALiveHolderItsRole(t *testing.T) {
+	claimant, observer := trailingListeners(t)
+	claimRole(t, claimant, "ses_live_holder", "contested")
+	if err := observer.sessions.Put("ses_resumer", session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+		t.Fatalf("register ses_resumer: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	roleSetHandler(observer, "test-machine").ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/roles/set",
+		strings.NewReader(`{"session_id":"ses_resumer","role":"contested","soft":true}`)))
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), `"holder":"ses_live_holder"`) {
+		t.Fatalf("soft claim of a live holder's role on a listener whose session cache trails the bucket: status %d %s, want 409 naming ses_live_holder", recorder.Code, recorder.Body.String())
+	}
+	if holder, err := claimant.registry.RoleHolder("contested"); err != nil || holder != "ses_live_holder" {
+		t.Fatalf("the contested claim after the soft claim = %q, %v; want ses_live_holder's", holder, err)
+	}
+}
+
+// The role reaper runs on every listener, so it reaches claims other listeners accepted: it ends a
+// claim only when the session bucket has lost the holder, not when this listener's trailing cache has
+// yet to see it.
+func TestTheRoleReaperWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testing.T) {
+	claimant, observer := trailingListeners(t)
+	claimRole(t, claimant, "ses_fresh_holder", "fresh-claim")
+	claimRole(t, claimant, "ses_gone_holder", "lapsed-claim")
+	if err := claimant.sessions.Delete("ses_gone_holder"); err != nil {
+		t.Fatalf("end ses_gone_holder's session: %v", err)
+	}
+	live := func(sessionID string) bool {
+		return roleHolderMayBeLive(logging.New("test"), observer.sessions, sessionID)
+	}
+	if reaped, err := observer.registry.ReapRoleClaims(live, observer.sessions.TTL()); err != nil || reaped != 1 {
+		t.Fatalf("reap role claims = %d, %v; want the one claim whose holder left the bucket", reaped, err)
+	}
+	for role, want := range map[string]string{"fresh-claim": "ses_fresh_holder", "lapsed-claim": ""} {
+		if holder, err := claimant.registry.RoleHolder(role); err != nil || holder != want {
+			t.Fatalf("%s after the reaper = %q, %v; want %q", role, holder, err, want)
+		}
+	}
+}
+
 func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)

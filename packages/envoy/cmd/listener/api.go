@@ -395,6 +395,22 @@ func releaseExpiredRoleClaim(registry roleClaimResolver, role, sessionID string,
 	return release, release == store.ExpiredRoleClaimSuperseded, nil
 }
 
+// roleHolderSession is a role holder's session entry for a decision that can take the role from it:
+// a lookup that releases a lapsed claim, a soft claim that supersedes a gone holder, the role reaper.
+// The cache answers when it holds the session. A miss is read again from the session bucket
+// (session.SessionRegistry.Refresh), because the cache trails the bucket while a claim is read from
+// the role bucket itself: a holder another listener registered and gave the role a moment ago is in
+// both buckets before it is in this cache, and during a rolling deploy the old task resolves the
+// claims the replacement accepts. nats.ErrKeyNotFound is the bucket's word that the session is gone;
+// any other error is a read that did not answer, on which nothing is taken from the holder.
+func roleHolderSession(sessions *session.SessionRegistry, sessionID string) (session.SessionEntry, error) {
+	entry, err := sessions.Get(sessionID)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return sessions.Refresh(sessionID)
+	}
+	return entry, err
+}
+
 func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
 	for range roleHolderResolutionAttempts {
 		claim, err := registry.RoleClaim(role)
@@ -404,7 +420,7 @@ func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.Session
 		if claim.HolderSessionID == "" {
 			return roleHolderResult{state: roleHolderUnclaimed}, nil
 		}
-		entry, err := sessions.Get(claim.HolderSessionID)
+		entry, err := roleHolderSession(sessions, claim.HolderSessionID)
 		if errors.Is(err, nats.ErrKeyNotFound) {
 			lastSeen := sessions.LastSeen(claim.HolderSessionID)
 			release, superseded, err := releaseExpiredRoleClaim(registry, role, claim.HolderSessionID, sessions.TTL())
@@ -765,10 +781,11 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 		previous := ""
 		var supersedable []string
 		if body.Soft {
-			// The registry sees only interest rows; liveness is this registry's
-			// call. A holder whose session entry has aged out (5m TTL) is dead
-			// and may be superseded; so may the claimant's own predecessor,
-			// live or not; any other live holder is protected.
+			// The registry sees only interest rows; liveness is the session
+			// bucket's call (roleHolderSession). A holder whose session entry
+			// has aged out (5m TTL) is dead and may be superseded; so may the
+			// claimant's own predecessor, live or not; any other live holder is
+			// protected.
 			holder, err := d.registry.RoleHolder(body.Role)
 			if err != nil {
 				writeNATSError(w, err, http.StatusServiceUnavailable, "read role holder: "+err.Error())
@@ -778,7 +795,7 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			if holder != "" && holder != body.SessionID {
 				if previous != "" && holder == previous {
 					supersedable = append(supersedable, holder)
-				} else if _, liveErr := d.sessions.Get(holder); errors.Is(liveErr, nats.ErrKeyNotFound) {
+				} else if _, liveErr := roleHolderSession(d.sessions, holder); errors.Is(liveErr, nats.ErrKeyNotFound) {
 					supersedable = append(supersedable, holder)
 				} else if liveErr != nil {
 					writeJSONError(w, http.StatusServiceUnavailable, "read role holder liveness: "+liveErr.Error())
