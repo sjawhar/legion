@@ -78,7 +78,8 @@ type Deps struct {
 	Lifetime         context.Context
 	TestHooksEnabled bool
 	// StreamHeartbeat is how often a server-sent event stream writes a heartbeat and resolves
-	// its caller again, closing once the caller no longer resolves.
+	// its caller again, and a document socket resolves its caller again (whileCallerResolves),
+	// each closing once the caller no longer resolves.
 	StreamHeartbeat time.Duration
 }
 
@@ -115,8 +116,9 @@ type DepsInput struct {
 	AgentSecretsURL   string
 	AgentSecretsToken string
 	TestHooksEnabled  bool
-	// StreamHeartbeat replaces the event streams' heartbeat (Deps.StreamHeartbeat). Zero keeps
-	// fifteen seconds; a test proving a stream closes sets a short one.
+	// StreamHeartbeat replaces the heartbeat of the event streams and the document socket
+	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
+	// sets a short one.
 	StreamHeartbeat time.Duration
 }
 
@@ -233,13 +235,43 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {
-		mux.Handle("GET /ws/doc/{room}", trackTransactions(websocket.ServeHTTP))
+		mux.Handle("GET /ws/doc/{room}", s.whileCallerResolves(trackTransactions(websocket.ServeHTTP)))
 	}
 }
 
 func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		handler(w, r.WithContext(store.WithTransactionTracking(r.Context())))
+	}
+}
+
+// whileCallerResolves serves a connection that outlives its request, the document websocket, only
+// while its caller resolves: on every StreamHeartbeat it resolves the caller again, as the event
+// streams do, and once the caller no longer resolves (a logout, a membership the sign-in pool no
+// longer confirms) it cancels the connection's context, on which the document server closes the
+// socket. The check runs beside the handler, which holds pooled connections of its own while it
+// admits the socket, so it marks a context of its own for the pool (store.ErrNestedAcquire).
+func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, closeConnection := context.WithCancel(r.Context())
+		defer closeConnection()
+		check := r.WithContext(store.WithTransactionTracking(ctx))
+		go func() {
+			heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
+			defer heartbeat.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-heartbeat.C:
+					if _, _, err := s.optionalActor(check); err != nil {
+						closeConnection()
+						return
+					}
+				}
+			}
+		}()
+		handler(w, r.WithContext(ctx))
 	}
 }
 

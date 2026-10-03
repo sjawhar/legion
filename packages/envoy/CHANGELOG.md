@@ -83,7 +83,7 @@
   identity) and are named by lowercase email everywhere: the email in their pool username, never
   the `email` claim. Only a member of `DISPATCH_SIGNIN_GROUP` signs in, and Dispatch confirms the
   membership with the pool's refresh token at least hourly, ending every session of a person the
-  pool refuses or drops from the group; the event and agent-conversation streams re-check the
+  pool refuses or drops from the group; the event streams and the document websocket re-check the
   caller on every heartbeat. The session cookie's payload encodes the email so any address
   round-trips; a cookie of the earlier shape no longer verifies. Header identity is only for tests
   and local harnesses, requires `DISPATCH_IDENTITY_HEADER_TRUSTED=1`, and never shares a
