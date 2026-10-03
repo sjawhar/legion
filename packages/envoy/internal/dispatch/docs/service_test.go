@@ -667,9 +667,10 @@ func TestReplaceCarriesAnAskTheBrowserLeftUnreadable(t *testing.T) {
 // (newAskMarkdown), and an ask a browser edit left holding a table the upload carries unchanged is
 // taken. The document's render wrote its tables' spans out under one budget, so the asks of one
 // check share one: the upload of the document's own markdown, holding twenty asks each over a table
-// whose spans take the whole budget, is taken. With a budget for each ask, the check refused it at
-// the second ask, whose table the document wrote with no span cells, and allocated some 1,300 MiB;
-// writing no span cells, it refused it at the first.
+// whose body rows each span its twenty-column header, is taken. The document stays under the
+// elements one write may make (pmdoc's maxWriteElements), as an upload must: twenty asks over tables
+// whose spans took the render's whole budget would make some 400,000, and their upload is refused
+// when it is parsed, before any ask is checked.
 func TestAnUploadOfTheDocumentsOwnMarkdownKeepsAsksOverSpannedTables(t *testing.T) {
 	var source strings.Builder
 	for index := range 20 {
@@ -681,7 +682,7 @@ func TestAnUploadOfTheDocumentsOwnMarkdownKeepsAsksOverSpannedTables(t *testing.
 	}
 	pmdoc.Walk(current, func(node *pmdoc.Node) bool {
 		if node.Type == "ask" {
-			node.Children = append(node.Children, wholeBudgetTable())
+			node.Children = append(node.Children, spannedTable(20, 20))
 		}
 		return true
 	})
