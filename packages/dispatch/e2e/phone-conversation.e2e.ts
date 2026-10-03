@@ -542,6 +542,60 @@ test("on a phone, the connection pill covers none of the docked composer", async
   }
 });
 
+// A thread opened full-screen on a phone has its own composers fixed at the foot of the screen:
+// the one a comment's Reply opens there, and the thread card's own inline reply. The connection
+// pill sits above whichever is on screen, grown by a refusal's row, in both of the pill's states.
+test("on a phone, the connection pill covers none of a thread's composers", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Connection pill over a thread" });
+  const root = await createComment(issue.key, { body: "Thread root" });
+  const alice = await asUser(browser, "alice");
+  const narrow = { height: 568, width: 320 };
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(narrow);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = await openThread(page, root.id);
+    const pill = page.getByTestId("connection-pill");
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+
+    await thread.getByRole("button", { exact: true, name: "Reply" }).click();
+    const threadForm = thread
+      .getByRole("form", { name: "Comment composer" })
+      .filter({ has: page.getByRole("textbox", { name: "Comment" }) });
+    await threadForm.getByLabel("Comment").fill("A draft\nover\nfour lines\nof text");
+    await threadForm.getByRole("button", { exact: true, name: "Send" }).click();
+    refuse();
+    await expect(threadForm.getByText("Couldn't send — the server is down")).toBeVisible();
+    await alice.setOffline(true);
+    await expect(pill).toHaveText("Reconnecting…");
+    await expectUncovered(pill, threadForm);
+
+    // A stream the server refuses for good: the pill offers a reload instead.
+    await page.route(/\/api\/v1\/events(\?|$)/, (route) =>
+      route.fulfill({ body: "{}", contentType: "application/json", status: 410 })
+    );
+    await alice.setOffline(false);
+    await expect(pill).toContainText("Live updates unavailable");
+    await expectUncovered(pill, threadForm);
+
+    // Cancel reply gives the thread back its card's own reply, which a refusal grows too.
+    await threadForm.getByRole("button", { name: "Cancel reply" }).click();
+    const cardForm = thread
+      .getByRole("form", { name: "Comment composer" })
+      .filter({ has: page.getByRole("textbox", { name: "Reply" }) });
+    await cardForm.getByRole("textbox", { name: "Reply" }).fill("A reply\nover\nfour lines");
+    await cardForm.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(cardForm.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expectUncovered(pill, cardForm);
+    await page.setViewportSize(phone);
+    await expectUncovered(pill, cardForm);
+  } finally {
+    await alice.close();
+  }
+});
+
 // A thread opened full-screen covers the Conversation, and the pill acts on the Conversation's
 // place, which the reader cannot see from the thread: it stays off the thread view, where it would
 // sit over the thread's own reply composer, and comes back with the Conversation on Back.
