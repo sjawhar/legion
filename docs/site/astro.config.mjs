@@ -22,7 +22,7 @@ export default defineConfig({
         { label: "Legion", items: [{ autogenerate: { directory: "legion" } }] },
         { label: "Dispatch", items: [{ autogenerate: { directory: "dispatch" } }] },
         { label: "Secrets Broker", items: [{ autogenerate: { directory: "broker" } }] },
-        { label: "Contributing to these docs", items: ["contributing"] },
+        "contributing",
       ],
       plugins: [starlightLinksValidator(), starlightAutoSidebar()],
     }),

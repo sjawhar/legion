@@ -11,31 +11,31 @@ agents. The **Secrets Broker** gives those agents credentials, with a person's a
 Dispatch when the rules require one. **Envoy** carries events between them.
 
 ```mermaid
-flowchart LR
+flowchart TB
   people([People])
+  github[(GitHub)]
   subgraph dispatch [Dispatch]
-    record[Projects, issues and documents]
-    inbox[Inbox: asks, approvals and credential requests]
+    record[Issues and documents]
+    inbox[Inbox]
   end
-  envoy{{Envoy event bus}}
+  envoy{{Envoy}}
   subgraph legion [Legion]
     coordinator[Coordinator]
-    agents[Agents: controller, architects and phase workers]
+    agents[Agents]
   end
   broker[Secrets Broker]
-  github[(GitHub: pull requests and CI)]
 
-  people -- "file issues, answer asks, approve specs" --> dispatch
-  dispatch -- "issue and document events" --> envoy
-  github -- "pull request and CI events" --> envoy
-  envoy -- "events for the issues it works" --> coordinator
-  envoy -- "messages addressed to a session" --> agents
-  coordinator -- "starts, resumes and wakes" --> agents
-  agents -- "specs, comments, asks and status" --> dispatch
-  agents -- "branches and pull requests" --> github
-  agents -- "request a secret" --> broker
-  dispatch <-- "shows pending requests, relays the decision" --> broker
-  people -- "merge" --> github
+  people -->|file issues, answer asks, approve specs| dispatch
+  people -->|merge| github
+  dispatch -->|events| envoy
+  github -->|pull request and CI events| envoy
+  envoy -->|events| coordinator
+  envoy -->|messages| agents
+  coordinator -->|runs| agents
+  agents -->|specs, comments, asks, status| dispatch
+  agents -->|pull requests| github
+  agents -->|request a secret| broker
+  broker <-->|pending requests and decisions| inbox
 ```
 
 ## Dispatch: the record of work and decisions
