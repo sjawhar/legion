@@ -4,6 +4,27 @@
 
 ### Changed
 
+- Brainstorming happens in the spec (LEGION-475). When a session has Dispatch, the `dispatch`
+  skill's "Design changes are brainstormed here" replaces the brainstorming skill's chat questions
+  and its spec file: the first version holds only what the conversation has established and every
+  question that is ready, each as a decision block at the end of the section that sets it up, and
+  each next version folds the answers in, in the human's words with the date. An approval request
+  carries nothing new: it goes out only once the human has agreed to every point in the spec, a
+  point they have not agreed to getting its own decision block first or leaving the spec, and its
+  `summary` says only what the human is approving, with no commentary. A lane's technical decisions
+  are made in the plan or the code, not the spec. The `legion-architect` skill, both root architect
+  role prompts and `dispatch_request_approval`'s description say the same, and `dispatch-first`
+  sends an agent to the `dispatch` skill before its first design question. A root architect's spec
+  adds only the evidence each decision needs and what the human decides, each as a decision block;
+  the architect's decomposition, its waves, how each outcome is proven and the integration test go
+  in the child issues and the planner's `.legion/plan.json`, so the design gate never asks the
+  human to approve the architect's own calls. The `dispatch` skill, its approval reference and
+  `legion-architect` describe the approval request as Dispatch keeps it: a new version moves the
+  open request and leaves it waiting on the agent, whose next request, once the human has agreed
+  to every point in the new version, hands the same request back; an answer closes it, so the
+  request after an answer opens a new one. A reply under an open ask whose next move is the
+  agent's, such as an approval request it must revise or hand back, goes with `reply_to_ask` and
+  `turn: "agent"`, since a default-turn reply hands the request back to the human unchanged.
 - The plugin speaks one daemon (LEGION-223): every Legion session boots through the Go daemon's
   claim routes (`claims/register`, `claims/ready`) and mints its grants there, whatever its
   environment holds. The TypeScript daemon's client, its `legion` tool (`spawn_worker`,
@@ -52,6 +73,11 @@
 - A controller now displays its project token in canonical uppercase
   (`Legion controller · AGENTC`), rather than the lowercase token the Go daemon carries in
   `LEGION_PROJECT` (LEGION-480).
+- A `task` subagent whose first transcript publish loses Oh My Pi's session publish lock to
+  another writer no longer fails every tool call for the rest of its life (LEGION-491). The
+  subagent check asks the host's agent roster first, which needs no publish; where the roster
+  gives no opinion and the publish fails, it answers from the transcript on disk, logs a warning,
+  and asks again at the next check instead of keeping the failure.
 
 ### Added
 

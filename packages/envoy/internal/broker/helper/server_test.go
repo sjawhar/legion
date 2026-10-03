@@ -37,6 +37,13 @@ type rig struct {
 // is newRig plus that login, for every test that doesn't care about the pre-login state itself.
 func newRig(t *testing.T, statePath string) *rig {
 	t.Helper()
+	return newLoggedRig(t, statePath, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+}
+
+// newLoggedRig is newRig with log as both the Server's and the Broker's logger, as
+// cmd/agent-secrets-helper wires them, so a test can read every line the helper writes.
+func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
+	t.Helper()
 	f := newFakeBroker(t)
 	of := operatorFile(t, "ada@example.com")
 	r := &rig{fake: f}
@@ -45,9 +52,9 @@ func newRig(t *testing.T, statePath string) *rig {
 	}
 	r.srv = &Server{
 		Registry: NewRegistry(statePath),
-		Broker:   &Broker{URL: f.srv.URL, OperatorFile: of, HTTP: f.srv.Client()},
+		Broker:   &Broker{URL: f.srv.URL, OperatorFile: of, HTTP: f.srv.Client(), Log: log},
 		Hostname: "testhost",
-		Log:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Log:      log,
 		MinRenew: 50 * time.Millisecond,
 	}
 	r.srv.PeerOf = func(conn *net.UnixConn) (*Peer, error) {

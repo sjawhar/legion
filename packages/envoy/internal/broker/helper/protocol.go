@@ -41,20 +41,60 @@ type Request struct {
 // Code NO_CREDENTIAL while the helper holds no launcher credential to enroll it with), and a
 // login/login-status reply carries the confirmation code in Code while OK is true.
 type Response struct {
-	OK             bool          `json:"ok"`
-	Code           string        `json:"code,omitempty"`
-	Error          string        `json:"error,omitempty"`
-	EnrollmentID   string        `json:"enrollment_id,omitempty"`
-	RuntimeID      string        `json:"runtime_id,omitempty"`
-	Operator       string        `json:"operator,omitempty"`
-	State          string        `json:"state,omitempty"`           // register: enrolling | enrolled
-	LoginState     string        `json:"login_state,omitempty"`     // login/login-status: the most recent login's pending|issued|denied|expired; expired whenever LoginRefused and that login is not pending
-	CredentialHeld bool          `json:"credential_held,omitempty"` // login-status: the helper holds a launcher credential, whatever the most recent login's state
-	LoginRefused   bool          `json:"login_refused,omitempty"`   // login-status: the broker refused the credential the helper held, and no login has started or settled since
-	LeaseExpires   string        `json:"lease_expires,omitempty"`   // enroll-box: RFC3339Nano
-	Proof          string        `json:"proof,omitempty"`
-	RequestObject  string        `json:"request_object,omitempty"` // sign-request: the signed compact JWS
-	Sessions       []SessionInfo `json:"sessions,omitempty"`
+	OK                  bool          `json:"ok"`
+	Code                string        `json:"code,omitempty"`
+	Error               string        `json:"error,omitempty"`
+	EnrollmentID        string        `json:"enrollment_id,omitempty"`
+	RuntimeID           string        `json:"runtime_id,omitempty"`
+	Operator            string        `json:"operator,omitempty"`
+	State               string        `json:"state,omitempty"`                 // register: enrolling | enrolled
+	LoginState          string        `json:"login_state,omitempty"`           // login/login-status: the most recent login's pending|issued|denied|expired; expired whenever LoginRefused and that login is not pending
+	CredentialHeld      bool          `json:"credential_held,omitempty"`       // login-status: the helper holds a launcher credential, whatever the most recent login's state
+	CredentialExpiresAt string        `json:"credential_expires_at,omitempty"` // login-status: RFC3339, when the held credential expires; empty while none is held or its broker did not say
+	LoginRefused        bool          `json:"login_refused,omitempty"`         // login-status: the helper dropped the credential it held (the broker refused it, or it reached the expiry the broker named), and no login has started or settled since
+	CredentialDropped   string        `json:"credential_dropped,omitempty"`    // login-status: why, set exactly when LoginRefused (dropRefused or dropExpired); a helper from before this field sends LoginRefused alone
+	LeaseExpires        string        `json:"lease_expires,omitempty"`         // enroll-box: RFC3339Nano
+	Proof               string        `json:"proof,omitempty"`
+	RequestObject       string        `json:"request_object,omitempty"` // sign-request: the signed compact JWS
+	Sessions            []SessionInfo `json:"sessions,omitempty"`
+}
+
+// The causes for which the helper drops the launcher credential it holds, as login-status's
+// credential_dropped carries them: each starts the ERROR line the helper logs as it drops the
+// credential (Broker.drop), and is the reason a session cannot enroll from then until a login is
+// recorded.
+const (
+	// dropRefused: the broker answered a launcher proof 401 LAUNCHER_INVALID (clearOnInvalid).
+	dropRefused = "the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch)"
+	// dropExpired: the credential reached the expiry the broker named when it issued it
+	// (watchExpiry).
+	dropExpired = "the launcher credential reached its expiry"
+)
+
+// NoCredentialReason says why a helper holds no launcher credential, from login-status's fields:
+// the most recent login's state, login_refused and credential_dropped. The helper logs it on every
+// enrollment it cannot attempt, and `agent-secrets launcher login-status` prints it, so the journal
+// and the client say the same thing. It names no confirmation code: a pending login's code is for
+// the approver's screen, never the journal. A login still pending outranks a dropped credential,
+// since its approval is what replaces it. A helper from before credential_dropped sets
+// login_refused only when the broker refused the credential, so login_refused alone reads as that.
+func NoCredentialReason(loginState string, refused bool, dropped string) string {
+	switch {
+	case loginState == "pending":
+		return "a machine login is waiting for a human to approve it"
+	case dropped != "":
+		return dropped
+	case refused:
+		return dropRefused
+	case loginState == "denied":
+		return "the most recent machine login was denied"
+	case loginState == "expired":
+		return "the most recent machine login expired before anyone approved it"
+	case loginState == "":
+		return "no machine login since the helper started; a restart discards the launcher credential"
+	default:
+		return "the most recent machine login is " + loginState
+	}
 }
 
 // SessionInfo is one registered session as `sessions` lists it: never a key.
@@ -66,19 +106,34 @@ type SessionInfo struct {
 	RegisteredAt string `json:"registered_at"`
 }
 
+// The codes a helper answers a request it refuses with. Every one carries a doc comment: the
+// broker's generated error reference (scripts/docs/broker/refgen) prints it and refuses a code
+// without one.
 const (
+	// CodeNotASession answers sign, sign-request or unregister from a process that descends from no
+	// session `agent-secrets register` registered.
 	CodeNotASession = "NOT_A_SESSION"
 	// CodeNotEnrolled answers sign or sign-request for a registered session that is still
 	// enrolling: the helper holds a launcher credential, and its enroll loop has not succeeded yet.
 	CodeNotEnrolled = "NOT_ENROLLED"
-	// CodeNoCredential answers them instead while the helper holds no launcher credential, from
-	// every restart until the operator logs the machine in: it enrolls no one, so the session has
-	// no broker identity. A register reply for such a session carries it too, beside OK.
-	CodeNoCredential   = "NO_CREDENTIAL"
-	CodeBadRequest     = "BAD_REQUEST"
-	CodeUnidentified   = "PEER_UNIDENTIFIED"
-	CodeLoginFailed    = "LOGIN_FAILED"
-	CodeEnrollFailed   = "ENROLL_FAILED"
+	// CodeNoCredential answers sign or sign-request while the helper holds no launcher credential,
+	// from every restart until the operator logs the machine in: it enrolls no one, so the session
+	// has no broker identity. A register reply for such a session carries it too, beside OK.
+	CodeNoCredential = "NO_CREDENTIAL"
+	// CodeBadRequest answers a request that is not one JSON object per line, names an unknown op,
+	// or leaves out a field its op needs.
+	CodeBadRequest = "BAD_REQUEST"
+	// CodeUnidentified answers a caller the kernel could not identify, or one whose process exited
+	// or changed while the helper was identifying it.
+	CodeUnidentified = "PEER_UNIDENTIFIED"
+	// CodeLoginFailed answers a login the helper could not start with the broker; the error says
+	// why.
+	CodeLoginFailed = "LOGIN_FAILED"
+	// CodeEnrollFailed answers an enroll-box the broker refused or could not be asked; the error
+	// says why.
+	CodeEnrollFailed = "ENROLL_FAILED"
+	// CodeUnenrollFailed answers an unenroll-box the broker refused or could not be asked; the
+	// error says why.
 	CodeUnenrollFailed = "UNENROLL_FAILED"
 )
 

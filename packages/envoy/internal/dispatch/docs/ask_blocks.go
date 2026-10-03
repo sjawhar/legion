@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -32,9 +33,61 @@ type askBlock struct {
 // the reconciled tree: a settlement whose markdown repeats the latest version writes no version
 // and leaves the document at the one it found.
 type settlementReconciliation struct {
-	changed   bool
+	repairs   []askRepair
 	events    []model.Event
 	retracted []model.Ask
+}
+
+// askRepair is one server-owned attribute repair settlement made to the ask block carrying blockID
+// in the tree it read, which set makes again on that block in the live document (repairLive).
+type askRepair struct {
+	blockID string
+	set     func(*pmdoc.Node) bool
+}
+
+// repair runs set on node, the ask block carrying blockID in the tree settlement read, and records
+// it for repairLive when it changed the block.
+func (r *settlementReconciliation) repair(node *pmdoc.Node, blockID string, set func(*pmdoc.Node) bool) bool {
+	if !set(node) {
+		return false
+	}
+	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: set})
+	return true
+}
+
+// repairLive makes the reconciliation's repairs on live, the document as it stands when settlement
+// writes them, which a peer may have edited since settlement read the tree it reconciled, and
+// reports whether any changed it. A repair lands on the first block carrying its id - the holder
+// EnsureBlockIDs keeps the id for - while that block is an ask: one removed or retyped since takes
+// none, and the settlement its removal scheduled reconciles it.
+func (r *settlementReconciliation) repairLive(live *pmdoc.Node) bool {
+	holders := make(map[string]*pmdoc.Node, len(r.repairs))
+	for _, repair := range r.repairs {
+		holders[repair.blockID] = nil
+	}
+	unfound := len(holders)
+	pmdoc.Walk(live, func(node *pmdoc.Node) bool {
+		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+		if holder, wanted := holders[id]; id != "" && wanted && holder == nil {
+			holders[id] = node
+			unfound--
+		}
+		return unfound > 0
+	})
+	changed := false
+	for _, repair := range r.repairs {
+		if holder := holders[repair.blockID]; holder != nil && holder.Type == "ask" && repair.set(holder) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+// writeLive writes the reconciliation's repairs into doc as it stands (rewriteLive, repairLive) and
+// reports whether any changed it.
+func (r *settlementReconciliation) writeLive(doc *crdt.Doc, origin any) (bool, error) {
+	_, repaired, err := rewriteLive(doc, origin, r.repairLive)
+	return repaired, err
 }
 
 // nameVersion completes the reconciliation at the version the settled document is at, writing
@@ -129,19 +182,22 @@ func (s *Service) reconcileAskBlocks(
 	reconciled := settlementReconciliation{}
 	var rewrites []serverRewrite
 	answered := false
-	rewrite := func(node *pmdoc.Node, ask model.Ask) bool {
+	// rewrite is reconciled.repair of node's server attributes, the ask block carrying blockID,
+	// recording for withholdAnswers what they were and whether the repair wrote an answer.
+	rewrite := func(node *pmdoc.Node, blockID string, ask model.Ask) bool {
 		found := readAskServerState(node)
 		changed, wroteAnswer := setAskServerAttributes(node, ask, false)
-		if changed {
-			rewrites = append(rewrites, serverRewrite{node: node, ask: ask, found: found, event: -1})
-			answered = answered || wroteAnswer
+		if !changed {
+			return false
 		}
-		return changed
+		reconciled.repairs = append(reconciled.repairs, askRepair{blockID: blockID, set: askServerAttributes(ask, false)})
+		rewrites = append(rewrites, serverRewrite{node: node, ask: ask, found: found, repair: len(reconciled.repairs) - 1, event: -1})
+		answered = answered || wroteAnswer
+		return true
 	}
 	for _, invalid := range invalidBlocks {
 		delete(rows, invalid.id)
-		if setAskInvalidAttribute(invalid.node, invalid.reason.Error()) {
-			reconciled.changed = true
+		if reconciled.repair(invalid.node, invalid.id, askInvalidAttribute(invalid.reason.Error())) {
 			reconciled.events = append(reconciled.events, documentAskEvent(
 				owner,
 				artifactID,
@@ -155,7 +211,6 @@ func (s *Service) reconcileAskBlocks(
 			))
 		}
 	}
-	invalidChanged := reconciled.changed
 	for _, block := range blocks {
 		ask, exists := rows[block.id]
 		if !exists {
@@ -170,9 +225,7 @@ func (s *Service) reconcileAskBlocks(
 			reconciled.events = append(reconciled.events, documentAskEvent(
 				owner, artifactID, "ask.opened", actor, model.NewAskEventPayload(ask, changes),
 			))
-			if rewrite(block.node, ask) {
-				reconciled.changed = true
-			}
+			rewrite(block.node, block.id, ask)
 			continue
 		}
 		delete(rows, block.id)
@@ -230,8 +283,7 @@ func (s *Service) reconcileAskBlocks(
 				model.NewAskEditEventPayload(ask, previous, actor, changes),
 			))
 		}
-		if rewrite(block.node, ask) {
-			reconciled.changed = true
+		if rewrite(block.node, block.id, ask) {
 			rewrites[len(rewrites)-1].event = len(reconciled.events)
 			reconciled.events = append(reconciled.events, documentAskEvent(
 				owner,
@@ -243,7 +295,7 @@ func (s *Service) reconcileAskBlocks(
 		}
 	}
 	if answered {
-		reconciled.withholdAnswers(artifactID, tree, before, rewrites, invalidChanged)
+		reconciled.withholdAnswers(artifactID, tree, before, rewrites)
 	}
 
 	for _, ask := range rows {
@@ -583,9 +635,18 @@ func restoreRetractedAsk(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.A
 	return ask, nil
 }
 
-// askServerAttributes are the attributes of an ask block the server keeps in agreement with its
-// ask row (setAskServerAttributes).
-var askServerAttributes = [...]string{"state", "answered_by", "answered_at", "selected", "answer", "invalid"}
+// askServerAttributeNames are the attributes of an ask block the server keeps in agreement with
+// its ask row (setAskServerAttributes).
+var askServerAttributeNames = [...]string{"state", "answered_by", "answered_at", "selected", "answer", "invalid"}
+
+// askServerAttributes is setAskServerAttributes for ask as it stands now, withholding its answer
+// when withholdAnswer, for a repair to make again on another tree (settlementReconciliation.repair).
+func askServerAttributes(ask model.Ask, withholdAnswer bool) func(*pmdoc.Node) bool {
+	return func(node *pmdoc.Node) bool {
+		changed, _ := setAskServerAttributes(node, ask, withholdAnswer)
+		return changed
+	}
+}
 
 // setAskServerAttributes makes node's server attributes agree with ask, and reports whether it
 // changed any and whether it wrote an answer's own text: the answer, or the options it selects,
@@ -601,7 +662,7 @@ func setAskServerAttributes(node *pmdoc.Node, ask model.Ask, withholdAnswer bool
 			desired["answer"] = *ask.Answer.Text
 		}
 	}
-	for _, name := range askServerAttributes {
+	for _, name := range askServerAttributeNames {
 		answer := name == "answer" || name == "selected"
 		if answer && withholdAnswer {
 			continue
@@ -625,15 +686,15 @@ func setAskServerAttributes(node *pmdoc.Node, ask model.Ask, withholdAnswer bool
 	return changed, answered
 }
 
-// askServerState is an ask block's server attributes (askServerAttributes) as it holds them.
-type askServerState [len(askServerAttributes)]struct {
+// askServerState is an ask block's server attributes (askServerAttributeNames) as it holds them.
+type askServerState [len(askServerAttributeNames)]struct {
 	value   any
 	present bool
 }
 
 func readAskServerState(node *pmdoc.Node) askServerState {
 	var state askServerState
-	for index, name := range askServerAttributes {
+	for index, name := range askServerAttributeNames {
 		state[index].value, state[index].present = node.Attrs[name]
 	}
 	return state
@@ -641,7 +702,7 @@ func readAskServerState(node *pmdoc.Node) askServerState {
 
 // restore gives node back the server attributes state holds.
 func (state askServerState) restore(node *pmdoc.Node) {
-	for index, name := range askServerAttributes {
+	for index, name := range askServerAttributeNames {
 		if state[index].present {
 			node.Attrs[name] = state[index].value
 		} else {
@@ -650,14 +711,16 @@ func (state askServerState) restore(node *pmdoc.Node) {
 	}
 }
 
-// serverRewrite is an ask block whose server attributes settlement rewrote to agree with its ask:
-// the attributes as settlement found them, and the index in the reconciliation's events of the
-// block.repaired the rewrite emitted, or -1 for a new ask's block, whose rewrite emits none.
+// serverRewrite is an ask block whose server attributes settlement repaired to agree with its ask:
+// the attributes as settlement found them, the index of the repair in the reconciliation's
+// repairs, and the index in its events of the block.repaired the repair emitted, or -1 for a new
+// ask's block, whose repair emits none.
 type serverRewrite struct {
-	node  *pmdoc.Node
-	ask   model.Ask
-	found askServerState
-	event int
+	node   *pmdoc.Node
+	ask    model.Ask
+	found  askServerState
+	repair int
+	event  int
 }
 
 // withholdAnswers keeps the answers settlement wrote back into their blocks out of the document
@@ -666,14 +729,13 @@ type serverRewrite struct {
 // same way). An answer is stored on its ask as well as in its block, and a block that leaves the
 // document and returns gets its answer back from the ask, so a returning block is the answer's
 // text arriving without the answer route that weighs it: twenty-four answers of 900 KB, each
-// weighed against a document their deleted blocks had left small, came back in one 1,852-byte edit
-// as a 21.6 MB document. Withheld, each block is rewritten with its answer and selection as it held
+// weighed against a document their deleted blocks had left small, came back in one 1,540-byte edit
+// as a 21.6 MB document. Withheld, each block is repaired with its answer and selection as it held
 // them, so it still says who answered and when, and the ask keeps the answer; a later settlement of
-// a document with room for it writes it back. block.repaired is kept only for a block the rewrite
-// still changes, and the reconciliation changes the document only if any does or an invalid block
-// was flagged (invalidChanged). A document that does not render cannot be weighed, so its answers
-// are withheld, and the settlement that renders it next fails as it would have.
-func (r *settlementReconciliation) withholdAnswers(artifactID string, tree *pmdoc.Node, before string, rewrites []serverRewrite, invalidChanged bool) {
+// a document with room for it writes it back. A repair that then changes nothing is dropped with
+// its block.repaired. A document that does not render cannot be weighed, so its answers are
+// withheld, and the settlement that renders it next fails as it would have.
+func (r *settlementReconciliation) withholdAnswers(artifactID string, tree *pmdoc.Node, before string, rewrites []serverRewrite) {
 	after, err := renderTree(tree)
 	if err == nil {
 		if _, err = weighRendering(before, after); err == nil {
@@ -681,26 +743,34 @@ func (r *settlementReconciliation) withholdAnswers(artifactID string, tree *pmdo
 		}
 	}
 	slog.Warn("dispatch: settlement withholds restored answers from their blocks", "room", artifactID, "reason", err)
-	r.changed = invalidChanged
-	dropped := map[int]bool{}
+	droppedRepairs, droppedEvents := map[int]bool{}, map[int]bool{}
 	for _, rewrite := range rewrites {
 		rewrite.found.restore(rewrite.node)
 		if changed, _ := setAskServerAttributes(rewrite.node, rewrite.ask, true); changed {
-			r.changed = true
-		} else if rewrite.event >= 0 {
-			dropped[rewrite.event] = true
+			r.repairs[rewrite.repair].set = askServerAttributes(rewrite.ask, true)
+			continue
+		}
+		droppedRepairs[rewrite.repair] = true
+		if rewrite.event >= 0 {
+			droppedEvents[rewrite.event] = true
 		}
 	}
+	r.repairs = without(r.repairs, droppedRepairs)
+	r.events = without(r.events, droppedEvents)
+}
+
+// without is items but those at the indexes dropped names, in their order, in items' own array.
+func without[T any](items []T, dropped map[int]bool) []T {
 	if len(dropped) == 0 {
-		return
+		return items
 	}
-	kept := r.events[:0]
-	for index, event := range r.events {
+	kept := items[:0]
+	for index, item := range items {
 		if !dropped[index] {
-			kept = append(kept, event)
+			kept = append(kept, item)
 		}
 	}
-	r.events = kept
+	return kept
 }
 
 func askServerAttributeEqual(got, want any) bool {
@@ -746,6 +816,13 @@ func setAskInvalidAttribute(node *pmdoc.Node, reason string) bool {
 	node.Attrs["invalid"] = reason
 	return true
 }
+
+// askInvalidAttribute is setAskInvalidAttribute for reason, for a repair to make again on another
+// tree (settlementReconciliation.repair).
+func askInvalidAttribute(reason string) func(*pmdoc.Node) bool {
+	return func(node *pmdoc.Node) bool { return setAskInvalidAttribute(node, reason) }
+}
+
 func documentAskEvent(owner artifactOwner, artifactID, eventType string, actor model.Actor, payload any) model.Event {
 	event := model.Event{IssueKey: owner.IssueKey, Type: eventType, Actor: actor, Payload: payload}
 	if owner.IssueKey == nil {

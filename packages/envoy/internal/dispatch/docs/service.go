@@ -85,6 +85,20 @@ type Service struct {
 	// afterSettleLock runs after settleRoom has taken the document's advisory lock and before
 	// it touches the room. Nil outside tests; tests use it to fail the room in that window.
 	afterSettleLock func(room string)
+	// afterSettleRead runs after settleRoom has read the document and before it stamps block ids
+	// into the room. Nil outside tests; tests use it to edit the room in that window.
+	afterSettleRead func(room string)
+	// afterSettleReconcile runs after settleRoom has reconciled the document's ask blocks with
+	// their rows and before it writes their repairs into the room. Nil outside tests; tests use it
+	// to edit the room in that window.
+	afterSettleReconcile func(room string)
+	// afterSettleVersionRead runs after a settlement that wrote into the room has read the tree
+	// its version is rendered from, and before it renders it. Nil outside tests; tests use it to
+	// edit the room while the version renders.
+	afterSettleVersionRead func(room string)
+	// afterBackfillRead runs after the block-id backfill has read a document that needs stamping
+	// and before it stamps it. Nil outside tests; tests use it to edit the room in that window.
+	afterBackfillRead func(room string)
 	// afterPublishRefused runs when a committed write's publish is refused by its room, before
 	// the publish decides whether to fail that room. Nil outside tests; tests use it to let the
 	// refused room's recovery finish in that window.
@@ -206,11 +220,29 @@ type suppressSlot struct {
 	canceled  bool
 	discarded bool
 	consumed  bool
+	// committedTo and committed are the document a repair's transaction committed into and the
+	// update it committed (recordSuppressedCommit), set before ygo hands that update to the room's
+	// persistence.
+	committedTo *crdt.Doc
+	committed   []byte
 }
 
-// identityClosureOrigin identifies a server-owned identity repair transaction.
-// It must remain non-zero sized because Ygo compares origins by interface equality.
-type identityClosureOrigin struct{ _ byte }
+// identityClosureOrigin identifies a server-owned repair transaction - settlement's, or the
+// block-id backfill's - and carries the suppression slot its update is held from the room's
+// persistence by. Being non-zero sized also keeps each origin distinct, since ygo compares origins
+// by interface equality.
+type identityClosureOrigin struct{ slot *suppressSlot }
+
+// recordSuppressedCommit records on slot the update its repair transaction committed and the
+// document it committed it into. The room's update observer runs it (onLoadDocument) on the
+// committing goroutine before ygo's own persistence observer, which the room registers after
+// OnLoadDocument, so the slot holds both before either path to the store is handed the update.
+func (s *Service) recordSuppressedCommit(slot *suppressSlot, doc *crdt.Doc, update []byte) {
+	s.suppressMu.Lock()
+	defer s.suppressMu.Unlock()
+	slot.committedTo = doc
+	slot.committed = append([]byte(nil), update...)
+}
 
 func (s *Service) prepareSuppressedPersistence(room string) *suppressSlot {
 	slot := &suppressSlot{ready: make(chan struct{})}
@@ -226,7 +258,7 @@ func (s *Service) prepareSuppressedPersistence(room string) *suppressSlot {
 // applyCaptured runs mutate on room's live document, whose transactions it tags with origin,
 // and returns the updates the room recorded for that origin, in order: the bytes the room's
 // persistence observer is handed, which a suppression slot must match. A mutation that changes
-// nothing is no error.
+// nothing is no error. A mutation that fails returns the updates it recorded before it failed.
 func (s *Service) applyCaptured(ctx context.Context, room string, origin any, mutate func(*crdt.Doc) error) ([][]byte, error) {
 	var updates [][]byte
 	var mutationErr error
@@ -240,12 +272,70 @@ func (s *Service) applyCaptured(ctx context.Context, room string, origin any, mu
 		mutationErr = mutate(doc)
 	})
 	if mutationErr != nil {
-		return nil, mutationErr
+		return updates, mutationErr
 	}
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return nil, err
 	}
 	return updates, nil
+}
+
+// errRoomReplaced is a repair refused because the room no longer holds the document its caller
+// read - the room was evicted, its last browser having left or a CloseRoom having closed it, and
+// the write would load a replacement from the store - or given up because the room left the
+// server while the repair's transaction committed into it.
+var errRoomReplaced = errors.New("document room was replaced")
+
+// applySuppressed writes one repair - settlement's, or the block-id backfill's - into room's live
+// document under a suppression slot of its own: mutate writes at most one transaction, tagged with
+// the origin it is handed, and reports whether that transaction changed the document. The room's
+// persistence worker is handed each transaction's update on its own, so a slot matches exactly
+// one. It returns the slot with the update when the transaction changed the document, and
+// otherwise neither, having released the slot: a slot left queued holds the worker at the room's
+// next update. A repair computed against the document as it stands finds nothing to write when
+// another writer has made it unnecessary since the caller read the document (LEGION-479), and its
+// transaction still reports an update, the document's delete set, which ygo reports for every
+// transaction it commits. The slot is finished with that update, so the worker takes it with the
+// slot rather than storing it. A mutation that ran no transaction leaves nothing to match, and its
+// slot is cancelled. One that fails after its transaction ran returns the slot and the update with
+// its error: what it wrote is in the room, so its caller discards the slot and fails the room.
+//
+// A repair is written only into want, the document its caller read, when want is not nil: one
+// written into a replacement the room loaded since would be versioned from want, which never got
+// it. It is refused, writing nothing, with errRoomReplaced. A room can also retire under the
+// repair's transaction, between Server.Apply finding it and the commit: the commit's update then
+// reaches the store's adapter on this goroutine, which consumeSuppressedPersistence answers by
+// discarding it, so a repair whose room is gone once it has written returns its slot with
+// errRoomReplaced, and its caller fails the room as for any write it gives up.
+func (s *Service) applySuppressed(ctx context.Context, room string, want *crdt.Doc, mutate func(doc *crdt.Doc, origin any) (bool, error)) (*suppressSlot, []byte, error) {
+	slot := s.prepareSuppressedPersistence(room)
+	origin := &identityClosureOrigin{slot: slot}
+	var written *crdt.Doc
+	wrote := false
+	updates, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
+		if want != nil && doc != want {
+			return errRoomReplaced
+		}
+		written = doc
+		var mutateErr error
+		wrote, mutateErr = mutate(doc, origin)
+		return mutateErr
+	})
+	if len(updates) == 0 {
+		s.cancelSuppressedPersistence(room, slot)
+		return nil, nil, err
+	}
+	if err == nil && len(updates) > 1 {
+		err = fmt.Errorf("a repair wrote %d updates, want one", len(updates))
+	}
+	if err == nil && !wrote {
+		s.finishSuppressedPersistence(slot, updates[0])
+		return nil, nil, nil
+	}
+	if err == nil && s.srv.GetDoc(room) != written {
+		err = errRoomReplaced
+	}
+	return slot, updates[0], err
 }
 
 func (s *Service) finishSuppressedPersistence(slot *suppressSlot, update []byte) {
@@ -258,10 +348,16 @@ func (s *Service) finishSuppressedPersistence(slot *suppressSlot, update []byte)
 	close(slot.ready)
 }
 
-// discardSuppressedPersistence prevents a completed live mutation from falling
-// back to ygo's independent persistence after its enclosing transaction failed.
-// The persistence callback consumes the slot and discards its matching update.
-func (s *Service) discardSuppressedPersistence(room string, slot *suppressSlot) {
+// discardSuppressedPersistence prevents completed live mutations from falling
+// back to ygo's independent persistence after their enclosing transaction failed.
+// The persistence callback consumes each slot and discards its matching update.
+func (s *Service) discardSuppressedPersistence(room string, slots ...*suppressSlot) {
+	for _, slot := range slots {
+		s.discardSuppressedSlot(room, slot)
+	}
+}
+
+func (s *Service) discardSuppressedSlot(room string, slot *suppressSlot) {
 	s.suppressMu.Lock()
 	defer s.suppressMu.Unlock()
 	if slot == nil || slot.consumed || slot.canceled {
@@ -287,7 +383,30 @@ func (s *Service) consumeSuppressedPersistence(room string, update []byte) bool 
 		}
 		slot := slots[0]
 		ready := slot.ready
+		committedTo := slot.committedTo
+		own := committedTo != nil && bytes.Equal(slot.committed, update)
 		s.suppressMu.Unlock()
+
+		// A repair's update committed into a room whose persistence worker has retired reaches
+		// this adapter on the repair's own goroutine, inside its commit (ygo's persistStranded),
+		// and a room retires only once it has left the server. Waiting there for the slot, which
+		// that goroutine finishes or discards once its commit returns, would never end. The repair
+		// finds its room gone and gives the write up (applySuppressed), so its update is
+		// discarded here instead.
+		if own && s.srv.GetDoc(room) != committedTo {
+			s.suppressMu.Lock()
+			if current := s.suppressed[room]; len(current) > 0 && current[0] == slot && !slot.consumed {
+				if !slot.canceled && slot.update == nil {
+					slot.canceled = true
+					close(slot.ready)
+				}
+				s.consumeHeadSlotLocked(room)
+				s.suppressMu.Unlock()
+				return true
+			}
+			s.suppressMu.Unlock()
+			continue
+		}
 
 		<-ready
 
@@ -298,13 +417,7 @@ func (s *Service) consumeSuppressedPersistence(room string, update []byte) bool 
 			continue
 		}
 		if slot.canceled {
-			slot.consumed = true
-			slots = slots[1:]
-			if len(slots) == 0 {
-				delete(s.suppressed, room)
-			} else {
-				s.suppressed[room] = slots
-			}
+			s.consumeHeadSlotLocked(room)
 			discarded := slot.discarded
 			s.suppressMu.Unlock()
 			return discarded
@@ -313,16 +426,22 @@ func (s *Service) consumeSuppressedPersistence(room string, update []byte) bool 
 			s.suppressMu.Unlock()
 			return false
 		}
-		slot.consumed = true
-		slots = slots[1:]
-		if len(slots) == 0 {
-			delete(s.suppressed, room)
-		} else {
-			s.suppressed[room] = slots
-		}
+		s.consumeHeadSlotLocked(room)
 		s.suppressMu.Unlock()
 		return true
 	}
+}
+
+// consumeHeadSlotLocked marks room's first suppression slot consumed and removes it. The caller
+// holds suppressMu.
+func (s *Service) consumeHeadSlotLocked(room string) {
+	slots := s.suppressed[room]
+	slots[0].consumed = true
+	if len(slots) == 1 {
+		delete(s.suppressed, room)
+		return
+	}
+	s.suppressed[room] = slots[1:]
 }
 
 func (s *Service) cancelSuppressedPersistence(room string, slot *suppressSlot) {
@@ -772,7 +891,14 @@ func (s *Service) retrySettle(room string, generation uint64, err error) {
 }
 
 func (s *Service) retrySettleLocked(room string, state *roomState, generation uint64, err error) {
-	slog.Error("dispatch: settle document", "room", room, "error", err)
+	if errors.Is(err, errRoomReplaced) {
+		// Expected, not a fault: the settlement wrote nothing (one that wrote fails the room
+		// instead) because the room it read was replaced first, and the replacement's load arms
+		// the settlement the document still owes.
+		slog.Info("dispatch: document settlement wrote nothing into a replaced room", "room", room, "error", err)
+	} else {
+		slog.Error("dispatch: settle document", "room", room, "error", err)
+	}
 	if state.gen != generation {
 		return
 	}
@@ -801,22 +927,35 @@ func ArtifactVersionEventPayload(
 	return payload
 }
 
-func ensureBlockIDsInDocument(doc *crdt.Doc, origin any) (*pmdoc.Node, int, error) {
-	fragment := doc.GetXmlFragment(fragmentName)
-	tree, err := treeOf(doc)
-	if err != nil {
-		return nil, 0, err
+// stampBlockIDs stamps the block ids doc's tree lacks or repeats on the tree as it stands
+// (rewriteLive), and returns the stamped tree with how many ids it minted. Its caller decides
+// from a read of its own whether any id needs repair, so a document that needs none opens no
+// transaction.
+func stampBlockIDs(doc *crdt.Doc, origin any) (*pmdoc.Node, int, error) {
+	minted := 0
+	stamped, _, err := rewriteLive(doc, origin, func(live *pmdoc.Node) bool {
+		minted = pmdoc.EnsureBlockIDsCount(live)
+		return minted > 0
+	})
+	return stamped, minted, err
+}
+
+// settlementAuthors copies state's pending authors, which a settlement's version credits, and names
+// the actor its events carry: the first of those authors, or else the room's latest editor. The
+// caller holds state.mu.
+func settlementAuthors(state *roomState) (map[string]model.Actor, []model.Actor, model.Actor) {
+	pending := make(map[string]model.Actor, len(state.pending))
+	for key, actor := range state.pending {
+		pending[key] = actor
 	}
-	stamped := pmdoc.EnsureBlockIDsCount(tree)
-	if stamped == 0 {
-		return tree, 0, nil
+	authors := actorSlice(pending)
+	actor := model.Actor{}
+	if len(authors) > 0 {
+		actor = authors[0]
+	} else if state.lastActor != nil {
+		actor = *state.lastActor
 	}
-	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
-		return pmdoc.Update(transaction, fragment, tree)
-	}, origin); err != nil {
-		return nil, 0, err
-	}
-	return tree, stamped, nil
+	return pending, authors, actor
 }
 
 func (s *Service) settleRoom(room string, generation uint64) {
@@ -949,7 +1088,12 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		retry(err)
 		return
 	}
-	tree, err := treeOf(doc)
+	// The settlement reads the document three times, and each read has its own name: read is this
+	// one, before the database work; reconciled is the tree the ask blocks are reconciled on, the
+	// stamp's when it stamped ids; versioned is the one the version is rendered from, read again
+	// after the repairs when the settlement wrote any. A browser's edit made in between is in a
+	// later one and not an earlier one.
+	read, err := treeOf(doc)
 	if err != nil {
 		if errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
@@ -966,26 +1110,53 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// otherwise would sit past every later version's cursor, since no version follows it to move
 	// the cursor, and the first settlement after a renderer change would version a document
 	// nobody had touched.
-	beforeMarkdown, beforeRenderErr := renderTree(tree)
+	beforeMarkdown, beforeRenderErr := renderTree(read)
+	if s.afterSettleRead != nil {
+		s.afterSettleRead(room)
+	}
 
-	stamped := pmdoc.BlockIDRepairCount(tree)
-	var slot *suppressSlot
+	// slots holds a suppression slot for each update this settlement writes into the room, in the
+	// order the room's persistence worker is handed them, and updates holds those updates. Every
+	// path after a write finishes or discards all of them.
+	var slots []*suppressSlot
 	var updates [][]byte
-	if stamped > 0 {
-		slot = s.prepareSuppressedPersistence(room)
-		origin := &identityClosureOrigin{}
-		updates, err = s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
+	keep := func(slot *suppressSlot, update []byte) {
+		if slot != nil {
+			slots, updates = append(slots, slot), append(updates, update)
+		}
+	}
+	finishSlots := func() {
+		for index, slot := range slots {
+			s.finishSuppressedPersistence(slot, updates[index])
+		}
+	}
+	// abandon ends a settlement that cannot finish. What it wrote is in the room and its browsers
+	// and will never reach the store through this settlement, so its slots are discarded and the
+	// room fails, which reloads the document from the store and leaves its settlement to that load.
+	// A settlement that wrote nothing is retried.
+	abandon := func(err error) {
+		if len(slots) > 0 {
+			s.discardSuppressedPersistence(room, slots...)
+			s.failRoom(room, err)
+			return
+		}
+		retry(err)
+	}
+	reconciled := read
+	if pmdoc.BlockIDRepairCount(read) > 0 {
+		slot, update, err := s.applySuppressed(ctx, room, doc, func(doc *crdt.Doc, origin any) (bool, error) {
+			var minted int
 			var stampErr error
-			tree, stamped, stampErr = ensureBlockIDsInDocument(doc, origin)
-			return stampErr
+			reconciled, minted, stampErr = stampBlockIDs(doc, origin)
+			return minted > 0, stampErr
 		})
+		keep(slot, update)
 		if err != nil {
-			s.cancelSuppressedPersistence(room, slot)
-			if errors.Is(err, ErrDocSchema) {
+			if len(slots) == 0 && errors.Is(err, ErrDocSchema) {
 				slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
 				return
 			}
-			retry(err)
+			abandon(err)
 			return
 		}
 	}
@@ -993,9 +1164,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	state.mu.Lock()
 	if s.stopping.Load() || state.closed || state.failed != nil {
 		state.mu.Unlock()
-		if stamped > 0 {
-			s.discardSuppressedPersistence(room, slot)
-		}
+		s.discardSuppressedPersistence(room, slots...)
 		return
 	}
 	// An open live write is not in the room yet, and since this settlement holds the owner row,
@@ -1008,126 +1177,116 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 	if superseded {
 		state.mu.Unlock()
-		if stamped == 0 {
+		if len(slots) == 0 {
 			return
 		}
-		identityUpdate, mergeErr := mergeUpdates(updates)
-		if mergeErr != nil {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, mergeErr)
+		identityUpdate, err := mergeUpdates(updates)
+		if err != nil {
+			abandon(err)
 			return
 		}
 		if err := s.srv.BroadcastUpdate(ctx, room, identityUpdate); err != nil {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, fmt.Errorf("broadcast superseded document identity update: %w", err))
+			abandon(fmt.Errorf("broadcast superseded document identity update: %w", err))
 			return
 		}
-		identityChanged := closureChangedMarkdown(beforeMarkdown, beforeRenderErr, tree)
+		identityChanged := closureChangedMarkdown(beforeMarkdown, beforeRenderErr, reconciled)
 		if _, err := s.persistence.AppendUpdateTx(ctx, tx, room, identityUpdate, identityChanged); err != nil {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, err)
+			abandon(err)
 			return
 		}
 		if err := tx.Commit(ctx); err != nil {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, fmt.Errorf("commit superseded document identity update: %w", err))
+			abandon(fmt.Errorf("commit superseded document identity update: %w", err))
 			return
 		}
-		s.finishSuppressedPersistence(slot, identityUpdate)
+		finishSlots()
 		return
 	}
-	pending := make(map[string]model.Actor, len(state.pending))
-	for key, actor := range state.pending {
-		pending[key] = actor
-	}
-	lastActor := state.lastActor
+	pending, authors, eventActor := settlementAuthors(state)
 	state.mu.Unlock()
-	authors := actorSlice(pending)
-	eventActor := model.Actor{}
-	if len(authors) > 0 {
-		eventActor = authors[0]
-	} else if lastActor != nil {
-		eventActor = *lastActor
-	}
-	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, tree, beforeMarkdown, eventActor)
+	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, reconciled, beforeMarkdown, eventActor)
 	if err != nil {
-		if stamped > 0 {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, err)
-			return
-		}
-		retry(err)
+		abandon(err)
 		return
 	}
-	if reconciliation.changed {
-		if slot == nil {
-			slot = s.prepareSuppressedPersistence(room)
-		}
-		origin := &identityClosureOrigin{}
-		reconciled, err := s.applyCaptured(ctx, room, origin, func(doc *crdt.Doc) error {
-			fragment := doc.GetXmlFragment(fragmentName)
-			return doc.TransactE(func(transaction *crdt.Transaction) error {
-				return pmdoc.Update(transaction, fragment, tree)
-			}, origin)
-		})
+	if s.afterSettleReconcile != nil {
+		s.afterSettleReconcile(room)
+	}
+	if len(reconciliation.repairs) > 0 {
+		// The repairs are made on the document as it stands (writeLive): the tree they were
+		// reconciled on was read before settlement's database work.
+		slot, update, err := s.applySuppressed(ctx, room, doc, reconciliation.writeLive)
+		keep(slot, update)
 		if err != nil {
-			s.cancelSuppressedPersistence(room, slot)
-			s.failRoom(room, fmt.Errorf("write reconciled typed blocks: %w", err))
+			abandon(fmt.Errorf("write reconciled typed blocks: %w", err))
 			return
 		}
-		updates = append(updates, reconciled...)
-		stamped = 1
 	}
 
-	var update []byte
-	if stamped > 0 {
-		update, err = mergeUpdates(updates)
+	versioned := reconciled
+	if len(slots) > 0 {
+		update, err := mergeUpdates(updates)
 		if err != nil {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, err)
+			abandon(err)
 			return
 		}
 		if err := s.srv.BroadcastUpdate(ctx, room, update); err != nil {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, fmt.Errorf("broadcast document closure update: %w", err))
+			abandon(fmt.Errorf("broadcast document closure update: %w", err))
 			return
 		}
-		closureChanged := closureChangedMarkdown(beforeMarkdown, beforeRenderErr, tree)
-		if _, appendErr := s.persistence.AppendUpdateTx(ctx, tx, room, update, closureChanged); appendErr != nil {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, appendErr)
+		closureChanged := closureChangedMarkdown(beforeMarkdown, beforeRenderErr, reconciled)
+		if _, err := s.persistence.AppendUpdateTx(ctx, tx, room, update, closureChanged); err != nil {
+			abandon(err)
 			return
 		}
-	}
-	if stamped > 0 {
 		snapshotCursor, err = currentUpdateCursor(ctx, tx, room)
 		if err != nil {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, err)
+			abandon(err)
 			return
+		}
+		// The version is the document as it stands after the repairs, read under its lock, not the
+		// tree settlement reconciled before them: a peer's edit made since is in the room, its
+		// browsers and its stored updates, and a version rendered from the earlier tree would leave
+		// it out (LEGION-479).
+		versioned, err = lockedTreeOf(doc)
+		if err != nil {
+			abandon(err)
+			return
+		}
+		// That tree holds the edits made since the authors were taken above, so the version is
+		// credited to their authors too, taken again with the tree: an edit's own settlement finds
+		// the document already versioned and writes no version to credit them on. They are taken
+		// here, not after the render, where an edit made while the version renders would be
+		// credited on this version, which lacks it, rather than on the version its own settlement
+		// writes. ygo runs the update observer that credits an edit after the edit's transaction
+		// releases the document, so an edit this tree holds that its observer has not yet credited
+		// is not credited here; its author stays pending for a later version.
+		state.mu.Lock()
+		pending, authors, eventActor = settlementAuthors(state)
+		state.mu.Unlock()
+		if s.afterSettleVersionRead != nil {
+			s.afterSettleVersionRead(room)
 		}
 	}
-	markdown, err := renderTree(tree)
+	markdown, err := renderTree(versioned)
 	if err != nil {
-		if stamped > 0 {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, err)
-			return
-		}
-		if errors.Is(err, ErrDocSchema) {
+		if len(slots) == 0 && errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
 			return
 		}
-		retry(err)
+		abandon(err)
 		return
 	}
 
 	state.mu.Lock()
-	if s.stopping.Load() || state.closed || state.failed != nil || state.gen != generation {
+	// A settlement that wrote into the room commits what it wrote even when the document has moved
+	// since its read: the room and its peers hold those updates, and dropped here they would never
+	// reach the store. Its version is the document as it stood after the repairs, the move
+	// included; the move's own update is appended once this transaction releases the room lock.
+	// Should that append fail, the room fails and reloads without the move's text, which the
+	// version holds, until the browser that made it resends it on reconnecting.
+	if s.stopping.Load() || state.closed || state.failed != nil || (state.gen != generation && len(slots) == 0) {
 		state.mu.Unlock()
-		if stamped > 0 {
-			s.discardSuppressedPersistence(room, slot)
-		}
+		s.discardSuppressedPersistence(room, slots...)
 		return
 	}
 	state.mu.Unlock()
@@ -1164,12 +1323,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// this settlement's to canonicalise when nothing has touched the document since.
 	contentChanged, err := contentChangedSinceVersion(ctx, tx, room, latest.docUpdateVersion)
 	if err != nil {
-		if stamped > 0 {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, err)
-			return
-		}
-		retry(err)
+		abandon(err)
 		return
 	}
 	versioning := contentChanged && markdown != latest.markdown
@@ -1178,26 +1332,16 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		settledVersion++
 	}
 	if err := reconciliation.nameVersion(ctx, tx, room, owner, settledVersion); err != nil {
-		if stamped > 0 {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, err)
-			return
-		}
-		retry(err)
+		abandon(err)
 		return
 	}
 	if versioning {
-		result, writeErr := s.writeVersionTx(ctx, tx, room, markdown, tree, eventActor, &versionWrite{
+		result, writeErr := s.writeVersionTx(ctx, tx, room, markdown, versioned, eventActor, &versionWrite{
 			authors:          authors,
 			docUpdateVersion: &snapshotCursor,
 		})
 		if writeErr != nil {
-			if stamped > 0 {
-				s.discardSuppressedPersistence(room, slot)
-				s.failRoom(room, writeErr)
-				return
-			}
-			retry(writeErr)
+			abandon(writeErr)
 			return
 		}
 		published = append(published, ledger.events...)
@@ -1213,47 +1357,25 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			versionEvent.ArtifactID = &room
 		}
 		if err := appendEvents([]model.Event{versionEvent}); err != nil {
-			if stamped > 0 {
-				s.discardSuppressedPersistence(room, slot)
-				s.failRoom(room, err)
-				return
-			}
-			retry(err)
+			abandon(err)
 			return
 		}
 	}
 	if err := appendEvents(reconciliation.events); err != nil {
-		if stamped > 0 {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, err)
-			return
-		}
-		retry(err)
+		abandon(err)
 		return
 	}
 	// Every update this settlement read is settled once it commits, so the row that left the
 	// settlement to a later load goes with that commit.
 	if err := clearSettlementPending(ctx, tx, room); err != nil {
-		if stamped > 0 {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, err)
-			return
-		}
-		retry(err)
+		abandon(err)
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
-		if stamped > 0 {
-			s.discardSuppressedPersistence(room, slot)
-			s.failRoom(room, fmt.Errorf("commit document settlement: %w", err))
-			return
-		}
-		retry(fmt.Errorf("commit document settlement: %w", err))
+		abandon(fmt.Errorf("commit document settlement: %w", err))
 		return
 	}
-	if stamped > 0 {
-		s.finishSuppressedPersistence(slot, update)
-	}
+	finishSlots()
 	// This release runs before the publish below, the order Ledger.Commit keeps for every other
 	// version write, so a subscriber acting on this version's artifact.version event acts after
 	// it. Publishing first would let that subscriber's write be credited to these authors again.
@@ -1268,7 +1390,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	for _, event := range published {
 		s.events.Publish(event)
 	}
-	s.sweepUnrecordedMarks(room, tree)
+	s.sweepUnrecordedMarks(room, versioned)
 }
 
 func currentUpdateCursor(ctx context.Context, tx pgx.Tx, artifactID string) (int64, error) {
@@ -1385,63 +1507,60 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	state.mu.Unlock()
 
 	backfillCtx := withOwnerVerified(ctx)
-	slot := s.prepareSuppressedPersistence(artifactID)
-	origin := &identityClosureOrigin{}
 	// The backfill writes the same closure the settlement does, so its row is classified the same
 	// way: stamping a block a rendering never names changes no text, while re-minting a typed
 	// block's repeated id changes the `#id` its directive carries.
 	var stampedChanged bool
-	updates, err := s.applyCaptured(backfillCtx, artifactID, origin, func(doc *crdt.Doc) error {
-		before, beforeErr := renderDocument(doc)
-		stamped, count, stampErr := ensureBlockIDsInDocument(doc, origin)
-		report.Stamped = count
-		if stampErr != nil {
-			return stampErr
+	slot, update, err := s.applySuppressed(backfillCtx, artifactID, nil, func(doc *crdt.Doc, origin any) (bool, error) {
+		read, err := treeOf(doc)
+		if err != nil {
+			return false, err
+		}
+		if pmdoc.BlockIDRepairCount(read) == 0 {
+			return false, nil
+		}
+		if s.afterBackfillRead != nil {
+			s.afterBackfillRead(artifactID)
+		}
+		before, beforeErr := renderTree(read)
+		stamped, minted, err := stampBlockIDs(doc, origin)
+		report.Stamped = minted
+		if err != nil {
+			return false, err
 		}
 		stampedChanged = closureChangedMarkdown(before, beforeErr, stamped)
-		return nil
+		return minted > 0, nil
 	})
-	if err != nil {
-		s.cancelSuppressedPersistence(artifactID, slot)
-		report.Err = fmt.Errorf("stamp document: %w", err)
+	if slot == nil {
+		if err != nil {
+			report.Err = fmt.Errorf("stamp document: %w", err)
+		}
 		return report
 	}
-	if report.Stamped == 0 {
-		s.cancelSuppressedPersistence(artifactID, slot)
-		return report
-	}
-	update, err := mergeUpdates(updates)
-	if err != nil {
+	// abandon gives up a stamp that is in the room but will not reach the store through the
+	// backfill: its slot is discarded and the room fails, which reloads the document from the store.
+	abandon := func(err error) BlockIDBackfill {
 		s.discardSuppressedPersistence(artifactID, slot)
 		s.failRoom(artifactID, err)
-		report.Err = fmt.Errorf("capture identity update: %w", err)
+		report.Err = err
 		return report
 	}
+	if err != nil {
+		return abandon(fmt.Errorf("stamp document: %w", err))
+	}
 	if err := s.srv.BroadcastUpdate(backfillCtx, artifactID, update); err != nil {
-		s.discardSuppressedPersistence(artifactID, slot)
-		s.failRoom(artifactID, fmt.Errorf("broadcast identity update: %w", err))
-		report.Err = fmt.Errorf("broadcast identity update: %w", err)
-		return report
+		return abandon(fmt.Errorf("broadcast identity update: %w", err))
 	}
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
-		s.discardSuppressedPersistence(artifactID, slot)
-		s.failRoom(artifactID, err)
-		report.Err = fmt.Errorf("begin document transaction: %w", err)
-		return report
+		return abandon(fmt.Errorf("begin document transaction: %w", err))
 	}
 	defer tx.Rollback(ctx)
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, stampedChanged); err != nil {
-		s.discardSuppressedPersistence(artifactID, slot)
-		s.failRoom(artifactID, err)
-		report.Err = fmt.Errorf("append identity update: %w", err)
-		return report
+		return abandon(fmt.Errorf("append identity update: %w", err))
 	}
 	if err := tx.Commit(ctx); err != nil {
-		s.discardSuppressedPersistence(artifactID, slot)
-		s.failRoom(artifactID, err)
-		report.Err = fmt.Errorf("commit identity update: %w", err)
-		return report
+		return abandon(fmt.Errorf("commit identity update: %w", err))
 	}
 	s.finishSuppressedPersistence(slot, update)
 	return report
