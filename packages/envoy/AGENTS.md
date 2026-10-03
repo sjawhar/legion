@@ -1619,8 +1619,7 @@ login-status says `issued`, once the pinned release carries that answer and the 
 restarted on it; its login-status probe stays, since it also finds a helper that does not answer.
 Against an older helper an unconditional `--wait 10` stalls every launch 10 s while no credential
 exists. With `--wait N --exec`, a session the helper cannot enroll for want of a credential starts
-with a warning that its `agent-secrets` calls fail, and secret-run uses secretsd, until the machine
-is logged in.
+with a warning that its `agent-secrets` calls fail until the machine is logged in.
 
 `config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
 `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required; a literal

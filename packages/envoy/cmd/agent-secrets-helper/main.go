@@ -57,13 +57,31 @@ func loadConfig(getenv func(string) string) (config, error) {
 	return cfg, nil
 }
 
+const usage = `usage:
+  agent-secrets-helper [serve]     run the helper: listen on its socket, sign for the host sessions
+                                   registered with it, and enroll each with the broker
+  agent-secrets-helper sessions    list live sessions: pid, runtime id, enrollment id, state
+  agent-secrets-helper --version   print the release this binary was built as
+
+environment:
+  AGENT_SECRETS_URL            the broker's base URL; serve needs it
+  AGENT_SECRETS_HELPER_SOCK    the helper's socket
+                               (default $XDG_RUNTIME_DIR/agent-secrets/helper.sock)
+  AGENT_SECRETS_OPERATOR_FILE  a file holding the operator's Dispatch login, which a machine login
+                               names as its approver (default ~/.config/agent-secrets/operator)
+`
+
 func main() {
 	sub := "serve"
 	if len(os.Args) > 1 {
 		sub = os.Args[1]
 	}
-	if sub == "--version" {
+	switch sub {
+	case "--version":
 		fmt.Printf("agent-secrets-helper %s\n", buildversion.String())
+		return
+	case "-h", "-help", "--help", "help":
+		fmt.Print(usage)
 		return
 	}
 	cfg, err := loadConfig(os.Getenv)
@@ -74,7 +92,7 @@ func main() {
 	case "sessions":
 		fatal(printSessions(cfg.Socket))
 	default:
-		fmt.Fprintln(os.Stderr, "usage: agent-secrets-helper [serve|sessions|--version]")
+		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
 }

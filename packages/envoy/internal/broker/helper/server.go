@@ -244,7 +244,7 @@ func (s *Server) sign(peer *Peer, pid int, method, url string) Response {
 		peer.Close()
 		return Response{Code: CodeBadRequest, Error: "sign needs method and url"}
 	}
-	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered host session; a session root is started with `agent-secrets register --exec -- <agent argv>` (shims/omp does this)", pid))
+	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered host session; a session root is started with `agent-secrets register --exec -- <agent argv>`", pid))
 	if !ok {
 		return resp
 	}
@@ -273,7 +273,7 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string)
 		peer.Close()
 		return Response{Code: CodeBadRequest, Error: "sign-request needs at least one secret name"}
 	}
-	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered host session; a session root is started with `agent-secrets register --exec -- <agent argv>` (shims/omp does this)", pid))
+	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered host session; a session root is started with `agent-secrets register --exec -- <agent argv>`", pid))
 	if !ok {
 		return resp
 	}

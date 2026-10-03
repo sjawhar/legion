@@ -139,6 +139,9 @@ func helperInstalled() bool {
 // its other backend does not do so silently. With no key dir, no socket named or present, and no
 // helper installed (a laptop), it is exit 1 and silent.
 func cmdIdentity(args []string, stdout, stderr io.Writer) int {
+	if flaglessHelp("identity", args, stderr) {
+		return 0
+	}
 	if len(args) > 0 {
 		fmt.Fprintf(stderr, "agent-secrets identity: unexpected argument %q\n", args[0])
 		return exitUsageError

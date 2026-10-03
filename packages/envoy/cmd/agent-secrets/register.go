@@ -9,7 +9,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -26,8 +25,7 @@ import (
 const helperConnectPatience = 10 * time.Second
 
 func cmdRegister(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("agent-secrets register", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newFlagSet("register", stderr)
 	wait := flags.Int("wait", 0, "wait up to this many seconds for the helper to enroll the session (0 returns at once, as does a helper holding no launcher credential)")
 	doExec := flags.Bool("exec", false, "after registering, exec the command that follows as this same process")
 	if err := flags.Parse(args); err != nil {
@@ -65,13 +63,13 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	// --exec never blocks a launch on the broker, but never launches silently either: the agent
 	// starts with no secrets access (helper unreachable), with broker calls that fail NOT_ENROLLED
 	// until the helper's enroll loop succeeds, or, while the helper holds no launcher credential,
-	// with no broker identity at all: its agent-secrets calls fail NO_CREDENTIAL and secret-run
-	// (dotfiles), which asks identity, uses secretsd until the machine is logged in.
+	// with no broker identity at all: its agent-secrets calls fail NO_CREDENTIAL, and identity
+	// exits 1, until the machine is logged in.
 	switch {
 	case err != nil:
 		fmt.Fprintf(stderr, "agent-secrets: helper at %s unreachable (%v); this session has no secrets access until it is relaunched with the helper running\n", sock, err)
 	case *wait > 0 && resp.State != "enrolled" && resp.Code == helper.CodeNoCredential:
-		fmt.Fprintln(stderr, "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets launcher login) this session's agent-secrets calls fail and secret-run uses secretsd")
+		fmt.Fprintln(stderr, "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets launcher login) this session's agent-secrets calls fail")
 	case *wait > 0 && resp.State != "enrolled":
 		fmt.Fprintf(stderr, "agent-secrets register: not enrolled yet (%s); launching anyway, and this session's secrets calls fail until the helper enrolls it\n", resp.Error)
 	}
