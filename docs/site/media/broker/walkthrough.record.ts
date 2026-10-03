@@ -7,13 +7,15 @@
 //   b1-machine.webm     the operator types the code in Dispatch and approves it
 //   t2-session.cast     the login has returned; a session registers with the helper
 //   t3-request.cast     the session asks for DEMO_API_KEY; the request waits for approval
+//   t4-ran.cast         recorded around b2: the waiting command receives the key as the request is
+//                       approved, and runs; then the request's status names who decided it
 //   b2-approve.webm     the request in the Inbox, its record, the approval
-//   t4-ran.cast         the command ran with the key; the request names who decided it
 //   b3-grants.webm      from the approved record to Settings, where the grant is listed
 //
 // A take records every section, in this order: each depends on the one before it (the browser
 // types the code the terminal printed, the session needs the login the browser approved, the
-// browser approves the request the terminal made), so no section can be recorded alone.
+// browser approves the request the terminal made, and the terminal records through that
+// approval), so no section can be recorded alone.
 //
 // Terminal sections are asciinema casts of one persistent shell on the agent machine (a private
 // tmux server, started without the user's tmux configuration, which can draw the real hostname
@@ -511,7 +513,8 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
       await enter();
       await waitForScreen(new RegExp(`operator: ${operator}`), "the session's operator");
       mark("self");
-      await sleep(3_000);
+      // Long enough for the line that names the enrollment `self` printed.
+      await sleep(6_500);
     });
 
     // T3: the session asks for DEMO_API_KEY; the request waits on a person.
@@ -529,33 +532,48 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
       await sleep(3_000);
     });
 
-    // B2: the request in the Inbox, its record, and the approval.
-    await browserSection(browser, "b2-approve.webm", rig.dispatchUrl, async (page, hold, mark) => {
-      await page.goto("/");
-      const row = dispatch.inboxRequest(page);
-      await expect(row).toBeVisible();
-      mark("inbox");
-      await sleep(2_500);
-      await clickVisibly(page, row);
-      await expect(dispatch.requestReason(page)).toBeVisible();
-      mark("record");
-      await sleep(4_500);
-      await clickVisibly(page, dispatch.approve(page));
-      mark("approve");
-      await hold(dispatch.requestApproved(page));
-    });
-
-    // T4: the command ran with the key; the request names who decided it.
-    await waitForScreen(printed.keyReached, "the command's output");
-    await terminalSection("t4-ran.cast", async (mark) => {
+    // T4, around B2: the terminal records while the operator finds the request in the Inbox, reads
+    // its record and approves it, so the cast shows the waiting command receive the key and run.
+    // Then the request's status names who decided it.
+    await terminalSection("t4-ran.cast", async (markTerminal) => {
+      let keyShownAt = 0;
+      const keyShown = waitForScreen(printed.keyReached, "the command's output", 180_000).then(
+        () => {
+          keyShownAt = Date.now();
+          markTerminal("key");
+        }
+      );
+      // B2: the request in the Inbox, its record, and the approval.
+      await browserSection(
+        browser,
+        "b2-approve.webm",
+        rig.dispatchUrl,
+        async (page, hold, mark) => {
+          await page.goto("/");
+          const row = dispatch.inboxRequest(page);
+          await expect(row).toBeVisible();
+          mark("inbox");
+          await sleep(2_500);
+          await clickVisibly(page, row);
+          await expect(dispatch.requestReason(page)).toBeVisible();
+          mark("record");
+          // Long enough to say what the page shows before the pointer moves to Approve.
+          await sleep(6_000);
+          await clickVisibly(page, dispatch.approve(page));
+          mark("approve");
+          markTerminal("approve");
+          await hold(dispatch.requestApproved(page));
+        }
+      );
+      await keyShown;
       // The command's output alone on screen long enough for the video to open on it.
-      await sleep(4_500);
-      mark("status-typing");
+      await sleep(Math.max(0, keyShownAt + 4_500 - Date.now()));
+      markTerminal("status-typing");
       await type(`agent-secrets status ${requestId}`);
-      mark("status-typed");
+      markTerminal("status-typed");
       await enter();
       await waitForScreen(new RegExp(`decided_by: ${operator}`), "who decided");
-      mark("decided");
+      markTerminal("decided");
       await sleep(3_500);
     });
 
@@ -574,14 +592,16 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
       await grants.evaluate((section) =>
         section.scrollIntoView({ behavior: "smooth", block: "start" })
       );
-      await sleep(1_500);
-      mark("approver");
+      const grantRow = grants.getByRole("row", { name: /DEMO_API_KEY/ });
+      await expect(grantRow).toBeInViewport({ ratio: 1 });
+      mark("row");
+      await sleep(1_000);
       await pointAt(page, grants.getByRole("cell", { name: operator, exact: true }));
       await sleep(2_000);
       mark("revoke");
       await pointAt(page, grants.getByRole("button", { name: "Revoke" }));
       await sleep(3_000);
-      await hold(grants.getByRole("row", { name: /DEMO_API_KEY/ }));
+      await hold(grantRow);
     });
     rmSync(join(rawDir, ".video"), { force: true, recursive: true });
   } finally {

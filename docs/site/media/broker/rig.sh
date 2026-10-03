@@ -8,8 +8,7 @@
 #     (internal/broker/secrets' development store), holding one secret, DEMO_API_KEY, whose value
 #     is made up, in a database of its own beside DATABASE_URL's, created and dropped by this run;
 #   - the Dispatch e2e harness (packages/dispatch/e2e: fake Envoy, fake GitHub, run-server.sh) on
-#     DATABASE_URL, pointed at that broker, with the e2e workspace seeded; its signed-in human is
-#     `alice`;
+#     DATABASE_URL, emptied, pointed at that broker; its signed-in human is `alice`;
 #   - an agent machine whose hostname is example-host-build: agent-secrets-helper (the host side of
 #     the broker) for the operator `alice`, alone in a UTS namespace of its own, with the agent's
 #     shells on this machine.
@@ -199,7 +198,7 @@ DISPATCH_E2E_AGENT_SECRETS_URL="$broker_url" DISPATCH_E2E_AGENT_SECRETS_TOKEN_FI
 await_start fake_envoy "$fake_envoy_pid" 0 60 "the fake Envoy" curl -s -o /dev/null "http://127.0.0.1:$fake_envoy_port/"
 await_start fake_github "$fake_github_pid" 0 60 "the fake GitHub" curl -s -o /dev/null "http://127.0.0.1:$fake_github_port/"
 await_start dispatch "$dispatch_pid" 0 600 "Dispatch" curl -sf "$dispatch_url/"
-note "seeding the e2e workspace"
+note "emptying the Dispatch database"
 bun "$SCRIPT_DIR/seed.ts"
 
 # --- The agent machine: agent-secrets-helper under the example hostname, and agent-exec. --------
@@ -240,7 +239,7 @@ cat >&2 <<EOF
 
 rig: ready.
 
-  Dispatch    $dispatch_url  (sign in as $OPERATOR, the e2e workspace's human, at $dispatch_url/auth/_dev/signin?login=$OPERATOR)
+  Dispatch    $dispatch_url  (sign in as $OPERATOR at $dispatch_url/auth/_dev/signin?login=$OPERATOR)
   broker      $broker_url
   agent       $agent_exec bash   (hostname $AGENT_HOST; agent-secrets-helper for $OPERATOR)
   logs        $work/logs

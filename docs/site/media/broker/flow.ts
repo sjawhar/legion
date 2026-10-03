@@ -5,7 +5,7 @@
 // person acts on, and the Dispatch pages and controls a person uses to approve it.
 import type { Locator, Page } from "@playwright/test";
 
-/** The e2e workspace's human: the agent machine's operator and every request's approver. */
+/** The harness's signed-in human: the agent machine's operator and every request's approver. */
 export const operator = "alice";
 export const agentHost = "example-host-build";
 export const reason = "Publish the docs preview for PR 42 with the demo API";

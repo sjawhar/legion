@@ -1,7 +1,7 @@
 # Secrets broker media
 
 The scripts that make the secrets broker's screenshots and narrated walkthrough. Everything they
-show runs on one machine on example data: the Dispatch e2e workspace (whose signed-in human is
+show runs on one machine on example data: an empty Dispatch e2e workspace (whose signed-in human is
 `alice`), a broker on example rules whose one secret, `DEMO_API_KEY`, holds a made-up value, and an
 agent machine whose hostname is `example-host-build`. No credential, private hostname or
 production service is involved.
@@ -9,7 +9,7 @@ production service is involved.
 | File | What it is |
 | --- | --- |
 | `rig.sh` | Starts the whole stack and stays in the foreground, or runs a command against it (`rig.sh -- <command>`) and then stops it. |
-| `seed.ts` | Seeds the Dispatch e2e workspace, the same one the e2e suite builds. |
+| `seed.ts` | Empties the Dispatch e2e database through the harness's own reset: the flow needs no workspace content. |
 | `flow.ts` | The flow both specs show, written once: what the rig hands its command, the demo's names and reason, what the agent machine prints, and the Dispatch controls a person uses. |
 | `agent.ts` | Drives the agent machine from a script, for the screenshots: a machine login, a secret request. |
 | `agent/` | What the agent machine mounts: its shell prompt and the demo command, `check-demo-key.sh`. |
@@ -27,8 +27,8 @@ DATABASE_URL=<url> bash docs/site/media/broker/rig.sh
 It builds the broker, `agent-secrets` and `agent-secrets-helper`; creates the broker's database
 beside `DATABASE_URL`'s and starts the broker on a local rules file and its development secrets
 file; starts the Dispatch e2e harness's three servers on `DATABASE_URL` with the server pointed at
-the broker (`packages/dispatch/e2e/run-server.sh`'s `DISPATCH_E2E_AGENT_SECRETS_URL`), and seeds
-the workspace; and starts the agent machine, `agent-secrets-helper` for `alice` under the hostname
+the broker (`packages/dispatch/e2e/run-server.sh`'s `DISPATCH_E2E_AGENT_SECRETS_URL`), and empties
+its database; and starts the agent machine, `agent-secrets-helper` for `alice` under the hostname
 `example-host-build`, alone in a UTS namespace of its own, with the agent's shells on this
 machine. It prints the addresses, then waits; Ctrl-C stops everything it started and drops the
 broker's database.
