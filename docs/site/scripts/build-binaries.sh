@@ -19,7 +19,7 @@ bin=$(realpath -m "$1")
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 
 # The Go coordinator.
-legion_module=packages/daemon-go
+legion_module=packages/daemon
 # Dispatch, the secrets broker, its client, the client's host helper, and the broker's reference
 # generator.
 envoy_module=packages/envoy

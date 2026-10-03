@@ -76,13 +76,13 @@ make_omp_home "$omp_home"
 operator=$omp_home/shop
 mkdir -p "$operator"
 export XDG_STATE_HOME=$work/xdg TMUX_TMPDIR=$work/tmux
-pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
+pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 # The pinned Oh My Pi as the run's own `omp` (LEGION_OMP_PATH), so what `legion controller start`
 # prints of its invocation names the run's directory and nothing of the machine's tool layout.
 printf '#!/bin/sh\nexec %q "$@"\n' "$(mise where "$pin")/bin/omp" >"$work/bin/omp"
 chmod +x "$work/bin/omp"
-(cd "$root/packages/daemon-go" && nice -n 19 go build -o "$work/bin/legion" ./cmd/legion)
+(cd "$root/packages/daemon" && nice -n 19 go build -o "$work/bin/legion" ./cmd/legion)
 stage_role_prompts "$root" "$work/bin"
 (cd "$root/packages/envoy" && nice -n 19 go build -o "$work/envoy-listener" ./cmd/listener)
 pick_port daemon_port

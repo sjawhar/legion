@@ -22,6 +22,18 @@ e2e_port="${DISPATCH_E2E_PORT:-8777}"
 fake_envoy_port="${FAKE_ENVOY_PORT:-9021}"
 fake_github_port="${FAKE_GITHUB_PORT:-9022}"
 
+# The docs media rig (docs/site/media/broker/rig.sh) points the server at a secrets broker it
+# started on this machine, read here before the sweep below drops every DISPATCH_* variable; every
+# other run leaves the credential-request feature off (404 FEATURE_OFF). The broker's bearer stays
+# in its file: the server reads DISPATCH_AGENT_SECRETS_TOKEN_FILE itself, so no argv carries it.
+broker_env=()
+if [ -n "${DISPATCH_E2E_AGENT_SECRETS_URL:-}" ]; then
+  : "${DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE:?DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE must accompany DISPATCH_E2E_AGENT_SECRETS_URL}"
+  broker_env=(
+    DISPATCH_AGENT_SECRETS_URL="$DISPATCH_E2E_AGENT_SECRETS_URL"
+    DISPATCH_AGENT_SECRETS_TOKEN_FILE="$DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE"
+  )
+fi
 mapfile -t inherited < <(compgen -e)
 for name in "${inherited[@]}"; do
   case "$name" in
@@ -53,6 +65,7 @@ cd "$(dirname "$0")/../../envoy"
 # when the source changed, and a running server keeps the inode it started from.
 flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
 exec env \
+  "${broker_env[@]}" \
   DATABASE_URL="$database_url" \
   DISPATCH_AGENT_TOKEN=e2e-token \
   DISPATCH_ALLOWED_LOGINS=alice,bob \

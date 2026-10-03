@@ -18,12 +18,10 @@
     "packages/contracts",
     "packages/envoy-client",
     "packages/pi-envoy",
-    "packages/daemon",
     "packages/envoy-plugin",
     "packages/claude-envoy",
     "packages/proof-editor",
     "packages/dispatch",
-    "packages/workspace",
     "packages/envoy/internal/dispatch/pmdoc/gen",
     "docs/site"
   ],
