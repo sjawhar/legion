@@ -569,7 +569,10 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
       // The command's output alone on screen long enough for the video to open on it.
       await sleep(Math.max(0, keyShownAt + 4_500 - Date.now()));
       markTerminal("status-typing");
-      await type(`agent-secrets status ${requestId}`);
+      await type("agent-secrets status ");
+      // The word typed, the request id not yet begun: where the cut jumps the id's typing.
+      markTerminal("status-word");
+      await type(requestId);
       markTerminal("status-typed");
       await enter();
       await waitForScreen(new RegExp(`decided_by: ${operator}`), "who decided");

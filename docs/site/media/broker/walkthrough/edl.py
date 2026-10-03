@@ -56,8 +56,10 @@ NARRATION: dict[str, str] = {
 
 # The ran beat is three windows of one cast. ran ends and ran-status starts on the same frozen frame
 # (the command's line under a fresh prompt), so that join shows no seam while it drops the seconds
-# before anyone types; ran-status ends once `status ` is typed, and ran-result jumps the request
-# UUID, typed a character at a time, to its end.
+# before anyone types; ran-status ends at `status-word`, once `agent-secrets status ` is typed and
+# before the request id's first character, and ran-result jumps the id, typed a character at a
+# time, to its end. The recorder sets `status-word` just before it sends the id's first character,
+# so the cut sits a few hundredths of a second before the mark.
 CLIPS: list[Clip] = [
     # The payoff: the command's line, just after the key reached it.
     Clip("open", "t4-ran.cast", At("key", 0.05), At("key", 4.35), (("open", At("key", 0.1)),)),
@@ -69,11 +71,12 @@ CLIPS: list[Clip] = [
           ("session-self", At("self-typing", -0.3)))),
     Clip("request", "t3-request.cast", At("typing", -0.4), At("end"),
          (("request-ask", At("typing", -0.2)), ("request-wait", At("waiting", 0.0)))),
-    Clip("approve", "b2-approve.webm", At("inbox", -0.3), At("result", 1.3),
+    # Opens on the request in the Inbox: before `inbox` the page may still be loading.
+    Clip("approve", "b2-approve.webm", At("inbox"), At("result", 1.3),
          (("approve-inbox", At("inbox", 0.0)), ("approve-record", At("record", -0.2)), ("approve-click", At("approve", -0.6)))),
     # The waiting command, still waiting just after the approval, gets the key and runs.
     Clip("ran", "t4-ran.cast", At("key", -1.5), At("key", 2.7), (("ran-runs", At("key", -1.3)),)),
-    Clip("ran-status", "t4-ran.cast", At("status-typing", -0.2), At("status-typing", 1.33)),
+    Clip("ran-status", "t4-ran.cast", At("status-typing", -0.2), At("status-word", -0.04)),
     Clip("ran-result", "t4-ran.cast", At("status-typed", -0.3), At("decided", 3.2),
          (("ran-status", At("decided", -0.1)),)),
     # From the Settings click: the live grant's row, its approver, its Revoke button.
