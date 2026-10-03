@@ -171,10 +171,13 @@ async function entryChunkPath(): Promise<string> {
 
 /**
  * Answers the page's entry chunk 404, as a server whose deployment never built it does, whenever
- * `missing` says so for that request (numbered from 1), and counts the page's document loads and
- * entry requests.
+ * `missing` says so for that request (numbered from 1; it may hold the request until it answers),
+ * and counts the page's document loads and entry requests.
  */
-async function missEntryChunk(page: Page, missing: (request: number) => boolean) {
+async function missEntryChunk(
+  page: Page,
+  missing: (request: number) => boolean | Promise<boolean>
+) {
   const entry = await entryChunkPath();
   const counts = { documents: 0, entryRequests: 0 };
   page.on("request", (request) => {
@@ -186,7 +189,7 @@ async function missEntryChunk(page: Page, missing: (request: number) => boolean)
     (url) => url.pathname === entry,
     async (route) => {
       counts.entryRequests += 1;
-      if (!missing(counts.entryRequests)) {
+      if (!(await missing(counts.entryRequests))) {
         await route.continue();
         return;
       }
@@ -269,6 +272,114 @@ test("a missing entry chunk after a page chunk spent the session's reload stays"
     await page.waitForTimeout(1_000);
     expect(counts).toEqual({ documents: 3, entryRequests: 3 });
     await expect(page.locator("#root")).toBeEmpty();
+  } finally {
+    await context.close();
+  }
+});
+
+// A failed download while the browser is offline is an outage, not a replaced deployment, and a
+// reload would swap the blank page for the browser's offline page.
+test("a page whose entry chunk fails while the browser is offline does not reload", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await page.addInitScript(() => {
+    Object.defineProperty(Navigator.prototype, "onLine", { configurable: true, get: () => false });
+  });
+  const counts = await missEntryChunk(page, () => true);
+
+  try {
+    await page.goto("/", { waitUntil: "commit" });
+    await expect.poll(() => counts.entryRequests).toBeGreaterThan(0);
+    // Long enough for a reload the miss started to have asked for the page again.
+    await page.waitForTimeout(1_000);
+    expect(counts).toEqual({ documents: 1, entryRequests: 1 });
+  } finally {
+    await context.close();
+  }
+});
+
+// WebKit and Firefox cancel the downloads still in flight when the reader navigates away, and a
+// cancelled entry chunk fails like a missing one; a reload then would replace the reader's
+// navigation. The page counts as left from `beforeunload`, or from `pagehide` in a browser that
+// fires no `beforeunload` (iOS Safari), until it is shown again.
+for (const leaving of ["beforeunload", "pagehide"]) {
+  test(`a page whose entry chunk fails after ${leaving} stays until it is shown again`, async ({
+    browser,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
+    const context = await asUser(browser, "alice");
+    const page = await context.newPage();
+    const requested = Promise.withResolvers<void>();
+    const released = Promise.withResolvers<void>();
+    const counts = await missEntryChunk(page, async (request) => {
+      if (request > 1) {
+        return false;
+      }
+      requested.resolve();
+      await released.promise;
+      return true;
+    });
+
+    try {
+      await page.goto("/", { waitUntil: "commit" });
+      await requested.promise;
+      await page.evaluate((type) => window.dispatchEvent(new Event(type)), leaving);
+      released.resolve();
+      // Long enough for a reload the miss started to have asked for the page again.
+      await page.waitForTimeout(1_000);
+      expect(counts).toEqual({ documents: 1, entryRequests: 1 });
+
+      // Shown again (a back/forward-cache restore fires `pageshow`), the page's next failed build
+      // script reloads it.
+      await page.evaluate(() => {
+        window.dispatchEvent(new Event("pageshow"));
+        const script = document.createElement("script");
+        script.src = "/assets/index-missing.js";
+        document.head.append(script);
+      });
+      await expect(page.getByText("Signed in as alice")).toBeVisible();
+      expect(counts).toEqual({ documents: 2, entryRequests: 2 });
+    } finally {
+      await context.close();
+    }
+  });
+}
+
+// The recovery is for this build's own scripts. A script another origin serves (a browser
+// extension's, or a third party's) is not this build's, whatever its path, so its failure to load
+// neither reloads a page the reader is using nor spends the session's one reload.
+test("a script from another origin that fails under an /assets/ path leaves the page alone", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the recovery does not depend on the layout");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await page.route("https://extension.invalid/**", (route) => route.abort());
+  const counts = await missEntryChunk(page, () => false);
+
+  try {
+    await page.goto("/");
+    await expect(page.getByText("Signed in as alice")).toBeVisible();
+    await page
+      .evaluate(
+        () =>
+          new Promise<void>((resolve) => {
+            const script = document.createElement("script");
+            script.src = "https://extension.invalid/assets/inject.js";
+            script.addEventListener("error", () => resolve());
+            document.head.append(script);
+          })
+      )
+      .catch(() => undefined);
+    // Long enough for a reload the failure started to have asked for the page again.
+    await page.waitForTimeout(1_000);
+    expect(counts).toEqual({ documents: 1, entryRequests: 1 });
+    expect(
+      await page.evaluate(() => window.sessionStorage.getItem("dispatch.reloaded-for-chunk"))
+    ).toBeNull();
   } finally {
     await context.close();
   }
