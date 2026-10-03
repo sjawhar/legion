@@ -1,4 +1,4 @@
-import { fakeEnvoyPort } from "./harness-ports";
+import { harnessPorts } from "./harness-ports";
 
 interface FakeSession {
   readonly session_id: string;
@@ -20,15 +20,42 @@ interface SentMessage {
   readonly expects_reply: string;
 }
 
-let sessions: FakeSession[] = [];
-let liveSessions = new Set<string>();
-const sendStatuses = new Map<string, 200 | 404>();
-let interests: { session_id: string; topics: string[]; updated_at?: number }[] = [];
-const sentMessages: SentMessage[] = [];
-/** (idempotency key, recipient) pairs this stand-in has already published, the stream's own
- *  duplicate window for the life of the fixture. Cleared with the session seed. */
-const publishedKeys = new Set<string>();
-const unsubscribeCalls: unknown[] = [];
+interface FakeInterest {
+  session_id: string;
+  topics: string[];
+  updated_at?: number;
+}
+
+/** Every piece of fixture state this listener holds. `PUT /__fixture/reset` replaces it whole, so
+ *  a field added here is reset with the rest without being listed anywhere else. A session reseed
+ *  replaces it whole too, so a handler reads its request body before it touches `state`: a write
+ *  through a `state` read before that await lands in an object a reseed may already have
+ *  dropped. */
+interface FakeEnvoyState {
+  readonly sessions: FakeSession[];
+  readonly liveSessions: Set<string>;
+  readonly sendStatuses: Map<string, 200 | 404>;
+  interests: FakeInterest[];
+  readonly sentMessages: SentMessage[];
+  /** (idempotency key, recipient) pairs this stand-in has already published, the stream's own
+   *  duplicate window for the life of the fixture. Cleared with the session seed. */
+  readonly publishedKeys: Set<string>;
+  readonly unsubscribeCalls: unknown[];
+}
+
+function emptyState(): FakeEnvoyState {
+  return {
+    interests: [],
+    liveSessions: new Set(),
+    publishedKeys: new Set(),
+    sendStatuses: new Map(),
+    sentMessages: [],
+    sessions: [],
+    unsubscribeCalls: [],
+  };
+}
+
+let state = emptyState();
 
 /** A row in the real registry always carries a recent `last_seen` (the heartbeat). A seed that
  *  omits it means "live now", so it is stamped on every read rather than once at seeding: a
@@ -42,21 +69,21 @@ function asSeen(session: FakeSession, now: number): FakeSession {
 
 Bun.serve({
   hostname: "127.0.0.1",
-  port: fakeEnvoyPort,
+  port: harnessPorts.fakeEnvoy.port,
   async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/v1/sessions") {
       const now = Date.now();
       return Response.json(
-        sessions
-          .filter((session) => liveSessions.has(session.session_id))
+        state.sessions
+          .filter((session) => state.liveSessions.has(session.session_id))
           .map((session) => asSeen(session, now))
       );
     }
     if (request.method === "GET" && url.pathname.startsWith("/v1/roles/")) {
       const role = decodeURIComponent(url.pathname.slice("/v1/roles/".length));
-      const holder = sessions.find(
-        (session) => liveSessions.has(session.session_id) && session.roles?.includes(role)
+      const holder = state.sessions.find(
+        (session) => state.liveSessions.has(session.session_id) && session.roles?.includes(role)
       );
       if (holder === undefined)
         return Response.json({ error: `no holder for role ${role}` }, { status: 404 });
@@ -70,12 +97,12 @@ Bun.serve({
     }
     if (request.method === "POST" && url.pathname === "/v1/messages/send") {
       const message = (await request.json()) as SentMessage;
-      sentMessages.push(message);
-      const sendStatus = sendStatuses.get(message.target_session);
+      state.sentMessages.push(message);
+      const sendStatus = state.sendStatuses.get(message.target_session);
       if (
         sendStatus === 404 ||
-        !liveSessions.has(message.target_session) ||
-        !sessions.some((session) => session.session_id === message.target_session)
+        !state.liveSessions.has(message.target_session) ||
+        !state.sessions.some((session) => session.session_id === message.target_session)
       ) {
         return Response.json(
           { error: `no live session ${message.target_session}` },
@@ -86,53 +113,64 @@ Bun.serve({
       // the recipient, so a repeat of a key the stream already holds is suppressed and answered
       // `duplicate`. Modelling that here is what lets an e2e see the duplicate wording.
       const streamKey = `${message.idempotency_key}@${message.target_session}`;
-      const duplicate = publishedKeys.has(streamKey);
-      publishedKeys.add(streamKey);
+      const duplicate = state.publishedKeys.has(streamKey);
+      state.publishedKeys.add(streamKey);
       return Response.json({
-        event_id: `envelope-${sentMessages.length}`,
+        event_id: `envelope-${state.sentMessages.length}`,
         recipient: message.target_session,
         ...(duplicate ? { duplicate: true } : {}),
       });
     }
+    if (request.method === "PUT" && url.pathname === "/__fixture/reset") {
+      state = emptyState();
+      return Response.json({ ok: true });
+    }
+    // A reseed starts the sessions over (their live set, send statuses, sends and duplicate
+    // window) and keeps the persisted subscriptions, which a test seeds on their own.
     if (request.method === "PUT" && url.pathname === "/__fixture/sessions") {
-      sessions = (await request.json()) as FakeSession[];
-      sendStatuses.clear();
-      for (const session of sessions) sendStatuses.set(session.session_id, 200);
-      liveSessions = new Set(sessions.map((session) => session.session_id));
-      sentMessages.length = 0;
-      publishedKeys.clear();
+      const sessions = (await request.json()) as FakeSession[];
+      const ids = sessions.map((session) => session.session_id);
+      state = {
+        ...emptyState(),
+        interests: state.interests,
+        liveSessions: new Set(ids),
+        sendStatuses: new Map(ids.map((id) => [id, 200] as const)),
+        sessions,
+        unsubscribeCalls: state.unsubscribeCalls,
+      };
       return Response.json({ ok: true });
     }
     if (request.method === "PATCH" && url.pathname.startsWith("/__fixture/sessions/")) {
       const sessionID = decodeURIComponent(url.pathname.slice("/__fixture/sessions/".length));
-      if (!sessions.some((session) => session.session_id === sessionID)) {
+      const body = (await request.json()) as { live?: boolean; send_status?: 200 | 404 };
+      if (!state.sessions.some((session) => session.session_id === sessionID)) {
         return Response.json({ error: `unknown fixture session ${sessionID}` }, { status: 404 });
       }
-      const body = (await request.json()) as { live?: boolean; send_status?: 200 | 404 };
       if (body.live !== undefined) {
-        if (body.live) liveSessions.add(sessionID);
-        else liveSessions.delete(sessionID);
+        if (body.live) state.liveSessions.add(sessionID);
+        else state.liveSessions.delete(sessionID);
       }
       if (body.send_status !== undefined) {
         if (body.send_status !== 200 && body.send_status !== 404) {
           return Response.json({ error: "send_status must be 200 or 404" }, { status: 400 });
         }
-        sendStatuses.set(sessionID, body.send_status);
+        state.sendStatuses.set(sessionID, body.send_status);
       }
       return Response.json({
-        live: liveSessions.has(sessionID),
-        send_status: sendStatuses.get(sessionID) ?? 200,
+        live: state.liveSessions.has(sessionID),
+        send_status: state.sendStatuses.get(sessionID) ?? 200,
         session_id: sessionID,
       });
     }
     if (request.method === "GET" && url.pathname === "/__fixture/sends") {
-      return Response.json(sentMessages);
+      return Response.json(state.sentMessages);
     }
     if (request.method === "GET" && url.pathname === "/v1/interests/") {
-      return Response.json(interests);
+      return Response.json(state.interests);
     }
     if (request.method === "PUT" && url.pathname === "/__fixture/interests") {
-      interests = (await request.json()) as typeof interests;
+      const interests = (await request.json()) as FakeInterest[];
+      state.interests = interests;
       return Response.json({ ok: true });
     }
     // The real Dispatch server (packages/envoy/internal/dispatch/envoy/client.go's
@@ -140,7 +178,7 @@ Bun.serve({
     // it, so this must resolve even though only the bare list is seeded directly.
     if (request.method === "GET" && url.pathname.startsWith("/v1/interests/")) {
       const sessionId = decodeURIComponent(url.pathname.slice("/v1/interests/".length));
-      const interest = interests.find((item) => item.session_id === sessionId);
+      const interest = state.interests.find((item) => item.session_id === sessionId);
       if (interest === undefined) {
         return new Response("not found", { status: 404 });
       }
@@ -148,19 +186,19 @@ Bun.serve({
     }
     if (request.method === "POST" && url.pathname === "/v1/interests/unsubscribe") {
       const body = (await request.json()) as { session_id: string; topics: string[] };
-      unsubscribeCalls.push(body);
-      const interest = interests.find((item) => item.session_id === body.session_id);
+      state.unsubscribeCalls.push(body);
+      const interest = state.interests.find((item) => item.session_id === body.session_id);
       if (interest !== undefined) {
         interest.topics = interest.topics.filter((topic) => !body.topics.includes(topic));
       }
       return Response.json({ removed: body.topics });
     }
     if (request.method === "GET" && url.pathname === "/__fixture/unsubscribe-calls") {
-      return Response.json(unsubscribeCalls);
+      return Response.json(state.unsubscribeCalls);
     }
     if (url.pathname === "/healthz") return Response.json({ ok: true });
     return new Response("not found", { status: 404 });
   },
 });
 
-console.log(`fake envoy listener on 127.0.0.1:${fakeEnvoyPort}`);
+console.log(`fake envoy listener on 127.0.0.1:${harnessPorts.fakeEnvoy.port}`);

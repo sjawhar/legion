@@ -393,10 +393,11 @@ first and the 409 as the expected daemon answer — do not wait for it to say 20
 pi-envoy release it would ship as; `main` released 1.17.3, 1.18.0, and 1.18.1 during its five rounds, and the number
 was edited three times (1.17.3 → 1.17.4 → 1.18.2), one of them a tester FAIL, and the change then shipped as 1.20.1 anyway (two more releases landed before the merge queue reached it), corrected by this fast-follow. The workable rule: compute the number at
 commit time from the latest tag with the release workflow's own script —
-`.github/scripts/release-bump.sh <prev> pi-legion-envoy-v<prev>..<head> -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ packages/workspace/ skills/`
-(paths from `.github/workflows/release.yaml`) — the merger recomputes it at READY, and a drift that appears after
+`.github/scripts/release-bump.sh <prev> pi-legion-envoy-v<prev>..<head> --patch-path skills/ -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ packages/workspace/ skills/`
+(arguments from `.github/workflows/release.yaml`) — the merger recomputes it at READY, and a drift that appears after
 approval is a one-line fast-follow, not a test FAIL. Note the merge queue's squash body is its READY packet, not the
-branch's commit subjects, so only the PR title's conventional-commit type classifies the bump.
+branch's commit subjects, so only the PR title's conventional-commit type classifies the bump, except that a change
+under `skills/` bumps at least the patch version whatever that type.
 
 **"Diff against `main`" is not the branch's diff once `main` has moved.** A fresh-eyes review of this branch reported
 that it "reverted" LEGION-11's `reconnectWorkers`-after-`api` fix and "deleted" its regression test. It had diffed the

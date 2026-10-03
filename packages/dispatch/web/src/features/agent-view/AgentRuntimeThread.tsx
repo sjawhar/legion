@@ -6,6 +6,7 @@ import {
 import { type ReactNode, useMemo } from "react";
 
 import type { Message, MessageRead } from "../../api/types";
+import { compareTimestamps } from "../../lib/timestamps";
 import { actorName, isViewer } from "../refs/actor";
 import { AgentThread } from "./AgentThread";
 import { type AgentConversation, dispatchTurns, isRunning, toThreadMessages } from "./conversation";
@@ -72,9 +73,13 @@ export function AgentRuntimeThread({
     });
     // Dispatch's side of the conversation, interleaved with the stream by time: what the session
     // wrote is its reply, what the viewer wrote is theirs, and anything anyone else sent the
-    // session (another human's direct message, an issue message, another agent) says who.
+    // session (another human's direct message, an issue message, another agent) says who. The
+    // stream's times are whole milliseconds, so the merge below compares milliseconds; the stored
+    // messages carry microseconds, so they are put in time order first, and the stable merge keeps
+    // that order between two stored messages in one millisecond.
     const dispatch: ThreadMessageLike[] = storedMessages
       .filter((message) => !taken.has(message.id))
+      .sort((left, right) => compareTimestamps(left.created_at, right.created_at))
       .map((message) => {
         const content = [{ text: message.body, type: "text" as const }];
         const createdAt = new Date(message.created_at);

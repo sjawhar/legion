@@ -5,6 +5,7 @@ import { useLocation } from "react-router-dom";
 import { api } from "../../api/client";
 import { inboxQuery, userStateQuery } from "../../api/queries";
 import type { Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
+import { compareTimestamps } from "../../lib/timestamps";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import { pinnedEventIds } from "../issue/pins";
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
@@ -156,7 +157,10 @@ function commentThreads(comments: Comment[]): Thread[] {
     threads.set(rootId, entry);
   }
   return [...threads.values()].map(({ replies, root }) => {
-    replies.sort((left, right) => left.created_at.localeCompare(right.created_at));
+    replies.sort(
+      (left, right) =>
+        compareTimestamps(left.created_at, right.created_at) || left.id.localeCompare(right.id)
+    );
     return {
       anchor: root.anchor,
       key: root.id,
@@ -168,16 +172,17 @@ function commentThreads(comments: Comment[]): Thread[] {
   });
 }
 
+/** The ask or comment a card shows. */
+export function marginItemRecord(item: MarginItem): Ask | ThreadComment {
+  return item.kind === "ask" ? item.ask : item.comment;
+}
+
 export function marginItemId(item: MarginItem): string {
-  return item.kind === "ask" ? item.ask.id : item.comment.id;
+  return marginItemRecord(item).id;
 }
 
 export function marginItemMarkId(item: MarginItem): string | undefined {
-  return item.kind === "ask" ? item.ask.anchor?.mark_id : item.comment.anchor?.mark_id;
-}
-
-export function marginItemCreatedAt(item: MarginItem): string {
-  return item.kind === "ask" ? item.ask.created_at : item.comment.created_at;
+  return marginItemRecord(item).anchor?.mark_id;
 }
 
 export function threadMarkId(thread: Thread): string | undefined {
@@ -202,33 +207,23 @@ function isInBlock(anchor: Anchor | null, blockFilterId: string | undefined): bo
   return blockFilterId === undefined || anchor?.block_id === blockFilterId;
 }
 
-function itemAnchor(item: MarginItem): Anchor | null {
-  return item.kind === "ask" ? item.ask.anchor : item.comment.anchor;
-}
-
-function itemPlacement(
-  item: MarginItem,
+/** Document order for anchored cards: placed ones by position, unplaced ones after them, and
+ *  among the unplaced the newest first, by time and then by id. */
+function byPlacementThenNewest(
+  left: Ask | ThreadComment,
+  right: Ask | ThreadComment,
   markPlacements: ReadonlyMap<string, MarkPlacement>,
   blockPlacements: ReadonlyMap<string, MarkPlacement>
-): MarkPlacement | undefined {
-  return anchorPlacement(itemAnchor(item), markPlacements, blockPlacements);
-}
-
-/** Document order for anchored cards: placed ones by position, unplaced ones after them, and
- *  among the unplaced the newest first. */
-function byPlacementThenNewest(
-  leftPlacement: MarkPlacement | undefined,
-  rightPlacement: MarkPlacement | undefined,
-  leftCreatedAt: string,
-  rightCreatedAt: string
 ): number {
+  const leftPlacement = anchorPlacement(left.anchor, markPlacements, blockPlacements);
+  const rightPlacement = anchorPlacement(right.anchor, markPlacements, blockPlacements);
   if (leftPlacement !== undefined && rightPlacement !== undefined) {
     return leftPlacement.pos - rightPlacement.pos;
   }
   if (leftPlacement !== undefined || rightPlacement !== undefined) {
     return leftPlacement === undefined ? 1 : -1;
   }
-  return rightCreatedAt.localeCompare(leftCreatedAt);
+  return compareTimestamps(right.created_at, left.created_at) || left.id.localeCompare(right.id);
 }
 
 export function useMarginItems(
@@ -320,12 +315,7 @@ export function useMarginItems(
   }, [blockFilterId, comments.data, ownerKind, visibleArtifact?.id]);
   const compareThreads = useCallback(
     (left: Thread, right: Thread) =>
-      byPlacementThenNewest(
-        anchorPlacement(left.anchor, markPlacements, blockPlacements),
-        anchorPlacement(right.anchor, markPlacements, blockPlacements),
-        left.root.comment.created_at,
-        right.root.comment.created_at
-      ),
+      byPlacementThenNewest(left.root.comment, right.root.comment, markPlacements, blockPlacements),
     [blockPlacements, markPlacements]
   );
   const sortedThreads = useMemo(
@@ -349,10 +339,10 @@ export function useMarginItems(
     return [...anchoredAsks.map((ask) => ({ ask, kind: "ask" as const })), ...commentItems].sort(
       (left, right) =>
         byPlacementThenNewest(
-          itemPlacement(left, markPlacements, blockPlacements),
-          itemPlacement(right, markPlacements, blockPlacements),
-          marginItemCreatedAt(left),
-          marginItemCreatedAt(right)
+          marginItemRecord(left),
+          marginItemRecord(right),
+          markPlacements,
+          blockPlacements
         )
     );
   }, [anchoredAsks, blockPlacements, markPlacements, sortedThreads]);
