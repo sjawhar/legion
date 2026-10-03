@@ -611,13 +611,18 @@ func agentSecretsToken(env settingValues) (string, error) {
 }
 
 // sessionSigningKey is the key session cookies are signed with: one generated for this process
-// under dev sign-in, otherwise DISPATCH_SIGNING_KEY when it is set, otherwise the data dir's
-// signing-key file, created on first start.
+// under dev sign-in, otherwise DISPATCH_SIGNING_KEY when it is set (a deployment's, from its
+// secrets manager), otherwise the data dir's signing-key file, created on first start (a local
+// run's). Outside dev sign-in the key must stay the same across deploys, or every dsession cookie
+// is invalidated whenever a container rolls.
 func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
 	if boot.DevSignIn {
 		return auth.NewSigningKey()
 	}
-	return auth.LoadSigningKey(boot.SigningKey, filepath.Join(dataDir, "signing-key"))
+	if boot.SigningKey != "" {
+		return boot.SigningKey, nil
+	}
+	return auth.LoadOrCreateSigningKey(filepath.Join(dataDir, "signing-key"))
 }
 
 // appContextOptions is what main hands routes.BuildAppContext: built, what main made from the

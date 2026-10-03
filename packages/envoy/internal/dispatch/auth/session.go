@@ -55,20 +55,6 @@ func NewSigningKey() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-// LoadSigningKey returns configured (cmd/dispatch's DISPATCH_SIGNING_KEY) when it is not empty,
-// otherwise falls back to LoadOrCreateSigningKey(path). The configured key is the production
-// shape (key sourced from a secrets manager and injected into the container env) — the file
-// path is the local-dev shape.
-//
-// Whichever source wins, the resulting key MUST be stable across deploys
-// or every dsession cookie invalidates whenever a container rolls.
-func LoadSigningKey(configured, path string) (string, error) {
-	if configured != "" {
-		return configured, nil
-	}
-	return LoadOrCreateSigningKey(path)
-}
-
 func sign(payload, key string) string {
 	mac := hmac.New(sha256.New, []byte(key))
 	mac.Write([]byte(payload))
