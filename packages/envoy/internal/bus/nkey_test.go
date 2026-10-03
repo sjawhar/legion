@@ -161,7 +161,7 @@ func TestAnUnusableSeedIsAnErrorNamingItsVariable(t *testing.T) {
 			if strings.Contains(err.Error(), userSeed) || strings.Contains(err.Error(), "hunter2") {
 				t.Fatalf("error %q carries the seed", err)
 			}
-			if _, err := bus.Dial("nkey-test", []string{"nats://127.0.0.1:1"}); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if _, err := bus.Dial("nkey-test", []string{"nats://127.0.0.1:1"}, os.LookupEnv); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Dial error = %v, want it to contain %q", err, tc.want)
 			}
 		})

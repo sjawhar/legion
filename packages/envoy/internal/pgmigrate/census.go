@@ -191,12 +191,6 @@ func Census(ctx context.Context, conn *pgx.Conn, migrations []Migration, version
 			return report, nil
 		}
 	}
-	// Postgres cancels an autovacuum that holds a lock another session waits for, once that
-	// session has waited deadlock_timeout; the migration waits LockTimeout at most.
-	var cancelsAutovacuum bool
-	if err := tx.QueryRow(ctx, "select current_setting('deadlock_timeout')::interval < $1::interval", lockTimeoutSetting).Scan(&cancelsAutovacuum); err != nil {
-		return nil, fmt.Errorf("census: read deadlock_timeout: %w", err)
-	}
 	// The foreign keys a migration's rows reach through: the catalog's, then each pending
 	// migration's as it is read, since at boot each applies before the next.
 	keys, err := foreignKeys(ctx, tx)
@@ -211,14 +205,18 @@ func Census(ctx context.Context, conn *pgx.Conn, migrations []Migration, version
 		if len(report.Pending) == 0 && len(unrecorded) > 0 {
 			entry.refuse("%s records no version, yet the database holds %s: the runner would apply every migration from this one over it", versionTable, someTables(unrecorded))
 		}
+		bound, err := lockBoundOf(ctx, tx, &entry)
+		if err != nil {
+			return nil, err
+		}
 		text := readMigration(migration.SQL)
-		tables, err := censusTables(ctx, tx, text, migrationTouches(text), keys)
+		tables, err := censusTables(ctx, tx, text, matchedTouches(text.code), keys)
 		if err != nil {
 			return nil, fmt.Errorf("census: %s: %w", migration.Name, err)
 		}
 		keys = append(keys, addedForeignKeys(text.code)...)
 		for _, table := range tables {
-			if err := censusTable(ctx, tx, table, options, cancelsAutovacuum, &entry); err != nil {
+			if err := censusTable(ctx, tx, table, options, bound, &entry); err != nil {
 				return nil, err
 			}
 		}
@@ -244,6 +242,115 @@ func Census(ctx context.Context, conn *pgx.Conn, migrations []Migration, version
 		return nil, fmt.Errorf("census: read long transactions: %w", err)
 	}
 	return report, nil
+}
+
+// lockBound is how long a pending migration waits for a lock: a lock_timeout it waits under, as
+// Postgres takes it, and whether Postgres cancels an autovacuum holding that lock first. Where the
+// migration waits under several, it is the first Postgres would not cancel an autovacuum within,
+// or the last when it would within all of them.
+type lockBound struct {
+	setting           string
+	cancelsAutovacuum bool
+}
+
+// lockBoundOf reads entry's migration's lockBound. Postgres cancels an autovacuum holding a lock a
+// session waits for once that session has waited deadlock_timeout, so it does inside a lock_timeout
+// longer than deadlock_timeout, or none (0). Each lock_timeout the migration waits under
+// (migrationLockTimeouts) is set in a savepoint, so Postgres reads it as the migration's own SET
+// would and the census keeps its own. A value set_config refuses - one the migration would fail
+// on, or SET syntax such as DEFAULT that set_config does not take - is refused: the census cannot
+// judge the migration's lock holders against it.
+func lockBoundOf(ctx context.Context, tx pgx.Tx, entry *MigrationCensus) (lockBound, error) {
+	var bound lockBound
+	for _, setting := range migrationLockTimeouts(entry.Migration.SQL) {
+		bound = lockBound{setting: setting}
+		nested, err := tx.Begin(ctx)
+		if err != nil {
+			return lockBound{}, fmt.Errorf("census: savepoint: %w", err)
+		}
+		_, err = nested.Exec(ctx, "select set_config('lock_timeout', $1, true)", setting)
+		if err == nil {
+			err = nested.QueryRow(ctx, `
+				select l.setting::bigint = 0 or d.setting::bigint < l.setting::bigint
+				from pg_settings l, pg_settings d
+				where l.name = 'lock_timeout' and d.name = 'deadlock_timeout'
+			`).Scan(&bound.cancelsAutovacuum)
+		}
+		if rollback := nested.Rollback(ctx); err == nil {
+			err = rollback
+		}
+		var pgErr *pgconn.PgError
+		switch {
+		case errors.As(err, &pgErr):
+			entry.refuse("the census could not set lock_timeout to %q, the value it sets (SQLSTATE %s), so it cannot judge the sessions holding its tables against it", setting, pgErr.Code)
+			return bound, nil
+		case err != nil:
+			return lockBound{}, fmt.Errorf("census: %s: read its lock timeout: %w", entry.Migration.Name, err)
+		case !bound.cancelsAutovacuum:
+			return bound, nil
+		}
+	}
+	return bound, nil
+}
+
+// migrationLockTimeouts are the lock_timeout settings a migration's statements wait under: Exec's
+// LockTimeout until the migration's first SET [LOCAL | SESSION] lock_timeout, then each value it
+// sets, as SET would give it to Postgres (a string literal's text, any other value as written). A
+// migration that sets its own before any other statement waits under that alone. Comments and
+// literals are read past as Postgres reads them (scanSQL), and a DO block's body is not read.
+func migrationLockTimeouts(sql string) []string {
+	type token struct {
+		kind sqlTokenKind
+		text string
+	}
+	var settings []string
+	var statement []token
+	set, defaulted := false, false
+	word := func(t token, want string) bool { return t.kind == sqlWord && strings.EqualFold(t.text, want) }
+	end := func() {
+		words := statement
+		statement = nil
+		if len(words) == 0 {
+			return
+		}
+		if len(words) > 1 && word(words[0], "set") && (word(words[1], "local") || word(words[1], "session")) {
+			words = append(words[:1:1], words[2:]...)
+		}
+		if len(words) >= 4 && word(words[0], "set") && word(words[1], "lock_timeout") && (words[2].text == "=" || word(words[2], "to")) {
+			value := words[3:]
+			if len(value) == 1 && value[0].kind == sqlString && strings.HasPrefix(value[0].text, "'") {
+				settings = append(settings, strings.ReplaceAll(value[0].text[1:len(value[0].text)-1], "''", "'"))
+			} else {
+				var written strings.Builder
+				for _, part := range value {
+					written.WriteString(part.text)
+				}
+				settings = append(settings, written.String())
+			}
+			set = true
+			return
+		}
+		if !set && !defaulted {
+			settings = append(settings, lockTimeoutSetting)
+			defaulted = true
+		}
+	}
+	_ = scanSQL(sql, func(t sqlToken) error {
+		text := sql[t.start:t.end]
+		switch {
+		case t.kind == sqlSpace || t.kind == sqlComment:
+		case t.kind == sqlOther && text == ";":
+			end()
+		default:
+			statement = append(statement, token{kind: t.kind, text: text})
+		}
+		return nil
+	})
+	end()
+	if len(settings) == 0 {
+		return []string{lockTimeoutSetting}
+	}
+	return settings
 }
 
 // recordedVersions reads every version versionTable records; none when the table does not exist.
@@ -303,7 +410,7 @@ func someTables(names []string) string {
 // names above the limit is refused on its size, and its rows are not counted; a table a foreign
 // key reaches has no limit, since the migration checks or acts on only the rows that key connects,
 // and its rows are never counted.
-func censusTable(ctx context.Context, tx pgx.Tx, touched TouchedTable, options CensusOptions, cancelsAutovacuum bool, entry *MigrationCensus) error {
+func censusTable(ctx context.Context, tx pgx.Tx, touched TouchedTable, options CensusOptions, bound lockBound, entry *MigrationCensus) error {
 	name := touched.Name
 	table := TableCensus{Name: name, Through: touched.Through}
 	defer func() { entry.Tables = append(entry.Tables, table) }()
@@ -323,7 +430,7 @@ func censusTable(ctx context.Context, tx pgx.Tx, touched TouchedTable, options C
 	}
 	for _, holder := range holders {
 		table.Holders = append(table.Holders, holder.Session)
-		if reason := holderRefusal(holder, name, pastFreezeAge, cancelsAutovacuum, options.LongTransaction); reason != "" {
+		if reason := holderRefusal(holder, name, pastFreezeAge, bound, options.LongTransaction); reason != "" {
 			entry.Refusals = append(entry.Refusals, reason)
 		}
 	}
@@ -408,18 +515,18 @@ func lockHolders(ctx context.Context, tx pgx.Tx, oid uint32) ([]lockHolder, erro
 }
 
 // holderRefusal says why a session holding a lock on table refuses the migration, or "" when it
-// does not: whether it would hold the migration's lock past LockTimeout. An autovacuum worker
-// would not, however long it has run: Postgres cancels it once the migration has waited
-// deadlock_timeout for a lock it holds (cancelsAutovacuum says that is inside LockTimeout), except
-// an anti-wraparound one, which its activity says it is, or, where its activity says nothing,
-// which it may be while the table is past its freeze age (pastFreezeAge), refusing a vacuum
-// launched just before the table passed it too. Any other session might, when its transaction is
-// long open or the census cannot see how long.
+// does not: whether it would hold the migration's lock past the lock_timeout it waits under. An
+// autovacuum worker would not, however long it has run: Postgres cancels it once the migration has
+// waited deadlock_timeout for a lock it holds (bound says whether that is inside the migration's
+// lock_timeout), except an anti-wraparound one, which its activity says it is, or, where its
+// activity says nothing, which it may be while the table is past its freeze age (pastFreezeAge),
+// refusing a vacuum launched just before the table passed it too. Any other session might, when
+// its transaction is long open or the census cannot see how long.
 //
 // When the census's role may see a session with track_activities off, Postgres reports its state
 // as disabled, its activity text empty and its transaction start unrecorded. Without the ordinary
 // pg_read_all_stats visibility, those fields are hidden instead.
-func holderRefusal(holder lockHolder, table string, pastFreezeAge, cancelsAutovacuum bool, long time.Duration) string {
+func holderRefusal(holder lockHolder, table string, pastFreezeAge bool, bound lockBound, long time.Duration) string {
 	untracked := holder.State == untrackedState
 	if holder.Autovacuum {
 		antiWraparound := holder.antiWraparound
@@ -435,8 +542,8 @@ func holderRefusal(holder lockHolder, table string, pastFreezeAge, cancelsAutova
 				unknown = "Postgres records no activity for it with track_activities off, so the census cannot read which"
 			}
 			return fmt.Sprintf("%s holds a lock on %s, which is past its freeze age, so it may be an anti-wraparound autovacuum, which Postgres does not cancel for the migration's lock; %s", holder.Session, table, unknown)
-		case !cancelsAutovacuum:
-			return fmt.Sprintf("%s holds a lock on %s, and the server's deadlock_timeout is not shorter than the migration's %s lock timeout, so the migration would give up before Postgres cancels the autovacuum", holder.Session, table, LockTimeout)
+		case !bound.cancelsAutovacuum:
+			return fmt.Sprintf("%s holds a lock on %s, and the server's deadlock_timeout is not shorter than the migration's lock_timeout of %s, so the migration would give up before Postgres cancels the autovacuum", holder.Session, table, bound.setting)
 		}
 		return ""
 	}

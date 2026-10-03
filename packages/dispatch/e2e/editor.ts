@@ -3,6 +3,7 @@ import {
   expect,
   type Locator,
   type Page,
+  type Route,
   type WebSocketRoute,
 } from "@playwright/test";
 
@@ -54,11 +55,26 @@ export function markSpan(page: Page, markId: string): Locator {
   return documentEditor(page).locator(`[data-id="${markId}"]`);
 }
 
-/** Waits until `page`'s editor shows the mark `markId` over exactly `quote`. */
+/** The text of each mark among `spans`, keyed by mark id: a mark another mark nests inside renders
+ *  as more than one span, and an outer span's text includes the spans inside it, so a mark's text
+ *  is its own spans' text joined in document order. */
+export function markTexts(spans: Locator): Promise<Record<string, string>> {
+  return spans.evaluateAll((elements) => {
+    const texts: Record<string, string> = {};
+    for (const element of elements) {
+      const id = element.getAttribute("data-id") ?? "";
+      texts[id] = (texts[id] ?? "") + (element.textContent ?? "");
+    }
+    return texts;
+  });
+}
+
+/** Waits until `page`'s editor shows the mark `markId` over exactly `quote`, whether it renders as
+ *  one span or, with another mark nested inside it, as several. */
 export async function expectMark(page: Page, markId: string, quote: string): Promise<void> {
-  const mark = markSpan(page, markId);
-  await expect(mark).toBeVisible();
-  await expect(mark).toHaveText(quote);
+  const spans = markSpan(page, markId);
+  await expect(spans.first()).toBeVisible();
+  await expect.poll(async () => (await markTexts(spans))[markId] ?? "").toBe(quote);
 }
 
 export function cursorLabel(page: Page, name: string): Locator {
@@ -66,45 +82,72 @@ export function cursorLabel(page: Page, name: string): Locator {
 }
 
 /** Selects the first occurrence of `quote` inside the focused ProseMirror node the way a drag
- * does: a DOM Range plus the selectionchange ProseMirror's DOMObserver listens to. */
+ * does: a DOM Range plus the selectionchange ProseMirror's DOMObserver listens to. A quote no one
+ * text node holds - text another mark's span splits - is found across the text nodes in order. */
 export async function selectEditorText(page: Page, quote: string): Promise<void> {
-  await setEditorRange(page, quote, "whole");
+  await setEditorRange(page, { extent: "whole", quote });
   await actionBar(page).waitFor({ state: "visible" });
 }
 
 /** Puts the caret directly before or after the first occurrence of `quote`, the way a click
  * there does. */
 export function placeCaret(page: Page, edge: "before" | "after", quote: string): Promise<void> {
-  return setEditorRange(page, quote, edge);
+  return setEditorRange(page, { extent: edge, quote });
 }
 
-async function setEditorRange(
-  page: Page,
-  quote: string,
-  extent: "whole" | "before" | "after"
-): Promise<void> {
+/** Over, before or after the first occurrence of `quote`, or the end of the last text a caret can
+ * enter: a collaborator's cursor label and an atom's text sit in `contenteditable="false"`. */
+type EditorRange = { extent: "whole" | "before" | "after"; quote: string } | { extent: "end" };
+
+/** Sets the page's selection and dispatches the selectionchange ProseMirror's DOMObserver reads, so
+ * the editor takes the selection before this returns. Without that read, ProseMirror's focus
+ * handler (prosemirror-view `handlers.focus`) writes the editor's own selection back to the page
+ * 20 ms after focus and undoes a caret placed in between. */
+async function setEditorRange(page: Page, target: EditorRange): Promise<void> {
   const editor = documentEditor(page);
   await editor.waitFor();
   await editor.focus();
-  await editor.evaluate(
-    (root, { quote, extent }) => {
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  await editor.evaluate((root, target) => {
+    const range = document.createRange();
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    if (target.extent === "end") {
+      let last: Node | null = null;
       for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-        const index = node.textContent?.indexOf(quote) ?? -1;
-        if (index < 0) continue;
-        const range = document.createRange();
-        range.setStart(node, extent === "after" ? index + quote.length : index);
-        range.setEnd(node, extent === "before" ? index : index + quote.length);
-        const selection = window.getSelection();
-        selection?.removeAllRanges();
-        selection?.addRange(range);
-        document.dispatchEvent(new Event("selectionchange"));
-        return;
+        if (node.parentElement?.isContentEditable === true) last = node;
       }
-      throw new Error(`quote is not in the editor: ${quote}`);
-    },
-    { quote, extent }
-  );
+      if (last === null) throw new Error("the editor holds no text a caret can enter");
+      range.setStart(last, last.textContent?.length ?? 0);
+    } else {
+      // Reads the text nodes as one text, so a quote another mark's span splits is found as
+      // readily as one a single node holds, and maps the quote's two ends back to their nodes.
+      const { extent, quote } = target;
+      const runs: { node: Node; start: number; end: number }[] = [];
+      let text = "";
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        const start = text.length;
+        text += node.textContent ?? "";
+        runs.push({ end: text.length, node, start });
+      }
+      const index = text.indexOf(quote);
+      const first = runs.find((run) => run.start <= index && index < run.end);
+      const last = runs.find(
+        (run) => run.start < index + quote.length && index + quote.length <= run.end
+      );
+      if (index < 0 || first === undefined || last === undefined) {
+        throw new Error(`quote is not in the editor: ${quote}`);
+      }
+      const startAt = { node: first.node, offset: index - first.start };
+      const endAt = { node: last.node, offset: index + quote.length - last.start };
+      const from = extent === "after" ? endAt : startAt;
+      const to = extent === "before" ? startAt : endAt;
+      range.setStart(from.node, from.offset);
+      range.setEnd(to.node, to.offset);
+    }
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  }, target);
 }
 
 export async function deleteEditorText(page: Page, quote: string): Promise<void> {
@@ -112,16 +155,41 @@ export async function deleteEditorText(page: Page, quote: string): Promise<void>
   await page.keyboard.press("Backspace");
 }
 
+/** Presses Enter at the end of the document's last text, then types `text`: after a heading or a
+ * paragraph, that is a paragraph of its own. */
 export async function typeAtEnd(page: Page, text: string): Promise<void> {
-  const editor = documentEditor(page);
-  await editor.click();
-  await page.keyboard.press("Control+End");
+  await setEditorRange(page, { extent: "end" });
   await page.keyboard.press("Enter");
   await page.keyboard.type(text);
 }
 
 export function marginCard(page: Page, id: string): Locator {
   return page.locator(`[data-margin-item="${id}"]`);
+}
+
+/** The card of a margin thread the reader opened: in the Thread dialog on the phone layout, in
+ *  the margin beside the document everywhere else. */
+export function openedThreadCard(page: Page, project: string, rootId: string): Locator {
+  return project === "iphone"
+    ? page.getByRole("dialog", { name: "Thread" }).getByTestId(`margin-comment-${rootId}`)
+    : marginCard(page, rootId);
+}
+
+// On the phone layout the margin is a bottom sheet over the document. Acting on a selection
+// opens it; close it again before selecting another range, as a person would.
+export async function setSheet(page: Page, project: string, open: boolean): Promise<void> {
+  if (project !== "iphone") {
+    return;
+  }
+  const sheet = page.getByTestId("margin-sheet");
+  if ((await sheet.getAttribute("data-expanded")) !== String(open)) {
+    if (open) {
+      await page.getByRole("button", { name: /Open review panel/ }).click();
+    } else {
+      await page.mouse.click(1, 1);
+    }
+  }
+  await expect(sheet).toHaveAttribute("data-expanded", String(open));
 }
 
 /** The thread card rendered inside a Conversation turn (the margin renders the same thread as
@@ -222,6 +290,30 @@ export async function documentTransport(
       }
     },
   };
+}
+
+/**
+ * Holds the first request `page` makes for a URL matching `url` and lets every later one through,
+ * so a test decides when that one download ends: `held` resolves with its route once the page has
+ * made it, for the test to abort or continue. Install it before the navigation that makes the
+ * request. The route stays installed for the page's life on purpose. A `{ times: 1 }` route does
+ * not stay: Playwright removes an expiring route from the page before its handler runs, and a page
+ * left with no route stops intercepting while that request is still held (playwright-core 1.63,
+ * `Page._onRoute`). In Chromium the reload a failed chunk starts then got no response in 12 of 40
+ * runs.
+ */
+export async function holdFirstRequest(page: Page, url: RegExp): Promise<{ held: Promise<Route> }> {
+  const first = Promise.withResolvers<Route>();
+  let holding = false;
+  await page.route(url, async (route) => {
+    if (!holding) {
+      holding = true;
+      first.resolve(route);
+      return;
+    }
+    await route.continue();
+  });
+  return { held: first.promise };
 }
 
 export interface Clipboard {

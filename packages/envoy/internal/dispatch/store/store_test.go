@@ -212,7 +212,14 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		where schemaname = current_schema()
 	`, []string{"graph_edges"})
 
+	// Every search column is filled by its table's BEFORE trigger (0057-0061), never by application code.
 	assertDatabaseObjects(t, ctx, store.Pool, `
+		select event_object_table
+		from information_schema.triggers
+		where trigger_schema = current_schema() and trigger_name = event_object_table || '_search'
+		  and event_manipulation = 'INSERT'
+	`, []string{"issues", "artifact_versions", "comments", "asks", "messages"})
+	assertDatabaseObjectsAbsent(t, ctx, store.Pool, `
 		select table_name
 		from information_schema.columns
 		where table_schema = current_schema() and column_name = 'search' and is_generated = 'ALWAYS'
@@ -885,13 +892,12 @@ func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 	}
 }
 
-// 0053 pairs an ask's kind with its approval: an approval ask carries an approval whose known keys
-// hold the types model.AskApproval decodes and name a document version, and no other kind carries
-// one, not even the JSON null. A hand-written row that breaks the pairing either way is refused at
-// insert, and an approval the route writes is stored at every version a document can have. The
-// rows named in residual are shapes 0053 admits and ScanAsk still fails on. They are
-// skipped, which go test reports only under -v, and dispatch://LEGION-429 deletes their entries
-// when it adds the check that refuses them.
+// 0053 pairs an ask's kind with its approval; 0064 adds requested_version to that approval. An
+// approval ask carries the fields model.AskApproval decodes and no other kind carries approval,
+// not even JSON null. A hand-written row that breaks the pairing either way is refused at insert.
+// The rows named in residual are shapes 0053 admits and ScanAsk still fails on. They are skipped,
+// which go test reports only under -v, and dispatch://LEGION-429 deletes their entries when it
+// adds the check that refuses them.
 func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -905,7 +911,7 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 	`); err != nil {
 		t.Fatalf("seed issue: %v", err)
 	}
-	const approval = `{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1}`
+	const approval = `{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1,"requested_version":1}`
 	residual := map[string]bool{
 		"an approval ask repeating version under another case as a fraction":     true,
 		"an approval ask repeating name under another case as a number":          true,
@@ -927,12 +933,12 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		// an object.
 		{"an approval ask whose document id is empty, as the JSON null reads back", "approval", new(`{"artifact_id":"","name":"","version":0}`), true},
 		// An id that is not a uuid fails the cast answering the ask makes on it (22P02), and one in
-		// capitals is never found by docs.ApprovalAskAt, which compares the id as text with the
-		// lowercase text Postgres writes, so a new version would never retract the ask.
+		// capitals is never found by docs.OpenApprovalAsk, which compares the id as text with the
+		// lowercase text Postgres writes, so a new version would never move the ask.
 		{"an approval ask whose document id is empty at a real version", "approval", new(`{"artifact_id":"","name":"spec.md","version":1}`), true},
 		{"an approval ask whose document id is in capitals", "approval", new(`{"artifact_id":"7C1E8A52-3F4B-4D6E-9A0B-1C2D3E4F5A6B","name":"spec.md","version":1}`), true},
 		// A character before or after the uuid, or a letter past f in it, also fails that cast, and
-		// docs.ApprovalAskAt never finds the ask. Each row is refused only while its anchor, or the
+		// docs.OpenApprovalAsk never finds the ask. Each row is refused only while its anchor, or the
 		// pattern's hex class, is as written.
 		{"an approval ask whose document id has a digit after the uuid", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b0","name":"spec.md","version":1}`), true},
 		{"an approval ask whose document id has a digit before the uuid", "approval", new(`{"artifact_id":"07c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1}`), true},
@@ -945,7 +951,7 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		// ScanAsk decodes the approval into model.AskApproval, whose version is an int and whose name
 		// is a string, so a number that is no int, or a name that is no string, fails every read of
 		// the ask: the ask itself, its issue, the inbox, answering it, and each new version of its
-		// document, which reads every open approval ask on the document to retract it.
+		// document, which reads the one open approval ask on the document to move it.
 		{"an approval ask whose version is not a whole number", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1.5}`), true},
 		{"an approval ask whose version is written with a fraction", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":1.0}`), true},
 		{"an approval ask whose version is past what an int holds", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":9223372036854775808}`), true},
@@ -977,8 +983,8 @@ func TestMigrate0053RefusesAnApprovalOnAnyAskButAnApprovalAsk(t *testing.T) {
 		// The route writes every version a document has, and a check that admitted too few would
 		// refuse its own insert. artifact_versions.number is an integer: 10 is the first version
 		// with two digits, and 2147483647 the highest it holds.
-		{"an approval ask at version 10", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":10}`), false},
-		{"an approval ask at the highest version a document can have", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":2147483647}`), false},
+		{"an approval ask at version 10", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":10,"requested_version":10}`), false},
+		{"an approval ask at the highest version a document can have", "approval", new(`{"artifact_id":"7c1e8a52-3f4b-4d6e-9a0b-1c2d3e4f5a6b","name":"spec.md","version":2147483647,"requested_version":2147483647}`), false},
 		{"a question naming none", "question", nil, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {

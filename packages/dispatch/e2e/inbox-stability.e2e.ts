@@ -1,6 +1,5 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { setLiveSessions } from "./agents";
 import {
   answerAsk,
   createAsk,
@@ -24,9 +23,6 @@ const session = {
 
 test.beforeEach(async () => {
   await resetDatabase();
-  if (!process.env.PLAYWRIGHT_BASE_URL) {
-    await setLiveSessions([]);
-  }
 });
 
 // Issue titles sharing no terms, so the server's duplicate check never refuses a seed.

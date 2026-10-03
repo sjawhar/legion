@@ -8,10 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -24,6 +22,16 @@ type ConnectOption func(*connectOpts)
 type connectOpts struct {
 	replicas                    int
 	publishAcknowledgementClock AcknowledgementClock
+	environment                 func(string) (string, bool)
+}
+
+// parseConnectOptions applies options over the defaults every connect starts from.
+func parseConnectOptions(options []ConnectOption) connectOpts {
+	opts := connectOpts{replicas: 1, publishAcknowledgementClock: wallClock{}, environment: os.LookupEnv}
+	for _, o := range options {
+		o(&opts)
+	}
+	return opts
 }
 
 // AcknowledgementClock supplies deadline contexts for JetStream publish acknowledgements.
@@ -47,12 +55,36 @@ func WithReplicas(n int) ConnectOption {
 	return func(o *connectOpts) { o.replicas = n }
 }
 
+// WithEnvironment names where a connect reads ENVOY_ALLOW_REMOTE_NATS (AllowRemoteEnvVar),
+// NATS_NKEY_SEED_FILE and NATS_NKEY_SEED, in place of the process environment (os.LookupEnv):
+// envoy-dispatch hands it the lookup over its settings table, which lists all three. Dial takes
+// the same lookup as its environment parameter.
+func WithEnvironment(lookup func(string) (string, bool)) ConnectOption {
+	return func(o *connectOpts) { o.environment = lookup }
+}
+
 type subscriptionTransport uint8
 
 const (
 	jetStreamSubscription subscriptionTransport = iota
 	coreSubscription
 	subscriptionCount
+)
+
+// clientStopMode is how the client was stopped, which decides what a bind that ends after the stop
+// does with what it bound (endBind).
+type clientStopMode uint8
+
+const (
+	clientRunning clientStopMode = iota
+	// clientDraining: Drain is taking the subscriptions it drains itself. A bind that ends now
+	// installs for its next pass.
+	clientDraining
+	// clientDrainCollected: Drain has taken the last of those subscriptions, just before it drains
+	// the connection. A bind that ends now drains what it bound.
+	clientDrainCollected
+	// clientClosed: Close stopped the client. A bind that ends now unsubscribes what it bound.
+	clientClosed
 )
 
 type recoverableSubscription struct {
@@ -62,6 +94,10 @@ type recoverableSubscription struct {
 	handler   nats.MsgHandler
 	opts      []nats.SubOpt
 	active    *nats.Subscription
+	// binding is set while a bind of this registration is in flight, and closed when it ends. A
+	// registration has one bind at a time: a restore leaves one that has a bind in flight, and a
+	// registration that replaces it waits for that bind first.
+	binding chan struct{}
 }
 
 type Client struct {
@@ -72,11 +108,23 @@ type Client struct {
 	publishAcknowledgementClock AcknowledgementClock
 	mu                          sync.Mutex
 
+	// subscriptionsMu guards subscriptions and stopMode. It is held to read and write them, never
+	// across a bind's request to the server, so a reconnect's restore, the health reads and Drain
+	// never wait out a request the reconnect lost.
 	subscriptionsMu sync.Mutex
 	subscriptions   [subscriptionCount]recoverableSubscription
+	stopMode        clientStopMode
 
 	reconnectHooksMu sync.Mutex
 	reconnectHooks   []func(*nats.Conn) error
+	// rewatchMu holds a run of the reconnect hooks (rewatch), so two never run at once.
+	rewatchMu sync.Mutex
+	// connEvents counts the connection events the reconnect hooks follow, under mu: each connection
+	// the client installs after its first, and each reconnect of the current one in place.
+	// hookedEvents is the count the last run that succeeded began at. The hooks are due while the
+	// two differ.
+	connEvents   uint64
+	hookedEvents uint64
 
 	// recovery state
 	recovering int32
@@ -220,19 +268,20 @@ func connectWithContext(ctx context.Context, name string, urls []string, credent
 }
 
 // Dial opens a tuned core NATS connection using envoy's standard options (5s connect timeout,
-// infinite reconnect every second, retry-loop for the initial 10 attempts), as the NATS user the
+// infinite reconnect every second, retry-loop for the initial 10 attempts), as the NATS user
 // environment names (nkeyCredential). A caller that needs core pub/sub on a connection of its own
 // uses it: nats.go re-subscribes core subscriptions on reconnect by itself, so it needs none of
 // Client's recovery, and it touches no stream. It refuses a NATS server that is not this machine's
-// on the same terms as Connect.
+// on the same terms as Connect, reading ENVOY_ALLOW_REMOTE_NATS from environment too, which
+// answers as os.LookupEnv does (WithEnvironment).
 //
 // For JetStream-backed publishing or a durable consumer, use Connect; to reconcile the stream
 // this codebase owns, ConnectOwningStream.
-func Dial(name string, urls []string) (*nats.Conn, error) {
-	if err := refuseRemoteNATS(urls); err != nil {
+func Dial(name string, urls []string, environment func(string) (string, bool)) (*nats.Conn, error) {
+	if err := refuseRemoteNATS(urls, environment); err != nil {
 		return nil, err
 	}
-	credential, err := nkeyCredential(os.LookupEnv)
+	credential, err := nkeyCredential(environment)
 	if err != nil {
 		return nil, err
 	}
@@ -251,10 +300,7 @@ func Dial(name string, urls []string) (*nats.Conn, error) {
 //
 // For the JetStream stream this codebase owns, use ConnectOwningStream.
 func Connect(urls []string, options ...ConnectOption) (*Client, error) {
-	if err := refuseRemoteNATS(urls); err != nil {
-		return nil, err
-	}
-	return newClient(urls, false, options)
+	return newClient(urls, false, parseConnectOptions(options))
 }
 
 // ConnectOwningStream opens a client that also reconciles ENVOY_NOTIFICATIONS against this
@@ -262,18 +308,14 @@ func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 // when the server has none. Only the deployed services call it: envoy-listener and
 // envoy-dispatch's server.
 func ConnectOwningStream(urls []string, options ...ConnectOption) (*Client, error) {
-	if err := refuseRemoteNATS(urls); err != nil {
-		return nil, err
-	}
-	return newClient(urls, true, options)
+	return newClient(urls, true, parseConnectOptions(options))
 }
 
-func newClient(urls []string, ownsStream bool, options []ConnectOption) (*Client, error) {
-	opts := connectOpts{replicas: 1, publishAcknowledgementClock: wallClock{}}
-	for _, o := range options {
-		o(&opts)
+func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error) {
+	if err := refuseRemoteNATS(urls, opts.environment); err != nil {
+		return nil, err
 	}
-	credential, err := nkeyCredential(os.LookupEnv)
+	credential, err := nkeyCredential(opts.environment)
 	if err != nil {
 		return nil, err
 	}
@@ -306,6 +348,8 @@ func newClient(urls []string, ownsStream bool, options []ConnectOption) (*Client
 }
 
 func (c *Client) JS() nats.JetStreamContext {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.js
 }
 
@@ -314,73 +358,6 @@ func (c *Client) Connected() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.Conn != nil && c.Conn.Status() == nats.CONNECTED
-}
-
-// onClosed is wired as the ClosedCB callback. It launches recovery in a
-// background goroutine so the NATS library callback returns immediately.
-func (c *Client) onClosed() {
-	go c.recover()
-}
-
-func (c *Client) onReconnect(nc *nats.Conn) {
-	// A reconnect while Drain runs belongs to a process that is shutting down: nats.go has re-sent
-	// the draining subscriptions, and nothing will drain them now, so close the connection rather
-	// than hand deliveries to a process that is exiting.
-	if c.stopped() {
-		nc.Close()
-		return
-	}
-	// nc is the connection already in c.Conn, reconnected in place, and the JetStream context taken
-	// from it keeps working, so neither field is reassigned here.
-	if err := c.restoreSubscriptions(); err != nil {
-		if errors.Is(err, errStopped) {
-			// Stopped between the check above and the re-subscribe: same as that branch.
-			nc.Close()
-			return
-		}
-		slog.Error("envoy nats resubscribe failed", slog.String("error", err.Error()))
-		go c.recover()
-		return
-	}
-	// Drain stops the client before it takes the subscriptions to drain them, so a stop can land
-	// while restoreSubscriptions runs. The drain then owns the subscriptions and the connection, and
-	// a hook would only rewatch state the drain is about to close, as recover's attempt skips them.
-	if c.stopped() {
-		return
-	}
-	if err := c.runReconnectHooks(nc); err != nil {
-		// A failure after the stop is the stop: a shutdown that began while a hook ran closed what
-		// the hook was reading through. recover reports that case the same way, with the error kept
-		// on the line in case a real failure coincided with the stop.
-		if c.stopped() {
-			slog.Info("envoy nats reconnect hooks cancelled", slog.String("error", err.Error()))
-			return
-		}
-		slog.Error("envoy nats reconnect hook failed", slog.String("error", err.Error()))
-	}
-}
-
-// AddReconnectHook registers recovery for state that is attached to NATS but
-// not represented by Client subscriptions, such as KV watchers.
-func (c *Client) AddReconnectHook(hook func(*nats.Conn) error) {
-	if hook == nil {
-		return
-	}
-	c.reconnectHooksMu.Lock()
-	c.reconnectHooks = append(c.reconnectHooks, hook)
-	c.reconnectHooksMu.Unlock()
-}
-
-func (c *Client) runReconnectHooks(conn *nats.Conn) error {
-	c.reconnectHooksMu.Lock()
-	hooks := slices.Clone(c.reconnectHooks)
-	c.reconnectHooksMu.Unlock()
-	for _, hook := range hooks {
-		if err := hook(conn); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // Subscribe creates the listener's recoverable JetStream subscription. The client keeps one
@@ -420,43 +397,79 @@ func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler, queues .
 	}, conn, js)
 }
 
+// registerSubscription makes next the transport's subscription and binds it. The registration
+// stays when the bind fails, so a later restore binds it. A bind of the transport's subscription
+// already in flight, a restore's or another registration's, is waited for first. Once Drain or
+// Close has stopped the client it registers nothing, as a restore binds nothing: replacing the
+// transport's subscription would unsubscribe one the drain is letting finish.
 func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.Conn, js nats.JetStreamContext) (*nats.Subscription, error) {
 	c.subscriptionsMu.Lock()
-	defer c.subscriptionsMu.Unlock()
 	subscription := &c.subscriptions[next.transport]
+	for subscription.binding != nil {
+		inFlight := subscription.binding
+		c.subscriptionsMu.Unlock()
+		<-inFlight
+		c.subscriptionsMu.Lock()
+	}
+	if c.stopped() {
+		c.subscriptionsMu.Unlock()
+		return nil, errStopped
+	}
 	// Registering replaces the transport's subscription, so the one it replaces stops delivering:
 	// the listener's self-health rebuild re-registers after its durable consumer was lost, and the
 	// old handle, bound to that consumer's deliver inbox, would otherwise stay subscribed for good.
-	// For a consumer the library created, Unsubscribe also deletes it, as it always does.
-	if subscription.active != nil {
-		_ = subscription.active.Unsubscribe()
-	}
+	// For a consumer the library created, Unsubscribe also deletes it, as it always does. It runs
+	// before the bind, which a durable still bound to the old handle would refuse.
+	replaced := subscription.active
 	*subscription = next
-	if err := restoreSubscription(subscription, conn, js); err != nil {
+	subscription.binding = make(chan struct{})
+	c.subscriptionsMu.Unlock()
+	if replaced != nil {
+		_ = replaced.Unsubscribe()
+	}
+	sub, err := bind(next, conn, js)
+	if err := c.endBind(subscription, sub, err); err != nil {
 		return nil, err
 	}
-	return subscription.active, nil
+	return sub, nil
 }
 
-func restoreSubscription(subscription *recoverableSubscription, conn *nats.Conn, js nats.JetStreamContext) error {
-	var (
-		sub *nats.Subscription
-		err error
-	)
-	switch subscription.transport {
-	case jetStreamSubscription:
-		sub, err = js.Subscribe(subscription.subject, subscription.handler, subscription.opts...)
-	case coreSubscription:
-		if subscription.queue == "" {
-			sub, err = conn.Subscribe(subscription.subject, subscription.handler)
-		} else {
-			sub, err = conn.QueueSubscribe(subscription.subject, subscription.queue, subscription.handler)
-		}
+// bind subscribes registration's handler, through js for a JetStream subscription and on conn for
+// a core one. It is the request to the server, so no lock of the client's is held across it.
+func bind(registration recoverableSubscription, conn *nats.Conn, js nats.JetStreamContext) (*nats.Subscription, error) {
+	if registration.transport == jetStreamSubscription {
+		return js.Subscribe(registration.subject, registration.handler, registration.opts...)
 	}
+	if registration.queue == "" {
+		return conn.Subscribe(registration.subject, registration.handler)
+	}
+	return conn.QueueSubscribe(registration.subject, registration.queue, registration.handler)
+}
+
+// endBind ends the bind in flight of the registration subscription holds. A bind that ends during
+// Drain's collection installs for the next pass; after that collection it drains itself. A Close
+// never installs a bind that finishes after it stopped the client.
+func (c *Client) endBind(subscription *recoverableSubscription, sub *nats.Subscription, err error) error {
+	c.subscriptionsMu.Lock()
+	close(subscription.binding)
+	subscription.binding = nil
+	mode := c.stopMode
+	if err == nil && (mode == clientRunning || mode == clientDraining) {
+		subscription.active = sub
+	}
+	c.subscriptionsMu.Unlock()
+
 	if err != nil {
 		return err
 	}
-	subscription.active = sub
+	switch mode {
+	case clientDrainCollected:
+		_ = sub.Drain()
+		return errStopped
+	case clientClosed:
+		_ = sub.Unsubscribe()
+		return errStopped
+	}
 	return nil
 }
 
@@ -492,6 +505,11 @@ func (c *Client) stopped() bool {
 
 // Close stops any recovery goroutine and closes the underlying NATS connection.
 func (c *Client) Close() {
+	c.subscriptionsMu.Lock()
+	if c.stopMode == clientRunning {
+		c.stopMode = clientClosed
+	}
+	c.subscriptionsMu.Unlock()
 	c.stop()
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -509,17 +527,17 @@ func (c *Client) Close() {
 // connection refuses. Only then does it drain the connection, whose Drain only starts the drain,
 // and wait for it to close itself. A connection that is reconnecting is closed at once: nothing it
 // sends reaches the server, so no subscription would drain and a reconnect would re-send them.
+// A bind in flight at the stop is not waited for: one that ends while the subscriptions drain
+// installs its own, which the next pass drains, and one that ends after the last pass drains its
+// own, which the connection's drain takes (endBind). The close ends one still in flight.
 func (c *Client) Drain(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	c.stop()
 	c.subscriptionsMu.Lock()
-	var delivering []*nats.Subscription
-	for _, subscription := range c.subscriptions {
-		if subscription.active != nil && subscription.active.IsValid() {
-			delivering = append(delivering, subscription.active)
-		}
+	if c.stopMode == clientRunning {
+		c.stopMode = clientDraining
 	}
 	c.subscriptionsMu.Unlock()
+	c.stop()
 	c.mu.Lock()
 	conn := c.Conn
 	c.mu.Unlock()
@@ -536,14 +554,20 @@ func (c *Client) Drain(timeout time.Duration) error {
 		}
 		return nil
 	}
-	for _, subscription := range delivering {
-		if err := subscription.Drain(); err != nil {
-			return err
+	for {
+		delivering := c.deliveringSubscriptions()
+		if len(delivering) == 0 {
+			break
 		}
-	}
-	for _, subscription := range delivering {
-		if err := waitUntil(func() bool { return !subscription.IsValid() }); err != nil {
-			return err
+		for _, subscription := range delivering {
+			if err := subscription.Drain(); err != nil {
+				return err
+			}
+		}
+		for _, subscription := range delivering {
+			if err := waitUntil(func() bool { return !subscription.IsValid() }); err != nil {
+				return err
+			}
 		}
 	}
 	if err := conn.Drain(); err != nil {
@@ -552,116 +576,22 @@ func (c *Client) Drain(timeout time.Duration) error {
 	return waitUntil(conn.IsClosed)
 }
 
-// recover attempts to restore the NATS connection and every recoverable
-// subscription after a CLOSED state or failed re-subscribe.
-func (c *Client) recover() {
-	if !atomic.CompareAndSwapInt32(&c.recovering, 0, 1) {
-		return
-	}
-	defer atomic.StoreInt32(&c.recovering, 0)
-
-	// The dial retries a lost server for up to ten attempts; the stop cancels it, so a recovery
-	// ends at Close or Drain instead of outliving the client.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		select {
-		case <-c.stopCh:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-
-	backoff := time.Second
-	const maxBackoff = 30 * time.Second
-	for attempt := 1; ; attempt++ {
-		if c.stopped() {
-			slog.Info("envoy nats recovery cancelled")
-			return
-		}
-		if c.subscriptionsHealthy() {
-			slog.Info("envoy nats recovery: already healthy")
-			return
-		}
-		slog.Info("envoy nats recovery attempt", slog.Int("attempt", attempt))
-		failure := "envoy nats recovery reconnect failed"
-		err := c.ensureConnWithContext(ctx)
-		if err == nil {
-			failure = "envoy nats recovery resubscribe failed"
-			err = c.restoreSubscriptions()
-		}
-		if err == nil && !c.stopped() {
-			c.mu.Lock()
-			conn := c.Conn
-			c.mu.Unlock()
-			err = c.runReconnectHooks(conn)
-		}
-		// A failure after the stop is the stop: the dial it cancelled, a subscription the drain
-		// closed, a connection it refused to install. None of them is a recovery failure, but the
-		// error stays on the line in case a real one coincided with the stop.
-		if c.stopped() {
-			if err != nil {
-				slog.Info("envoy nats recovery cancelled", slog.String("error", err.Error()))
-			} else {
-				slog.Info("envoy nats recovery cancelled")
-			}
-			return
-		}
-		if err == nil {
-			slog.Info("envoy nats recovery successful", slog.Int("attempt", attempt))
-			return
-		}
-		slog.Error(failure, slog.Int("attempt", attempt), slog.String("error", err.Error()))
-		select {
-		case <-c.stopCh:
-			slog.Info("envoy nats recovery cancelled")
-			return
-		case <-time.After(backoff):
-		}
-		backoff = min(backoff*2, maxBackoff)
-	}
-}
-
-func (c *Client) subscriptionsHealthy() bool {
-	c.mu.Lock()
-	connOK := c.Conn != nil && c.Conn.Status() != nats.CLOSED
-	c.mu.Unlock()
+// deliveringSubscriptions returns the installed subscriptions that are still valid, those a pass
+// of Drain has yet to drain. Finding none during a Drain, it records that Drain has taken its last
+// (clientDrainCollected).
+func (c *Client) deliveringSubscriptions() []*nats.Subscription {
 	c.subscriptionsMu.Lock()
 	defer c.subscriptionsMu.Unlock()
+	var delivering []*nats.Subscription
 	for _, subscription := range c.subscriptions {
-		if subscription.handler != nil && (subscription.active == nil || !subscription.active.IsValid()) {
-			return false
+		if subscription.active != nil && subscription.active.IsValid() {
+			delivering = append(delivering, subscription.active)
 		}
 	}
-	return connOK
-}
-
-func (c *Client) restoreSubscriptions() error {
-	c.mu.Lock()
-	conn, js := c.Conn, c.js
-	c.mu.Unlock()
-	c.subscriptionsMu.Lock()
-	defer c.subscriptionsMu.Unlock()
-	// Drain collects the subscriptions to drain under subscriptionsMu after stopping the client, so
-	// a recovery that reaches here after it re-subscribes nothing.
-	if c.stopped() {
-		return errStopped
+	if len(delivering) == 0 && c.stopMode == clientDraining {
+		c.stopMode = clientDrainCollected
 	}
-	for index := range c.subscriptions {
-		subscription := &c.subscriptions[index]
-		// A reconnect in place leaves a subscription valid: nats.go has already re-sent its SUB, so
-		// it delivers as it did. Unsubscribing it to bind again would race the server's release of
-		// the consumer's push binding, which refuses the new bind while it still sees the old one.
-		// One on a replaced connection is invalid and is bound again.
-		if subscription.handler == nil || subscription.active.IsValid() {
-			continue
-		}
-		slog.Info("envoy nats resubscribing", slog.String("subject", subscription.subject))
-		if err := restoreSubscription(subscription, conn, js); err != nil {
-			return err
-		}
-	}
-	return nil
+	return delivering
 }
 
 func (c *Client) ensureConn() error {
@@ -719,6 +649,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 	}
 	c.Conn = nc
 	c.js = js
+	c.connEvents++
 	c.mu.Unlock()
 	return nil
 }
@@ -787,8 +718,11 @@ func validSubject(subject string) bool {
 // would.
 func (c *Client) refused(err error, size int) error {
 	if errors.Is(err, nats.ErrMaxPayload) {
+		c.mu.Lock()
+		conn := c.Conn
+		c.mu.Unlock()
 		return fmt.Errorf("%w: an envelope of %d bytes against the server's max payload of %d bytes",
-			ErrTooLarge, size, c.Conn.MaxPayload())
+			ErrTooLarge, size, conn.MaxPayload())
 	}
 	return err
 }
@@ -841,12 +775,13 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
 		options = append(options, nats.MsgId(item.DedupeKey+":"+item.Topic))
 	}
-	ack, err := c.js.Publish(item.Topic, data, options...)
+	js := c.JS()
+	ack, err := js.Publish(item.Topic, data, options...)
 	if err != nil && errors.Is(err, nats.ErrConnectionClosed) {
 		if err := c.ensureConnWithContext(ctx); err != nil {
 			return false, err
 		}
-		ack, err = c.js.Publish(item.Topic, data, options...)
+		ack, err = c.JS().Publish(item.Topic, data, options...)
 	}
 	if err != nil {
 		return false, c.refused(err, len(data))

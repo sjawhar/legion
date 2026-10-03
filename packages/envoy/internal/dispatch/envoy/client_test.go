@@ -159,7 +159,6 @@ func TestSessionsMapsListenerRowsAndDefaultsMissingSlices(t *testing.T) {
 }
 
 func TestSessionsSendsEnvoyToken(t *testing.T) {
-	t.Setenv("ENVOY_TOKEN", "listener-token")
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer listener-token" {
 			t.Errorf("Authorization = %q, want Bearer listener-token", got)
@@ -169,7 +168,7 @@ func TestSessionsSendsEnvoyToken(t *testing.T) {
 	}))
 	defer listener.Close()
 
-	sessions, err := New(listener.URL).Sessions(context.Background())
+	sessions, err := New(listener.URL, WithToken("listener-token")).Sessions(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +308,6 @@ func TestRoleAndSendPreserveTheListenerDeliveryContract(t *testing.T) {
 	// A non-loopback listener requires the bearer on every /v1 call; the send is the one that
 	// reaches a live agent, so an unauthenticated send fails delivery in production while
 	// every read succeeds.
-	t.Setenv("ENVOY_TOKEN", "listener-token")
 	var sent map[string]any
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer listener-token" {
@@ -329,15 +327,16 @@ func TestRoleAndSendPreserveTheListenerDeliveryContract(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
+	client := New(listener.URL, WithToken("listener-token"))
 
-	holder, err := New(listener.URL).Role(context.Background(), "legion-planner")
+	holder, err := client.Role(context.Background(), "legion-planner")
 	if err != nil {
 		t.Fatalf("get role: %v", err)
 	}
 	if holder.SessionID != "s1" || holder.Title != "planner" || !reflect.DeepEqual(holder.Capabilities, []string{"aside", "btw"}) {
 		t.Fatalf("holder = %#v", holder)
 	}
-	result, err := New(listener.URL).Send(context.Background(), SendInput{
+	result, err := client.Send(context.Background(), SendInput{
 		TargetSession:  "s1",
 		Message:        "Can this ship?",
 		Payload:        json.RawMessage(`{"event":{"type":"message.created"},"delivery":{"attempt":1,"mode":"btw"}}`),

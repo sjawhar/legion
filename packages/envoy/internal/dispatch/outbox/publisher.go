@@ -361,16 +361,22 @@ func payloadPreviousClaimSession(payload any) string {
 	return id
 }
 
-// publishFollowerRoutes delivers an ask's answer, edit, resolution, and every reply on it
+// publishFollowerRoutes delivers an ask's answer, edit, hand-back, resolution, and every reply on it
 // to each session following the ask (the asker, every session that replied, and any
 // session a human added), on the session's own topic. Unlike the route and author routes
 // this ignores Notify: an agent's reply on an ask must still reach the other followers,
-// who otherwise learn of it only by subscribing to the whole issue. The event's own actor
-// is skipped, and a topic the route already reached is not published twice.
+// who otherwise learn of it only by subscribing to the whole issue. A quiet ask.edited (a version
+// move of an approval request already waiting on its agent, model.AskEditEventPayload.Quiet)
+// reaches no follower. The event's own actor is skipped, and a topic the route already reached is
+// not published twice.
 func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
 	var askID string
 	switch event.Type {
-	case "ask.answered", "ask.edited", "ask.resolved":
+	case "ask.edited":
+		if !payloadBool(event.Payload, "quiet") {
+			askID = payloadString(event.Payload, "id")
+		}
+	case "ask.answered", "ask.handed_back", "ask.resolved":
 		askID = payloadString(event.Payload, "id")
 	case "comment.created", "comment.resolved", "comment.reopened", "comment.edited":
 		askID = payloadString(event.Payload, "ask_id")

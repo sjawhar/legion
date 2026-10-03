@@ -18,7 +18,7 @@ import {
   SelectedItemLabel,
   stubMatchMedia,
 } from "./margin-fixture";
-import { RELAYOUT_SETTLES_MS } from "./useCardHold";
+import { RELAYOUT_SETTLES_FRAMES } from "./useCardHold";
 
 const secondComment: Comment = {
   ...comment,
@@ -86,37 +86,21 @@ function renderCommentLinkLanding(comments: Comment[] = [comment], asks: Ask[] =
   );
 }
 
-/**
- * The gap between the scrolls in "a stream of scrolls after one relayout does not slide the
- * window along", short enough that each lands inside the window the one before it would have
- * extended. That test is the only consumer, and the derivation is what keeps it able to fail:
- * it asserts the hold *ended*, so shrinking the window alone can never make it red - only the
- * window-sliding bug can, and only while the scrolls still land inside the window. A
- * hard-coded 40 ms gap catches that bug at the shipped 250 ms window and goes blind at 30
- * (40 > 30, so every scroll falls outside and the first one ends the hold, bug or no bug),
- * which is what the derivation fixes.
- *
- * How often the derived gap catches it at the shipped `Math.max(5, …)` floor, planting the bug
- * and counting reds over 11 runs: 11/11 at a 250 ms window, 9/11 at 30, 2/11 at 10, 0/11 at 5.
- * The last row is not decay but arithmetic: the floor makes the gap 5 ms at a 5 ms window, and
- * the hold's check is `elapsed < RELAYOUT_SETTLES_MS`, so a scroll one gap later is never
- * strictly inside the window and the bug has nothing to slide. At 10 ms the gap is inside the
- * window but only by 5 ms, which is the timer jitter, hence the middling count. Those numbers
- * are what this derivation offers below 30 - counts, not a promise.
- */
-const CADENCE_MS = Math.max(5, Math.floor(RELAYOUT_SETTLES_MS / 6));
-
-async function tick(): Promise<void> {
+/** One rendering frame. happy-dom runs animation frames as immediates, so this is one turn of the
+ *  event loop - and a frame is the unit the hold's relayout window counts. */
+async function nextFrame(): Promise<void> {
   const done = Promise.withResolvers<void>();
-  setTimeout(done.resolve, CADENCE_MS);
+  requestAnimationFrame(() => done.resolve());
   await done.promise;
 }
 
-/** Longer than the hold's relayout window, so what follows is judged on its own. */
+/** Longer than the hold's relayout window, so what follows is judged on its own: whatever the
+ *  margin is still rendering lands first, then the window's frames run out. */
 async function settled(): Promise<void> {
-  const done = Promise.withResolvers<void>();
-  setTimeout(done.resolve, RELAYOUT_SETTLES_MS + 150);
-  await done.promise;
+  await quiet();
+  for (let frame = 0; frame <= RELAYOUT_SETTLES_FRAMES; frame += 1) {
+    await nextFrame();
+  }
 }
 
 async function quiet(): Promise<void> {
@@ -425,6 +409,23 @@ test("the margin stops correcting a linked card once the reader scrolls the marg
   }
 });
 
+/** The comment link's landing beside a document that registers and reports an empty layout on
+ *  the "Report layout" press: by default the spec the margin shows cards for. */
+function renderLandingWithReport(artifactId?: string): RenderResult {
+  return render(
+    <MemoryRouter
+      initialEntries={[`${buildIssuePath({ key: issue.key, kind: "spec" })}?comment=comment-1`]}
+    >
+      <QueryClientProvider client={landingClient([comment])}>
+        <MarginProvider>
+          <ReportEmptyLayoutButton artifactId={artifactId} />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+}
+
 test("a press in the document takes over once the document has reported an empty layout", async () => {
   // The signal is the document saying it reported, not the size of what it reported: an orphaned
   // comment on a document with no live mark and no typed ask block publishes empty maps, and a
@@ -433,18 +434,7 @@ test("a press in the document takes over once the document has reported an empty
   const restoreRects = stubRects(() => cardTop);
   const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
   const restoreMatchMedia = stubMatchMedia(false);
-  const view = render(
-    <MemoryRouter
-      initialEntries={[`${buildIssuePath({ key: issue.key, kind: "spec" })}?comment=comment-1`]}
-    >
-      <QueryClientProvider client={landingClient([comment])}>
-        <MarginProvider>
-          <ReportEmptyLayoutButton />
-          <Margin />
-        </MarginProvider>
-      </QueryClientProvider>
-    </MemoryRouter>
-  );
+  const view = renderLandingWithReport();
 
   try {
     const card = await screen.findByTestId("margin-comment-comment-1");
@@ -466,6 +456,83 @@ test("a press in the document takes over once the document has reported an empty
     act(() => placement.setAttribute("style", "position: absolute; top: 1200px;"));
     await quiet();
     expect(scrollTo.mock.calls.length).toBe(afterReader);
+  } finally {
+    view.unmount();
+    restoreMatchMedia();
+    restoreRects();
+    scrollTo.mockRestore();
+  }
+});
+
+test("a press in the document leaves the hold armed while the layout reported is another document's", async () => {
+  // A document the route has left can stay registered - hidden behind the next page's loading
+  // view until that page's code arrives - with its layout reported. Its report says nothing
+  // about where this margin's cards belong, so a press then is the reader arriving, not leaving.
+  let cardTop = 900;
+  const restoreRects = stubRects(() => cardTop);
+  const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
+  const restoreMatchMedia = stubMatchMedia(false);
+  const view = renderLandingWithReport("artifact-handbook");
+
+  try {
+    const card = await screen.findByTestId("margin-comment-comment-1");
+    const placement = card.parentElement;
+    if (placement === null) {
+      throw new Error("Expected the anchored card to be positioned by its placement wrapper");
+    }
+    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(0));
+
+    fireEvent.click(screen.getByRole("button", { name: "Report layout" }));
+    await quiet();
+    act(() => {
+      document.body.dispatchEvent(new window.PointerEvent("pointerdown", { bubbles: true }));
+    });
+    await quiet();
+    const afterPress = scrollTo.mock.calls.length;
+
+    cardTop = 1200;
+    act(() => placement.setAttribute("style", "position: absolute; top: 1200px;"));
+    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(afterPress));
+  } finally {
+    view.unmount();
+    restoreMatchMedia();
+    restoreRects();
+    scrollTo.mockRestore();
+  }
+});
+
+test("a text update in the margin keeps its anchoring scroll from taking over", async () => {
+  let cardTop = 900;
+  const restoreRects = stubRects(() => cardTop);
+  const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
+  const restoreMatchMedia = stubMatchMedia(false);
+  const view = renderCommentLinkLanding();
+
+  try {
+    const card = await screen.findByTestId("margin-comment-comment-1");
+    const placement = card.parentElement;
+    if (placement === null) {
+      throw new Error("Expected the anchored card to be positioned by its placement wrapper");
+    }
+    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(0));
+    await settled();
+
+    const text = document.createTreeWalker(card, NodeFilter.SHOW_TEXT).nextNode();
+    if (!(text instanceof Text)) {
+      throw new Error("Expected the margin card to contain text");
+    }
+    const sheet = screen.getByTestId("margin-sheet");
+    act(() => {
+      text.data = `${text.data} after the reference title resolves`;
+      sheet.scrollTop = 240;
+      fireEvent.scroll(sheet);
+    });
+    await quiet();
+    const afterReference = scrollTo.mock.calls.length;
+
+    cardTop = 1400;
+    act(() => placement.setAttribute("style", "position: absolute; top: 1400px;"));
+    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(afterReference));
   } finally {
     view.unmount();
     restoreMatchMedia();
@@ -571,15 +638,15 @@ test("a stream of scrolls after one relayout does not slide the window along", a
     await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(0));
     await settled();
 
-    // One relayout, then a stream of scrolls close enough together that each lands inside the
-    // window the one before it would have extended - a reader dragging a scrollbar the page sees
-    // no pointer event for, or paging through find-in-page hits.
+    // One relayout, then a stream of scrolls one frame apart, so each lands inside the window the
+    // one before it would have extended - a reader dragging a scrollbar the page sees no pointer
+    // event for, or paging through find-in-page hits. Twelve frames is four windows' worth.
     const sheet = screen.getByTestId("margin-sheet");
     act(() => placement.setAttribute("style", "position: absolute; top: 950px;"));
     for (const step of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) {
       sheet.scrollTop = 100 * step;
       fireEvent.scroll(sheet);
-      await tick();
+      await nextFrame();
     }
     const afterReader = scrollTo.mock.calls.length;
 
@@ -587,6 +654,51 @@ test("a stream of scrolls after one relayout does not slide the window along", a
     act(() => placement.setAttribute("style", "position: absolute; top: 1400px;"));
     await quiet();
     expect(scrollTo.mock.calls.length).toBe(afterReader);
+  } finally {
+    view.unmount();
+    restoreMatchMedia();
+    restoreRects();
+    scrollTo.mockRestore();
+  }
+});
+
+test("a relayout's own scroll that lands after a long task leaves the hold alone", async () => {
+  // The browser delivers a relayout's scroll at a rendering update, and a page busy mounting its
+  // editor can go hundreds of milliseconds without one: CI's WebKit let the margin clamp to a
+  // shorter content height, then delivered that clamp's scroll after a long task, and a window
+  // timed on the wall clock read it as the reader. No frame has run here, so it is the layout's.
+  let cardTop = 900;
+  const restoreRects = stubRects(() => cardTop);
+  const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
+  const restoreMatchMedia = stubMatchMedia(false);
+
+  const view = renderCommentLinkLanding();
+
+  try {
+    const card = await screen.findByTestId("margin-comment-comment-1");
+    const placement = card.parentElement;
+    if (placement === null) {
+      throw new Error("Expected the anchored card to be positioned by its placement wrapper");
+    }
+    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(0));
+    await settled();
+
+    const sheet = screen.getByTestId("margin-sheet");
+    placement.setAttribute("style", "position: absolute; top: 700px;");
+    // The observer's callback is a microtask: it has seen the relayout before the long task.
+    await Promise.resolve();
+    const busyUntil = performance.now() + 500;
+    while (performance.now() < busyUntil) {
+      // The long task: no rendering update runs until it ends.
+    }
+    sheet.scrollTop = 300;
+    fireEvent.scroll(sheet);
+    await quiet();
+    const afterClamp = scrollTo.mock.calls.length;
+
+    cardTop = 1400;
+    act(() => placement.setAttribute("style", "position: absolute; top: 1400px;"));
+    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(afterClamp));
   } finally {
     view.unmount();
     restoreMatchMedia();

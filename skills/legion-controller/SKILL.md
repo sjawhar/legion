@@ -69,9 +69,8 @@ their own machine, and you are that foreground OMP session. The command fetched 
 secret from the daemon with the operator's token, wrote it to a 0600 file under `LEGION_STATE_DIR`
 (`~/.local/state/legion/<project>-controller` by default) beside the `gh` shim and the `legion`
 launcher, and started you with `LEGION_CONTROLLER=1` and the same environment a tmux controller pane
-carries, so nothing changes in how you handle wakes. Under the TypeScript daemon the extension
-claims the role and calls `/controller/ready` exactly as under tmux; under the Go daemon
-(`LEGION_DAEMON_API=go` in your environment) it registers on `/legion/v1/claims/register` with the
+carries, so nothing changes in how you handle wakes. The extension registers on
+`/legion/v1/claims/register` with the
 secret, claims the role, then subscribes to `notifications.legion.<project>.controller`, where the
 Go daemon publishes the rows marked from the Go daemon in the wake routing table. The daemon records
 you as `controllerLocator: {runtime, external: true, sessionId, registeredAt}`, `runtime` being the
@@ -198,7 +197,7 @@ dispatch_issues({ project: "<PROJECT>", status: "todo", priority: [0], limit: 25
 
 When the first line ends `(showing 1-250 of N)`, the next page is `offset: 250`, then `500`. Read
 pages only as far as you need: stop listing once the free slots are filled. `<PROJECT>` is the
-Dispatch project key, the prefix of this deployment's issue keys (`AGENTC-12` → `AGENTC`), which is
+Dispatch project key, the prefix of this deployment's issue keys (`PROJ-12` → `PROJ`), which is
 also `daemon.project` in `legion state --json`: the project key exactly as `legion.yaml` writes it.
 A row that shows `claimed by …` and does not end its claim with `· not running` (the route, when
 the row shows one, comes after the claim) is claimed, as the table below says: skip it without

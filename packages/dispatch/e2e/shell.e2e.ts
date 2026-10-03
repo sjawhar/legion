@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
-import { createIssue, createProject } from "./api";
+import { baseUrl, createIssue, createProject, sessionCookieName } from "./api";
+import { holdFirstRequest } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -39,43 +40,34 @@ test("a transient whoami failure shows a retry banner and keeps the app, not the
   await context.close();
 });
 
-test("signing out returns to the sign-in page", async ({ browser }, testInfo) => {
+test("signing out revokes the session on the server and returns to the sign-in page", async ({
+  browser,
+}, testInfo) => {
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-
   await page.goto("/");
   if (testInfo.project.name === "iphone") {
     await page.getByRole("button", { name: "Open navigation" }).click();
   }
   await expect(page.getByText("Signed in as alice")).toBeVisible();
-
-  // This harness authenticates through a trusted proxy header rather than the session
-  // cookie /auth/logout clears, so nothing server-side makes a later whoami actually
-  // fail. Simulate the real-world post-logout state deterministically: once the logout
-  // request has been seen, every subsequent whoami call is answered as unauthenticated,
-  // proving the app reaches sign-in from the resetQueries-triggered refetch alone (no
-  // page reload).
-  let loggedOut = false;
-  await page.route("**/auth/whoami", async (route) => {
-    if (loggedOut) {
-      await route.fulfill({
-        body: JSON.stringify({ error: "unauthorized" }),
-        contentType: "application/json",
-        status: 401,
-      });
-      return;
-    }
-    await route.continue();
-  });
-  await page.route("**/auth/logout", async (route) => {
-    loggedOut = true;
-    await route.continue();
-  });
+  const session = (await context.cookies()).find((cookie) => cookie.name === sessionCookieName);
+  if (session === undefined) {
+    throw new Error(`no ${sessionCookieName} cookie after sign-in`);
+  }
+  const whoami = () =>
+    fetch(new URL("/auth/whoami", baseUrl), {
+      headers: { Cookie: `${sessionCookieName}=${session.value}` },
+    });
+  // The copy authenticates on its own before Sign out, so its refusal afterwards is the logout's.
+  expect((await whoami()).status).toBe(200);
 
   await page.getByRole("button", { name: "Sign out" }).click();
-
   await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toBeVisible();
 
+  // /auth/logout clears the browser's cookie, which alone would make the next whoami 401. The
+  // check that cannot pass for that reason: a copy of the cookie the browser held, replayed after
+  // Sign out, is refused because logout advanced alice's session generation on the server.
+  expect((await whoami()).status).toBe(401);
   await context.close();
 });
 
@@ -102,6 +94,66 @@ test("a page chunk that fails again after the session's one reload shows the fai
     await expect(box).toContainText("Failed to fetch dynamically imported module");
     await expect(box).not.toContainText("Cannot read properties of undefined");
     await expect(box.getByRole("button", { name: "Reload Dispatch" })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+// A Download link (`<a download>`) starts a navigation the browser answers with a download, so the
+// page stays the reader's. The Navigation API's `navigate` event fires for it with `downloadRequest`
+// set and `destination.sameDocument` false, and a chunk that fails after it must still reload the
+// page, as on any page nobody is leaving.
+test("a chunk that fails after a Download link was followed reloads the page", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the guard does not depend on the layout");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: "Downloadable spec.", title: "Files" });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  // The spec's document transport is still downloading when the reader opens the Artifacts tab
+  // and follows a Download link; the chunk fails only after that.
+  const transportCode = await holdFirstRequest(page, /\/assets\/yjs-[^/]+\.js$/u);
+  // Records what each `navigate` event says about where it goes.
+  await page.addInitScript(() => {
+    const seen: { download: unknown; sameDocument: unknown }[] = [];
+    Object.assign(window, { seenNavigations: seen });
+    const navigation = "navigation" in window ? window.navigation : undefined;
+    if (!(navigation instanceof EventTarget)) {
+      return;
+    }
+    navigation.addEventListener("navigate", (event) => {
+      const destination = "destination" in event ? event.destination : undefined;
+      seen.push({
+        download: "downloadRequest" in event ? event.downloadRequest : undefined,
+        sameDocument:
+          typeof destination === "object" && destination !== null && "sameDocument" in destination
+            ? destination.sameDocument
+            : undefined,
+      });
+    });
+  });
+  let loads = 0;
+  page.on("load", () => {
+    loads += 1;
+  });
+
+  try {
+    await page.goto(`/issues/${issue.key}/spec`);
+    const held = await transportCode.held;
+    await page.getByRole("tab", { name: /^Artifacts/ }).click();
+    const download = page.waitForEvent("download");
+    await page.getByRole("link", { name: "Download version 1" }).click();
+    await download;
+    // The browser announced the download as a navigation to another document: the case the
+    // guard has to tell apart from a page being left.
+    expect(
+      await page.evaluate(() => ("seenNavigations" in window ? window.seenNavigations : undefined))
+    ).toContainEqual({ download: expect.any(String), sameDocument: false });
+    expect(loads).toBe(1);
+
+    await held.abort();
+    await expect.poll(() => loads).toBe(2);
   } finally {
     await context.close();
   }

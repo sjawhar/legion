@@ -23,7 +23,10 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-const maxArtifactBlobSize = 25 << 20
+const (
+	maxArtifactBlobSize      = 25 << 20
+	maxDocumentMarkdownBytes = int(maxJSONRequestBytes) // A Markdown document; maxJSONRequestBytes bounds an issue's spec and every edit the same way (LEGION-465).
+)
 
 func (s *server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -115,7 +118,12 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 		writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "invalid artifact content type")
 		return
 	}
-	s.storeArtifact(w, r, input, actor, artifactKind(mediaType), target)
+	kind := artifactKind(mediaType)
+	if kind == "doc" && len(input.content) > maxDocumentMarkdownBytes {
+		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "a markdown document is at most 1 MiB; a larger file is stored as a binary artifact under another content type")
+		return
+	}
+	s.storeArtifact(w, r, input, actor, kind, target)
 }
 
 func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (artifactUploadInput, bool) {
@@ -314,7 +322,7 @@ func (s *server) storeArtifact(
 	defer ledger.Discard()
 	var documentMarkdown string
 	var documentChanges model.ReferenceChanges
-	var retractions []model.Event
+	var movedEvents []model.Event
 	if kind == "doc" {
 		if created {
 			documentMarkdown, err = s.deps.Docs.SeedText(documentCtx, artifact.ID, string(input.content), actor)
@@ -360,9 +368,11 @@ func (s *server) storeArtifact(
 	}
 	var diff *string
 	if !created && kind == "doc" {
-		// This route writes its version itself rather than through the document service, so it
-		// retracts the approval asks naming an older version as every other version write does.
-		retractions, err = docs.RetractStaleApprovalAsks(r.Context(), tx, s.deps.Events, artifact.ID, version)
+		// This route writes its version itself rather than through the document service, so its
+		// open approval request follows that version just as every other version write does.
+		movedEvents, err = docs.MoveApprovalAsk(
+			r.Context(), tx, s.deps.Events, artifact.ID, version, s.deps.ServerURL,
+		)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -409,7 +419,7 @@ func (s *server) storeArtifact(
 		// document's ask blocks are indexed and its block ids repaired.
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publish(append(retractions, event)...)
+	s.publish(append(movedEvents, event)...)
 	var blocks *documentBlocks
 	if kind == "doc" {
 		blocks = readDocumentBlocks(documentMarkdown)
@@ -613,6 +623,32 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(content)
 }
 
+// commitArtifactVersionEvent appends the artifact.version event of a version the transaction wrote
+// and stamps the document's new mention edges with it (refs.Stamp), after the append so stamping
+// never touches sequence allocation.
+func (s *server) commitArtifactVersionEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	eventOwner owner,
+	actor model.Actor,
+	artifactID, name string,
+	written docs.VersionResult,
+	diff *string,
+) (model.Event, error) {
+	event, err := s.appendEvent(ctx, tx, eventOwner.event(
+		"artifact.version",
+		actor,
+		docs.ArtifactVersionEventPayload(artifactID, name, written.Version, diff, written.Changes),
+	))
+	if err != nil {
+		return model.Event{}, err
+	}
+	if err := refs.Stamp(ctx, tx, "artifact", artifactID, event.ID); err != nil {
+		return model.Event{}, err
+	}
+	return event, nil
+}
+
 func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -671,16 +707,8 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, eventOwner.event(
-		"artifact.version",
-		actor,
-		docs.ArtifactVersionEventPayload(artifact.ID, artifact.Name, version, diff, named.Changes),
-	))
+	event, err := s.commitArtifactVersionEvent(r.Context(), tx, eventOwner, actor, artifact.ID, artifact.Name, named, diff)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := refs.Stamp(r.Context(), tx, "artifact", artifact.ID, event.ID); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -778,16 +806,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			event, err := s.appendEvent(r.Context(), tx, eventOwner.event(
-				"artifact.version",
-				actor,
-				docs.ArtifactVersionEventPayload(artifact.ID, artifact.Name, written.Version, diff, written.Changes),
-			))
+			event, err := s.commitArtifactVersionEvent(r.Context(), tx, eventOwner, actor, artifact.ID, artifact.Name, *written, diff)
 			if err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-			if err := refs.Stamp(r.Context(), tx, "artifact", artifact.ID, event.ID); err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
@@ -824,8 +844,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		// Which operations the live document did not hold once this write reached it: a
 		// concurrent change that landed after the version was rendered and before the publish is
 		// past undoing, so the edit reports it rather than refusing (LEGION-269). null means the
-		// check reached no verdict - the publish failed and the room is reloading - which is not
-		// the same statement as the empty list.
+		// check reached no verdict - the publish failed and the room is reloading, or the room
+		// holds a tree too deep to read - which is not the same statement as the empty list.
 		"lost_ops": lostOps(ledger, artifact.ID),
 		"token":    edit.Token,
 	}, advice))

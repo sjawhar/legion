@@ -129,12 +129,10 @@ committed predecessor handoffs in lifecycle order from `$LEGION_WORKSPACE/.legio
 4. `test.json`
 5. `review.json`
 
-Read only files that precede the assigned phase. Every handoff is validated when it is read:
-`validatePhaseHandoff` (`packages/contracts/src/handoff-schema.ts`) checks the
-file, and the ledger (`packages/daemon/src/handoff/ledger.ts`) treats a file that
-fails validation as missing.
-Undeclared fields pass validation untouched and reach the next worker; a declared field of the
-wrong type fails the whole file, so the `legion` tool's `handoff_read` returns null for that phase.
+Read only files that precede the assigned phase. Each was held to its phase's rules when it was
+written (`handoff_write`, in the completion gate below): fields the phase does not declare passed
+untouched and reach the next worker. The `legion` tool's `handoff_read` returns each file as it
+stands in the workspace.
 Write the phase-specific fields the next phase and the architect need, consistent with what
 predecessor phases already wrote. The durable copy lives in
 `$LEGION_WORKSPACE/.legion/<phase>.json`. If a committed handoff conflicts with memory or a prior
@@ -323,7 +321,7 @@ line), the full definition of a proof, what the tester verifies, and the simplif
 ## Completion gate: handoff write, verification, and persistence
 
 The merger writes no handoff and pushes nothing, so this gate does not apply to it
-(`packages/pi-envoy/roles/merger.md`).
+(`packages/daemon/internal/prompts/roles/merger.md`).
 
 Write the phase-specific handoff: call the `legion` tool with `op: "handoff_write"`, `phase: "<p>"`,
 and `data`: a JSON object of the phase-specific fields only. It runs `legion handoff write` in

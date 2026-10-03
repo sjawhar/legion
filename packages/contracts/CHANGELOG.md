@@ -4,6 +4,28 @@
 
 ### Changed
 
+- `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary
+  and no question, and an approval is requested only once the human has agreed to every point in
+  the document (LEGION-475).
+- Added `AskApproval.requested_version`. An open approval ask now follows a document's latest
+  version in the same row, and `requested_version < version` marks the interval while the agent
+  is revising before handing that row back to a human (LEGION-470).
+- Added the `ask.handed_back` event (`AskEventPayload`): an agent handed its approval request back
+  to the human, at the version `approval.requested_version` names. `ask.edited` stays a rewording:
+  a hand-back that changes no wording records only `ask.handed_back` and leaves `edited_at` as it
+  was, and one with a new summary records `ask.edited` and then `ask.handed_back` (LEGION-470).
+- Added `AskEditEventPayload.quiet`: `true` on a version move of an approval request that already
+  waits on its agent, which carries `notify: false` and reaches no follower, as a human's unnamed
+  `artifact.version` does; only the move that takes the request from the human wakes anyone
+  (LEGION-470).
+- Added `ArtifactApproval.waiting_on`, whose move an `awaiting` approval's request waits on, and
+  `ApprovalRequestResponse`, the answer of `POST /api/v1/artifacts/{id}/approval-requests`
+  (LEGION-470).
+- `dispatch_request_approval`'s description and `summary` say an approval request carries nothing
+  new: the summary says only what the human is approving, a later version leaves the request
+  waiting on the agent until it hands the request back once the human has agreed to every point,
+  and a call while the request already waits on the human hands nothing back, refusing a different
+  summary (LEGION-470).
 - `dispatch_request_approval` requires `summary`, the proposals in the document's latest version
   the human hasn't already agreed to (LEGION-387). `SPEC_SECTIONS` is removed: `dispatch_issue`'s
   `spec` and `dispatch_doc_edit` point at the dispatch skill's "Writing a spec" instead of listing
@@ -12,9 +34,32 @@
   open decision block, even when a human asked for approval (LEGION-387); its `summary`
   description no longer repeats that rule. `dispatch_doc_edit`'s description says a `delete` or
   `retype` that would take an ask block out of the document while its ask is open is refused.
+- `itemFromSearch` answers `null` for an item id that decodes to a control character, as the
+  Dispatch server's reference reader names nothing for one (LEGION-463). No item has such an id,
+  and a NUL in one failed the write that cited it.
+- `AnchorPosition.anchor_block_error` can be `DOCUMENT_UNLOADABLE`: the anchor's document has a
+  stored history that cannot load, the state a rebuild from its latest saved version repairs, which
+  the API answers `409 DOCUMENT_UNLOADABLE` where it answered `503 DOC_SERVICE_UNAVAILABLE`.
+  `dispatch_read`'s description names it (LEGION-469).
 
 ### Added
 
+- `ArtifactRebuildReport`, the answer of `POST /api/v1/artifacts/{id}/rebuild`: what the rebuild
+  removed, the head it wrote, the validation error the history failed with, and `source_version`,
+  the version the rebuilt document holds (its latest saved version, or the version supplied
+  markdown wrote) (LEGION-469).
+- `DOCUMENT_SCHEMA_CLOSE_CODE` (`4409`) and `DOCUMENT_SCHEMA_CLOSE_REASON` (`"DOC_SCHEMA"`), the
+  close the document websocket refuses a room outside the Proof schema with, before any sync.
+  `gen:go` generates them into Go as `contracts.DocumentSchemaCloseCode` and
+  `contracts.DocumentSchemaCloseReason`, so the server's close and the dashboard's reading of it
+  cannot drift apart (LEGION-469).
+- `UserAgentStateInput.read_replies`: the ids of a session's own replies to mark read, those
+  alone, for a view that shows only some of a session's replies (LEGION-485).
+- `DISPATCH_TEXT_REFERENCES`: markdown bodies with the `dispatch://` references each one cites,
+  read against `https://dispatch.test` or the row's `origin`. The dashboard's
+  `composerReferences` and the Go reader `text.Extract`, through its JSON copy, are both tested
+  against it, so neither where a reference ends nor what it names changes on one side only
+  (LEGION-463).
 - `BlockPath`, `BlockPathEntry` and `TablePosition`, the shape of
   `GET /api/v1/artifacts/{id}/blocks/{block_id}`: a block's path from the top-level block down
   and, in a table, the row and column indexes `delete_row` and `delete_column` take, the text of
@@ -82,3 +127,8 @@
 
 - Removed `HandoffMessage`, `validateHandoffMessage`, and `MESSAGES_DIR_NAME`: the `legion handoff message|messages` commands they served are gone, and nothing else read `.legion/messages/`.
 - Removed `legionNoticeSubject`: the Go daemon publishes no notice on an issue's topic any more, and its one caller, `legionControllerNoticeSubject`, now builds the controller topic itself.
+- Removed the handoff schema: `validatePhaseHandoff`, `describePhaseHandoffProblems`,
+  `describePhaseHandoffWriteProblems`, `isHandoffPhase`, the phase handoff interfaces,
+  `PHASE_FILE_NAMES`, `LEGION_DIR_NAME`, `HANDOFF_SCHEMA_VERSION`, `PLAN_REVIEW_MAX_ROUNDS` and
+  `PLAN_REVIEW_VERDICTS`. The Go `legion handoff write` holds each phase's handoff to the same
+  rules and names every field at fault; `HANDOFF_PHASES`, the `legion` tool's phase words, stays.

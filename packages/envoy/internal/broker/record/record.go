@@ -1,6 +1,6 @@
 // Package record implements the credential-request record: its canonical body and content-addressed
 // id, who may decide it, and verification of the requester's signed request object (AGENTC-393
-// design v4, contract v9).
+// design v4, and the shared broker contract at dispatch://AGENTC-393/artifact/plan-overview-md).
 package record
 
 import (
@@ -48,8 +48,9 @@ func ValidSlot(slot string) bool {
 	return slotPattern.MatchString(slot)
 }
 
-// CanonicalLogin lowercases and trims a GitHub login. Every login comparison in the module goes
-// through this form on both sides.
+// CanonicalLogin lowercases and trims the name Dispatch signs a person in with, their email (a
+// record created before people were named by email keeps the GitHub login it was decided under).
+// Every login comparison in the module goes through this form on both sides.
 func CanonicalLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }

@@ -3,20 +3,27 @@ package pmdoc
 import (
 	"reflect"
 
+	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 )
 
-// inlineParsers is goldmark's default inline parsers with its emphasis parser, found by its type
-// as blockParsers finds the block parsers it wraps, replaced by emphasis.
+// inlineParsers is goldmark's default inline parsers, each found by its type as blockParsers finds
+// the block parsers it wraps: its emphasis parser replaced by emphasis, and its link parser
+// measuring the images it makes (imageNesting).
 func inlineParsers(emphasis emphasisParser) []util.PrioritizedValue {
 	parsers := parser.DefaultInlineParsers()
 	emphasisType := reflect.TypeOf(parser.NewEmphasisParser())
+	linkType := reflect.TypeOf(parser.NewLinkParser())
 	for index, prioritized := range parsers {
-		if reflect.TypeOf(prioritized.Value) == emphasisType {
+		switch reflect.TypeOf(prioritized.Value) {
+		case emphasisType:
 			parsers[index].Value = emphasis
+		case linkType:
+			parsers[index].Value = imageNesting{prioritized.Value.(goldmarkLinkParser)}
 		}
 	}
 	return parsers
@@ -69,11 +76,42 @@ func (p emphasisParser) Parse(_ ast.Node, block text.Reader, pc parser.Context) 
 	if char == '_' {
 		canOpen, canClose = canOpen && (beforeIsSpace || beforeIsPunct || !canClose), canClose && (afterIsSpace || afterIsPunct || !canOpen)
 	}
+	if !canOpen && !canClose {
+		// A run that can neither open nor close pairs with nothing. goldmark's ProcessDelimiters
+		// walks every delimiter still on its list when a closer looks for its opener, and never
+		// takes such a run off it, so a paragraph of `a_b*a_b*…` cost time quadratic in its length
+		// (LEGION-465). It is read as the text it would have become; cmark pushes no such run.
+		text := ast.NewTextSegment(segment.WithStop(segment.Start + length))
+		block.Advance(length)
+		return text
+	}
 	node := parser.NewDelimiter(canOpen, canClose, length, char, emphasisDelimiters{})
 	node.Segment = segment.WithStop(segment.Start + node.OriginalLength)
 	block.Advance(node.OriginalLength)
 	pc.PushDelimiter(node)
 	return node
+}
+
+// strikethrough is Goldmark's GFM parser with a guard for delimiter runs it already refuses.
+// Goldmark refuses a `~` whose preceding character is `~`, but it scans that run before doing so.
+// Returning before the scan preserves its result and makes one run linear (LEGION-465).
+type strikethrough struct{}
+
+func (strikethrough) Extend(markdown goldmark.Markdown) {
+	markdown.Parser().AddOptions(parser.WithInlineParsers(util.Prioritized(newStrikethroughGuard(), 500)))
+}
+
+type strikethroughGuard struct{ parser.InlineParser }
+
+func newStrikethroughGuard() strikethroughGuard {
+	return strikethroughGuard{InlineParser: extension.NewStrikethroughParser()}
+}
+
+func (g strikethroughGuard) Parse(parent ast.Node, block text.Reader, context parser.Context) ast.Node {
+	if block.PrecendingCharacter() == '~' {
+		return nil
+	}
+	return g.InlineParser.Parse(parent, block, context)
 }
 
 // emphasisDelimiters pairs an opener and a closer of one character. CommonMark's rule of three
