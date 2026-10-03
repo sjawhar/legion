@@ -69,7 +69,8 @@ because replying to an ask makes you one of its followers (see [Following](skill
 `quote` requires `artifact`; its anchor is pinned to the containing block while retaining the quote
 for display. Omit both for a floating issue comment. A reply (`reply_to`/`reply_to_ask`) takes no
 `quote`; it belongs to its parent's anchor. Reply to any comment in a thread; the server keeps
-threads flat. A reply to a resolved thread reopens it. Use `reply_to_ask` to reply directly under a
+threads flat. A reply to a resolved thread reopens it, except a decided suggestion's: a reply joins
+that thread and the suggestion stays accepted or rejected. Use `reply_to_ask` to reply directly under a
 question asked with `dispatch_ask`; `turn` (only with `reply_to_ask`) says who holds the turn after
 the reply — `agent` for a progress note that keeps the ask waiting on you, `human` (the default) when
 the human needs to act; see "Asking" in `skill://dispatch`. Comments are edited only by their author from the
