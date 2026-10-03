@@ -95,7 +95,7 @@ func BlockIDRepairCount(tree *Node) (repairs int) {
 			return true
 		}
 		id, ok := node.Attrs[BlockIDAttr].(string)
-		if ok && id != "" {
+		if ok && writableBlockID(id) {
 			if _, duplicate := seen[id]; !duplicate {
 				seen[id] = struct{}{}
 				return true
@@ -107,8 +107,8 @@ func BlockIDRepairCount(tree *Node) (repairs int) {
 	return repairs
 }
 
-// EnsureBlockIDsCount gives every block in tree a unique blockId and reports
-// how many missing or duplicate IDs it replaced.
+// EnsureBlockIDsCount gives every block in tree a unique blockId and reports how many missing,
+// unwritable (writableBlockID) or duplicate IDs it replaced.
 func EnsureBlockIDsCount(tree *Node) (stamped int) {
 	seen := make(map[string]struct{})
 	walk(tree, func(node *Node, _ []int, _, _ int) bool {
@@ -116,7 +116,7 @@ func EnsureBlockIDsCount(tree *Node) (stamped int) {
 			return true
 		}
 		id, ok := node.Attrs[BlockIDAttr].(string)
-		if ok && id != "" {
+		if ok && writableBlockID(id) {
 			if _, duplicate := seen[id]; !duplicate {
 				seen[id] = struct{}{}
 				return true
@@ -137,6 +137,23 @@ func EnsureBlockIDsCount(tree *Node) (stamped int) {
 		return true
 	})
 	return stamped
+}
+
+// writableBlockID reports whether id is one a typed block's markdown can carry and read back
+// (`#id`: letters, digits, `_` and `-`, as directiveNameByte reads them), which every id this
+// package mints is. A browser's update can set any string, one holding U+0000 among them, which
+// an ask row or an anchor cannot store and a version cannot render, so such an id is minted again
+// as a missing one is.
+func writableBlockID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for index := range len(id) {
+		if !directiveNameByte(id[index]) {
+			return false
+		}
+	}
+	return true
 }
 
 // BlockIDForRange returns the lowest block that contains all of r. A range

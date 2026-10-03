@@ -427,6 +427,56 @@ func TestABrowsersNulLeavesTheDocumentVersionable(t *testing.T) {
 	}
 }
 
+// A hand-built client can set a block's id to any string, such as one holding a U+0000, which an
+// ask row cannot store and a typed block's `#id` cannot render. Settlement mints such an id again
+// as it mints a missing one, so the document settles: the ask is indexed under the new id and the
+// version holds no NUL.
+func TestABlockIDOutsideTheIDFormatIsMintedAgain(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		spec string
+	}{
+		{"ask block", "before\n\n:::ask{#q1 urgency=\"med\"}\nWhich one?\n\n- A\n- B\n:::\n"},
+		{"callout", "before\n\n:::callout{#c1 kind=\"note\"}\ninside\n:::\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			documentService, handler, database := browserDocumentService(t)
+			issue := createInteractionIssue(t, handler, "TEST", "Crafted block id", test.spec)
+			peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
+			peer.edit(t, func(tree *pmdoc.Node) error {
+				tree.Children[1].Attrs[pmdoc.BlockIDAttr] = "x" + nulText
+				return nil
+			})
+			peer.barrier(t)
+			peer.closeAndWait(t)
+
+			var versions, owed int
+			var markdown string
+			if err := database.Pool.QueryRow(context.Background(), `
+				select (select count(*) from artifact_versions where artifact_id = $1),
+					(select count(*) from doc_settlements_pending where artifact_id = $1),
+					(select markdown from artifact_versions where artifact_id = $1 order by number desc limit 1)
+			`, issue.PrimaryArtifactID).Scan(&versions, &owed, &markdown); err != nil {
+				t.Fatalf("read the document's settlement: %v", err)
+			}
+			if versions != 2 || owed != 0 || strings.IndexByte(markdown, 0) >= 0 || strings.Contains(markdown, "{#x") {
+				t.Fatalf("after the crafted id: %d versions, %d settlements owed, latest version %q; want 2, 0 and a minted id", versions, owed, markdown)
+			}
+			if test.name == "ask block" {
+				asks := decodeBody[[]model.Ask](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks?state=open", nil, "alice"))
+				if len(asks) != 1 || asks[0].BlockID == nil || strings.IndexByte(*asks[0].BlockID, 0) >= 0 || asks[0].Question != "Which one?" {
+					t.Fatalf("open asks = %+v, want the block's ask under a minted id", asks)
+				}
+			}
+			if edit := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+				"ops": []map[string]any{{"op": "insert", "after": "end", "markdown": "An agent's line."}},
+			}, "alice"); edit.Code != http.StatusOK {
+				t.Fatalf("agent edit: status=%d body=%s", edit.Code, edit.Body.String())
+			}
+		})
+	}
+}
+
 func assertNulRefusal(t *testing.T, response *httptest.ResponseRecorder, request, field string) {
 	t.Helper()
 	var refusal struct {

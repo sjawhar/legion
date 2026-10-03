@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"path"
 	"strconv"
@@ -177,8 +178,19 @@ func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (art
 }
 
 func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request) (artifactUploadInput, bool) {
+	// Only the size limits are 413: the body past maxArtifactBlobSize and a megabyte of fields
+	// (uploadArtifactFor's MaxBytesReader), or fields past what the parser holds in memory. Any
+	// other refusal is a body the parser cannot read, answered with its reason.
 	if err := r.ParseMultipartForm(1 << 20); err != nil {
-		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+		var tooLarge *http.MaxBytesError
+		switch {
+		case errors.As(err, &tooLarge):
+			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+		case errors.Is(err, multipart.ErrMessageTooLarge):
+			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "the upload's form fields are too large to read")
+		default:
+			writeError(w, "ARTIFACT_INPUT", http.StatusBadRequest, "invalid multipart body: "+err.Error())
+		}
 		return artifactUploadInput{}, false
 	}
 	if refusal := nulInForm(r.MultipartForm.Value); refusal != nil {

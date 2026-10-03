@@ -40,7 +40,9 @@ events to the right session.
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
 
 Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
-and `EnsureBlockIDs` repairs legacy or duplicate IDs before agent updates are written. Document
+and `EnsureBlockIDs` repairs missing, duplicate and unwritable IDs (any outside the `#id` format a
+typed block's markdown carries, letters, digits, `_` and `-`, such as one a hand-built client set
+holding a NUL; `writableBlockID`) before agent updates are written. Document
 settlement is two-phase: it first writes its repairs into the room (`EnsureBlockIDs`, then the
 server-owned attributes of each ask block it reconciled) and persists the updates they captured in
 the same Postgres transaction as any resulting version and event, then renders and compares

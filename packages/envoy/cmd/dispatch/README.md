@@ -592,6 +592,7 @@ table's width is rejected as `TABLE_WIDTH`; blank cells there are dropped.
 | Status / code | Meaning |
 | --- | --- |
 | `400 NUL_CHARACTER` | Caller text holds a NUL character (U+0000), which PostgreSQL's text and jsonb cannot store: any string in a JSON body a route decodes, member names included, a multipart upload's field or markdown file, or any route's path or query parameter. The message names where it stands (`title`, `options[1].label`, `file`, `path parameter session_id`, `query parameter label`) and the character's position, counted from 1 in UTF-16 units; nothing is written. A NUL a browser edit puts in a live document is written as U+FFFD, which is what CommonMark reads one as, in the document's version, an anchor's quote and an ask block's question and options. |
+| `400 ARTIFACT_INPUT` | An artifact upload's multipart body the parser cannot read, such as a part header holding a control character, named with the parser's reason. A body past the upload's size limit stays `413 CAP_EXCEEDED`. |
 
 ## Document errors
 
