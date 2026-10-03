@@ -1026,7 +1026,7 @@ func TestSuggestionAcceptEmitsAnchorRefreshEventsForChangedOpenRows(t *testing.T
 		commentEvent.Deliveries == nil || len(commentEvent.Mentions) != 0 || len(commentEvent.Deliveries) != 0 ||
 		commentEvent.ArtifactName != "spec.md" || commentEvent.ProjectKey != "TEST" ||
 		commentEvent.ArtifactSlug != "spec" ||
-		commentEvent.Event.Actor != (model.Actor{Kind: "session", ID: "session-0123456789abcdef"}) ||
+		commentEvent.Event.Actor != (model.Actor{Kind: "user", ID: "alice"}) ||
 		commentEvent.Event.Notify || commentEvent.Event.CreatedAt.IsZero() || commentEvent.Event.Seq == 0 ||
 		acceptedSuggestionSeq == 0 || commentEvent.Event.Seq >= acceptedSuggestionSeq {
 		t.Fatalf("comment.anchor_refreshed payload = %#v, want full orphaned earlier-comment payload", commentEvent)

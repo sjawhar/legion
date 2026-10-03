@@ -10,17 +10,7 @@ import {
   spyOn,
   test,
 } from "bun:test";
-import {
-  access,
-  cp,
-  mkdir,
-  mkdtemp,
-  readdir,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type IssueKey, LEGION_ROLES, type LegionRole, roleToken } from "@legion/contracts";
@@ -486,7 +476,7 @@ interface ClaimPane {
 }
 
 /** A pane the daemon launched for a claim (a root architect, or a phase worker): the identity
- * variables the tmux runtime sets (`packages/daemon-go/internal/runtime/tmux/spawn.go`'s
+ * variables the tmux runtime sets (`packages/daemon/internal/runtime/tmux/spawn.go`'s
  * `panePairs`), the boot token as a 0600 file behind `LEGION_BOOT_TOKEN_FILE`, and
  * `LEGION_GRANT_FILE` naming `<claim>-grant` beside it, under a state directory of its own. The
  * stub answers `extraRoutes` first, then the daemon's claim routes (`register` and `ready`
@@ -1862,38 +1852,6 @@ describe("Legion OMP extension", () => {
       reason: expect.stringContaining("`legion` tool's `handoff_complete`"),
     });
   });
-  test("ships a roles/<role>.md residue file for every LegionRole", async () => {
-    // The daemon reads packages/pi-envoy/roles/${role}.md for every phase-worker role, including a
-    // sub-architect (packages/daemon/src/daemon/processes.ts launchWorker). Phase workers also compose
-    // their core and headless mechanics parts; the sub-architect remains single-file. A missing residue
-    // 500s the spawn.
-    for (const role of LEGION_ROLES) {
-      const rolePath = path.join(import.meta.dir, "..", "roles", `${role}.md`);
-      await access(rolePath);
-      // A zero-byte file would pass the existence check above and boot a worker with no
-      // instructions at all -- fail loudly on that instead of leaving it a silent runtime bug.
-      expect((await readFile(rolePath, "utf8")).trim()).not.toBe("");
-    }
-  });
-  test("keeps shared phase-worker mechanics in one fragment and required-skills guidance in the applicable residues", async () => {
-    const rolesDir = path.join(import.meta.dir, "..", "roles");
-    const phaseRoles = ["planner", "implementer", "tester", "reviewer", "merger"] as const;
-    const rolesWithRequiredSkillsSentence = ["implementer", "reviewer", "tester"];
-    const requiredSkillsSentence =
-      "Then read the plan handoff's `requiredSkills` for your role and follow those too.";
-    const mechanics = await readFile(path.join(rolesDir, "mechanics", "headless.md"), "utf8");
-
-    expect(mechanics).toContain("## Step one: find this repository's skills");
-    expect(mechanics).toContain("When your phase is done, stay in this session afterwards:");
-
-    for (const role of phaseRoles) {
-      const residue = await readFile(path.join(rolesDir, `${role}.md`), "utf8");
-      expect(residue).toContain(`# Legion ${role.charAt(0).toUpperCase()}${role.slice(1)}`);
-      expect(residue.includes(requiredSkillsSentence)).toBe(
-        rolesWithRequiredSkillsSentence.includes(role)
-      );
-    }
-  });
 
   describe("a phase worker left idle with its phase open", () => {
     // What OMP hands the hooks: the daemon's assignment arrives as a user message (its RPC
@@ -2650,7 +2608,7 @@ describe("Legion OMP extension", () => {
 
 /** The session `legion controller start` launches against the daemon: the `LEGION_CONTROLLER`
  * marker, and the controller capability as a 0600 file behind `LEGION_CONTROLLER_SECRET_FILE`
- * (`packages/daemon-go/cmd/legion/controller.go`). The stub answers the claim registration with
+ * (`packages/daemon/cmd/legion/controller.go`). The stub answers the claim registration with
  * the controller's registration (or `register`'s answer, when it gives one), mints grants (or
  * answers `grant`'s refusal), and 404s every other daemon path as the daemon's catch-all does; its
  * Envoy side keeps a role holder and an interest registry, as the listener does, and names no

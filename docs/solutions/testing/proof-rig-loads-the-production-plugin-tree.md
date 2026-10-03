@@ -27,7 +27,7 @@ LEGION-12's release (pi-envoy 1.17.1) was proven on a rig that loaded the Legion
 and failed on the first real worker: the `secretsd` plugin replaces the bash tool and drops the
 `env` field the fix relied on (the mechanism is in
 [omp-tool-call-hook-rewrites-are-model-visible](../envoy/omp-tool-call-hook-rewrites-are-model-visible.md),
-lesson 2). Sami's ruling on 2026-09-13 (AGENTC-79) followed: the agent that builds a change proves
+lesson 2). Sami's ruling on 2026-09-13 followed: the agent that builds a change proves
 it before merge on a production-like surface. LEGION-54 turned that into a rig mode and the mode
 caught two more defects the extension-only rig never would have. This note is the pattern, so the
 next rig author starts from it rather than from the README's default.
@@ -81,9 +81,10 @@ resolve its *own* `gh` to the shim and hand every child pane a second `worker-bi
 So the rig deliberately taints its launch PATH — this pane's `worker-bin` first, a second
 `/tmp/other-daemon/worker-bin` last — and the worker's `printenv` probe (verdict G) must show the
 rig's `worker-bin` exactly once. The strip that makes this true is one shared function,
-`pathWithoutWorkerBin` in `packages/daemon/src/daemon/worker-bin.ts`, applied at the daemon
-boundary (`resolveDaemonEnvironment`), in `legion gh` before it spawns `gh`, and in the rig's
-`workerEnvironment` — never re-implemented per call site. The general rule for anything a daemon
+`workerbin.FreePath` in `packages/daemon/internal/runtime/workerbin`, applied where the daemon
+resolves the `gh`, `git` and `jj` every pane is told (`resolveTools`, which the rig's
+`daemon-pane.go` calls too), in `legion gh` before it spawns `gh`, and in `legion controller start`
+— never re-implemented per call site. The general rule for anything a daemon
 puts on a pane for life is in
 [config-env-keys-that-panes-also-carry](../daemon/config-env-keys-that-panes-also-carry.md); the
 rig's job is to start from the environment that rule protects against, not from a clean shell.

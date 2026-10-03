@@ -1,2 +1,0 @@
-[test]
-preload = ["./src/daemon/__tests__/fixture-recorder.ts"]

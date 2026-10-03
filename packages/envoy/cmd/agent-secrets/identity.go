@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
@@ -71,6 +72,13 @@ func helperSocket() (sock string, named bool) {
 		return sock, true
 	}
 	return helper.DefaultSocket(os.Getenv), false
+}
+
+// approveURL is AGENT_SECRETS_APPROVE_URL, Dispatch's origin, without a trailing slash: the base
+// of the pages `launcher login` and a pending exec form name for a person to decide on. Empty
+// when unset.
+func approveURL() string {
+	return strings.TrimSuffix(os.Getenv("AGENT_SECRETS_APPROVE_URL"), "/")
 }
 
 func exists(path string) bool {

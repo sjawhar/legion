@@ -23,7 +23,7 @@ through `scripts/e2e/.shellcheckrc`.
 
 ```sh
 LEGION_REAL_GITHUB=1 LEGION_TEST_PG_DSN=postgres://… \
-  go -C packages/daemon-go test -count=1 ./internal/api \
+  go -C packages/daemon test -count=1 ./internal/api \
     -run '^TestRealGitHubCredentialSurface$' -v
 ```
 
@@ -41,12 +41,12 @@ bash scripts/e2e/stage1-skeleton.sh     # → "stage 1 e2e: PASS", exit 0
 ```
 
 Needs `go`, `docker`, `jq`, `curl`, `ss` and `tmux`. It builds the binary from the checkout
-(`packages/daemon-go/cmd/legion`), so it proves the tree you are standing in.
+(`packages/daemon/cmd/legion`), so it proves the tree you are standing in.
 
 The daemon supervises its agents under tmux, and it refuses to start without what a launch needs
 — tmux on `PATH`, an `operator_token_file`, and an OMP to run — and before anything else its
 plugin gate holds the Oh My Pi plugin a pane would load to this daemon's contract
-(`packages/daemon-go/internal/daemon/bootgate.go`). The run supplies all of it: its `legion.yaml`
+(`packages/daemon/internal/daemon/bootgate.go`). The run supplies all of it: its `legion.yaml`
 names a 0600 operator token file in the work directory; `LEGION_OMP_PATH` points at a stub there
 that answers the gate's load probe (`omp models --extension <probe> --json`) as a loaded plugin does
 — `LEGION_PLUGIN_LOADED=yes` and, beside it, `LEGION_PLUGIN_LOADED_FROM=file://…/dist/legion.js`
@@ -72,7 +72,7 @@ two sessions — neither collide nor report each other as a leftover:
   manifest, the two state documents, the refusal log. Removed when the run passes; **kept when it
   fails**, and its path printed, because those documents are the evidence.
 - `XDG_STATE_HOME=<work>/xdg` — so the legions registry the run writes is its own, never the
-  box's `~/.local/state/legion/legions-go.json`.
+  box's `~/.local/state/legion/legions.json`.
 - a per-run project key (`E2E<pid><epoch>`) — boots are counted per project, so a fresh key is
   what makes `boots == 1` true on a store that has served other runs.
 - a free daemon port picked per run by [`lib/free-port.sh`](#libfree-portsh), below the kernel's
@@ -103,16 +103,14 @@ Two notes on what the script had to learn about its own surface:
 
 ### In CI
 
-The `daemon-go` job in `.github/workflows/envoy-and-contracts.yaml` runs `go vet -tags e2e ./...` (which also compiles the e2e-tagged Stage 4a harness) in
-`packages/daemon-go`, installs `tmux` — the tmux runtime's tests drive a real tmux server and skip
-without one, and the daemon refuses to start without it — and the pinned `jj` (through mise, as the
-pi-envoy job does) — the workspace tests drive a real jj, and the daemon resolves jj at boot and
-refuses to start without it — then `go test ./...` against its
+On every pull request, the required `typecheck` job of `.github/workflows/pr-and-main.yaml` runs
+`go vet -tags e2e ./...` (which also compiles the e2e-tagged Stage 4a harness) in
+`packages/daemon`, and its required `test` job installs `tmux` — the tmux runtime's tests drive a
+real tmux server and skip without one, and the daemon refuses to start without it — and the pinned
+`jj` (through mise, as the pi-envoy job does) — the workspace tests drive a real jj, and the daemon
+resolves jj at boot and refuses to start without it — then runs `go test ./...` against its
 `postgres:16` service (`LEGION_TEST_PG_DSN`), then this script with `LEGION_E2E_PG_DSN` pointing at
-the same service, so the script runs no docker of its own there. The job is gated on the
-workflow's `changes` filter (`daemon_go`: `packages/daemon-go/**`, `go.work`, `scripts/e2e/**`,
-`packages/pi-envoy/**`, `packages/contracts/fixtures/**`, and the native Dispatch server under
-`packages/envoy/internal/dispatch/**` and `packages/envoy/cmd/dispatch/**`).
+the same service, so the script runs no docker of its own there.
 
 ## stage2-tmux-supervision.sh
 
@@ -147,7 +145,7 @@ What it stands up, all of it the run's own:
   that `HOME` and with `OMP_PROFILE` naming the profile, so the gate and every pane load it, and the
   operator's `~/.omp/profiles` holds none of the run; `profile-stays-in-the-run` checks that last.
 - **OMP**: `omp_invocation: mise x <pin> -- omp`, the pin read from
-  `packages/daemon/src/daemon/omp-pin.ts`. At boot the daemon asks `mise where <pin>` for the
+  `.omp-pin`. At boot the daemon asks `mise where <pin>` for the
   configured tool's executable, then runs that absolute binary under `mise x <pin>` for every boot
   probe and pane. The script deliberately keeps the ordinary daemon `PATH`, where this devbox has
   `~/.dotfiles/shims/omp` first, and checks the boot log's resolved binary, the OMP child's
@@ -179,7 +177,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | `gate-refuses-another-contract` | edits the installed (unpacked) manifest to declare the next `daemonApiVersion`; `legion start` refuses naming both numbers; the manifest is put back byte for byte |
 | `gate-refuses-a-disabled-plugin` | `omp plugin disable`; `legion start` refuses with "installed but not loaded by omp"; `omp plugin enable` |
 | `gate-refuses-a-missing-skill` | the installed plugin's `dist/skills/thermonuclear-deep-review` moved aside; `legion start` refuses with "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md, roles/core/reviewer.md)", the agent definition and the reviewer's role prompt that load it; the rubric put back |
-| `gate-refuses-a-skill-only-the-role-prompts-load` | the installed plugin's `dist/skills/legion-controller` moved aside, a skill only `roles/controller-root.md` loads; `legion start` refuses with "finds no skill legion-controller (loaded by roles/controller-root.md)", which only a gate reading the daemon's roles directory can say; the skill put back |
+| `gate-refuses-a-skill-only-a-role-prompt-loads` | the installed plugin's `dist/skills/legion-controller` moved aside, a skill only `roles/controller-root.md` loads; `legion start` refuses with "finds no skill legion-controller (loaded by roles/controller-root.md)", which only a gate reading the daemon's own role prompts can say; the skill put back |
 | `gate-refuses-an-unconfigured-model-role` | `modelRoles.oracle` removed from the isolated profile's `config.yml`; `legion start` refuses with "on its model @oracle: role oracle is not configured", naming `task agent oracle` and the prompts that dispatch it; the profile put back byte for byte |
 | `architect-registers-and-is-ready` | `legion start` passes the gate (its log line); `legion claims spawn` of a root architect whose role prompt says to reply `ready` and wait; the claim reaches `ready` and the daemon logged its registration at contract 1 |
 | `envoy-role-held` | `GET /v1/roles/<claim token>` on the listener names the claim's session as holder |
@@ -441,7 +439,7 @@ LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
 ```
 
 **Devbox only, against the production cluster; CI compiles the harness (`go vet -tags e2e ./...`
-in the `daemon-go` job) and does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives
+in the Tests workflow's `typecheck` job) and does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives
 Agent Sandbox pods in namespace `legion` from the devbox, the way the 4b daemon will. The script
 needs `go`, `kubectl`, `aws` (the runtime kubeconfig's `aws eks get-token`), `curl`, `ss`,
 `diff`, and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
@@ -480,7 +478,7 @@ with the providers Secret mounted, as a deployment with `provider_keys` does.
 | `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` | required | the audience the model gateway accepts on a worker's projected ServiceAccount token, put in place of the `${MODEL_TOKEN_AUDIENCE}` placeholder in the run's copy of the operator route's `pod.yml`; checked by [`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh) |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
-| `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker (AGENTC-393) the run enrolls pods with — the **production** broker (Plan D), never a development slot (below) |
+| `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker the run enrolls pods with — the **production** broker (Plan D, the broker design's AWS deployment plan), never a development slot (below) |
 | `LEGION_E2E_AGENT_SECRETS_OPERATOR` | unset | the email of the person this run's machine login is approved by — the harness starts a `legion-daemon` machine login and prints `STAGE4A: approve machine login code XXXX-XXXX on the Dispatch credential page as <operator>`, the stage is devbox-attended so the operator enters the code and clicks Approve, signed in to Dispatch as that person, during the run (polled up to 10 minutes; a timeout, denial, or expiry blocks the `secrets-*` checks with that reason, never fails the stage); distinct from the daemon's own production credential |
 | `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256` | unset | the `sha256sum` of the dummy value Sami seeded into the production broker's secret store for rule `LEGION_E2E_AUTO` (pod, automatic, inject) — the harness never sees the value itself, only its hash |
 | `LEGION_E2E_AGENT_SECRETS_BIN` | `$work/agent-secrets` (built by the script; not read from the environment) | the checkout's `agent-secrets` CLI (`packages/envoy/cmd/agent-secrets`), run directly from the devbox for the `secrets-old-uid-and-revocation` check's before/after-revocation reads |
@@ -494,7 +492,7 @@ launcher credential — nothing, the daemon included, can enroll against it. Ins
 against the **production broker** with a rules file carrying only two throwaway secrets
 (`LEGION_E2E_AUTO`: pod, automatic, inject; `LEGION_E2E_APPROVAL`: pod, approval by
 `login:<name>` naming the same login as `LEGION_E2E_AGENT_SECRETS_OPERATOR`, inject — the shared
-broker contract (dispatch://AGENTC-393/artifact/plan-overview-md) permits only `operator` or
+broker contract (the broker's design overview) permits only `operator` or
 `login:<name>` approvers, never `issue_assignee`; both 3600 s, Sami's
 values seeded after Plan D's apply) —
 "before any real secret moves" is exactly this state, and it is what spec Acceptance 2's "a live
@@ -574,8 +572,9 @@ What the run had to learn about production:
   pod of the tree can ever join it. A CPU request on the root does not fix it: when a child is
   placed first, as the concurrent launch showed, the root must join the child's node, and there a
   2-CPU root beside another tree's root stayed Pending on `Insufficient cpu`. The `legion`
-  NodePool's floor, `karpenter.k8s.aws/instance-cpu` Gt 3 (agent-c #20006), keeps every Legion pod
-  on a node of at least 4 vCPUs with room for the tree, and no pod requests anything.
+  NodePool's floor, `karpenter.k8s.aws/instance-cpu` Gt 3 (set in the cluster's own infrastructure
+  code), keeps every Legion pod on a node of at least 4 vCPUs with room for the tree, and no pod
+  requests anything.
 - gVisor on production reports `4.19.0-gvisor` from `uname -r`.
 - The worker image has no `kill` binary; the exec runs the shell's builtin.
 
@@ -768,7 +767,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `fence` | a pod the controller recreates on its own is never adopted. Once the relaunch's boot token is in the Secret, the replaced generation's token is refused, and the daemon logs `worker-stream: rejected hello (stale worker generation)` |
 | `daemon-relaunch-count` | the daemon relaunched the merger, `resumed`, once for each pod the driver ended |
 | `restart-mid-tree` | a daemon restart re-adopts the merger's pod and session |
-| `controller` | `legion controller start` registers with the Sandbox daemon, and the controller's first turn starts itself: its session's first user message is the start message the command launches Oh My Pi with, and the model answers it, with nothing typed into its pane; tree 3's held notice reaches its session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)); `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it. Tree 3's planner is told to plan, and each launch of its implementer is killed once its agent is ready or in a turn with its task outstanding, so every death is charged whatever a relaunch's boot takes. Tree 3 is held by one of its implementer claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its implementer's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's end, registration, death and charge. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon-go/internal/supervise/budgets_test.go`. With tree 3 out and a slot free, the controller's walk wakes: its Oh My Pi was launched with the daemon's ``Design gate policy: `gates.design: off`.`` line; an unlabelled issue set to `todo` puts `todo on <KEY>` in its session, and the daemon's tick (`controller_wake_interval_seconds: 60`) `tick on LEGSMOKE`; a minute later that issue is still unlabelled and unrecorded, since the proof's scope says the controller hands Legion no issue, and it is set `done`; tree 3's root issue is claimed by its architect's session, and its events carry the `issue.claimed` |
+| `controller` | `legion controller start` registers with the Sandbox daemon, and the controller's first turn starts itself: its session's first user message is the start message the command launches Oh My Pi with, and the model answers it, with nothing typed into its pane; tree 3's held notice reaches its session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)); `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it. Tree 3's planner is told to plan, and each launch of its implementer is killed once its agent is ready or in a turn with its task outstanding, so every death is charged whatever a relaunch's boot takes. Tree 3 is held by one of its implementer claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its implementer's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's end, registration, death and charge. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon/internal/supervise/budgets_test.go`. With tree 3 out and a slot free, the controller's walk wakes: its Oh My Pi was launched with the daemon's ``Design gate policy: `gates.design: off`.`` line; an unlabelled issue set to `todo` puts `todo on <KEY>` in its session, and the daemon's tick (`controller_wake_interval_seconds: 60`) `tick on LEGSMOKE`; a minute later that issue is still unlabelled and unrecorded, since the proof's scope says the controller hands Legion no issue, and it is set `done`; tree 3's root issue is claimed by its architect's session, and its events carry the `issue.claimed` |
 | `daily-report` | the controller's daily report, which the proof's instructions exempt from their wait for a targeted message and fit to the run: an issue titled `Legion daily report (<run directory>)` appears in LEGSMOKE, parked in icebox and without the `legion` label, holding the controller session's message, which names tree 1 and the free slots within 2,000 characters; in the controller's session that message comes after the first `tick on LEGSMOKE` delivery, never in its start turn. `production-audit` then holds that the issue, like every write, is in LEGSMOKE |
 | `deaths-with-work` | tree 4, admitted once tree 3 has left: its planner, killed once mid-turn, is sent its task again, told the turn was interrupted, and finishes planning; its implementer, killed after each ready with its task outstanding, is failed after 3 deaths (`budgets.deaths` 3, `supervise: claim failed` because "deaths with work outstanding ran out"), tree 4 is held and nothing relaunches it; `legion status … backlog` then takes tree 4 out |
 | `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done`; tree 1's events carry its architect's `issue.claimed`, and the done leaves its root issue unclaimed |
@@ -1071,9 +1070,8 @@ manifest=$(scripts/e2e/lib/install-plugin-profile.sh --profile legion-e2e-$$ --h
 
 All three flags are required; each refusal names its flag and exits 2. Stdout is exactly one line, the
 installed manifest's path as `HOME=<home> OMP_PROFILE=<name> omp plugin list --json` reports the plugin; that is
-the manifest both daemons' contract gates read under the same profile — the TypeScript daemon's
-(`getPluginsNodeModules()`, `packages/daemon/src/daemon/boot-probes.ts`) and the Go daemon's
-(`pluginManifestPath`, `packages/daemon-go/internal/daemon/bootgate.go`). Every step's own output
+the manifest the daemon's contract gate reads under the same profile
+(`pluginManifestPath`, `packages/daemon/internal/daemon/bootgate.go`). Every step's own output
 goes to stderr.
 
 The plugin is packed by [`lib/pack-plugin.sh`](#libpack-pluginsh), the release's pack steps run in the
@@ -1087,7 +1085,7 @@ strands no `.tgz` in the checkout). Then:
 3. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the tarball's version,
    enabled, and resolving to `<dir>`.
 
-Steps 2 and 3 run the Oh My Pi both daemons pin (`omp-pin.ts`, through `mise x <pin>`) under
+Steps 2 and 3 run the Oh My Pi the daemon pins (`.omp-pin`, through `mise x <pin>`) under
 `HOME=<home>`, from `<dir>`, rather than the `omp` on the caller's `PATH`: an operator's wrapper
 there (the devbox's `~/.dotfiles/shims/omp`) reads its own files from `HOME`, which is the run's.
 
@@ -1527,7 +1525,7 @@ The handoff checks read the daemon's phase record (the `phases` table joined to 
 ids of the facts it processed, so they hold whatever format a handoff event id takes. A role's
 `handoff_commit` is the commit its last accepted completion reported, and the daemon empties it
 when a transition starts that role on a new phase (`clearHandoff`,
-`packages/daemon-go/internal/workflow/effects.go`); the implementer's `rounds` counts its returns
+`packages/daemon/internal/workflow/effects.go`); the implementer's `rounds` counts its returns
 to implementing. Read right after the transition a completion caused, a role's non-empty
 `handoff_commit` is that phase's own: `assert_round_handoff ISSUE ROUND` (testing reached on the
 implementer's completion of that round; implementing moves to testing only once that handoff is
