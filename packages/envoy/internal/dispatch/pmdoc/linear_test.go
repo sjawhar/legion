@@ -12,7 +12,7 @@ import (
 // development machine (parse: `a_` 0.3 s, `a_b*` 2 s, `a~b_` 1 s per MiB; render of 4 MiB: `[a`
 // 1.4 s, `a_b&` 0.4 s, `<a` 1.3 s, `[^a` 1.0 s) and well under the time before it (parse of 1 MiB
 // of `a_`: about 4 minutes; of `a_b*`: 12 minutes; render of 4 MiB of `[a`: minutes). A caller's
-// write of a mebibyte of these is refused for the elements it makes (maxWriteElements), so the
+// write of a mebibyte of these is refused for the elements it makes (MaxDocumentElements), so the
 // parse here is a read-back's, which counts none and reads all of it.
 func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 	for _, shape := range []string{"a_", "a_b*", "a~b_"} {

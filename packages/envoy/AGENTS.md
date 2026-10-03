@@ -182,11 +182,15 @@ every document write takes its transaction from the ledger and refuses a context
 joined (`errUnjoined`): `SeedText`, the version writes, and every write that runs through
 `applyLive` (`docs/mutation.go`) - an upload's replacement, an edit batch, an accepted or rejected
 suggestion, an ask's edited text and its answer or resolution, a comment's anchor mark and its
-margin record - each of which `applyLive` also weighs by what it leaves (`docs/growth.go`). The
-only server writes outside it are settlement's repairs, the block-id backfill and the sweep of
-unrecorded marks, which add no caller text. A joined operation never writes the room: it runs on
-the transaction's fork of the room's document (`docs/livewrite.go`), appends its update inside the
-transaction, and reads through the same fork. The handler ends the transaction with
+margin record - each of which `applyLive` also weighs by what it leaves (`docs/growth.go`). An
+answer the document has no room for is left out of its block, which records who answered and when,
+and kept on its ask. The server writes outside `applyLive` are settlement's repairs, the block-id
+backfill and the sweep of unrecorded marks. Of those, only settlement's repairs carry caller text:
+the answer an ask keeps, written back into a block that returns to the document. Settlement weighs
+each such answer and leaves out the ones the document has no room for (`withholdAnswers`). A joined
+operation never writes the room: it runs on the transaction's fork of the room's document
+(`docs/livewrite.go`), appends its update inside the transaction, and reads through the same fork.
+The handler ends the transaction with
 `ledger.Commit`, which commits, credits the writes' actor to their rooms, releases the authors a
 version the transaction wrote named, then applies and broadcasts the updates, and last publishes
 the events its document operations appended, ahead of the handler's own; it defers

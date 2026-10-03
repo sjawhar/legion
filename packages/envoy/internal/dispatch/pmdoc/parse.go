@@ -345,7 +345,7 @@ func readInline(markdown string, inline parser.Parser, budget *WriteBudget) (nod
 	if err != nil {
 		return nil, err
 	}
-	count.weigh(root)
+	count.weigh(root, source)
 	if refusal := count.refusal(source, 1); refusal != nil {
 		return nil, refusal
 	}

@@ -47,7 +47,7 @@ func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budg
 	if err != nil {
 		return nil, err
 	}
-	count.weigh(root)
+	count.weigh(root, source)
 	if refusal := count.refusal(source, at.line); refusal != nil {
 		return nil, refusal
 	}

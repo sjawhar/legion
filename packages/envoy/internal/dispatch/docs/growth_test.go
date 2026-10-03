@@ -57,7 +57,7 @@ func TestAWriteMayNotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 			if want == "" {
 				want = tooLong(test.before, test.after)
 			}
-			err := refuseGrowth(growth{before: test.before, after: test.after})
+			_, err := weighRendering(test.before, test.after)
 			if want == "-" {
 				if err != nil {
 					t.Fatalf("refused: %v, want it taken", err)
@@ -189,17 +189,21 @@ func seedByWriter(t *testing.T, service *Service, artifactID string, client crdt
 func TestAWriteMayNotLeaveADocumentThatWouldNotLoad(t *testing.T) {
 	parks := parkingDocument(t, 16_384)
 	fails := parkingDocument(t, 17_000)
-	stateOnly := func() bool { return true }
+	write := func(fork *crdt.Doc, before, after string, serverState bool) growth {
+		empty := &pmdoc.Node{Type: "doc"}
+		return growth{fork: fork, before: before, after: after, margin: &marginWatch{}, anchors: anchorWatch{before: empty, after: empty},
+			serverState: func() bool { return serverState }}
+	}
 	for _, test := range []struct {
 		name    string
 		write   growth
 		refused bool
 	}{
-		{"a write that grows a document parking 98,316 items", growth{fork: parks, before: "a\n", after: "a\n\nb\n"}, true},
-		{"a write that leaves the rendering of a document parking 98,316 items as it was", growth{fork: parks, before: "a\n", after: "a\n"}, false},
-		{"a change of an ask's state that lengthens a document parking 98,316 items", growth{fork: parks, before: "a\n", after: "a b\n", serverState: stateOnly}, false},
-		{"a write that leaves the rendering of a document parking 102,012 items as it was", growth{fork: fails, before: "a\n", after: "a\n"}, true},
-		{"a change of an ask's state on a document parking 102,012 items", growth{fork: fails, before: "a\n", after: "a b\n", serverState: stateOnly}, true},
+		{"a write that grows a document parking 98,316 items", write(parks, "a\n", "a\n\nb\n", false), true},
+		{"a write that leaves the rendering of a document parking 98,316 items as it was", write(parks, "a\n", "a\n", false), false},
+		{"a change of an ask's state that lengthens a document parking 98,316 items", write(parks, "a\n", "a b\n", true), false},
+		{"a write that leaves the rendering of a document parking 102,012 items as it was", write(fails, "a\n", "a\n", false), true},
+		{"a change of an ask's state on a document parking 102,012 items", write(fails, "a\n", "a b\n", true), true},
 	} {
 		err := refuseGrowth(test.write)
 		if refused := errors.Is(err, ErrDocumentTooLarge) && strings.Contains(err.Error(), "load again"); refused != test.refused || (err != nil && !refused) {
@@ -241,12 +245,12 @@ func parkingDocument(t *testing.T, headings int) *crdt.Doc {
 	return browser
 }
 
-// An ask's state, who answered it and when, and which of its own options were chosen are what the
-// server knows of the ask's text rather than text a caller writes, so the asks of a document
-// already past what one upload may hold - stored before the bound, or grown by a browser - can
-// still be answered with a choice and resolved, though each makes the document's markdown longer.
-// An answer's own words are caller text: on such a document an answer that would lengthen it is
-// refused as any write that would is, and the ask stays open.
+// An ask's state and who answered it and when are what the server knows of the ask's text rather
+// than text a caller writes, so the asks of a document already past what one upload may hold -
+// stored before the bound, or grown by a browser - can still be answered and resolved, though each
+// makes the document's markdown longer. The answer itself - its words, and the options it selects,
+// whose labels are the asker's text - is caller text, so on such a document it is left out of the
+// block, which says who answered and when, and the document grows by the server's state alone.
 func TestTheAsksOfADocumentPastTheBoundCanStillBeAnsweredAndResolved(t *testing.T) {
 	service, _ := newTestService(t)
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -263,14 +267,18 @@ func TestTheAsksOfADocumentPastTheBoundCanStillBeAnsweredAndResolved(t *testing.
 		t.Fatalf("resolving an ask on a document past the bound: %v", err)
 	}
 	answered["answer"] = "Ship it now."
-	if err := joinedSetBlockAttributes(service, artifactID, "worded", answered, alice); !errors.Is(err, ErrDocumentTooLarge) || !strings.HasPrefix(err.Error(), "document too large to store: ") {
-		t.Fatalf("answering an ask in words on a document past the bound: %v, want it refused as too large to store, as the refusal words it", err)
+	if err := joinedSetBlockAttributes(service, artifactID, "worded", answered, alice); err != nil {
+		t.Fatalf("answering an ask in words on a document past the bound: %v", err)
 	}
 	markdown, err := service.Text(context.Background(), artifactID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`{#chosen urgency="med" multiple="false" state="answered"`, `{#resolved urgency="med" multiple="false" state="resolved"}`, `{#worded urgency="med" multiple="false" state="open"}`} {
+	for _, want := range []string{
+		`{#chosen urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-03T00:00:00Z"}`,
+		`{#resolved urgency="med" multiple="false" state="resolved"}`,
+		`{#worded urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-03T00:00:00Z"}`,
+	} {
 		if !strings.Contains(markdown, want) {
 			t.Errorf("the %d-byte document holds no %s", len(markdown), want)
 		}

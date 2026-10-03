@@ -414,7 +414,7 @@ func isInlineNodeType(typeName string) bool {
 
 // Equal compares document content and structure while ignoring block identity.
 func (n *Node) Equal(o *Node) bool {
-	return equalNode(n, o, func(_ string, a, b Attrs) bool { return nodeAttrsEqual(a, b, false) })
+	return equalNode(n, o, func(_ string, a, b Attrs) bool { return attrsEqualButBlockID(a, b) })
 }
 
 // EqualWithBlockIDs compares document content, structure, and block identity.
@@ -424,23 +424,30 @@ func (n *Node) EqualWithBlockIDs(o *Node) bool {
 
 // EqualOutsideServerState compares document content, structure and block identity as
 // EqualWithBlockIDs does, but for the attributes of a typed block that the server keeps (the
-// schema's server attributes) other than an ask's answer: an ask's state, who answered it and when,
-// which of its own options were chosen, and whether it reads. No caller writes those, they say
-// what the server knows about the block's own text, and each is a word or a timestamp beside it.
-// An answer is server state too, but its text is the answerer's, so it counts.
+// schema's server attributes) other than an ask's answer (IsAnswerAttribute): an ask's state, who
+// answered it and when, and whether it reads. No caller writes those, they say what the server
+// knows about the block's own text, and each is a word or a timestamp beside it.
 func (n *Node) EqualOutsideServerState(o *Node) bool {
 	return equalNode(n, o, attrsEqualOutsideServerState)
 }
 
-// answerAttr is the server attribute of an ask that holds caller text: the answer's own words.
-const answerAttr = "answer"
+// IsAnswerAttribute reports whether name is a server attribute of an ask that holds the answer
+// itself rather than what the server knows of it: the answer's own words, and the options it
+// selects. The server keeps both in agreement with the ask, but both are caller text - a selection
+// copies the asker's option labels, and renders each escaped, a `<` as seven bytes, so one choice
+// of a 1,000,000-character label made a 1 MB document 8 MB. So a write that changes either is
+// weighed as caller text is (EqualOutsideServerState), and where the document has no room for
+// them the server records the answer on the ask and leaves both out of the block.
+func IsAnswerAttribute(name string) bool {
+	return name == "answer" || name == "selected"
+}
 
 func attrsEqualOutsideServerState(nodeType string, a, b Attrs) bool {
 	typ, typed := typedBlock(nodeType)
 	if !typed {
 		return attrsEqual(a, b)
 	}
-	return attrsEqualBut(a, b, func(name string) bool { return name != answerAttr && typ.Attributes[name].Server })
+	return attrsEqualBut(a, b, func(name string) bool { return !IsAnswerAttribute(name) && typ.Attributes[name].Server })
 }
 
 // equalNode compares n and o, their content and structure, holding each node's attributes to
@@ -465,10 +472,8 @@ func equalNode(n, o *Node, attrs func(nodeType string, a, b Attrs) bool) bool {
 	return true
 }
 
-func nodeAttrsEqual(a, b Attrs, includeBlockIDs bool) bool {
-	if includeBlockIDs {
-		return attrsEqual(a, b)
-	}
+// attrsEqualButBlockID is attrsEqual over every attribute but the block id.
+func attrsEqualButBlockID(a, b Attrs) bool {
 	return attrsEqualBut(a, b, func(name string) bool { return name == BlockIDAttr })
 }
 

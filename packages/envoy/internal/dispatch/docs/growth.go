@@ -17,100 +17,118 @@ import (
 // and thirty-two suggestions of 900 KB, which leave the markdown as it was, took one cold
 // websocket load of their document to 296 MiB. So every write a caller makes runs through
 // applyLive, which refuses one outside a transaction (errUnjoined) and weighs every one by what it
-// leaves (refuseGrowth) before it is appended, as SeedText weighs a new document:
+// leaves (refuseGrowth) before it is appended, as SeedText weighs a new document's rendering
+// (weighRendering):
 //
 //   - its rendering, the markdown GET .../text answers and an upload of it would send, measured as
 //     an upload is measured (pmdoc.MeasureDocument): its bytes, and the elements the upload's parse
 //     makes of it. So whatever a write leaves, its own text uploads back.
 //   - its margin, the comment and suggestion records a browser shows beside the document, which
 //     every load builds though no rendering carries them (marginWatch).
+//   - the actor ids its anchor marks carry, which no rendering carries either (anchorWatch).
 //   - the live document it leaves, which must load again with room to spare under the item cap ygo
 //     loads a document under (refuseUnloadable).
 //
 // A write that leaves the document no bigger and no heavier than it was passes, so a document
 // already past the bound - stored before it, or grown by browser edits, which no server write
 // carries - can still be trimmed or split. Each refusal is ErrDocumentTooLarge, served as 413
-// CAP_EXCEEDED. Of the writes that do not run through applyLive, the block-id backfill and the
-// sweep of unrecorded marks add no caller text, and settlement's repairs add one: the answer an
-// ask keeps, which settlement writes back into its block when the block returns to the document.
-// Settlement weighs that as a write is weighed (weighRendering) and withholds the answer's text
-// where it would grow the document past the bound (withholdAnswers). What the bound weighs is the
-// document a write leaves, not the history its store keeps: every update stays stored with the
-// content later writes delete, and a cold load builds all of it, so repeated versions and a
-// comment's margin record, which each reply rewrites whole, still grow what a load costs
-// (LEGION-496).
+// CAP_EXCEEDED. An answer is caller text the server writes twice: the answer route writes it into
+// its ask's block, and settlement writes it back into a block that returns to the document. Where
+// the document has no room for it, each records who answered and when and leaves the answer out of
+// the block (SetBlockAttributes, withholdAnswers), and the ask keeps it. Of the other writes that
+// do not run through applyLive, the block-id backfill and the sweep of unrecorded marks add no
+// caller text. What the bound weighs is the document a write leaves, not the history its store
+// keeps: every update stays stored with the content later writes delete, and a cold load builds
+// all of it, so repeated versions and a comment's margin record, which each reply rewrites whole,
+// still grow what a load costs (LEGION-496).
 
 // growth is what one write leaves a document, as refuseGrowth weighs it.
 type growth struct {
 	// fork is the transaction's copy of the live document the write leaves, which
-	// refuseUnloadable loads, or nil for a new document, which one writer wrote and so parks
-	// nothing.
+	// refuseUnloadable loads.
 	fork *crdt.Doc
-	// before and after are the document's renderings before the write ("" for a new document)
-	// and after it.
+	// before and after are the document's renderings before the write and after it.
 	before, after string
-	// margin is the margin records the write changed, or nil for a new document, which has none.
-	margin *marginWatch
+	// margin is the margin records the write changed, and anchors the actor ids its anchor marks
+	// gained.
+	margin  *marginWatch
+	anchors anchorWatch
 	// serverState reports whether the write changed the document's tree only in the state the
-	// server keeps on its typed blocks, an answer's text apart (pmdoc.EqualOutsideServerState),
-	// or is nil for a new document. Such a write is weighed as one that left the rendering as it
-	// was, so an ask on a document already past the bound can still be answered with a choice,
-	// resolved or retracted, while an answer's own words are measured as any caller text is.
+	// server keeps on its typed blocks, an answer apart (pmdoc.EqualOutsideServerState). Such a
+	// write is weighed as one that left the rendering as it was, so an ask on a document already
+	// past the bound can still be answered, resolved or retracted, while an answer's own words and
+	// the options it selects are measured as any caller text is.
 	serverState func() bool
 }
 
 // refuseGrowth is the refusal of the write g describes, or nil. Its rendering is weighed by
 // weighRendering. A rendering the write left as it was - an anchor mark, a margin record, an
 // attribute no rendering carries - is not measured again, and one that changed only the server's
-// state of a typed block (serverState) is taken whatever the measures say of it, and counts as no
+// state of a typed block (serverState) is taken whatever the measures say of it; neither counts as
 // growth to the trial load.
 func refuseGrowth(g growth) error {
 	if err := g.margin.refusal(); err != nil {
 		return err
 	}
-	if g.after == g.before {
-		if g.fork == nil {
-			return nil
-		}
+	if err := g.anchors.refusal(); err != nil {
+		return err
+	}
+	if g.after == g.before || g.serverState() {
 		return refuseUnloadable(g.fork, func() bool { return false })
 	}
 	grew, err := weighRendering(g.before, g.after)
-	if g.serverState != nil {
-		serverState := sync.OnceValue(g.serverState)
-		if err != nil && serverState() {
-			err, grew = nil, func() bool { return false }
-		} else if err == nil {
-			measured := grew
-			grew = func() bool { return !serverState() && measured() }
-		}
-	}
 	if err != nil {
 		return err
-	}
-	if g.fork == nil {
-		return nil
 	}
 	return refuseUnloadable(g.fork, grew)
 }
 
 // weighRendering is the refusal of after, a document's rendering once a write has run, against
-// before, its rendering until then: after is refused past either of an upload's limits when it is
-// bigger than before by that measure - longer than before past pmdoc.MaxDocumentBytes, heavier than
-// before past pmdoc.MaxDocumentElements. Otherwise it gives grew, which reports whether after is
-// bigger than before by either measure. A rendering refused by its bytes is not parsed, and before
-// is measured only when a refusal or grew turns on its elements.
+// before, its rendering until then (weigh).
 func weighRendering(before, after string) (grew func() bool, err error) {
-	if len(after) > pmdoc.MaxDocumentBytes && len(after) > len(before) {
+	return weigh(renderingOf(before), renderingOf(after))
+}
+
+// rendering is a document's rendering as weigh judges it: its length, and what an upload's parse
+// measures of it (pmdoc.MeasureDocument), which is measured only when a judgement turns on it.
+type rendering struct {
+	bytes    int
+	measured func() pmdoc.DocumentSize
+}
+
+func renderingOf(markdown string) rendering {
+	return rendering{bytes: len(markdown), measured: sync.OnceValue(func() pmdoc.DocumentSize { return pmdoc.MeasureDocument(markdown) })}
+}
+
+// size is what an upload's parse measures of r.
+func (r rendering) size() pmdoc.DocumentSize {
+	size := r.measured()
+	size.Bytes = r.bytes
+	return size
+}
+
+// longer is r with n bytes more that make no element: text an ask block's attributes carry, which
+// its directive writes quoted on its one opening line (pmdoc.IsAnswerAttribute).
+func (r rendering) longer(n int) rendering {
+	return rendering{bytes: r.bytes + n, measured: r.measured}
+}
+
+// weigh is the refusal of after against before: after is refused past either of an upload's
+// limits when it is bigger than before by that measure - longer than before past
+// pmdoc.MaxDocumentBytes, heavier than before past pmdoc.MaxDocumentElements. Otherwise it gives
+// grew, which reports whether after is bigger than before by either measure. A rendering refused by
+// its bytes is not parsed, and before is measured only when a refusal or grew turns on its elements.
+func weigh(before, after rendering) (grew func() bool, err error) {
+	if after.bytes > pmdoc.MaxDocumentBytes && after.bytes > before.bytes {
 		return nil, fmt.Errorf("%w: a markdown document is at most 1 MiB (%d bytes), and this change would make the document's markdown %d bytes (it was %d); shorten the change, or split the document",
-			ErrDocumentTooLarge, pmdoc.MaxDocumentBytes, len(after), len(before))
+			ErrDocumentTooLarge, pmdoc.MaxDocumentBytes, after.bytes, before.bytes)
 	}
-	size := pmdoc.MeasureDocument(after)
-	was := sync.OnceValue(func() pmdoc.DocumentSize { return pmdoc.MeasureDocument(before) })
-	if size.TooHeavy() && heavier(was(), size) {
+	size := after.size()
+	if size.TooHeavy() && heavier(before.size(), size) {
 		return nil, fmt.Errorf("%w: this change would make the document's markdown make %s elements, past the %d one document may hold (it made %s); shorten the change, or split the document",
-			ErrDocumentTooLarge, elements(size), pmdoc.MaxDocumentElements, elements(was()))
+			ErrDocumentTooLarge, elements(size), pmdoc.MaxDocumentElements, elements(before.size()))
 	}
-	return func() bool { return len(after) > len(before) || heavier(was(), size) }, nil
+	return func() bool { return after.bytes > before.bytes || heavier(before.size(), size) }, nil
 }
 
 // maxMarginBytes is the most text a document's margin may hold: the records of every comment and
@@ -154,9 +172,6 @@ func watchMargin(fork *crdt.Doc) (watch *marginWatch, stop func()) {
 // maxMarginRecordBytes of text and more than it held, or the margin holding more than
 // maxMarginBytes and more than it held, or nil. A write that changes no record weighs nothing here.
 func (w *marginWatch) refusal() error {
-	if w == nil {
-		return nil
-	}
 	grew := 0
 	for key, was := range w.was {
 		now, _ := w.marks.Get(key)
@@ -177,6 +192,56 @@ func (w *marginWatch) refusal() error {
 			ErrDocumentTooLarge, maxMarginBytes, held, held-grew)
 	}
 	return nil
+}
+
+// maxAnchorBytes is the most text the anchor marks on a document's text may hold. The mark of each
+// comment, suggestion and ask carries its id and who made it (MarkSpec), which no rendering carries
+// and every load of the document builds, and an ask's mark has no margin record to weigh it: thirty
+// asks anchored by a session whose id was 200 KB left a 210-byte rendering over six megabytes of
+// live document. It is as much as the margin may hold (maxMarginBytes).
+const maxAnchorBytes = 1 << 20
+
+// anchorWatch is a write's document tree before it and after it, whose anchor marks refusal
+// weighs.
+type anchorWatch struct{ before, after *pmdoc.Node }
+
+// refusal is the refusal of a write that leaves the anchor marks of the document holding more than
+// maxAnchorBytes of text and more than they held, or nil.
+func (w anchorWatch) refusal() error {
+	held := anchorText(w.after)
+	if held <= maxAnchorBytes {
+		return nil
+	}
+	was := anchorText(w.before)
+	if held <= was {
+		return nil
+	}
+	return fmt.Errorf("%w: the marks a document's comments, suggestions and asks hold on its text carry at most 1 MiB (%d bytes) of ids and authors, and this change would make them carry %d bytes (they carried %d); anchor fewer, or split the document",
+		ErrDocumentTooLarge, maxAnchorBytes, held, was)
+}
+
+// anchorText is the text the anchor marks on tree's text carry: every string in each comment's,
+// suggestion's and ask's mark, counted once however many texts the mark covers.
+func anchorText(tree *pmdoc.Node) int {
+	seen := map[string]bool{}
+	text := 0
+	for stack := []*pmdoc.Node{tree}; len(stack) > 0; {
+		node := stack[len(stack)-1]
+		stack = append(stack[:len(stack)-1], node.Children...)
+		for _, mark := range node.Marks {
+			switch MarkKind(mark.Type) {
+			case MarkAsk, MarkComment, MarkSuggestion:
+			default:
+				continue
+			}
+			id, _ := mark.Attrs["id"].(string)
+			if key := mark.Type + "\x00" + id; !seen[key] {
+				seen[key] = true
+				text += textIn(map[string]any(mark.Attrs))
+			}
+		}
+	}
+	return text
 }
 
 // marginText is how much text a margin record holds: every string in it, at any depth, but the

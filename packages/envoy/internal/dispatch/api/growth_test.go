@@ -1,10 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -135,71 +137,202 @@ func TestAnAcceptCannotGrowADocumentPastWhatOneDocumentMayHold(t *testing.T) {
 	}
 }
 
-// An ask's text and its answer are written into its block, so they are caller text in the
-// document as an edit's is, and editing the asks of one document or answering them cannot grow it
-// past what one upload may hold either: through these routes thirty-two option descriptions of
-// 900 KB grew one document to 28.8 MB, on which a one-word edit then took the server past the
-// production task's 1,024 MiB. The write that would pass the bound is refused with 413
-// CAP_EXCEEDED, saying what to do; the ask keeps its text and stays open, and the document still
-// reads.
-func TestAskEditsAndAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
+// An ask's text is written into its block, so it is caller text in the document as an edit's is,
+// and editing the asks of one document cannot grow it past what one upload may hold either:
+// through this route thirty-two option descriptions of 900 KB grew one document to 28.8 MB, on
+// which a one-word edit then took the server past the production task's 1,024 MiB. The edit that
+// would pass the bound is refused with 413 CAP_EXCEEDED, saying what to do; the ask keeps its text
+// and stays open, and the document still reads.
+func TestAskEditsCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 	prose := strings.Repeat("word ", 180_000)
-	for _, route := range []struct {
-		name  string
-		write func(handler http.Handler, askID string) *httptest.ResponseRecorder
-		kept  func(ask model.Ask) bool
-	}{
-		{"PATCH /api/v1/asks/{id}", func(handler http.Handler, askID string) *httptest.ResponseRecorder {
-			return dispatchRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
-				"options": []map[string]string{{"label": "A", "description": prose}},
-			}, "alice")
-		}, func(ask model.Ask) bool { return ask.State == "open" && len(ask.Options) == 0 }},
-		{"POST /api/v1/asks/{id}/answer", func(handler http.Handler, askID string) *httptest.ResponseRecorder {
-			return dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{"text": prose}, "alice")
-		}, func(ask model.Ask) bool { return ask.State == "open" && ask.Answer == nil }},
-	} {
-		t.Run(route.name, func(t *testing.T) {
-			handler, _ := blockAskHandler(t)
-			const asks = 3
-			var spec strings.Builder
-			spec.WriteString("Context\n")
-			for index := range asks {
-				fmt.Fprintf(&spec, "\n:::ask{#ask-%d urgency=\"med\" multiple=\"false\" state=\"open\"}\nQuestion %d?\n:::\n", index, index)
-			}
-			issue := createInteractionIssue(t, handler, "TEST", "Ask growth", spec.String())
-			refused := 0
-			for index := range asks {
-				blockID := fmt.Sprintf("ask-%d", index)
-				awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, blockID, fmt.Sprintf("Question %d?", index))
-				askID := blockAskID(t, handler, issue.Key, blockID)
-				response := route.write(handler, askID)
-				if response.Code == http.StatusOK && refused == 0 {
-					continue
-				}
-				if !refusedTooLarge(t, response) || !strings.Contains(response.Body.String(), "shorten the change, or split the document") {
-					t.Fatalf("write %d: status=%d body=%.500s, want 200 until one is refused with 413 CAP_EXCEEDED saying to shorten the change, as the document service words it, and 413 after it", index+1, response.Code, response.Body.String())
-				}
-				if ask := readBlockAsk(t, handler, askID); !route.kept(ask) {
-					t.Fatalf("the ask after its refused write = %#v, want it as it was", ask)
-				}
-				if refused == 0 {
-					refused = index + 1
-					t.Logf("write %d refused: %.300s", refused, response.Body.String())
-				}
-			}
-			if refused == 0 {
-				t.Fatalf("all %d writes were taken, want the document's growth refused", asks)
-			}
-			for _, read := range []string{"/text", "/blocks"} {
-				if response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+read, nil, "alice"); response.Code != http.StatusOK {
-					t.Fatalf("%s after write %d was refused: status=%d body=%.300s, want 200", read, refused, response.Code, response.Body.String())
-				}
-			}
-			if text := documentMarkdown(t, handler, issue.PrimaryArtifactID); len(text) > 1<<20 {
-				t.Fatalf("the document's markdown is %d bytes, past the 1 MiB one upload may hold", len(text))
-			}
-		})
+	handler, _ := blockAskHandler(t)
+	const asks = 3
+	issue := createInteractionIssue(t, handler, "TEST", "Ask growth", openAsksSpec(asks))
+	refused := 0
+	for index := range asks {
+		blockID := fmt.Sprintf("ask-%d", index)
+		awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, blockID, fmt.Sprintf("Question %d?", index))
+		askID := blockAskID(t, handler, issue.Key, blockID)
+		response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+			"options": []map[string]string{{"label": "A", "description": prose}},
+		}, "alice")
+		if response.Code == http.StatusOK && refused == 0 {
+			continue
+		}
+		if !refusedTooLarge(t, response) || !strings.Contains(response.Body.String(), "shorten the change, or split the document") {
+			t.Fatalf("edit %d: status=%d body=%.500s, want 200 until one is refused with 413 CAP_EXCEEDED saying to shorten the change, as the document service words it, and 413 after it", index+1, response.Code, response.Body.String())
+		}
+		if ask := readBlockAsk(t, handler, askID); ask.State != "open" || len(ask.Options) != 0 {
+			t.Fatalf("the ask after its refused edit = %#v, want it as it was", ask)
+		}
+		if refused == 0 {
+			refused = index + 1
+			t.Logf("edit %d refused: %.300s", refused, response.Body.String())
+		}
 	}
+	if refused == 0 {
+		t.Fatalf("all %d edits were taken, want the document's growth refused", asks)
+	}
+	for _, read := range []string{"/text", "/blocks"} {
+		if response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+read, nil, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("%s after edit %d was refused: status=%d body=%.300s, want 200", read, refused, response.Code, response.Body.String())
+		}
+	}
+	if text := documentMarkdown(t, handler, issue.PrimaryArtifactID); len(text) > 1<<20 {
+		t.Fatalf("the document's markdown is %d bytes, past the 1 MiB one upload may hold", len(text))
+	}
+}
+
+// An ask's question and options are plain text the server makes into nodes, renders escaped and
+// reads back, so they are weighed before that, as caller markdown is weighed while goldmark reads
+// it: an option description whose syntax characters or line feeds alone weigh more elements than
+// one write may make is refused with 413 CAP_EXCEEDED, saying so, before it is rendered, and the
+// refusal allocates a fraction of what rendering it took. A 920 KB description of `)_` held 417 MiB
+// before its edit was weighed, 400 KB of it was taken, and one of 330,000 lines did not finish its
+// edit in twenty minutes. An ordinary long description is taken.
+func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Ask text", openAsksSpec(1))
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "ask-0", "Question 0?")
+	askID := blockAskID(t, handler, issue.Key, "ask-0")
+	edit := func(description string) *httptest.ResponseRecorder {
+		return dispatchRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+			"options": []map[string]string{{"label": "A", "description": description}},
+		}, "alice")
+	}
+	for _, description := range []struct{ name, text string }{
+		{"400 KB of )_", strings.Repeat(")_", 200_000)},
+		{"40,000 lines", strings.Repeat("a\n", 40_000)},
+	} {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		response := edit(description.text)
+		runtime.ReadMemStats(&after)
+		if !refusedTooLarge(t, response) || !strings.Contains(response.Body.String(), "this write's text weighs at least") {
+			t.Fatalf("an option description of %s: status=%d body=%.500s, want 413 CAP_EXCEEDED refusing the text's weight", description.name, response.Code, response.Body.String())
+		}
+		if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 160<<20 {
+			t.Errorf("refusing an option description of %s allocated %d MiB, want at most 160 MiB", description.name, allocated>>20)
+		}
+		if ask := readBlockAsk(t, handler, askID); ask.State != "open" || len(ask.Options) != 0 {
+			t.Fatalf("the ask after its refused edit = %#v, want it as it was", ask)
+		}
+	}
+	if response := edit(strings.Repeat("word, ", 100_000)); response.Code != http.StatusOK {
+		t.Fatalf("an option description of 600 KB of prose: status=%d body=%.300s, want 200", response.Code, response.Body.String())
+	}
+}
+
+// An answer is written into its ask's block, and the answer itself - its words, and the options it
+// selects, whose labels are the asker's text and render escaped, a `>` as seven bytes - is caller
+// text. Where the document has no room for it the ask still takes the answer whole, and its block
+// is written without it, saying who answered and when, so no answer grows the document past what
+// one upload may hold: one choice of a 1,000,000-character option took a 1 MB document to 8 MB,
+// and an answer of 900 KB to a document with no room for it was refused and recorded nowhere.
+func TestAnAnswerTheDocumentHasNoRoomForIsKeptOnItsAskAndLeftOutOfItsBlock(t *testing.T) {
+	t.Run("words", func(t *testing.T) {
+		prose := strings.Repeat("word ", 180_000)
+		handler, _ := blockAskHandler(t)
+		const asks = 3
+		issue := createInteractionIssue(t, handler, "TEST", "Answer growth", openAsksSpec(asks))
+		for index := range asks {
+			blockID := fmt.Sprintf("ask-%d", index)
+			awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, blockID, fmt.Sprintf("Question %d?", index))
+			askID := blockAskID(t, handler, issue.Key, blockID)
+			if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{"text": prose}, "alice"); response.Code != http.StatusOK {
+				t.Fatalf("answer %d: status=%d body=%.300s, want 200", index+1, response.Code, response.Body.String())
+			}
+			if ask := readBlockAsk(t, handler, askID); ask.State != "answered" || ask.Answer == nil || ask.Answer.Text == nil || *ask.Answer.Text != prose {
+				t.Fatalf("ask %d after its answer = %#v, want it answered with the whole text", index+1, ask)
+			}
+		}
+		text := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+		if len(text) > 1<<20 {
+			t.Fatalf("the answers left a %d-byte document, past the 1 MiB one upload may hold", len(text))
+		}
+		if line := askDirective(t, text, "ask-0"); !strings.Contains(line, `answer="`+prose) {
+			t.Fatalf("the block of the answer the document had room for reads %.300s, want the answer", line)
+		}
+		for _, blockID := range []string{"ask-1", "ask-2"} {
+			if line := askDirective(t, text, blockID); !strings.Contains(line, `state="answered" answered_by="alice" answered_at="`) || strings.Contains(line, "answer=") {
+				t.Fatalf("the block of an answer the document had no room for reads %.300s, want who answered and when, without the answer", line)
+			}
+		}
+	})
+	t.Run("a choice of a 1,000,000-character option", func(t *testing.T) {
+		handler, _ := blockAskHandler(t)
+		label := "a" + strings.Repeat(">", 1_000_000)
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "TEST", "name": "TEST project"}, "alice"); response.Code != http.StatusCreated {
+			t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+		}
+		created := literalRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+			"project": "TEST", "title": "A long option",
+			"spec": ":::ask{#ask-0 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n- " + label + "\n:::\n",
+		})
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create issue: status=%d body=%.300s", created.Code, created.Body.String())
+		}
+		issue := decodeBody[struct {
+			Key               string `json:"key"`
+			PrimaryArtifactID string `json:"primary_artifact_id"`
+		}](t, created)
+		awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "ask-0", "Which?")
+		askID := blockAskID(t, handler, issue.Key, "ask-0")
+		if response := literalRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{"selected": []string{label}, "expected_edited_at": nil}); response.Code != http.StatusOK {
+			t.Fatalf("answer with the long option: status=%d body=%.300s, want 200", response.Code, response.Body.String())
+		}
+		if ask := readBlockAsk(t, handler, askID); ask.State != "answered" || ask.Answer == nil || len(ask.Answer.Selected) != 1 || ask.Answer.Selected[0] != label {
+			t.Fatalf("the ask after its answer = %.300v, want it answered with the long option", ask)
+		}
+		text := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+		if len(text) > 1<<20 {
+			t.Fatalf("one choice left a %d-byte document, past the 1 MiB one upload may hold", len(text))
+		}
+		if line := askDirective(t, text, "ask-0"); !strings.Contains(line, `state="answered" answered_by="alice" answered_at="`) || strings.Contains(line, "selected=") {
+			t.Fatalf("the block of the choice reads %.300s, want who answered and when, without the selection", line)
+		}
+	})
+}
+
+// openAsksSpec is a spec of asks open ask blocks, ask-0 asking "Question 0?" and on.
+func openAsksSpec(asks int) string {
+	var spec strings.Builder
+	spec.WriteString("Context\n")
+	for index := range asks {
+		fmt.Fprintf(&spec, "\n:::ask{#ask-%d urgency=\"med\" multiple=\"false\" state=\"open\"}\nQuestion %d?\n:::\n", index, index)
+	}
+	return spec.String()
+}
+
+// askDirective is the directive line of the ask block blockID in markdown.
+func askDirective(t *testing.T, markdown, blockID string) string {
+	t.Helper()
+	for line := range strings.SplitSeq(markdown, "\n") {
+		if strings.HasPrefix(line, ":::ask{#"+blockID+" ") || strings.HasPrefix(line, ":::ask{#"+blockID+"}") {
+			return line
+		}
+	}
+	t.Fatalf("the document holds no %s block:\n%.500s", blockID, markdown)
+	return ""
+}
+
+// literalRequest is dispatchRequest with the body encoded as a browser or curl sends it, `<`, `>`
+// and `&` as themselves, where Go's \u003e would take a long text past the 1 MiB request cap.
+func literalRequest(t *testing.T, handler http.Handler, method, target string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(body); err != nil {
+		t.Fatalf("encode request body: %v", err)
+	}
+	request := httptest.NewRequest(method, target, &encoded)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Dispatch-User", "alice")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
 }
 
 // A suggestion's replacement and a comment's text live in the document's margin, which every load
@@ -365,5 +498,95 @@ func TestSettlementCannotGrowADocumentPastWhatOneUploadMayHoldByRestoringAnswers
 	edit(map[string]string{"op": "delete", "block": "ask-1"})
 	if line, size := directive(); !strings.Contains(line, `answer="`+prose) {
 		t.Fatalf("once the %d-byte document has room again, ask-0's block reads %.300s, want its answer back", size, line)
+	}
+}
+
+// Settlement weighs each answer it writes back into a returning block on its own, in document
+// order: two answers of 400 KB returned in one edit to a 300 KB document, which has room for one,
+// leave the first block with its answer and the second saying who answered and when without it,
+// and the second's answer comes back once the document has room for it. Withheld together, neither
+// came back until both fit.
+func TestSettlementGivesBackEachReturnedAnswerTheDocumentHasRoomFor(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	prose := strings.Repeat("words ", 50_000)
+	answerText := strings.Repeat("word ", 80_000)
+	block := func(index int) string {
+		return fmt.Sprintf(":::ask{#ask-%d urgency=\"med\" multiple=\"false\"}\nQuestion %d?\n:::\n", index, index)
+	}
+	issue := createInteractionIssue(t, handler, "TEST", "Returned answers", prose+"\n\n"+block(0)+"\n"+block(1))
+	ids := make([]string, 2)
+	for index := range ids {
+		blockID := fmt.Sprintf("ask-%d", index)
+		awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, blockID, fmt.Sprintf("Question %d?", index))
+		ids[index] = blockAskID(t, handler, issue.Key, blockID)
+	}
+	settled := 0
+	edit := func(op map[string]string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{"ops": []map[string]string{op}}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("edit %v: status=%d body=%.300s", op, response.Code, response.Body.String())
+		}
+		settled++
+		settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, fmt.Sprintf("settled-%d", settled))
+	}
+	for index := range ids {
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ids[index]+"/answer", map[string]any{"text": answerText}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("answer ask-%d: status=%d body=%.300s", index, response.Code, response.Body.String())
+		}
+		edit(map[string]string{"op": "delete", "block": fmt.Sprintf("ask-%d", index)})
+	}
+	edit(map[string]string{"op": "insert", "after": "end", "markdown": block(0) + "\n" + block(1)})
+	text := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	if len(text) > 1<<20 {
+		t.Fatalf("returning both blocks left a %d-byte document, past the 1 MiB one upload may hold", len(text))
+	}
+	if line := askDirective(t, text, "ask-0"); !strings.Contains(line, `answer="`+answerText) {
+		t.Fatalf("the first returned block, whose answer the document has room for, reads %.300s, want its answer", line)
+	}
+	if line := askDirective(t, text, "ask-1"); !strings.Contains(line, `state="answered" answered_by="alice" answered_at="`) || strings.Contains(line, "answer=") {
+		t.Fatalf("the second returned block, whose answer the document has no room for beside the first, reads %.300s, want who answered and when, without the answer", line)
+	}
+	edit(map[string]string{"op": "delete", "block": "ask-0"})
+	if line := askDirective(t, documentMarkdown(t, handler, issue.PrimaryArtifactID), "ask-1"); !strings.Contains(line, `answer="`+answerText) {
+		t.Fatalf("once the document has room, the second block reads %.300s, want its answer back", line)
+	}
+}
+
+// An anchor mark carries the id of whoever anchored it, which no rendering carries and every load of
+// the document builds, and an ask's anchor has no margin record to weigh it: thirty asks anchored
+// by a session whose id is 200 KB were each taken, leaving a 210-byte rendering over six megabytes
+// of live document. The marks on a document's text carry at most 1 MiB, so the anchor that would
+// pass it is refused with 413 CAP_EXCEEDED saying so, and the document still reads.
+func TestAnchorMarksCannotGrowALiveDocumentPastWhatItsMarksMayCarry(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	words := make([]string, 30)
+	for index := range words {
+		words[index] = fmt.Sprintf("word%02d", index)
+	}
+	issue := createInteractionIssue(t, handler, "TEST", "Anchors", strings.Join(words, " ")+"\n")
+	actor := map[string]any{"kind": "session", "id": "s" + strings.Repeat("a", 200_000)}
+	refused := 0
+	for index, word := range words {
+		response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+			"question": fmt.Sprintf("Why %s?", word),
+			"anchor":   map[string]any{"artifact": "spec", "quote": word},
+			"actor":    actor,
+		})
+		if response.Code == http.StatusCreated && refused == 0 {
+			continue
+		}
+		if !refusedTooLarge(t, response) || !strings.Contains(response.Body.String(), "carry at most 1 MiB") {
+			t.Fatalf("anchored ask %d: status=%d body=%.500s, want 201 until one is refused with 413 CAP_EXCEEDED naming the marks' bound, and 413 after it", index+1, response.Code, response.Body.String())
+		}
+		if refused == 0 {
+			refused = index + 1
+			t.Logf("anchored ask %d refused: %.300s", refused, response.Body.String())
+		}
+	}
+	if refused == 0 || refused > 6 {
+		t.Fatalf("the first refused anchor was %d of %d, want the sixth, whose 200 KB actor id passes 1 MiB", refused, len(words))
+	}
+	if response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("the document's text after the refused anchors: status=%d body=%.300s", response.Code, response.Body.String())
 	}
 }

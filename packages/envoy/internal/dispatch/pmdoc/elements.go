@@ -4,25 +4,27 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/parser"
 	gmtext "github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 )
 
 // MaxDocumentElements is how many elements one document's markdown may make, and the markdown one
-// caller write sends, weighed as elementWeight weighs them and as an upload's parse counts them.
+// caller write sends, weighed as nodeWeight weighs them and as an upload's parse counts them.
 // What a byte of markdown makes ranges from nothing to an element per byte, and every element costs
 // the server memory in each stage a write runs - goldmark's tree, the Proof tree, the renderer's
 // read-back of each run, the read-back of the whole document, the live document - and in every read
 // and settlement of the document it stores: a mebibyte of `)_` makes 786,432 of them and held a
 // gigabyte (LEGION-481). The heaviest document of each shape measured at this limit holds at most
 // about 220 MiB above the server's idle memory to store and settle, and 200 MiB to read
-// (cmd/dispatch's memory tests). Over this repository's 591 markdown files (MeasureDocument), every
+// (cmd/dispatch's memory tests). Over this repository's 606 markdown files (MeasureDocument), every
 // one of 4 KiB or more weighs 1.5 to 379 elements a kibibyte, so prose passes to the 1 MiB cap and
-// the densest, a comparison matrix, to about 173 KiB; smaller files run denser, up to 1,296 a
-// kibibyte for a 147-byte test fixture of nested empty list items.
+// the densest, a comparison matrix, to about 173 KiB; smaller files run denser, up to 986 a
+// kibibyte for a 189-byte test fixture of adjacent lists.
 const MaxDocumentElements = 65_536
 
 // nodeGuard is how many times MaxDocumentElements goldmark may make nodes, lines and table cells,
@@ -135,7 +137,46 @@ const (
 	// heaviest document of hard breaks the limit admitted held 350 MiB stored, and four cold reads
 	// of it at once 1,190 MiB.
 	hardbreakWeight = 3
+	// escapeWeight is a backslash escape or a character reference in a text: goldmark keeps it in
+	// its text node, so it makes no node there, but it spells a character - `_`, `~`, `[` - that
+	// the Proof tree holds bare and every rendering writes again, and the renderer reads each run
+	// back in a spelling that leaves such characters bare (inlineWithEscapes), where they make the
+	// delimiters and link openers they would unescaped: a mebibyte of `\~a`, `)\_`, `\)\_` or
+	// `\[a` weighed four elements and allocated 330 to 720 MiB to parse and 260 to 620 MiB to
+	// render, and the stored `\)\_` held 256 MiB to read cold and 973 MiB for four reads at once.
+	escapeWeight = 1
 )
+
+// nodeWeight is what one node of goldmark's tree, read from source, weighs: elementWeight, and
+// escapeWeight for each escape a text node outside a code span carries.
+func nodeWeight(node ast.Node, source []byte) int {
+	weight := elementWeight(node)
+	if text, ok := node.(*ast.Text); ok && node.Parent().Kind() != ast.KindCodeSpan {
+		weight += escapeWeight * escapes(text.Segment.Value(source))
+	}
+	return weight
+}
+
+// escapes is how many backslash escapes of punctuation and character references (characterReference)
+// value holds, the spellings the parser reads as the one character each names.
+func escapes(value []byte) int {
+	count := 0
+	for index := 0; index < len(value); index++ {
+		switch value[index] {
+		case '\\':
+			if index+1 < len(value) && util.IsPunct(value[index+1]) {
+				count++
+				index++
+			}
+		case '&':
+			if reference := characterReference.Find(value[index:]); reference != nil {
+				count++
+				index += len(reference) - 1
+			}
+		}
+	}
+	return count
+}
 
 // elementWeight is what one node of goldmark's tree weighs.
 func elementWeight(node ast.Node) int {
@@ -155,7 +196,7 @@ func elementWeight(node ast.Node) int {
 }
 
 // weights is how a refusal of a write's elements names the weights.
-var weights = fmt.Sprintf("a block weighs %d elements, a table cell %d, a hard line break %d, an autolink %d, and each piece of inline syntax, mark and line of text %d",
+var weights = fmt.Sprintf("a block weighs %d elements, a table cell %d, a hard line break %d, an autolink %d, and each piece of inline syntax, escape, mark and line of text %d",
 	blockWeight, tableCellWeight, hardbreakWeight, autolinkWeight, inlineWeight)
 
 // MaxDocumentBytes is the most bytes of markdown one document may hold: what one upload of a
@@ -182,29 +223,36 @@ func (s DocumentSize) TooHeavy() bool { return !s.Counted || s.Elements > MaxDoc
 
 // MeasureDocument is the DocumentSize of markdown, a whole document. Its elements are counted
 // exactly as an upload's parse counts them, its guard included, so markdown MeasureDocument finds
-// within both limits is what one upload may send, as far as its size goes. Markdown nested past
-// the parse's bounds, which no upload may send, measures as markdown past the element limit; the
-// renderer refuses a tree that deep, so no rendering a write leaves is one.
+// within both limits is what one upload may send, as far as its size goes. Markdown an upload's
+// parse refuses for its shape - nested past the parse's bounds, or tables whose short rows would
+// take more padding cells than one write may add, which the parse leaves as a paragraph that weighs
+// next to nothing - measures as markdown past the element limit: a 101-column header over 200
+// one-cell rows measured 407 elements where it weighs 82,111 written whole. The renderer refuses a
+// tree nested that deep, and writes such short rows only where it leaves browser-made spans
+// unwritten.
 func MeasureDocument(markdown string) DocumentSize {
 	size := DocumentSize{Bytes: len(markdown)}
 	source := []byte(markdown)
 	_, rest, unclosedFrontmatter := parseFrontmatterBlock(source)
-	root, count, _, err := blockReader.read(source[rest:], unclosedFrontmatter, NewWriteBudget(), 0)
+	root, count, pc, err := blockReader.read(source[rest:], unclosedFrontmatter, NewWriteBudget(), 0)
 	if err != nil || count.passed() {
 		return size
 	}
+	if refused, _ := pc.Get(tablePaddingErrorKey).(error); refused != nil {
+		return size
+	}
 	for node := root; node != nil; node = nextInTree(root, node) {
-		size.Elements += elementWeight(node)
+		size.Elements += nodeWeight(node, source[rest:])
 	}
 	size.Counted = true
 	return size
 }
 
-// weigh charges the write the elements root makes, which the parse p counts made, and records
-// where they take it past its limit. root is weighed without recursion, so a tree nested as deep
-// as the guard allows costs no stack. A tree the guard stopped is not weighed, and a parse that
-// counts nothing (a nil p) weighs nothing.
-func (p *parseCount) weigh(root ast.Node) {
+// weigh charges the write the elements root, read from source, makes, which the parse p counts
+// made, and records where they take it past its limit. root is weighed without recursion, so a tree
+// nested as deep as the guard allows costs no stack. A tree the guard stopped is not weighed, and a
+// parse that counts nothing (a nil p) weighs nothing.
+func (p *parseCount) weigh(root ast.Node, source []byte) {
 	if p == nil || p.passed() {
 		return
 	}
@@ -212,7 +260,7 @@ func (p *parseCount) weigh(root ast.Node) {
 		if p.server > 0 && nodeOffset(node) < p.server {
 			continue
 		}
-		p.write.made += elementWeight(node)
+		p.write.made += nodeWeight(node, source)
 		if p.write.made > p.write.limit {
 			p.at = nodeOffset(node)
 			return
@@ -240,6 +288,42 @@ func (p *parseCount) refusal(source []byte, firstLine int) error {
 	line := firstLine + bytes.Count(source[:min(p.at, len(source))], []byte("\n"))
 	return fmt.Errorf("%w: this write's markdown makes more than %d elements, %s %d; %s. Shorten the change, or split the document; an upload of data rather than prose can go up as a file of another content type",
 		ErrTooManyElements, p.write.limit, passing, line, weights)
+}
+
+// plainTextSyntax is the characters of plain text that its markdown writes escaped, or bare as the
+// inline syntax they open: a delimiter, a link's bracket, a code span, raw HTML. Each weighs at
+// least an element in the rendering, an escape or the node it makes.
+const plainTextSyntax = "\\*_~`[]<"
+
+// lineFeedWeight is the least a line feed in plain text weighs in its rendering: it is written as a
+// hard break, beside the text after it, or, two at once, as a paragraph and its text.
+const lineFeedWeight = (blockWeight + inlineWeight) / 2
+
+// RefusePlainText is the refusal of texts, which a caller writes into a document as plain text -
+// an ask's question and its options - when what their rendering weighs at least, an element for
+// each syntax character (plainTextSyntax) and lineFeedWeight for each line feed, would take the
+// write b budgets past its element limit, or nil. Plain text is made into nodes, rendered escaped
+// and read back run by run (inlineWithEscapes) before any parse of its rendering counts what it
+// makes: a 920 KB option description of `)_` held 417 MiB to render, and one of 330,000 lines
+// did not finish its write in twenty minutes. Nothing is charged here; the parse of the rendering
+// charges the write what it makes.
+func (b *WriteBudget) RefusePlainText(texts ...string) error {
+	weight := 0
+	for _, text := range texts {
+		for index := range len(text) {
+			switch {
+			case text[index] == '\n':
+				weight += lineFeedWeight
+			case strings.IndexByte(plainTextSyntax, text[index]) >= 0:
+				weight += escapeWeight
+			}
+		}
+	}
+	if b.elements.made+weight <= b.elements.limit {
+		return nil
+	}
+	return fmt.Errorf("%w: this write's text weighs at least %d elements as markdown - its line feeds and the characters its markdown writes escaped or reads as syntax (%s) - past the %d one write may make (%s); shorten it, or split the document",
+		ErrTooManyElements, weight, plainTextSyntax, b.elements.limit, weights)
 }
 
 // nextInTree is the node after node in a walk of root's tree in document order.

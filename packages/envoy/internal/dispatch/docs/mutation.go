@@ -123,7 +123,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if err != nil {
 		return err
 	}
-	if err := refuseGrowth(growth{fork: fork, before: beforeMarkdown, after: markdown, margin: margin, serverState: func() bool {
+	if err := refuseGrowth(growth{fork: fork, before: beforeMarkdown, after: markdown, margin: margin, anchors: anchorWatch{before: before, after: tree}, serverState: func() bool {
 		return tree.EqualOutsideServerState(before)
 	}}); err != nil {
 		return err
@@ -197,7 +197,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if err != nil {
 		return "", err
 	}
-	if err := refuseGrowth(growth{after: canonical}); err != nil {
+	if _, err := weighRendering("", canonical); err != nil {
 		return "", err
 	}
 	doc := crdt.New()
@@ -884,14 +884,50 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 }
 
 // SetBlockAttributes applies server-owned typed-block state through the
-// transactional live-document mutation path.
+// transactional live-document mutation path. An ask's answer the document has no room for - its
+// words or the options it selects (pmdoc.IsAnswerAttribute), which are caller text - is left out of
+// the block: the block is written without either, saying who answered and when, and the caller's
+// ask keeps the answer, as settlement leaves a returning block's answer out (withholdAnswers).
 func (s *Service) SetBlockAttributes(
 	ctx context.Context,
 	artifactID, blockID string,
 	attributes map[string]any,
 	actor model.Actor,
 ) error {
-	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+	err := s.setBlockAttributes(ctx, artifactID, blockID, attributes, actor)
+	if withheld, withholds := withoutAnswer(attributes); withholds && isTooLarge(err) {
+		slog.Warn("dispatch: an answer is left out of its block", "room", artifactID, "block", blockID, "reason", err)
+		// A refused write appends nothing, and the transaction's next write starts from its fork
+		// as it was (applyLive).
+		err = s.setBlockAttributes(ctx, artifactID, blockID, withheld, actor)
+	}
+	// Setting attributes a block already carries writes nothing, which the live path reports as
+	// ErrNoChanges; the block holds what the caller asked for, so that is success.
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		if isTooLarge(err) {
+			return err
+		}
+		return fmt.Errorf("set live block attributes: %w", err)
+	}
+	return nil
+}
+
+// withoutAnswer is attributes with each answer attribute they name (pmdoc.IsAnswerAttribute) taken
+// off the block instead, and whether they name one with a value to leave out.
+func withoutAnswer(attributes map[string]any) (withheld map[string]any, withholds bool) {
+	withheld = make(map[string]any, len(attributes))
+	for name, value := range attributes {
+		if pmdoc.IsAnswerAttribute(name) {
+			withholds = withholds || value != nil
+			value = nil
+		}
+		withheld[name] = value
+	}
+	return withheld, withholds
+}
+
+func (s *Service) setBlockAttributes(ctx context.Context, artifactID, blockID string, attributes map[string]any, actor model.Actor) error {
+	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := treeOf(doc)
 		if err != nil {
@@ -913,15 +949,6 @@ func (s *Service) SetBlockAttributes(
 		}
 		return nil
 	})
-	// Setting attributes a block already carries writes nothing, which the live path reports as
-	// ErrNoChanges; the block holds what the caller asked for, so that is success.
-	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-		if isTooLarge(err) {
-			return err
-		}
-		return fmt.Errorf("set live block attributes: %w", err)
-	}
-	return nil
 }
 
 // NamedVersion records the live document as a deliberately named immutable version. Like

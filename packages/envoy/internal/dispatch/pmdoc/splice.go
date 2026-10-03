@@ -459,7 +459,7 @@ func joinAcrossBoundary(doc *Node, selection spliceSelection, r Range, with *Nod
 func buildMergedTextblock(doc *Node, selection spliceSelection, r Range, with *Node) (*Node, bool, error) {
 	left := nodeAtPath(doc, selection.first.path)
 	right := nodeAtPath(doc, selection.last.path)
-	if left.Type == right.Type && !nodeAttrsEqual(left.Attrs, right.Attrs, false) {
+	if left.Type == right.Type && !attrsEqualButBlockID(left.Attrs, right.Attrs) {
 		return nil, false, nil
 	}
 	prefix, err := inlineRange(left, selection.first.pos, selection.first.pos+1, r.From)

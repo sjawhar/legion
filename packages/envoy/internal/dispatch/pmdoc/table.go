@@ -234,7 +234,8 @@ func (r tableRows) padding(lines *gmtext.Segments, source []byte) tablePadding {
 
 // charge charges count the cells goldmark's transformer makes of the table in lines once padded,
 // each row's at the line it is written on, so a row the server wrote ahead of the caller's
-// markdown is charged nothing (parseCount.free). It reports whether the count passed the guard.
+// markdown is charged nothing (parseCount.charge, below parseCount.server). It reports whether the
+// count passed the guard.
 func (r tableRows) charge(count *parseCount, lines *gmtext.Segments) bool {
 	for row := r.header; row < lines.Len(); row++ {
 		if row != r.header+1 && count.charge(r.width, lines.At(row).Start) {

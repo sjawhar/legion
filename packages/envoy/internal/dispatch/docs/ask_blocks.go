@@ -36,6 +36,9 @@ type settlementReconciliation struct {
 	repairs   []askRepair
 	events    []model.Event
 	retracted []model.Ask
+	// rewrites are the ask blocks whose server attributes repairAsk repaired, which
+	// withholdAnswers reads again where a repair wrote back an answer.
+	rewrites []serverRewrite
 }
 
 // askRepair is one server-owned attribute repair settlement made to the ask block carrying blockID
@@ -53,6 +56,25 @@ func (r *settlementReconciliation) repair(node *pmdoc.Node, blockID string, set 
 	}
 	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: set})
 	return true
+}
+
+// repairAsk repairs the server attributes of node, the ask block carrying blockID in the tree
+// settlement read, to agree with ask (setAskServerAttributes), and records the repair for
+// repairLive and, when event is not nil, the block.repaired it emits - each where withholdAnswers
+// finds it again.
+func (r *settlementReconciliation) repairAsk(node *pmdoc.Node, blockID string, ask model.Ask, event *model.Event) {
+	found := readAskServerState(node)
+	changed, wroteAnswer := setAskServerAttributes(node, ask, false)
+	if !changed {
+		return
+	}
+	rewrite := serverRewrite{node: node, ask: ask, found: found, answer: wroteAnswer, repair: len(r.repairs), event: -1}
+	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: askServerAttributes(ask, false)})
+	if event != nil {
+		rewrite.event = len(r.events)
+		r.events = append(r.events, *event)
+	}
+	r.rewrites = append(r.rewrites, rewrite)
 }
 
 // repairLive makes the reconciliation's repairs on live, the document as it stands when settlement
@@ -180,21 +202,6 @@ func (s *Service) reconcileAskBlocks(
 	}
 
 	reconciled := settlementReconciliation{}
-	var rewrites []serverRewrite
-	answered := false
-	// rewrite is reconciled.repair of node's server attributes, the ask block carrying blockID,
-	// recording for withholdAnswers what they were and whether the repair wrote an answer.
-	rewrite := func(node *pmdoc.Node, blockID string, ask model.Ask) bool {
-		found := readAskServerState(node)
-		changed, wroteAnswer := setAskServerAttributes(node, ask, false)
-		if !changed {
-			return false
-		}
-		reconciled.repairs = append(reconciled.repairs, askRepair{blockID: blockID, set: askServerAttributes(ask, false)})
-		rewrites = append(rewrites, serverRewrite{node: node, ask: ask, found: found, repair: len(reconciled.repairs) - 1, event: -1})
-		answered = answered || wroteAnswer
-		return true
-	}
 	for _, invalid := range invalidBlocks {
 		delete(rows, invalid.id)
 		if reconciled.repair(invalid.node, invalid.id, askInvalidAttribute(invalid.reason.Error())) {
@@ -225,7 +232,7 @@ func (s *Service) reconcileAskBlocks(
 			reconciled.events = append(reconciled.events, documentAskEvent(
 				owner, artifactID, "ask.opened", actor, model.NewAskEventPayload(ask, changes),
 			))
-			rewrite(block.node, block.id, ask)
+			reconciled.repairAsk(block.node, block.id, ask, nil)
 			continue
 		}
 		delete(rows, block.id)
@@ -283,20 +290,16 @@ func (s *Service) reconcileAskBlocks(
 				model.NewAskEditEventPayload(ask, previous, actor, changes),
 			))
 		}
-		if rewrite(block.node, block.id, ask) {
-			rewrites[len(rewrites)-1].event = len(reconciled.events)
-			reconciled.events = append(reconciled.events, documentAskEvent(
-				owner,
-				artifactID,
-				"block.repaired",
-				actor,
-				model.BlockRepairedEventPayload{BlockID: block.id, DisturbedBy: actor},
-			))
-		}
+		repaired := documentAskEvent(
+			owner,
+			artifactID,
+			"block.repaired",
+			actor,
+			model.BlockRepairedEventPayload{BlockID: block.id, DisturbedBy: actor},
+		)
+		reconciled.repairAsk(block.node, block.id, ask, &repaired)
 	}
-	if answered {
-		reconciled.withholdAnswers(artifactID, tree, before, rewrites)
-	}
+	reconciled.withholdAnswers(artifactID, tree, before)
 
 	for _, ask := range rows {
 		// Only an open ask is retracted: an answered or resolved one is already closed, its
@@ -639,8 +642,8 @@ func restoreRetractedAsk(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.A
 // its ask row (setAskServerAttributes).
 var askServerAttributeNames = [...]string{"state", "answered_by", "answered_at", "selected", "answer", "invalid"}
 
-// askServerAttributes is setAskServerAttributes for ask as it stands now, withholding its answer
-// when withholdAnswer, for a repair to make again on another tree (settlementReconciliation.repair).
+// askServerAttributes is setAskServerAttributes for ask as it stands now, leaving its answer out
+// when withholdAnswer, for a repair to make again on another tree (repairLive).
 func askServerAttributes(ask model.Ask, withholdAnswer bool) func(*pmdoc.Node) bool {
 	return func(node *pmdoc.Node) bool {
 		changed, _ := setAskServerAttributes(node, ask, withholdAnswer)
@@ -649,24 +652,23 @@ func askServerAttributes(ask model.Ask, withholdAnswer bool) func(*pmdoc.Node) b
 }
 
 // setAskServerAttributes makes node's server attributes agree with ask, and reports whether it
-// changed any and whether it wrote an answer's own text: the answer, or the options it selects,
-// which the person answering chose rather than the server. With withholdAnswer it writes neither,
-// and the block keeps the answer and the selection it holds.
+// changed any and whether it wrote an answer (pmdoc.IsAnswerAttribute): its words, or the options
+// it selects, which are caller text the server keeps. With withholdAnswer it leaves the answer out
+// of the block, taking off any the block holds, and writes the rest: the block still says who
+// answered and when.
 func setAskServerAttributes(node *pmdoc.Node, ask model.Ask, withholdAnswer bool) (changed, answered bool) {
 	desired := pmdoc.Attrs{"state": ask.State}
 	if ask.State == "answered" && ask.Answer != nil {
 		desired["answered_by"] = ask.Answer.User
 		desired["answered_at"] = ask.Answer.At.UTC().Format(time.RFC3339Nano)
-		desired["selected"] = append([]string(nil), ask.Answer.Selected...)
-		if ask.Answer.Text != nil {
-			desired["answer"] = *ask.Answer.Text
+		if !withholdAnswer {
+			desired["selected"] = append([]string(nil), ask.Answer.Selected...)
+			if ask.Answer.Text != nil {
+				desired["answer"] = *ask.Answer.Text
+			}
 		}
 	}
 	for _, name := range askServerAttributeNames {
-		answer := name == "answer" || name == "selected"
-		if answer && withholdAnswer {
-			continue
-		}
 		want, present := desired[name]
 		got, exists := node.Attrs[name]
 		if present {
@@ -675,7 +677,7 @@ func setAskServerAttributes(node *pmdoc.Node, ask model.Ask, withholdAnswer bool
 			}
 			node.Attrs[name] = want
 			changed = true
-			answered = answered || answer
+			answered = answered || pmdoc.IsAnswerAttribute(name)
 			continue
 		}
 		if exists {
@@ -712,51 +714,113 @@ func (state askServerState) restore(node *pmdoc.Node) {
 }
 
 // serverRewrite is an ask block whose server attributes settlement repaired to agree with its ask:
-// the attributes as settlement found them, the index of the repair in the reconciliation's
-// repairs, and the index in its events of the block.repaired the repair emitted, or -1 for a new
-// ask's block, whose repair emits none.
+// the attributes as settlement found them, whether the repair wrote an answer, the index of the
+// repair in the reconciliation's repairs, and the index in its events of the block.repaired the
+// repair emitted, or -1 for a new ask's block, whose repair emits none.
 type serverRewrite struct {
 	node   *pmdoc.Node
 	ask    model.Ask
 	found  askServerState
+	answer bool
 	repair int
 	event  int
 }
 
-// withholdAnswers keeps the answers settlement wrote back into their blocks out of the document
-// when the document they leave would pass what one upload may hold and be bigger than before, the
-// document's rendering as settlement read it (weighRendering, which weighs a caller's write the
-// same way). An answer is stored on its ask as well as in its block, and a block that leaves the
-// document and returns gets its answer back from the ask, so a returning block is the answer's
+// withholdAnswers keeps out of the document each answer settlement wrote back into its block that
+// the document has no room for: one that would leave it past what one upload may hold and bigger
+// than before, the document's rendering as settlement read it (weigh, which weighs a caller's write
+// the same way). An answer is stored on its ask as well as in its block, and a block that leaves
+// the document and returns gets its answer back from the ask, so a returning block is the answer's
 // text arriving without the answer route that weighs it: twenty-four answers of 900 KB, each
 // weighed against a document their deleted blocks had left small, came back in one 1,540-byte edit
-// as a 21.6 MB document. Withheld, each block is repaired with its answer and selection as it held
-// them, so it still says who answered and when, and the ask keeps the answer; a later settlement of
-// a document with room for it writes it back. A repair that then changes nothing is dropped with
-// its block.repaired. A document that does not render cannot be weighed, so its answers are
-// withheld, and the settlement that renders it next fails as it would have.
-func (r *settlementReconciliation) withholdAnswers(artifactID string, tree *pmdoc.Node, before string, rewrites []serverRewrite) {
+// as a 21.6 MB document. Where the answers do not all fit, every one is left out, and each is
+// given back in document order while the document still has room for it (returnAnswersWithRoom).
+// A block whose answer stays out is repaired without it, so it still says who answered and when,
+// and the ask keeps the answer; a later settlement of a document with room for it writes it back.
+// A repair that then changes nothing is dropped with its block.repaired. A document that does not
+// render cannot be weighed, so its answers all stay out, and the settlement that renders it next
+// fails as it would have.
+func (r *settlementReconciliation) withholdAnswers(artifactID string, tree *pmdoc.Node, before string) {
+	var answered []int
+	for index, rewrite := range r.rewrites {
+		if rewrite.answer {
+			answered = append(answered, index)
+		}
+	}
+	if len(answered) == 0 {
+		return
+	}
 	after, err := renderTree(tree)
-	if err == nil {
+	rendered := err == nil
+	if rendered {
 		if _, err = weighRendering(before, after); err == nil {
 			return
 		}
 	}
-	slog.Warn("dispatch: settlement withholds restored answers from their blocks", "room", artifactID, "reason", err)
-	droppedRepairs, droppedEvents := map[int]bool{}, map[int]bool{}
-	for _, rewrite := range rewrites {
+	// changes says whether each block repaired without its answer still changes from what
+	// settlement found.
+	changes := make(map[int]bool, len(answered))
+	for _, index := range answered {
+		rewrite := r.rewrites[index]
 		rewrite.found.restore(rewrite.node)
-		if changed, _ := setAskServerAttributes(rewrite.node, rewrite.ask, true); changed {
+		changes[index], _ = setAskServerAttributes(rewrite.node, rewrite.ask, true)
+	}
+	returned := map[int]bool{}
+	if rendered {
+		returned = r.returnAnswersWithRoom(tree, before, answered)
+	}
+	slog.Warn("dispatch: settlement withholds restored answers from their blocks", "room", artifactID,
+		"withheld", len(answered)-len(returned), "answers", len(answered), "reason", err)
+	droppedRepairs, droppedEvents := map[int]bool{}, map[int]bool{}
+	for _, index := range answered {
+		rewrite := r.rewrites[index]
+		switch {
+		case returned[index]:
+		case changes[index]:
 			r.repairs[rewrite.repair].set = askServerAttributes(rewrite.ask, true)
-			continue
-		}
-		droppedRepairs[rewrite.repair] = true
-		if rewrite.event >= 0 {
-			droppedEvents[rewrite.event] = true
+		default:
+			droppedRepairs[rewrite.repair] = true
+			if rewrite.event >= 0 {
+				droppedEvents[rewrite.event] = true
+			}
 		}
 	}
 	r.repairs = without(r.repairs, droppedRepairs)
 	r.events = without(r.events, droppedEvents)
+}
+
+// returnAnswersWithRoom gives back, in document order, the answer of each rewrite answered names
+// (r.rewrites), all of them left out of tree, while the document still has room for it, and
+// reports which it gave back. An answer lengthens its block's directive line, which carries every
+// attribute quoted, and makes no element, so the document's rendering grows by what the block's own
+// rendering does: the document is rendered once, without them, and each answer is weighed by its
+// block alone.
+func (r *settlementReconciliation) returnAnswersWithRoom(tree *pmdoc.Node, before string, answered []int) map[int]bool {
+	returned := map[int]bool{}
+	left, err := renderTree(tree)
+	if err != nil {
+		return returned
+	}
+	document, was := renderingOf(left), renderingOf(before)
+	for _, index := range answered {
+		rewrite := r.rewrites[index]
+		alone := &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{rewrite.node}}
+		withheld, err := renderTree(alone)
+		setAskServerAttributes(rewrite.node, rewrite.ask, false)
+		if err == nil {
+			var answeredBlock string
+			if answeredBlock, err = renderTree(alone); err == nil {
+				grown := document.longer(len(answeredBlock) - len(withheld))
+				if _, err = weigh(was, grown); err == nil {
+					document = grown
+					returned[index] = true
+					continue
+				}
+			}
+		}
+		setAskServerAttributes(rewrite.node, rewrite.ask, true)
+	}
+	return returned
 }
 
 // without is items but those at the indexes dropped names, in their order, in items' own array.

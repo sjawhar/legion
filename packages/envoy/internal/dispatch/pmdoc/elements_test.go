@@ -62,6 +62,13 @@ func TestMarkdownPastTheElementLimitIsRefusedBeforeItIsBuilt(t *testing.T) {
 		{"hard breaks", fill("a  \n"), ErrTooManyElements},
 		{"headings", fill("# a\n"), ErrTooManyElements},
 		{"a two-column table", table, ErrTooManyElements},
+		// Escaped syntax, which weighed four elements before an escape weighed one, while the
+		// parse that read it whole allocated 330 to 720 MiB (escapeWeight).
+		{`\~a`, fill(`\~a`), ErrTooManyElements},
+		{`)\_`, fill(`)\_`), ErrTooManyElements},
+		{`\)\_`, fill(`\)\_`), ErrTooManyElements},
+		{`\[a`, fill(`\[a`), ErrTooManyElements},
+		{"&#95;a", fill("&#95;a"), ErrTooManyElements},
 		// Nested past the inline bound too, which refuses it first (nestingRefusal).
 		{"262,140 nested marks", run + "x" + run, ErrSchema},
 	} {
@@ -207,5 +214,48 @@ func TestATableRowInsertIsChargedItsRowsAlone(t *testing.T) {
 	_, _, err = InsertTableRows(doc, anchor, "\n| y |\n", true, budget)
 	if !errors.Is(err, ErrTooManyElements) || !strings.Contains(err.Error(), "passing that at line 2;") {
 		t.Fatalf("a row past what the batch has left: %v, want a refusal at line 2, the row's", err)
+	}
+}
+
+// An escape weighs an element as the syntax it spells does: the document and its paragraph weigh
+// four, so 32,766 units of `\)\_`, two escapes each, weigh the limit exactly and are read, one unit
+// more is refused, and MeasureDocument counts the same. A backslash inside a code span is no
+// escape, and the text a plain-text write sends is weighed before it is made into markdown: an
+// element for each character its markdown escapes or reads as syntax, two for each line feed.
+func TestAnEscapeWeighsAnElement(t *testing.T) {
+	units := (MaxDocumentElements - 4) / 2
+	if _, err := ParseForWrite(strings.Repeat(`\)\_`, units), nil); err != nil {
+		t.Fatalf("%d units of \\)\\_: %v, want them read", units, err)
+	}
+	if _, err := ParseForWrite(strings.Repeat(`\)\_`, units+1), nil); !errors.Is(err, ErrTooManyElements) {
+		t.Fatalf("%d units of \\)\\_: %v, want ErrTooManyElements", units+1, err)
+	}
+	if size := MeasureDocument(strings.Repeat(`\)\_`, units)); !size.Counted || size.Elements != MaxDocumentElements {
+		t.Fatalf("%d units of \\)\\_ measure %+v, want %d elements", units, size, MaxDocumentElements)
+	}
+	if size := MeasureDocument("`" + strings.Repeat(`\_`, 2*MaxDocumentElements) + "`"); !size.Counted || size.Elements > 10 {
+		t.Fatalf("a code span of backslashes measures %+v, want a few elements", size)
+	}
+	if err := NewWriteBudget().RefusePlainText(strings.Repeat(")_", MaxDocumentElements)); err != nil {
+		t.Fatalf("plain text of %d underscores: %v, want it taken", MaxDocumentElements, err)
+	}
+	if err := NewWriteBudget().RefusePlainText(strings.Repeat(")_", MaxDocumentElements/2), strings.Repeat("~a", MaxDocumentElements/2+1)); !errors.Is(err, ErrTooManyElements) {
+		t.Fatalf("plain text of %d syntax characters: %v, want ErrTooManyElements", MaxDocumentElements+1, err)
+	}
+	if err := NewWriteBudget().RefusePlainText(strings.Repeat("a\n", MaxDocumentElements/2+1)); !errors.Is(err, ErrTooManyElements) {
+		t.Fatalf("plain text of %d line feeds: %v, want ErrTooManyElements", MaxDocumentElements/2+1, err)
+	}
+}
+
+// Markdown an upload's parse refuses for its tables' padding measures past the limit rather than as
+// the paragraph the refused table is left as: a 101-column header over 200 one-cell rows, which
+// would pad 20,000 cells, measured 407 elements, where it weighs 82,111 written whole.
+func TestATableThePaddingRefusesMeasuresPastTheLimit(t *testing.T) {
+	table := strings.Repeat("| h ", 101) + "|\n" + strings.Repeat("| - ", 101) + "|\n" + strings.Repeat("| x |\n", 200)
+	if _, err := ParseForWrite(table, nil); !errors.Is(err, ErrTablePadding) {
+		t.Fatalf("the table's upload: %v, want ErrTablePadding", err)
+	}
+	if size := MeasureDocument(table); !size.TooHeavy() {
+		t.Fatalf("the table measures %+v, want it past the limit", size)
 	}
 }

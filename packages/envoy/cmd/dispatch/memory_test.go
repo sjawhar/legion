@@ -71,10 +71,12 @@ func TestEveryUploadAtTheCapStaysWithinTheMemoryBound(t *testing.T) {
 
 // The heaviest documents the element limit admits are stored, and storing one - upload and
 // settlement - and then reading it - its text, its blocks, and a websocket load of its room - each
-// hold at most the bound, a read on a server that has not loaded the document.
+// hold at most the bound, a read on a server that has not loaded the document. Escaped syntax is
+// among them (escapedAdmittedShapes): a stored document of `\)\_`, which weighed four elements
+// before an escape weighed one, held 256 MiB to read cold.
 func TestTheHeaviestStoredDocumentsStayWithinTheMemoryBound(t *testing.T) {
 	memory := newMemoryHarness(t)
-	for _, shape := range heaviestAdmittedShapes(t) {
+	for _, shape := range append(heaviestAdmittedShapes(t), escapedAdmittedShapes(t)...) {
 		t.Run(shape.name, func(t *testing.T) {
 			writer := memory.start(t)
 			var upload uploadResult
@@ -146,15 +148,19 @@ func TestTwoUploadsAtOnceStayWithinTheMemoryBound(t *testing.T) {
 }
 
 // Two cold reads at once of the heaviest documents the limit admits hold at most twice the bound
-// together, on a server that has not loaded the document: `)_`, and the hard breaks that, weighed as
-// one inline node, held 565 MiB for two reads and 1,190 MiB for four. Four reads at once are
-// logged beside them, the production task being 1,024 MiB.
+// together, on a server that has not loaded the document: `)_`, the hard breaks that, weighed as
+// one inline node, held 565 MiB for two reads and 1,190 MiB for four, and escaped syntax, of which
+// four cold reads of a stored `\)\_` held 973 MiB before an escape weighed an element. Four reads
+// at once are logged beside them, the production task being 1,024 MiB.
 func TestConcurrentColdReadsStayWithinTheMemoryBound(t *testing.T) {
 	memory := newMemoryHarness(t)
+	var shapes []admittedShape
 	for _, shape := range heaviestAdmittedShapes(t) {
-		if shape.name != ")_" && !strings.HasPrefix(shape.name, "hard breaks") {
-			continue
+		if shape.name == ")_" || strings.HasPrefix(shape.name, "hard breaks") {
+			shapes = append(shapes, shape)
 		}
+	}
+	for _, shape := range append(shapes, escapedAdmittedShapes(t)...) {
 		t.Run(shape.name, func(t *testing.T) {
 			writer := memory.start(t)
 			upload := writer.upload(t, "json", memory.issue, shape.markdown)
@@ -348,12 +354,13 @@ func refusedWithAdvice(answer response) bool {
 
 // An ask's text and its answer are written into its block, so they grow a document as an edit
 // does, and are held to what one upload may hold on a real Dispatch process as an edit is: edits of
-// the asks of one document, each giving an option a 900 KB description, and answers of 900 KB to
-// them, are taken until one would leave the document's markdown past 1 MiB, which is refused with
-// 413 CAP_EXCEEDED, and so is every one after it. The document still reads, and a one-word edit on
-// a server that has not loaded it holds at most the bound. Before the bound reached these routes,
-// thirty-two such edits grew one document to 28.8 MB, on which a one-word edit held 1,204 MiB, and
-// under the production task's 1,024 MiB the server was killed.
+// the asks of one document, each giving an option a 900 KB description, are taken until one would
+// leave the document's markdown past 1 MiB, which is refused with 413 CAP_EXCEEDED, and so is every
+// one after it; answers of 900 KB to them are all taken, each the document has no room for kept on
+// its ask and left out of its block. Either way the document stays within the cap, still reads, and
+// a one-word edit on a server that has not loaded it holds at most the bound. Before the bound
+// reached these routes, thirty-two such edits grew one document to 28.8 MB, on which a one-word
+// edit held 1,204 MiB, and under the production task's 1,024 MiB the server was killed.
 func TestAskEditsAndAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testing.T) {
 	memory := newMemoryHarness(t)
 	const asks = 32
@@ -366,9 +373,12 @@ func TestAskEditsAndAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testin
 	for _, route := range []struct {
 		name, method, path string
 		body               map[string]any
+		// refuses says the route refuses the write the document has no room for, rather than
+		// taking it without the text.
+		refuses bool
 	}{
-		{"PATCH /api/v1/asks/{id}", http.MethodPatch, "", map[string]any{"options": []map[string]string{{"label": "A", "description": prose}}}},
-		{"POST /api/v1/asks/{id}/answer", http.MethodPost, "/answer", map[string]any{"text": prose, "expected_edited_at": nil}},
+		{"PATCH /api/v1/asks/{id}", http.MethodPatch, "", map[string]any{"options": []map[string]string{{"label": "A", "description": prose}}}, true},
+		{"POST /api/v1/asks/{id}/answer", http.MethodPost, "/answer", map[string]any{"text": prose, "expected_edited_at": nil}, false},
 	} {
 		t.Run(route.name, func(t *testing.T) {
 			body, err := json.Marshal(route.body)
@@ -386,13 +396,15 @@ func TestAskEditsAndAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testin
 				t.Logf("write %d: %d, %d MiB above idle with what earlier writes left: %.200s", index+1, answer.status, peak>>20, answer.body)
 				switch {
 				case answer.status == http.StatusOK && !refused:
-				case refusedWithAdvice(answer):
+				case route.refuses && refusedWithAdvice(answer):
 					refused = true
-				default:
+				case route.refuses:
 					t.Errorf("write %d answered %d %.300s, want 200 until one is refused with 413 CAP_EXCEEDED saying to shorten the change, and 413 after it", index+1, answer.status, answer.body)
+				default:
+					t.Errorf("answer %d answered %d %.300s, want 200", index+1, answer.status, answer.body)
 				}
 			}
-			if !refused {
+			if route.refuses && !refused {
 				t.Errorf("all %d writes were taken, want the document's growth refused", asks)
 			}
 			server.get(t, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks")
@@ -415,6 +427,43 @@ func TestAskEditsAndAnswersCannotGrowADocumentPastWhatOneUploadMayHold(t *testin
 				t.Errorf("a one-word edit of the %d-byte document held %d MiB above idle, want at most %d MiB", len(text), peak>>20, requestMemoryBound>>20)
 			}
 		})
+	}
+}
+
+// An ask's question and options are plain text the server makes into markdown, so they are weighed
+// before they are rendered, on a real Dispatch process as in the route's tests: an option
+// description of 920 KB of `)_`, whose edit held 417 MiB before its text was weighed, and one of
+// 330,000 lines, whose edit did not answer within twenty minutes, are each refused with 413
+// CAP_EXCEEDED, naming the text's weight, within the bound and in seconds.
+func TestAnAsksTextIsWeighedBeforeItIsRendered(t *testing.T) {
+	memory := newMemoryHarness(t)
+	server := memory.start(t)
+	issue := server.createIssue(t, "Ask text", "Before.\n\n:::ask{#ask-0 urgency=\"med\" multiple=\"false\" state=\"open\"}\nQuestion 0?\n:::\n")
+	askID := server.blockAsks(t, issue.Key, 1)[0]
+	for _, description := range []struct{ name, text string }{
+		{"920 KB of )_", strings.Repeat(")_", 460_000)},
+		{"330,000 lines", strings.Repeat("a\n", 330_000)},
+	} {
+		body, err := json.Marshal(map[string]any{"options": []map[string]string{{"label": "A", "description": description.text}}})
+		if err != nil {
+			t.Fatalf("encode the edit: %v", err)
+		}
+		var answer response
+		started := time.Now()
+		peak := server.peakAboveIdle(t, func() {
+			answer = server.send(t, http.MethodPatch, "/api/v1/asks/"+askID, "application/json", bytes.NewReader(body), http.Header{"X-Dispatch-User": {"alice"}})
+		})
+		elapsed := time.Since(started)
+		t.Logf("an option description of %s: %d in %s, %d MiB above idle: %.200s", description.name, answer.status, elapsed, peak>>20, answer.body)
+		if answer.status != http.StatusRequestEntityTooLarge || !strings.Contains(string(answer.body), "this write's text weighs at least") {
+			t.Errorf("an option description of %s answered %d %.300s, want 413 CAP_EXCEEDED naming the text's weight", description.name, answer.status, answer.body)
+		}
+		if peak > requestMemoryBound {
+			t.Errorf("refusing an option description of %s held %d MiB above idle, want at most %d MiB", description.name, peak>>20, requestMemoryBound>>20)
+		}
+		if elapsed > 10*time.Second {
+			t.Errorf("refusing an option description of %s took %s, want at most 10s", description.name, elapsed)
+		}
 	}
 }
 
@@ -857,7 +906,8 @@ var capShapeAnswersWithin = map[string]time.Duration{"link reference definitions
 // bound refuses it as soon as it nests past 100. Flat list items, empty or not, are where the
 // guard has to close a list to stop, and hard breaks weigh as blocks. A paragraph of link
 // reference definitions cost goldmark time quadratic in its lines: a mebibyte of them took a
-// minute to refuse, so it answers within ten seconds.
+// minute to refuse, so it answers within ten seconds. Escaped syntax weighed four elements a
+// mebibyte, and its upload held 265 to 323 MiB before its rendering was refused by its bytes.
 func capShapes() []memoryShape {
 	repeated := func(unit string) func() string { return func() string { return fill(unit) } }
 	return []memoryShape{
@@ -906,6 +956,10 @@ func capShapes() []memoryShape {
 		{"hard breaks of a backslash", repeated("a\\\n")},
 		{"1 MiB of bare >", repeated(">")},
 		{"link reference definitions", repeated("[a]: b\n")},
+		{`\~a`, repeated(`\~a`)},
+		{`)\_`, repeated(`)\_`)},
+		{`\)\_`, repeated(`\)\_`)},
+		{`\[a`, repeated(`\[a`)},
 	}
 }
 
@@ -952,10 +1006,26 @@ func heaviestAdmittedShapes(t *testing.T) []admittedShape {
 	return shapes
 }
 
+// escapedAdmittedShapes are the heaviest documents of escaped syntax the element limit admits: each
+// escape spells a character - `~`, `_`, `[` - that the renderer reads back bare, as the delimiter or
+// opener it makes, so a document of them costs what that syntax does. Weighed as the four elements
+// of its one text, a stored `\)\_` held 275 MiB to store, 256 MiB to read cold and 973 MiB for four
+// cold reads at once.
+func escapedAdmittedShapes(t *testing.T) []admittedShape {
+	t.Helper()
+	var shapes []admittedShape
+	for _, unit := range []string{`\~a`, `)\_`, `\)\_`, `\[a`, "&#95;a"} {
+		shapes = append(shapes, admittedShape{name: unit, markdown: heaviestAdmitted(t, func(units int) string { return strings.Repeat(unit, units) })})
+	}
+	return shapes
+}
+
 // heaviestAdmitted is the document of the most units build makes that the element limit admits,
 // padded with a paragraph of plain words, which weighs next to nothing, to the cap: the cap of what
 // the server stores, its rendering, which can run longer than the markdown written - a blank line
-// between two headings, a line feed at the end - so the padding gives way to that.
+// between two headings, a line feed at the end - so the padding gives way to that. The rendering is
+// weighed as well as the markdown, as the server weighs a new document: an escape it writes bare
+// (`\[a` is stored `[a`) can weigh more there than as written.
 func heaviestAdmitted(t *testing.T, build func(units int) string) string {
 	t.Helper()
 	document := func(units int) string {
@@ -963,11 +1033,18 @@ func heaviestAdmitted(t *testing.T, build func(units int) string) string {
 		return text + strings.Repeat("word ", documentCap/5+1)[:documentCap-len(text)]
 	}
 	admitted := func(units int) bool {
-		_, err := pmdoc.Parse(document(units))
+		tree, err := pmdoc.Parse(document(units))
 		if err != nil && !errors.Is(err, pmdoc.ErrTooManyElements) {
 			t.Fatalf("parse %d units: %v", units, err)
 		}
-		return err == nil
+		if err != nil {
+			return false
+		}
+		rendered, err := pmdoc.Render(tree)
+		if err != nil {
+			t.Fatalf("render %d units: %v", units, err)
+		}
+		return !pmdoc.MeasureDocument(rendered).TooHeavy()
 	}
 	low, high := 1, 1
 	for admitted(high) {
