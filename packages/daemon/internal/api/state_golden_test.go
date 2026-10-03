@@ -19,7 +19,7 @@ import (
 var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this package pins")
 
 // goldenPath is the cross-language pin: Go writes the wire shape, and
-// `packages/contracts/src/legion-go-api.test.ts` parses it through the strict zod schema the
+// `packages/contracts/src/legion-api.test.ts` parses it through the strict zod schema the
 // plugin reads with. Go is the source of truth; the fixture is how the schema is held to it.
 func goldenPath(name string) string {
 	return filepath.Join("..", "..", "..", "contracts", "fixtures", "daemon-api", name)
@@ -194,7 +194,7 @@ func TestStateOperatorClaimGolden(t *testing.T) {
 }
 
 // golden pins one response's wire shape: Go writes it (`-update`), and
-// `packages/contracts/src/legion-go-api.test.ts` parses it through the strict schema of the
+// `packages/contracts/src/legion-api.test.ts` parses it through the strict schema of the
 // response it is. A fixture that differs from what Go now writes is stale.
 func golden(t *testing.T, name string, value any) {
 	t.Helper()

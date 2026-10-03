@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -25,6 +26,14 @@ import {
 // The WAITING self-check case below fails if that ever changes.
 const omp = process.env.LEGION_TEST_OMP;
 const onActions = process.env.GITHUB_ACTIONS === "true";
+/** The daemon's golden registration answer (`packages/daemon/internal/api`), so a field the daemon
+ * adds to it reaches the stub below. */
+const registered: Record<string, unknown> = JSON.parse(
+  readFileSync(
+    path.resolve(import.meta.dir, "../../contracts/fixtures/daemon-api/register.json"),
+    "utf8"
+  )
+);
 
 interface Pane {
   /** Every request the stand-in served: the model gateway's, the daemon's, and the listener's. */
@@ -172,6 +181,7 @@ async function runPane(
     }
     if (url.pathname === "/legion/v1/claims/register") {
       return Response.json({
+        ...registered,
         claimToken: "legion-stall-stall-2-implementer",
         tree: "STALL-1",
         issue: "STALL-2",

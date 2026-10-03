@@ -27,7 +27,7 @@ func TestRoleConstantsAreTheWireWords(t *testing.T) {
 }
 
 // The register/ready/exit wire is exchanged with the Oh My Pi plugin and mirrored by
-// `packages/contracts/src/legion-go-api.ts`, so every member name here is a contract with another
+// `packages/contracts/src/legion-api.ts`, so every member name here is a contract with another
 // language. Marshalling is what pins them: a renamed Go field silently changes the wire unless a
 // test reads the bytes.
 func TestWireMemberNames(t *testing.T) {

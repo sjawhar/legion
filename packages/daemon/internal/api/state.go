@@ -3,7 +3,7 @@
 // The shape here is designed from the LEGION-208 spec's Issue record, not ported from the
 // TypeScript daemon's `packages/contracts/src/legion-daemon-api.ts` (which still carries the
 // tossed worker queue and the Dispatch/GitHub mirror). Go is the source of truth for the wire:
-// `packages/contracts/src/legion-go-api.ts` mirrors these types as strict zod objects and is
+// `packages/contracts/src/legion-api.ts` mirrors these types as strict zod objects and is
 // held to them by the golden fixture in `packages/contracts/fixtures/daemon-api/`.
 package api
 

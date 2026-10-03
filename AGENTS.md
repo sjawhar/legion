@@ -95,7 +95,7 @@ projects:
 | Task                   | Location                                      | Notes                                     |
 | ---------------------- | --------------------------------------------- | ----------------------------------------- |
 | Add CLI command        | `packages/daemon/cmd/legion/main.go`          | one `command` per subcommand                   |
-| Change Legion API      | `packages/daemon/internal/api/`               | `state.go` owns the wire shape; `packages/contracts/src/legion-go-api.ts` mirrors it |
+| Change Legion API      | `packages/daemon/internal/api/`               | `state.go` owns the wire shape; `packages/contracts/src/legion-api.ts` mirrors it |
 | Change daemon state    | `packages/daemon/internal/store/`             | Postgres migrations and the issue record        |
 | Deployment instructions (`legion.yaml` `instructions:`) | `packages/daemon/internal/config/files.go` | Operator markdown appended to every pane's system prompt |
 | Add phase guidance     | `skills/legion-worker/SKILL.md`                | See `skills/AGENTS.md`                          |
@@ -109,7 +109,7 @@ projects:
 | Prove the Kubernetes runtime live | `scripts/e2e/stage4b-sandbox-tree.sh` (a full tree), `scripts/e2e/stage4a-sandbox-runtime.sh` (the runtime alone) | The Go daemon on Agent Sandbox in the production cluster; `scripts/e2e/README.md` |
 | Native Dispatch workspace | `packages/dispatch/`, `packages/envoy/cmd/dispatch/` | React SPA and native Dispatch server |
 | Dispatch's document editor | `packages/proof-editor/` | The editor entry, typed blocks and block ids, source-only. Copied from the `sjawhar/proof-sdk` fork at the commit a git dependency pins; the upstream editor modules stay there. See `packages/proof-editor/AGENTS.md` |
-| Legion daemon | `packages/daemon/` | The Go module the root `go.work` binds, with the worker image's Dockerfile under `docker/`. `cmd/legion` is its CLI, `internal/api/state.go` owns its wire shape, `packages/contracts/src/legion-go-api.ts` mirrors it, `scripts/e2e/` holds each stage's live proof. It resolves role prompts at boot from `LEGION_ROLE_PROMPTS_DIR` or `role-prompts` beside the running `legion` executable, validates every shared part, and snapshots the bundle below its state directory before any pane or controller starts. |
+| Legion daemon | `packages/daemon/` | The Go module the root `go.work` binds, with the worker image's Dockerfile under `docker/`. `cmd/legion` is its CLI, `internal/api/state.go` owns its wire shape, `packages/contracts/src/legion-api.ts` mirrors it, `scripts/e2e/` holds each stage's live proof. It resolves role prompts at boot from `LEGION_ROLE_PROMPTS_DIR` or `role-prompts` beside the running `legion` executable, validates every shared part, and snapshots the bundle below its state directory before any pane or controller starts. |
 | Secrets broker | `packages/envoy/cmd/broker`, `packages/envoy/internal/broker` | See `packages/envoy/AGENTS.md` |
 | Documentation site | `docs/site/` | Astro Starlight, published to GitHub Pages by `.github/workflows/docs.yaml`. See `docs/site/README.md`; generated reference pages come from `docs/site/generators/` |
 

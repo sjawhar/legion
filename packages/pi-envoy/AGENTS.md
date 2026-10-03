@@ -77,7 +77,7 @@ acknowledged, and a receipt that fails to publish is logged while delivery conti
 
 The plugin speaks to the Legion daemon (`packages/daemon`) through
 `src/legion/daemon-client.ts`, which reads every response through the strict schemas of
-`@legion/contracts/legion-go-api`, and boots every Legion session through the claim session
+`@legion/contracts/legion-api`, and boots every Legion session through the claim session
 (`src/legion/claim-session.ts`) or, for the controller, the controller session
 (`src/legion/controller-session.ts`). `package.json` declares the contract it was built against as
 `legion.daemonApiVersion` (currently 12): the claim, credential, workflow, controller, and state
@@ -142,7 +142,7 @@ other secret files, and every Sandbox pod's names the providers Secret's own `NA
 extension's Envoy connections read the seed from it (`@legion/envoy-client`'s `nats-auth.ts`), so
 they authenticate as that nkey user once production NATS stops admitting credential-less clients.
 With no seed there is no pointer, and the connections carry no credential.
-Contract 10 adds `POST /legion/v1/roots/close` (`LegionGoRootCloseRequest`: `grantId`, `issue`,
+Contract 10 adds `POST /legion/v1/roots/close` (`LegionRootCloseRequest`: `grantId`, `issue`,
 `reason`), the `legion` tool's `close_root`: a root architect ends its tree while the root is
 admitted and no phase has started, and the daemon posts the reason on the issue before it writes
 `done`.
@@ -185,7 +185,7 @@ And the daemon refuses a controller registration whose `pluginContract` is not i
 `LEGION_PROJECT`, or one whose controller role is not that of the project the state names
 (`legionProjectToken` in `@legion/contracts`, the daemon's own rule), stops the claim there; then
 `claims/register` with the capability in place of a boot token, answered with
-`api.ControllerRegisterResponse` (`LegionGoControllerRegisterResponse`), then the Envoy role
+`api.ControllerRegisterResponse` (`LegionControllerRegisterResponse`), then the Envoy role
 `legion-<project>-controller`, then a subscription to the project's controller topic
 `notifications.legion.<project>.controller` (`legionControllerNoticeSubject`, the project from
 `LEGION_PROJECT`), then a controller grant per credentialed tool call from the `/grants`

@@ -7,7 +7,7 @@
  * (`GET /legion/v1/state`, which `legion handoff complete` reads the issue's phase from, then
  * `handoff/complete`).
  *
- * Every request and response body is the Go daemon's (`@legion/contracts/legion-go-api`): the
+ * Every request and response body is the Go daemon's (`@legion/contracts/legion-api`): the
  * plugin's grant request, the CLI's redemptions and completion, and the state document. The grant
  * rule mirrors the real daemon's: a grant lives for 60 seconds and redeems any number of times
  * while it lives; an unknown or expired grant id answers 403 `{"error":"Invalid or expired
@@ -27,12 +27,12 @@ import { randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 import { isLegionRole, type LegionRole, roleToken } from "@legion/contracts";
 import {
-  LegionGoGrantCredentialRequest,
-  LegionGoGrantRequest,
-  LegionGoHandoffCompleteRequest,
-  type LegionGoPhase,
-  LegionGoStateResponse,
-} from "@legion/contracts/legion-go-api";
+  LegionGrantCredentialRequest,
+  LegionGrantRequest,
+  LegionHandoffCompleteRequest,
+  type LegionPhase,
+  LegionStateResponse,
+} from "@legion/contracts/legion-api";
 
 const GRANT_TTL_MS = 60_000;
 /** Encoded exactly as the daemon encodes it (`legion-<project>-<key>-<role>`, lower-cased),
@@ -48,7 +48,7 @@ const SESSION_SECRET = "rig-secret";
 const GIT_TOKEN = "rig-token";
 
 /** The workflow phase each role's worker runs in (`workflow.RoleFor`'s inverse). */
-const ROLE_PHASE: Readonly<Record<LegionRole, LegionGoPhase>> = {
+const ROLE_PHASE: Readonly<Record<LegionRole, LegionPhase>> = {
   architect: "admitted",
   planner: "planning",
   implementer: "implementing",
@@ -58,7 +58,7 @@ const ROLE_PHASE: Readonly<Record<LegionRole, LegionGoPhase>> = {
 };
 const startedAt = new Date().toISOString();
 /** `GET /legion/v1/state`: the one issue the worker holds, admitted in the phase its role works. */
-const STATE = LegionGoStateResponse.parse({
+const STATE = LegionStateResponse.parse({
   daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
   admission: { cap: 1, active: [issue], waiting: [] },
   issues: {
@@ -143,7 +143,7 @@ function handle(path: string, body: unknown): { response: Response; mintedGrantI
       return { response: new Response(null, { status: 204 }) };
     }
     case "/legion/v1/grants": {
-      const parsed = LegionGoGrantRequest.safeParse(body);
+      const parsed = LegionGrantRequest.safeParse(body);
       if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
       if (parsed.data.secret !== SESSION_SECRET) {
         return { response: forbidden("Invalid session secret") };
@@ -159,7 +159,7 @@ function handle(path: string, body: unknown): { response: Response; mintedGrantI
     // The daemon reads both credential redemptions as `api.GrantCredentialRequest` (a strict
     // `{ grantId }`), so the stand-in refuses the same malformed bodies it would.
     case "/legion/v1/git-credential": {
-      const parsed = LegionGoGrantCredentialRequest.safeParse(body);
+      const parsed = LegionGrantCredentialRequest.safeParse(body);
       if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
       const refused = resolveGrant(parsed.data.grantId);
       if (refused) return { response: refused };
@@ -170,14 +170,14 @@ function handle(path: string, body: unknown): { response: Response; mintedGrantI
       };
     }
     case "/legion/v1/gh-token": {
-      const parsed = LegionGoGrantCredentialRequest.safeParse(body);
+      const parsed = LegionGrantCredentialRequest.safeParse(body);
       if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
       const refused = resolveGrant(parsed.data.grantId);
       if (refused) return { response: refused };
       return { response: json(200, { token: GIT_TOKEN, appLogin: "rig[bot]" }) };
     }
     case "/legion/v1/handoff/complete": {
-      const parsed = LegionGoHandoffCompleteRequest.safeParse(body);
+      const parsed = LegionHandoffCompleteRequest.safeParse(body);
       if (!parsed.success) return { response: json(400, { error: parsed.error.message }) };
       const refused = resolveGrant(parsed.data.grantId);
       if (refused) return { response: refused };
