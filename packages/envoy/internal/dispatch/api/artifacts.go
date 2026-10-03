@@ -330,11 +330,6 @@ func (s *server) storeArtifact(
 		s.writeHandlerError(w, err)
 		return
 	}
-	authors, err := encodeJSON([]model.Actor{actor})
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
 	var version model.Version
 	var versionAuthors []byte
 	checksum := sha256.Sum256(input.content)
@@ -373,6 +368,11 @@ func (s *server) storeArtifact(
 			return
 		}
 	} else {
+		authors, err := encodeJSON([]model.Actor{actor})
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		size := len(input.content)
 		if err := tx.QueryRow(r.Context(), `
 			insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, named, summary)

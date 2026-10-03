@@ -8,10 +8,10 @@ import "github.com/sjawhar/envoy/internal/dispatch/model"
 // version's commit releases only the entries it took (authorCapture.release).
 //
 // That is sound because a version takes its authors no later than it reads the tree it records,
-// and a change is credited only once the room holds it. A settlement takes its authors under the
-// room's state lock before it copies the tree; a version read straight from the room holds that
-// lock across its copy; and a transaction's version takes its authors before its fork is brought
-// up to date with the room (captureLiveTextAndAuthors, forkLive). The update observer that credits
+// and a change is credited only once the room holds it. A settlement and a version read straight
+// from the room take their authors under the room's state lock before they copy the tree; a
+// transaction's version takes its authors before its fork is brought up to date with the room
+// (captureLiveTextAndAuthors, forkLive). The update observer that credits
 // service's change runs only once the change is in the room; a committed transaction's write is
 // credited before its publish, but while the transaction still holds the writer slot, and a
 // settlement that finds the slot held, or published since its read, writes no version
@@ -38,6 +38,9 @@ type authorCapture struct {
 	state   *roomState
 	through uint64
 	authors map[string]model.Actor
+	// superseded is pending credit the caller's replacement removed from the tree. Its commit
+	// clears these entries without naming their authors on the replacement's version.
+	superseded map[string]struct{}
 }
 
 // creditAuthor makes actor a pending author of the room's next version, for a content change of
@@ -68,20 +71,39 @@ func (capture authorCapture) credit(actor model.Actor) {
 	capture.authors[actorKey(actor)] = actor
 }
 
+// creditKey adds actor under a key the caller already computed.
+func (capture authorCapture) creditKey(key string, actor model.Actor) {
+	capture.authors[key] = actor
+}
+
 // has reports whether the version credits actor.
 func (capture authorCapture) has(actor model.Actor) bool {
 	_, found := capture.authors[actorKey(actor)]
 	return found
 }
 
+// supersede clears the pending entry keyed key when this capture commits, without crediting its
+// author on the version.
+func (capture *authorCapture) supersede(key string) {
+	if capture.superseded == nil {
+		capture.superseded = make(map[string]struct{})
+	}
+	capture.superseded[key] = struct{}{}
+}
+
 // release releases, once the version the capture was taken for has committed, the pending entries
-// the version holds and credits: each of its authors' entries credited no later than through. Every
-// release of pending authors goes through it.
+// the version holds and credits, plus entries its replacement superseded: each was credited no
+// later than through. Every release of pending authors goes through it.
 func (capture authorCapture) release() {
 	state := capture.state
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	for key := range capture.authors {
+		if entry, pending := state.pending[key]; pending && entry.seq <= capture.through {
+			delete(state.pending, key)
+		}
+	}
+	for key := range capture.superseded {
 		if entry, pending := state.pending[key]; pending && entry.seq <= capture.through {
 			delete(state.pending, key)
 		}

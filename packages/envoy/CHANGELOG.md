@@ -301,18 +301,19 @@
   observer once the edit's transaction has released the document, and observers wait for each
   other's renders) was credited on no version: the edit's own settlement found the document
   versioned, wrote none, and released the author. Each pending author now carries the change it
-  credits, every version takes its authors no later than it reads the tree it records, a version's
+  credits, every version takes its authors before or with the tree read it records, a version's
   commit releases only the entries it took, and a settlement that writes no version releases
   nothing, so the next version credits such an author. That includes an author whose edits came to
-  nothing, typed and undone before a settlement, and one whose text an upload replaced, since the
-  upload's version credits its uploader alone. An upload's version records that it credits its
-  uploader, who is not credited again on the next version for the upload or for browser edits the
-  upload was written over. A service edit or upload now records the actor that introduced each new
-  ask block until settlement indexes it, so a browser edit elsewhere cannot make that browser the
-  ask's author; a browser-created ask uses the latest known browser editor, and an ambiguous browser
-  edit uses the document-settlement actor. Approval moves likewise name the actor whose edit moved
-  the version, even when it credits several authors, so a stale pending author does not make a
-  human's move appear as the document settlement or suppress its notification.
+  nothing, typed and undone before a settlement. An upload's replacement clears every pending
+  credit it overwrote through the upload write's room read, while an edit credited after that read
+  stays pending for the next version. A service edit or upload records the actor that introduced
+  each new ask block until settlement indexes it, so a browser edit elsewhere cannot make that
+  browser the ask's author; a browser-created ask uses the latest known browser editor, an ambiguous
+  browser edit uses the document-settlement actor, and a browser ask that appeared after a
+  settlement took its author snapshot waits for its own settlement. Approval moves likewise name
+  the actor whose edit moved the version, even when it credits several authors, so a stale pending
+  author does not make a human's move appear as the document settlement or suppress its
+  notification.
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds

@@ -294,6 +294,38 @@ func TestSettlementCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *
 	}
 }
 
+// A browser ask block inserted after settlement takes its authors and before it copies the tree is
+// left to the edit's own settlement. The first settlement cannot attribute a block its author
+// snapshot predates; the next one sees Bob's credit and creates the ask in his name (LEGION-503).
+func TestSettlementDefersAnAskInsertedBetweenItsAuthorsAndCopy(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+
+	var release func()
+	service.afterSettleAuthorsTake = func(room string) {
+		if room == artifactID && release == nil {
+			release = holdPeerEdit(t, service, artifactID, &service.afterCreditUpdate, appendBlocks(t, ":::ask{#between-take-and-copy urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n"))
+		}
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if release == nil {
+		t.Fatal("settlement never reached the window between its authors and its copy")
+	}
+	service.afterSettleAuthorsTake = nil
+	release()
+	settleCurrentGeneration(t, service, artifactID)
+	if author := blockAskAuthor(t, service, artifactID, "between-take-and-copy"); author != bob {
+		t.Fatalf("ask author = %#v, want %v, who inserted it", author, bob)
+	}
+	if actor := blockAskOpenedActor(t, service, artifactID, "between-take-and-copy"); actor != bob {
+		t.Fatalf("ask.opened actor = %#v, want %v, who inserted it", actor, bob)
+	}
+}
+
 // An author already pending when a settlement takes its authors who edits again before it commits
 // is credited on both versions: the settlement's, which holds the first edit, and the one the
 // second edit's own settlement writes. The second edit's update observer credits the author under
