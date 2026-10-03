@@ -337,7 +337,7 @@ test(
     const [unauthorizedError, featureOffError, documentSchemaError, serverErrorResult] =
       await Promise.all([
         unauthorized.whoAmI().catch((error: unknown) => error),
-        featureOff.getCredentialPending().catch((error: unknown) => error),
+        featureOff.getCredentialRecord("record-1").catch((error: unknown) => error),
         documentSchema.getArtifactText("artifact-1").catch((error: unknown) => error),
         serverError.whoAmI().catch((error: unknown) => error),
       ]);
@@ -351,8 +351,8 @@ test(
 );
 
 test(
-  "the production retry policy issues one credential-requests request when the broker is " +
-    "unconfigured, not three (the Inbox and Settings queries share this policy from main.tsx)",
+  "the production retry policy issues one credential request when the broker is unconfigured, " +
+    "not three (every query shares this policy from main.tsx)",
   async () => {
     const stub = stubFetch(() =>
       Response.json({ error: "not configured", code: "FEATURE_OFF" }, { status: 404 })
@@ -372,15 +372,15 @@ test(
     try {
       await expect(
         queryClient.fetchQuery({
-          queryFn: () => client.getCredentialPending(),
-          queryKey: ["credential-pending"],
+          queryFn: () => client.getCredentialRecord("record-1"),
+          queryKey: ["credential-record", "record-1"],
         })
       ).rejects.toMatchObject({ code: "FEATURE_OFF" });
 
       // isRetryableQueryError must treat FEATURE_OFF as non-retryable: if it doesn't, every
-      // Inbox and Settings load where DISPATCH_AGENT_SECRETS_URL is unset issues three
-      // requests (and logs three failed fetches) instead of one, the same shape as an
-      // unconfigured architecture source.
+      // credential page opened where DISPATCH_AGENT_SECRETS_URL is unset issues three requests
+      // (and logs three failed fetches) instead of one, the same shape as an unconfigured
+      // architecture source.
       expect(stub.requests).toHaveLength(1);
     } finally {
       queryClient.clear();
