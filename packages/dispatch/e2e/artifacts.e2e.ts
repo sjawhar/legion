@@ -9,6 +9,7 @@ import {
   createIssue,
   createIssueArtifact,
   createProject,
+  dashboardOrigin,
   getArtifactText,
 } from "./api";
 import { countDocumentSockets, documentEditor, documentTransport, typeAtEnd } from "./editor";
@@ -46,6 +47,12 @@ async function openArtifacts(page: Page, isPhone: boolean) {
 // "Upload" button (or "Cancel" to discard the pick) before it actually creates the version.
 async function confirmUpload(page: Page): Promise<void> {
   await page.getByRole("button", { exact: true, name: "Upload" }).click();
+}
+
+// `page.request` sends the page's session cookie and no `Origin`, and the server refuses a
+// cookie-authenticated write whose `Origin` is not the dashboard's (enforceCookieOrigin).
+function postAsPage(page: Page, path: string, data?: object) {
+  return page.request.post(path, { data, headers: { Origin: dashboardOrigin } });
 }
 
 test("artifacts upload, version, references, and phone layout", async ({ page }, testInfo) => {
@@ -316,7 +323,8 @@ test("an out-of-schema document names its repair and uploads replacement markdow
     content: "before\n",
     name: "repair.md",
   });
-  const corrupted = await page.request.post(
+  const corrupted = await postAsPage(
+    page,
     `/api/v1/artifacts/${upload.artifact.id}/_test/outside-schema`
   );
   expect(corrupted.status()).toBe(204);
@@ -347,7 +355,8 @@ test("an out-of-schema document does not reconnect from cached text", async ({ p
   await expect.poll(sockets).toBe(1);
 
   await page.goto(`/issues/${issue.key}`);
-  const corrupted = await page.request.post(
+  const corrupted = await postAsPage(
+    page,
     `/api/v1/artifacts/${upload.artifact.id}/_test/outside-schema`
   );
   expect(corrupted.status()).toBe(204);
@@ -384,7 +393,8 @@ test("a mounted editor does not reconnect into a document made unreadable while 
   // invalid. A held socket opens no network connection, so it is counted once it is released.
   transport.hold();
   await transport.sever();
-  const corrupted = await page.request.post(
+  const corrupted = await postAsPage(
+    page,
     `/api/v1/artifacts/${upload.artifact.id}/_test/outside-schema`
   );
   expect(corrupted.status()).toBe(204);
@@ -463,9 +473,7 @@ test("a live document refuses a rebuild", async ({ page }) => {
 
   await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
   await expect(documentEditor(page)).toContainText("before");
-  const rebuilt = await page.request.post(`/api/v1/artifacts/${upload.artifact.id}/rebuild`, {
-    data: {},
-  });
+  const rebuilt = await postAsPage(page, `/api/v1/artifacts/${upload.artifact.id}/rebuild`, {});
   expect(rebuilt.status()).toBe(409);
   await expect(rebuilt.text()).resolves.toContain(`"code":"DOCUMENT_LIVE"`);
   await expect(documentEditor(page)).toContainText("before");
