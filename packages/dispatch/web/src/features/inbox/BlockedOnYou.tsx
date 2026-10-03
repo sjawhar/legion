@@ -29,13 +29,31 @@ export function waitingOnYou<
   return asks.filter((ask) => ask.waiting_on === "human" && !isSnoozed(ask));
 }
 
-/** How many of the things the Inbox lists wait for the viewer: its asks whose turn is theirs, and
- *  every pending credential request, each of which names the viewer as its approver. The rail's
- *  and the compact top bar's `Needs you N` count the whole inbox; the banner counts the view. */
+/** Everything the Inbox lists that waits for the viewer - its asks whose turn is theirs, and every
+ *  pending credential request, each of which names the viewer as its approver - counted, with when
+ *  the oldest of them began waiting (undefined when nothing does). The badges and the banner read
+ *  this one rule, so another kind of waiting item is added here once. */
+export function needsYou(
+  asks: readonly InboxRow[],
+  credentialRequests: readonly CredentialPendingRow[]
+): { count: number; oldest: string | undefined } {
+  const since = [
+    ...waitingOnYou(asks).map((ask) => ask.created_at),
+    ...credentialRequests.map((request) => request.requested_at),
+  ];
+  const oldest = since.reduce<string | undefined>(
+    (earlier, at) => (earlier === undefined || compareTimestamps(at, earlier) < 0 ? at : earlier),
+    undefined
+  );
+  return { count: since.length, oldest };
+}
+
+/** The rail's and the compact top bar's `Needs you N`, over the whole inbox; the banner counts
+ *  the view. */
 export function useNeedsYouCount(): number {
   const inbox = useQuery(inboxQuery());
   const { requests } = useCredentialRequests();
-  return waitingOnYou(inbox.data ?? []).length + requests.length;
+  return needsYou(inbox.data ?? [], requests).count;
 }
 
 export function BlockedOnYou({
@@ -50,9 +68,8 @@ export function BlockedOnYou({
   credentialRequests?: readonly CredentialPendingRow[];
   variant?: "banner" | "pill";
 }): ReactNode {
-  const waiting = waitingOnYou(asks);
-  const count = waiting.length + credentialRequests.length;
-  if (count === 0) return null;
+  const { count, oldest } = needsYou(asks, credentialRequests);
+  if (oldest === undefined) return null;
 
   if (variant === "pill") {
     return (
@@ -64,11 +81,6 @@ export function BlockedOnYou({
       </Link>
     );
   }
-
-  const oldest = [
-    ...waiting.map((ask) => ask.created_at),
-    ...credentialRequests.map((request) => request.requested_at),
-  ].reduce((earlier, at) => (compareTimestamps(at, earlier) < 0 ? at : earlier));
 
   // A count of every waiting ask, not one urgency, so the strip stays structural: the spec
   // reserves the urgency hues for urgency and priority. `w-full` is load-bearing - below

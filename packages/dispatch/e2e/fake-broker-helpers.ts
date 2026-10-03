@@ -1,5 +1,6 @@
 import { test } from "@playwright/test";
 
+import type { FakePendingRequest } from "./fake-broker";
 import { usesFakeBroker } from "./harness-broker";
 import { harnessPorts } from "./harness-ports";
 
@@ -18,13 +19,7 @@ async function fixtureRequest(path: string, body: unknown): Promise<void> {
  *  The test that seeds them is skipped where this run's server reads no fake broker: a deployed
  *  server, or one the harness switch points at no broker or another (e2e/harness-broker.ts). */
 export async function setPendingCredentialRequests(
-  requests: readonly {
-    approver: string;
-    identifiers: readonly string[];
-    kind: "agent_secret" | "launcher_credential";
-    record_id: string;
-    requested_at: string;
-  }[]
+  requests: readonly FakePendingRequest[]
 ): Promise<void> {
   test.skip(!usesFakeBroker, "this run's server reads no fake broker (e2e/harness-broker.ts)");
   await fixtureRequest("/__fixture/pending", requests);

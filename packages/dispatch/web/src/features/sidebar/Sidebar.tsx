@@ -20,7 +20,8 @@ import {
   railSecondaryText,
 } from "../../theme/classes";
 import { totalUnreadReplies, unreadRepliesLabel } from "../agents/unread";
-import { useNeedsYouCount } from "../inbox/BlockedOnYou";
+import { useCredentialRequests } from "../credentials/pending";
+import { needsYou } from "../inbox/BlockedOnYou";
 import { buildIssuePath, buildProjectPath, parseIssuePath, parseProjectPath } from "../refs/routes";
 
 /** One rail entry: a key, its title, and the open-ask count when there is one. */
@@ -81,7 +82,7 @@ export function Sidebar({
     queryFn: () => api.listIssues({ pinned: true }),
   });
   const projects = useQuery(projectsQuery());
-  const needsYou = useNeedsYouCount();
+  const credentials = useCredentialRequests();
   const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
   const currentIssue = parseIssuePath(location.pathname)?.key;
   const currentProject = parseProjectPath(location.pathname)?.project;
@@ -114,6 +115,7 @@ export function Sidebar({
       </>
     );
   }
+  const needsYouCount = needsYou(inbox.data, credentials.requests).count;
 
   return (
     <>
@@ -126,11 +128,11 @@ export function Sidebar({
             to="/"
           >
             <span>Inbox</span>
-            {needsYou === 0 ? null : (
+            {needsYouCount === 0 ? null : (
               <span
                 className={`rounded-full px-1.5 py-0.5 text-xs ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
               >
-                Needs you {needsYou}
+                Needs you {needsYouCount}
               </span>
             )}
           </Link>
