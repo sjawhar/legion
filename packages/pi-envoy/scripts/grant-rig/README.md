@@ -90,7 +90,7 @@ Scratch directory `$RIG` (default `mktemp -d /tmp/l12rig.XXXX`), standing in for
 | `state/bin/record-grant` | Appends `<grant file contents> <mode> <LEGION_GRANT or ->` to `$RIG/seen-grants.log`, so the prompt never names the credential; the third field is what a 1.17.0 (text-delivery) command ran under. |
 | `state/worker-bin/gh` | The `gh` shim the daemon installs at boot, installed with the launcher: drops its own directory from PATH and execs `legion gh`. |
 | `state/home` | The home under which the pane's four XDG base directories are made, as the daemon makes them for every pane. |
-| `state/prompts` | Empty here: only a pane given a role bundle (the skill scenarios' tester) gets the daemon's prompt snapshot. |
+| `state/prompts` | Empty here: only a pane given a system prompt (the skill scenarios' tester) gets the daemon's prompt snapshot. |
 | `state/gh` | The `GH_CONFIG_DIR` `legion gh` gives the gh it runs. |
 | `ws` | The worker's workspace, an empty jj repository (the boot handshake sets a jj identity on it). |
 | `rig-mode.json` | What `setup.sh` laid out: plugin mode, Legion build, checkout commit, and the `worker-bin` directory verdict G expects first on the pane's PATH; copied into each run's `report.json`. |

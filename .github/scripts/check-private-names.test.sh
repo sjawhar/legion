@@ -30,6 +30,9 @@ key="AGENT""C"
 company="trajectory"
 company_proper="T""rajectory"
 labs="labs"
+internal="internal"
+private_host_suffix="private.example"
+example_host_suffix="example"
 
 # fixture <name>: a clean repository with one tracked file. Echoes its root.
 fixture() {
@@ -60,7 +63,7 @@ echo "case: a clean repository"
 root=$(fixture clean)
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
-check "says so" "$(contains "$out" 'no text file names the private deployment repository or the company')"
+check "says so" "$(contains "$out" 'no text file names the private deployment repository, company, or internal host')"
 
 echo "case: every spelling of the deployment repository and its project key is refused"
 mentions=(
@@ -106,6 +109,20 @@ for index in "${!mentions[@]}"; do
     "$(contains "$out" 'docs/notes.md:1: names the company')"
 done
 
+echo "case: a private internal host is refused"
+root=$(fixture private-host)
+printf 'https://listener.%s.%s\n' "$internal" "$private_host_suffix" > "$root/docs/notes.md"
+run_check "$root"
+check "private host fails" "$(is "$status" 1)"
+check "private host is named at its file and line" \
+  "$(contains "$out" 'docs/notes.md:1: names a private internal host')"
+
+root=$(fixture public-host)
+printf 'https://listener.%s.%s\n' "$internal" "$example_host_suffix" > "$root/docs/notes.md"
+printf '%s\n' 'this.internal.push' >> "$root/docs/notes.md"
+run_check "$root"
+check "reserved example host passes" "$(is "$status" 0)"
+
 echo "case: identifiers that merely start with those letters, and the English word, pass"
 root=$(fixture lookalikes)
 cat > "$root/docs/notes.md" <<'TEXT'
@@ -124,7 +141,7 @@ check "fails" "$(is "$status" 1)"
 check "annotates the file and line for GitHub" \
   "$(contains "$out" '^::error file=docs/notes.md,line=1::docs/notes.md:1:')"
 check "does not repeat the name" "$(is "$(contains "$out" "$repo")" false)"
-check "counts the lines" "$(contains "$out" '1 line(s) name the private deployment repository or the company')"
+check "counts the lines" "$(contains "$out" '1 line(s) name the private deployment repository, company, or an internal host')"
 
 echo "case: a line naming both is reported once"
 root=$(fixture both)

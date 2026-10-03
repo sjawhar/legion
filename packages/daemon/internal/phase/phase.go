@@ -29,7 +29,7 @@ var All = []Phase{
 // HandoffFile is the handoff a phase ends with, .legion/<word>.json, and whether it ends with one
 // its role writes and commits: the planner's, the implementer's implementing rounds, the tester's,
 // and the reviewer's, each under the word its role's prompt passes to the legion tool's
-// handoff_write (packages/pi-envoy/roles/*.md). Retro, the production check, and the merger's
+// handoff_write (internal/prompts/roles/*.md). Retro, the production check, and the merger's
 // READY write none, and report the commit they stand on.
 func HandoffFile(p Phase) (string, bool) {
 	switch p {

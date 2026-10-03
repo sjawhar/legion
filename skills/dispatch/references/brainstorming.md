@@ -38,15 +38,16 @@ goes out at once, whatever its stage.
 ## Coming to terms
 
 The conversation comes to terms in both directions. Explain what the code does today, plainly
-enough for the human to react to, and ask; the human's model comes out of those reactions, and so
-do corrections to it. Neither your model nor theirs is the starting truth.
+enough for the human to react to and with each tool, event and route it uses named exactly (as
+"Writing for the human" in `skill://dispatch` says), and ask; the human's model comes out of those
+reactions, and so do corrections to it. Neither your model nor theirs is the starting truth.
 
 ## A worked example
 
-One project's spec for its secrets broker's identity model shows the pattern. Its first version
+Take the spec for the secrets broker's identity model. Its first version
 held the problem, the human's words, what exists today, and the one question that was ready then;
 it also called itself "a conversation", which the human struck as commentary. Each later version
 folds the answers in with the human's words and date and adds the questions they open. Its first
-approval request, at version 35, named four inferences the human had never discussed; the human
-rejected it, and each of the four was then either put to the human as its own decision block or
-taken out of the spec.
+approval request, on the spec's version 35, named four inferences the human
+had never discussed; the human rejected it, and each of the four was then either put to the human
+as its own decision block or taken out of the spec.
