@@ -110,8 +110,8 @@ screenshots are committed too, and its walkthrough has a build of its own:
 `docs/site/media/broker/walkthrough/build.py` makes it from the cut in `edl.py`, not
 `walkthrough.ts`. Its terminal casts are recorded live against the rig between its browser
 sections, since each section acts on what the one before it left. Its browser sections are
-Playwright's `recordVideo` at 1280x720 and 30 fps, the recorder the shared pipeline avoids for its
-blur, because the committed footage and the marks the cut is placed at come from it, and changing
-it needs a new take. It publishes the video, its captions and its poster to
-`public/media/broker/`. `docs/site/media/broker/walkthrough/README.md` says how to record and
-build it.
+Playwright's `recordVideo` at 1280x720, which `build.py` renders at 30 fps. The shared pipeline
+avoids that recorder for its blur; this walkthrough keeps it because the committed footage and the
+marks the cut is placed at come from it, and changing it needs a new take. It publishes the video,
+its captions and its poster to `public/media/broker/`.
+`docs/site/media/broker/walkthrough/README.md` says how to record and build it.

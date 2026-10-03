@@ -17,7 +17,7 @@ is silence the clip's length with its narration parts laid at their marks. Each 
 its text, shown from where the part starts until the next part in its clip starts or the clip
 ends. The build fails when a clip or part names a mark its section did not record, a window falls
 outside its file, a part starts before its clip, runs past its clip's end or overlaps the next
-part, a part has no text or its caption falls outside its clip, or a section's file duration is
+part, a part's text in narration.json is missing or blank, or a section's file duration is
 off its wall-clock length (a browser recording outside its actions' and its page's lengths by
 more than 5%, a cast more than 1.5 s shorter than its section or any longer). The clips are
 concatenated into build/walkthrough.mp4, the video copied and the narration normalized to -16 LUFS
@@ -61,10 +61,10 @@ CAST_SLACK = 1.5  # how much shorter a cast may be than its section: the recorde
 DEAD_AIR = 2.0  # seconds of silence over a frozen frame the video may not hold
 # Silence is below SILENCE_DB; a sound shorter than BLIP (a breath, a click) does not end a silence.
 SILENCE_DB, BLIP = -45, 0.3
-# Every docs video's narration loudness (docs/site/media/README.md): -16 LUFS integrated, with a
-# true peak of at most -1.5 dBTP. loudnorm aims the peak AAC_HEADROOM dB lower, since encoding the
-# AAC raises it again. A built video more than LOUDNESS_SLACK LU off LUFS, or peaking over
-# TRUE_PEAK, fails the build.
+# Every docs video's narration loudness, as docs/site/media/walkthrough.ts sets it
+# (`loudnorm=I=-16:TP=-1.5`): -16 LUFS integrated, with a true peak of at most -1.5 dBTP. loudnorm
+# aims the peak AAC_HEADROOM dB lower, since encoding the AAC raises it again. A built video more
+# than LOUDNESS_SLACK LU off LUFS, or peaking over TRUE_PEAK, fails the build.
 LUFS, TRUE_PEAK, LOUDNESS_SLACK, AAC_HEADROOM = -16.0, -1.5, 0.5, 0.5
 LOUDNORM = f"loudnorm=I={LUFS}:TP={TRUE_PEAK - AAC_HEADROOM}:LRA=11"
 
@@ -202,10 +202,9 @@ def check(clips: list[Clip]) -> tuple[list[Resolved], list[str]]:
         untexted = [part for part, _ in r.narration if part not in TEXT]
         if untexted:
             problems.append(f"{clip.id}: narration.json has no text for {', '.join(untexted)}")
-            continue
-        for start, end, text in r.captions():
-            if not 0 <= start < end <= r.span:
-                problems.append(f"{clip.id}: caption {text!r} at {start:.2f}-{end:.2f}s falls outside the clip (0-{r.span:.2f}s)")
+        blank = [part for part, _ in r.narration if part in TEXT and not TEXT[part].strip()]
+        if blank:
+            problems.append(f"{clip.id}: narration.json's text for {', '.join(blank)} is blank")
     return resolved, problems
 
 

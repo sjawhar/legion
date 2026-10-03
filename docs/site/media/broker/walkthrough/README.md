@@ -27,12 +27,13 @@ python3 build.py           # builds build/walkthrough.mp4 and checks it, writes 
 shorter than its actions or longer than its page's life, by more than 5%; a cast more than 1.5 s
 shorter than its section, or longer), a clip or part naming a mark its section did not record, a
 window outside its file, a narration part that starts before its clip, overlaps the next or runs
-past its clip's end, and a part with no text in `narration.json` or a caption outside its clip.
+past its clip's end, and a part whose text in `narration.json` is missing or blank.
 Nothing is stretched or held: a clip is its window of the file, at its own speed, and the audio is
 padded with silence, never the video with frames. It prints the cut it resolved (each clip's
 window in its file and where each part falls in the video). It writes the video into `build/`,
 with the video copied from the clips untouched and the narration normalized to every docs video's
-loudness (`docs/site/media/README.md`): -16 LUFS integrated, with a true peak of at most -1.5 dBTP.
+loudness, as `docs/site/media/walkthrough.ts` sets it (`loudnorm=I=-16:TP=-1.5`): -16 LUFS
+integrated, with a true peak of at most -1.5 dBTP.
 loudnorm does that in two passes over the joined clips, the first measuring and the second
 normalizing from that measurement; it aims the peak at -2 dBTP, since encoding the AAC raises it
 again. Where the gain would push the peak over its aim, as in this cut, loudnorm normalizes
