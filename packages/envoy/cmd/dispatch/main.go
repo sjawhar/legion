@@ -648,8 +648,7 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 // loadEnvoyConfig is envoy.json as Dispatch reads it: the files config.Load finds, under the
 // DISPATCH_SERVER_URL and NATS_URLS rows of the settings table.
 func loadEnvoyConfig(env settingValues, options config.LoadOptions) (*config.EnvoyConfig, error) {
-	options.Environment = env.lookup
-	return config.Load(options)
+	return config.Load(env.lookup, options)
 }
 
 // validateDefaultProject confirms DISPATCH_DEFAULT_PROJECT names a project

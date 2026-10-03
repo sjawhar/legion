@@ -7,21 +7,12 @@ import (
 	"testing"
 )
 
-// environment is a LoadOptions.Environment holding exactly values: a key present is set, even
+// environment is the environment Load reads holding exactly values: a key present is set, even
 // when its value is empty, as os.LookupEnv answers.
 func environment(values map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
 		value, set := values[key]
 		return value, set
-	}
-}
-
-// Load reads no environment it is not handed, so a caller cannot lose the overrides by leaving
-// Environment out.
-func TestLoadRefusesNoEnvironment(t *testing.T) {
-	_, err := Load(LoadOptions{CWD: t.TempDir(), HomeDir: t.TempDir()})
-	if err == nil || !strings.Contains(err.Error(), "Environment") {
-		t.Fatalf("Load without an Environment: err = %v, want a refusal naming Environment", err)
 	}
 }
 
@@ -35,7 +26,7 @@ func TestLoadMergesUserAndRepo(t *testing.T) {
 	mustWrite(t, filepath.Join(cwd, ".opencode", "envoy.json"), `{
 		"dispatch": {"serverUrl": "https://repo.example"}
 	}`)
-	cfg, err := Load(LoadOptions{CWD: cwd, HomeDir: home, Environment: environment(nil)})
+	cfg, err := Load(environment(nil), LoadOptions{CWD: cwd, HomeDir: home})
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -87,7 +78,7 @@ func TestLoadEnvironmentOverridesMergedConfig(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := Load(LoadOptions{CWD: cwd, HomeDir: home, Environment: environment(tc.environment)})
+			cfg, err := Load(environment(tc.environment), LoadOptions{CWD: cwd, HomeDir: home})
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
@@ -117,7 +108,7 @@ func TestLoadRejectsInvalidEnvironmentOverrides(t *testing.T) {
 		{name: "empty NATS URL element", environment: map[string]string{"NATS_URLS": "nats://one:4222, "}, variable: "NATS_URLS"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Load(LoadOptions{CWD: t.TempDir(), HomeDir: t.TempDir(), Environment: environment(tc.environment)})
+			_, err := Load(environment(tc.environment), LoadOptions{CWD: t.TempDir(), HomeDir: t.TempDir()})
 			if err == nil {
 				t.Fatalf("expected %s to be rejected", tc.variable)
 			}
@@ -133,7 +124,7 @@ func TestLoadRejectsRemovedDefaultRepoKey(t *testing.T) {
 	mustWrite(t, filepath.Join(home, ".config", "opencode", "envoy.json"), `{
 		"dispatch": {"defaultRepo": "user/repo"}
 	}`)
-	_, err := Load(LoadOptions{CWD: t.TempDir(), HomeDir: home, Environment: environment(nil)})
+	_, err := Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: home})
 	if err == nil {
 		t.Fatalf("expected an error for the removed dispatch.defaultRepo key")
 	}
@@ -147,7 +138,7 @@ func TestLoadRejectsRemovedAppClientIDKey(t *testing.T) {
 	mustWrite(t, filepath.Join(home, ".config", "opencode", "envoy.json"), `{
 		"dispatch": {"appClientId": "user-id"}
 	}`)
-	_, err := Load(LoadOptions{CWD: t.TempDir(), HomeDir: home, Environment: environment(nil)})
+	_, err := Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: home})
 	if err == nil {
 		t.Fatalf("expected an error for the removed dispatch.appClientId key")
 	}
@@ -161,14 +152,14 @@ func TestLoadRejectsInvalidServerURL(t *testing.T) {
 	mustWrite(t, filepath.Join(home, ".config", "opencode", "envoy.json"), `{
 		"dispatch": {"serverUrl": ""}
 	}`)
-	_, err := Load(LoadOptions{CWD: t.TempDir(), HomeDir: home, Environment: environment(nil)})
+	_, err := Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: home})
 	if err == nil {
 		t.Fatalf("expected an error for an invalid serverUrl")
 	}
 }
 
 func TestLoadMissingFilesReturnEmpty(t *testing.T) {
-	cfg, err := Load(LoadOptions{CWD: t.TempDir(), HomeDir: t.TempDir(), Environment: environment(nil)})
+	cfg, err := Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

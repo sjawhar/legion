@@ -30,15 +30,10 @@ type EnvoyConfig struct {
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
-// LoadOptions controls where Load looks for config files and environment overrides.
+// LoadOptions controls where Load looks for config files.
 type LoadOptions struct {
 	CWD     string
 	HomeDir string
-	// Environment is where Load reads the DISPATCH_SERVER_URL and NATS_URLS overrides, as
-	// os.LookupEnv answers: a variable that is set overrides the files, even when it is empty.
-	// It is required: envoy-dispatch hands Load its settings table's lookup, and any other
-	// caller says which environment it means.
-	Environment func(string) (string, bool)
 }
 
 var dispatchKnownKeys = map[string]struct{}{
@@ -59,14 +54,13 @@ func (e *InvalidConfigError) Error() string {
 	return fmt.Sprintf("invalid config %s: %s", e.Path, strings.Join(e.Issues, "; "))
 }
 
-// Load reads user and repo config and applies DISPATCH_SERVER_URL and NATS_URLS
-// environment overrides from opts.Environment. A missing file is not an error. A file that exists
-// but fails validation (an unrecognized key, a malformed value) stops the load
-// and returns an *InvalidConfigError naming the file and the key.
-func Load(opts LoadOptions) (*EnvoyConfig, error) {
-	if opts.Environment == nil {
-		return nil, errors.New("config: LoadOptions.Environment is required")
-	}
+// Load reads user and repo config and applies the DISPATCH_SERVER_URL and NATS_URLS overrides
+// from environment, which answers as os.LookupEnv does: a variable that is set overrides the
+// files, and one set but empty is refused. envoy-dispatch hands it its settings table's lookup;
+// any other caller names the environment it means. A missing file is not an error. A file that
+// exists but fails validation (an unrecognized key, a malformed value) stops the load and returns
+// an *InvalidConfigError naming the file and the key.
+func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConfig, error) {
 	cwd := opts.CWD
 	if cwd == "" {
 		var err error
@@ -99,7 +93,7 @@ func Load(opts LoadOptions) (*EnvoyConfig, error) {
 	if repoCfg != nil {
 		merged = mergeConfig(merged, repoCfg)
 	}
-	if err := applyEnvironmentOverrides(merged, opts.Environment); err != nil {
+	if err := applyEnvironmentOverrides(merged, environment); err != nil {
 		return nil, err
 	}
 	return merged, nil
