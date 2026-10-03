@@ -311,8 +311,13 @@ func TestReadRejectsAResponseLargerThanTheLimit(t *testing.T) {
 	}
 
 	body, status, header, err := client.Read(context.Background(), "installation-token", "/repos/acme/web/pulls/7")
-	if err == nil || !strings.Contains(err.Error(), "1048576-byte limit") {
-		t.Fatalf("Read: err = %v, want a response-limit error", err)
+	if err == nil || !strings.Contains(err.Error(), "GET "+server.URL+"/repos/acme/web/pulls/7: ") ||
+		!strings.Contains(err.Error(), "1048576-byte limit") {
+		t.Fatalf("Read: err = %v, want a response-limit error naming the method and path", err)
+	}
+	var tooLarge *ResponseTooLargeError
+	if !errors.As(err, &tooLarge) || tooLarge.Limit != responseLimit {
+		t.Fatalf("Read: err = %v, want a *ResponseTooLargeError with limit %d", err, responseLimit)
 	}
 	if body != nil || status != 0 || header != nil {
 		t.Fatalf("Read: body=%d status=%d header=%v, want no truncated response", len(body), status, header)

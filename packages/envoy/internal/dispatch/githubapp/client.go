@@ -362,7 +362,7 @@ func (c *Client) request(ctx context.Context, method, target, authorization stri
 		return nil, 0, nil, fmt.Errorf("read %s %s response: %w", method, target, err)
 	}
 	if int64(len(body)) > limit {
-		return nil, 0, nil, &ResponseTooLargeError{Limit: limit}
+		return nil, 0, nil, fmt.Errorf("%s %s: %w", method, target, &ResponseTooLargeError{Limit: limit})
 	}
 	return body, response.StatusCode, response.Header, nil
 }
