@@ -1,0 +1,16 @@
+WEBVTT
+
+00:00:00.400 --> 00:00:07.324
+Your Inbox holds every question agents are waiting on you to answer.
+
+00:00:07.324 --> 00:00:11.398
+This one asks which sign-in path to use.
+
+00:00:13.280 --> 00:00:17.038
+Pick an option, add a note, and answer.
+
+00:00:17.038 --> 00:00:20.411
+The answered ask leaves your Inbox.
+
+00:00:22.160 --> 00:00:31.904
+The answer is written into the issue's spec, inside the decision block: who answered, the option they chose, and their note.

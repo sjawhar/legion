@@ -9,6 +9,9 @@
   "type": "module",
   "description": "Autonomous development swarm using Oh My Pi agents",
   "private": true,
+  "scripts": {
+    "docs:media": "bun docs/site/media/shots.ts"
+  },
   "workspaces": [
     "packages/contracts",
     "packages/envoy-client",
