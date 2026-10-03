@@ -1,4 +1,4 @@
--- 0029_tree_lifecycle.up.sql - each tree's durable admission and cleanup barrier. Claims, starts
+-- 0030_tree_lifecycle.up.sql - each tree's durable admission and cleanup barrier. Claims, starts
 -- and resources bind the open epoch; a cleanup reservation refuses them until API-confirmed
 -- release, and only a fresh root admission opens the next epoch. Keyed by the normalized project
 -- token claims and runtime labels use (claim.ProjectToken), not the issue row's Dispatch key.

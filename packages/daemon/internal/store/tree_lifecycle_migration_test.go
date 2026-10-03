@@ -16,7 +16,7 @@ import (
 func TestTheLifecycleMigrationOpensEpochOneForTreesAdmittedBeforeIt(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
-	migrateThrough(t, store, 28)
+	migrateThrough(t, store, 29)
 	if _, err := store.Pool().Exec(ctx, `insert into issues
 		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
 		values ('LEGION-208', 'LEGION-208', 'LEGION', 'root', 'implementing', 1, 'in_progress', 'A', 1),
