@@ -4,6 +4,19 @@
 
 ### Changed
 
+- `DispatchClient.requestApproval` returns `recorded`, false when Dispatch answered 200 because the
+  open request already stood as asked, and `dispatch_request_approval` says which it was: "Approval
+  requested" when the call opened the request or handed it back (rewording it first when the
+  summary was new), and "already waits on the human, so this call changed nothing" otherwise,
+  naming what would have left it waiting on the agent (LEGION-470). A different summary while the
+  request waits on the human is Dispatch's `409 APPROVAL_WAITS_ON_HUMAN`, reported as the error it
+  is. `DispatchClient.comment` and `artifactComment` return `CommentWriteResponse`, the comment
+  plus `ask_waiting_on` on a reply to an open ask, which `dispatch_comment` reports as the ask's
+  state after the reply. Delivery accepts the new `ask.handed_back` event, whose payload is the ask.
+  A document's approval line in `dispatch_read` and `dispatch_doc_read` says whom an awaiting
+  request waits on (`Approval: awaiting, waiting on agent (…)`), so an agent whose own revision
+  moved its request, which sends it no event, reads that the request waits on it.
+  `DispatchClient.requestApproval` answers `ApprovalRequestResponse` plus `recorded`.
 - `DispatchClient.requestApproval` takes `{ actor, summary }`, and `dispatch_request_approval`
   sends `summary` and quotes the question the server returned in its result (LEGION-387).
 - `dispatch_request_approval` is refused, with no request sent, while the version it would name

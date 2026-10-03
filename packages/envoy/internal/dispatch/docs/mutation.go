@@ -1102,10 +1102,9 @@ type versionWriteResult struct {
 }
 
 // writeVersionTx is the only path that changes the durable version protocol:
-// version writes index references, refresh anchors, retract the approval asks
-// naming an older version, and retain its author capture until the enclosing
-// transaction commits. A nil write records no version but keeps a transactional
-// tree mutation's anchors in the same path.
+// version writes index references, move open approval asks to the new version, refresh anchors,
+// and retain their author capture until the enclosing transaction commits. A nil write records no
+// version but keeps a transactional tree mutation's anchors in the same path.
 func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, markdown string, tree *pmdoc.Node, actor model.Actor, write *versionWrite) (versionWriteResult, error) {
 	if write == nil {
 		return versionWriteResult{}, s.refreshAnchors(ctx, tx, artifactID, tree, actor)
@@ -1135,13 +1134,13 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	if err != nil {
 		return versionWriteResult{}, err
 	}
-	// An approval ask naming an older version can no longer be answered, so it leaves the Inbox
-	// now, and its followers learn that approval has to be requested again.
-	retractions, err := RetractStaleApprovalAsks(ctx, tx, s.events, artifactID, version)
+	// The open approval request follows the document version without leaving its thread or opening
+	// another Inbox row. The request remains waiting on its agent until it is handed back.
+	moved, err := MoveApprovalAsk(ctx, tx, s.events, artifactID, version, s.serverURL)
 	if err != nil {
 		return versionWriteResult{}, err
 	}
-	for _, event := range retractions {
+	for _, event := range moved {
 		collectEvent(ctx, event)
 	}
 	// The transaction's own live operation already refreshed this tree's anchors (applyJoined);

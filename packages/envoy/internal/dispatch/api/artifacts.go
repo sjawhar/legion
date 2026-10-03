@@ -322,7 +322,7 @@ func (s *server) storeArtifact(
 	defer ledger.Discard()
 	var documentMarkdown string
 	var documentChanges model.ReferenceChanges
-	var retractions []model.Event
+	var movedEvents []model.Event
 	if kind == "doc" {
 		if created {
 			documentMarkdown, err = s.deps.Docs.SeedText(documentCtx, artifact.ID, string(input.content), actor)
@@ -368,9 +368,11 @@ func (s *server) storeArtifact(
 	}
 	var diff *string
 	if !created && kind == "doc" {
-		// This route writes its version itself rather than through the document service, so it
-		// retracts the approval asks naming an older version as every other version write does.
-		retractions, err = docs.RetractStaleApprovalAsks(r.Context(), tx, s.deps.Events, artifact.ID, version)
+		// This route writes its version itself rather than through the document service, so its
+		// open approval request follows that version just as every other version write does.
+		movedEvents, err = docs.MoveApprovalAsk(
+			r.Context(), tx, s.deps.Events, artifact.ID, version, s.deps.ServerURL,
+		)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -417,7 +419,7 @@ func (s *server) storeArtifact(
 		// document's ask blocks are indexed and its block ids repaired.
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publish(append(retractions, event)...)
+	s.publish(append(movedEvents, event)...)
 	var blocks *documentBlocks
 	if kind == "doc" {
 		blocks = readDocumentBlocks(documentMarkdown)
