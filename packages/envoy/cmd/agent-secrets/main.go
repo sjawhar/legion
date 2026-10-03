@@ -133,7 +133,8 @@ environment:
   AGENT_SECRETS_ENROLL_WAIT  how long a call waits while a box's launcher is still enrolling it
                              (default 20s)
   AGENT_SECRETS_APPROVE_URL  Dispatch's address; launcher login names the page under it where the
-                             operator types the code
+                             operator types the code, and the exec form the page where a person
+                             approves its waiting request
   OMP_SESSION_ID             the agent session the broker notifies if a pending request expires
 
 exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 77 denied;
