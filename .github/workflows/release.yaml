@@ -46,7 +46,6 @@ jobs:
       legion: ${{ steps.filter.outputs.legion }}
       envoy_plugin: ${{ steps.filter.outputs.envoy_plugin }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
-      go: ${{ steps.filter.outputs.go }}
       worker_image: ${{ steps.filter.outputs.worker_image }}
     steps:
       - uses: actions/checkout@v5
@@ -54,8 +53,10 @@ jobs:
         id: filter
         with:
           filters: |
-            # The Go `legion` the legion job releases: its module, the modules go.work binds it to,
-            # and the role prompts every release archive carries beside the binary.
+            # The Go `legion` the legion job releases and worker.Dockerfile's go stage compiles: its
+            # module, the modules go.work binds it to (packages/envoy is also copied whole into the
+            # image for the agent-secrets binary it builds, AGENTC-393), and the role prompts every
+            # release archive carries beside the binary.
             legion:
               - 'packages/daemon/**'
               - 'go.work'
@@ -72,20 +73,13 @@ jobs:
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
               - 'skills/**'
-            # The Go `legion` the worker image compiles and its build inputs (worker.Dockerfile's go
-            # stage), plus packages/envoy — copied whole for the agent-secrets binary it also builds
-            # (AGENTC-393).
-            go:
-              - 'packages/daemon/**'
-              - 'go.work'
-              - 'go.work.sum'
-              - 'packages/envoy/**'
             # The plugin stage's frozen install needs the root manifest, lockfile, patches, and each
             # root-workspace manifest. Keep this explicit because a workspace can affect Bun's
-            # install without its source becoming part of the worker image. The Dockerfile, the OMP
-            # pin, the context's .dockerignore and the called workflow change the image too. With
-            # pi_envoy and go this covers every file worker.Dockerfile builds from;
-            # .github/scripts/check-image-trigger-paths.sh fails the build when it misses one.
+            # install without its source becoming part of the worker image. The OMP pin, the
+            # context's .dockerignore and the called workflow change the image too. With legion
+            # (which holds the Dockerfile, packages/daemon/docker) and pi_envoy this covers every
+            # file worker.Dockerfile builds from; .github/scripts/check-image-trigger-paths.sh fails
+            # the build when it misses one.
             worker_image:
               - 'package.json'
               - 'bun.lock'
@@ -99,7 +93,6 @@ jobs:
               - 'packages/dispatch/package.json'
               - 'packages/envoy/internal/dispatch/pmdoc/gen/package.json'
               - 'docs/site/package.json'
-              - 'packages/daemon/docker/**'
               - '.omp-pin'
               - '.dockerignore'
               - '.github/workflows/worker-image.yaml'
@@ -108,11 +101,20 @@ jobs:
   # itself (role-prompts/, which a standalone `legion` needs unless LEGION_ROLE_PROMPTS_DIR names
   # another bundle), on a legion-v* tag of the commit the run checked out. Nothing is committed: a
   # Go module carries no version file, so the tag alone records the version, and `legion version`
-  # names it.
+  # names it. Only main releases one: a workflow_dispatch from another branch skips this job, and the
+  # worker image job below then publishes that commit's sha- tag alone, as it does for any branch.
   legion:
     needs: changes
-    if: needs.changes.outputs.legion == 'true' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (needs.changes.outputs.legion == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
+    # The workflow's own grants, plus the attestations API for the archives' provenance below
+    # (id-token is already one of them: it is the Sigstore signing certificate's OIDC token).
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     outputs:
       version: ${{ steps.version.outputs.version }}
       release_tag: ${{ steps.version.outputs.release_tag }}
@@ -196,6 +198,14 @@ jobs:
           version=$(out/legion-linux-amd64/legion version)
           echo "$version"
           test "$version" = "legion v$VERSION commit $GITHUB_SHA"
+      # Build provenance for the archives a mise pin installs, so `gh attestation verify
+      # legion-<os>-<arch>.tar.gz --repo sjawhar/legion` checks a downloaded asset against this
+      # workflow run rather than against SHA256SUMS, which sits in the same mutable release. The
+      # release below uploads these exact files.
+      - uses: actions/attest-build-provenance@v4
+        if: steps.version.outputs.skip != 'true'
+        with:
+          subject-path: assets/legion-*.tar.gz
       - name: Tag release
         if: steps.version.outputs.skip != 'true'
         env:
@@ -229,8 +239,7 @@ jobs:
     if: >-
       always() && (needs.legion.result == 'success' || needs.legion.result == 'skipped') &&
       (needs.changes.outputs.legion == 'true' || needs.changes.outputs.pi_envoy == 'true' ||
-      needs.changes.outputs.worker_image == 'true' || needs.changes.outputs.go == 'true' ||
-      github.event_name == 'workflow_dispatch')
+      needs.changes.outputs.worker_image == 'true' || github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/worker-image.yaml
     # No `secrets:`: the called workflow reads only GITHUB_TOKEN, which it receives automatically;
     # `inherit` would hand DEPLOY_KEY and every other repository secret to a job that runs a
