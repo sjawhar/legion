@@ -275,6 +275,9 @@ func errorsPage(root string, a *api) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := checkHelperRefusals(root, helperCodes); err != nil {
+		return "", err
+	}
 	b.WriteString("\n## Host helper\n\n`agent-secrets-helper` answers a request it refuses with one of these codes and an error message; `agent-secrets` prints them as `<code>: <error>`.\n\n| Code | Meaning |\n| --- | --- |\n")
 	for _, c := range helperCodes {
 		fmt.Fprintf(&b, "| `%s` | %s |\n", c.value, cell(lead(c.name, c.doc)))
@@ -282,6 +285,9 @@ func errorsPage(root string, a *api) (string, error) {
 
 	exitCodes, err := docConsts(root, cliDir, "exit")
 	if err != nil {
+		return "", err
+	}
+	if err := checkExitCodes(root, exitCodes); err != nil {
 		return "", err
 	}
 	b.WriteString("\n## agent-secrets exit codes\n\n`agent-secrets` exits 0 when it is done and 1 when it failed; these are the other codes it exits with.\n\n| Exit code | Meaning |\n| --- | --- |\n")
@@ -294,7 +300,8 @@ func errorsPage(root string, a *api) (string, error) {
 type docConst struct{ name, value, doc string }
 
 // docConsts reads every package-level constant in dir whose name starts with prefix, with its
-// doc or line comment, refusing one that has neither.
+// doc or line comment, refusing one that has neither, in the order of their values (numbers by
+// size).
 func docConsts(root, dir, prefix string) ([]docConst, error) {
 	src, err := parseDir(root, dir)
 	if err != nil {
@@ -322,7 +329,14 @@ func docConsts(root, dir, prefix string) ([]docConst, error) {
 			out = append(out, docConst{name: n.Name, value: value, doc: doc})
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].value < out[j].value })
+	sort.SliceStable(out, func(i, j int) bool {
+		a, errA := strconv.Atoi(out[i].value)
+		b, errB := strconv.Atoi(out[j].value)
+		if errA == nil && errB == nil {
+			return a < b
+		}
+		return out[i].value < out[j].value
+	})
 	return out, nil
 }
 

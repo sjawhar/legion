@@ -150,7 +150,7 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 	sess, err := newSession(pid, ticks, fmt.Sprintf("%s:%d:%d", s.Hostname, pid, ticks), peer)
 	if err != nil {
 		peer.Close()
-		return Response{Code: "KEYGEN", Error: err.Error()}
+		return Response{Code: CodeKeygen, Error: err.Error()}
 	}
 	existing, won := s.Registry.addRootIfAbsent(pid, sess)
 	if peer.PID() != pid {
@@ -256,7 +256,7 @@ func (s *Server) sign(peer *Peer, pid int, method, url string) Response {
 	}
 	compact, err := proof.Sign(sess.Key, id, method, url, time.Now())
 	if err != nil {
-		return Response{Code: "SIGN", Error: err.Error()}
+		return Response{Code: CodeSign, Error: err.Error()}
 	}
 	return Response{OK: true, Proof: compact, EnrollmentID: id, RuntimeID: sess.RuntimeID}
 }
@@ -287,7 +287,7 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string)
 	}
 	compact, err := record.Sign(sess.Key, s.Broker.URL, details, reason, "", time.Now())
 	if err != nil {
-		return Response{Code: "SIGN", Error: err.Error()}
+		return Response{Code: CodeSign, Error: err.Error()}
 	}
 	return Response{OK: true, RequestObject: compact}
 }

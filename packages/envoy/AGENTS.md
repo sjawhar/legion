@@ -1725,8 +1725,12 @@ response struct of `internal/broker/api` (never a map literal), every JSON field
 response body (and of an object it holds) a doc comment saying what it is, a response type that is
 one of several answers of a route a doc comment saying when, every `Config` field a doc comment
 opening with the `BROKER_*` variables it reads and a colon (`BROKER_FAKE_SECRETS_FILE`'s is in
-`cmd/broker/main.go`), and every helper refusal code and `agent-secrets` exit code a comment. The
-CLI reference is the built binaries' own `--help`, so every form must answer `-h` with exit 0.
+`cmd/broker/main.go`), and every helper `Code*` constant and `agent-secrets` `exit*` constant a
+comment. It also checks where those codes are produced: every helper `Response` literal that is not
+`OK: true` must name its fields and set `Code` to a documented `Code*` constant, and every
+`int`-returning function in `cmd/agent-secrets` (and every `os.Exit` there) may return only `0`, `1`,
+a documented `exit*` constant or another such function's result. The CLI reference is the built
+binaries' own `--help`, so every form must answer `-h` with exit 0.
 
 `internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 19 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
