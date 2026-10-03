@@ -784,7 +784,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 
 	state, grantID, requestID := result.State, result.GrantID, result.RequestID
 	if state == "pending" {
-		reportPending(stderr, requestID, result.RecordID, *wait)
+		reportPending(stderr, requestID, *result.RecordID, *wait)
 		deadline := time.Now().Add(*wait)
 		backoff := 2 * time.Second
 		for state == "pending" {
@@ -851,14 +851,12 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 }
 
 // reportPending says, once, before the exec form's wait, that a person must decide the request
-// and where: the Dispatch page of its credential record, under AGENT_SECRETS_APPROVE_URL
-// (Dispatch's origin, the base `launcher login` names the machine page under) when that is set,
-// else the Inbox's Credential requests section.
-func reportPending(stderr io.Writer, requestID string, recordID *string, wait time.Duration) {
+// and where: the Dispatch page of its credential record (the broker names one for every pending
+// request) under approveURL when that is set, else the Inbox's Credential requests section.
+func reportPending(stderr io.Writer, requestID, recordID string, wait time.Duration) {
 	fmt.Fprintf(stderr, "agent-secrets: request %s is waiting for approval; waiting up to %s\n", requestID, wait)
-	approveURL := strings.TrimSuffix(os.Getenv("AGENT_SECRETS_APPROVE_URL"), "/")
-	if approveURL != "" && recordID != nil && *recordID != "" {
-		fmt.Fprintf(stderr, "agent-secrets: approve or deny it at %s/credentials/%s\n", approveURL, *recordID)
+	if base := approveURL(); base != "" {
+		fmt.Fprintf(stderr, "agent-secrets: approve or deny it at %s/credentials/%s\n", base, recordID)
 		return
 	}
 	fmt.Fprintln(stderr, "agent-secrets: approve or deny it under Credential requests in the Dispatch Inbox")

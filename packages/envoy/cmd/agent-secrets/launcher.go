@@ -7,8 +7,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
@@ -50,8 +48,8 @@ func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "machine login code: %s\n", resp.Code)
-	if approveURL := strings.TrimSuffix(os.Getenv("AGENT_SECRETS_APPROVE_URL"), "/"); approveURL != "" {
-		fmt.Fprintf(stdout, "enter it at %s/credentials/machine — approve only if the code matches this terminal\n", approveURL)
+	if base := approveURL(); base != "" {
+		fmt.Fprintf(stdout, "enter it at %s/credentials/machine — approve only if the code matches this terminal\n", base)
 	} else {
 		fmt.Fprintln(stdout, "enter it on the Dispatch credential page")
 	}
