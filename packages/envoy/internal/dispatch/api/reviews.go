@@ -577,7 +577,7 @@ func (s *server) renewApprovalAsk(
 	switch {
 	case waitingOn == "human" && summary != openSummary:
 		return nil, errorf(http.StatusConflict, "APPROVAL_WAITS_ON_HUMAN",
-			"the approval request already waits on the human, asking %q, and a different summary would rewrite the card they are reading, so nothing was changed; raise what changed with the human first, in the request's thread or as a decision block in the document, and once a reply or a new version leaves the request waiting on you, hand it back with the new summary",
+			"the approval request already waits on the human, asking %q, and a different summary would rewrite the card they are reading, so nothing was changed; raise what changed with the human first, in the request's thread or as a decision block in the document, and once they have agreed to every point in it and a reply or a new version leaves the request waiting on you, hand it back with the new summary",
 			open.Question)
 	case waitingOn == "agent":
 		if summary != openSummary {

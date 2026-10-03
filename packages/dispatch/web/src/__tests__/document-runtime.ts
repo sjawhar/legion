@@ -37,9 +37,13 @@ export interface FakeDocumentRuntime {
   admit(readOnly: boolean): void;
   connections: FakeConnection[];
   editors: FakeEditor[];
+  /** The server refuses the current socket because the stored document is outside the Proof
+   * schema; a destroyed provider hears nothing more, so earlier connections are not told. */
+  refuse(): void;
   runtime: DocumentRuntimeValue;
   status(state: ConnectionState): void;
   sync(): void;
+  text: string;
 }
 
 const blockSchema = {
@@ -147,6 +151,9 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
     },
     connections,
     editors,
+    refuse() {
+      callbacks.at(-1)?.onOutsideSchema();
+    },
     runtime: { blockSchema, createEditor, loadTransport: async () => connect },
     status(state) {
       for (const callback of callbacks) {
@@ -158,5 +165,6 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
         callback.onSynced();
       }
     },
+    text: seed.text ?? "",
   };
 }

@@ -3,7 +3,10 @@ package api
 // unreadDirectRepliesCTE is the one definition of "a reply this login has not read in this
 // session": a session's own reply, anywhere under a root this viewer targeted at this session
 // (an issue-less message whose own target is `session:<id>`, a broadcast's copy included), newer
-// than the later of the login's read mark and Clear for that session. That scope is deliberate.
+// than the later of the login's read mark and Clear for that session, and not one the login has
+// read by its id (user_agent_reply_read, which the broadcast page writes for the replies it
+// shows, so an older reply elsewhere stays unread where moving the mark would hide it). That
+// scope is deliberate.
 // A root the session only received a delivery of - one targeted at a role, or at another
 // session - is not a direct message this viewer sent it, so it is never unread for them; the
 // conversation window still lists it by activity, like any other conversation the session is in. It is the recursive part of a
@@ -20,16 +23,17 @@ package api
 //
 // Parameters, in this order, so a query appending its own starts at $4:
 //
-//	$1  the caller's canonical login (keys the read mark, and matches the author of their own
-//	    direct messages, which the identity source may spell in any casing)
+//	$1  the caller's canonical login (keys the read mark and the replies read by id, and matches
+//	    the author of their own direct messages, which the identity source may spell in any casing)
 //	$2  the caller's raw actor id (keys the Clear, user_agent_state, migration 0033)
 //	$3  one session id to narrow to, or null for every session
 //
 // The login is bound once by unreadDirectRepliesArgs, referenced only inside this fragment
-// (direct_roots and direct_marks), and never inside a union arm - the window's candidates union
-// takes $3 alone. The hazard a future edit opens is exactly that: put a login predicate into one
-// candidate branch (filtering the delivered branch to roots the viewer authored, say) and the
-// surface genuinely doubles, with only the call-site mutation's test standing behind it.
+// (direct_roots, direct_marks and unread_direct_replies), and never inside a union arm - the
+// window's candidates union takes $3 alone. The hazard a future edit opens is exactly that: put a
+// login predicate into one candidate branch (filtering the delivered branch to roots the viewer
+// authored, say) and the surface genuinely doubles, with only the call-site mutation's test
+// standing behind it.
 //
 // unreadDirectRepliesArgs builds them, so no call site spells the canonical login itself.
 const unreadDirectRepliesCTE = `
@@ -75,6 +79,10 @@ const unreadDirectRepliesCTE = `
 		left join direct_marks on direct_marks.session_id = direct_thread.session_id
 		where direct_thread.author->>'kind' = 'session'
 		  and direct_thread.created_at > coalesce(direct_marks.at, '-infinity'::timestamptz)
+		  and not exists (
+			select 1 from user_agent_reply_read
+			where user_agent_reply_read.login = $1 and user_agent_reply_read.reply_id = direct_thread.id
+		  )
 	)`
 
 // unreadDirectRepliesArgs is unreadDirectRepliesCTE's parameter list for one caller: their

@@ -7,6 +7,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -189,11 +190,17 @@ func writeJSON(w http.ResponseWriter, v any) {
 // subcommand.
 func newKeyDir(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
 	key, err := proof.NewKey()
 	if err != nil {
 		t.Fatalf("proof.NewKey: %v", err)
 	}
+	return writeKeyDir(t, key, testEnrollmentID)
+}
+
+// writeKeyDir writes key as key.pem and enrollmentID as the enrollment file into a new key dir.
+func writeKeyDir(t *testing.T, key *ecdsa.PrivateKey, enrollmentID string) string {
+	t.Helper()
+	dir := t.TempDir()
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
@@ -202,7 +209,7 @@ func newKeyDir(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, "key.pem"), pemBytes, 0o600); err != nil {
 		t.Fatalf("write key.pem: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "enrollment"), []byte(testEnrollmentID+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "enrollment"), []byte(enrollmentID+"\n"), 0o600); err != nil {
 		t.Fatalf("write enrollment: %v", err)
 	}
 	return dir
@@ -372,6 +379,29 @@ func TestTopLevelHelpExitsZero(t *testing.T) {
 
 	if _, _, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil); exit != exitUsageError {
 		t.Fatalf("agent-secrets with no arguments: exit = %d, want %d", exit, exitUsageError)
+	}
+}
+
+// TestEveryFormAnswersHelp pins that each form usage lists answers -h with its own synopsis and
+// exit 0, flags or none, before it needs a broker, a key or a helper; the docs site's CLI
+// reference is built from these answers.
+func TestEveryFormAnswersHelp(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	for _, c := range commands {
+		if c.name == "--version" {
+			continue
+		}
+		args := append(strings.Fields(c.name), "-h")
+		if c.name == "" {
+			args = []string{"NAME", "-h", "--", "true"}
+		}
+		_, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(), nil, args...)
+		if exit != 0 {
+			t.Fatalf("agent-secrets %s: exit = %d, want 0: %s", strings.Join(args, " "), exit, stderr)
+		}
+		if !strings.Contains(stderr, "usage: "+c.synopsis) {
+			t.Fatalf("agent-secrets %s: stderr = %q, want its synopsis %q", strings.Join(args, " "), stderr, c.synopsis)
+		}
 	}
 }
 
@@ -871,31 +901,37 @@ func TestLauncherLoginExitsOneOnDenied(t *testing.T) {
 // every login state with none, "none" when login was never run (empty LoginState) — with a single
 // helper call, never login's mint-a-fresh-key-and-poll side effect. A re-login still pending or
 // expired unapproved beside a held credential prints "issued" and names that login on stderr; a
-// helper from before credential_held sends "issued" alone exactly while it holds one. Every state
-// with no credential and no login in flight (never logged in, denied, or expired, which is also
-// what a credential the broker rejected becomes) says on stderr to run the login again, and a
-// login in flight outranks a refused credential.
+// helper from before credential_held sends "issued" alone exactly while it holds one. Every held
+// credential's answer ends with when it expires, or that the helper cannot say. Every state with
+// no credential and no login in flight (never logged in, denied, or expired, which is also what a
+// credential the broker rejected becomes) says on stderr to run the login again, and a login in
+// flight outranks a refused credential.
 func TestLauncherLoginStatusExitsZeroOnlyWhileACredentialIsHeld(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	const held = "the helper still holds the launcher credential an earlier login issued"
+	const prefix = "agent-secrets launcher login-status: "
+	const unknown = prefix + "the helper does not know when the launcher credential expires (it, or its broker, is older than this client)\n"
+	expiresAt := time.Now().Add(50 * time.Hour).UTC().Format(time.RFC3339)
 	for _, tc := range []struct {
 		name   string
 		resp   helper.Response
 		want   string
 		exit   int
 		remedy bool
-		notice string
+		stderr string // the whole of stderr, when the case pins it
 	}{
-		{name: "issued", resp: helper.Response{LoginState: "issued"}, want: "issued\n"},
+		{name: "issued", resp: helper.Response{LoginState: "issued"}, want: "issued\n", stderr: unknown},
+		{name: "issued with its expiry", resp: helper.Response{LoginState: "issued", CredentialHeld: true, CredentialExpiresAt: expiresAt}, want: "issued\n",
+			stderr: prefix + "the launcher credential expires at " + expiresAt + " (in 2d1h59m); the broker has no renewal, so a new machine login a human approves must replace it before then\n"},
 		{name: "pending", resp: helper.Response{LoginState: "pending"}, want: "pending\n", exit: 1},
 		{name: "denied", resp: helper.Response{LoginState: "denied"}, want: "denied\n", exit: 1, remedy: true},
 		{name: "expired", resp: helper.Response{LoginState: "expired"}, want: "expired\n", exit: 1, remedy: true},
 		{name: "none", resp: helper.Response{}, want: "none\n", exit: 1, remedy: true},
 		{name: "pending beside a refused credential", resp: helper.Response{LoginState: "pending", LoginRefused: true}, want: "pending\n", exit: 1},
 		{name: "pending beside a held credential", resp: helper.Response{LoginState: "pending", CredentialHeld: true}, want: "issued\n",
-			notice: "a machine login is waiting for approval (code KQ7M-X4PZ); " + held},
+			stderr: prefix + "a machine login is waiting for approval (code KQ7M-X4PZ); " + held + "\n" + unknown},
 		{name: "expired beside a held credential", resp: helper.Response{LoginState: "expired", CredentialHeld: true}, want: "issued\n",
-			notice: "the most recent machine login (code KQ7M-X4PZ) expired before anyone approved it; " + held},
+			stderr: prefix + "the most recent machine login (code KQ7M-X4PZ) expired before anyone approved it; " + held + "\n" + unknown},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.resp.OK, tc.resp.Code = true, "KQ7M-X4PZ"
@@ -908,13 +944,32 @@ func TestLauncherLoginStatusExitsZeroOnlyWhileACredentialIsHeld(t *testing.T) {
 			if got := strings.Contains(stderr, "run: agent-secrets launcher login"); got != tc.remedy {
 				t.Fatalf("stderr = %q, want the login remedy: %v", stderr, tc.remedy)
 			}
-			if tc.notice != "" && stderr != "agent-secrets launcher login-status: "+tc.notice+"\n" {
-				t.Fatalf("stderr = %q, want %q", stderr, tc.notice)
+			if tc.stderr != "" && stderr != tc.stderr {
+				t.Fatalf("stderr = %q, want %q", stderr, tc.stderr)
 			}
 			if req := <-reqs; req.Op != "login-status" || len(reqs) != 0 {
 				t.Fatalf("helper calls: first %q, %d more; want one login-status", req.Op, len(reqs))
 			}
 		})
+	}
+}
+
+// TestCredentialExpiryLine: login-status's expiry line rounds to the minute with days, names a
+// credential already past its expiry (the helper has not dropped it yet) with the login remedy,
+// and says plainly when the helper's answer carries no expiry or one it cannot read.
+func TestCredentialExpiryLine(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct{ expiresAt, want string }{
+		{"2026-10-10T11:59:30Z", "the launcher credential expires at 2026-10-10T11:59:30Z (in 6d23h59m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
+		{"2026-10-03T15:05:00Z", "the launcher credential expires at 2026-10-03T15:05:00Z (in 3h5m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
+		{"2026-10-03T12:00:40Z", "the launcher credential expires at 2026-10-03T12:00:40Z (in 0m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
+		{"2026-10-03T12:00:00Z", "the launcher credential expired at 2026-10-03T12:00:00Z; run: agent-secrets launcher login"},
+		{"", "the helper does not know when the launcher credential expires (it, or its broker, is older than this client)"},
+		{"next tuesday", `the helper reported an unreadable launcher credential expiry "next tuesday"`},
+	} {
+		if got := credentialExpiry(tc.expiresAt, now); got != tc.want {
+			t.Errorf("credentialExpiry(%q) = %q, want %q", tc.expiresAt, got, tc.want)
+		}
 	}
 }
 

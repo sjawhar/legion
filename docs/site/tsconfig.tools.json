@@ -7,5 +7,5 @@
   "compilerOptions": {
     "types": ["bun"]
   },
-  "include": ["scripts", "generators", "media/*.ts", "media/walkthroughs/*.ts"]
+  "include": ["scripts", "generators", "media/*.ts", "media/*/*.ts"]
 }

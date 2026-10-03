@@ -109,7 +109,7 @@ func recordInsertedText(
 	}
 	inserted, err := pmdoc.AuthoredTextRuns(fragment, live.clientID, since, nil)
 	if err != nil {
-		return docSchema(err)
+		return documentSchemaError(err)
 	}
 	if len(inserted) == 0 {
 		return nil
@@ -171,7 +171,7 @@ func (c *lossCheck) lost(doc *crdt.Doc) ([]int, error) {
 	}
 	held, err := pmdoc.AuthoredTextRuns(doc.GetXmlFragment(fragmentName), c.client, c.since, written)
 	if err != nil {
-		return nil, docSchema(err)
+		return nil, documentSchemaError(err)
 	}
 	missing := c.inserted.Missing(held)
 	if len(missing) == 0 {

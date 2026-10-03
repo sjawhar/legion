@@ -63,10 +63,11 @@ type Rig struct {
 }
 
 // NewRig writes a rules file naming the person ada@example.com as a test secret's approver and as
-// a box operator, wires a real pod verifier (a local OIDC issuer trusted by an enroll.K8sPodVerifier,
-// mirroring cmd/broker/main.go's own wiring), and mounts api.Register on an httptest.Server —
-// wired exactly as cmd/broker/main.go and api_test.go's newTestServer wire it. It skips t when
-// BROKER_TEST_DATABASE_URL is unset (storetest.Open's own contract).
+// a box operator, with a delivery: proxy secret (TEST_PROXY_SECRET) granted to that operator's boxes
+// automatically, wires a real pod verifier (a local OIDC issuer trusted by an
+// enroll.K8sPodVerifier, mirroring cmd/broker/main.go's own wiring), and mounts api.Register on an
+// httptest.Server — wired exactly as cmd/broker/main.go and api_test.go's newTestServer wire it. It
+// skips t when BROKER_TEST_DATABASE_URL is unset (storetest.Open's own contract).
 func NewRig(t *testing.T) *Rig {
 	t.Helper()
 	st := storetest.Open(t)
@@ -80,6 +81,14 @@ secrets:
     max_lifetime_seconds: 43200
     requesters:
       - {kind: box, operator: ` + operator + `, decision: approval, approver: operator}
+  TEST_PROXY_SECRET:
+    source: example/agent-secrets/TEST_PROXY_SECRET
+    owner: ` + operator + `
+    delivery: proxy
+    max_lifetime_seconds: 43200
+    proxy: {scheme: https, host: api.example.com, port: 443, path_prefix: /, methods: [GET], header: Authorization, header_format: "Bearer {value}"}
+    requesters:
+      - {kind: box, operator: ` + operator + `, decision: automatic}
 `
 	rulesPath := t.TempDir() + "/rules.yaml"
 	if err := os.WriteFile(rulesPath, []byte(rulesYAML), 0o600); err != nil {
