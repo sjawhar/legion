@@ -129,9 +129,9 @@ func TestAHistoryThatCannotLoadReadsAsDocumentUnloadable(t *testing.T) {
 }
 
 // A caller-supplied rebuild source is a document change: it writes the next immutable version,
-// emits its artifact.version event, and retracts the approval ask pinned to the prior version.
-// Omitting markdown intentionally keeps the latest-version rebuild behavior, including its
-// existing version and approval state.
+// emits its artifact.version event, and moves the open approval request to that version, where it
+// waits on its agent. Omitting markdown intentionally keeps the latest-version rebuild behavior,
+// including its existing version and approval state.
 func TestRebuildArtifactVersionsSuppliedMarkdownButNotTheLatestVersionSource(t *testing.T) {
 	handler, database, broken := newBrokenTestServer(t)
 	issue := createArtifactIssue(t, handler)
@@ -197,8 +197,11 @@ func TestRebuildArtifactVersionsSuppliedMarkdownButNotTheLatestVersionSource(t *
 	if events := count(t, `select count(*) from events where type = 'artifact.version' and payload->>'artifact_id' = $1`, supplied.ID); events != 1 {
 		t.Fatalf("supplied rebuild events = %d, want one artifact.version event", events)
 	}
-	if approval := readApproval(t, handler, supplied.ID).Approval; approval == nil || approval.State != "draft" || approval.LatestVersion != 2 {
-		t.Fatalf("supplied rebuild approval = %#v, want stale approval invalidated at version 2", approval)
+	if approval := readApproval(t, handler, supplied.ID).Approval; approval == nil || approval.State != "awaiting" || approval.LatestVersion != 2 || approval.WaitingOn != "agent" {
+		t.Fatalf("supplied rebuild approval = %#v, want the request moved to version 2 and waiting on its agent", approval)
+	}
+	if moved := count(t, `select count(*) from asks where kind = 'approval' and state = 'open' and approval->>'artifact_id' = $1 and (approval->>'version')::int = 2 and (approval->>'requested_version')::int = 1`, supplied.ID); moved != 1 {
+		t.Fatalf("supplied rebuild left %d open approval requests at version 2 requested at version 1, want the original request moved", moved)
 	}
 	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+supplied.ID+"/text", nil, "alice")
 	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":""`) {

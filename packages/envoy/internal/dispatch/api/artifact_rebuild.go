@@ -11,9 +11,9 @@ import (
 // rebuildArtifact discards only a history ygo cannot load and replaces it with one seed update
 // from the latest saved markdown, or supplied markdown. It is human-only because a rebuild
 // intentionally deletes durable history; a document that loads is refused unchanged. The rebuild,
-// the version supplied markdown writes, its artifact.version event and the approval ask it
-// retracts commit in one transaction, so no refusal or failure leaves a changed document without
-// them.
+// the version supplied markdown writes, its artifact.version event and the move of the open
+// approval request to that version commit in one transaction, so no refusal or failure leaves a
+// changed document without them.
 func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
