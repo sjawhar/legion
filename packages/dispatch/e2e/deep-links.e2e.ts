@@ -163,7 +163,9 @@ interface HeldAnimationFrames {
 
 const heldAnimationFramesKey = "__dispatchHeldAnimationFrames";
 
-async function holdAnimationFrames(page: Page): Promise<void> {
+/** Runs `during` with the page's animation frames held, then runs every frame it requested, however
+ *  `during` ends: a frame-scheduled step, such as the editor's layout report, waits until it is over. */
+async function withAnimationFramesHeld(page: Page, during: () => Promise<void>): Promise<void> {
   await page.evaluate((key) => {
     const target = window as typeof window & { [key: string]: HeldAnimationFrames | undefined };
     const frames = new Map<number, FrameRequestCallback>();
@@ -182,22 +184,35 @@ async function holdAnimationFrames(page: Page): Promise<void> {
       frames.delete(frame);
     }) as typeof cancelAnimationFrame;
   }, heldAnimationFramesKey);
+  try {
+    await during();
+  } finally {
+    await page.evaluate((key) => {
+      const target = window as typeof window & { [key: string]: HeldAnimationFrames | undefined };
+      const held = target[key];
+      if (held === undefined) {
+        return;
+      }
+      window.requestAnimationFrame = held.requestAnimationFrame;
+      window.cancelAnimationFrame = held.cancelAnimationFrame;
+      for (const callback of held.frames.values()) {
+        held.requestAnimationFrame.call(window, callback);
+      }
+      delete target[key];
+    }, heldAnimationFramesKey);
+  }
 }
 
-async function releaseAnimationFrames(page: Page): Promise<void> {
-  await page.evaluate((key) => {
-    const target = window as typeof window & { [key: string]: HeldAnimationFrames | undefined };
-    const held = target[key];
-    if (held === undefined) {
-      return;
-    }
-    window.requestAnimationFrame = held.requestAnimationFrame;
-    window.cancelAnimationFrame = held.cancelAnimationFrame;
-    for (const callback of held.frames.values()) {
-      held.requestAnimationFrame.call(window, callback);
-    }
-    delete target[key];
-  }, heldAnimationFramesKey);
+/** Searches the issue tracker for `query` from the shell's search dialog and returns its one
+ *  comment hit. */
+async function searchHit(page: Page, query: string): Promise<Locator> {
+  await page.getByRole("button", { name: /^search/i }).click();
+  await page.getByRole("combobox", { name: "Search" }).fill(query);
+  const hit = page.getByRole("dialog", { name: "Search" }).getByRole("option", {
+    name: /^comment /,
+  });
+  await expect(hit).toHaveCount(1);
+  return hit;
 }
 
 async function expectSelectedMarginItem(
@@ -537,13 +552,7 @@ for (const state of crossDocumentLandingStates) {
           await route.continue();
         });
       }
-      await page.getByRole("button", { name: /^search/i }).click();
-      await page.getByRole("combobox", { name: "Search" }).fill("must show its quote");
-      const hit = page.getByRole("dialog", { name: "Search" }).getByRole("option", {
-        name: /^comment /,
-      });
-      await expect(hit).toHaveCount(1);
-      await hit.click();
+      await (await searchHit(page, "must show its quote")).click();
       await expect(page).toHaveURL(`/issues/${issue.key}/spec?comment=${comment.id}`);
       if (!state.holdIssuePageCode) {
         await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute(
@@ -575,113 +584,80 @@ for (const state of crossDocumentLandingStates) {
   });
 }
 
-test("a hidden spec editor withdraws its report before View in document returns to it", async ({
-  browser,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the phone arms the hold only once the reader opens the sheet"
-  );
-  const { comment, issue, markId } = await seedLongDocument();
-  const context = await asUser(browser, "alice");
-  let page: Page | undefined;
-  let framesHeld = false;
+/** Two views of the issue that keep the live editor mounted and registered but hidden. `hide` leaves
+ *  the editor of the issue `issueKey` hidden, opened at `link`, and returns the way back to it. */
+const hiddenEditorJourneys = [
+  {
+    name: "a hidden spec editor withdraws its report before View in document returns to it",
+    namedVersion: false,
+    async hide(page: Page): Promise<() => Promise<void>> {
+      await page.getByRole("tab", { name: "Conversation" }).click();
+      const conversation = page.getByRole("tabpanel", { name: "Conversation" });
+      await expect(conversation).toBeVisible();
+      return async () => {
+        await conversation.getByRole("link", { name: "View in document" }).click();
+        await expect(page.getByRole("tabpanel", { name: "Spec" })).toBeVisible();
+      };
+    },
+  },
+  {
+    name: "a hidden live editor withdraws its report before returning from a historical version",
+    namedVersion: true,
+    async hide(page: Page, issueKey: string, link: string): Promise<() => Promise<void>> {
+      await page.getByRole("combobox", { name: "Version" }).selectOption("1");
+      await expect(page.getByTestId("version-view")).toBeVisible();
+      await expect(page).toHaveURL(`/issues/${issueKey}/artifacts/spec?v=1`);
+      const hit = await searchHit(page, "must show its quote");
+      return async () => {
+        await hit.click();
+        await expect(page).toHaveURL(link);
+      };
+    },
+  },
+] as const;
 
-  try {
-    page = await context.newPage();
-    await page.goto(`/issues/${issue.key}/spec?comment=${comment.id}`);
-    const sheet = page.getByTestId("margin-sheet");
-    const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
-    const placement = card.locator("xpath=..");
-    await expect(markSpan(page, markId)).toBeInViewport();
-    await landingSettled(sheet);
-
-    await page.getByRole("tab", { name: "Conversation" }).click();
-    const conversation = page.getByRole("tabpanel", { name: "Conversation" });
-    await expect(conversation).toBeVisible();
-    await expect
-      .poll(() => placement.evaluate((element) => (element as HTMLElement).style.top))
-      .toBe("0px");
-
-    await holdAnimationFrames(page);
-    framesHeld = true;
-    await conversation.getByRole("link", { name: "View in document" }).click();
-    await expect(page.getByRole("tabpanel", { name: "Spec" })).toBeVisible();
-    const document = page.getByRole("article", { name: "Document" });
-    await expect(document).toBeVisible();
-    await page.mouse.click(400, 400);
-
-    await releaseAnimationFrames(page);
-    framesHeld = false;
-    await expect(markSpan(page, markId)).toBeInViewport();
-    await landingSettled(sheet);
-    await expect(card).toBeInViewport();
-    await expectSettledInside(card, sheet);
-  } finally {
-    if (framesHeld && page !== undefined) {
-      await releaseAnimationFrames(page);
+for (const journey of hiddenEditorJourneys) {
+  test(journey.name, async ({ browser }, testInfo) => {
+    test.skip(
+      testInfo.project.name === "iphone",
+      "the phone arms the hold only once the reader opens the sheet"
+    );
+    const { comment, issue, markId } = await seedLongDocument();
+    if (journey.namedVersion) {
+      await createNamedVersion(issue.primary_artifact_id, "Initial long document");
     }
-    await context.close();
-  }
-});
+    const context = await asUser(browser, "alice");
 
-test("a hidden live editor withdraws its report before returning from a historical version", async ({
-  browser,
-}, testInfo) => {
-  test.skip(
-    testInfo.project.name === "iphone",
-    "the phone arms the hold only once the reader opens the sheet"
-  );
-  const { comment, issue, markId } = await seedLongDocument();
-  await createNamedVersion(issue.primary_artifact_id, "Initial long document");
-  const context = await asUser(browser, "alice");
-  let page: Page | undefined;
-  let framesHeld = false;
+    try {
+      const page = await context.newPage();
+      const link = `/issues/${issue.key}/spec?comment=${comment.id}`;
+      await page.goto(link);
+      const sheet = page.getByTestId("margin-sheet");
+      const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
+      const placement = card.locator("xpath=..");
+      await expect(markSpan(page, markId)).toBeInViewport();
+      await landingSettled(sheet);
 
-  try {
-    page = await context.newPage();
-    await page.goto(`/issues/${issue.key}/spec?comment=${comment.id}`);
-    const sheet = page.getByTestId("margin-sheet");
-    const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
-    const placement = card.locator("xpath=..");
-    await expect(markSpan(page, markId)).toBeInViewport();
-    await landingSettled(sheet);
+      const returnToDocument = await journey.hide(page, issue.key, link);
+      await expect
+        .poll(() => placement.evaluate((element) => (element as HTMLElement).style.top))
+        .toBe("0px");
 
-    const versionPicker = page.getByRole("combobox", { name: "Version" });
-    await versionPicker.selectOption("1");
-    await expect(page.getByTestId("version-view")).toBeVisible();
-    await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/spec?v=1`);
-    await expect
-      .poll(() => placement.evaluate((element) => (element as HTMLElement).style.top))
-      .toBe("0px");
-
-    await page.getByRole("button", { name: /^search/i }).click();
-    await page.getByRole("combobox", { name: "Search" }).fill("must show its quote");
-    const hit = page.getByRole("dialog", { name: "Search" }).getByRole("option", {
-      name: /^comment /,
-    });
-    await expect(hit).toHaveCount(1);
-    await holdAnimationFrames(page);
-    framesHeld = true;
-    await hit.click();
-    await expect(page).toHaveURL(`/issues/${issue.key}/spec?comment=${comment.id}`);
-    const document = page.getByRole("article", { name: "Document" });
-    await expect(document).toBeVisible();
-    await page.mouse.click(400, 400);
-
-    await releaseAnimationFrames(page);
-    framesHeld = false;
-    await expect(markSpan(page, markId)).toBeInViewport();
-    await landingSettled(sheet);
-    await expect(card).toBeInViewport();
-    await expectSettledInside(card, sheet);
-  } finally {
-    if (framesHeld && page !== undefined) {
-      await releaseAnimationFrames(page);
+      // The press lands before the shown editor reports its layout, which waits for a frame.
+      await withAnimationFramesHeld(page, async () => {
+        await returnToDocument();
+        await expect(page.getByRole("article", { name: "Document" })).toBeVisible();
+        await page.mouse.click(400, 400);
+      });
+      await expect(markSpan(page, markId)).toBeInViewport();
+      await landingSettled(sheet);
+      await expect(card).toBeInViewport();
+      await expectSettledInside(card, sheet);
+    } finally {
+      await context.close();
     }
-    await context.close();
-  }
-});
+  });
+}
 
 test("a resolving reference above a linked card does not end the hold", async ({
   browser,
