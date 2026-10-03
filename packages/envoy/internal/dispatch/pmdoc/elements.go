@@ -19,8 +19,8 @@ import (
 // makes 786,432 of them and held a gigabyte (LEGION-481). The heaviest document of each shape
 // measured at this limit holds at most about 220 MiB above the server's idle memory to store and
 // settle, and 170 MiB to read (cmd/dispatch's memory tests). This repository's own markdown weighs
-// 44 to 100 elements a kibibyte, its route tables the most, so prose passes to the 1 MiB cap and a
-// table-dense document to about 650 KiB.
+// 1.5 to 429 elements a kibibyte (MeasureDocument over its 591 files): prose passes to the 1 MiB
+// cap, and the densest, a comparison matrix of 379 a kibibyte, to about 173 KiB.
 const maxWriteElements = 65_536
 
 // nodeGuard is how many times maxWriteElements goldmark may make nodes, lines and table cells,
@@ -172,13 +172,15 @@ func (s DocumentSize) TooHeavy() bool { return !s.Counted || s.Elements > MaxDoc
 
 // MeasureDocument is the DocumentSize of markdown, a whole document. Its elements are counted
 // exactly as an upload's parse counts them, its guard included, so markdown MeasureDocument finds
-// within both limits is what one upload may send, as far as its size goes.
+// within both limits is what one upload may send, as far as its size goes. Markdown nested past
+// the parse's bounds, which no upload may send, measures as markdown past the element limit; the
+// renderer refuses a tree that deep, so no rendering a write leaves is one.
 func MeasureDocument(markdown string) DocumentSize {
 	size := DocumentSize{Bytes: len(markdown)}
 	source := []byte(markdown)
 	_, rest, unclosedFrontmatter := parseFrontmatterBlock(source)
-	root, count, _ := blockReader.read(source[rest:], unclosedFrontmatter, NewTablePaddingBudget())
-	if count.passed() {
+	root, count, _, err := blockReader.read(source[rest:], unclosedFrontmatter, NewTablePaddingBudget())
+	if err != nil || count.passed() {
 		return size
 	}
 	for node := root; node != nil; node = nextInTree(root, node) {

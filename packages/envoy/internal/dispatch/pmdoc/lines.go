@@ -35,7 +35,10 @@ func segmentsText(segments *gmtext.Segments, source []byte) string {
 // firstLine is the number source's first line has in what the caller wrote, which a refusal of
 // those elements names its line from.
 func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budget *TablePaddingBudget, firstLine int) (ast.Node, error) {
-	root, count, pc := reader.read(source, unclosedFrontmatter, budget)
+	root, count, pc, err := reader.read(source, unclosedFrontmatter, budget)
+	if err != nil {
+		return nil, err
+	}
 	if refusal := count.refusal(root, source, firstLine); refusal != nil {
 		return nil, refusal
 	}
@@ -46,15 +49,58 @@ func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool, budg
 }
 
 // read is goldmark's tree of source, its tables padded and its elements counted on budget, with the
-// count and the parser context it kept, before anything refuses it.
-func (reader markdownReader) read(source []byte, unclosedFrontmatter bool, budget *TablePaddingBudget) (ast.Node, *parseCount, parser.Context) {
+// count and the parser context it kept, or the refusal of markdown nested past either of
+// parseSource's bounds, before anything else refuses it.
+func (reader markdownReader) read(source []byte, unclosedFrontmatter bool, budget *TablePaddingBudget) (ast.Node, *parseCount, parser.Context, error) {
 	pc := parser.NewContext()
 	if unclosedFrontmatter {
 		pc.Set(unclosedFrontmatterKey, true)
 	}
 	pc.Set(tablePaddingBudgetKey, budget)
 	count := budget.elements.countParse(pc)
-	return withLineStarts(reader.md.Parser(), source, pc), count, pc
+	root, err := parseSource(reader.md.Parser(), source, pc)
+	return root, count, pc, err
+}
+
+// maxReferenceLines is how many of a paragraph's lines goldmark's link reference definition
+// transformer reads (linkReferenceDefinitions).
+const maxReferenceLines = 1_024
+
+// linkReferenceDefinitions is goldmark's link reference definition transformer reading no more of a
+// paragraph than its first maxReferenceLines lines. Goldmark takes each definition it parses out of
+// the paragraph's lines by copying every line after it (parser/link_ref.go:41-50 at v1.8.6), so a
+// paragraph of n definitions costs n² line copies: a mebibyte of `[a]: b` lines took a minute to
+// refuse. Every document holding a definition is refused at the first one in document order
+// (convertedBlocks), which those first lines hold, so the paragraph's later lines stay its text and
+// the refusal is the one a whole read makes.
+type linkReferenceDefinitions struct{ parser.ParagraphTransformer }
+
+func (t linkReferenceDefinitions) Transform(node *ast.Paragraph, reader gmtext.Reader, pc parser.Context) {
+	lines := node.Lines()
+	if lines.Len() <= maxReferenceLines {
+		t.ParagraphTransformer.Transform(node, reader, pc)
+		return
+	}
+	parent, next := node.Parent(), node.NextSibling()
+	rest := lines.Sliced(maxReferenceLines, lines.Len())
+	head := gmtext.NewSegments()
+	head.AppendAll(lines.Sliced(0, maxReferenceLines))
+	node.SetLines(head)
+	t.ParagraphTransformer.Transform(node, reader, pc)
+	if node.Parent() == nil {
+		// Every line it read was a definition, and goldmark took the paragraph out: the rest is a
+		// paragraph of its own where that one stood.
+		node = ast.NewParagraph()
+		node.SetLines(gmtext.NewSegments())
+		if next != nil {
+			parent.InsertBefore(parent, next, node)
+		} else {
+			parent.AppendChild(parent, node)
+		}
+	}
+	kept := node.Lines()
+	kept.AppendAll(rest)
+	node.SetLines(kept)
 }
 
 // unclosedFrontmatterKey marks the parse of a document that opens with a front-matter opener no
@@ -536,7 +582,7 @@ func (taskMarkerParser) Parse(parent ast.Node, block gmtext.Reader, _ parser.Con
 type lineRecordingParagraph struct{ parser.BlockParser }
 
 // untrimmedLinesKey holds the recorded lines while a document parses, and untrimmedLinesAttr on
-// the parsed document root afterwards (withLineStarts).
+// the parsed document root afterwards (parseSource).
 var (
 	untrimmedLinesKey  = parser.NewContextKey()
 	untrimmedLinesAttr = []byte("pmdoc-untrimmed-lines")
@@ -576,15 +622,25 @@ func recordLine(line gmtext.Segment, source []byte, pc parser.Context) {
 	recorded[line.TrimLeftSpace(source).Start] = line
 }
 
-// withLineStarts parses source with context, with each footnote definition where it is written
-// (definitionsInPlace), and leaves the lines lineRecordingParagraph recorded on the document root.
-func withLineStarts(p parser.Parser, source []byte, context parser.Context) ast.Node {
+// parseSource is pmdoc's one parse of markdown: it parses source with context, puts each footnote
+// definition where it is written (definitionsInPlace), and leaves the lines lineRecordingParagraph
+// recorded on the document root. It refuses markdown nested past either bound - a block
+// nestingGuard refused, or a textblock's inline marks past maxInlineNesting (nestingRefusal) -
+// before anything walks the tree, and goldmark's own walk through a link's label inside the parse
+// meets each image imageNesting held to the inline bound. Goldmark runs an AST transformer inside
+// its parse, so pmdoc registers none, and takes the backslash out of a cell's escaped pipes itself
+// once the bounds hold (unescapeTablePipes).
+func parseSource(p parser.Parser, source []byte, context parser.Context) (ast.Node, error) {
 	root := p.Parse(gmtext.NewReader(source), parser.WithContext(context))
 	definitionsInPlace(root, context)
 	if recorded := context.Get(untrimmedLinesKey); recorded != nil {
 		root.SetAttribute(untrimmedLinesAttr, recorded)
 	}
-	return root
+	if err := nestingRefusal(root, source, context); err != nil {
+		return nil, err
+	}
+	unescapeTablePipes(root, source)
+	return root, nil
 }
 
 // multilineCodeSpanText is the text of a code span that runs over more than one line, as the

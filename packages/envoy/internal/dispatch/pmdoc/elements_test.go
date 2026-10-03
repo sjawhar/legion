@@ -48,18 +48,22 @@ func TestMarkdownPastTheElementLimitIsRefusedBeforeItIsBuilt(t *testing.T) {
 	fill := func(unit string) string { return strings.Repeat(unit, mebibyte/len(unit)+1)[:mebibyte] }
 	table := "| a | b |\n| - | - |\n" + strings.Repeat("| x | y |\n", mebibyte/10)
 	run := strings.Repeat("*", 2*262_140)
-	for _, shape := range []struct{ name, markdown string }{
-		{")_", fill(")_")},
-		{"a_", fill("a_")},
-		{"a_b*", fill("a_b*")},
-		{"[a", fill("[a")},
-		{"a line feed per character", fill("a\n")},
-		{"list items", fill("- a\n")},
-		{"empty list items", fill("-\n")},
-		{"hard breaks", fill("a  \n")},
-		{"headings", fill("# a\n")},
-		{"a two-column table", table},
-		{"262,140 nested marks", run + "x" + run},
+	for _, shape := range []struct {
+		name, markdown string
+		want           error
+	}{
+		{")_", fill(")_"), ErrTooManyElements},
+		{"a_", fill("a_"), ErrTooManyElements},
+		{"a_b*", fill("a_b*"), ErrTooManyElements},
+		{"[a", fill("[a"), ErrTooManyElements},
+		{"a line feed per character", fill("a\n"), ErrTooManyElements},
+		{"list items", fill("- a\n"), ErrTooManyElements},
+		{"empty list items", fill("-\n"), ErrTooManyElements},
+		{"hard breaks", fill("a  \n"), ErrTooManyElements},
+		{"headings", fill("# a\n"), ErrTooManyElements},
+		{"a two-column table", table, ErrTooManyElements},
+		// Nested past the inline bound too, which refuses it first (nestingRefusal).
+		{"262,140 nested marks", run + "x" + run, ErrSchema},
 	} {
 		for _, reader := range []struct {
 			name  string
@@ -76,8 +80,8 @@ func TestMarkdownPastTheElementLimitIsRefusedBeforeItIsBuilt(t *testing.T) {
 				runtime.ReadMemStats(&before)
 				err := reader.parse(shape.markdown)
 				runtime.ReadMemStats(&after)
-				if !errors.Is(err, ErrTooManyElements) {
-					t.Fatalf("a mebibyte of %s: %v, want ErrTooManyElements", shape.name, err)
+				if !errors.Is(err, shape.want) {
+					t.Fatalf("a mebibyte of %s: %v, want %v", shape.name, err, shape.want)
 				}
 				if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 160<<20 {
 					t.Errorf("refusing a mebibyte of %s allocated %d MiB, want at most 160 MiB", shape.name, allocated>>20)

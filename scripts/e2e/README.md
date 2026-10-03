@@ -176,7 +176,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 
 | check | what it does and requires |
 | :--- | :--- |
-| `gate-refuses-another-contract` | edits the installed (unpacked) manifest to declare the next `goDaemonApiVersion`; `legion start` refuses naming both numbers; the manifest is put back byte for byte |
+| `gate-refuses-another-contract` | edits the installed (unpacked) manifest to declare the next `daemonApiVersion`; `legion start` refuses naming both numbers; the manifest is put back byte for byte |
 | `gate-refuses-a-disabled-plugin` | `omp plugin disable`; `legion start` refuses with "installed but not loaded by omp"; `omp plugin enable` |
 | `gate-refuses-a-missing-skill` | the installed plugin's `dist/skills/thermonuclear-deep-review` moved aside; `legion start` refuses with "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md, roles/core/reviewer.md)", the agent definition and the reviewer's role prompt that load it; the rubric put back |
 | `gate-refuses-a-skill-only-the-role-prompts-load` | the installed plugin's `dist/skills/legion-controller` moved aside, a skill only `roles/controller-root.md` loads; `legion start` refuses with "finds no skill legion-controller (loaded by roles/controller-root.md)", which only a gate reading the daemon's roles directory can say; the skill put back |
@@ -526,7 +526,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `identity` | refuses to start unless the runtime context is set and authenticates as someone other than the operator; a SelfSubjectReview shows the assumed `…legion-daemon` role in group `legion-daemon`; `list secrets -n legion` is 403; a SelfSubjectRulesReview (`can-i --list`) in every namespace finds no grant beyond the plan's; access reviews, which reach EKS's webhook authorizer that a rules review cannot enumerate, deny every kind of impersonation, `serviceaccounts/token`, pod create and exec, secret list and create, PVC get, nodes, RBAC create/update/patch/escalate/bind, and Sandboxes outside `legion`, beside two positive controls |
 | `installed` | `CheckInstalled` with production's `InstallRef` passes under the `resourceNames` grants |
 | `boot-refusal-negative` | `CheckInstalled` naming `legion-no-such-controller` refuses, naming that Deployment and the 403 the `resourceNames` grant answers, without blaming the CRD |
-| `image-probe` | `ProbeImage` on the image under test, with the daemon's own probe command (`--role-references` with the checkout's role prompts' references, and `--provider-env-dir`, the run having a provider key), its probe pod carrying the operator's pod, passes; its log confirms `go-daemon-api-version` equal to the daemon's contract and `agent-models=resolved` (every task agent the prompts dispatch resolved its model under the operator's pod), and the probe Sandbox is deleted |
+| `image-probe` | `ProbeImage` on the image under test, with the daemon's own probe command (`--role-references` with the checkout's role prompts' references, and `--provider-env-dir`, the run having a provider key), its probe pod carrying the operator's pod, passes; its log confirms `daemon-api-version` equal to the daemon's contract and `agent-models=resolved` (every task agent the prompts dispatch resolved its model under the operator's pod), and the probe Sandbox is deleted |
 | `image-probe-negative` | with `modelRoles.oracle` removed from the run's ConfigMap, `ProbeImage` on the same image is refused naming `task agent oracle` and `role oracle is not configured`; the ConfigMap is restored before the check ends, so every later check boots on it |
 | `root-ready` | Spawn of the root: its Sandbox Ready, the returned incarnation the pod's uid, the init log (`pods/log`) carrying `workspace-init: /legion/workspaces/sjawhar/legion-smoke/s4a-1 on legion/S4A-1`, and a hello registered at generation 1 with that generation's token |
 | `gvisor` | `uname -r` in the root pod is gVisor's emulated kernel (`…-gvisor`), not the node's, and the pod's `runtimeClassName` is `gvisor` |
@@ -642,19 +642,23 @@ the smoke file goes) to the human. `admitted-issue-cap` prints `SKIPPED`, and `s
 to 12 hours for a human to answer the architect's decision block and approve the spec in Dispatch.
 It then fails unless the architect's approval request at the approved version carries a summary
 after `Approve spec.md (version N)?`, a human answered at least one of the spec's decision blocks,
-and no approval request on the spec, retracted ones included, was early by either of two rules
+and no approval request on the spec was early by either of two rules
 ([`lib/design-gate-verdict.jq`](lib/design-gate-verdict.jq), tested by `bun test scripts/e2e/lib`).
-The version rule judges every request: the version it named must hold none of the spec's blocks
-open, read from the version itself by the block ids of the spec's block asks, because Dispatch
-indexes a block as an ask only when it settles the document, after the edit that wrote it. The
-answer-time rule judges a request no human answered: it must not come before a human answered one
-of the spec's blocks, which catches a request made while the choice was still prose or sent in
+The version rule judges every hand-back: the version its event records in `requested_version` must
+hold none of the spec's blocks open, read from the version itself by the block ids of the spec's
+block asks, because Dispatch indexes a block as an ask only when it settles the document, after
+the edit that wrote it. An approval row follows versions in place, so `ask.opened` records its
+first hand-back and each `ask.handed_back` a later one; an `ask.edited` only rewords the request.
+The answer-time rule judges a hand-back no human answered: it must not come before a human answered
+one of the spec's blocks, which catches a request made while the choice was still prose or sent in
 parallel with the edit that wrote the block. A request the human answered is left to the version
 rule, so the flow `legion-architect` prescribes after Request changes (the revision raises a block,
-the human answers it, the architect requests again) passes; the trade-off is that a premature
-request the human answered with Request changes no longer fails the run, since the human caught it.
-It keeps the issue's asks as `<issue>-asks.json`, each requested version as
-`<issue>-spec-v<N>.json`, and the verdict as `<issue>-gate-verdict.json`.
+the human answers it, and the architect requests approval again, which opens a new request since
+Request changes answered the old one) passes; the trade-off is that a
+premature request the human answered with Request changes no longer fails the run, since the human
+caught it. It keeps the issue's asks as `<issue>-asks.json`, approval events as
+`<issue>-events.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as
+`<issue>-gate-verdict.json`.
 
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.

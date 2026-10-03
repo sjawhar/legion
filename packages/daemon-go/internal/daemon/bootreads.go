@@ -21,8 +21,8 @@ type bootReads struct {
 	paneNatsUser                                    string         // the pane seed's user's public key, "" with no pane seed
 	nats                                            natsConnection // the user the daemon's own NATS connection authenticates as
 	instructions                                    []byte         // nil when the configuration names none
-	tmux                                            tmuxReads    // runtime: tmux
-	sandbox                                         sandboxReads // runtime: kubernetes
+	tmux                                            tmuxReads      // runtime: tmux
+	sandbox                                         sandboxReads   // runtime: kubernetes
 }
 
 // readBoot is every refusal boot makes from the configuration, the daemon's environment (lookup,

@@ -28,7 +28,11 @@ import (
 // already past the bound - stored before it, or grown by browser edits, which no server write
 // carries - can still be trimmed or split. Each refusal is pmdoc.ErrTooManyElements, served as 413
 // CAP_EXCEEDED. The writes that do not run through applyLive add no caller text: settlement's
-// repairs, the block-id backfill and the sweep of unrecorded marks.
+// repairs, the block-id backfill and the sweep of unrecorded marks. What the bound weighs is the
+// document a write leaves, not the history its store keeps: every update stays stored with the
+// content later writes delete, and a cold load builds all of it, so repeated versions and a
+// comment's margin record, which each reply rewrites whole, still grow what a load costs
+// (LEGION-496).
 
 // refuseGrowth is the refusal of a write that leaves the document rendering as after where it
 // rendered as before ("" for a new document), or nil. The rendering is refused past either of an

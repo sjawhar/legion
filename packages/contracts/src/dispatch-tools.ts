@@ -868,14 +868,17 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_request_approval",
-    example: { issue: "DSP-1", summary: "Proposes a live sync in place of the nightly export." },
+    example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
     description:
       "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " +
       "Request changes) in the human's Inbox whose question names the document and version, " +
       "followed by the summary; the answer pins a review to that version and arrives as " +
-      "artifact.approved or artifact.changes_requested. A later version makes an approval stale, " +
-      "and writing it retracts an open request for an older version; request again for the new " +
-      "one. A repeat at the version an open request names returns that request unchanged. " +
+      "artifact.approved or artifact.changes_requested. A later version carries the same open " +
+      "request forward and leaves it waiting on you; once the revision is complete and the human " +
+      "has agreed to every point in it, call this again to hand that request back. The request " +
+      "carries nothing new. A call while it already waits on the human hands nothing back: the " +
+      "same summary changes nothing, and a different one is refused, since it would rewrite the " +
+      "card the human is reading. " +
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +
@@ -892,7 +895,7 @@ export const dispatchToolSpecs = [
       summary: z
         .string({ min: 1 })
         .describe(
-          "The proposals in this version the human hasn't already agreed to, in one to three sentences."
+          "What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question. Request approval only once the human has agreed to every point in the document."
         ),
     }),
     validation: documentOwnerValidation(true),

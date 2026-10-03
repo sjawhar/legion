@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -78,4 +79,71 @@ func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 30*time.Second {
 		t.Errorf("parse of a run of 1 MiB of ~ took %s, want under 30 s", elapsed)
 	}
+}
+
+// A table whose every row holds an escaped pipe in a code span parses in time linear in its size,
+// up to the 1 MiB a document may be. goldmark's table transformer checked every code span's text
+// against every escaped pipe in the document: on one machine at a load of about 300, 16 KiB of such
+// rows parsed in 35 ms and 256 KiB in 6.8 s, and 1 MiB took 2 min 9 s. unescapeTablePipes,
+// which replaced it, parsed 16 KiB in 19 ms, 256 KiB in 0.6-0.8 s and 1 MiB in 2.0-2.4 s there. No
+// wall-clock bound holds on every runner, so the parse is timed at growing sizes and its growth
+// bounded (growsLinearly). A caller's write of a table that size passes the element limit and is
+// refused, so it is read as a rendering is, whose parse no element limit stops.
+func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
+	const header, row = "| a |\n| --- |\n", "`\\|`\n"
+	growsLinearly(t, "parsing a table of `\\|` cells", []int{16 << 10, 256 << 10, 1 << 20}, func(size int) time.Duration {
+		markdown := header + strings.Repeat(row, (size-len(header))/len(row))
+		started := time.Now()
+		if _, err := ParseRendering(markdown); err != nil {
+			t.Fatalf("parse %d bytes of `\\|` rows: %v", size, err)
+		}
+		return time.Since(started)
+	})
+}
+
+// growthAllowance is how many times faster than its input a parse's time may grow from one size
+// to the next. Linear time grows at most as fast as the input, less while a fixed cost counts, and
+// quadratic time as the input's square. Four times the input's growth lets a runner's load
+// quadruple between two parses and still refuses a quadratic one at any step over four.
+const growthAllowance = 4
+
+// growsLinearly times what at each of sizes in turn and fails t at the first size whose time grew
+// more than growthAllowance times faster than the size did. The first size is timed three times
+// before the second and three times after it, and the fastest of the six kept, so neither a first
+// run's warm-up nor a load spike shorter than the second size's run reads as growth. A step over
+// the bound times the larger size again and keeps the faster time, and after the first step also
+// times the smaller size again and keeps the slower, so load that rose between two runs does not
+// read as growth either.
+func growsLinearly(t *testing.T, what string, sizes []int, timed func(size int) time.Duration) {
+	t.Helper()
+	first := func() time.Duration { return min(timed(sizes[0]), timed(sizes[0]), timed(sizes[0])) }
+	before := first()
+	for i := 1; i < len(sizes); i++ {
+		smaller, size := sizes[i-1], sizes[i]
+		growth := size / smaller
+		took := timed(size)
+		if i == 1 {
+			before = min(before, first())
+		}
+		if took > time.Duration(growthAllowance*growth)*before {
+			took = min(took, timed(size))
+			if i > 1 {
+				before = max(before, timed(smaller))
+			}
+		}
+		ratio := float64(took) / float64(before)
+		if took > time.Duration(growthAllowance*growth)*before {
+			t.Fatalf("%s took %s at %s, %.0f times the %s it took at %s: the input grew %d times, and a parse linear in it may grow %d times at most (growthAllowance)",
+				what, took.Round(time.Millisecond), sizeText(size), ratio, before.Round(time.Millisecond), sizeText(smaller), growth, growthAllowance*growth)
+		}
+		t.Logf("%s: %s at %s, %s at %s, %.1f times for an input %d times larger (at most %d)", what, before.Round(time.Millisecond), sizeText(smaller), took.Round(time.Millisecond), sizeText(size), ratio, growth, growthAllowance*growth)
+		before = took
+	}
+}
+
+func sizeText(size int) string {
+	if size >= 1<<20 && size%(1<<20) == 0 {
+		return fmt.Sprintf("%d MiB", size>>20)
+	}
+	return fmt.Sprintf("%d KiB", size>>10)
 }

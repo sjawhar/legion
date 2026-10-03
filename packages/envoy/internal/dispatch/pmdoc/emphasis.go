@@ -11,14 +11,19 @@ import (
 	"github.com/yuin/goldmark/util"
 )
 
-// inlineParsers is goldmark's default inline parsers with its emphasis parser, found by its type
-// as blockParsers finds the block parsers it wraps, replaced by emphasis.
+// inlineParsers is goldmark's default inline parsers, each found by its type as blockParsers finds
+// the block parsers it wraps: its emphasis parser replaced by emphasis, and its link parser
+// measuring the images it makes (imageNesting).
 func inlineParsers(emphasis emphasisParser) []util.PrioritizedValue {
 	parsers := parser.DefaultInlineParsers()
 	emphasisType := reflect.TypeOf(parser.NewEmphasisParser())
+	linkType := reflect.TypeOf(parser.NewLinkParser())
 	for index, prioritized := range parsers {
-		if reflect.TypeOf(prioritized.Value) == emphasisType {
+		switch reflect.TypeOf(prioritized.Value) {
+		case emphasisType:
 			parsers[index].Value = emphasis
+		case linkType:
+			parsers[index].Value = imageNesting{prioritized.Value.(goldmarkLinkParser)}
 		}
 	}
 	return parsers
