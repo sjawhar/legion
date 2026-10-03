@@ -16,16 +16,19 @@ import (
 // byte, and every element costs the server memory in each stage a write runs - goldmark's tree, the
 // Proof tree, the renderer's read-back of each run, the read-back of the whole document, the live
 // document - and in every read and settlement of the document it stores: a mebibyte of `)_`
-// makes 786,432 of them and held a gigabyte (LEGION-481). At this limit a write of any shape holds
-// under 130 MiB above the server's idle memory. Hand-written markdown weighs 30 to 45 elements a
-// kibibyte, so a document at the 1 MiB cap weighs at most about 46,000.
+// makes 786,432 of them and held a gigabyte (LEGION-481). The heaviest document of each shape
+// measured at this limit holds at most about 220 MiB above the server's idle memory to store and
+// settle, and 170 MiB to read (cmd/dispatch's memory tests). This repository's own markdown weighs
+// 44 to 100 elements a kibibyte, its route tables the most, so prose passes to the 1 MiB cap and a
+// table-dense document to about 650 KiB.
 const maxWriteElements = 65_536
 
 // nodeGuard is how many times maxWriteElements goldmark may make nodes, lines and table cells,
 // counted while it parses, before the parse stops. Markdown counts there at most about twice what
 // it weighs - a line of text counts as its line and its text, and weighs one element - so the guard
-// stops only a write at or past the limit; and goldmark's tree for this many costs at most about
-// 90 MiB, so such a write is refused before goldmark allocates the rest of it.
+// stops only a write at or past the limit, and goldmark builds no more of the tree than that:
+// refusing a mebibyte of any shape measured allocates at most about 130 MiB (hard breaks, which
+// count two and weigh four), where reading a mebibyte of `)_` whole allocated 2.6 GB.
 const nodeGuard = 2
 
 // ErrTooManyElements is the refusal of markdown that makes more elements than one write may
@@ -107,9 +110,10 @@ func countedElements(pc parser.Context) *parseCount {
 
 // elementWeight is what one node of goldmark's tree weighs: a table cell four, as the cell, the
 // paragraph and the text the Proof tree makes of it; any other block three, as the Proof block
-// and the attributes it carries in the live document; and an inline node one. Each weight is the
-// memory the node costs at its worst, measured through the upload route, in units of an inline
-// node's.
+// and the attributes it carries in the live document; a line of text ending in a hard break four,
+// its text and the break, which the Proof tree makes a node of its own (hardbreakWeight); and any
+// other inline node one. Each weight is the memory the node costs at its worst, measured through
+// the upload route, in units of an inline node's.
 func elementWeight(node ast.Node) int {
 	switch {
 	case node.Kind() == ast.KindDocument:
@@ -118,9 +122,17 @@ func elementWeight(node ast.Node) int {
 		return 4
 	case node.Type() == ast.TypeBlock:
 		return 3
+	case node.Kind() == ast.KindText && node.(*ast.Text).HardLineBreak():
+		return 1 + hardbreakWeight
 	}
 	return 1
 }
+
+// hardbreakWeight is what a hard line break weighs. The Proof tree makes it a node of its own
+// between two texts, and the live document an element splitting its textblock's text in two, so it
+// costs what a block does: weighed as one inline node, the heaviest document of hard breaks the
+// limit admitted held 350 MiB stored, and four cold reads of it at once 1,190 MiB.
+const hardbreakWeight = 3
 
 // refusal is the refusal of the parse p counts, which made root from source whose first line is
 // firstLine of what the caller wrote, or nil: goldmark passed the guard, or root's elements take the
@@ -143,7 +155,7 @@ func (p *parseCount) refusal(root ast.Node, source []byte, firstLine int) error 
 		return nil
 	}
 	line := firstLine + bytes.Count(source[:min(p.at, len(source))], []byte("\n"))
-	return fmt.Errorf("%w: this write's markdown makes more than %d elements, passing that at line %d; a block weighs 3 elements, a table cell 4, and each piece of inline syntax, mark and line of text 1. Split the document, or upload data as a file of another content type",
+	return fmt.Errorf("%w: this write's markdown makes more than %d elements, passing that at line %d; a block weighs 3 elements, a table cell 4, a hard line break 3, and each piece of inline syntax, mark and line of text 1. Split the document, or upload data as a file of another content type",
 		ErrTooManyElements, p.write.limit, line)
 }
 
@@ -183,7 +195,8 @@ func nodeOffset(node ast.Node) int {
 // it reads, so each block and each line counts once. Once the write's markdown passes the guard it
 // opens a raw block that takes every line after it unread, so a refused document costs no more of
 // goldmark's tree than the guard allows. A list holds only list items, which goldmark's list parser
-// reads its children as, so in a list the raw block opens inside the item goldmark opens next.
+// reads its children as, so no raw block opens in a list itself: the list closes instead
+// (elementListGuard), and the raw block opens where the list was.
 type elementBlockCounter struct{}
 
 // everyByte is every byte a line can open with: the counter is tried for each line whatever opens
@@ -220,6 +233,19 @@ func (elementBlockCounter) Close(ast.Node, gmtext.Reader, parser.Context) {}
 func (elementBlockCounter) CanInterruptParagraph() bool { return true }
 
 func (elementBlockCounter) CanAcceptIndentedLine() bool { return true }
+
+// elementListGuard is goldmark's list parser closing its list on the first line after the write's
+// markdown passed the guard, so that line opens the raw block that takes the rest
+// (elementBlockCounter) where the list stood, rather than one more list item and the raw block in
+// it, as every later line would.
+type elementListGuard struct{ parser.BlockParser }
+
+func (p elementListGuard) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	if count := countedElements(pc); count != nil && count.passed() {
+		return parser.Close
+	}
+	return p.BlockParser.Continue(node, reader, pc)
+}
 
 // elementInlineCounter is an inline parser that parses nothing but counts what goldmark's inline
 // phase makes: tried first at every character an inline parser triggers on, a line's start among

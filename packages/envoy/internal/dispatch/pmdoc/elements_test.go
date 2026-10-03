@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"errors"
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
@@ -20,10 +21,28 @@ func TestAWriteAtTheElementLimitIsReadAndOneElementMoreIsRefused(t *testing.T) {
 	}
 }
 
+// A line ending in a hard break weighs four elements, its text and the break, written as two
+// spaces or a backslash, and the paragraph's last line, which ends in no break, weighs one with the
+// paragraph's three: 16,384 lines weigh the limit exactly and are read, and one line more is
+// refused, naming the line that passes it.
+func TestHardBreaksWeighAsTheirTextAndABlock(t *testing.T) {
+	lines := maxWriteElements / 4
+	for _, line := range []string{"a  \n", "a\\\n"} {
+		if _, err := ParseForWrite(strings.Repeat(line, lines), nil); err != nil {
+			t.Fatalf("%d lines of %q, %d elements: %v, want them read", lines, line, maxWriteElements, err)
+		}
+		_, err := ParseForWrite(strings.Repeat(line, lines+1), nil)
+		if !errors.Is(err, ErrTooManyElements) || !strings.Contains(err.Error(), fmt.Sprintf("passing that at line %d", lines)) {
+			t.Fatalf("%d lines of %q: %v, want ErrTooManyElements naming line %d", lines+1, line, err, lines)
+		}
+	}
+}
+
 // A caller's mebibyte of any shape that makes elements by the byte is refused before goldmark has
-// built the rest of it: every reader of caller markdown refuses it, a list included, whose list
-// holds only items, and the refusal allocates a fraction of what reading it whole took (2.6 GB for
-// `)_`, which held a gigabyte at once, LEGION-481); list items allocate the most, about 200 MiB.
+// built the rest of it: every reader of caller markdown refuses it, a list included, which closes at
+// the guard (elementListGuard), and the refusal allocates a fraction of what reading it whole took
+// (2.6 GB for `)_`, which held a gigabyte at once, LEGION-481). Hard breaks allocate the most,
+// about 130 MiB; a list that stayed open past the guard made an item a line, and took 240 MiB.
 func TestMarkdownPastTheElementLimitIsRefusedBeforeItIsBuilt(t *testing.T) {
 	const mebibyte = 1 << 20
 	fill := func(unit string) string { return strings.Repeat(unit, mebibyte/len(unit)+1)[:mebibyte] }
@@ -36,6 +55,8 @@ func TestMarkdownPastTheElementLimitIsRefusedBeforeItIsBuilt(t *testing.T) {
 		{"[a", fill("[a")},
 		{"a line feed per character", fill("a\n")},
 		{"list items", fill("- a\n")},
+		{"empty list items", fill("-\n")},
+		{"hard breaks", fill("a  \n")},
 		{"headings", fill("# a\n")},
 		{"a two-column table", table},
 		{"262,140 nested marks", run + "x" + run},
@@ -58,8 +79,8 @@ func TestMarkdownPastTheElementLimitIsRefusedBeforeItIsBuilt(t *testing.T) {
 				if !errors.Is(err, ErrTooManyElements) {
 					t.Fatalf("a mebibyte of %s: %v, want ErrTooManyElements", shape.name, err)
 				}
-				if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 256<<20 {
-					t.Errorf("refusing a mebibyte of %s allocated %d MiB, want at most 256 MiB", shape.name, allocated>>20)
+				if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 160<<20 {
+					t.Errorf("refusing a mebibyte of %s allocated %d MiB, want at most 160 MiB", shape.name, allocated>>20)
 				}
 			})
 		}

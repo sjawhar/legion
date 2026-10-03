@@ -52,7 +52,8 @@ var blockReader = markdownReader{md: goldmark.New(
 // heading parser opening no heading under a table (underlineAfterTable), its list, list item and
 // quote parsers recording where their containers' lines end (endsContainers), its list and quote
 // parsers opening nothing at the document's level after an unclosed front-matter opener
-// (frontmatterAttempt), and every one placing the block it opens where its text starts
+// (frontmatterAttempt), its list parser closing a list once a write's markdown has passed the
+// element guard (elementListGuard), and every one placing the block it opens where its text starts
 // (tabIndented).
 func blockParsers() []util.PrioritizedValue {
 	parsers := parser.DefaultBlockParsers()
@@ -66,7 +67,7 @@ func blockParsers() []util.PrioritizedValue {
 		block := prioritized.Value.(parser.BlockParser)
 		switch reflect.TypeOf(block) {
 		case listParser:
-			parsers[index].Value = frontmatterAttempt{tabIndented{endsContainers{emptyItemGuard{block}}, listMarkerStart}}
+			parsers[index].Value = elementListGuard{frontmatterAttempt{tabIndented{endsContainers{emptyItemGuard{block}}, listMarkerStart}}}
 		case listItemParser:
 			parsers[index].Value = tabIndented{endsContainers{listItemColumns{block}}, listMarkerStart}
 		case quoteParser:

@@ -156,6 +156,53 @@ func TestTwoUploadsAtOnceStayWithinTheMemoryBound(t *testing.T) {
 	}
 }
 
+// Two cold reads at once of the heaviest documents the limit admits hold at most twice the bound
+// together, on a server that has not loaded the document: `)_`, and the hard breaks that, weighed as
+// one inline node, held 565 MiB for two reads and 1,190 MiB for four. Four reads at once are
+// logged beside them, the production task being 1,024 MiB.
+func TestConcurrentColdReadsStayWithinTheMemoryBound(t *testing.T) {
+	memory := newMemoryHarness(t)
+	for _, shape := range heaviestAdmittedShapes(t) {
+		if shape.name != ")_" && !strings.HasPrefix(shape.name, "hard breaks") {
+			continue
+		}
+		t.Run(shape.name, func(t *testing.T) {
+			writer := memory.start(t)
+			upload := writer.upload(t, "json", memory.issue, shape.markdown)
+			if upload.status != http.StatusCreated {
+				t.Fatalf("upload of the heaviest %s the limit admits: status %d body %.300s, want 201", shape.name, upload.status, upload.body)
+			}
+			memory.waitForSettlement(t, upload)
+			writer.stop(t)
+			for _, readers := range []int{2, 4} {
+				server := memory.start(t)
+				peak := server.peakAboveIdle(t, func() {
+					failures := make([]error, readers)
+					var group sync.WaitGroup
+					for index := range readers {
+						group.Go(func() {
+							answer, err := server.trySend(http.MethodGet, "/api/v1/artifacts/"+upload.artifactID+"/text", "", nil, http.Header{"X-Dispatch-User": {"alice"}})
+							if err == nil && answer.status != http.StatusOK {
+								err = fmt.Errorf("read %d: status %d body %.300s", index, answer.status, answer.body)
+							}
+							failures[index] = err
+						})
+					}
+					group.Wait()
+					if err := errors.Join(failures...); err != nil {
+						t.Fatal(err)
+					}
+				})
+				server.stop(t)
+				t.Logf("%s: %d cold text reads at once, %d MiB above idle", shape.name, readers, peak>>20)
+				if readers == 2 && peak > concurrentMemoryBound {
+					t.Errorf("two cold reads of %s at once held %d MiB above idle, want at most %d MiB", shape.name, peak>>20, concurrentMemoryBound>>20)
+				}
+			}
+		})
+	}
+}
+
 // A caller's quote is read as markdown when its text alone matches nothing in the document: the
 // `find` of an edit's replace, and the quote a comment or an ask anchors on. Each is caller
 // markdown, as a write's is, so a quote filling the 1 MiB request cap holds at most the bound above
@@ -240,7 +287,8 @@ type memoryShape struct {
 // pull requests (#1670, #1669) found quadratic or deep, a table of a mebibyte of cells, and the
 // node-heavy tables and links #1669's review measured. 1 MiB of bare `>` nests a quote per byte:
 // main's parse ran 14 minutes into a stack overflow that took the server down, and #1669's depth
-// bound refuses it as soon as it nests past 100.
+// bound refuses it as soon as it nests past 100. Flat list items, empty or not, are where the
+// guard has to close a list to stop, and hard breaks weigh as blocks.
 func capShapes() []memoryShape {
 	repeated := func(unit string) func() string { return func() string { return fill(unit) } }
 	return []memoryShape{
@@ -283,6 +331,10 @@ func capShapes() []memoryShape {
 			}
 			return text.String() + strings.Repeat("a", documentCap-text.Len())
 		}},
+		{"list items", repeated("- a\n")},
+		{"empty list items", repeated("-\n")},
+		{"hard breaks of two spaces", repeated("a  \n")},
+		{"hard breaks of a backslash", repeated("a\\\n")},
 		{"1 MiB of bare >", repeated(">")},
 	}
 }
@@ -299,8 +351,8 @@ type admittedShape struct {
 }
 
 // heaviestAdmittedShapes are the heaviest documents of the shapes that cost the most memory per
-// element - italic spans, delimiter runs, table cells, headings and list items - that the element
-// limit admits, each found by the parser the server writes with.
+// element - italic spans, delimiter runs, table cells, headings, list items and hard breaks - that
+// the element limit admits, each found by the parser the server writes with.
 func heaviestAdmittedShapes(t *testing.T) []admittedShape {
 	t.Helper()
 	repeated := func(unit string) func(int) string {
@@ -320,6 +372,8 @@ func heaviestAdmittedShapes(t *testing.T) []admittedShape {
 		{"a four-column table", table("| a | b | c | d |\n", "| - | - | - | - |\n", "| w | x | y | z |\n")},
 		{"headings", repeated("# a\n")},
 		{"list items", repeated("- a\n")},
+		{"hard breaks of two spaces", repeated("a  \n")},
+		{"hard breaks of a backslash", repeated("a\\\n")},
 	} {
 		shapes = append(shapes, admittedShape{name: shape.name, markdown: heaviestAdmitted(t, shape.build)})
 	}
