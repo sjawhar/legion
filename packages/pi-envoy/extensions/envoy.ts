@@ -1866,18 +1866,19 @@ export default function envoyExtension(pi: PiApi): void {
       askAwareness.session_id === context.sessionManager.getSessionId() &&
       askAwareness.period > 0
     ) {
-      // A tool-device `write` (to `xd://<tool>`) is no call of its own: Oh My Pi reports the tool it
-      // ran first, under that tool's name, input and details, and one whose content asks for help
-      // runs nothing. So the `write` opens no ask, and one to a Dispatch device is no work either.
-      const device = deviceTool(event);
-      if (device === undefined && opensAsk(event)) {
+      // A tool-device `write` (to `xd://<tool>`) opens no ask and counts as work by the tool it
+      // names. A device backed by a registered tool reports that tool first, under its own name,
+      // input and details, which is the report that opens an ask; Oh My Pi's own devices
+      // (`resolve`, `report_issue`, …) report only the `write`, and a help write runs nothing.
+      const tool = deviceTool(event) ?? event.toolName;
+      if (opensAsk(event)) {
         // The agent asked the humans itself, so this stop has nothing left for the nudge to
         // say: it spends the check the period owed rather than ending the period, and aborts a
         // check in flight before its verdict can be used. Later real work can re-arm a fresh
         // check, whose prompt names the ask.
         askAwareness = { ...askAwareness, check_due: false };
         abortSelfCheck("the agent opened the ask itself");
-      } else if (!(device ?? event.toolName).startsWith(DISPATCH_TOOL_PREFIX)) {
+      } else if (!tool.startsWith(DISPATCH_TOOL_PREFIX)) {
         // Real work: it owes the period another check, the way finishing a step re-arms the
         // host's todo reminder. A Dispatch write is the agent talking to the humans this nudge
         // is about, not work, so it owes nothing — and a turn that only replies calls no tool

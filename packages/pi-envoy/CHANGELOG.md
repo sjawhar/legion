@@ -82,7 +82,9 @@
   the nudge's check, as `dispatch_ask` does, and so does a `dispatch_issue` or `dispatch_artifact`
   whose stored document the server counted a decision block in (answered blocks too, so a
   re-upload of a document whose blocks are all answered spends it). An inserted opener is read on
-  its own line, so a long run of blank lines no longer stalls the session for seconds.
+  its own line, so a long run of blank lines no longer stalls the session for seconds, and an
+  opener inside fenced code, which the server stores as text, opens nothing, so an example of the
+  syntax leaves the check owed.
 
 ### Fixed
 

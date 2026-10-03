@@ -4,19 +4,47 @@ import type { ToolResultEvent } from "./pi-types";
 
 /**
  * An `ask` block's opener: `:::ask{` at the start of a line, after nothing but spaces or tabs, as the
- * server reads an opener only on a line of its own. `[ \t]*` keeps each attempt on one line, where a
- * `\s*` would cross line breaks and make every line start of a long blank run rescan the run.
+ * server reads an opener only on a line of its own. It is matched one line at a time, so a long
+ * blank run is read once.
  */
-const ASK_BLOCK_OPENER = /^[ \t]*:::ask\{/mu;
+const ASK_BLOCK_OPENER = /^[ \t]*:::ask\{/u;
+
+/** A code fence line: up to three spaces, three or more backticks or tildes, then the rest. */
+const CODE_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/u;
+
+/**
+ * Whether markdown holds an `ask` block's opener outside fenced code, which the server stores as
+ * text. A fence opens on a line of three or more backticks (with no backtick after them) or tildes,
+ * and closes on a line of nothing but the same character at least as many times; an unclosed fence
+ * runs to the end.
+ */
+function opensAskBlock(markdown: string): boolean {
+  let fence: string | undefined;
+  for (const line of markdown.split(/\r\n|\r|\n/u)) {
+    const [, marker, rest = ""] = CODE_FENCE.exec(line) ?? [];
+    if (fence === undefined) {
+      if (marker !== undefined && !(marker.startsWith("`") && rest.includes("`"))) fence = marker;
+      else if (ASK_BLOCK_OPENER.test(line)) return true;
+    } else if (
+      marker !== undefined &&
+      marker[0] === fence[0] &&
+      marker.length >= fence.length &&
+      rest.trim() === ""
+    ) {
+      fence = undefined;
+    }
+  }
+  return false;
+}
 
 /**
  * Whether a successful call opened the ask itself, so the run-end nudge has nothing to say:
  * `dispatch_ask`, `dispatch_request_approval`, a `dispatch_issue` or `dispatch_artifact` whose
  * stored document holds a decision block, or a `dispatch_doc_edit` that writes one, by inserting an
- * `ask` block or by retyping a block into one. The server counts every block in a stored document
- * (`advice.decision_blocks`), answered ones included, so re-uploading a document whose blocks are
- * all answered reads as opening one and that stop goes without a reminder: no result tells the two
- * apart.
+ * `ask` block outside fenced code or by retyping a block into one. The server counts every block in
+ * a stored document (`advice.decision_blocks`), answered ones included, so re-uploading a document
+ * whose blocks are all answered reads as opening one and that stop goes without a reminder: no
+ * result tells the two apart.
  */
 export function opensAsk({ toolName, input, details }: ToolResultEvent): boolean {
   if (toolName === "dispatch_ask" || toolName === "dispatch_request_approval") return true;
@@ -28,7 +56,7 @@ export function opensAsk({ toolName, input, details }: ToolResultEvent): boolean
   // A successful edit's operations passed the tool's schema.
   return (input.ops as readonly EditOp[]).some(
     ({ op, markdown, type }) =>
-      (op === "insert" && markdown !== undefined && ASK_BLOCK_OPENER.test(markdown)) ||
+      (op === "insert" && markdown !== undefined && opensAskBlock(markdown)) ||
       (op === "retype" && type === "ask")
   );
 }
