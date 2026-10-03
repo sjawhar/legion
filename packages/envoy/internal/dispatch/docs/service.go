@@ -37,8 +37,9 @@ const maxSettleFailures = 3
 const (
 	maxLiveRooms       = 1_000
 	maxRoomConnections = 1_000
-	// roomIdleTimeout is how long a room stays resident after its last peer leaves (New). A peer
-	// that returns within it rejoins the warm room rather than reloading the document.
+	// roomIdleTimeout is how long a room stays resident after its last peer leaves, or after the
+	// last Server.Apply on a room no peer is in returns (New). A peer that returns within it
+	// rejoins the warm room rather than reloading the document.
 	roomIdleTimeout = time.Minute
 )
 
@@ -551,7 +552,9 @@ func New(deps Deps) *Service {
 	// park past it. It is also the most a room's peers can park in it, about ten times ygo's
 	// default; bounding what one peer's update can do to a room is LEGION-487.
 	srv.MaxPendingItems = maxUpdateItems
-	// A room whose last peer leaves stays resident until it has been idle for roomIdleTimeout.
+	// A room whose last peer leaves, or that only Server.Apply touches, stays resident until it has
+	// been idle for roomIdleTimeout (ygo stamps a room with no peer idle when an Apply returns,
+	// reearth/ygo#269).
 	// Eager eviction, ygo's default, evicts the room the moment its last peer leaves, even while
 	// a Server.Apply is inside its callback on that room (reearth/ygo v1.49.5,
 	// provider/websocket/peer.go:477-504 checks peers alone): the callback's write then lands on
@@ -559,8 +562,9 @@ func New(deps Deps) *Service {
 	// the next access has already loaded the store without it and serves, and takes, the next
 	// write on a state missing the first. The two writes, each made from the same document, merge
 	// into a document neither wrote, which can hold no block at all. Idle eviction refuses a
-	// room any Apply holds, or has touched since its last peer left (idle_sweep.go:185), so every
-	// write a room the sweeper evicts has taken is durable before a successor can load. CloseRoom
+	// room any Apply holds (idle_sweep.go:185) and counts its idle time from the last Apply's
+	// return, and the sweeper flushes the room before it evicts it, so every write a room the
+	// sweeper evicts has taken is durable before a successor can load. CloseRoom
 	// checks peers alone too (inject.go:475-621), and the service still calls it to close an
 	// issue's rooms (SetIssueClosed), for a room with an editor at Shutdown, and to evict one
 	// (evictRoom): a write that commits on a room it has retired reaches the store through ygo's
