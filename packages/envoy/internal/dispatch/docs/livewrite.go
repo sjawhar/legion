@@ -116,8 +116,7 @@ func (s *Service) joinLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID string) (*liveWrite, error) {
 	write := &liveWrite{artifactID: artifactID, clientID: crdt.NewClientID(), done: make(chan struct{})}
 	for {
-		state := s.room(artifactID)
-		state.mu.Lock()
+		state := s.lockState(artifactID)
 		if state.liveWriter == nil {
 			state.liveWriter = write
 			state.gen++
@@ -142,8 +141,10 @@ func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 // joined to a transaction sees every write committed before it.
 func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error {
 	for {
-		state := s.room(artifactID)
-		state.mu.Lock()
+		state := s.lockExistingState(artifactID)
+		if state == nil {
+			return nil
+		}
 		writer := state.liveWriter
 		state.mu.Unlock()
 		if writer == nil {
@@ -451,6 +452,6 @@ func (s *Service) finishLiveWrite(write *liveWrite) {
 		state.settleDeferred = false
 		s.scheduleSettleLocked(write.artifactID, state)
 	}
-	state.mu.Unlock()
+	s.unlockState(write.artifactID, state)
 	close(write.done)
 }

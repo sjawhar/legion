@@ -579,9 +579,8 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 // commitVersion clears authors consumed by a version only after its enclosing transaction has
 // committed (Ledger.Commit).
 func (s *Service) commitVersion(artifactID string, version model.Version) {
-	state := s.room(artifactID)
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	state := s.lockState(artifactID)
+	defer s.unlockState(artifactID, state)
 	capture, ok := state.pendingVersions[version.Number]
 	if !ok {
 		return
@@ -596,10 +595,9 @@ func (s *Service) commitVersion(artifactID string, version model.Version) {
 }
 
 func (s *Service) discardPendingVersion(room string, version model.Version) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockState(room)
 	delete(state.pendingVersions, version.Number)
-	state.mu.Unlock()
+	s.unlockState(room, state)
 }
 
 // prevalidateLiveOperations performs database-backed table-anchor checks
@@ -1074,10 +1072,9 @@ func (s *Service) serviceTransact(transact func(func(*crdt.Transaction)), actor 
 }
 
 func (s *Service) recordLastActor(room string, actor model.Actor) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockState(room)
 	state.lastActor = new(actor)
-	state.mu.Unlock()
+	s.unlockState(room, state)
 }
 
 // captureLiveTextAndAuthors is the tree a version records and whom it credits. joinRead brings
@@ -1093,10 +1090,9 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		return nil, "", versionPending{}, nil, err
 	}
 	if write := joinedLiveWrite(ctx, room); fork != nil && write != nil && write.tree != nil && write.fork == fork {
-		state := s.room(room)
-		state.mu.Lock()
+		state := s.lockState(room)
 		capture, authors := captureAuthors(state, write, actor)
-		state.mu.Unlock()
+		s.unlockState(room, state)
 		return write.tree, write.markdown, capture, authors, nil
 	}
 	// The room's state lock is held from the read to the authors it captures, so an author the
@@ -1112,19 +1108,17 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	var capture versionPending
 	var authors []model.Actor
 	if doc != nil {
-		state := s.room(room)
-		state.mu.Lock()
+		state := s.lockState(room)
 		capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
-		state.mu.Unlock()
+		s.unlockState(room, state)
 	} else {
 		var copyErr error
 		err := s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
 			if s.afterReadWarm != nil {
 				s.afterReadWarm(room)
 			}
-			state := s.room(room)
-			state.mu.Lock()
-			defer state.mu.Unlock()
+			state := s.lockState(room)
+			defer s.unlockState(room, state)
 			if doc, copyErr = snapshotDocument(live); copyErr == nil {
 				capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
 			}
@@ -1167,10 +1161,9 @@ func captureAuthors(state *roomState, write *liveWrite, actor *model.Actor) (ver
 }
 
 func (s *Service) rememberPendingVersion(room string, version model.Version, capture versionPending) {
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockState(room)
 	state.pendingVersions[version.Number] = capture
-	state.mu.Unlock()
+	s.unlockState(room, state)
 }
 
 func latestVersion(ctx context.Context, tx pgx.Tx, artifactID string) (struct {

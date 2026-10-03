@@ -19,7 +19,16 @@ import (
 // PgVersioned persists a room's Yjs V1 updates in Dispatch's Postgres store.
 type PgVersioned struct {
 	store *store.Store
-	locks sync.Map
+	// locksMu guards locks: each room's in-process lock (lockRoom), kept while a caller holds it
+	// or waits for it and dropped with the last, so it holds only the rooms being written.
+	locksMu sync.Mutex
+	locks   map[string]*roomLock
+}
+
+// roomLock is one room's in-process lock and how many callers hold it or wait for it.
+type roomLock struct {
+	sync.Mutex
+	users int
 }
 
 // NewPgVersioned creates the versioned store for a Dispatch database.
@@ -680,8 +689,8 @@ func (p *PgVersioned) lockRoom(ctx context.Context, room string, wait bool, fn f
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	value, _ := p.locks.LoadOrStore(room, &sync.Mutex{})
-	lock := value.(*sync.Mutex)
+	lock := p.acquireRoomLock(room)
+	defer p.releaseRoomLock(room, lock)
 	if wait {
 		lock.Lock()
 	} else if !lock.TryLock() {
@@ -713,6 +722,33 @@ func (p *PgVersioned) lockRoom(ctx context.Context, room string, wait bool, fn f
 	}
 	defer func() { _, _ = conn.Exec(context.Background(), `select pg_advisory_unlock(hashtext($1))`, room) }()
 	return fn(conn)
+}
+
+// acquireRoomLock counts the caller among room's lock's users, creating the lock for the first, so
+// every caller of one room shares one lock however many come and go.
+func (p *PgVersioned) acquireRoomLock(room string) *roomLock {
+	p.locksMu.Lock()
+	defer p.locksMu.Unlock()
+	if p.locks == nil {
+		p.locks = make(map[string]*roomLock)
+	}
+	lock := p.locks[room]
+	if lock == nil {
+		lock = &roomLock{}
+		p.locks[room] = lock
+	}
+	lock.users++
+	return lock
+}
+
+// releaseRoomLock ends a use acquireRoomLock counted, dropping room's lock with its last user.
+func (p *PgVersioned) releaseRoomLock(room string, lock *roomLock) {
+	p.locksMu.Lock()
+	defer p.locksMu.Unlock()
+	lock.users--
+	if lock.users == 0 {
+		delete(p.locks, room)
+	}
 }
 
 func (p *PgVersioned) pool() *store.Pool {
