@@ -1,24 +1,21 @@
 package phase
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
+// All is the wire contract's phase list, in the transition table's order.
 func TestPhaseValuesMatchWorkflowWireContract(t *testing.T) {
-	want := map[Phase]string{
-		Admitted:        "admitted",
-		Planning:        "planning",
-		Implementing:    "implementing",
-		Testing:         "testing",
-		Reviewing:       "reviewing",
-		Retro:           "retro",
-		Merging:         "merging",
-		AwaitingMerge:   "awaiting_merge",
-		ProductionCheck: "production_check",
-		Done:            "done",
-		Held:            "held",
+	want := []string{
+		"admitted", "planning", "implementing", "testing", "reviewing", "retro", "merging",
+		"awaiting_merge", "production_check", "done", "held",
 	}
-	for value, text := range want {
-		if string(value) != text {
-			t.Fatalf("phase %q = %q, want %q", value, value, text)
-		}
+	got := make([]string, len(All))
+	for index, value := range All {
+		got[index] = string(value)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("All = %q, want %q", got, want)
 	}
 }

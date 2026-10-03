@@ -1,6 +1,7 @@
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 
+import { reaskHeldCredentialList } from "../features/credentials/pending";
 import { markPendingAskThreadInvalidation } from "../features/inbox/ask-thread-freshness";
 
 import {
@@ -690,6 +691,9 @@ export function useEventStream({
         // so its refetch issues no request. A genuine reconnect after a gap refreshes on the
         // leading edge; `visibilitychange` reopening the stream repeatedly does not.
         refreshEverything();
+        // The one query that refresh skips: a credential list held at `null` (no broker), which
+        // a server restarted since with a broker configured would now answer with a list.
+        reaskHeldCredentialList(queryClient);
       }
       attempt = 0;
     };
