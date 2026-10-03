@@ -130,6 +130,15 @@ var loginColumns = []loginColumn{
 	{table: "agent_tokens", column: "owner", rewrite: []string{
 		`update agent_tokens t set owner = m.email from people_map m where m.login = lower(t.owner)`,
 	}},
+	// A person recorded under a login, which only a header-identity harness records, becomes their
+	// email, signed in since the earlier of the two; a row the email already has keeps the refresh
+	// token and confirmation a sign-in through the pool gave it.
+	{table: "people", column: "email", rewrite: []string{`
+		insert into people (email, signed_in_at)
+		select m.email, min(p.signed_in_at) from people p join people_map m on m.login = p.email
+		group by m.email
+		on conflict (email) do update set signed_in_at = least(people.signed_in_at, excluded.signed_in_at)
+	`, `delete from people p using people_map m where m.login = p.email`}},
 	// One person's state on one issue: pinned if either row was, read as far as the further, every
 	// dismissal either row made, and the later change. A row with nothing to merge keeps its
 	// dismissals as they were, in their order.

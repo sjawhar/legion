@@ -475,6 +475,8 @@ email, lowercased; only this subcommand reads it, never the server. The command 
   `broadcast_idempotency_keys`), merging the rows two casings of one login, or a login and the
   email, kept apart: a pin either row held, every dismissal, the later or further mark, a reply read
   under either;
+- a `people` row recorded under a login, which only a header-identity harness records: it becomes
+  the email's row, and a row the email already has keeps its pool refresh token;
 - each document's answered asks (`answered_by`), by an update appended to the document's state,
   never by replacing it, so a browser that kept the document across the outage merges the rename
   when it reconnects. The update is no content change, so settling the document versions nothing,

@@ -138,6 +138,10 @@ func seedEveryPersonField(t *testing.T, database *store.Store) string {
 	`)
 	exec(`insert into broadcast_idempotency_keys (login, idempotency_key, broadcast_id, request_digest) values ('ada-example', 'k1', $1, 'digest')`, broadcast)
 	exec(`insert into user_sessions (login, generation) values ('Ada-Example', 3), ('ada@example.com', 1)`)
+	exec(`
+		insert into people (email, signed_in_at, refresh_token, confirmed_at) values
+		('ada-example', '2026-09-01T00:00:00Z', null, null), ('ada@example.com', '2026-09-20T00:00:00Z', 'pool-refresh', '2026-09-20T00:00:00Z')
+	`)
 	return spec
 }
 
@@ -326,6 +330,8 @@ func TestRunMovesEveryPersonFieldToEmail(t *testing.T) {
 		{"the session generations: the login's goes, the email's stays", `select jsonb_object_agg(login, generation) from user_sessions`,
 			map[string]any{ada: 1.0}},
 		{"the people the records name", `select jsonb_agg(email order by email) from people`, []any{ada, bob}},
+		{"Ada's person, from her login's row onto her email's, which keeps its pool refresh token", `select to_jsonb(p) - 'confirmed_at' from people p where email = 'ada@example.com'`,
+			map[string]any{"email": ada, "signed_in_at": "2026-09-01T00:00:00+00:00", "refresh_token": "pool-refresh"}},
 	} {
 		if got := readJSON(t, database, check.query); !reflect.DeepEqual(got, check.want) {
 			t.Errorf("%s = %#v, want %#v", check.name, got, check.want)
@@ -342,6 +348,7 @@ func TestRunMovesEveryPersonFieldToEmail(t *testing.T) {
 	for _, line := range []string{
 		"migrate-people: before issues.assignee=2\n",
 		"migrate-people: before user_issue_state.login=4\n",
+		"migrate-people: before people.email=1\n",
 		"migrate-people: before user_agent_reply_read.login=3\n",
 		"migrate-people: before events.payload=4\n",
 		"migrate-people: before user_sessions.login=1\n",
@@ -350,7 +357,8 @@ func TestRunMovesEveryPersonFieldToEmail(t *testing.T) {
 		"migrate-people: after documents.answered_by=0\n",
 		"migrate-people: census user_agent_reply_read.login=0\n",
 		"migrate-people: census events.payload=0\n",
-		"migrate-people: people recorded=2\n",
+		// Ada's email already had a row; Bob is the one new person.
+		"migrate-people: people recorded=1\n",
 	} {
 		if !strings.Contains(out, line) {
 			t.Errorf("output lacks %q:\n%s", line, out)

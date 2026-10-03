@@ -19,7 +19,7 @@ import (
 )
 
 // migrationPeople maps every login this package's fixtures act under to an email.
-var migrationPeople = peoplemigration.Map{"alice": "alice@example.com", "ada-example": "ada@example.com"}
+var migrationPeople = peoplemigration.Map{"alice": "alice@example.com", "ada-example": "ada@example.com", "bob": "bob@example.com"}
 
 // answeredUnderLogin opens an issue whose spec holds an ask Ada answered under her GitHub login,
 // the way Dispatch's GitHub sign-in left it: the ask row's answer and the block's answered_by
