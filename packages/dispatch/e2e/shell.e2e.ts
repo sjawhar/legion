@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Route, test } from "@playwright/test";
 
 import { baseUrl, createIssue, createProject, sessionCookieName } from "./api";
 import { resetDatabase } from "./seed";
@@ -93,6 +93,76 @@ test("a page chunk that fails again after the session's one reload shows the fai
     await expect(box).toContainText("Failed to fetch dynamically imported module");
     await expect(box).not.toContainText("Cannot read properties of undefined");
     await expect(box.getByRole("button", { name: "Reload Dispatch" })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+// A Download link (`<a download>`) starts a navigation the browser answers with a download, so the
+// page stays the reader's. The Navigation API's `navigate` event fires for it with `downloadRequest`
+// set and `destination.sameDocument` false, and a chunk that fails after it must still reload the
+// page, as on any page nobody is leaving.
+test("a chunk that fails after a Download link was followed reloads the page", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one engine shows the navigate event");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: "Downloadable spec.", title: "Files" });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  // The spec's document transport is still downloading when the reader opens the Artifacts tab
+  // and follows a Download link; the chunk fails only after that. The route stays installed and
+  // lets every later request through: with `{ times: 1 }` Playwright drops the route while it
+  // still holds the chunk, and the reload the app started after the failure then got no response
+  // in 12 of 40 Chromium runs.
+  const held: Route[] = [];
+  await page.route(/\/assets\/yjs-[^/]+\.js$/u, async (route) => {
+    if (held.length === 0) {
+      held.push(route);
+      return;
+    }
+    await route.continue();
+  });
+  // Records what each `navigate` event says about where it goes.
+  await page.addInitScript(() => {
+    const seen: { download: unknown; sameDocument: unknown }[] = [];
+    Object.assign(window, { seenNavigations: seen });
+    const navigation = "navigation" in window ? window.navigation : undefined;
+    if (!(navigation instanceof EventTarget)) {
+      return;
+    }
+    navigation.addEventListener("navigate", (event) => {
+      const destination = "destination" in event ? event.destination : undefined;
+      seen.push({
+        download: "downloadRequest" in event ? event.downloadRequest : undefined,
+        sameDocument:
+          typeof destination === "object" && destination !== null && "sameDocument" in destination
+            ? destination.sameDocument
+            : undefined,
+      });
+    });
+  });
+  let loads = 0;
+  page.on("load", () => {
+    loads += 1;
+  });
+
+  try {
+    await page.goto(`/issues/${issue.key}/spec`);
+    await expect.poll(() => held.length).toBe(1);
+    await page.getByRole("tab", { name: /^Artifacts/ }).click();
+    const download = page.waitForEvent("download");
+    await page.getByRole("link", { name: "Download version 1" }).click();
+    await download;
+    // The browser announced the download as a navigation to another document: the case the
+    // guard has to tell apart from a page being left.
+    expect(
+      await page.evaluate(() => ("seenNavigations" in window ? window.seenNavigations : undefined))
+    ).toContainEqual({ download: expect.any(String), sameDocument: false });
+    expect(loads).toBe(1);
+
+    await held[0]?.abort();
+    await expect.poll(() => loads).toBe(2);
   } finally {
     await context.close();
   }

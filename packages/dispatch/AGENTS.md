@@ -302,9 +302,12 @@ reason). `beforeunload` covers desktop Safari, not iOS Safari, which never fires
 Navigation API's `navigate` event to another document marks the page as left instead (iOS Safari
 26.2 and later, for a link followed or a form submitted, not an address typed), and older iOS
 Safari still reloads the page being left. Playwright drives no iOS Safari, so no e2e row covers it.
+A link with `download` (the Download version links) fires that `navigate` to another document too,
+with `downloadRequest` set, and then leaves the reader on the page, so it does not count: in
+Chromium, `shell.e2e.ts` follows one and then fails a chunk, and the page reloads.
 The page counts as staying again once it is shown (`pageshow`, or the tab turning
 visible) or pressed (a pointer or a key), since a navigation cancelled at a leave prompt, stopped,
-or answered with a download fires no event of its own.
+or answered by the server with a download fires no event of its own.
 It never default-prevents Vite's `vite:preloadError` (`installChunkFailureRecovery` says why), so
 every importer sees the load failure itself: a route's error box names the failed download, and
 the first editor a page mounts after its stylesheet failed shows the document's failed state. A

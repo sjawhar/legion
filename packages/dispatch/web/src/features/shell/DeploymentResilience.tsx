@@ -21,6 +21,7 @@ declare const __DISPATCH_BUILD__: string;
 // it yet, and a browser without it leaves `window.navigation` undefined.
 interface NavigateEvent extends Event {
   readonly destination: { readonly sameDocument: boolean };
+  readonly downloadRequest: string | null;
 }
 
 interface Navigation {
@@ -85,20 +86,22 @@ async function deploymentChanged(): Promise<boolean> {
 // the page starts after it, and Vite reports each as a failed chunk. Those are not a replaced
 // deployment, and a reload then would replace the reader's navigation with a reload of the page
 // they are leaving. A navigation can also not happen after all - cancelled at another page's leave
-// prompt, stopped, or answered with a download - and no event says so; the press or the return
-// that follows is what ends the state, never a timer, since a refusal can arrive any number of
-// tasks after the navigation started.
+// prompt, stopped, or answered by the server with a download - and no event says so; the press or
+// the return that follows is what ends the state, never a timer, since a refusal can arrive any
+// number of tasks after the navigation started.
 let leavingPage = false;
 
 function markPageLeaving(): void {
   leavingPage = true;
 }
 
-// A route change inside the app is a navigation within this document; only one to another document
-// leaves the page. iOS Safari fires `navigate` from 26.2, for a link followed or a form submitted
-// but not for an address the reader types.
+// A route change inside the app is a navigation within this document. A link with `download`
+// (Dispatch's Download version links) fires `navigate` to another document too, with
+// `downloadRequest` set, and then downloads the file and leaves the page where it is. Any other
+// navigation to another document leaves the page. iOS Safari fires `navigate` from 26.2, for a link
+// followed or a form submitted but not for an address the reader types.
 function markPageLeavingForAnotherDocument(event: NavigateEvent): void {
-  if (!event.destination.sameDocument) {
+  if (!event.destination.sameDocument && event.downloadRequest === null) {
     leavingPage = true;
   }
 }

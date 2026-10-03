@@ -19,6 +19,12 @@ function withOnLine<T>(onLine: boolean, run: () => Promise<T>): Promise<T> {
   });
 }
 
+/** A stand-in for the Navigation API's `navigate` event: whether it stays in this document, and
+ *  the file name a link with `download` asks for (null for every other navigation). */
+function navigateEvent(sameDocument: boolean, downloadRequest: string | null = null): Event {
+  return Object.assign(new Event("navigate"), { destination: { sameDocument }, downloadRequest });
+}
+
 test("warms the block schema and headless Markdown renderer once after the first paint", async () => {
   const warm = spyOn(MarkdownBody, "warmMarkdownRenderer").mockResolvedValue(undefined);
   const view = render(<DeploymentResilience />);
@@ -89,10 +95,7 @@ test("a navigation to another document marks the page as left where the browser 
   const navigation = new EventTarget();
   Object.defineProperty(window, "navigation", { configurable: true, value: navigation });
   const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
-  const navigate = (sameDocument: boolean) =>
-    navigation.dispatchEvent(
-      Object.assign(new Event("navigate"), { destination: { sameDocument } })
-    );
+  const navigate = (sameDocument: boolean) => navigation.dispatchEvent(navigateEvent(sameDocument));
   const failChunk = () =>
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
 
@@ -108,6 +111,28 @@ test("a navigation to another document marks the page as left where the browser 
     navigate(true);
     failChunk();
     expect(reload).toHaveBeenCalledTimes(1);
+  } finally {
+    window.dispatchEvent(new Event("pageshow"));
+    Reflect.deleteProperty(window, "navigation");
+    reload.mockRestore();
+    window.sessionStorage.clear();
+  }
+});
+
+test("a link answered with a download does not mark the page as left", () => {
+  window.sessionStorage.clear();
+  // A link with `download` fires `navigate` to another document, its `downloadRequest` naming the
+  // file, and the page stays where it is.
+  const navigation = new EventTarget();
+  Object.defineProperty(window, "navigation", { configurable: true, value: navigation });
+  const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
+
+  try {
+    installChunkFailureRecovery();
+    navigation.dispatchEvent(navigateEvent(false, "spec.md"));
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
   } finally {
     window.dispatchEvent(new Event("pageshow"));
     Reflect.deleteProperty(window, "navigation");
