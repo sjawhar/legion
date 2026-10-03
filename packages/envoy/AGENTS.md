@@ -61,8 +61,9 @@ scheduled. A repair is written only into the document the settlement read (`appl
 one whose room was evicted and reloaded since is refused and retried, and one whose room left the
 server while its transaction committed is given up and fails the room, its update discarded
 without waiting for its slot, since ygo then stores it on the committing goroutine itself
-(`persistStranded`). The room worker's compaction skips a room whose lock another holder has
-(`compactIfIdle`), so a settlement holding the lock never waits for that worker's exit.
+(`persistStranded`). The room worker's compaction, except a failed room's eviction, skips a room
+whose lock another holder has (`compactIfIdle`), so a settlement holding the lock never waits for
+that worker's exit.
 `envoy-dispatch backfill-block-ids` runs the same stamp through `applySuppressed` across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
