@@ -27,8 +27,9 @@ export interface PhoneThread {
    *  answering it - so the tab keeps it listed whoever resolves it. */
   readonly holds: (commentId: string) => boolean;
   /** The thread composer's reply, so the docked composer's own reply and draft stay as they were.
-   *  The view stays mounted, hidden, while it is set, so the composer and an unsent draft outlive
-   *  Back; a send it holds is the held-send store's, and comes back with its reply. */
+   *  The view stays mounted, hidden, while it is set, so the composer, an unsent draft and a send
+   *  still out outlive Back; a send it holds is the held-send store's, and comes back with its
+   *  reply. */
   readonly replyTo: ReplyTarget | null;
   /** The thread composer's send name: beneath the tab's, so every Reply holds for it as for the
    *  docked composer's, and its own, so the view can tell its send from the docked one's. */
@@ -38,10 +39,13 @@ export interface PhoneThread {
   readonly open: (commentId: string) => void;
   /** Answers `target` in its thread, and says whether it did: a send the tab has out refuses it. */
   readonly beginReply: (target: ReplyTarget) => boolean;
+  /** Ends the thread composer's reply, and the composer with it: a refusal it holds goes too, its
+   *  draft with it, as an inline reply's Cancel reply drops one. */
   readonly endReply: () => void;
   /** Back and Escape: refused while the open thread's card has its reply out, until the send's
    *  deadline. Past it they leave the thread and the reply keeps its send; otherwise a refusal
-   *  the card's reply holds goes with the thread, its draft with it. */
+   *  the thread shows - the card's reply's, or the thread composer's, which ends its reply - goes
+   *  with the thread, its draft with it. */
   readonly close: () => void;
 }
 
@@ -93,6 +97,10 @@ export function usePhoneThread({
     (commentId: string) => commentId === openId || commentId === replyTo?.id,
     [openId, replyTo]
   );
+  const endReply = () => {
+    store.discard(composerKey);
+    setReplyTo(null);
+  };
   return {
     beginReply: (target) => {
       if (sendingNow()) return false;
@@ -103,14 +111,18 @@ export function usePhoneThread({
     cardReplySending,
     close: () => {
       if (cardReplySendingNow()) return;
-      // Back drops a refusal the card's reply holds, its draft with it: a send still out past the
-      // deadline stays held for the thread's return.
-      if (openId !== undefined) store.discard(threadReplySendKey(sendKey, openId));
+      // Back drops a refusal the thread shows, its draft with it: a send still out past the
+      // deadline stays held for the thread's return, and so does a thread composer's refusal
+      // while another comment's thread hides it.
+      if (openId !== undefined) {
+        store.discard(threadReplySendKey(sendKey, openId));
+        if (replyTo?.id === openId && store.get(composerKey)?.status === "refused") endReply();
+      }
       setOpenId(undefined);
       setOutlived(false);
     },
     composerKey,
-    endReply: () => setReplyTo(null),
+    endReply,
     holds,
     id: isPhoneViewport || outlived || cardReplySending || replySending ? openId : undefined,
     open: setOpenId,

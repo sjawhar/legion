@@ -1,10 +1,13 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { type MutationKey, QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
+import { ApiError, api } from "../../api/client";
 import { pastDeadlineKey } from "../../hooks/useSending";
 import type { ReplyTarget } from "./composer-model";
+import { heldSends } from "./held-sends";
+import type { SentRequest } from "./send-request";
 import { threadReplySendKey, usePhoneThread } from "./usePhoneThread";
 
 const sendKey: MutationKey = ["conversation-composer", "CORE-1"];
@@ -31,6 +34,32 @@ function startSend(queryClient: QueryClient, mutationKey: MutationKey): () => Pr
       resolve();
       await settled;
     });
+}
+
+/** Sends a reply to `reply` under `mutationKey` through the held-send store, as the thread
+ *  composer does, and waits for the server's refusal. */
+async function refuseReply(queryClient: QueryClient, mutationKey: MutationKey): Promise<void> {
+  const createComment = spyOn(api, "createComment").mockRejectedValue(
+    new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
+  );
+  const request: SentRequest = {
+    anchor: undefined,
+    ask: { multiple: false, options: [], urgency: "med" },
+    draft: { body: "Refused reply", mentions: [], replacement: "" },
+    edit: undefined,
+    kind: "comment",
+    owner: { issueKey: "CORE-1", kind: "issue" },
+    replyTo: reply,
+  };
+  try {
+    const store = heldSends(queryClient);
+    act(() => {
+      store.send(mutationKey, request);
+    });
+    await waitFor(() => expect(store.get(mutationKey)?.status).toBe("refused"));
+  } finally {
+    createComment.mockRestore();
+  }
 }
 
 function renderPhoneThread() {
@@ -141,6 +170,69 @@ test("a Reply while the tab has a send out is refused and leaves the thread wher
     expect(view.result.current.id).toBeUndefined();
     expect(view.result.current.replyTo).toBeNull();
     await answer();
+  } finally {
+    view.unmount();
+  }
+});
+
+// Back and Escape with the thread composer's refusal on screen drop it, its draft with it, as
+// they drop the card's own reply's: the composer leaves with its reply, rather than staying
+// mounted, hidden, to bring the refusal back when the thread opens again.
+test("Back with the thread composer's refusal showing drops the refusal and ends its reply", async () => {
+  const { queryClient, view } = renderPhoneThread();
+
+  try {
+    act(() => {
+      expect(view.result.current.beginReply(reply)).toBe(true);
+    });
+    await refuseReply(queryClient, view.result.current.composerKey);
+
+    act(() => view.result.current.close());
+    expect(view.result.current.id).toBeUndefined();
+    expect(heldSends(queryClient).get(view.result.current.composerKey)).toBeUndefined();
+    expect(view.result.current.replyTo).toBeNull();
+    expect(view.result.current.holds("comment-1")).toBe(false);
+  } finally {
+    view.unmount();
+  }
+});
+
+// Back from another comment's thread leaves the composer's refusal where it is: it is not on
+// screen there, and the thread it answers still finds it.
+test("Back from another thread keeps the thread composer's refusal for its own thread", async () => {
+  const { queryClient, view } = renderPhoneThread();
+
+  try {
+    act(() => {
+      expect(view.result.current.beginReply(reply)).toBe(true);
+    });
+    await refuseReply(queryClient, view.result.current.composerKey);
+
+    act(() => view.result.current.open("comment-2"));
+    act(() => view.result.current.close());
+    expect(heldSends(queryClient).get(view.result.current.composerKey)?.status).toBe("refused");
+    expect(view.result.current.replyTo).toBe(reply);
+  } finally {
+    view.unmount();
+  }
+});
+
+// Cancel reply, and Escape in the composer's field, end the reply and with it the composer: a
+// refusal it holds goes too, as an inline reply's Cancel reply drops one, rather than coming back
+// under the next comment's Reply.
+test("ending the thread composer's reply drops a refusal it holds", async () => {
+  const { queryClient, view } = renderPhoneThread();
+
+  try {
+    act(() => {
+      expect(view.result.current.beginReply(reply)).toBe(true);
+    });
+    await refuseReply(queryClient, view.result.current.composerKey);
+
+    act(() => view.result.current.endReply());
+    expect(heldSends(queryClient).get(view.result.current.composerKey)).toBeUndefined();
+    expect(view.result.current.replyTo).toBeNull();
+    expect(view.result.current.id).toBe("comment-1");
   } finally {
     view.unmount();
   }

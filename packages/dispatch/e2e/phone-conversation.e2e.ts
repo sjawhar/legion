@@ -367,6 +367,68 @@ test("on a phone, a thread's Reply over its card's refused reply keeps that draf
   }
 });
 
+// The thread composer's refusal is the thread's while it shows: Back, Escape from the thread and
+// Escape in the composer's field each drop it, its draft with it, as they drop the card's own
+// reply's, so neither the thread opened again nor the next Reply brings it back.
+test("on a phone, Back and Escape from a thread reply's refusal drop its draft and refusal", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Leaving a refused thread reply" });
+  const earlier = await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(phone);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = threadView(page);
+    const threadForm = thread.getByRole("form", { name: "Comment composer" });
+    const field = threadForm.getByRole("textbox", { name: "Comment" });
+    const refusal = thread.getByText("Couldn't send — the server is down");
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    refuse();
+    const sendRefused = async (draft: string) => {
+      await expect(field).toHaveValue("");
+      await field.fill(draft);
+      await threadForm.getByRole("button", { exact: true, name: "Send" }).click();
+      await expect(refusal).toBeVisible();
+      await expect(field).toHaveValue(draft);
+    };
+    const expectDropped = async () => {
+      await expect(field).toHaveCount(0);
+      await expect(refusal).toHaveCount(0);
+      await expect(threadForm.getByRole("textbox", { name: "Reply" })).toHaveValue("");
+    };
+
+    await commentTurn(page, earlier.id).getByRole("button", { exact: true, name: "Reply" }).click();
+    await sendRefused("Refused, then Back");
+    await leaveThread(page);
+    await openThread(page, earlier.id);
+    await expectDropped();
+
+    await thread.getByRole("button", { exact: true, name: "Reply" }).click();
+    await sendRefused("Refused, then Escape");
+    // Escape from outside the composer is the thread dialog's own close.
+    await thread.getByRole("button", { name: /^Copy reference/ }).focus();
+    await page.keyboard.press("Escape");
+    await expect(threadView(page)).toHaveCount(0);
+    await openThread(page, earlier.id);
+    await expectDropped();
+
+    await thread.getByRole("button", { exact: true, name: "Reply" }).click();
+    await sendRefused("Refused, then Escape in the field");
+    await field.press("Escape");
+    await expect(thread).toBeVisible();
+    await expectDropped();
+    await thread.getByRole("button", { exact: true, name: "Reply" }).click();
+    await expect(field).toHaveValue("");
+    await expect(refusal).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
 // A send from the thread view keeps it open past the phone layout: while that send is out the
 // view stays full-screen at any width, with its card's reply composer - the draft, the send and
 // that send's refusal - until the reader leaves it with Back.

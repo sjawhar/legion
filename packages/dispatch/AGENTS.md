@@ -74,7 +74,10 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   with its own reply and its own send name beneath the tab's, which the thread view keeps mounted,
   hidden, across Back and another comment's thread until the reply is sent or cancelled; so a
   thread opened or left while a send is out leaves that send's composer, its draft and its refusal
-  where the reader finds them. A thread card's own inline reply lives in its thread, not the tab,
+  where the reader finds them. A refusal the thread shows is the reader's to leave: Back and Escape
+  drop it, its draft with it - the card's reply's, and the thread composer's, whose reply ends with
+  it - and so does the thread composer's Cancel reply, as an inline reply's does
+  (`usePhoneThread`). A thread card's own inline reply lives in its thread, not the tab,
   so it names its send beneath theirs (`threadReplySendKey`): every Reply holds while it is out,
   and so does its thread - Collapse thread, and on a phone Back and Escape - until the server
   answers or the send's deadline passes. A comment's Reply that another composer answers - the
