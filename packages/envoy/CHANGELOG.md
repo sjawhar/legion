@@ -189,7 +189,22 @@
 - Reading a textblock's inline markdown took one stack frame per nested mark, so the stack and memory it needed grew with the nesting the caller wrote: one 1 MiB upload of 262,140 nested strong marks read with no error but peaked at about 0.9 GB of memory. The inline bound above is checked before any walk of those marks that recurses, and goldmark's own walk through a link's label, which enters every image the label holds, meets each image held to the bound as it is made (LEGION-465).
 - A table whose rows hold an escaped pipe in a code span parsed in time quadratic in its size: goldmark's table transformer checked every code span's text against every escaped pipe in the document, and 1 MiB of such rows took over two minutes. Dispatch takes the backslash out of those pipes itself, in one pass, and 1 MiB parses in about two seconds (LEGION-465).
 - Marking or unmarking a document's text, and checking whether a concurrent change removed the text a write inserted, walked the live tree one stack frame per level with no bound, where an authenticated peer can grow the tree through any number of small websocket updates. Each now refuses a node more than 1,000 levels deep, text included, as the document's reads do, and a peer's update that deepens the tree between a write's read and its transaction is answered `500 DOC_SCHEMA` rather than `500 INTERNAL` (LEGION-465).
-- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.49.6-sami.3` (commit `7cf8e9ff`), which walks the deleted children iteratively and carries the transactional GC fix; the change is open upstream (LEGION-465).
+- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork (at `v1.50.1-sami.1` since the entry below), which walks the deleted children iteratively and carries the transactional GC fix, both open upstream as reearth/ygo#263 and #262 (LEGION-465).
+- Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.50.1-sami.1` (commit
+  `433bb33e`, on upstream `main` at `4d6865dc`), which adds four ygo fixes to the two above, each
+  open upstream (LEGION-496, LEGION-502). Text no longer changes order when a document is encoded
+  again: ygo folded a character into the run before it even when the two were typed toward
+  different right-hand neighbours, so a browser joining a room, settlement's copy of a room and a
+  compacted state could read the text in a different order from the room (reearth/ygo#266). An
+  update that fills a gap in one client's updates is no longer discarded: ygo integrated a merged
+  update's items past the gap, and now parks them until the gap arrives (#257). A complete
+  document state no longer fails once 100,000 of its items wait on items later in the same state,
+  as when a browser whose client id is lower than the server's writes more than 100,000 blocks
+  into a paragraph the server wrote: ygo resolves a state's own dependencies before it applies its
+  pending cap (#260). A room's broadcast of an update Dispatch writes now validates the update
+  with the server's `MaxPendingItems`, the queue the room itself decodes with, rather than ygo's
+  default (#267); Dispatch leaves that setting at ygo's default, so this changes nothing until it
+  raises it.
 
 - Document settlement no longer undoes an edit a browser or an agent makes while it settles
   (LEGION-479). Settlement wrote its repairs (the block ids it stamps, an ask block's server-owned
