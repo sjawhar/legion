@@ -48,7 +48,6 @@ type AppContext struct {
 	AllowedLogins  map[string]struct{}
 	Store          *store.Store
 	AgentToken     string
-	RepoProjects   string
 	DefaultProject string
 	ServerURL      string
 	// InsecureCookie drops the Secure attribute from every cookie the router sets, for browsers
@@ -76,7 +75,6 @@ type AppContextOptions struct {
 	AllowedLogins  map[string]struct{}
 	Store          *store.Store
 	AgentToken     string
-	RepoProjects   string
 	DefaultProject string
 	ServerURL      string
 	InsecureCookie bool
@@ -130,7 +128,6 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		Identity:          opts.Identity,
 		AllowedLogins:     opts.AllowedLogins,
 		AgentToken:        opts.AgentToken,
-		RepoProjectsRaw:   opts.RepoProjects,
 		DefaultProject:    opts.DefaultProject,
 		ServerURL:         opts.ServerURL,
 		EnvoyURL:          opts.EnvoyURL,
@@ -158,7 +155,6 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		AllowedLogins:  opts.AllowedLogins,
 		Store:          opts.Store,
 		AgentToken:     opts.AgentToken,
-		RepoProjects:   opts.RepoProjects,
 		DefaultProject: opts.DefaultProject,
 		ServerURL:      strings.TrimSuffix(opts.ServerURL, "/"),
 		InsecureCookie: opts.InsecureCookie,

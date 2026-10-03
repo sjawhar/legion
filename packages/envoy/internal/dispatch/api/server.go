@@ -84,14 +84,13 @@ type Deps struct {
 
 // DepsInput contains raw boot values used to construct API dependencies.
 type DepsInput struct {
-	Store           *store.Store
-	Identity        identity.Identity
-	AllowedLogins   map[string]struct{}
-	AgentToken      string
-	RepoProjectsRaw string
-	DefaultProject  string
-	ServerURL       string
-	EnvoyURL        string
+	Store          *store.Store
+	Identity       identity.Identity
+	AllowedLogins  map[string]struct{}
+	AgentToken     string
+	DefaultProject string
+	ServerURL      string
+	EnvoyURL       string
 	// EnvoyToken is the bearer the listener client sends (cmd/dispatch: ENVOY_TOKEN); empty sends
 	// none.
 	EnvoyToken string
@@ -118,9 +117,6 @@ type DepsInput struct {
 
 // NewDeps parses boot configuration once and returns API dependencies.
 func NewDeps(input DepsInput) (Deps, error) {
-	if _, err := ParseRepoProjects(input.RepoProjectsRaw); err != nil {
-		return Deps{}, err
-	}
 	defaultProject := strings.TrimSpace(input.DefaultProject)
 	if defaultProject != "" && !projectKeyPattern.MatchString(defaultProject) {
 		return Deps{}, fmt.Errorf("invalid DISPATCH_DEFAULT_PROJECT %q (expected project key)", defaultProject)

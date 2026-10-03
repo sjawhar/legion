@@ -369,18 +369,6 @@ func TestAuthStartEvictsExpiredPendingStates(t *testing.T) {
 	}
 }
 
-func TestBuildAppContextRejectsMalformedRepoProjectMapping(t *testing.T) {
-	_, err := BuildAppContext(AppContextOptions{
-		SigningKey:   "signing-key",
-		Users:        &memoryUserStore{users: map[string]*auth.User{}},
-		Identity:     identity.HeaderIdentity{Header: "X-Dispatch-User"},
-		RepoProjects: "not-a-repo-project-mapping",
-	})
-	if err == nil || !strings.Contains(err.Error(), "DISPATCH_REPO_PROJECTS") {
-		t.Fatalf("error: got %v, want malformed DISPATCH_REPO_PROJECTS rejection", err)
-	}
-}
-
 func TestStaticHandlerServesSpaShellForUnknownRoute(t *testing.T) {
 	webDist := t.TempDir()
 	if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {

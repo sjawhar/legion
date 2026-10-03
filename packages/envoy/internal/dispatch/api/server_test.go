@@ -111,7 +111,6 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		Identity:         identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
 		AllowedLogins:    allowed,
 		AgentToken:       "agent-token",
-		RepoProjectsRaw:  "owner/repo=TEST",
 		DefaultProject:   options.defaultProject,
 		ServerURL:        "https://dispatch.example",
 		Docs:             documentService,
@@ -1716,7 +1715,7 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: cookieIdentity, AllowedLogins: allowed, AgentToken: "agent-token",
-		RepoProjectsRaw: "owner/repo=TEST", Docs: documentService, Events: broker,
+		Docs: documentService, Events: broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -1992,14 +1991,13 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 	})
 	allowed := map[string]struct{}{"alice": {}, "bob": {}}
 	deps, err := NewDeps(DepsInput{
-		Store:           database,
-		Identity:        identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins:   allowed,
-		AgentToken:      "agent-token",
-		RepoProjectsRaw: "owner/repo=TEST",
-		ServerURL:       "https://dispatch.example",
-		Docs:            documentService,
-		Events:          broker,
+		Store:         database,
+		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
+		AllowedLogins: allowed,
+		AgentToken:    "agent-token",
+		ServerURL:     "https://dispatch.example",
+		Docs:          documentService,
+		Events:        broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

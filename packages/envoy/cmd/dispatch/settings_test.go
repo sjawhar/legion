@@ -568,14 +568,11 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_REPO_PROJECTS": " acme/widgets=WID "}); boot.RepoProjects != "acme/widgets=WID" {
 				t.Errorf("RepoProjects = %q", boot.RepoProjects)
 			}
-			// The router reads the mapping only to check it as it is built (main seeds the store
-			// with it before), so a malformed one is refused there, naming the variable.
-			t.Run("router", func(t *testing.T) {
-				if _, err := appContextFor(resolveWith(t, map[string]string{"DISPATCH_REPO_PROJECTS": "acme/widgets"}), routes.AppContextOptions{}); err == nil || !strings.Contains(err.Error(), "DISPATCH_REPO_PROJECTS") {
-					t.Errorf("DISPATCH_REPO_PROJECTS=acme/widgets: building the router: err = %v, want a refusal naming DISPATCH_REPO_PROJECTS", err)
-				}
-				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_REPO_PROJECTS": "acme/widgets=WID"}), routes.AppContextOptions{})
-			})
+			// Its one reader is seedRepoProjects, which main runs before it builds the router: a
+			// malformed mapping is refused there, naming the variable, before anything is written.
+			if err := seedRepoProjects(context.Background(), nil, resolveWith(t, map[string]string{"DISPATCH_REPO_PROJECTS": "acme/widgets"}).RepoProjects); err == nil || !strings.Contains(err.Error(), "DISPATCH_REPO_PROJECTS") {
+				t.Errorf("DISPATCH_REPO_PROJECTS=acme/widgets: seeding the repository mappings: err = %v, want a refusal naming DISPATCH_REPO_PROJECTS", err)
+			}
 		},
 		"DISPATCH_DEFAULT_PROJECT": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_DEFAULT_PROJECT": " WID "}); boot.DefaultProject != "WID" {

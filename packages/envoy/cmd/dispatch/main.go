@@ -634,7 +634,6 @@ func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
 func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.AppContextOptions {
 	built.AllowedLogins = boot.AllowedLogins
 	built.AgentToken = boot.AgentToken
-	built.RepoProjects = boot.RepoProjects
 	built.DefaultProject = boot.DefaultProject
 	built.InsecureCookie = boot.InsecureCookie
 	built.EnvoyURL = boot.EnvoyURL
