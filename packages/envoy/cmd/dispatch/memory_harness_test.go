@@ -45,6 +45,8 @@ type memoryHarness struct {
 	t        *testing.T
 	database *store.Store
 	issue    string
+	// env is added to every server's environment.
+	env []string
 }
 
 func newMemoryHarness(t *testing.T) *memoryHarness {
@@ -136,6 +138,7 @@ func (h *memoryHarness) start(t *testing.T) *dispatchProcess {
 		"DISPATCH_WEB_DIST=" + t.TempDir(),
 		"DISPATCH_SERVER_URL=http://127.0.0.1:" + port,
 	}
+	command.Env = append(command.Env, h.env...)
 	server := &dispatchProcess{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{})}
 	command.Stdout, command.Stderr = server.output, server.output
 	if err := command.Start(); err != nil {
