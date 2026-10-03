@@ -18,8 +18,7 @@
 // result it holds and then finds in its own recording's last frames. sections.json records each
 // section's wall-clock length beside its file, the capture-rate check the walkthrough's build
 // compares file durations against, and how closely each browser section's last frames match its
-// result. Output goes to WALKTHROUGH_RAW_DIR, default
-// docs/site/public/media/broker/walkthrough.src/raw.
+// result. Output goes to WALKTHROUGH_RAW_DIR, default docs/site/media/broker/walkthrough/raw.
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -32,8 +31,7 @@ import { signIn } from "../../../../packages/dispatch/e2e/users";
 import { rigState } from "./agent";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const rawDir =
-  process.env.WALKTHROUGH_RAW_DIR ?? join(here, "../../public/media/broker/walkthrough.src/raw");
+const rawDir = process.env.WALKTHROUGH_RAW_DIR ?? join(here, "walkthrough/raw");
 const reason = "Publish the docs preview for PR 42 with the demo API";
 const cols = 80;
 const rows = 20;

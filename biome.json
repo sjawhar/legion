@@ -19,7 +19,7 @@
     "includes": [
       "**",
       "!packages/envoy-client/src/__tests__/fixtures/dispatch-tool.schema.json",
-      "!docs/site/public/media/*/*.src/raw/sections.json"
+      "!docs/site/media/*/walkthrough/raw/sections.json"
     ]
   },
   "linter": {

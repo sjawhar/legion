@@ -13,7 +13,8 @@ production service is involved.
 | `agent.ts` | Drives the agent machine from a script: a machine login, a secret request. |
 | `agent/` | What the agent machine mounts: its shell prompt and the demo command, `check-demo-key.sh`. |
 | `screenshots.sh`, `screenshots.spec.ts` | Retake the screenshots into `docs/site/public/media/broker/`. |
-| `walkthrough.sh`, `walkthrough.record.ts` | Record the walkthrough's raw footage into `docs/site/public/media/broker/walkthrough.src/raw/`. |
+| `walkthrough.sh`, `walkthrough.record.ts` | Record the walkthrough's raw footage into `walkthrough/raw/`. |
+| `walkthrough/` | The walkthrough's footage, cut, narration and build, which writes `docs/site/public/media/broker/walkthrough.mp4`. |
 | `playwright.config.ts` | The Playwright config both specs run under; it starts no server, since the rig has. |
 
 ## The rig
@@ -81,7 +82,7 @@ request's command ran with the secret.
 ## The walkthrough
 
 The narrated video is `docs/site/public/media/broker/walkthrough.mp4`; its sources, the rebuild
-steps and its review are in `docs/site/public/media/broker/walkthrough.src/README.md`. Recording
+steps and its review are in `walkthrough/README.md`. Recording
 the raw footage again:
 
 ```bash

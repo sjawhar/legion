@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds ../walkthrough.mp4 from the raw footage and narration beside this file.
+"""Builds docs/site/public/media/broker/walkthrough.mp4 from the footage and narration beside this file.
 
   raw/*.cast, raw/*.webm   footage, one file per section (docs/site/media/broker/walkthrough.record.ts)
   narration/<id>.mp3       one file per narration part (narrate.py)
@@ -13,7 +13,7 @@ is silence the clip's length with its narration parts laid at their offsets, and
 when a part runs past the end of its clip or overlaps the next part, or when a section's file
 duration is off its wall-clock length (raw/sections.json): a browser recording outside its
 actions' and its page's lengths by more than 5%, a cast more than 1.5 s shorter than its section
-or any longer. The clips are concatenated into ../walkthrough.mp4.
+or any longer. The clips are concatenated into OUT, the video the site publishes.
 
   python3 build.py            # rebuild (renders casts once, into build/)
   python3 build.py --check    # verify the EDL against the footage and narration, write nothing
@@ -33,7 +33,7 @@ HERE = Path(__file__).resolve().parent
 RAW = HERE / "raw"
 NARRATION = HERE / "narration"
 BUILD = HERE / "build"
-OUT = HERE.parent / "walkthrough.mp4"
+OUT = HERE.parents[2] / "public" / "media" / "broker" / "walkthrough.mp4"
 W, H, FPS = 1280, 720, 30
 BACKGROUND = "0x272822"  # agg's monokai background, so a terminal's padding is invisible
 AGG = ["agg", "--font-size", "30", "--theme", "monokai", "--idle-time-limit", "3600", "--last-frame-duration", "0"]
