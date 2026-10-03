@@ -127,14 +127,8 @@ that points at the spec.
 
 The block is what reaches the human's Inbox. A question phrased as prose in the spec reaches
 nobody. A spec with no ask blocks is fine only when the issue genuinely needs no human decision.
-When `dispatch_issue` or `dispatch_artifact` answers `This spec holds no ask blocks …`, read it as a
-question: either no decision is needed and you say nothing, or you forgot to make it a block. When
-it answers `… typed-block openings in this document are text, not blocks`, the quoted openings are
-blocks stored as prose (inside a line, or a paste with something before every line): fix the markdown
-and upload again; a mention on purpose belongs in code. Neither answer sees a spec wrapped whole in a
-code fence (take the fence off), a malformed opening inside a line (`::ask{`, `:::ask {`: an ask opens
-only as `:::ask{…}` on a line of its own), or any `dispatch_doc_edit`: after an edit that writes an
-ask, `dispatch_doc_read` the section and check it renders as `:::ask{#<id> …}` on its own line.
+What `dispatch_issue` and `dispatch_artifact` answer about a spec's blocks, and how to check an edit
+wrote one, is in [Typed blocks](skill://dispatch/references/documents.md#typed-blocks).
 
 **Wrong:** a **Decisions needed** list at the top of the spec with three bullets.
 **Right:** each decision an `:::ask{#slug}` block at the end of the design section that discusses
@@ -223,6 +217,13 @@ field, and choosing your next issue are in [Working an issue](skill://dispatch/r
 
 ## Asking
 
+Two kinds of question reach a human. A decision about the design a document records is a decision
+block in that document ([Decision blocks](#decision-blocks)), whatever phase the work is in and
+whether or not the document was approved: a block in an approved document makes the approval
+stale, which is right. A Legion phase worker sends such a decision to its architect, which writes
+the block (`skill://legion-worker`). A to-do or permission only a human can give, or a decision
+with no document to live in, is a `dispatch_ask`. The gates below apply to both.
+
 ### Before you ask
 
 Every `dispatch_ask` passes four gates first:
@@ -266,14 +267,14 @@ Every `dispatch_ask` passes four gates first:
    is not what this forbids; changing something else is. An ask that turns his complaint about
    one control into a choice about another does not address what he asked, and changing that
    other control is a change he never asked for. What is still an ask the moment you know it,
-   even before delivery, is anything "Anything you are blocked on a human for is an open ask"
-   (further down) lists that the delivery waits on — including a conflict between what he asked
-   for and another of his rules, which this gate would otherwise bury as settled.
+   even before delivery, is anything "Anything you are blocked on a human for is visible in
+   Dispatch" (further down) lists that the delivery waits on — including a conflict between what
+   he asked for and another of his rules, which this gate would otherwise bury as settled.
 
 Nobody audits or retracts another session's asks: passing every gate, and carrying the content
 instead of pointing at another message in prose (below), is the asking session's own check.
 
-Open a decision with:
+Open a standalone ask with:
 ```ts
 dispatch_ask({
   issue?,
@@ -293,15 +294,14 @@ References belong in the question text; `ref` is sugar that appends its `dispatc
 
 An ask is read on a phone by someone who has not read the code. Write its question and options as
 [Writing for the human](#writing-for-the-human) says, and apply its phone test before posting.
-No file path, line number, sequence number, document version or role token leads the question; the
-evidence under it may cite one where the reader would check it, or anchor the ask to the passage.
-Anchor a document question with `anchor: { artifact, quote, occurrence? }`; `occurrence` is
-zero-based and selects a repeated quote. A quote anchor is pinned to its lowest complete
+Never lead a question with a file path, line number, sequence number, document version or role token: its own text explains the problem.
+Evidence below it may cite one where the reader checks it, or anchor the ask to the passage with `anchor: { artifact, quote, occurrence? }`; `occurrence` is zero-based and selects a repeated quote.
+A quote anchor is pinned to its lowest complete
 containing block while retaining its quote as display text, so rewording the passage keeps it
 attached; a quote spanning top-level blocks, and existing anchors without a block, stay readable
 against their original document version if their quote disappears.
 
-An ask must be answerable from its own text and its anchor alone. Anchor a question about a document
+An ask must be answerable from its own text and its anchor alone. Anchor a to-do about a document
 passage with `anchor`. Follow up on an ask or comment with `dispatch_comment`; cite anything else
 with a `dispatch://` reference (see [References](#references)). Never write "see above", "the
 message above", or "as attached".
@@ -329,19 +329,19 @@ they must read to decide belongs in the spec in the first place — see [Artifac
 
 Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you see what a whole project is waiting on rather than just your own asks.
 
-**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, send a one-line ask before the first implementation commit. A lane's schema decision or a contract two lanes agree does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request. A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without an ask, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for, and its ask comes before the commit that sets that shape.
+**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, write a decision block in the document that records the work before the first implementation commit; in a Legion tree the architect writes it, and a phase worker sends the decision to its architect. A lane's schema decision or a contract two lanes agree does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request. A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without a block, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for, and its block comes before the commit that sets that shape.
 
-**Anything you are blocked on a human for is an open ask.** An agent waits on a human only through
-an open ask. An approval, a credential or grant to renew, a setting only they can change, a review
-click, a decision, or a conflict between two of their own rules: open a `dispatch_ask` the moment
-you know. Start with the problem and why it matters, then the constraints, options and their
-costs, and your recommendation. For an action only the human can perform, state what it changes
-and risks; never make the action itself the question. Never write it into a spec, a comment reply,
-a message, or a pull-request body: nothing in those paths reaches the human's Inbox, and a human
-who is not reading your document does not know they are the blocker. Before asking, try to remove
-the step: a value already on the machine, a permission you already hold, an API that replaces the
-click. One ask per item, `urgency: "high"` when work is stopped on it; while it is open, keep
-working on everything that is not.
+**Anything you are blocked on a human for is visible in Dispatch.** An agent waits on a human only
+through an open ask. A to-do, permission, credential or grant renewal, setting only they can
+change, review click, or conflict between two of their own rules is a `dispatch_ask` the moment you
+know. Start with the problem and why it matters, then the constraints, options and their costs, and
+your recommendation. For an action only the human can perform, state what it changes and risks;
+never make the action itself the question (a design decision is a decision block, as above). Never
+write a human to-do only into a spec, a comment reply, a message, or a pull-request body: nothing
+in those paths reaches the human's Inbox, and a human who is not reading the document does not
+know they are the blocker. Before asking, try to remove the step: a value already on the machine, a
+permission you already hold, an API that replaces the click. One ask per item, `urgency: "high"`
+when work is stopped on it; while it is open, keep working on everything that is not.
 
 Once an ask is open (who answers it, handing a human a to-do, editing, retracting or resolving it,
 answering a clarification, whose turn a reply gives), see
@@ -478,7 +478,7 @@ dispatch_message({ issue, body })
 ```
 
 It returns `details` `{ issue, message }`. `body` is capped at 2,000 characters. A message is not a decision
-(`dispatch_ask`) or document feedback (`dispatch_comment`), and it does not wake anyone unless the issue is routed.
+(a decision block, or `dispatch_ask` for a human to-do) or document feedback (`dispatch_comment`), and it does not wake anyone unless the issue is routed.
 
 A BTW, Aside or Steer frame, or a message from the Agents page, is answered as
 [Targeted and direct messages](skill://dispatch/references/messages.md) says.

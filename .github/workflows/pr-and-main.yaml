@@ -122,6 +122,16 @@ jobs:
       - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command, the design-gate verdict)
         run: bun test scripts/e2e/lib
 
+      - name: Lint the Dispatch census script
+        run: bunx biome check --error-on-warnings scripts/dispatch
+
+      # scripts/dispatch is no workspace; the root package pins its TypeScript and Bun types.
+      - name: Typecheck the Dispatch census script
+        run: bunx tsc --noEmit -p scripts/dispatch
+
+      - name: Test the Dispatch census script
+        run: bun test scripts/dispatch
+
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: packages/daemon/go.mod
