@@ -22,7 +22,7 @@ import { credentialRecordQuery } from "./record";
 function CredentialDecision({ decided }: { decided: CredentialDecisionEvent }): ReactNode {
   return (
     <div className="space-y-1 text-sm">
-      <p className={`font-medium capitalize ${textPrimaryOnCanvas}`}>
+      <p className={`font-medium first-letter:uppercase ${textPrimaryOnCanvas}`}>
         {decided.event} <Timestamp at={decided.at} />
       </p>
       {decided.credential_id === null ? null : (
