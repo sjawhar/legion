@@ -674,6 +674,32 @@ export function MentionComposer({
     replyTo,
     submitGuard,
   ]);
+  // Below `sm` the docked composer is fixed at the foot of the screen, over the page. It says how
+  // far up from the screen's bottom edge it reaches (`--docked-composer-inset`, nothing while it
+  // sticks to the top or is hidden), so the shell's floating status sits above it rather than over
+  // its controls - a refusal's row grows it upward.
+  useLayoutEffect(() => {
+    const form = formRef.current;
+    if (!docked || dormant || form === null) return;
+    const root = document.documentElement;
+    const publish = () => {
+      const box = form.getBoundingClientRect();
+      const atFoot = box.height > 0 && getComputedStyle(form).position === "fixed";
+      root.style.setProperty(
+        "--docked-composer-inset",
+        atFoot ? `${window.innerHeight - box.top}px` : "0px"
+      );
+    };
+    const sizes = new ResizeObserver(publish);
+    sizes.observe(form);
+    window.addEventListener("resize", publish);
+    publish();
+    return () => {
+      sizes.disconnect();
+      window.removeEventListener("resize", publish);
+      root.style.removeProperty("--docked-composer-inset");
+    };
+  }, [docked, dormant]);
   const upload = useMutation({
     // An upload carries where it goes as its own variable, taken by the paste or drop that starts
     // it, as a send carries its `SentRequest`: TanStack gives a pending mutation each new render's

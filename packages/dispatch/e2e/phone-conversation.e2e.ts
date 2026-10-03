@@ -40,21 +40,24 @@ async function leaveThread(page: Page): Promise<void> {
   await expect(threadView(page)).toHaveCount(0);
 }
 
-/** Fails unless `pill` and `region` share no point on screen: the pill covers none of it. */
+/** Fails unless `pill` and `region` come to share no point on screen: the pill covers none of it.
+ *  It waits for a layout that settles after a resize. */
 async function expectUncovered(pill: Locator, region: Locator): Promise<void> {
-  const covering = await pill.boundingBox();
-  const covered = await region.boundingBox();
-  expect(covering).not.toBeNull();
-  expect(covered).not.toBeNull();
-  if (covering === null || covered === null) return;
-  const apart =
-    covering.x + covering.width <= covered.x ||
-    covered.x + covered.width <= covering.x ||
-    covering.y + covering.height <= covered.y ||
-    covered.y + covered.height <= covering.y;
-  expect(apart, `the pill at ${JSON.stringify(covering)} covers ${JSON.stringify(covered)}`).toBe(
-    true
-  );
+  await expect(async () => {
+    const covering = await pill.boundingBox();
+    const covered = await region.boundingBox();
+    expect(covering).not.toBeNull();
+    expect(covered).not.toBeNull();
+    if (covering === null || covered === null) return;
+    const apart =
+      covering.x + covering.width <= covered.x ||
+      covered.x + covered.width <= covering.x ||
+      covering.y + covering.height <= covered.y ||
+      covered.y + covered.height <= covering.y;
+    expect(apart, `the pill at ${JSON.stringify(covering)} covers ${JSON.stringify(covered)}`).toBe(
+      true
+    );
+  }).toPass({ timeout: 5_000 });
 }
 
 /** Scrolls the page to its foot, past the latest turn, as a reader browsing older turns does. */
@@ -492,6 +495,48 @@ test("on a phone, Jump to latest covers none of the docked composer's Retry or D
     await expectUncovered(jump, form);
     await form.getByRole("button", { name: "Discard draft" }).click();
     await expect(form).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The shell's connection pill floats at the foot of the screen, where a phone's docked composer
+// sits and grows upward with a refusal's row. In both of its states it sits above the composer,
+// on the narrowest phone and a common one, so it covers neither Retry, nor Send, nor the line
+// under Send.
+test("on a phone, the connection pill covers none of the docked composer", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Connection pill over a refusal" });
+  const alice = await asUser(browser, "alice");
+  const narrow = { height: 568, width: 320 };
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize(narrow);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const form = page.getByRole("form", { name: "Comment composer" });
+    const pill = page.getByTestId("connection-pill");
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await form.getByLabel("Comment").fill("A draft\nover\nfour lines\nof text");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+
+    await alice.setOffline(true);
+    await expect(pill).toHaveText("Reconnecting…");
+    await expectUncovered(pill, form);
+    await page.setViewportSize(phone);
+    await expectUncovered(pill, form);
+
+    // A stream the server refuses for good: the pill offers a reload instead.
+    await page.route(/\/api\/v1\/events(\?|$)/, (route) =>
+      route.fulfill({ body: "{}", contentType: "application/json", status: 410 })
+    );
+    await alice.setOffline(false);
+    await expect(pill).toContainText("Live updates unavailable");
+    await expectUncovered(pill, form);
+    await page.setViewportSize(narrow);
+    await expectUncovered(pill, form);
   } finally {
     await alice.close();
   }
