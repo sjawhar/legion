@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"weak"
 
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
@@ -444,11 +445,16 @@ func TestTheUpdateObserverNeverRendersAWriteHalfWay(t *testing.T) {
 	if logged := logs.String(); logged != "" {
 		t.Errorf("a healthy room under concurrent writes logged:\n%s", logged)
 	}
-	state := service.room(artifactID)
-	state.mu.Lock()
-	content := state.contentMarkdown
-	state.mu.Unlock()
-	live, err := snapshotDocument(service.srv.GetDoc(artifactID))
+	room := service.srv.GetDoc(artifactID)
+	listed, ok := service.replicas.Load(weak.Make(room))
+	if !ok {
+		t.Fatal("the written room lists no replica")
+	}
+	replica := listed.(*renderedReplica)
+	replica.mu.Lock()
+	content := replica.markdown
+	replica.mu.Unlock()
+	live, err := snapshotDocument(room)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +484,9 @@ func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
 	}, model.Actor{Kind: "user", ID: "bob"}); err != nil {
 		t.Fatal(err)
 	}
-	listed, ok := service.replicas.Load(artifactID)
+	// The listing's key holds the room's document weakly, as the listing does.
+	key := weak.Make(service.srv.GetDoc(artifactID))
+	listed, ok := service.replicas.Load(key)
 	if !ok {
 		t.Fatal("the written room lists no replica")
 	}
@@ -495,7 +503,7 @@ func TestAnEvictedRoomsReplicaGoesWithIt(t *testing.T) {
 	}
 	waitFor(t, 30*time.Second, "the evicted room's replica to go", func() bool {
 		runtime.GC()
-		_, listed := service.replicas.Load(artifactID)
+		_, listed := service.replicas.Load(key)
 		return !listed
 	})
 }

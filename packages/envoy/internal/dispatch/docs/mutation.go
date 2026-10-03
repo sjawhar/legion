@@ -790,11 +790,8 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		// No operation to apply, so the document this check read is the document the caller's
 		// next edit meets: its token is that edit's precondition.
 		tree, err := s.docTree(ctx, artifactID)
-		if errors.Is(err, ErrDocOutsideSchema) {
-			return EditOutcome{}, err
-		}
 		if err != nil {
-			return EditOutcome{}, fmt.Errorf("check empty document edit precondition: %w", err)
+			return EditOutcome{}, err
 		}
 		if err := checkEditPrecondition(tree, *precondition); err != nil {
 			return EditOutcome{}, err
@@ -1062,25 +1059,27 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	}
 	// The room's state lock is held from the read to the authors it captures, so an author the
 	// update observer credits (creditContentChange, after the update is in the room) is captured
-	// only with that update's text. The room itself is read through a copy taken under its
-	// document lock (snapshotDocument), as a peer or service write holds that lock while it
-	// applies and a direct walk of the live tree takes none. The order - state lock, then document
-	// lock - is never reversed: nothing that holds a document's lock, which only a Yjs
-	// transaction's own function does, takes a room's state lock. It is a copy rather than the
-	// room's replica (readLive), whose lock the update observer holds while it takes the state lock
-	// (updateChangesMarkdown). The copy is taken inside the Apply that loads and holds the room, as
-	// docTree reads it: a room looked up again once that Apply returned can have been evicted in
-	// between.
-	doc := fork
+	// only with that update's text. The room itself is read as of one moment under its document
+	// lock (liveTree), as a peer or service write holds that lock while it applies and a direct
+	// walk of the live tree takes none. The locks are taken in one order - the state lock, then the
+	// replica's, which a read only tries (readLive), then the document's - and nothing reverses
+	// it: the update observer releases the replica's lock before it takes the state lock
+	// (recordUpdateClass), and only a Yjs transaction's own function holds a document's lock, which
+	// takes neither. The read is taken inside the Apply that loads and holds the room, as docTree
+	// reads it: a room looked up again once that Apply returned can have been evicted in between.
+	var tree *pmdoc.Node
 	var capture versionPending
 	var authors []model.Actor
-	if doc != nil {
+	if fork != nil {
 		state := s.room(room)
 		state.mu.Lock()
 		capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
 		state.mu.Unlock()
+		if tree, err = treeOf(fork); err != nil {
+			return nil, "", versionPending{}, nil, err
+		}
 	} else {
-		var copyErr error
+		var readErr error
 		err := s.srv.Apply(ctx, room, func(live *crdt.Doc, _ func(func(*crdt.Transaction))) {
 			if s.afterReadWarm != nil {
 				s.afterReadWarm(room)
@@ -1088,20 +1087,16 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 			state := s.room(room)
 			state.mu.Lock()
 			defer state.mu.Unlock()
-			if doc, copyErr = snapshotDocument(live); copyErr == nil {
+			if tree, readErr = s.liveTree(room, live); readErr == nil {
 				capture, authors = captureAuthors(state, joinedLiveWrite(ctx, room), actor)
 			}
 		})
-		if copyErr != nil {
-			return nil, "", versionPending{}, nil, copyErr
+		if readErr != nil {
+			return nil, "", versionPending{}, nil, readErr
 		}
 		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 			return nil, "", versionPending{}, nil, fmt.Errorf("warm live document: %w", err)
 		}
-	}
-	tree, err := treeOf(doc)
-	if err != nil {
-		return nil, "", versionPending{}, nil, err
 	}
 	markdown, err := documentMarkdown(tree)
 	if err != nil {

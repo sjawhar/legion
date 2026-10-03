@@ -2,8 +2,11 @@ package docs
 
 import (
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/reearth/ygo/crdt"
 
@@ -97,6 +100,100 @@ func BenchmarkLiveDocumentRead(b *testing.B) {
 				b.StartTimer()
 			}
 		})
+	}
+}
+
+// BenchmarkKeystrokeBesideReads measures how long a peer's keystroke holds up the room's other
+// browsers while reads of the room run beside it: none, one every 250 ms, or one after another,
+// each through a copy (snapshotDocument, as main read) or through readLive. ygo broadcasts a
+// peer's update only once the room's update observer has returned, so a keystroke's latency here
+// is its transaction on the live document and the observer's catch-up of the replica under the
+// replica's lock (onLoadDocument). The observer's render is left out, so what is measured is the
+// wait for the two locks a read can hold: the live document's, for a copy's encode or a
+// catch-up's, and the replica's, for a read's walk. 120 keystrokes 20 ms apart on a 524 KiB
+// document; each run reports the latencies' percentiles in milliseconds.
+func BenchmarkKeystrokeBesideReads(b *testing.B) {
+	live := benchmarkLiveDocument(b, 524<<10)
+	texts := paragraphTexts(live)
+	if len(texts) == 0 {
+		b.Fatal("the document holds no paragraph text")
+	}
+	walk := func(doc *crdt.Doc) {
+		if _, err := treeOf(doc); err != nil {
+			b.Error(err)
+		}
+	}
+	readers := []struct {
+		name string
+		read func(service *Service)
+	}{
+		{"none", nil},
+		{"copy", func(*Service) {
+			copied, err := snapshotDocument(live)
+			if err != nil {
+				b.Error(err)
+				return
+			}
+			walk(copied)
+		}},
+		{"readLive", func(service *Service) {
+			if err := service.readLive("bench", live, walk); err != nil {
+				b.Error(err)
+			}
+		}},
+	}
+	for _, reader := range readers {
+		for _, every := range []time.Duration{250 * time.Millisecond, 0} {
+			name := reader.name
+			if reader.read != nil {
+				name += "/back-to-back"
+				if every > 0 {
+					name = fmt.Sprintf("%s/every-%s", reader.name, every)
+				}
+			} else if every == 0 {
+				continue
+			}
+			b.Run(name, func(b *testing.B) {
+				service := &Service{}
+				replica := service.keepReplica(live, nil)
+				replica.mu.Lock()
+				replica.catchUp("bench", live)
+				replica.mu.Unlock()
+				for b.Loop() {
+					stop := make(chan struct{})
+					var reading sync.WaitGroup
+					if reader.read != nil {
+						reading.Go(func() {
+							for {
+								select {
+								case <-stop:
+									return
+								case <-time.After(every):
+								}
+								reader.read(service)
+							}
+						})
+					}
+					latencies := make([]time.Duration, 0, 120)
+					for range 120 {
+						time.Sleep(20 * time.Millisecond)
+						start := time.Now()
+						live.Transact(func(txn *crdt.Transaction) { texts[0].Insert(txn, 0, "y", nil) })
+						replica.mu.Lock()
+						replica.catchUp("bench", live)
+						replica.mu.Unlock()
+						latencies = append(latencies, time.Since(start))
+					}
+					close(stop)
+					reading.Wait()
+					slices.Sort(latencies)
+					for _, percentile := range []int{50, 90, 99, 100} {
+						at := min(len(latencies)*percentile/100, len(latencies)-1)
+						b.ReportMetric(float64(latencies[at])/float64(time.Millisecond), fmt.Sprintf("p%d-ms", percentile))
+					}
+				}
+			})
+		}
 	}
 }
 
