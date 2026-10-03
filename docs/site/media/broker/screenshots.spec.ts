@@ -11,9 +11,9 @@ import { fileURLToPath } from "node:url";
 
 import { expect, test } from "@playwright/test";
 
-import { rigState, startMachineLogin, startSecretRequest } from "./agent";
+import { rigState, startMachineLogin, startSecretRequest, waitForOutput } from "./agent";
 
-const assets = join(dirname(fileURLToPath(import.meta.url)), "../../src/assets/broker");
+const assets = join(dirname(fileURLToPath(import.meta.url)), "../../public/media/broker");
 const reason = "Publish the docs preview for PR 42 with the demo API.";
 
 test("the Dispatch pages a person approves broker requests on", async ({ browser }) => {
@@ -33,10 +33,14 @@ test("the Dispatch pages a person approves broker requests on", async ({ browser
   await page.goto("/credentials/machine");
   await page.getByLabel("Code shown on the machine").fill(login.code);
   await page.getByRole("button", { name: "Look up" }).click();
-  await expect(page.getByText("Approving lets example-host-build start agent sessions as you.")).toBeVisible();
+  await expect(
+    page.getByText("Approving lets example-host-build start agent sessions as you.")
+  ).toBeVisible();
   await page.screenshot({ path: join(assets, "machine-login.png") });
   await page.getByRole("button", { name: "Approve" }).click();
-  await expect(page.getByText("Approved. example-host-build can start agent sessions as you.")).toBeVisible();
+  await expect(
+    page.getByText("Approved. example-host-build can start agent sessions as you.")
+  ).toBeVisible();
   expect((await login.done).code).toBe(0);
 
   // A secret request from a session on that machine: its Inbox row, its record, its approval.
@@ -51,16 +55,18 @@ test("the Dispatch pages a person approves broker requests on", async ({ browser
   await page.screenshot({ path: join(assets, "credential-request.png") });
   await page.getByRole("button", { name: "Approve" }).click();
   await expect(page.getByText(/^approved/i)).toBeVisible();
-  const ran = await request.done;
-  expect(ran.code, ran.stderr).toBe(0);
-  expect(ran.stdout).toContain("DEMO_API_KEY reached this command");
+  await waitForOutput(request, /DEMO_API_KEY reached this command/, "the command's output");
   await page.screenshot({ path: join(assets, "credential-request-approved.png") });
 
-  // The grant that approval made, naming its approver, under Settings' Live grants.
+  // The grant that approval made, naming its approver, under Settings' Live grants: live while
+  // the session that asked is open.
   await page.goto("/settings");
   const grants = page.locator("section[aria-labelledby='credential-grants-heading']");
   await expect(grants.getByText("DEMO_API_KEY")).toBeVisible();
   await grants.screenshot({ path: join(assets, "live-grants.png") });
 
+  request.end();
+  const ran = await request.done;
+  expect(ran.code, ran.stderr).toBe(0);
   await context.close();
 });

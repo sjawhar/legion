@@ -1,7 +1,7 @@
 // docs/site/media/broker/agent.ts
 //
 // Drives the rig's agent machine (docs/site/media/broker/rig.sh) from a script: reads the state
-// file the rig writes, starts a machine login and a secret request inside the agent container,
+// file the rig writes, starts a machine login and a secret request on the agent machine,
 // and hands back what each prints that a person acts on (the machine login's code, the request's
 // Dispatch record), so the browser side can approve it.
 import { type ChildProcess, spawn } from "node:child_process";
@@ -20,7 +20,9 @@ export interface RigState {
 export function rigState(): RigState {
   const path = process.env.BROKER_RIG_STATE;
   if (path === undefined || path === "") {
-    throw new Error("BROKER_RIG_STATE is unset: run this under docs/site/media/broker/rig.sh -- <command>");
+    throw new Error(
+      "BROKER_RIG_STATE is unset: run this under docs/site/media/broker/rig.sh -- <command>"
+    );
   }
   const values = new Map(
     readFileSync(path, "utf8")
@@ -45,10 +47,12 @@ export interface Running {
   /** Resolves with the command's exit code and everything it printed, once it exits. */
   done: Promise<{ code: number | null; stdout: string; stderr: string }>;
   child: ChildProcess;
+  /** Everything the command has printed so far, stdout then stderr. */
+  output: () => string;
 }
 
-function run(agentExec: string, argv: string[]): Running & { output: () => string } {
-  const child = spawn(agentExec, argv, { stdio: ["ignore", "pipe", "pipe"] });
+function run(agentExec: string, argv: string[], stdin: "ignore" | "pipe" = "ignore"): Running {
+  const child = spawn(agentExec, argv, { stdio: [stdin, "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
   child.stdout?.on("data", (chunk) => {
@@ -65,8 +69,8 @@ function run(agentExec: string, argv: string[]): Running & { output: () => strin
 
 /** Polls a running command's output until `pattern` matches, failing with what it printed when
  *  it exits first or `timeoutMs` passes. */
-async function waitForOutput(
-  running: Running & { output: () => string },
+export async function waitForOutput(
+  running: Running,
   pattern: RegExp,
   what: string,
   timeoutMs = 60_000
@@ -88,32 +92,54 @@ async function waitForOutput(
 /** `agent-secrets launcher login` on the agent machine: resolves once it prints its code. */
 export async function startMachineLogin(agentExec: string): Promise<Running & { code: string }> {
   const running = run(agentExec, ["agent-secrets", "launcher", "login"]);
-  const match = await waitForOutput(running, /machine login code: ([A-Z0-9]{4}-[A-Z0-9]{4})/, "machine login code");
+  const match = await waitForOutput(
+    running,
+    /machine login code: ([A-Z0-9]{4}-[A-Z0-9]{4})/,
+    "machine login code"
+  );
   return { ...running, code: match[1] };
 }
 
 /** A session registered with the agent machine's helper, as an agent's session is, asking for
  *  DEMO_API_KEY to run ./check-demo-key.sh: resolves once it names the Dispatch record a person
- *  decides. */
+ *  decides. The session stays open after the command runs, as an agent's does, so its grant stays
+ *  live (the helper ends a session's enrollment, and with it the grant, when its process exits);
+ *  `end()` closes it. */
 export async function startSecretRequest(
   agentExec: string,
   reason: string
-): Promise<Running & { recordId: string; requestId: string }> {
-  const running = run(agentExec, [
-    "agent-secrets",
-    "register",
-    "--wait",
-    "20",
-    "--exec",
-    "--",
-    "agent-secrets",
-    "DEMO_API_KEY",
-    "--reason",
-    reason,
-    "--",
-    "./check-demo-key.sh",
-  ]);
-  const request = await waitForOutput(running, /request (\S+) is waiting for approval/, "pending request");
-  const record = await waitForOutput(running, /\/credentials\/([0-9a-f]{64})/, "credential record link");
-  return { ...running, recordId: record[1], requestId: request[1] };
+): Promise<Running & { recordId: string; requestId: string; end: () => void }> {
+  const running = run(
+    agentExec,
+    [
+      "agent-secrets",
+      "register",
+      "--wait",
+      "20",
+      "--exec",
+      "--",
+      "sh",
+      "-c",
+      'agent-secrets DEMO_API_KEY --reason "$1" -- ./check-demo-key.sh || exit; read -r _ || true',
+      "session",
+      reason,
+    ],
+    "pipe"
+  );
+  const request = await waitForOutput(
+    running,
+    /request (\S+) is waiting for approval/,
+    "pending request"
+  );
+  const record = await waitForOutput(
+    running,
+    /\/credentials\/([0-9a-f]{64})/,
+    "credential record link"
+  );
+  return {
+    ...running,
+    end: () => running.child.stdin?.end(),
+    recordId: record[1],
+    requestId: request[1],
+  };
 }
