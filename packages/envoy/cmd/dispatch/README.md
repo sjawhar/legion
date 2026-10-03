@@ -520,7 +520,10 @@ or listener and never a test hook; the docs site's HTTP API reference is generat
 table below is a summary. An unknown path under `/api`, `/v1`, `/auth`, `/ws`,
 or `/healthz` is a JSON 404 `{"code":"NOT_FOUND","error":"no route for GET
 /v1/issues","hint":"GET /api/v1 lists every route"}`, never the dashboard shell; a missing file
-under `/assets` stays `404 {"error":"not found"}`.
+under `/assets` stays `404 {"error":"not found"}`. The dashboard's pages (`index.html` and the
+shell served for a browser route) carry `Cache-Control: no-cache` and an `ETag` of their bytes, no
+`Last-Modified`, and its hashed `/assets` files `public, max-age=31536000, immutable`, so a
+browser keeps no page from another build.
 
 | Path | Method | Identity | Purpose |
 | --- | --- | --- | --- |

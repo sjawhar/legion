@@ -7,11 +7,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
-var allWorkflowPhases = []phase.Phase{
-	phase.Admitted, phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing,
-	phase.Retro, phase.Merging, phase.AwaitingMerge, phase.ProductionCheck, phase.Done, phase.Held,
-}
-
 var allWorkflowTriggers = []TriggerKind{
 	TriggerGateOpened, TriggerPlannerCompleted, TriggerImplementationReady, TriggerTesterPassed,
 	TriggerTesterFailed, TriggerReviewApproved, TriggerReviewRejected, TriggerRetroCompleted,
@@ -35,7 +30,7 @@ func TestDeletingAnyTransitionRowBreaksCoverage(t *testing.T) {
 }
 
 func validateTable(rows []Row) error {
-	for _, current := range allWorkflowPhases {
+	for _, current := range phase.All {
 		for _, trigger := range allWorkflowTriggers {
 			hasRow := false
 			for _, row := range rows {
@@ -61,7 +56,7 @@ func validateTable(rows []Row) error {
 			}
 		}
 	}
-	for _, from := range allWorkflowPhases {
+	for _, from := range phase.All {
 		for _, to := range requiredBackwardTargets(from) {
 			if !hasBackwardRow(rows, from, to) {
 				return fmt.Errorf("%s/backward -> %s is missing a transition row", from, to)

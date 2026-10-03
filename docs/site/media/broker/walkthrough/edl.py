@@ -3,10 +3,11 @@
 Each clip is a window of one raw file, cut hard: no speed change, no held frame. Its start, its
 end and each narration part's start are a mark the recorder set in that file
 (walkthrough.record.ts's `mark(...)`, recorded in raw/sections.json) plus an offset in seconds, so
-a new take re-times the cut itself. `start` and `end` are every file's first and last instants.
-build.py fails when a part runs past its clip's end, into the next part, or starts before its
-clip. The narration was written after the cut, to each clip's measured length, and says only what
-the clip shows.
+a new take re-times the cut itself. `start` and `end` are every file's first and last instants,
+except that a cast's `end` stops short of the detached client's farewell, its last event, by
+build.py's FAREWELL_GUARD. build.py fails when a cast's clip ends after its `end`, or a part runs
+past its clip's end, into the next part, or starts before its clip. The narration was written
+after the cut, to each clip's measured length, and says only what the clip shows.
 
 The video opens on its payoff, the command that received the key, then shows how it got there in
 order: the machine's login, its approval, the session, the request, its approval, the command

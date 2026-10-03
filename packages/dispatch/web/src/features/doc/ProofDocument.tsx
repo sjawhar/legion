@@ -49,8 +49,6 @@ import {
   composerKindFor,
   markPlacements,
   selectionBarKindFor,
-  setActiveBlockClass,
-  setActiveMarkClass,
 } from "./marks";
 import { NameVersionDialog } from "./NameVersionDialog";
 import { DocumentRuntime } from "./runtime";
@@ -188,7 +186,7 @@ export function ProofDocument({
   } = useContext(DocumentRuntime);
   const navigate = useNavigate();
   const margin = useMargin();
-  const { blockFocusRequest, blockPlacements } = margin;
+  const { blockPlacements } = margin;
   // The editor effect and its callbacks reach the margin's latest functions through this ref
   // rather than listing them as dependencies, so a margin re-render never rebuilds the editor.
   const marginRef = useRef(margin);
@@ -389,15 +387,15 @@ export function ProofDocument({
       }
       setSearchHighlights(handle.view.dom, highlightTermRef.current);
       marginRef.current.registerDocument({
+        artifactId: artifact.id,
         focusBlock: (blockId) => {
           requestAnimationFrame(() => handle.focusBlock(blockId));
         },
         focusMark: (markId) => handle.focusMark(markId),
         removeMark: (markId) => handle.removeMark(markId),
         retypeMark: (markId, kind) => handle.retypeMark(markId, selectionBarKindFor(kind)),
-        setComposerMark: (markId) => handle.setComposerMark(markId),
-        setActiveBlocks: (blockIds) => setActiveBlockClass(handle.view.dom, blockIds),
-        setActiveMarks: (markIds) => setActiveMarkClass(handle.view.dom, markIds),
+        setActiveBlocks: (blockIds) => handle.setActiveBlocks(blockIds),
+        setActiveMarks: (markIds) => handle.setActiveMarks(markIds),
       });
       const unbindRemoteMarks = bindRemoteMarks(connection.doc, handle);
       const fragment = connection.doc.getXmlFragment("prosemirror");
@@ -414,6 +412,12 @@ export function ProofDocument({
       const publishPlacements = () => {
         cancelAnimationFrame(frame);
         frame = requestAnimationFrame(() => {
+          // A hidden editor has no layout. Reporting its zero offsets would make the
+          // link hold read a press after the panel is shown again as a placed landing.
+          if (handle.view.dom.getClientRects().length === 0) {
+            marginRef.current.withdrawPlacements();
+            return;
+          }
           marginRef.current.setMarkPlacements(
             markPlacements(handle.view.state.doc, handle.markOffsets())
           );
@@ -581,16 +585,6 @@ export function ProofDocument({
   useEffect(() => {
     editorRef.current?.setReadOnly(isClosed || schemaReadOnlyRef.current);
   }, [isClosed]);
-
-  useEffect(() => {
-    if (blockFocusRequest === undefined) {
-      return;
-    }
-    const frame = requestAnimationFrame(() => {
-      editorRef.current?.focusBlock(blockFocusRequest.blockId);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [blockFocusRequest]);
 
   useEffect(() => {
     const editor = editorRef.current;

@@ -237,7 +237,6 @@ exit %[2]d
 	t.Setenv("PI_CODING_AGENT_DIR", "")
 	t.Setenv("PATH", "/usr/bin:/bin:/opt/x/worker-bin")
 	t.Setenv("LEGION_OMP_PATH", omp)
-	t.Setenv("LEGION_ROLE_PROMPTS_DIR", testRolePromptsDir(t))
 	c.installPlugin(api.DaemonAPIVersion)
 	return c
 }
@@ -757,16 +756,6 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 		os.Remove(filepath.Join(c.dir, "dispatch-token"))
 		c.refused(fmt.Sprintf("dispatch_token_file names %s, which could not be read: ", filepath.Join(c.dir, "dispatch-token")))
 		c.wantNoSecretRequest()
-	})
-	t.Run("an unusable role-prompt directory, naming it and controller-root.md", func(t *testing.T) {
-		d := newControllerDaemon(t)
-		c := newControllerStart(t, d, controllerOptions{})
-		empty := t.TempDir()
-		t.Setenv("LEGION_ROLE_PROMPTS_DIR", empty)
-		c.refused("Role prompts directory " + empty + " is missing")
-		c.refused("controller-root.md")
-		c.wantNoSecretRequest()
-		c.wantNothingLaunchedOrWritten(c.defaultDir)
 	})
 	t.Run("a missing instructions file", func(t *testing.T) {
 		d := newControllerDaemon(t)

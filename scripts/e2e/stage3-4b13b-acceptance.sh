@@ -112,8 +112,6 @@ soft() {
 . "$root/scripts/e2e/lib/omp-home.sh"
 # shellcheck source=/dev/null
 . "$root/scripts/e2e/lib/workflow.sh"
-# shellcheck source=/dev/null
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 # The daemon's database is this run's own in the shared Postgres container, read with the host psql.
 db_value() { PGPASSWORD=$(cat "$work/postgres-password") psql -h 127.0.0.1 -p "$port_pg" -U "$pg_user" -d "$legion_db" -tAc "$1"; }
 
@@ -663,7 +661,6 @@ nats_url='^([A-Za-z][A-Za-z0-9+.-]*://)?([^@/?#,[:space:]]+@)?[A-Za-z0-9_-]+(\.[
   printf 'ci' >"$work/postgres-password")
 chmod 0600 "$work"/*token "$work/envoy-auth-header" "$work/postgres-password"
 (cd "$root/packages/daemon" && go build -ldflags "-X main.revision=$head_commit" -o "$work/legion" ./cmd/legion)
-stage_role_prompts "$root" "$work"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
 {
   printf 'head under test %s\n' "$head_commit"
