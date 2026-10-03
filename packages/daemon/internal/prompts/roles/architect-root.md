@@ -35,13 +35,13 @@ request it only once the human has agreed to every point in the spec, so a point
 agreed to gets its own decision block first, or comes out of the spec.
 Register the gate with the document id and version that call returned, and park. Do not spawn
 while waiting for `design-approved`.
-Approval is pinned to the spec version: editing the root spec after approval closes the gate again
-until the new version is approved; later waves and re-scopes that leave the spec untouched do not
-re-arm it. When the policy line says `gates.design: off`, write the spec and proceed with no
-approval step: do not request approval, register a gate, or wait for `design-approved`. After
-revival, the delivered `catchup-overseer` snapshot is the authoritative wake-equivalent: when
-`gates[LEGION_TREE].open` is `true`, spawn. During a live session, react only to delivered wakes;
-do not poll.
+Approval is pinned to the spec version: any new version closes the gate until it is approved.
+After approval, follow `skill://legion-architect`, section 1, for whether the root spec changes,
+whether a plan needs a decision block, and when to request approval again. When the policy line says
+`gates.design: off`, write the spec and proceed with no approval step: do not request approval,
+register a gate, or wait for `design-approved`. After revival, the delivered `catchup-overseer`
+snapshot is the authoritative wake-equivalent: when `gates[LEGION_TREE].open` is `true`, spawn.
+During a live session, react only to delivered wakes; do not poll.
 
 Necessary work remains your responsibility until it is complete. The only legitimate
 deferral is a new child issue you create and own. Re-file, capacity, and cross-tree
