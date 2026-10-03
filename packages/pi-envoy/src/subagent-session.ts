@@ -59,10 +59,12 @@ interface SubagentSessionAnswer {
  *
  * The host's roster answers first (`registeredSubagent`): it needs no transcript and no write.
  * Only when it gives no opinion does the transcript decide (`transcriptSaysSubagent`), after
- * `ensureOnDisk` has published it so the on-disk layout can be read. That publish fails while
- * another writer holds the transcript's publish lock (Oh My Pi's `SessionLockError`); the check
- * then answers from what is on disk now and reports itself unsettled, so the next check asks
- * again rather than failing the hook that asked.
+ * `ensureOnDisk` has published it so the on-disk layout can be read. That publish stays: with no
+ * roster opinion the transcript is the only signal, and a top-level session whose own file is not
+ * on disk yet would read as a subagent wherever this process recorded a different bootstrapped
+ * transcript. It fails while another writer holds the transcript's publish lock (Oh My Pi's
+ * `SessionLockError`); the check then answers from what is on disk now and reports itself
+ * unsettled, so the next call asks again rather than failing the call that asked.
  */
 async function isSubagentSession(context: SessionIdentityContext): Promise<SubagentSessionAnswer> {
   const registered = registeredSubagent(context);
@@ -72,7 +74,7 @@ async function isSubagentSession(context: SessionIdentityContext): Promise<Subag
   } catch (error) {
     const subagent = transcriptSaysSubagent(context);
     logger.warn(
-      "subagent check: publishing the transcript failed; answered from the transcript on disk, and the next hook asks again",
+      "subagent check: publishing the transcript failed; answered from the transcript on disk, and the next call asks again",
       { sessionFile: context.sessionManager.getSessionFile(), subagent, error: messageFor(error) }
     );
     return { subagent, settled: false };
@@ -140,7 +142,9 @@ function registeredSubagent(context: SessionIdentityContext): boolean | undefine
 /**
  * `isSubagentSession` for one extension instance, which gates several of its hooks: a settled
  * answer is kept for the instance's life, since a session's kind and transcript path never
- * change; an unsettled one answers only the hook that asked, and the next hook asks again.
+ * change; an unsettled one answers only the call that made it, and the next call asks again.
+ * Each hook calls it once and passes the answer on (envoy.ts's `replyAddress` takes it; legion.ts
+ * asks once per session change for both the title and the controller's re-claim).
  */
 export function subagentSessionCheck(): (context: SessionIdentityContext) => Promise<boolean> {
   let settled: boolean | undefined;

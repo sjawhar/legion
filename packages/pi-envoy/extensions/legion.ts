@@ -501,8 +501,8 @@ export default function legionExtension(pi: PiApi): void {
   let capability: SessionCapability | undefined;
   let bootstrap: Promise<void> | undefined;
 
-  // Gates session_start, tool_call and the controller's re-claim below; its settled answer is
-  // kept, so it runs once per session, not once per tool call.
+  // Gates session_start, tool_call and the session-change re-claim below, one call per hook; its
+  // settled answer is kept, so it runs once per session, not once per tool call.
   const checkSubagentSession = subagentSessionCheck();
   // The pane rules this pane is held to (PANE_RULES), judged from the environment on the first
   // tool_call. A subagent's own instance inherits the pane's environment, so the rules bind it
@@ -625,7 +625,6 @@ export default function legionExtension(pi: PiApi): void {
       recordBootstrappedSession(persisted.sessionFile);
       return persisted;
     },
-    checkSubagentSession,
     () => (process.env.LEGION_DAEMON_API === "go" ? goController : typescriptController)
   );
 
@@ -942,14 +941,11 @@ export default function legionExtension(pi: PiApi): void {
   // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree
   // navigation carries no reason, and every one of them can leave the pane on a new session id.
   // The controller re-claims whatever session the pane is left on, so that session takes the
-  // controller's title first; a session that keeps its id keeps its title.
+  // controller's title first; a session that keeps its id keeps its title. A `task` subagent's
+  // instance does neither, and the subagent check is asked once for both.
   const afterSessionChange = async (context: SessionContext): Promise<void> => {
-    if (
-      classifySession(process.env).kind === "controller" &&
-      !(await checkSubagentSession(context))
-    ) {
-      await titleSession(context);
-    }
+    if (await checkSubagentSession(context)) return;
+    if (classifySession(process.env).kind === "controller") await titleSession(context);
     await controllerSession.reclaimAfterSessionChange(context);
   };
   pi.on("session_switch", (_event, context) => afterSessionChange(context));

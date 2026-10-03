@@ -45,7 +45,7 @@
   another writer no longer fails every tool call for the rest of its life (LEGION-491). The
   subagent check asks the host's agent roster first, which needs no publish; where the roster
   gives no opinion and the publish fails, it answers from the transcript on disk, logs a warning,
-  and asks again at the next hook instead of keeping the failure.
+  and asks again at the next check instead of keeping the failure.
 
 ### Added
 

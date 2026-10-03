@@ -2083,6 +2083,60 @@ describe("Legion OMP extension", () => {
     expect(fixture.tools.find((tool) => tool.name === "legion")).toBeUndefined();
     expect(publishes).toBe(0);
   });
+  test("a session the host's roster calls main boots as the top-level session even where its transcript sits like a subagent's", async () => {
+    // The roster's answer outranks the transcript layout. A check that let the layout win would
+    // need the transcript, and so a publish, before it could answer: LEGION-491's lock race again.
+    const requests: { readonly path: string }[] = [];
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error(`exitProcess(${code})`);
+    });
+    const tree = "REPO-42";
+    const token = roleToken("omp", tree, "architect");
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "boot-roster-main";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ROLE = "architect";
+    process.env.LEGION_ISSUE = tree;
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      requests.push({ path: url.pathname });
+      if (url.pathname === "/legion/v1/process/started") {
+        return Response.json({
+          roleTokens: { architect: token },
+          controlSubject: "legion.ctl.owner-repo-42.3",
+          secret: "root-secret",
+        });
+      }
+      return Response.json({
+        session_id: "ses_roster_main",
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [token],
+      });
+    }) as typeof fetch;
+    // On disk the layout says subagent: a `.jsonl` sits beside this transcript's directory.
+    const { childFile } = await createSubagentTranscriptPaths();
+    testAgentRoster().push({
+      id: "Main",
+      kind: "main",
+      session: { sessionManager: { getSessionId: () => "ses_roster_main" } },
+      sessionFile: childFile,
+    });
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("session_start handler was not registered");
+
+    await sessionStart({}, sessionContext("ses_roster_main", childFile));
+
+    expect(requests.map((request) => request.path)).toContain("/legion/v1/process/started");
+    expect(fixture.tools.find((tool) => tool.name === "legion")).toBeDefined();
+    expect(exits).toEqual([]);
+  });
   test("throws naming the missing variable when a phase worker boots without LEGION_BOOT_TOKEN", async () => {
     process.env.ENVOY_URL = "http://envoy.test";
     process.env.LEGION_DAEMON_URL = "http://daemon.test";

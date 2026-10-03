@@ -88,7 +88,6 @@ export function typescriptControllerDaemon(
  */
 export function createControllerSession(
   persistedTranscript: PersistedTranscript,
-  checkSubagentSession: (context: SessionContext) => Promise<boolean>,
   daemon: () => ControllerDaemon
 ): ControllerSession {
   let controllerSessionID: string | undefined;
@@ -124,9 +123,11 @@ export function createControllerSession(
     }
   };
 
-  /** `/new`, `/resume`, or `/fork` can replace the controller session and its transcript in place. */
+  /**
+   * `/new`, `/resume`, or `/fork` can replace the controller session and its transcript in place.
+   * The caller never passes a `task` subagent's session (legion.ts `afterSessionChange`).
+   */
   const reclaimAfterSessionChange = async (context: SessionContext): Promise<void> => {
-    if (await checkSubagentSession(context)) return;
     if (classifySession(process.env).kind !== "controller") return;
     if (
       context.sessionManager.getSessionId() === controllerSessionID &&
