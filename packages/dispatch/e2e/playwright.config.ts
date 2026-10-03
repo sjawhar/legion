@@ -160,21 +160,13 @@ export default defineConfig({
       testIgnore: plainHttpSpec,
       use: { ...devices["iPhone 13"], browserName: "chromium" },
     },
-    // A caret beside a collaborator's cursor behaves per engine, and the issue picker's
-    // keyboard-step rule rests on each engine dispatching a closed select's `change` in the key's
-    // own task, so those two specs also run in WebKit.
+    // A caret beside a collaborator's cursor behaves per engine, the issue picker's keyboard-step
+    // rule rests on each engine dispatching a closed select's `change` in the key's own task, and
+    // deep links meet each engine's chunk cancellation and the margin hold's frame and scroll order.
+    // So those three specs also run in WebKit.
     {
       name: "webkit",
-      testMatch: /(collab-cursor|keyboard-agents-picker)\.e2e\.ts/,
-      use: { ...devices["Desktop Safari"] },
-    },
-    // WebKit and Firefox cancel the chunk downloads in flight when a navigation starts, and a link
-    // followed while the page before it is still loading has to open rather than reload that page;
-    // and the margin's hold on a linked card meets each engine's own order of frames and scroll
-    // events. So the whole deep-links spec also runs in WebKit.
-    {
-      name: "webkit-deep-links",
-      testMatch: /deep-links\.e2e\.ts/,
+      testMatch: /(collab-cursor|deep-links|keyboard-agents-picker)\.e2e\.ts/,
       use: { ...devices["Desktop Safari"] },
     },
     // The live view's phone layout (its keyboard cap, gutter and scroll locks) also runs in WebKit,

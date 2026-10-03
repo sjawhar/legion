@@ -407,6 +407,12 @@ export function ProofDocument({
                 const publishPlacements = () => {
                   cancelAnimationFrame(frame);
                   frame = requestAnimationFrame(() => {
+                    // A hidden editor has no layout. Reporting its zero offsets would make the
+                    // link hold read a press after the panel is shown again as a placed landing.
+                    if (handle.view.dom.getClientRects().length === 0) {
+                      marginRef.current.withdrawPlacements();
+                      return;
+                    }
                     marginRef.current.setMarkPlacements(
                       markPlacements(handle.view.state.doc, handle.markOffsets())
                     );

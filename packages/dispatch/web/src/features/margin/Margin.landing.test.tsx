@@ -501,6 +501,46 @@ test("a press in the document leaves the hold armed while the layout reported is
   }
 });
 
+test("a text update in the margin keeps its anchoring scroll from taking over", async () => {
+  let cardTop = 900;
+  const restoreRects = stubRects(() => cardTop);
+  const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
+  const restoreMatchMedia = stubMatchMedia(false);
+  const view = renderCommentLinkLanding();
+
+  try {
+    const card = await screen.findByTestId("margin-comment-comment-1");
+    const placement = card.parentElement;
+    if (placement === null) {
+      throw new Error("Expected the anchored card to be positioned by its placement wrapper");
+    }
+    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(0));
+    await settled();
+
+    const text = document.createTreeWalker(card, NodeFilter.SHOW_TEXT).nextNode();
+    if (!(text instanceof Text)) {
+      throw new Error("Expected the margin card to contain text");
+    }
+    const sheet = screen.getByTestId("margin-sheet");
+    act(() => {
+      text.data = `${text.data} after the reference title resolves`;
+      sheet.scrollTop = 240;
+      fireEvent.scroll(sheet);
+    });
+    await quiet();
+    const afterReference = scrollTo.mock.calls.length;
+
+    cardTop = 1400;
+    act(() => placement.setAttribute("style", "position: absolute; top: 1400px;"));
+    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(afterReference));
+  } finally {
+    view.unmount();
+    restoreMatchMedia();
+    restoreRects();
+    scrollTo.mockRestore();
+  }
+});
+
 test("a scroll the margin did not perform, with nothing having changed, ends the hold", async () => {
   // The other half of the relayout window: a scroll that no layout change and no correction of
   // ours explains is the reader's, even without a gesture to recognise them by.

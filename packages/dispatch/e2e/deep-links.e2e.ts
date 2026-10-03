@@ -6,14 +6,20 @@ import {
   createComment,
   createIssue,
   createIssueArtifact,
+  createNamedVersion,
   createProject,
   createProjectDocument,
+  editArtifact,
 } from "./api";
 import { barAction, documentTransport, markSpan, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 const spec = "# Instruments\n\nThe astrolabe measures altitude.\n";
+const agentSession = {
+  actor: { kind: "session" as const, id: "e2e-deep-links" },
+  as: "agent" as const,
+};
 const secondaryName = "expert-message-v4.md";
 const secondarySlug = "expert-message-v4-md";
 const secondaryBody = "Secondary document: please link the astrolabe handbook here.";
@@ -147,6 +153,51 @@ async function expectSettledInside(inner: Locator, outer: Locator): Promise<void
       return innerBounds.top >= outerBounds.top && innerBounds.bottom <= outerBounds.bottom;
     })
     .toBe(true);
+}
+
+interface HeldAnimationFrames {
+  cancelAnimationFrame: typeof cancelAnimationFrame;
+  frames: Map<number, FrameRequestCallback>;
+  requestAnimationFrame: typeof requestAnimationFrame;
+}
+
+const heldAnimationFramesKey = "__dispatchHeldAnimationFrames";
+
+async function holdAnimationFrames(page: Page): Promise<void> {
+  await page.evaluate((key) => {
+    const target = window as typeof window & { [key: string]: HeldAnimationFrames | undefined };
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextID = 0;
+    target[key] = {
+      cancelAnimationFrame: window.cancelAnimationFrame,
+      frames,
+      requestAnimationFrame: window.requestAnimationFrame,
+    };
+    window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      nextID += 1;
+      frames.set(nextID, callback);
+      return nextID;
+    }) as typeof requestAnimationFrame;
+    window.cancelAnimationFrame = ((frame: number) => {
+      frames.delete(frame);
+    }) as typeof cancelAnimationFrame;
+  }, heldAnimationFramesKey);
+}
+
+async function releaseAnimationFrames(page: Page): Promise<void> {
+  await page.evaluate((key) => {
+    const target = window as typeof window & { [key: string]: HeldAnimationFrames | undefined };
+    const held = target[key];
+    if (held === undefined) {
+      return;
+    }
+    window.requestAnimationFrame = held.requestAnimationFrame;
+    window.cancelAnimationFrame = held.cancelAnimationFrame;
+    for (const callback of held.frames.values()) {
+      held.requestAnimationFrame.call(window, callback);
+    }
+    delete target[key];
+  }, heldAnimationFramesKey);
 }
 
 async function expectSelectedMarginItem(
@@ -440,7 +491,91 @@ test("a press in the document while a comment link is still landing does not end
   }
 });
 
-test("a press while a comment link reached from another document is landing does not end the hold", async ({
+const crossDocumentLandingStates = [
+  {
+    holdIssuePageCode: false,
+    name: "the issue page is shown with the document transport held",
+  },
+  { holdIssuePageCode: true, name: "the issue page code is held" },
+] as const;
+
+for (const state of crossDocumentLandingStates) {
+  test(`a press while a comment link reached from another document is landing and ${state.name} does not end the hold`, async ({
+    browser,
+  }, testInfo) => {
+    test.skip(
+      testInfo.project.name === "iphone",
+      "the phone arms the hold only once the reader opens the sheet"
+    );
+    const { comment, issue, markId } = await seedLongDocument();
+    // A document the reader is already on, whose own offsets the margin has. Following a link out
+    // of it is a client-side navigation: the margin provider never unmounts, so offsets left
+    // behind would tell the next landing it was already over.
+    const handbook = await createProjectDocument("CORE", {
+      content: "The handbook explains the calibration.",
+      name: "handbook.md",
+    });
+    const context = await asUser(browser, "alice");
+    const pageCodeHeld = Promise.withResolvers<void>();
+
+    try {
+      const page = await context.newPage();
+      const transport = await documentTransport(page);
+      await page.goto(`/projects/CORE/documents/${handbook.artifact.slug}`);
+      await expect(
+        page.getByRole("textbox", { name: "Document editor" }).getByText("The handbook explains")
+      ).toBeVisible();
+      await landingSettled(page.getByTestId("margin-sheet"));
+
+      // The document transport stays held in both states, so the issue editor has not reported
+      // layout. The loop pins whether its route has rendered yet, rather than racing the press
+      // against the Suspense reveal.
+      transport.hold();
+      if (state.holdIssuePageCode) {
+        await page.route(/\/assets\/IssuePage-[^/]+\.js$/, async (route) => {
+          await pageCodeHeld.promise;
+          await route.continue();
+        });
+      }
+      await page.getByRole("button", { name: /^search/i }).click();
+      await page.getByRole("combobox", { name: "Search" }).fill("must show its quote");
+      const hit = page.getByRole("dialog", { name: "Search" }).getByRole("option", {
+        name: /^comment /,
+      });
+      await expect(hit).toHaveCount(1);
+      await hit.click();
+      await expect(page).toHaveURL(`/issues/${issue.key}/spec?comment=${comment.id}`);
+      if (!state.holdIssuePageCode) {
+        await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute(
+          "aria-selected",
+          "true"
+        );
+      }
+
+      const sheet = page.getByTestId("margin-sheet");
+      const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
+      const placement = card.locator("xpath=..");
+      await card.waitFor();
+      expect(await placement.evaluate((element) => (element as HTMLElement).style.top)).toBe("0px");
+      await page.mouse.click(400, 400);
+
+      pageCodeHeld.resolve();
+      await transport.release();
+      // The document's half of the landing first: `landingSettled` reports stillness, and a
+      // margin that has not started moving yet is still. Waiting for the released transport to
+      // project the mark is waiting for the landing to have begun, not guessing that it has.
+      await expect(markSpan(page, markId)).toBeInViewport();
+      await landingSettled(sheet);
+      await expect(card).toBeInViewport();
+      await expectSettledInside(card, sheet);
+    } finally {
+      pageCodeHeld.resolve();
+      await context.close();
+    }
+  });
+}
+
+test("a hidden spec editor withdraws its report before View in document returns to it", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -448,57 +583,49 @@ test("a press while a comment link reached from another document is landing does
     "the phone arms the hold only once the reader opens the sheet"
   );
   const { comment, issue, markId } = await seedLongDocument();
-  // A document the reader is already on, whose own offsets the margin has. Following a link out
-  // of it is a client-side navigation: the margin provider never unmounts, so offsets left
-  // behind would tell the next landing it was already over.
-  const handbook = await createProjectDocument("CORE", {
-    content: "The handbook explains the calibration.",
-    name: "handbook.md",
-  });
   const context = await asUser(browser, "alice");
+  let page: Page | undefined;
+  let framesHeld = false;
 
   try {
-    const page = await context.newPage();
-    const transport = await documentTransport(page);
-    await page.goto(`/projects/CORE/documents/${handbook.artifact.slug}`);
-    await expect(
-      page.getByRole("textbox", { name: "Document editor" }).getByText("The handbook explains")
-    ).toBeVisible();
-    await landingSettled(page.getByTestId("margin-sheet"));
-
-    // From here the next document's transport is held, so the landing the press interrupts is a
-    // state this test owns: the handbook has reported its layout, the issue's spec has not.
-    transport.hold();
-    await page.getByRole("button", { name: /^search/i }).click();
-    await page.getByRole("combobox", { name: "Search" }).fill("must show its quote");
-    const hit = page.getByRole("dialog", { name: "Search" }).getByRole("option", {
-      name: /^comment /,
-    });
-    await expect(hit).toHaveCount(1);
-    await hit.click();
-    await expect(page).toHaveURL(`/issues/${issue.key}/spec?comment=${comment.id}`);
-
+    page = await context.newPage();
+    await page.goto(`/issues/${issue.key}/spec?comment=${comment.id}`);
     const sheet = page.getByTestId("margin-sheet");
     const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
     const placement = card.locator("xpath=..");
-    await card.waitFor();
-    expect(await placement.evaluate((element) => (element as HTMLElement).style.top)).toBe("0px");
+    await expect(markSpan(page, markId)).toBeInViewport();
+    await landingSettled(sheet);
+
+    await page.getByRole("tab", { name: "Conversation" }).click();
+    const conversation = page.getByRole("tabpanel", { name: "Conversation" });
+    await expect(conversation).toBeVisible();
+    await expect
+      .poll(() => placement.evaluate((element) => (element as HTMLElement).style.top))
+      .toBe("0px");
+
+    await holdAnimationFrames(page);
+    framesHeld = true;
+    await conversation.getByRole("link", { name: "View in document" }).click();
+    await expect(page.getByRole("tabpanel", { name: "Spec" })).toBeVisible();
+    const document = page.getByRole("article", { name: "Document" });
+    await expect(document).toBeVisible();
     await page.mouse.click(400, 400);
 
-    await transport.release();
-    // The document's half of the landing first: `landingSettled` reports stillness, and a margin
-    // that has not started moving yet is still. Waiting for the released transport to project
-    // the mark is waiting for the landing to have begun, not guessing that it has.
+    await releaseAnimationFrames(page);
+    framesHeld = false;
     await expect(markSpan(page, markId)).toBeInViewport();
     await landingSettled(sheet);
     await expect(card).toBeInViewport();
     await expectSettledInside(card, sheet);
   } finally {
+    if (framesHeld && page !== undefined) {
+      await releaseAnimationFrames(page);
+    }
     await context.close();
   }
 });
 
-test("a press while the page a comment link opens is still downloading does not end the hold", async ({
+test("a hidden live editor withdraws its report before returning from a historical version", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -506,54 +633,112 @@ test("a press while the page a comment link opens is still downloading does not 
     "the phone arms the hold only once the reader opens the sheet"
   );
   const { comment, issue, markId } = await seedLongDocument();
-  const handbook = await createProjectDocument("CORE", {
-    content: "The handbook explains the calibration.",
-    name: "handbook.md",
-  });
+  await createNamedVersion(issue.primary_artifact_id, "Initial long document");
   const context = await asUser(browser, "alice");
+  let page: Page | undefined;
+  let framesHeld = false;
 
   try {
-    const page = await context.newPage();
-    const transport = await documentTransport(page);
-    await page.goto(`/projects/CORE/documents/${handbook.artifact.slug}`);
-    await expect(
-      page.getByRole("textbox", { name: "Document editor" }).getByText("The handbook explains")
-    ).toBeVisible();
-    await landingSettled(page.getByTestId("margin-sheet"));
+    page = await context.newPage();
+    await page.goto(`/issues/${issue.key}/spec?comment=${comment.id}`);
+    const sheet = page.getByTestId("margin-sheet");
+    const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
+    const placement = card.locator("xpath=..");
+    await expect(markSpan(page, markId)).toBeInViewport();
+    await landingSettled(sheet);
 
-    // The issue page's own code is held, so the route stays on its loading view - with the
-    // handbook's editor still mounted behind it - while the margin, which loads its cards itself,
-    // already shows the linked one. That is the state the link's hold has to read correctly: the
-    // handbook has reported its layout, the document the card belongs to has not.
-    transport.hold();
-    const pageCodeHeld = Promise.withResolvers<void>();
-    await page.route(/\/assets\/IssuePage-[^/]+\.js$/, async (route) => {
-      await pageCodeHeld.promise;
-      await route.continue();
-    });
+    const versionPicker = page.getByRole("combobox", { name: "Version" });
+    await versionPicker.selectOption("1");
+    await expect(page.getByTestId("version-view")).toBeVisible();
+    await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/spec?v=1`);
+    await expect
+      .poll(() => placement.evaluate((element) => (element as HTMLElement).style.top))
+      .toBe("0px");
+
     await page.getByRole("button", { name: /^search/i }).click();
     await page.getByRole("combobox", { name: "Search" }).fill("must show its quote");
     const hit = page.getByRole("dialog", { name: "Search" }).getByRole("option", {
       name: /^comment /,
     });
     await expect(hit).toHaveCount(1);
+    await holdAnimationFrames(page);
+    framesHeld = true;
     await hit.click();
     await expect(page).toHaveURL(`/issues/${issue.key}/spec?comment=${comment.id}`);
-
-    const sheet = page.getByTestId("margin-sheet");
-    const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
-    const placement = card.locator("xpath=..");
-    await card.waitFor();
-    expect(await placement.evaluate((element) => (element as HTMLElement).style.top)).toBe("0px");
+    const document = page.getByRole("article", { name: "Document" });
+    await expect(document).toBeVisible();
     await page.mouse.click(400, 400);
 
-    pageCodeHeld.resolve();
-    await transport.release();
+    await releaseAnimationFrames(page);
+    framesHeld = false;
     await expect(markSpan(page, markId)).toBeInViewport();
     await landingSettled(sheet);
     await expect(card).toBeInViewport();
     await expectSettledInside(card, sheet);
   } finally {
+    if (framesHeld && page !== undefined) {
+      await releaseAnimationFrames(page);
+    }
+    await context.close();
+  }
+});
+
+test("a resolving reference above a linked card does not end the hold", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === "iphone",
+    "the phone arms the hold only once the reader opens the sheet"
+  );
+  const { comment, issue } = await seedLongDocument();
+  const target = await createIssue({
+    project: "CORE",
+    title: "The calibration needs a much longer title after the reference resolves",
+  });
+  for (const index of [1, 2]) {
+    await createAsk(issue.key, {
+      options: [{ label: "Yes" }, { label: "No" }],
+      question: `Does dispatch://${target.key} need observer ${index} before this document can ship?`,
+    });
+  }
+  const context = await asUser(browser, "alice");
+  const referenceHeld = Promise.withResolvers<void>();
+
+  try {
+    const page = await context.newPage();
+    await page.route(new RegExp(`/api/v1/issues/${target.key}$`), async (route) => {
+      await referenceHeld.promise;
+      await route.continue();
+    });
+    await page.goto(`/issues/${issue.key}/spec?comment=${comment.id}`);
+
+    const sheet = page.getByTestId("margin-sheet");
+    const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
+    await expect(card).toBeInViewport();
+    await expect(sheet.getByText(target.key, { exact: true }).first()).toBeVisible();
+    await expect(sheet.getByText(target.title, { exact: true })).toHaveCount(0);
+    await landingSettled(sheet);
+
+    referenceHeld.resolve();
+    await expect(sheet.getByText(target.title, { exact: true })).toHaveCount(2);
+    const before = "Paragraph 34: surrounding context for a long document.";
+    const inserted = Array.from(
+      { length: 30 },
+      (_, index) => `Inserted paragraph ${index}: the linked quote moves farther down.`
+    );
+    await editArtifact(
+      issue.primary_artifact_id,
+      { ops: [{ after: before, markdown: inserted.join("\n\n"), op: "insert" }] },
+      agentSession
+    );
+    await expect(page.getByRole("textbox", { name: "Document editor" })).toContainText(
+      "Inserted paragraph 29"
+    );
+    await landingSettled(sheet);
+    await expect(card).toBeInViewport();
+    await expectSettledInside(card, sheet);
+  } finally {
+    referenceHeld.resolve();
     await context.close();
   }
 });

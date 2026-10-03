@@ -75,9 +75,10 @@ export const RELAYOUT_SETTLES_FRAMES = 3;
  * autoscroll and a wheel all end the hold through their gestures. Find-in-page, `scrollIntoView`,
  * an assistive-tech focus move and Tab from the document into the margin do not carry one, so a
  * scroll of theirs that lands while the window is open is read as the layout's. The window is
- * opened by any class or style change in the margin's subtree and by any card arriving or
- * leaving it (the observer watches `childList` too) - hovering a card re-arms it, harmlessly,
- * since every reader path that matters takes over without consulting it; an arriving card is
+ * opened by any class, style or text change in the margin's subtree and by any card arriving or
+ * leaving it (the observer watches `characterData` and `childList` too) - hovering a card re-arms
+ * it, harmlessly, since every reader path that matters takes over without consulting it; a text
+ * change can resize a card, and an arriving card is
  * how the margin's own relayouts open it, which is what `placementAfterArrival` exercises in
  * `deep-links.e2e.ts`; and a remote collaborator typing in the open document keeps it open
  * while they type, because each republished placement rewrites the cards' `style.top`. The cost
@@ -107,15 +108,15 @@ function keepCardInView(
   // relayout can move the scroll more than once - scroll anchoring during the change, then
   // clamping as the content settles - so this is a window, not a flag one scroll consumes.
   let framesSinceRelayout = RELAYOUT_SETTLES_FRAMES;
-  let frameCount: number | undefined;
+  let countingFrame: number | undefined;
   const countFrame = () => {
     framesSinceRelayout += 1;
-    frameCount =
+    countingFrame =
       framesSinceRelayout < RELAYOUT_SETTLES_FRAMES ? requestAnimationFrame(countFrame) : undefined;
   };
   const relaidOut = () => {
     framesSinceRelayout = 0;
-    frameCount ??= requestAnimationFrame(countFrame);
+    countingFrame ??= requestAnimationFrame(countFrame);
     schedule();
   };
   const observer = new MutationObserver(relaidOut);
@@ -126,13 +127,13 @@ function keepCardInView(
     for (const gesture of marginGestures) {
       container.removeEventListener(gesture, readerTookOver);
     }
-    for (const pending of [frame, frameCount]) {
+    for (const pending of [frame, countingFrame]) {
       if (pending !== undefined) {
         cancelAnimationFrame(pending);
       }
     }
     frame = undefined;
-    frameCount = undefined;
+    countingFrame = undefined;
   };
   const readerTookOver = () => {
     stop();
@@ -195,6 +196,7 @@ function keepCardInView(
   observer.observe(container, {
     attributeFilter: ["class", "style"],
     attributes: true,
+    characterData: true,
     childList: true,
     subtree: true,
   });

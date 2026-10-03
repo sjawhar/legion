@@ -12,8 +12,8 @@ import type { RetypeOutcome, RetypeRefusal } from "../doc/editor";
 import type { MarkPlacement } from "./useMarginItems";
 
 export interface DocumentBridge {
-  /** The artifact the registered document shows. Its bridge and its layout describe that
-   *  document's marks only, so the margin trusts them only while it shows that artifact's cards. */
+  /** The artifact the registered document shows. The link hold compares it with the artifact
+   *  whose cards the margin shows before it trusts the registered document's layout report. */
   artifactId: string;
   focusBlock(blockId: string): void;
   focusMark(markId: string): void;
@@ -64,9 +64,9 @@ interface MarginContextValue {
   markPlacements: ReadonlyMap<string, MarkPlacement>;
   pendingCompose: PendingCompose | undefined;
   /** Whether the registered document has reported its layout: it says so by publishing
-   *  placements, and the answer resets whenever a document registers or unregisters. An empty map
-   *  is still an answer - a document with no live mark and no typed block has one - so the maps
-   *  cannot stand in for this. */
+   *  placements, and the answer resets whenever a document registers or unregisters, or the
+   *  registered document withdraws a hidden layout. An empty map is still an answer - a document
+   *  with no live mark and no typed block has one - so the maps cannot stand in for this. */
   placementsReported: boolean;
   registerDocument(bridge: DocumentBridge | undefined): void;
   /** The open mark composer's kind switch: retypes its mark and moves the pending compose to the
@@ -79,6 +79,8 @@ interface MarginContextValue {
   setMarkItemIds(markItemIds: ReadonlyMap<string, string>): void;
   setMarkPlacements(placements: ReadonlyMap<string, MarkPlacement>): void;
   settleCompose(outcome: "saved" | "cancelled"): void;
+  /** Takes back the registered document's layout while it is hidden and has no layout to report. */
+  withdrawPlacements(): void;
 }
 
 const unavailableMargin = (): never => {
@@ -111,6 +113,7 @@ const MarginContext = createContext<MarginContextValue>({
   setMarkItemIds: unavailableMargin,
   setMarkPlacements: unavailableMargin,
   settleCompose: unavailableMargin,
+  withdrawPlacements: unavailableMargin,
 });
 
 export function MarginProvider({ children }: { children: ReactNode }): ReactNode {
@@ -230,17 +233,23 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const setMarkItemIds = useCallback((nextMarkItemIds: ReadonlyMap<string, string>) => {
     markItemIds.current = nextMarkItemIds;
   }, []);
-  // Placements describe the registered document, so each registration - the next document, or
-  // none - starts with no report. The provider outlives the route: offsets left behind would
-  // place the next document's cards from the last one's layout, and would tell the link's hold
-  // that this landing is already over before the new document has reported anything.
-  const registerDocument = useCallback((bridge: DocumentBridge | undefined) => {
-    bridgeRef.current = bridge;
-    setDocumentBridge(bridge);
+  const withdrawPlacements = useCallback(() => {
     setBlockPlacements(new Map());
     setMarkPlacements(new Map());
     setPlacementsReported(false);
   }, []);
+  // Placements describe the registered document, so each registration - the next document, or
+  // none - starts with no report. The provider outlives the route: offsets left behind would
+  // place the next document's cards from the last one's layout, and would tell the link's hold
+  // that this landing is already over before the new document has reported anything.
+  const registerDocument = useCallback(
+    (bridge: DocumentBridge | undefined) => {
+      bridgeRef.current = bridge;
+      setDocumentBridge(bridge);
+      withdrawPlacements();
+    },
+    [withdrawPlacements]
+  );
   const publishBlockPlacements = useCallback((placements: ReadonlyMap<string, MarkPlacement>) => {
     setBlockPlacements(placements);
     setPlacementsReported(true);
@@ -282,6 +291,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       setMarkItemIds,
       setMarkPlacements: publishMarkPlacements,
       settleCompose,
+      withdrawPlacements,
     }),
     [
       blockFilterId,
@@ -308,6 +318,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       selectedItemId,
       setMarkItemIds,
       settleCompose,
+      withdrawPlacements,
     ]
   );
 

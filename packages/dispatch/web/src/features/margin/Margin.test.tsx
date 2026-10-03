@@ -17,6 +17,7 @@ import {
   issue,
   SelectedItemLabel,
   specArtifact,
+  stubDocumentBridge,
   stubMatchMedia,
 } from "./margin-fixture";
 
@@ -730,10 +731,7 @@ function fakeBridge(retype: (markId: string, kind: string) => RetypeOutcome): {
   const removed: string[] = [];
   const retyped: [string, string][] = [];
   return {
-    bridge: {
-      artifactId: specArtifact.id,
-      focusBlock() {},
-      focusMark() {},
+    bridge: stubDocumentBridge(specArtifact.id, {
       removeMark(markId) {
         removed.push(markId);
       },
@@ -741,9 +739,7 @@ function fakeBridge(retype: (markId: string, kind: string) => RetypeOutcome): {
         retyped.push([markId, kind]);
         return retype(markId, kind);
       },
-      setActiveBlocks() {},
-      setActiveMarks() {},
-    },
+    }),
     removed,
     retyped,
   };
