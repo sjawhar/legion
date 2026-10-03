@@ -3,8 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -28,6 +32,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // storetestImport is the one package under internal/dispatch that reads the process environment
@@ -272,14 +277,16 @@ func envoyJSONHome(t *testing.T) string {
 }
 
 // routerFor is the router main serves for boot, built through appContextOptions as main builds it,
-// with app as the loaded GitHub App and no database: the requests the cases send never reach one.
-func routerFor(t *testing.T, boot bootConfig, app *auth.AppConfig) http.Handler {
+// with app as the loaded GitHub App and database as the store: nil where the requests a case sends
+// never reach one.
+func routerFor(t *testing.T, boot bootConfig, app *auth.AppConfig, database *store.Store) http.Handler {
 	t.Helper()
 	appCtx, err := routes.BuildAppContext(appContextOptions(boot, routes.AppContextOptions{
 		SigningKey: "signing-key",
 		Users:      store.NewPgUserStore(nil),
 		Identity:   identity.CookieIdentity{SigningKey: "signing-key", AllowedLogins: boot.AllowedLogins},
 		App:        app,
+		Store:      database,
 	}))
 	if err != nil {
 		t.Fatalf("build the router: %v", err)
@@ -449,7 +456,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				request := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
 				request.Header.Set("Authorization", "Bearer agent-token")
 				response := httptest.NewRecorder()
-				routerFor(t, resolveWith(t, overrides), nil).ServeHTTP(response, request)
+				routerFor(t, resolveWith(t, overrides), nil, nil).ServeHTTP(response, request)
 				if response.Code != http.StatusOK {
 					t.Fatalf("GET /api/v1/agents: %d %s", response.Code, response.Body.String())
 				}
@@ -529,6 +536,44 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_GITHUB_API_BASE": " http://127.0.0.1:9022 "}); boot.GitHubAPIBase != "http://127.0.0.1:9022" {
 				t.Errorf("GitHubAPIBase = %q", boot.GitHubAPIBase)
 			}
+			// The origin the router's App calls go to: a sync of a project's architecture source
+			// first looks up the App's installation on the repository there.
+			t.Run("router", func(t *testing.T) {
+				database := storetest.Open(t)
+				if _, err := database.Pool.Exec(context.Background(), `
+					insert into projects (key, name) values ('ARCH', 'ARCH');
+					insert into architecture_sources (project_key, repo, branch, installation_id, created_by)
+					values ('ARCH', 'acme/arch', 'main', 1, '{"kind":"session","id":"test"}');
+				`); err != nil {
+					t.Fatalf("seed the architecture source: %v", err)
+				}
+				key, err := rsa.GenerateKey(rand.Reader, 2048)
+				if err != nil {
+					t.Fatal(err)
+				}
+				app := &auth.AppConfig{ClientID: "Iv1.env", ClientSecret: "secret", PEM: string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))}
+				called := make(chan string, 1)
+				github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					select {
+					case called <- r.Method + " " + r.URL.Path:
+					default:
+					}
+					w.WriteHeader(http.StatusNotFound)
+				}))
+				defer github.Close()
+				request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/ARCH/architecture-source/sync", nil)
+				request.Header.Set("Authorization", "Bearer agent-token")
+				response := httptest.NewRecorder()
+				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_GITHUB_API_BASE": github.URL}), app, database).ServeHTTP(response, request)
+				select {
+				case got := <-called:
+					if got != "GET /repos/acme/arch/installation" {
+						t.Errorf("the GitHub API DISPATCH_GITHUB_API_BASE names received %s, want the App's installation lookup", got)
+					}
+				default:
+					t.Errorf("the sync answered %d %s, and the GitHub API DISPATCH_GITHUB_API_BASE names received no call", response.Code, response.Body.String())
+				}
+			})
 		},
 		"DISPATCH_SIGNING_KEY": func(t *testing.T) {
 			dataDir := t.TempDir()
@@ -554,7 +599,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			app := &auth.AppConfig{ClientID: "Iv1.env", ClientSecret: "secret"}
 			for value, insecure := range map[string]bool{"": false, "1": true, "false": true} {
 				response := httptest.NewRecorder()
-				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_INSECURE_COOKIE": value}), app).
+				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_INSECURE_COOKIE": value}), app, nil).
 					ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/start", nil))
 				cookies := response.Result().Cookies()
 				if response.Code != http.StatusFound || len(cookies) != 1 || cookies[0].Secure == insecure {

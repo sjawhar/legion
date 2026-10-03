@@ -629,9 +629,9 @@ func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
 }
 
 // appContextOptions is what main hands routes.BuildAppContext: built, what main made from the
-// configuration (the stores, the identity, the signing key, the loaded App and the like), with
-// every setting the router takes from boot filled in. The settings tests build the router through
-// it, so a setting main resolves but never hands the router fails its case.
+// configuration, with every setting the router takes from boot filled in. The settings tests build
+// the router through it, so dropping AgentToken, EnvoyURL, EnvoyToken, InsecureCookie or
+// GitHubAPIBase here fails a case; the rest are checked only on bootConfig.
 func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.AppContextOptions {
 	built.AllowedLogins = boot.AllowedLogins
 	built.AgentToken = boot.AgentToken
