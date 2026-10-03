@@ -5,8 +5,9 @@
 # print, every form of it, captured from the binaries on PATH (docs/site/scripts/build-binaries.sh
 # builds them from this checkout). The forms come from agent-secrets --help itself, and a form
 # whose -h does not exit 0 fails the build, so the page cannot leave one out.
-# shellcheck disable=SC2016 # the single-quoted backticks are Markdown code fences
 set -euo pipefail
+# shellcheck source=SCRIPTDIR/lib/fence.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/fence.sh"
 
 content_dir="${1:?usage: broker-cli.sh <content dir>}"
 out="$content_dir/broker/reference/cli.md"
@@ -17,18 +18,32 @@ trap 'rm -f "$out.tmp"' EXIT
 # AGENT_SECRETS_KEY_DIR, so each binary runs with PATH alone.
 clean() { env -i PATH="$PATH" "$@" 2>&1; }
 
-# form_help prints one form's help in a fenced block, refusing a form whose help exits nonzero.
-form_help() {
+# help prints one form's help, refusing a form whose help exits nonzero.
+help() {
   local text
   if ! text="$(clean "$@")"; then
     echo "broker-cli.sh: '$*' exited nonzero; every form must answer --help with exit 0" >&2
     printf '%s\n' "$text" >&2
     exit 1
   fi
-  printf '```text\n%s\n```\n' "$text"
+  printf '%s\n' "$text"
 }
 
-usage="$(clean agent-secrets --help)"
+# fenced prints text in a code block that no line of the text can close early.
+fenced() {
+  local ticks
+  ticks=$(fence <<<"$1")
+  printf '%stext\n%s\n%s\n' "$ticks" "$1" "$ticks"
+}
+
+# form_help prints one form's help in a fenced block.
+form_help() {
+  local text
+  text="$(help "$@")"
+  fenced "$text"
+}
+
+usage="$(help agent-secrets --help)"
 {
   cat <<'EOF'
 ---
@@ -44,7 +59,7 @@ the per-user daemon that signs for a host's agent sessions. This page is their o
 ## agent-secrets
 
 EOF
-  printf '```text\n%s\n```\n' "$usage"
+  fenced "$usage"
   # Each "  agent-secrets <form>" line of the usage names a form: one or two lowercase words
   # (launcher login), or NAME... for the form that runs a command with secrets.
   while IFS= read -r line; do

@@ -5,10 +5,12 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"iter"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,49 +95,52 @@ func (s *source) funcs() (map[string]*ast.FuncDecl, error) {
 	return out, nil
 }
 
-// typeSpec finds a named type declared in the package.
-func (s *source) typeSpec(name string) *ast.TypeSpec {
-	for _, f := range s.files {
-		for _, d := range f.Decls {
-			gd, ok := d.(*ast.GenDecl)
-			if !ok || gd.Tok != token.TYPE {
-				continue
-			}
-			for _, spec := range gd.Specs {
-				if ts := spec.(*ast.TypeSpec); ts.Name.Name == name {
-					return ts
+// specs yields every spec of the package's declarations of the given kinds (token.TYPE,
+// token.CONST, token.VAR), each with the declaration holding it, whose doc comment a lone spec's
+// is.
+func (s *source) specs(toks ...token.Token) iter.Seq2[ast.Spec, *ast.GenDecl] {
+	return func(yield func(ast.Spec, *ast.GenDecl) bool) {
+		for _, f := range s.files {
+			for _, d := range f.Decls {
+				gd, ok := d.(*ast.GenDecl)
+				if !ok || !slices.Contains(toks, gd.Tok) {
+					continue
 				}
-			}
-		}
-	}
-	return nil
-}
-
-// valueSpec finds a package-level var or const and the declaration holding it.
-func (s *source) valueSpec(name string) (*ast.ValueSpec, *ast.GenDecl, int) {
-	for _, f := range s.files {
-		for _, d := range f.Decls {
-			gd, ok := d.(*ast.GenDecl)
-			if !ok || (gd.Tok != token.VAR && gd.Tok != token.CONST) {
-				continue
-			}
-			for _, spec := range gd.Specs {
-				vs := spec.(*ast.ValueSpec)
-				for i, n := range vs.Names {
-					if n.Name == name {
-						return vs, gd, i
+				for _, spec := range gd.Specs {
+					if !yield(spec, gd) {
+						return
 					}
 				}
 			}
 		}
 	}
-	return nil, nil, 0
+}
+
+// typeSpec finds a named type declared in the package and the declaration holding it.
+func (s *source) typeSpec(name string) (*ast.TypeSpec, *ast.GenDecl) {
+	for spec, gd := range s.specs(token.TYPE) {
+		if ts := spec.(*ast.TypeSpec); ts.Name.Name == name {
+			return ts, gd
+		}
+	}
+	return nil, nil
+}
+
+// valueSpec finds a package-level var or const, and which of the spec's names it is.
+func (s *source) valueSpec(name string) (*ast.ValueSpec, int) {
+	for spec := range s.specs(token.VAR, token.CONST) {
+		vs := spec.(*ast.ValueSpec)
+		if i := slices.IndexFunc(vs.Names, func(n *ast.Ident) bool { return n.Name == name }); i >= 0 {
+			return vs, i
+		}
+	}
+	return nil, 0
 }
 
 // stringConst is the string a package-level const or var is set to: a literal, an
 // errors.New(literal), or an fmt.Errorf(literal) with its verbs shown as "…".
 func (s *source) stringConst(name string) (string, bool) {
-	vs, _, i := s.valueSpec(name)
+	vs, i := s.valueSpec(name)
 	if vs == nil || i >= len(vs.Values) {
 		return "", false
 	}
@@ -193,7 +198,16 @@ func prose(cg *ast.CommentGroup) string {
 	return strings.Join(strings.Fields(cg.Text()), " ")
 }
 
-// lineComment is the text of a // comment that sits alone on the line just above line.
+// docOf is a declaration's doc comment as one paragraph, or, when it has none, fallback's: the
+// comment at the end of its line, or the doc comment of the declaration group holding it.
+func docOf(doc, fallback *ast.CommentGroup) string {
+	if text := prose(doc); text != "" {
+		return text
+	}
+	return prose(fallback)
+}
+
+// commentAbove is the text of a // comment that sits alone on the line just above line.
 func (s *source) commentAbove(f *ast.File, line int) string {
 	for _, cg := range f.Comments {
 		if s.line(cg.End()) == line-1 {

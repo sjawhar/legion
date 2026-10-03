@@ -439,7 +439,10 @@ func (g *graph) resolve(info funcInfo, params map[string][]string, visiting map[
 			if len(s.call.Args) != 4 {
 				return nil, fmt.Errorf("%s: writeError takes (w, status, code, message)", s.at)
 			}
-			statuses := g.eval(s.call.Args[1], env, nil)
+			statuses, err := statusCodes(g.eval(s.call.Args[1], env, nil), s.at)
+			if err != nil {
+				return nil, err
+			}
 			codes := g.eval(s.call.Args[2], env, nil)
 			if len(statuses) == 0 || len(codes) == 0 {
 				return nil, fmt.Errorf("%s: cannot read this refusal's status and code", s.at)
@@ -448,11 +451,7 @@ func (g *graph) resolve(info funcInfo, params map[string][]string, visiting map[
 			if len(messages) == 0 {
 				messages = []string{varies}
 			}
-			for _, st := range statuses {
-				status, err := strconv.Atoi(st)
-				if err != nil {
-					return nil, fmt.Errorf("%s: status %q is not a number", s.at, st)
-				}
+			for _, status := range statuses {
 				for _, code := range codes {
 					out = append(out, outcome{Status: status, Code: code, Messages: messages, At: s.at})
 				}
@@ -462,7 +461,10 @@ func (g *graph) resolve(info funcInfo, params map[string][]string, visiting map[
 			if len(s.call.Args) == 3 {
 				arg = s.call.Args[1]
 			}
-			statuses := g.eval(arg, env, nil)
+			statuses, err := statusCodes(g.eval(arg, env, nil), s.at)
+			if err != nil {
+				return nil, err
+			}
 			if len(statuses) == 0 {
 				if _, isParam := paramIndex(info.params, arg); isParam {
 					continue // a status passed in, as writeError's own WriteHeader takes it
@@ -472,11 +474,7 @@ func (g *graph) resolve(info funcInfo, params map[string][]string, visiting map[
 			if fun, ok := s.call.Fun.(*ast.Ident); ok && fun.Name == "writeJSON" && s.respType == "" {
 				return nil, fmt.Errorf("%s: cannot name this answer's body type; answer with one of the package's named response types", s.at)
 			}
-			for _, st := range statuses {
-				status, err := strconv.Atoi(st)
-				if err != nil {
-					return nil, fmt.Errorf("%s: status %q is not a number", s.at, st)
-				}
+			for _, status := range statuses {
 				out = append(out, outcome{Status: status, RespType: s.respType, At: s.at})
 			}
 		case siteCall:
@@ -506,6 +504,19 @@ func (g *graph) resolve(info funcInfo, params map[string][]string, visiting map[
 			}
 			out = append(out, got...)
 		}
+	}
+	return out, nil
+}
+
+// statusCodes reads each candidate status eval found for the call at at as a number.
+func statusCodes(candidates []string, at string) ([]int, error) {
+	out := make([]int, 0, len(candidates))
+	for _, st := range candidates {
+		status, err := strconv.Atoi(st)
+		if err != nil {
+			return nil, fmt.Errorf("%s: status %q is not a number", at, st)
+		}
+		out = append(out, status)
 	}
 	return out, nil
 }

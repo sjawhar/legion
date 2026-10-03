@@ -8,11 +8,15 @@ import (
 	"strings"
 )
 
-// structRef is a named struct type and the package that declares it.
+// structRef is a named struct type, the declaration holding it, and the package that declares it.
 type structRef struct {
 	src  *source
 	spec *ast.TypeSpec
+	decl *ast.GenDecl
 }
+
+// doc is the type's doc comment, or its declaration's when the type is declared alone.
+func (r structRef) doc() string { return docOf(r.spec.Doc, r.decl.Doc) }
 
 // pkg parses one of the broker's own packages, once.
 func (g *graph) pkg(dir string) (*source, error) {
@@ -32,12 +36,12 @@ func (g *graph) pkg(dir string) (*source, error) {
 func (g *graph) structOf(src *source, file *ast.File, e ast.Expr) (structRef, bool, error) {
 	switch x := e.(type) {
 	case *ast.Ident:
-		ts := src.typeSpec(x.Name)
+		ts, gd := src.typeSpec(x.Name)
 		if ts == nil {
 			return structRef{}, false, nil
 		}
 		_, isStruct := ts.Type.(*ast.StructType)
-		return structRef{src, ts}, isStruct, nil
+		return structRef{src, ts, gd}, isStruct, nil
 	case *ast.SelectorExpr:
 		pkgName, ok := x.X.(*ast.Ident)
 		if !ok {
@@ -51,12 +55,12 @@ func (g *graph) structOf(src *source, file *ast.File, e ast.Expr) (structRef, bo
 		if err != nil {
 			return structRef{}, false, err
 		}
-		ts := other.typeSpec(x.Sel.Name)
+		ts, gd := other.typeSpec(x.Sel.Name)
 		if ts == nil {
 			return structRef{}, false, fmt.Errorf("%s declares no type %s", dir, x.Sel.Name)
 		}
 		_, isStruct := ts.Type.(*ast.StructType)
-		return structRef{other, ts}, isStruct, nil
+		return structRef{other, ts, gd}, isStruct, nil
 	}
 	return structRef{}, false, nil
 }
@@ -93,10 +97,7 @@ func (g *graph) fields(ref structRef) ([]jsonField, error) {
 			continue
 		}
 		name, options, _ := strings.Cut(jsonTag, ",")
-		doc := prose(f.Doc)
-		if doc == "" {
-			doc = prose(f.Comment)
-		}
+		doc := docOf(f.Doc, f.Comment)
 		if doc == "" {
 			return nil, fmt.Errorf("%s: field %s of %s has no doc comment saying what it is", ref.src.at(f), f.Names[0].Name, ref.spec.Name.Name)
 		}

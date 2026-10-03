@@ -57,10 +57,6 @@ func readAPI(root string) (*api, error) {
 // request body, response body and refusals.
 func apiPage(a *api) (string, error) {
 	g, routes, classes := a.g, a.routes, a.classes
-	labels := map[string]string{}
-	for _, c := range classes {
-		labels[c.Wrapper] = c.Label
-	}
 	var b strings.Builder
 	b.WriteString(frontMatter("HTTP API", "Every route the secrets broker serves, the credential each needs, and what each answers.", apiDir))
 	b.WriteString("The broker answers JSON. A refusal is `{\"code\": \"…\", \"error\": \"…\"}` with the HTTP status below; the [error reference](/legion/broker/reference/errors/) lists every code.\n\n")
@@ -80,13 +76,13 @@ func apiPage(a *api) (string, error) {
 
 	b.WriteString("\n## Routes\n\n| Method | Path | Credential | What it does |\n| --- | --- | --- | --- |\n")
 	for _, r := range routes {
-		fmt.Fprintf(&b, "| `%s` | `%s` | %s | %s |\n", r.Method, r.Pattern, labels[r.Wrapper], cell(r.Summary))
+		fmt.Fprintf(&b, "| `%s` | `%s` | %s | %s |\n", r.Method, r.Pattern, credentialLabels[r.Wrapper], cell(r.Summary))
 	}
 
 	for i, r := range routes {
 		outs := a.outcomes[i]
 		fmt.Fprintf(&b, "\n### %s %s\n\n%s\n\n", r.Method, r.Pattern, cell(r.Summary))
-		fmt.Fprintf(&b, "- Credential: %s\n", labels[r.Wrapper])
+		fmt.Fprintf(&b, "- Credential: %s\n", credentialLabels[r.Wrapper])
 		if params := pathParams.FindAllStringSubmatch(r.Pattern, -1); len(params) > 0 {
 			var names []string
 			for _, p := range params {
@@ -147,12 +143,7 @@ func apiPage(a *api) (string, error) {
 				if err != nil {
 					return "", err
 				}
-				doc := prose(ref.spec.Doc)
-				if doc == "" {
-					if gd := genDeclOf(g.src, ref.spec); gd != nil {
-						doc = prose(gd.Doc)
-					}
-				}
+				doc := ref.doc()
 				if doc == "" {
 					return "", fmt.Errorf("%s: %s is one of several answers of %s %s, so it needs a doc comment saying when", g.src.at(ref.spec), typeName, r.Method, r.Pattern)
 				}
@@ -182,22 +173,6 @@ func (g *graph) localStruct(name string) (structRef, error) {
 		return structRef{}, fmt.Errorf("%s declares no struct type %s", apiDir, name)
 	}
 	return ref, nil
-}
-
-// genDeclOf is the declaration holding spec, whose doc comment a lone type spec's is.
-func genDeclOf(src *source, spec *ast.TypeSpec) *ast.GenDecl {
-	for _, f := range src.files {
-		for _, d := range f.Decls {
-			if gd, ok := d.(*ast.GenDecl); ok {
-				for _, s := range gd.Specs {
-					if s == spec {
-						return gd
-					}
-				}
-			}
-		}
-	}
-	return nil
 }
 
 var pathParams = regexp.MustCompile(`\{([a-z_]+)\}`)
@@ -326,36 +301,25 @@ func docConsts(root, dir, prefix string) ([]docConst, error) {
 		return nil, err
 	}
 	var out []docConst
-	for _, f := range src.files {
-		for _, d := range f.Decls {
-			gd, ok := d.(*ast.GenDecl)
-			if !ok || gd.Tok != token.CONST {
+	for spec := range src.specs(token.CONST) {
+		vs := spec.(*ast.ValueSpec)
+		for i, n := range vs.Names {
+			if !strings.HasPrefix(n.Name, prefix) || i >= len(vs.Values) {
 				continue
 			}
-			for _, spec := range gd.Specs {
-				vs := spec.(*ast.ValueSpec)
-				for i, n := range vs.Names {
-					if !strings.HasPrefix(n.Name, prefix) || i >= len(vs.Values) {
-						continue
-					}
-					value, ok := strLit(vs.Values[i])
-					if !ok {
-						lit, isLit := vs.Values[i].(*ast.BasicLit)
-						if !isLit {
-							return nil, fmt.Errorf("%s: %s is not a literal", src.at(vs), n.Name)
-						}
-						value = lit.Value
-					}
-					doc := prose(vs.Doc)
-					if doc == "" {
-						doc = prose(vs.Comment)
-					}
-					if doc == "" {
-						return nil, fmt.Errorf("%s: %s has no comment saying what it means", src.at(vs), n.Name)
-					}
-					out = append(out, docConst{name: n.Name, value: value, doc: doc})
+			value, ok := strLit(vs.Values[i])
+			if !ok {
+				lit, isLit := vs.Values[i].(*ast.BasicLit)
+				if !isLit {
+					return nil, fmt.Errorf("%s: %s is not a literal", src.at(vs), n.Name)
 				}
+				value = lit.Value
 			}
+			doc := docOf(vs.Doc, vs.Comment)
+			if doc == "" {
+				return nil, fmt.Errorf("%s: %s has no comment saying what it means", src.at(vs), n.Name)
+			}
+			out = append(out, docConst{name: n.Name, value: value, doc: doc})
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].value < out[j].value })

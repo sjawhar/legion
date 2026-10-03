@@ -41,22 +41,21 @@ func readConfig(root string) ([]variable, error) {
 		return nil, err
 	}
 	vars := map[string]*variable{}
-	docs := map[string]string{}
-	groups := map[string]string{}
-	docAt := map[string]string{}
+	// doc is what the comment documenting a variable says, the variables it documents together, and
+	// where it is.
+	type doc struct{ text, group, at string }
+	docs := map[string]doc{}
 	addDocs := func(src *source, cg *ast.CommentGroup) {
 		m := documentedVars.FindStringSubmatch(prose(cg))
 		if m == nil {
 			return
 		}
 		for name := range strings.SplitSeq(m[1], ", ") {
-			docs[name] = m[2]
-			groups[name] = m[1]
-			docAt[name] = src.at(cg)
+			docs[name] = doc{text: m[2], group: m[1], at: src.at(cg)}
 		}
 	}
 
-	ts := cfg.typeSpec("Config")
+	ts, _ := cfg.typeSpec("Config")
 	if ts == nil {
 		return nil, fmt.Errorf("%s declares no Config", configDir)
 	}
@@ -74,8 +73,7 @@ func readConfig(root string) ([]variable, error) {
 			vars[name] = &variable{Name: name, At: src.at(n)}
 		}
 	}
-	removed := map[string]string{}
-	if vs, _, _ := cfg.valueSpec("removedVars"); vs != nil {
+	if vs, _ := cfg.valueSpec("removedVars"); vs != nil {
 		for _, elt := range vs.Values[0].(*ast.CompositeLit).Elts {
 			row := elt.(*ast.CompositeLit)
 			name, _ := strLit(row.Elts[0])
@@ -88,7 +86,6 @@ func readConfig(root string) ([]variable, error) {
 			if name == "" || !ok {
 				return nil, fmt.Errorf("%s: a removedVars row is {name, reason}", cfg.at(row))
 			}
-			removed[name] = reason
 			vars[name] = &variable{Name: name, Removed: true, Doc: reason, At: cfg.at(row)}
 		}
 	}
@@ -99,10 +96,6 @@ func readConfig(root string) ([]variable, error) {
 				fun, _ := x.Fun.(*ast.Ident)
 				switch {
 				case fun == nil:
-				case fun.Name == "getenv" && len(x.Args) == 1:
-					if name, ok := strLit(x.Args[0]); ok && brokerVar.MatchString(name) && removed[name] == "" {
-						read(cfg, name, x)
-					}
 				case fun.Name == "secretValue" && len(x.Args) == 2:
 					if name, ok := strLit(x.Args[1]); ok {
 						read(cfg, name, x)
@@ -134,7 +127,7 @@ func readConfig(root string) ([]variable, error) {
 			case *ast.BasicLit:
 				// Every other name the loader spells out, such as the required-variable list and
 				// the rules sources oidc.ConfigFromEnv reads.
-				if name, ok := strLit(x); ok && brokerVar.MatchString(name) && removed[name] == "" {
+				if name, ok := strLit(x); ok && brokerVar.MatchString(name) {
 					read(cfg, name, x)
 				}
 			}
@@ -165,16 +158,16 @@ func readConfig(root string) ([]variable, error) {
 			out = append(out, *v)
 			continue
 		}
-		doc, ok := docs[name]
+		d, ok := docs[name]
 		if !ok {
 			return nil, fmt.Errorf("%s: the broker reads %s, and no comment opens with %q to document it", v.At, name, name+":")
 		}
-		v.Doc, v.Group = doc, groups[name]
+		v.Doc, v.Group = d.text, d.group
 		out = append(out, *v)
 	}
 	for _, name := range sortedKeys(docs) {
 		if _, ok := vars[name]; !ok {
-			return nil, fmt.Errorf("%s: documents %s, which the broker does not read", docAt[name], name)
+			return nil, fmt.Errorf("%s: documents %s, which the broker does not read", docs[name].at, name)
 		}
 	}
 	return out, nil
