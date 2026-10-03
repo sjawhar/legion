@@ -12,7 +12,7 @@ import {
 import { api } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
 import type { Agent } from "../../api/types";
-import { useSending } from "../../hooks/useSending";
+import type { Sending } from "../../hooks/useSending";
 import {
   borderDefault,
   dangerText,
@@ -54,25 +54,28 @@ export function useAgentSendKey(sessionID: string): MutationKey {
  */
 export function AgentMessageComposer({
   agent,
+  hold,
   onCancelReply,
   onClose,
   replyTo,
   sendKey,
 }: {
   agent: Agent;
+  /** The row's hold on that send (`useSending(sendKey)`): while it is out the message is
+   *  addressed, so the picker holds until it lands, from Send's own task on. The send's request is
+   *  frozen at Send either way. */
+  hold: Sending;
   onCancelReply: () => void;
   /** One level out of the composer: the row it belongs to takes focus. The composer calls it on
    *  Escape from an untouched draft and on Discard - and also right after a successful send,
    *  which is NOT one level out; that case is filtered below. */
   onClose: () => void;
   replyTo: AgentReply | null;
-  /** The row's `useAgentSendKey`, which names the composer's send. While that send is out the
-   *  message is addressed, so the picker holds until it lands, from Send's own task on
-   *  (`useSending`). The send's request is frozen at Send either way. */
+  /** The row's `useAgentSendKey`, which names the composer's send. */
   sendKey: MutationKey;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const { sending, sendingNow } = useSending(sendKey);
+  const { sending, sendingNow } = hold;
   const [issueKey, setIssueKey] = useState("");
   const [issuePickerOpen, setIssuePickerOpen] = useState(false);
   // `MentionComposer` calls `onSent` and then `onClose` on a successful send (its save's

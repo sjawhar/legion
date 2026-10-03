@@ -110,8 +110,9 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   seed - an issue pick, or a reply that moves the message to another channel - into its live
   draft in place (`seededDraft`); a message on its way holds the picker, every Reply and Cancel
   reply, and the composer its whole draft (above), until the server answers, and a refusal hands
-  back exactly the draft that was sent. The row reads its send through `useSending` on
-  `useAgentSendKey`, a name that belongs to one mount of the row (`useId`), so a row that comes
+  back exactly the draft that was sent. An opened row reads its send through one `useSending` on
+  `useAgentSendKey` (`AgentRowDetails`, which mounts on the row's first open, so a row never
+  opened watches no send), a name that belongs to that one mount (`useId`), so a row that comes
   back while a send it lost is still out holds nothing for it. An upload's reference names where
   the file went, whatever was picked while it was out.
 - A person's direct Send or Aside reaches an Oh My Pi session as that person's own user turn once

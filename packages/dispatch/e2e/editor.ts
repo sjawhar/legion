@@ -50,6 +50,11 @@ export async function barAction(page: Page, label: "Comment" | "Suggest" | "Ask"
   await actionBar(page).getByRole("button", { exact: true, name: label }).click();
 }
 
+/** The comment composer: on a document page, the margin's, which a selection-bar action opens. */
+export function composer(page: Page): Locator {
+  return page.getByRole("form", { name: "Comment composer" });
+}
+
 export function markSpan(page: Page, markId: string): Locator {
   return documentEditor(page).locator(`[data-id="${markId}"]`);
 }

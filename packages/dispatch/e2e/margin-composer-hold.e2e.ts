@@ -2,7 +2,7 @@ import { expect, type Page, test } from "@playwright/test";
 
 import { holdPosts, refusePosts } from "./agents";
 import { createComment, createIssue, createProject, patchIssue } from "./api";
-import { barAction, connectedDot, documentEditor, selectEditorText } from "./editor";
+import { barAction, composer, connectedDot, documentEditor, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -15,10 +15,6 @@ const spec = "The quick brown fox";
 test.beforeEach(async () => {
   await resetDatabase();
 });
-
-function composer(page: Page) {
-  return page.getByRole("form", { name: "Comment composer" });
-}
 
 function compact(page: Page): boolean {
   return (page.viewportSize()?.width ?? 1280) < 1280;

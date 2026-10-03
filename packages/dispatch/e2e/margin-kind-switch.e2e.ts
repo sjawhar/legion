@@ -4,6 +4,7 @@ import { refusePosts } from "./agents";
 import { createComment, createIssue, createProject, getAsk, listComments } from "./api";
 import {
   barAction,
+  composer,
   connectedDot,
   deleteEditorText,
   documentEditor,
@@ -64,10 +65,6 @@ function commentMarks(page: Page) {
 
 function anyMarks(page: Page) {
   return documentEditor(page).locator("span[data-id]");
-}
-
-function composer(page: Page) {
-  return page.getByRole("form", { name: "Comment composer" });
 }
 
 function kindButton(page: Page, name: "Comment" | "Suggest" | "Ask") {

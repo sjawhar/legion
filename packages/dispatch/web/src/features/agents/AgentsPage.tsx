@@ -579,11 +579,6 @@ function AgentRow({
   // the reader unfolded each have one owner, which a collapse no more discards than a pin does.
   const [opened, setOpened] = useState(false);
   if (expanded && !opened) setOpened(true);
-  const sendKey = useAgentSendKey(agent.session_id);
-  const { sending, sendingNow } = useSending(sendKey);
-  const beginReply = (next: AgentReply) => {
-    if (!sendingNow()) setReplyTo(next);
-  };
   const detailsId = useId();
 
   return (
@@ -699,39 +694,77 @@ function AgentRow({
         </div>
       </div>
       {opened ? (
-        <div className={`border-t px-4 pb-4 ${borderDefault}`} hidden={!expanded} id={detailsId}>
-          <div
-            className={`mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${textMutedOnCanvas}`}
-          >
-            {agent.capabilities.map((capability) => (
-              <span key={capability}>{capabilityLabel(capability)}</span>
-            ))}
-            <span>
-              Seen <Timestamp at={new Date(agent.last_seen).toISOString()} />
-            </span>
-          </div>
-          <AgentMessageList
-            agent={agent}
-            liveAgents={liveAgents}
-            onReply={beginReply}
-            // Open means on screen: an expanded row a closed fold or a filter hides is as unseen
-            // as a collapsed one, so it marks nothing read, and showing it again is an open that
-            // freezes its unread set afresh.
-            open={expanded && !hidden}
-            replyDisabled={sending}
-          />
-          <div data-agent-composer="">
-            <AgentMessageComposer
-              agent={agent}
-              onCancelReply={() => setReplyTo(null)}
-              onClose={leaveAgentComposer}
-              replyTo={replyTo}
-              sendKey={sendKey}
-            />
-          </div>
-        </div>
+        <AgentRowDetails
+          agent={agent}
+          expanded={expanded}
+          hidden={hidden}
+          id={detailsId}
+          liveAgents={liveAgents}
+          replyTo={replyTo}
+          setReplyTo={setReplyTo}
+        />
       ) : null}
     </article>
+  );
+}
+
+/** What a row shows once opened: its conversation and its composer. It owns the row's send name,
+ *  so a row never opened watches no send, and holds every Reply while that send is out, from
+ *  Send's own task on. */
+function AgentRowDetails({
+  agent,
+  expanded,
+  hidden,
+  id,
+  liveAgents,
+  replyTo,
+  setReplyTo,
+}: {
+  agent: Agent;
+  expanded: boolean;
+  hidden: boolean;
+  id: string;
+  liveAgents: readonly Agent[];
+  replyTo: AgentReply | null;
+  setReplyTo: (reply: AgentReply | null) => void;
+}): ReactNode {
+  const sendKey = useAgentSendKey(agent.session_id);
+  const hold = useSending(sendKey);
+  return (
+    <div className={`border-t px-4 pb-4 ${borderDefault}`} hidden={!expanded} id={id}>
+      <div
+        className={`mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${textMutedOnCanvas}`}
+      >
+        {agent.capabilities.map((capability) => (
+          <span key={capability}>{capabilityLabel(capability)}</span>
+        ))}
+        <span>
+          Seen <Timestamp at={new Date(agent.last_seen).toISOString()} />
+        </span>
+      </div>
+      <AgentMessageList
+        agent={agent}
+        liveAgents={liveAgents}
+        onReply={(next) => {
+          if (!hold.sendingNow()) setReplyTo(next);
+        }}
+        // Open means on screen: an expanded row a closed fold or a filter hides is as unseen as
+        // a collapsed one, so it marks nothing read, and showing it again is an open that
+        // freezes its unread set afresh.
+        open={expanded && !hidden}
+        replyDisabled={hold.sending}
+      />
+      <div data-agent-composer="">
+        <AgentMessageComposer
+          agent={agent}
+          hold={hold}
+          onCancelReply={() => setReplyTo(null)}
+          onClose={leaveAgentComposer}
+          replyTo={replyTo}
+          sendKey={sendKey}
+        />
+      </div>
+    </div>
   );
 }
 
