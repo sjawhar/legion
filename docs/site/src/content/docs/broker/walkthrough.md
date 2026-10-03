@@ -50,9 +50,10 @@ command waits, and prints the Dispatch page where the request is decided.
 
 ## 4. Approve it
 
-The request is at the top of alice's Inbox, under **Credential requests**.
+The request is at the top of alice's Inbox, under **Credential requests**, and counts toward
+**Needs you** beside the sidebar's Inbox.
 
-![The Inbox, with a secret request for DEMO_API_KEY under Credential requests](/legion/media/broker/inbox-credential-request.png)
+![The Inbox, with a secret request for DEMO_API_KEY under Credential requests, Needs you 1 beside Inbox in the sidebar, and Blocked on you: 1 item](/legion/media/broker/inbox-credential-request.png)
 
 Its page shows what was asked for, by which session, for how long, who may approve it, and the
 agent's stated reason.
