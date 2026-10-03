@@ -633,13 +633,6 @@ export function MentionComposer({
     if (form === null || dormant) return;
     const handleEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      // A message on its way is the server's until it answers. The submit guard becomes held in
-      // the same task as Send, before mutation state can re-render, so Escape cannot raise a
-      // Discard prompt in that gap.
-      if (submitGuard.held()) {
-        event.preventDefault();
-        return;
-      }
       if (autocomplete !== undefined) {
         event.stopPropagation();
         setAutocomplete(undefined);
@@ -679,7 +672,6 @@ export function MentionComposer({
     referencePickerOpen,
     replacement,
     replyTo,
-    submitGuard,
   ]);
   // A composer fixed at the foot of the screen - the docked one below `sm`, or one a host's frame
   // places there, as a phone thread's are - says how far up it reaches, so the shell's floating
@@ -847,6 +839,9 @@ export function MentionComposer({
       late.reset();
       save.mutate(sentRequest());
     });
+  /** The hold on the draft from Send's own task on, before React can disable the fieldset: the
+   *  fieldset's capture stops every key, click, input and change bound for a control in it - so
+   *  Escape raises no Discard prompt and Ctrl+K opens no picker over a draft that is out. */
   const stopHeldComposerInput = (event: SyntheticEvent) => {
     if (!submitGuard.held()) return;
     event.preventDefault();
@@ -1055,7 +1050,7 @@ export function MentionComposer({
               event.key.toLowerCase() === "k"
             ) {
               event.preventDefault();
-              if (!submitGuard.held()) setReferencePickerOpen(true);
+              setReferencePickerOpen(true);
               return;
             }
             submitOnModifiedEnter(event);

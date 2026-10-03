@@ -1102,7 +1102,7 @@ test("a send takes the Discard prompt with it and Escape raises none until the s
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(holdControls().disabled).toBe(true));
     expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
-    fireEvent.keyDown(screen.getByRole("form", { name: "Comment composer" }), { key: "Escape" });
+    fireEvent.keyDown(field, { key: "Escape" });
     expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
 
     refused.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
@@ -1165,7 +1165,7 @@ test("an Escape in Send's task cannot offer Discard", async () => {
     fireEvent.change(field, { target: { value: "@Planner hello" } });
     act(() => {
       fireEvent.click(screen.getByRole("button", { name: "Send" }));
-      fireEvent.keyDown(screen.getByRole("form", { name: "Comment composer" }), { key: "Escape" });
+      fireEvent.keyDown(field, { key: "Escape" });
     });
 
     expect(screen.queryByRole("button", { name: "Discard" })).toBeNull();
