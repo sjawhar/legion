@@ -188,7 +188,7 @@ the phase-verdict artifacts. No lifecycle labels carry worker state.
 
 ## Documentation
 
-- Plans: `docs/plans/YYYY-MM-DD-<slug>.md` — human-authored design history, not a Legion artifact. A Legion planner's plan lives in `.legion/plan.json` and the Dispatch issue document; no Legion role commits a plan or spec file here.
+- Plans: `docs/plans/YYYY-MM-DD-<slug>.md` — human-authored design history, not a Legion artifact. A Legion planner's plan lives in `.legion/plan.json` and the issue's `plan.md` document on Dispatch; no Legion role commits a plan or spec file here.
 - Learnings: `docs/solutions/<category>/<slug>.md`
 
 > Many docs in `docs/plans/` and `docs/solutions/` predate the TypeScript rewrite and contain Python-era references. These are marked with `[HISTORICAL]` headers.
