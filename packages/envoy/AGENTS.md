@@ -64,10 +64,11 @@ document the settlement read (`applySuppressed`): one whose room was evicted and
 refused and retried, and one whose room left the server while its transaction committed is given
 up and fails the room, its update discarded without waiting for its slot, since ygo then stores it
 on the committing goroutine itself (`persistStranded`). Every CloseRoom the service makes goes
-through `closeRoom` - a failed room's eviction, `Evict` and `Quiesce`, an issue's close and
-`Shutdown`'s close of a room with an editor - which waits for a repair committing into the room
-and refuses repairs while it closes (`closeGate`; a repair never waits for it and gives the write
-up as for a replaced room), so no close of the service's retires a room's persistence worker under
+through its server's own `CloseRoom` (`roomServer`, which shadows ygo's) - a failed room's
+eviction, `Evict` and `Quiesce`, an issue's close and `Shutdown`'s close of a room with an
+editor - which waits for a repair committing into the room and refuses repairs while it closes
+(`holdOpen`; a repair never waits for it and gives the write up as for a replaced room), so no
+close of the service's retires a room's persistence worker under
 a repair's commit (LEGION-498): that commit would reach the store only through ygo's stranded
 persistence on the repair's own goroutine, where a failed room's eviction, compacting under the
 lock the settlement holds, or a second writer's stranded store ahead of it holds it for good. The

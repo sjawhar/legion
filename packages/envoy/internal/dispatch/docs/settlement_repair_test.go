@@ -97,7 +97,7 @@ func TestSettlementWhoseRoomWasReplacedLeavesTheDocumentToTheReplacement(t *test
 			return
 		}
 		// ygo closes a room the moment its last browser leaves, on that browser's goroutine.
-		go func() { _ = service.srv.CloseRoom(room, true) }()
+		go func() { _ = service.srv.Server.CloseRoom(room, true) }()
 		deadline := time.Now().Add(5 * time.Second)
 		for service.srv.GetDoc(room) == held {
 			if time.Now().After(deadline) {
@@ -470,9 +470,9 @@ func TestSettlementThatStampsAndRepairsReleasesItsSlots(t *testing.T) {
 	}
 }
 
-// A repair whose room retires under its transaction - a CloseRoom made around the service, which
-// retires the room whether or not a Server.Apply holds it, where the service's own closes wait for
-// the repair (closeRoom) - commits into a room whose persistence worker is gone. ygo then
+// A repair whose room retires under its transaction - ygo's own CloseRoom, which retires the room
+// whether or not a Server.Apply holds it, where the service's CloseRoom waits for the repair
+// (roomServer) - commits into a room whose persistence worker is gone. ygo then
 // hands the commit's update to the store on the repair's own goroutine, inside the commit
 // (persistStranded), where nothing but that goroutine could release the repair's suppression slot.
 // The update is discarded there instead, and the repair, finding its room gone, gives the write
@@ -705,9 +705,9 @@ func endRoomLockHolders(t *testing.T, service *Service) {
 }
 
 // closeWaitsForRepair reports whether a close the service makes of a room is waiting for a repair
-// to finish committing into that room (closeRoom).
+// to finish committing into that room (roomServer).
 func closeWaitsForRepair() bool {
-	return goroutinesIn("(*Service).closeRoom", "sync.(*RWMutex).Lock") > 0
+	return goroutinesIn("(*roomServer).CloseRoom", "sync.(*RWMutex).Lock") > 0
 }
 
 // advisoryLockWaits counts the sessions of the test's database waiting for a session-level
@@ -777,11 +777,10 @@ func retireRoomUnderRepair(t *testing.T, service *Service, pause *repairCommitPa
 	case <-time.After(10 * time.Second):
 		t.Fatal("the repair never committed into the room")
 	}
-	// A CloseRoom made around the service, which does not wait for the repair as closeRoom does.
-	// The close returns once the room's persistence worker has exited, which includes its
-	// compaction.
+	// ygo's own CloseRoom, made around the service's, which does not wait for the repair. The
+	// close returns once the room's persistence worker has exited, which includes its compaction.
 	closed := make(chan error, 1)
-	go func() { closed <- service.srv.CloseRoom(artifactID, true) }()
+	go func() { closed <- service.srv.Server.CloseRoom(artifactID, true) }()
 	select {
 	case err := <-closed:
 		if err != nil {
