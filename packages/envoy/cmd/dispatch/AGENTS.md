@@ -20,7 +20,7 @@ database has not applied, read-only, run before the service rolls (README
 "Pre-deploy census"); `runSubcommand` refuses an argument it does not know with
 exit 2 instead of serving, since serving migrates.
 
-Every environment variable `cmd/dispatch` reads is a row of the settings table
+Every Dispatch setting `cmd/dispatch` reads is a row of the settings table
 (`cmd/dispatch/settings.go`): `main` reads every row once (`processSettings`),
 `resolveBootConfig` and the subcommands take their values from that read
 (`settingValues`, which panics on a name the table does not list), and each

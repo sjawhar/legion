@@ -6,7 +6,7 @@ application state in Postgres.
 
 ## Required configuration
 
-Every environment variable the server and its subcommands read is a row of one table,
+Every Dispatch setting the server and its subcommands read is a row of one table,
 `cmd/dispatch/settings.go`: `main` reads each row once, every reader takes its value from that
 read, and a test fails on any other environment read in `cmd/dispatch` or `internal/dispatch`.
 `envoy-dispatch settings` prints the table (name, `_FILE` form, default, whether it is required,

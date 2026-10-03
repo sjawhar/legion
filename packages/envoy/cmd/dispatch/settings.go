@@ -7,13 +7,16 @@ import (
 	"os"
 )
 
-// setting is one row of envoy-dispatch's settings table: an environment variable the server or
-// one of its subcommands reads. The table is the only way the process reads its environment: main
-// looks every row up once (processSettings), and each reader takes its value from that read
-// through settingValues, which refuses a name the table does not list. `envoy-dispatch settings`
-// prints the table, and the docs site's configuration reference is generated from that output.
-// A new setting is a new row here, never an os.Getenv; TestNoReaderBypassesTheSettingsTable holds
-// cmd/dispatch and internal/dispatch to that.
+// setting is one row of envoy-dispatch's settings table: a Dispatch setting, an environment
+// variable the server or one of its subcommands reads. The table is the only way Dispatch's own
+// code reads its environment: main looks every row up once (processSettings), and each reader
+// takes its value from that read through settingValues, which refuses a name the table does not
+// list. The libraries Dispatch links read a few variables for themselves, outside the table:
+// `HOME` (os.UserHomeDir), libpq's `PG*` (pgx), `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`
+// (net/http), `SSL_CERT_FILE` and `SSL_CERT_DIR` (crypto/x509), and the Go runtime's `GO*` and
+// `TZ`. `envoy-dispatch settings` prints the table, and the docs site's configuration reference is
+// generated from that output. A new setting is a new row here, never an os.Getenv;
+// TestNoReaderBypassesTheSettingsTable holds cmd/dispatch and internal/dispatch to that.
 type setting struct {
 	// Name is the environment variable.
 	Name string
@@ -29,10 +32,9 @@ type setting struct {
 	Description string
 }
 
-// settings is every environment variable envoy-dispatch reads, in the order an operator meets
-// them: storage, identity, where the server listens, NATS, the Envoy listener, projects, the
-// GitHub App, cookies, service-account tokens, the secrets broker, the dashboard, and local and
-// test runs.
+// settings is every Dispatch setting, in the order an operator meets them: storage, identity,
+// where the server listens, NATS, the Envoy listener, projects, the GitHub App, cookies,
+// service-account tokens, the secrets broker, the dashboard, and local and test runs.
 var settings = []setting{
 	{Name: "DATABASE_URL", Required: "yes",
 		Description: "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks` and `rebuild-refs` read it too. A `pool_max_conns` parameter is refused."},
@@ -130,8 +132,8 @@ func readSettings(lookup func(string) (string, bool)) settingValues {
 	return values
 }
 
-// processSettings reads the table from the process environment. It is the one place
-// envoy-dispatch reads its environment.
+// processSettings reads the table from the process environment. It is the one place Dispatch's own
+// code reads its environment.
 func processSettings() settingValues {
 	return readSettings(os.LookupEnv)
 }
