@@ -160,7 +160,8 @@ func (c *Client) MachineLookup(ctx context.Context, body json.RawMessage) (json.
 	return c.do(ctx, http.MethodPost, "/v1/machine-logins/lookup", body)
 }
 
-// Grants lists the credential grants the named approver issued.
+// Grants lists the live grants of the named person's sessions, automatic or approved, and the
+// grants the person approved on anyone's session.
 func (c *Client) Grants(ctx context.Context, approver string) (json.RawMessage, error) {
 	query := url.Values{"approver": {approver}}
 	return c.do(ctx, http.MethodGet, "/v1/grants?"+query.Encode(), nil)
