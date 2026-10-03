@@ -1,12 +1,10 @@
 #!/usr/bin/env bun
 // Writes <content dir>/dispatch/reference/configuration.md from Dispatch's settings table
 // (packages/envoy/cmd/dispatch/settings.go), read through `envoy-dispatch settings`, which prints
-// every environment variable the server and its subcommands read. It runs the `envoy-dispatch` on
-// PATH, which scripts/build-binaries.sh builds from this checkout before any generator runs, and
-// refuses to run without one.
+// every environment variable the server and its subcommands read. Contract: scripts/generate.ts;
+// lib/envoy-dispatch.ts runs the binary.
+import { readEnvoyDispatch } from "./lib/envoy-dispatch.ts";
 import { inline, writePage } from "./lib/markdown.ts";
-
-const COMMAND = ["envoy-dispatch", "settings"];
 
 interface Setting {
   name: string;
@@ -17,35 +15,19 @@ interface Setting {
 }
 
 function readSettings(): Setting[] {
-  if (Bun.which(COMMAND[0]) === null) {
-    throw new Error(
-      `${COMMAND[0]} is not on PATH: run this generator through docs/site/scripts/generate.ts, which builds it (scripts/build-binaries.sh) and puts it there`
-    );
-  }
-  const run = Bun.spawnSync(COMMAND, { stdout: "pipe", stderr: "pipe" });
-  if (run.exitCode !== 0) {
-    throw new Error(`${COMMAND.join(" ")} exited ${run.exitCode}:\n${run.stderr.toString()}`);
-  }
-  const body = JSON.parse(run.stdout.toString()) as { settings?: unknown };
-  if (!Array.isArray(body.settings) || body.settings.length === 0) {
-    throw new Error(`${COMMAND.join(" ")} printed no settings`);
-  }
-  return body.settings.map((setting: Record<string, unknown>) => {
-    for (const field of ["name", "required", "description"]) {
-      if (typeof setting[field] !== "string" || setting[field] === "") {
-        throw new Error(`setting ${JSON.stringify(setting)} has no ${field}`);
+  return readEnvoyDispatch("settings", "settings", ["name", "required", "description"]).map(
+    (setting) => {
+      for (const field of ["file", "default"]) {
+        if (setting[field] !== null && typeof setting[field] !== "string") {
+          throw new Error(`setting ${setting.name} has a ${field} that is neither text nor null`);
+        }
       }
-    }
-    for (const field of ["file", "default"]) {
-      if (setting[field] !== null && typeof setting[field] !== "string") {
-        throw new Error(`setting ${setting.name} has a ${field} that is neither text nor null`);
+      if (!/^(yes|no|when .+)$/.test(setting.required as string)) {
+        throw new Error(`setting ${setting.name} has required ${JSON.stringify(setting.required)}`);
       }
+      return setting as unknown as Setting;
     }
-    if (!/^(yes|no|when .+)$/.test(setting.required as string)) {
-      throw new Error(`setting ${setting.name} has required ${JSON.stringify(setting.required)}`);
-    }
-    return setting as unknown as Setting;
-  });
+  );
 }
 
 function render(settings: Setting[]): string {
