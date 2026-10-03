@@ -179,7 +179,6 @@ func main() {
 		slog.Error("dispatch: open database", "error", err)
 		os.Exit(1)
 	}
-	defer database.Pool.Close()
 	if err := database.Migrate(ctx); err != nil {
 		slog.Error("dispatch: migrate database", "error", err)
 		os.Exit(1)
@@ -314,7 +313,7 @@ func main() {
 
 	<-ctx.Done()
 	slog.Info("dispatch: shutting down")
-	shutdown(server, documentService)
+	shutdown(server, documentService, database.Pool)
 	select {
 	case err := <-serveErr:
 		slog.Error("dispatch: serve", "error", err)

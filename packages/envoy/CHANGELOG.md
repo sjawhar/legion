@@ -208,9 +208,11 @@
   before the process exits instead of when someone next opens the spec; a settlement that has to
   write into the room (stamping a block id, restoring an ask block's state) is still left to the
   next process, now with a WARN rather than an ERROR. An editor that keeps sending updates through
-  the shutdown no longer holds every other document's settlement past the budget. With a database
-  that answers, the document service is done within 15 s of the signal, and the compose file sets
-  `stop_grace_period: 30s`, which also ends a process whose database has stopped answering.
+  the shutdown no longer holds every other document's settlement past the budget. Dispatch exits
+  within 15 s of the signal: closing the database pool gets what is left of the document budget,
+  and a database that has stopped answering no longer holds the process until its runtime kills
+  it (`dispatch: exit with database connections still in use at the end of the shutdown budget`).
+  The compose file sets `stop_grace_period: 30s`.
 - A listener whose session cache had not yet seen a role holder another listener registered a moment ago released the holder's fresh claim as lapsed: a lookup (`GET /v1/roles/<role>`, a role publish) or a role delivery read the claim from the role bucket and the holder from a cache that trails the session bucket, so during a rolling deploy the old task could delete the claim the replacement had just accepted, and the role reached nobody until its holder claimed it again. A soft claim could take such a holder's role, and the role reaper end its claim, the same way. Each now reads the holder from the session bucket itself before it takes anything from it (LEGION-456).
 - One MiB of `>` formed 1,048,576 nested quotes inside the document cap and eventually ended the process in a stack overflow while its tree was validated. Dispatch now refuses the document before building that tree (LEGION-465).
 - Reading a textblock's inline markdown took one stack frame per nested mark, so the stack and memory it needed grew with the nesting the caller wrote: one 1 MiB upload of 262,140 nested strong marks read with no error but peaked at about 0.9 GB of memory. The inline bound above is checked before any walk of those marks that recurses, and goldmark's own walk through a link's label, which enters every image the label holds, meets each image held to the bound as it is made (LEGION-465).
