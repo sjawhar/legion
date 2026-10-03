@@ -1746,7 +1746,11 @@ audit row in one transaction; a non-pending record, and one past its expiry that
 not yet expired, is `409 RECORD_TERMINAL` for its approver (a duplicate or late decision changes
 nothing) — but a record past its expiry, whether the sweeper has recorded it expired or not,
 answers with a message saying it expired before its approver acted (`requests.ErrExpired`), never
-that it was decided. `Values` releases a
+that it was decided. An `agent_secret` record is pending while its request is: `GET /v1/pending`
+(`PendingForApprover`) lists it only then, and `GET /v1/credential-requests/{id}` (`ReadRecord`)
+reads a record whose request was cancelled as `cancelled` even when the record carries no
+cancelled event, the shape an ended enrollment's requests had before `endEnrollment` wrote one; a
+machine login is pending while it carries no terminal event. `Values` releases a
 live grant's inject-delivery values, re-checking the enrollment, the
 grant, its whole approval chain (`VerifyChain`), and — when the rules changed since the grant was
 decided — that the current rules still allow every granted name (`stillAllowed`: a name the rules no
