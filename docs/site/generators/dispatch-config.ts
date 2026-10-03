@@ -6,8 +6,6 @@
 // refuses to run without one.
 import { inline, writePage } from "./lib/markdown.ts";
 
-const SOURCE = "packages/envoy/cmd/dispatch/settings.go";
-const GENERATOR = "docs/site/generators/dispatch-config.ts";
 const COMMAND = ["envoy-dispatch", "settings"];
 
 interface Setting {
@@ -52,14 +50,6 @@ function readSettings(): Setting[] {
 
 function render(settings: Setting[]): string {
   const lines = [
-    "---",
-    "title: Configuration",
-    `description: ${JSON.stringify("Every environment variable Dispatch's server reads: what it does, whether it is required, and what it means when unset.")}`,
-    "editUrl: false",
-    "---",
-    "",
-    `> Generated from \`${SOURCE}\` by \`${GENERATOR}\`. Edit the settings table, not this page.`,
-    "",
     `Dispatch's server, \`envoy-dispatch\`, takes the ${settings.length} settings below from its environment. \`envoy-dispatch settings\` prints the same table from the binary you run.`,
     "",
     "A setting with a file form can name a file that holds its value instead. When Dispatch reads that setting, the file's trimmed contents win over the variable, and a file that cannot be read, or holds nothing, refuses startup.",
@@ -83,4 +73,11 @@ function render(settings: Setting[]): string {
   return lines.join("\n");
 }
 
-writePage(GENERATOR, "dispatch/reference/configuration.md", () => render(readSettings()));
+writePage({
+  path: "dispatch/reference/configuration.md",
+  title: "Configuration",
+  description:
+    "Every environment variable Dispatch's server reads: what it does, whether it is required, and what it means when unset.",
+  source: "packages/envoy/cmd/dispatch/settings.go",
+  body: () => render(readSettings()),
+});
