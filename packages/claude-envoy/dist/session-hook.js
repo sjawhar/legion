@@ -14269,11 +14269,11 @@ var dispatchToolSpecs = [
     description: "Edit an open question in place. Use it to correct or refine the same decision; retract the " + "old ask and open a new one when the decision itself changes. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " Previous text remains in the event log. Only the asking session can edit it; answered or " + "resolved asks cannot be edited. An ask that lives as an `ask` block in a document is written " + "in the document too, changing only the fields you name - pass urgency alone and the " + "question's wording, formatting, links and comment anchors are untouched - so the edit " + "writes a document version and closes a spec's design gate until that version is approved; " + "text the block cannot carry back unchanged is refused, naming the field - an option label " + 'containing ": ", the separator between a label and its description, is one example.',
     arguments: (z2) => ({
       ask: z2.string().describe("Ask id (uuid); an 8+ hex prefix unique among this session's own open asks works too."),
-      question: z2.string({ max: ASK_QUESTION_MAX }).optional().describe(`Replacement question. ${ASK_QUESTION_CONTRACT} At most ${ASK_QUESTION_MAX} characters.`),
+      question: z2.string({ max: ASK_QUESTION_MAX }).optional().describe(`${ASK_QUESTION_CONTRACT} Replaces the ask's question; at most ${ASK_QUESTION_MAX} characters.`),
       options: z2.array(z2.object({
         label: z2.string().describe("Selectable option label."),
         description: z2.string().optional().describe("What this option costs.")
-      }), { max: 8 }).optional().describe(`Replacement options. ${ASK_OPTIONS_CONTRACT} Up to 8 objects { label, description? }.`),
+      }), { max: 8 }).optional().describe(`${ASK_OPTIONS_CONTRACT} Replaces the ask's options; up to 8 objects { label, description? }.`),
       multiple: z2.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z2.enum(ASK_URGENCIES).describe("Replacement decision urgency.").optional()
     }),

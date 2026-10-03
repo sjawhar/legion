@@ -3,14 +3,14 @@ import { dispatchToolSchema, dispatchToolSpecs, zodSchemaApi } from "@legion/con
 import { z } from "zod";
 import { formatZodIssues, ToolInputError } from "../tool-input-errors";
 
-function schemaFor(name: string): z.ZodType {
+function specFor(name: string) {
   const spec = dispatchToolSpecs.find((candidate) => candidate.name === name);
   if (!spec) throw new Error(`missing ${name}`);
-  return dispatchToolSchema(spec, zodSchemaApi(z), { strict: true });
+  return spec;
 }
 
 function problemsFor(name: string, args: unknown): string[] {
-  const schema = schemaFor(name);
+  const schema: z.ZodType = dispatchToolSchema(specFor(name), zodSchemaApi(z), { strict: true });
   const parsed = schema.safeParse(args, { reportInput: true });
   if (parsed.success) throw new Error("expected the call to be refused");
   return formatZodIssues(parsed.error.issues, schema);
@@ -36,10 +36,7 @@ describe("ToolInputError", () => {
         "- a",
         "- b",
         "- Allowed keys: issue, project, artifact, ref, question, options, multiple, urgency, anchor",
-        '- Example: dispatch_ask({"issue":"DSP-1","question":"The release cannot pass its review gate because the revised plan is unreviewed. ' +
-          'How should we proceed? Recommendation: review the plan before release to keep the review gate.","options":[{"label":"Review the revised plan",' +
-          '"description":"Delays release for review but keeps the release gate."},{"label":"Release without review","description":"Ships sooner but bypasses ' +
-          'the review gate."}]})',
+        `- Example: dispatch_ask(${JSON.stringify(specFor("dispatch_ask").example)})`,
       ].join("\n")
     );
   });

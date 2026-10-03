@@ -270,15 +270,11 @@ It returns `details` `{ issue, ask, follows: { ask } }` for an issue or `{ proje
 
 References belong in the question text; `ref` is sugar that appends its `dispatch://` value to the question as a rendered link.
 
-An ask is read on a phone by someone who has not read the code. The question carries the problem
-the reader recognises and why it matters now, what constrains the answer, and the recommendation
-with its reason. It asks how to solve the problem or which outcome is wanted; never enumerate
-choices in the question. The options carry the genuinely different approaches. Each option has a
-label, and its description says what that approach costs.
+An ask is read on a phone by someone who has not read the code. Write its question and options as
+[Writing for the human](#writing-for-the-human) says, and apply its phone test before posting.
 Never put file paths, line numbers, sequence numbers, document versions, or role tokens in the
-question; if the human needs that detail, anchor the ask to the document passage instead. Apply
-the phone test from "Writing for the human" before posting. Anchor a document question with
-`anchor: { artifact, quote, occurrence? }`; `occurrence`
+question; if the human needs that detail, anchor the ask to the document passage instead. Anchor a
+document question with `anchor: { artifact, quote, occurrence? }`; `occurrence`
 is zero-based and selects a repeated quote. A quote anchor is pinned to its lowest complete
 containing block while retaining its quote as display text, so rewording the passage keeps it
 attached; a quote spanning top-level blocks, and existing anchors without a block, stay readable

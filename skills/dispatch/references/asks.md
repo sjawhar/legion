@@ -15,12 +15,9 @@ It returns `details` `{ session, owner, service }`: `owner` is the lowercase log
 
 ## Handing a human a to-do, editing, resolving, and replying
 
-A to-do handed to a human still follows the same contract. The question carries the problem the
-reader recognises and why it matters now, what constrains the answer, and the recommendation with
-its reason. It asks how to solve the problem or which outcome is wanted; never enumerate choices
-in the question. The options carry the genuinely different approaches. Each option has a label,
-and its description says what that approach costs. For a human-only action, what it changes and
-risks constrains the answer. There is no fixed vocabulary and the server treats no label specially.
+A to-do handed to a human still follows the question and options contract that `skill://dispatch`'s
+"Writing for the human" states. For a human-only action, what it changes and risks constrains the
+answer. There is no fixed vocabulary and the server treats no label specially.
 If an outcome needs a reason, say so in that option's description, and the human's free-text answer
 carries it:
 ```ts

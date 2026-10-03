@@ -504,7 +504,7 @@ export const dispatchToolSpecs = [
         .string({ max: ASK_QUESTION_MAX })
         .optional()
         .describe(
-          `Replacement question. ${ASK_QUESTION_CONTRACT} At most ${ASK_QUESTION_MAX} characters.`
+          `${ASK_QUESTION_CONTRACT} Replaces the ask's question; at most ${ASK_QUESTION_MAX} characters.`
         ),
       options: z
         .array(
@@ -516,7 +516,7 @@ export const dispatchToolSpecs = [
         )
         .optional()
         .describe(
-          `Replacement options. ${ASK_OPTIONS_CONTRACT} Up to 8 objects { label, description? }.`
+          `${ASK_OPTIONS_CONTRACT} Replaces the ask's options; up to 8 objects { label, description? }.`
         ),
       multiple: z.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z.enum(ASK_URGENCIES).describe("Replacement decision urgency.").optional(),

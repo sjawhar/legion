@@ -62,44 +62,18 @@ function dispatchSkillHeadings() {
   });
 }
 
+function specFor(name: string) {
+  const spec = dispatchToolSpecs.find((candidate) => candidate.name === name);
+  if (!spec) throw new Error(`missing ${name}`);
+  return spec;
+}
+
 const validCalls = {
   dispatch_issue: { project: "DSP", title: "Native workspace" },
   dispatch_issue_update: { issue: "DSP-1", status: "in_progress" },
   dispatch_claim: { issue: "DSP-1" },
-  dispatch_ask: {
-    issue: "DSP-1",
-    question:
-      "The release cannot pass its review gate because the revised plan is unreviewed. " +
-      "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
-    options: [
-      {
-        label: "Review the revised plan",
-        description: "Delays release for review but keeps the release gate.",
-      },
-      {
-        label: "Release without review",
-        description: "Ships sooner but bypasses the review gate.",
-      },
-    ],
-  },
-  dispatch_edit_ask: {
-    ask: "ask-1",
-    question:
-      "The release cannot pass its review gate because the revised plan is unreviewed. " +
-      "How should we proceed? Recommendation: review the plan before release to keep the review gate.",
-    options: [
-      {
-        label: "Review the revised plan",
-        description: "Delays release for review but keeps the release gate.",
-      },
-      {
-        label: "Release without review",
-        description: "Ships sooner but bypasses the review gate.",
-      },
-    ],
-    multiple: false,
-    urgency: "high",
-  },
+  dispatch_ask: specFor("dispatch_ask").example,
+  dispatch_edit_ask: { ...specFor("dispatch_edit_ask").example, multiple: false, urgency: "high" },
   dispatch_resolve_ask: {
     ask: "ask-1",
     kind: "retracted",
@@ -135,9 +109,7 @@ const validCalls = {
 } as const;
 
 function schemaFor(name: keyof typeof validCalls) {
-  const spec = dispatchToolSpecs.find((candidate) => candidate.name === name);
-  if (!spec) throw new Error(`missing ${name}`);
-  return dispatchToolSchema(spec, schemaApi);
+  return dispatchToolSchema(specFor(name), schemaApi);
 }
 
 const ISSUE_UPDATE_RULES =
