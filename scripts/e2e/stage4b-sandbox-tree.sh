@@ -1639,7 +1639,7 @@ gate_open() {
 # (lib/design-gate-verdict.jq): its approval request at the approved version carries a summary after
 # "Approve <name> (version N)?", a human answered at least one of the spec's decision blocks, and no
 # approval request it made on the spec named a version holding one open or came before a human
-# answered one.
+# answered one raised before the human's turn on that request.
 drive_gated_spec() {
   local issue=$1 artifact approved asks events version verdict request early blocks requested_versions
   local -a requested=()
@@ -1672,7 +1672,7 @@ drive_gated_spec() {
   [ "$early" = "[]" ] || fail "$issue: approval was requested before the spec's decision blocks were settled: $early"
   blocks=$(jq .blocks <<<"$verdict")
   [ "$blocks" -gt 0 ] || fail "$issue: a human answered none of the spec's decision blocks, so its open choice was never settled as one ($evidence/$issue-asks.json)"
-  note "$issue: a human answered $blocks of the spec's decision blocks, and every approval hand-back came after those answers on a version with none open"
+  note "$issue: a human answered $blocks of the spec's decision blocks, and no approval hand-back named a version with one open or came before the answer to one raised before the human's turn on it"
   note "$issue: the approval request at version $approved asked: $request"
   wait_for_phase "$issue" planning
 }

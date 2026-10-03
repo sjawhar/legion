@@ -2,10 +2,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -216,17 +218,22 @@ type queryer interface {
 // already holds one of its transactions (store.ErrNestedAcquire): one caller, one connection is
 // what keeps the pool from deadlocking, and a handler that breaks it fails here instead of in
 // production.
+//
+// Every route refuses a path or query parameter holding U+0000 or a byte that is not UTF-8 before
+// its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body, and the
+// document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
 func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{deps: deps}
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
 	for _, route := range routes {
-		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(route.Handler))
+		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(s.refuseUnstorableParameters(route.Pattern, route.Handler)))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {
-		mux.Handle("GET /ws/doc/{room}", trackTransactions(websocket.ServeHTTP))
+		const pattern = "/ws/doc/{room}"
+		mux.Handle("GET "+pattern, trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP))))
 	}
 }
 
@@ -611,13 +618,17 @@ func (maxBytesDiscarder) Header() http.Header             { return nil }
 func (maxBytesDiscarder) Write(value []byte) (int, error) { return len(value), nil }
 func (maxBytesDiscarder) WriteHeader(int)                 {}
 
+// decodeJSON decodes r's body, one JSON value of at most maxJSONRequestBytes, into value, which
+// declares every member the body may carry. A string the body holds anywhere that carries U+0000
+// is refused, naming where it stands (unstorableJSON).
 func decodeJSON(r *http.Request, value any) error {
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || (contentType != "application/json" && !strings.HasSuffix(contentType, "+json")) {
 		return errorf(http.StatusUnsupportedMediaType, "JSON_CONTENT_TYPE", "JSON mutations require Content-Type application/json")
 	}
 	r.Body = http.MaxBytesReader(maxBytesDiscarder{}, r.Body, maxJSONRequestBytes)
-	decoder := json.NewDecoder(r.Body)
+	var read bytes.Buffer
+	decoder := json.NewDecoder(io.TeeReader(r.Body, &read))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
 		var maxBytes *http.MaxBytesError
@@ -628,6 +639,9 @@ func decodeJSON(r *http.Request, value any) error {
 	}
 	if decoder.More() {
 		return errorf(http.StatusBadRequest, "INVALID_JSON", "request body must contain one JSON value")
+	}
+	if refusal := unstorableJSON("", read.Bytes()); refusal != nil {
+		return refusal
 	}
 	return nil
 }
