@@ -61,13 +61,19 @@ writes, not on this one. A settlement that wrote into the room commits what it w
 document moved after its read, since the room and its browsers hold it; one that wrote nothing
 leaves a moved document to the settlement the move scheduled. A repair is written only into the
 document the settlement read (`applySuppressed`): one whose room was evicted and reloaded since is
-refused and retried, and one whose room left the server while its transaction committed is given
-up and fails the room, its update discarded without waiting for its slot, since ygo then stores it
-on the committing goroutine itself (`persistStranded`). The room worker's compaction, except a
-failed room's eviction, skips a room whose lock another holder has (`compactIfIdle`), so a
-settlement holding the lock does not wait for that worker's exit. Two cases still hang until the
-server restarts (LEGION-498): a room that fails while a settlement commits into it, and a second
-writer committing into a room while it retires under a repair's commit.
+refused and retried. Every close of a room the service makes - a failed room's eviction, `Evict`
+and `Quiesce`, an issue's close, `Shutdown`'s close of a room with an editor - goes through its
+server's `CloseRoom` (`roomServer`, which shadows ygo's, so a call written against ygo's API is
+gated too). That close waits for a repair committing into the room and refuses new repairs while
+it closes; a repair never waits for a close and gives the write up as for a replaced room
+(`holdOpen`). `roomServer` says why a close retiring the room's worker under a repair's commit
+hung (LEGION-498). A room's close gate lives only while a close or a repair holds or waits on it.
+A repair's suppression slot that its settlement discarded is consumed by that repair's own update
+alone, since another writer's update can reach the room's worker first. The gate removes the
+repair-close cycle, but `compactIfIdle` remains for non-repair worker exits: a published live write
+is already durable and intentionally does not take the gate, so its room can still retire under
+its Apply. Its exit compaction is housekeeping and leaves a busy document lock to the next pass; a
+failed room's eviction is the exception and compacts under the lock before recovery.
 `envoy-dispatch backfill-block-ids` runs the same stamp through `applySuppressed` across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
