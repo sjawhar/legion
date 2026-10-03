@@ -1,12 +1,16 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { join } from "node:path";
-import { DispatchClient } from "../../../packages/envoy-client/src/dispatch-http.ts";
+import {
+  DISPATCH_TOOL_DEADLINE_MS,
+  DispatchClient,
+} from "../../../packages/envoy-client/src/dispatch-http.ts";
 import {
   applyCodes,
-  type CensusEvent,
+  censusIssues,
   excludeSessionAsks,
   fetchIssueEvents,
   filterAsksInWindow,
+  ISSUE_CONCURRENCY,
   parseCodes,
   summarizeApprovalRounds,
   summarizeAsks,
@@ -15,11 +19,15 @@ import {
 import {
   type ApprovalHistoryEvent,
   ARTIFACT,
+  approvalAsk,
   approved,
+  blockAnswered,
+  blockAsk,
   edited,
   followed,
   handedBack,
   opened,
+  recordedAt,
   recordedRounds,
   reply,
 } from "./approval-events.ts";
@@ -123,10 +131,10 @@ describe("ask census", () => {
   });
 
   test("reproduces the live census's approval rounds from the recorded events", () => {
-    const approvalAsks = recordedRounds.issues.flatMap((issue) => issue.asks);
-    expect(summarizeAsks(approvalAsks)).toEqual({
-      asks: 9,
-      decisionBlocks: 0,
+    const recordedAsks = recordedRounds.issues.flatMap((issue) => issue.asks);
+    expect(summarizeAsks(recordedAsks)).toEqual({
+      asks: 12,
+      decisionBlocks: 3,
       standaloneQuestions: 0,
       approvalRequests: 9,
     });
@@ -136,7 +144,10 @@ describe("ask census", () => {
     // answered before its first request, so it is no turn.
     expect(
       recordedRounds.issues.flatMap((issue) =>
-        summarizeApprovalRounds(issue.events).map((round) => ({ issue: issue.key, ...round }))
+        summarizeApprovalRounds(issue.events, issue.asks).map((round) => ({
+          issue: issue.key,
+          ...round,
+        }))
       )
     ).toEqual([
       {
@@ -169,7 +180,7 @@ describe("ask census", () => {
   test("counts the opening request and each hand-back since #1671, but no rewording", () => {
     // The move and the new summary are ask.edited and never reach the human; the reworded
     // hand-back arrives once, as its ask.handed_back.
-    expect(summarizeApprovalRounds(since1671)).toEqual([
+    expect(summarizeApprovalRounds(since1671, [])).toEqual([
       {
         artifactId: ARTIFACT,
         inboxRows: 1,
@@ -181,9 +192,9 @@ describe("ask census", () => {
   });
 
   test("counts the arrivals the stage 4b proof reads as approval requests, before and since #1671", () => {
-    const histories = [...recordedRounds.issues.map((issue) => issue.events), since1671];
-    const counted = histories.flatMap((events) =>
-      summarizeApprovalRounds(events).map((round) => ({
+    const histories = [...recordedRounds.issues, { asks: [], events: since1671 }];
+    const counted = histories.flatMap(({ asks, events }) =>
+      summarizeApprovalRounds(events, asks).map((round) => ({
         census: round.arrivals,
         stage4b: stage4bRequests(events, round.artifactId),
       }))
@@ -220,7 +231,7 @@ describe("ask census", () => {
       "/api/v1/issues/LEGION-470/events?after=0&limit=200",
       "/api/v1/issues/LEGION-470/events?after=200&limit=200",
     ]);
-    expect(summarizeApprovalRounds(fetched)).toEqual([
+    expect(summarizeApprovalRounds(fetched, [])).toEqual([
       {
         artifactId: ARTIFACT,
         inboxRows: 1,
@@ -268,96 +279,121 @@ describe("ask census", () => {
     // retracted when the document moved on to version 3, and the agent opened another at version
     // 3, with no human turn between them.
     // Since #1671 the same two arrivals are the opening request and one hand-back of the same row.
-    const recorded = recordedRounds.issues.find((issue) => issue.key === "LEGION-464")?.events;
-    expect(recorded?.slice(0, 3).map((event) => event.type)).toEqual([
+    const recorded = recordedRounds.issues.find((issue) => issue.key === "LEGION-464");
+    expect(recorded?.events.slice(0, 3).map((event) => event.type)).toEqual([
       "ask.opened",
       "ask.resolved",
       "ask.opened",
     ]);
-    const before1671 = summarizeApprovalRounds(recorded?.slice(0, 3) ?? []);
-    const following = summarizeApprovalRounds([
-      opened(1, 1),
-      edited(2, 2, 1, { version: 1 }),
-      handedBack(3, 2),
-    ]);
+    const before1671 = summarizeApprovalRounds(
+      recorded?.events.slice(0, 3) ?? [],
+      recorded?.asks ?? []
+    );
+    const following = summarizeApprovalRounds(
+      [opened(1, 1), edited(2, 2, 1, { version: 1 }), handedBack(3, 2)],
+      []
+    );
 
     expect(before1671[0]?.arrivals).toBe(2);
     expect(before1671[0]?.exceedsHumanTurnBudget).toBe(true);
     expect(following[0]?.arrivals).toBe(2);
     expect(following[0]?.exceedsHumanTurnBudget).toBe(true);
   });
-});
 
-function blockAnswered(seq: number, block: string): CensusEvent {
-  return {
-    id: seq,
-    type: "ask.answered",
-    actor: { kind: "user", id: "alice" },
-    payload: {
-      id: `block-ask-${block}`,
-      kind: "question",
-      block_id: block,
-      block_artifact: { id: ARTIFACT, primary: true, slug: "spec" },
-    } as CensusEvent["payload"],
-  };
-}
+  test("a hand-back after the human answers a decision block in the requested document is within budget", () => {
+    const events = [
+      opened(1, 1),
+      edited(2, 2, 1, { version: 1 }),
+      blockAnswered(3, "q1"),
+      edited(4, 4, 1, { version: 2 }),
+      handedBack(5, 4),
+      edited(6, 5, 4, { version: 4 }),
+      blockAnswered(7, "q2"),
+      edited(8, 7, 4, { version: 5 }),
+      handedBack(9, 7),
+    ];
+    expect(summarizeApprovalRounds(events, [blockAsk("q1"), blockAsk("q2")])).toEqual([
+      {
+        artifactId: ARTIFACT,
+        inboxRows: 1,
+        arrivals: 3,
+        humanTurns: 2,
+        exceedsHumanTurnBudget: false,
+      },
+    ]);
+  });
 
-test("a hand-back after the human answers a decision block in the requested document is within budget", () => {
-  const events = [
-    opened(1, 1),
-    edited(2, 2, 1, { version: 1 }),
-    blockAnswered(3, "q1"),
-    edited(4, 4, 1, { version: 2 }),
-    handedBack(5, 4),
-    edited(6, 5, 4, { version: 4 }),
-    blockAnswered(7, "q2"),
-    edited(8, 7, 4, { version: 5 }),
-    handedBack(9, 7),
-  ];
-  expect(summarizeApprovalRounds(events)).toEqual([
-    {
-      artifactId: ARTIFACT,
-      inboxRows: 1,
-      arrivals: 3,
-      humanTurns: 2,
-      exceedsHumanTurnBudget: false,
-    },
-  ]);
-});
+  test("a reply on a decision block is a turn once the round begins, and only in the requested document", () => {
+    const notes = blockAsk("notes", "artifact-2");
+    const events = [
+      blockAnswered(1, "q0"),
+      opened(2, 1),
+      reply(3, "human", notes),
+      edited(4, 2, 1, { version: 1 }),
+      reply(5, "human", blockAsk("q1")),
+      handedBack(6, 2),
+      edited(7, 3, 2, { version: 2 }),
+      handedBack(8, 3),
+    ];
 
-test("a reply on a decision block is a turn once the round begins, and only in the requested document", () => {
-  function blockReply(seq: number, block: string): CensusEvent {
-    return {
-      id: seq,
-      type: "comment.created",
-      actor: { kind: "user", id: "alice" },
-      payload: { id: `comment-${seq}`, ask_id: `block-ask-${block}` },
-    };
-  }
-  // The replied-to blocks were indexed before the window, so only the issue's asks name their
-  // documents.
-  const asks = [
-    { id: "block-ask-q1", block_artifact: { id: ARTIFACT, primary: true, slug: "spec" } },
-    { id: "block-ask-notes", block_artifact: { id: "artifact-2", primary: false, slug: "notes" } },
-  ];
-  const events = [
-    blockAnswered(1, "q0"),
-    opened(2, 1),
-    blockReply(3, "notes"),
-    edited(4, 2, 1, { version: 1 }),
-    blockReply(5, "q1"),
-    handedBack(6, 2),
-    edited(7, 3, 2, { version: 2 }),
-    handedBack(8, 3),
-  ];
-  const round = { artifactId: ARTIFACT, inboxRows: 1, arrivals: 3 };
+    // The reply on q1 is the one turn: q0 was answered before the first request, and the notes
+    // block lives in another document.
+    expect(summarizeApprovalRounds(events, [blockAsk("q0"), blockAsk("q1"), notes])).toEqual([
+      {
+        artifactId: ARTIFACT,
+        inboxRows: 1,
+        arrivals: 3,
+        humanTurns: 1,
+        exceedsHumanTurnBudget: true,
+      },
+    ]);
+  });
 
-  // The reply on q1 is the one turn: q0 was answered before the first request, and the notes
-  // block lives in another document.
-  expect(summarizeApprovalRounds(events, asks)).toEqual([
-    { ...round, humanTurns: 1, exceedsHumanTurnBudget: true },
-  ]);
-  expect(summarizeApprovalRounds(events)).toEqual([
-    { ...round, humanTurns: 0, exceedsHumanTurnBudget: true },
-  ]);
+  test("reads every issue when the whole run outlasts one client's deadline", async () => {
+    // Each client's deadline runs 200 times faster: 60 s becomes 300 ms. No read is slow, an issue's
+    // two take a fifth of a deadline, and six waves of ISSUE_CONCURRENCY issues take longer than one.
+    // The clock is real: the deadline is AbortSignal.timeout, which fake timers do not move, and a
+    // clock the stub moves as it serves runs ahead of the clients still reading its answers.
+    const deadline = DISPATCH_TOOL_DEADLINE_MS / 200;
+    const latency = deadline / 10;
+    const timeoutAfter = AbortSignal.timeout.bind(AbortSignal);
+    const timeout = spyOn(AbortSignal, "timeout").mockImplementation((milliseconds: number) =>
+      timeoutAfter(milliseconds / 200)
+    );
+    const read: string[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        await Bun.sleep(latency);
+        const { pathname } = new URL(request.url);
+        read.push(pathname);
+        if (pathname.endsWith("/asks")) return Response.json([approvalAsk(1, 1)]);
+        if (pathname.endsWith("/events")) return Response.json([]);
+        return new Response("not found", { status: 404 });
+      },
+    });
+    const issues = Array.from({ length: 6 * ISSUE_CONCURRENCY }, (_, index) => `TEST-${index + 1}`);
+
+    try {
+      const started = performance.now();
+      const census = await censusIssues(
+        { url: `http://127.0.0.1:${server.port}`, token: "token" },
+        issues,
+        {
+          from: recordedAt(0),
+          to: recordedAt(60),
+          projects: ["TEST"],
+          excludedSessionIds: new Set(),
+        }
+      );
+
+      expect(performance.now() - started).toBeGreaterThan(deadline);
+      expect(census.map((issue) => issue.issueRow?.issue)).toEqual(issues);
+      expect(read).toHaveLength(2 * issues.length);
+    } finally {
+      server.stop(true);
+      timeout.mockRestore();
+    }
+  });
 });

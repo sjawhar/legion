@@ -4,7 +4,6 @@ import type {
   ArtifactReviewEventPayload,
   Ask,
   AskApproval,
-  AskBlockArtifact,
   DispatchEvent,
   Issue,
 } from "../../packages/contracts/src/dispatch-api";
@@ -17,6 +16,9 @@ import { DispatchClient } from "../../packages/envoy-client/src/dispatch-http";
 const DEFAULT_PROJECTS = ["AGENTC", "LEGION", "OPS"] as const;
 const CODES = ["to-do", "design", "may-I-proceed", "operations"] as const;
 const EVENT_PAGE_SIZE = 200;
+/** Issues read at once: a few requests' latency each, well inside one client's deadline, while
+ * the run as a whole has no deadline at all. */
+export const ISSUE_CONCURRENCY = 8;
 
 type Code = (typeof CODES)[number];
 
@@ -30,9 +32,6 @@ export type CensusAsk = Pick<
 
 /** The document an approval ask names, as every `ask.*` event of one records it. */
 type RecordedApproval = Pick<AskApproval, "artifact_id">;
-
-/** The document a decision block's ask lives in, as every `ask.*` event of one records it. */
-type RecordedBlockArtifact = Pick<AskBlockArtifact, "id">;
 
 /**
  * The fields of a recorded Dispatch event the approval count reads. The history it reads predates
@@ -49,7 +48,6 @@ export interface CensusEvent {
     /** The ask a comment replied to or a review answered. */
     readonly ask_id?: ArtifactReviewEventPayload["ask_id"];
     readonly approval?: RecordedApproval;
-    readonly block_artifact?: RecordedBlockArtifact;
   };
 }
 
@@ -80,7 +78,7 @@ interface SessionSummary {
   readonly asks: number;
 }
 
-interface CensusOptions {
+export interface CensusOptions {
   readonly from: string;
   readonly to: string;
   readonly projects: readonly string[];
@@ -97,7 +95,7 @@ interface MutableApprovalRound {
 }
 
 /** What one issue adds to each table. */
-interface IssueCensus {
+export interface IssueCensus {
   readonly windowAsks: readonly CensusAsk[];
   /** `windowAsks` without the excluded sessions' asks. */
   readonly asks: readonly CensusAsk[];
@@ -189,12 +187,12 @@ function approvalRound(
  * A human's turn is an answer to the request or a reply in its thread, and, once the round has
  * begun, an answer or a reply on a decision block in the document the request names: a choice a
  * request's thread raises becomes such a block, and the hand-back after its answer responds to
- * that turn. `asks` names each block's document for a reply on a block with no `ask.*` event among
- * `events`. A round with more arrivals than human turns plus one is flagged.
+ * that turn. `asks`, every ask on the issue in every state, names each block's document. A round
+ * with more arrivals than human turns plus one is flagged.
  */
 export function summarizeApprovalRounds(
   events: readonly CensusEvent[],
-  asks: readonly Pick<CensusAsk, "id" | "block_artifact">[] = []
+  asks: readonly Pick<CensusAsk, "id" | "block_artifact">[]
 ): ApprovalRound[] {
   const rounds = new Map<string, MutableApprovalRound>();
   const approvalAskArtifacts = new Map<string, string>();
@@ -204,11 +202,9 @@ export function summarizeApprovalRounds(
   }
 
   for (const [index, { type, payload }] of events.entries()) {
-    if (payload.id === undefined) continue;
-    if (payload.kind === "question" && payload.block_artifact !== undefined) {
-      blockAskArtifacts.set(payload.id, payload.block_artifact.id);
+    if (payload.id === undefined || payload.kind !== "approval" || payload.approval === undefined) {
+      continue;
     }
-    if (payload.kind !== "approval" || payload.approval === undefined) continue;
     const artifactId = payload.approval.artifact_id;
     approvalAskArtifacts.set(payload.id, artifactId);
     const round = approvalRound(rounds, artifactId, index);
@@ -387,12 +383,15 @@ export async function fetchIssueEvents(
 }
 
 async function censusIssue(
-  client: DispatchClient,
+  config: DispatchConfig,
   issue: string,
   options: CensusOptions
 ): Promise<IssueCensus> {
   const fromTime = date(options.from, "from");
   const toTime = date(options.to, "to");
+  // A client's deadline (DISPATCH_TOOL_DEADLINE_MS) runs from its construction, so each issue's
+  // reads get one of their own, never what is left of the whole run's.
+  const client = new DispatchClient(config.url, config.token);
   const issueAsks = await client.listIssueAsks(issue);
   const windowAsks = filterAsksInWindow(issueAsks, options.from, options.to);
   const asks = excludeSessionAsks(windowAsks, options.excludedSessionIds);
@@ -419,6 +418,28 @@ async function censusIssue(
   };
 }
 
+/**
+ * Reads every issue's census, `ISSUE_CONCURRENCY` at a time, in the order given. Each issue starts
+ * its client's deadline when its turn comes, so a run of any length reads every issue whose own
+ * reads fit in one deadline; issues all started at once would share one in effect.
+ */
+export async function censusIssues(
+  config: DispatchConfig,
+  issues: readonly string[],
+  options: CensusOptions
+): Promise<IssueCensus[]> {
+  const census: IssueCensus[] = [];
+  let next = 0;
+  const reader = async (): Promise<void> => {
+    while (next < issues.length) {
+      const index = next++;
+      census[index] = await censusIssue(config, issues[index], options);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(ISSUE_CONCURRENCY, issues.length) }, reader));
+  return census;
+}
+
 async function run(options: CensusOptions): Promise<void> {
   const config = activeDispatchConfig(process.env);
   if (config === null) {
@@ -426,12 +447,13 @@ async function run(options: CensusOptions): Promise<void> {
       "Dispatch is not configured: set DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or enable dispatch in ~/.config/opencode/envoy.json"
     );
   }
-  const client = new DispatchClient(config.url, config.token);
   const codes =
     options.codesPath === undefined ? {} : parseCodes(await readFile(options.codesPath, "utf8"));
   // Without limit or offset the issues route answers every matching issue in one array, so this
-  // read is deliberately unpaged. Every event bumps an issue's updated_at, so the list holds every
-  // issue with activity in the window.
+  // read is deliberately unpaged and goes around DispatchClient, whose `listIssuePage` pages by
+  // offset (over a list that changes as it is read, which can skip or repeat an issue) and refuses
+  // a bare array. Every event bumps an issue's updated_at, so the list holds every issue with
+  // activity in the window.
   const projectIssues = await Promise.all(
     options.projects.map((project) =>
       get<Pick<Issue, "key">[]>(
@@ -440,10 +462,11 @@ async function run(options: CensusOptions): Promise<void> {
       )
     )
   );
-  // Each issue is read concurrently; the results keep project and issue order, which the approval
-  // rounds table prints in.
-  const census = await Promise.all(
-    projectIssues.flat().map((issue) => censusIssue(client, issue.key, options))
+  // The results keep project and issue order, which the approval rounds table prints in.
+  const census = await censusIssues(
+    config,
+    projectIssues.flat().map((issue) => issue.key),
+    options
   );
   const issueRows = census.flatMap((issue) =>
     issue.issueRow === undefined ? [] : [issue.issueRow]

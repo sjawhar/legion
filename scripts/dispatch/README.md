@@ -4,8 +4,10 @@
 
 `ask-census.ts` reproduces the question and approval-request counting used for LEGION-470. It
 reads every issue updated since the window opened and each issue's asks, then every page of the
-events of each issue that carries an approval ask, whenever that ask was opened. Each issue is
-read concurrently.
+events of each issue that carries an approval ask, whenever that ask was opened. Eight issues are
+read at a time, each through its own Dispatch client, so each issue's reads get the client's
+60-second deadline (`DISPATCH_TOOL_DEADLINE_MS`) to themselves and a run may take as long as it
+needs.
 
 ```bash
 bun scripts/dispatch/ask-census.ts \

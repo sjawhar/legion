@@ -8,14 +8,16 @@ import fixtureJson from "../__fixtures__/ask-census.json";
 import type { CensusAsk, CensusEvent } from "../ask-census.ts";
 
 /** The recorded asks and events of the three approval rounds LEGION-470 measured, from before
- * #1671 (when an approval request began following its document's versions), each event reduced to
- * the fields the census reads: the approval asks' events, and the in-window events of the decision
- * blocks in each round's document. They are Dispatch's JSON, whose literal fields a JSON import
- * widens to `string`. */
+ * #1671 (when an approval request began following its document's versions). Each issue's asks are
+ * its approval requests and the decision blocks in each round's document, and its events are the
+ * approval asks' events and the in-window events of those blocks, each reduced to the fields the
+ * census reads. They are Dispatch's JSON, whose literal fields a JSON import widens to `string`. */
 export const recordedRounds = fixtureJson as unknown as {
   readonly issues: ReadonlyArray<{
     readonly key: string;
-    readonly asks: ReadonlyArray<Pick<CensusAsk, "id" | "created_at" | "kind" | "block_id">>;
+    readonly asks: ReadonlyArray<
+      Pick<CensusAsk, "id" | "created_at" | "kind" | "block_id" | "block_artifact">
+    >;
     readonly events: readonly CensusEvent[];
   }>;
 };
@@ -146,9 +148,13 @@ export function handedBack(seq: number, version: number, summary = SUMMARY): App
   };
 }
 
-/** A reply in the request's thread: a human's hands the turn to the agent; a session's, by
- * default, to the human. */
-export function reply(seq: number, author: "human" | "agent"): ApprovalHistoryEvent {
+/** A reply in `ask`'s thread, the approval request's unless named: a human's hands the turn to the
+ * agent; a session's, by default, to the human. */
+export function reply(
+  seq: number,
+  author: "human" | "agent",
+  ask: Pick<Ask, "id" | "question"> = approvalAsk(1, 1)
+): ApprovalHistoryEvent {
   const actor = author === "human" ? human : agent;
   const turn = author === "human" ? "agent" : "human";
   return {
@@ -162,7 +168,7 @@ export function reply(seq: number, author: "human" | "agent"): ApprovalHistoryEv
       body: author === "human" ? "Why nightly?" : "The export runs off-peak.",
       anchor: null,
       reply_to: null,
-      ask_id: ASK,
+      ask_id: ask.id,
       turn,
       resolved: false,
       resolved_by: null,
@@ -173,7 +179,7 @@ export function reply(seq: number, author: "human" | "agent"): ApprovalHistoryEv
       mentions: [],
       deliveries: [],
       artifact_name: "",
-      ask_question: question(1, SUMMARY),
+      ask_question: ask.question,
       ask_state: "open",
       ask_waiting_on: turn,
     },
@@ -211,4 +217,42 @@ export function approved(seq: number, version: number): ApprovalHistoryEvent[] {
       },
     },
   ];
+}
+
+/** The decision block `block` in `artifact` (the request's document unless named), as the ask
+ * Dispatch indexed from it. */
+export function blockAsk(block: string, artifact = ARTIFACT): Ask {
+  return {
+    id: `block-ask-${block}`,
+    issue_key: ISSUE,
+    artifact_id: null,
+    block_id: block,
+    block_artifact: {
+      id: artifact,
+      slug: artifact === ARTIFACT ? "spec" : "notes",
+      primary: artifact === ARTIFACT,
+    },
+    author: agent,
+    kind: "question",
+    question: "Should the export run nightly or hourly?",
+    options: [{ label: "Nightly" }, { label: "Hourly" }],
+    multiple: false,
+    urgency: "high",
+    anchor: null,
+    state: "open",
+    answer: null,
+    opened_event_id: 1,
+    created_at: recordedAt(1),
+    edited_at: null,
+  };
+}
+
+/** The human answers the decision block `block` in the request's document. */
+export function blockAnswered(seq: number, block: string): ApprovalHistoryEvent {
+  const answered = { user: human.id, selected: ["Nightly"], text: null, at: recordedAt(seq) };
+  return {
+    ...recorded(seq, human),
+    type: "ask.answered",
+    payload: { ...blockAsk(block), state: "answered", answer: answered },
+  };
 }

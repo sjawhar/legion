@@ -26,6 +26,17 @@
           "created_at": "2026-10-01T17:18:47.673839Z",
           "kind": "approval",
           "block_id": null
+        },
+        {
+          "id": "c5e8abf4-a5f4-45d7-97b2-8d64da3ec74f",
+          "created_at": "2026-10-01T17:32:32.795817Z",
+          "kind": "question",
+          "block_id": "e7bc00de-80d4-4eaf-b1df-964d450aecc5",
+          "block_artifact": {
+            "id": "83feb774-59a9-4a3d-bf6b-ce583ac5aebf",
+            "slug": "spec",
+            "primary": true
+          }
         }
       ],
       "events": [
@@ -200,23 +211,12 @@
           "type": "ask.opened",
           "actor": {
             "kind": "session",
-            "id": "01a0ef85-79c0-7197-9a12-31f588da3406",
-            "origin": {
-              "host": "omp",
-              "machine": "sami-agents",
-              "cwd": "/home/ubuntu/src/legion",
-              "tmux": "dev4:4.7",
-              "pane": "%2246",
-              "session_title": "Clean up orphaned smoke-test processes"
-            }
+            "id": "01a0ef85-79c0-7197-9a12-31f588da3406"
           },
           "created_at": "2026-10-01T17:32:32.795817Z",
           "payload": {
             "id": "c5e8abf4-a5f4-45d7-97b2-8d64da3ec74f",
-            "kind": "question",
-            "block_artifact": {
-              "id": "83feb774-59a9-4a3d-bf6b-ce583ac5aebf"
-            }
+            "kind": "question"
           }
         },
         {
@@ -239,23 +239,12 @@
           "type": "ask.resolved",
           "actor": {
             "kind": "session",
-            "id": "01a0ef85-79c0-7197-9a12-31f588da3406",
-            "origin": {
-              "host": "omp",
-              "machine": "sami-agents",
-              "cwd": "/home/ubuntu/src/legion",
-              "tmux": "dev4:4.7",
-              "pane": "%2246",
-              "session_title": "Clean up orphaned smoke-test processes"
-            }
+            "id": "01a0ef85-79c0-7197-9a12-31f588da3406"
           },
           "created_at": "2026-10-01T17:35:35.927159Z",
           "payload": {
             "id": "c5e8abf4-a5f4-45d7-97b2-8d64da3ec74f",
-            "kind": "question",
-            "block_artifact": {
-              "id": "83feb774-59a9-4a3d-bf6b-ce583ac5aebf"
-            }
+            "kind": "question"
           }
         }
       ]
@@ -280,6 +269,17 @@
           "created_at": "2026-10-01T14:40:20.407605Z",
           "kind": "approval",
           "block_id": null
+        },
+        {
+          "id": "fc0796fe-a3fa-4c45-97e5-36346dff999a",
+          "created_at": "2026-10-01T14:19:13.446065Z",
+          "kind": "question",
+          "block_id": "03f8afb6-f7d8-4bfb-82ef-5002cafbca98",
+          "block_artifact": {
+            "id": "4bd9cfed-2e6e-4d79-83a4-ef99173d088d",
+            "slug": "spec",
+            "primary": true
+          }
         }
       ],
       "events": [
@@ -421,20 +421,12 @@
           "type": "ask.opened",
           "actor": {
             "kind": "session",
-            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4",
-            "origin": {
-              "host": "omp",
-              "machine": "legion-agentc-agentc-418-architect",
-              "cwd": "/legion/workspaces/trajectory-labs-pbc/agent-c/agentc-418"
-            }
+            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4"
           },
           "created_at": "2026-10-01T14:19:13.446065Z",
           "payload": {
             "id": "fc0796fe-a3fa-4c45-97e5-36346dff999a",
-            "kind": "question",
-            "block_artifact": {
-              "id": "4bd9cfed-2e6e-4d79-83a4-ef99173d088d"
-            }
+            "kind": "question"
           }
         },
         {
@@ -457,12 +449,7 @@
           "type": "comment.created",
           "actor": {
             "kind": "session",
-            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4",
-            "origin": {
-              "host": "omp",
-              "machine": "legion-agentc-agentc-418-architect",
-              "cwd": "/legion/workspaces/trajectory-labs-pbc/agent-c/agentc-418"
-            }
+            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4"
           },
           "created_at": "2026-10-01T14:24:13.117585Z",
           "payload": {
@@ -476,20 +463,12 @@
           "type": "ask.edited",
           "actor": {
             "kind": "session",
-            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4",
-            "origin": {
-              "host": "omp",
-              "machine": "legion-agentc-agentc-418-architect",
-              "cwd": "/legion/workspaces/trajectory-labs-pbc/agent-c/agentc-418"
-            }
+            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4"
           },
           "created_at": "2026-10-01T14:24:19.158036Z",
           "payload": {
             "id": "fc0796fe-a3fa-4c45-97e5-36346dff999a",
-            "kind": "question",
-            "block_artifact": {
-              "id": "4bd9cfed-2e6e-4d79-83a4-ef99173d088d"
-            }
+            "kind": "question"
           }
         },
         {
@@ -498,20 +477,12 @@
           "type": "ask.resolved",
           "actor": {
             "kind": "session",
-            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4",
-            "origin": {
-              "host": "omp",
-              "machine": "legion-agentc-agentc-418-architect",
-              "cwd": "/legion/workspaces/trajectory-labs-pbc/agent-c/agentc-418"
-            }
+            "id": "01a0f748-22b7-769a-b54f-51bf4bf607d4"
           },
           "created_at": "2026-10-01T14:34:53.221275Z",
           "payload": {
             "id": "fc0796fe-a3fa-4c45-97e5-36346dff999a",
-            "kind": "question",
-            "block_artifact": {
-              "id": "4bd9cfed-2e6e-4d79-83a4-ef99173d088d"
-            }
+            "kind": "question"
           }
         },
         {
@@ -581,6 +552,17 @@
           "created_at": "2026-10-01T15:11:41.583233Z",
           "kind": "approval",
           "block_id": null
+        },
+        {
+          "id": "815a86d5-7720-44c8-b78b-d5bcd00c40b0",
+          "created_at": "2026-10-01T14:59:04.972461Z",
+          "kind": "question",
+          "block_id": "08a19a57-9589-48fd-9120-dc2f9adfbb24",
+          "block_artifact": {
+            "id": "9ca2a4e4-515e-4dd9-a1a3-2f68b296d9bf",
+            "slug": "spec",
+            "primary": true
+          }
         }
       ],
       "events": [
@@ -590,23 +572,12 @@
           "type": "ask.opened",
           "actor": {
             "kind": "session",
-            "id": "01a0c1c2-0078-76f0-a629-f100206c8692",
-            "origin": {
-              "host": "omp",
-              "machine": "sami-agents",
-              "cwd": "/home/ubuntu/src/legion",
-              "tmux": "dev3:4.5",
-              "pane": "%22",
-              "session_title": "legion po"
-            }
+            "id": "01a0c1c2-0078-76f0-a629-f100206c8692"
           },
           "created_at": "2026-10-01T14:59:04.972461Z",
           "payload": {
             "id": "815a86d5-7720-44c8-b78b-d5bcd00c40b0",
-            "kind": "question",
-            "block_artifact": {
-              "id": "9ca2a4e4-515e-4dd9-a1a3-2f68b296d9bf"
-            }
+            "kind": "question"
           }
         },
         {
@@ -620,10 +591,7 @@
           "created_at": "2026-10-01T14:59:23.990074Z",
           "payload": {
             "id": "815a86d5-7720-44c8-b78b-d5bcd00c40b0",
-            "kind": "question",
-            "block_artifact": {
-              "id": "9ca2a4e4-515e-4dd9-a1a3-2f68b296d9bf"
-            }
+            "kind": "question"
           }
         },
         {
