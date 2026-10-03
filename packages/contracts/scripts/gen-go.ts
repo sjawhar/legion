@@ -3,10 +3,16 @@ import { dirname, resolve } from "node:path";
 
 import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
 import {
+  DEFAULT_ISSUE_PAGE_LIMIT,
   DELIVERY_DUPLICATE_WINDOW_MS,
+  DOCUMENT_SCHEMA_CLOSE_CODE,
+  DOCUMENT_SCHEMA_CLOSE_REASON,
   MAX_BROADCAST_RECIPIENTS,
+  MAX_ISSUE_PAGE_LIMIT,
   RECEIPT_TIMEOUT_CAUSE,
 } from "../src/dispatch-api";
+import { SEARCH_QUERY_HINT, SEARCH_QUERY_MAX } from "../src/dispatch-tools";
+import { MINTED_DEDUPE_KEY_PATTERN } from "../src/envelope";
 import { SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
 type ScalarKind = "string" | "integer" | "boolean";
@@ -75,10 +81,17 @@ func validateWireNonEmpty(fields map[string]json.RawMessage, field, path string)
 const AgentTopicPrefix = "notifications.agent."
 const RoleTopicPrefix = "notifications.role."
 
-// DeliveryDuplicateWindow is how long the notification stream recognises a repeated delivery as
-// a duplicate. Generated from DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts so the stream's
-// configuration and the dashboard's "retrying is safe" promise cannot drift apart.
+// DeliveryDuplicateWindow is how long a repeated delivery is recognised as a duplicate, by the
+// notification stream and by every host that subscribes over core NATS. Generated from
+// DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts, whose doc comment states the retry promise
+// this window bounds, so the stream, the hosts and the dashboard read one number.
 const DeliveryDuplicateWindow = ${DELIVERY_DUPLICATE_WINDOW_MS} * time.Millisecond
+
+// MintedDedupeKeyPattern is the shape of a dedupe key minted once for its message, by the listener
+// or by the shared transport's idempotency key, which DedupeKeyNamesTheUpstreamEvent counts as
+// naming its event. Generated from MINTED_DEDUPE_KEY_PATTERN in packages/contracts, which the
+// hosts' dedupe reads too, so the stream and the hosts answer one question the same way.
+const MintedDedupeKeyPattern = ${JSON.stringify(MINTED_DEDUPE_KEY_PATTERN)}
 
 // ReceiptTimeoutCause is what a delivery attempt records when the listener never answered its
 // send. Generated from RECEIPT_TIMEOUT_CAUSE in packages/contracts so the string Dispatch writes
@@ -89,6 +102,29 @@ const ReceiptTimeoutCause = ${JSON.stringify(RECEIPT_TIMEOUT_CAUSE)}
 // MAX_BROADCAST_RECIPIENTS in packages/contracts so the server's limit and the dashboard's
 // cannot drift apart.
 const MaxBroadcastRecipients = ${MAX_BROADCAST_RECIPIENTS}
+
+// SearchQueryMax is the longest GET /api/v1/search query, in UTF-16 units. Generated from
+// SEARCH_QUERY_MAX in packages/contracts so the server's refusal and the dispatch_search tool's
+// cannot drift apart.
+const SearchQueryMax = ${SEARCH_QUERY_MAX}
+
+// SearchQueryHint follows a refusal over SearchQueryMax, saying what to send instead. Generated
+// from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
+const SearchQueryHint = ${JSON.stringify(SEARCH_QUERY_HINT)}
+
+// MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
+// DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from
+// MAX_ISSUE_PAGE_LIMIT and DEFAULT_ISSUE_PAGE_LIMIT in packages/contracts so the server's bounds
+// and the dispatch_issues tool's cannot drift apart.
+const MaxIssuePageLimit = ${MAX_ISSUE_PAGE_LIMIT}
+const DefaultIssuePageLimit = ${DEFAULT_ISSUE_PAGE_LIMIT}
+
+// DocumentSchemaCloseCode and DocumentSchemaCloseReason close a document websocket whose room is
+// outside the Proof schema, before any sync. Generated from DOCUMENT_SCHEMA_CLOSE_CODE and
+// DOCUMENT_SCHEMA_CLOSE_REASON in packages/contracts so the server's close and the dashboard's
+// reading of it cannot drift apart.
+const DocumentSchemaCloseCode = ${DOCUMENT_SCHEMA_CLOSE_CODE}
+const DocumentSchemaCloseReason = ${JSON.stringify(DOCUMENT_SCHEMA_CLOSE_REASON)}
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

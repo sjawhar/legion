@@ -81,6 +81,12 @@ export interface AgentStreamMessage {
   readonly parts: readonly AgentStreamPart[];
   /** True while the message is still being produced. */
   readonly streaming: boolean;
+  /**
+   * The Dispatch message this user message delivered, set when the session matched the user
+   * message to a person's direct message it sent in as its user's own turn. A turn the session did
+   * not match carries none (`packages/pi-envoy/AGENTS.md` says which).
+   */
+  readonly dispatchMessageId?: string;
 }
 
 export interface AgentStreamToolResult {

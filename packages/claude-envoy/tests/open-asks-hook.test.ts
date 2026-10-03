@@ -3,13 +3,13 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
-const hookEntry = resolve(import.meta.dir, "..", "hooks", "open-asks-hook.ts")
+const hookEntry = resolve(import.meta.dir, "..", "hooks", "session-hook.ts")
 
 async function runHook(
   input: unknown,
   env: Record<string, string>,
 ): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> {
-  const run = Bun.spawn(["bun", hookEntry], {
+  const run = Bun.spawn(["bun", hookEntry, "open-asks"], {
     env: { PATH: process.env["PATH"] ?? "", ...env },
     stdin: new TextEncoder().encode(JSON.stringify(input)),
     stdout: "pipe",

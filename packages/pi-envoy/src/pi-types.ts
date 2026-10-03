@@ -25,10 +25,19 @@ export interface SessionContext {
   readonly sessionManager: {
     readonly getSessionId: () => string;
     /**
-     * Live display title. OMP assigns it after the first turn, so it is often
-     * undefined at session_start.
+     * Live display title: what `pi.setSessionName`, a rename, or OMP's title model last stored.
+     * OMP titles a session (`auto`) from the first message typed at its terminal or given on its
+     * command line; a Legion session sets its own at session_start (`src/legion/session-title.ts`).
      */
     readonly getSessionName?: () => string | undefined;
+    /**
+     * The session header (`ReadonlySessionManager.getHeader`); `titleSource` says who set the
+     * title: `auto` for OMP's title model, `user` for a rename or an extension's `setSessionName`.
+     */
+    readonly getHeader?: () => {
+      readonly title?: string;
+      readonly titleSource?: "auto" | "user";
+    } | null;
     readonly getSessionFile: () => string | undefined;
     /**
      * Force the session's transcript onto disk even before it has an
@@ -39,6 +48,12 @@ export interface SessionContext {
     readonly ensureOnDisk: () => Promise<void>;
     /** Entries of the active branch; non-empty at session_start on resume. */
     readonly getBranch?: () => readonly unknown[];
+    /**
+     * Every entry the session holds, on every branch of its tree, in the order they were written
+     * (the header excluded; `ReadonlySessionManager.getEntries`). An entry `pi.appendEntry` wrote
+     * is in it at once, before the transcript reaches disk.
+     */
+    readonly getEntries: () => readonly unknown[];
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
   /** The host's managed one-shot timer: a throw or rejection is contained, cleared on shutdown. */
@@ -156,6 +171,16 @@ export interface ResourcesDiscoverResult {
   readonly skillPaths?: readonly string[];
 }
 
+/** The messages one provider request is about to carry: a copy made for that request alone. */
+export interface ContextEvent {
+  readonly messages: readonly unknown[];
+}
+
+/** Replacement messages for that one request; Oh My Pi stores none of them in the session. */
+export interface ContextEventResult {
+  readonly messages?: readonly unknown[];
+}
+
 /**
  * Payload and result type of every host event these extensions subscribe to.
  * OMP declares `on` as one overload per event name; mirroring that here keeps a
@@ -182,6 +207,8 @@ export interface PiEventContract {
   readonly message_start: { readonly event: MessageStartEvent; readonly result: undefined };
   readonly message_update: { readonly event: MessageStartEvent; readonly result: undefined };
   readonly message_end: { readonly event: MessageStartEvent; readonly result: undefined };
+  /** Every provider request the session's agent loop sends, each turn and each tool round. */
+  readonly context: { readonly event: ContextEvent; readonly result: ContextEventResult };
   readonly session_stop: {
     readonly event: SessionStopEvent;
     readonly result: SessionStopEventResult;
@@ -311,12 +338,23 @@ export interface PiApi {
     options?: { readonly deliverAs: "steer" | "aside"; readonly triggerTurn: boolean }
   ) => void;
   /**
+   * Sends a user prompt, exactly as Enter at the terminal does: idle, it starts a turn; streaming,
+   * it steers. `deliverAs: "aside"` lands it at the next step without interrupting the running
+   * tool batch. The host queues the send, so the prompt's `message_start` comes after this returns.
+   */
+  readonly sendUserMessage: (content: string, options?: { readonly deliverAs: "aside" }) => void;
+  /**
    * The fork's side turn before Oh My Pi 18.3: the same call as `SessionContext.runEphemeralTurn`,
    * with the question wrapped in the /btw prompt by the host.
    */
   readonly askEphemeral?: SideTurn;
   /** Persist extension state in the session transcript; never sent to the model. */
   readonly appendEntry: <T = unknown>(customType: string, data?: T) => void;
+  /**
+   * Sets the session's display title and persists it in the transcript, so a `--resume` keeps it.
+   * The host stores it with `titleSource: "user"`, which OMP's own title model never overwrites.
+   */
+  readonly setSessionName: (name: string) => Promise<void>;
   readonly getActiveTools: () => readonly string[];
   readonly setActiveTools: (tools: string[]) => Promise<void>;
   readonly on: <Event extends keyof PiEventContract>(

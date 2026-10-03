@@ -6,10 +6,13 @@
 package routes
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html"
@@ -48,14 +51,19 @@ type AppContext struct {
 	AllowedLogins  map[string]struct{}
 	Store          *store.Store
 	AgentToken     string
-	RepoProjects   string
 	DefaultProject string
 	ServerURL      string
+	// InsecureCookie drops the Secure attribute from every cookie the router sets, for browsers
+	// reaching Dispatch over plain http (cmd/dispatch: DISPATCH_INSECURE_COOKIE).
+	InsecureCookie bool
 	HTTPClient     auth.HTTPClient
 	apiDeps        api.Deps
 	app            *auth.AppConfig // nil ⇒ not configured
-	appSource      string          // "env" | "file:<path>" | "" — for diagnostic logs
 	appMu          sync.RWMutex
+	// devSignInHost is the dashboard origin's host:port when the dev sign-in route is mounted,
+	// and empty otherwise. Only BuildAppContext sets it, from DevSignInOrigin, so no caller can
+	// turn the route on without the origin check.
+	devSignInHost string
 }
 
 // AppContextOptions is the explicit-injection bundle main.go assembles
@@ -70,23 +78,30 @@ type AppContextOptions struct {
 	AllowedLogins  map[string]struct{}
 	Store          *store.Store
 	AgentToken     string
-	RepoProjects   string
 	DefaultProject string
 	ServerURL      string
+	InsecureCookie bool
 	EnvoyURL       string
-	Docs           docs.API
-	Events         *events.Broker
-	App            *auth.AppConfig
-	AppSource      string
-	GitHubAPIBase  string
-	OIDC           *oidc.Verifier
-	AgentStream    agentstream.Source
-	Lifetime       context.Context
+	// EnvoyToken is the bearer every Envoy listener call sends (cmd/dispatch: ENVOY_TOKEN); empty
+	// sends none.
+	EnvoyToken    string
+	Docs          docs.API
+	Events        *events.Broker
+	App           *auth.AppConfig
+	GitHubAPIBase string
+	OIDC          *oidc.Verifier
+	AgentStream   agentstream.Source
+	Lifetime      context.Context
 	// AgentSecretsURL/AgentSecretsToken configure the credential-request UI's secrets broker
 	// client; empty URL means the feature is off. See api.DepsInput.
 	AgentSecretsURL   string
 	AgentSecretsToken string
 	TestHooksEnabled  bool
+	// DevSignIn mounts GET /auth/_dev/signin, which issues the session cookie for an allowlisted
+	// login with no GitHub exchange, and makes the whole router refuse a request whose Host is
+	// not the dashboard origin. cmd/dispatch sets it from DISPATCH_DEV_SIGNIN behind its boot
+	// fence; BuildAppContext refuses it for a non-loopback ServerURL.
+	DevSignIn bool
 }
 
 // BuildAppContext bundles the shared HTTP-handler state.
@@ -100,15 +115,26 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	if opts.Identity == nil {
 		return nil, fmt.Errorf("BuildAppContext: Identity required")
 	}
+	var devSignInHost string
+	if opts.DevSignIn {
+		if opts.Sessions == nil {
+			return nil, fmt.Errorf("BuildAppContext: DevSignIn requires a Sessions store")
+		}
+		host, err := DevSignInOrigin(opts.ServerURL)
+		if err != nil {
+			return nil, fmt.Errorf("BuildAppContext: %w", err)
+		}
+		devSignInHost = host
+	}
 	apiDeps, err := api.NewDeps(api.DepsInput{
 		Store:             opts.Store,
 		Identity:          opts.Identity,
 		AllowedLogins:     opts.AllowedLogins,
 		AgentToken:        opts.AgentToken,
-		RepoProjectsRaw:   opts.RepoProjects,
 		DefaultProject:    opts.DefaultProject,
 		ServerURL:         opts.ServerURL,
 		EnvoyURL:          opts.EnvoyURL,
+		EnvoyToken:        opts.EnvoyToken,
 		Docs:              opts.Docs,
 		Events:            opts.Events,
 		App:               opts.App,
@@ -132,12 +158,12 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		AllowedLogins:  opts.AllowedLogins,
 		Store:          opts.Store,
 		AgentToken:     opts.AgentToken,
-		RepoProjects:   opts.RepoProjects,
 		DefaultProject: opts.DefaultProject,
 		ServerURL:      strings.TrimSuffix(opts.ServerURL, "/"),
+		InsecureCookie: opts.InsecureCookie,
+		devSignInHost:  devSignInHost,
 		apiDeps:        apiDeps,
 		app:            opts.App,
-		appSource:      opts.AppSource,
 	}, nil
 }
 
@@ -187,7 +213,11 @@ func New(ctx *AppContext) http.Handler {
 	mux.HandleFunc("/api/github/graphql", r.apiGithubGraphql)
 	api.Register(mux, r.ctx.apiDeps)
 	mux.HandleFunc("/", r.staticHandler)
-	return r.enforceCookieOrigin(mux)
+	if ctx.devSignInHost == "" {
+		return r.enforceCookieOrigin(mux)
+	}
+	mux.HandleFunc("GET /auth/_dev/signin", r.authDevSignIn)
+	return requireHost(ctx.devSignInHost, r.enforceCookieOrigin(mux))
 }
 
 // ───── auth ─────────────────────────────────────────────────────────────────
@@ -213,7 +243,7 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "too many pending sign-in attempts")
 		return
 	}
-	http.SetCookie(w, oauthStateCookieFor(nonce, oauthStateMaxAge))
+	http.SetCookie(w, oauthStateCookieFor(nonce, oauthStateMaxAge, !r.ctx.InsecureCookie))
 	redirectURI := callbackURL(r.ctx.ServerURL, req)
 	target := auth.BuildAuthorizeURL(app.ClientID, redirectURI, state)
 	http.Redirect(w, req, target, http.StatusFound)
@@ -230,7 +260,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	http.SetCookie(w, oauthStateCookieFor("", -1))
+	http.SetCookie(w, oauthStateCookieFor("", -1, !r.ctx.InsecureCookie))
 	pending, ok := r.takePendingState(state)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid or expired state — start over at /auth/start")
@@ -258,18 +288,30 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "persist user")
 		return
 	}
-	generation := int64(0)
-	if r.ctx.Sessions != nil {
-		generation, err = r.ctx.Sessions.EnsureSession(req.Context(), user.Login)
-		if err != nil {
-			slog.Error("dispatch: ensure session generation failed", "login", user.Login, "error", err)
-			writeError(w, http.StatusInternalServerError, "session generation")
-			return
-		}
+	if !r.issueSession(w, req, user.Login) {
+		return
 	}
-	w.Header().Add("Set-Cookie", auth.IssueSessionCookie(user.Login, generation, r.ctx.SigningKey))
 	http.Redirect(w, req, pending.next, http.StatusFound)
 }
+
+// issueSession ensures login's session generation and sets the session cookie a sign-in issues,
+// answering 500 when the generation cannot be recorded. authCallback and authDevSignIn both mint
+// through it, so a local dev sign-in carries exactly the cookie a GitHub sign-in does.
+func (r *router) issueSession(w http.ResponseWriter, req *http.Request, login string) bool {
+	generation := int64(0)
+	if r.ctx.Sessions != nil {
+		var err error
+		generation, err = r.ctx.Sessions.EnsureSession(req.Context(), login)
+		if err != nil {
+			slog.Error("dispatch: ensure session generation failed", "login", login, "error", err)
+			writeError(w, http.StatusInternalServerError, "session generation")
+			return false
+		}
+	}
+	w.Header().Add("Set-Cookie", auth.IssueSessionCookie(login, generation, r.ctx.SigningKey, !r.ctx.InsecureCookie))
+	return true
+}
+
 func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
 	login, ok := r.login(w, req)
 	if !ok {
@@ -285,7 +327,7 @@ func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
 	if err := r.ctx.Users.Remove(req.Context(), login); err != nil {
 		slog.Warn("dispatch: remove user failed", "login", login, "error", err)
 	}
-	w.Header().Set("Set-Cookie", auth.ClearSessionCookie())
+	w.Header().Set("Set-Cookie", auth.ClearSessionCookie(!r.ctx.InsecureCookie))
 	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -317,6 +359,12 @@ func (r *router) apiGithubGraphql(w http.ResponseWriter, req *http.Request) {
 func (r *router) requireUser(w http.ResponseWriter, req *http.Request) *auth.User {
 	login, ok := r.login(w, req)
 	if !ok {
+		return nil
+	}
+	if r.ctx.devSignInHost != "" {
+		// Any loopback client can mint any allowlisted login here, so no stored token pair is
+		// used: one a GitHub sign-in stored, or one in a database another server shares.
+		writeCodeError(w, http.StatusServiceUnavailable, "github token unavailable: a dev sign-in server never uses a stored GitHub token", "GITHUB_TOKEN_UNAVAILABLE")
 		return nil
 	}
 	user, err := r.ctx.Users.Read(req.Context(), login)
@@ -376,8 +424,22 @@ func (r *router) proxyConfigForUser(w http.ResponseWriter, user *auth.User) (*gi
 // that must be answered as one.
 var serverRoots = []string{"/api", "/v1", "/auth", "/ws", "/healthz"}
 
+// assetRoots hold Vite's content-hashed build output: a file there never changes under its name,
+// because a changed file is written under a new one.
+var assetRoots = []string{"/assets"}
+
+const (
+	// pageCacheControl makes a browser revalidate a page before it runs it. A page names the
+	// hashed assets of the build that wrote it, and one kept by heuristic freshness from a
+	// Last-Modified would, after a deploy, ask for assets the server no longer has.
+	pageCacheControl = "no-cache"
+	// assetCacheControl lets a browser keep a hashed asset for a year without asking.
+	assetCacheControl = "public, max-age=31536000, immutable"
+)
+
 func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	requestedPath := req.URL.Path
+	// A rooted clean holds no `..`, so every path joined under the dist directory below stays in it.
 	normalized := filepath.Clean("/" + requestedPath)
 	if isReservedPath(normalized, serverRoots) {
 		api.WriteJSON(w, http.StatusNotFound, map[string]string{
@@ -404,12 +466,17 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	candidate := filepath.Join(r.ctx.WebDistDir, normalized)
-	if !strings.HasPrefix(candidate, r.ctx.WebDistDir) {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
 	info, err := os.Stat(candidate)
 	if err == nil && !info.IsDir() {
+		if filepath.Ext(candidate) == ".html" {
+			servePage(w, req, candidate)
+			return
+		}
+		if isReservedPath(normalized, assetRoots) {
+			// A 304 keeps it, and net/http drops it from an error it answers instead (a file
+			// removed after its stat), so a failure is never kept for an asset's year.
+			w.Header().Set("Cache-Control", assetCacheControl)
+		}
 		serveFile(w, req, candidate)
 		return
 	}
@@ -421,12 +488,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	indexPath := filepath.Join(r.ctx.WebDistDir, "index.html")
-	if _, err := os.Stat(indexPath); err != nil {
-		writeError(w, http.StatusNotFound, "dashboard build not found")
-		return
-	}
-	serveFile(w, req, indexPath)
+	servePage(w, req, filepath.Join(r.ctx.WebDistDir, "index.html"))
 }
 
 // isBrowserRoute reports whether an unmatched, non-static path should fall
@@ -435,7 +497,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 // anything that looks like a missing static asset must stay a real 404
 // instead, so asset clients never get an HTML body where they expected a file.
 func isBrowserRoute(normalized string) bool {
-	if isReservedPath(normalized, []string{"/assets"}) {
+	if isReservedPath(normalized, assetRoots) {
 		return false
 	}
 	// Issue routes carry user-controlled segments (artifact slugs, ask/comment
@@ -457,6 +519,29 @@ func isReservedPath(normalized string, roots []string) bool {
 		}
 	}
 	return false
+}
+
+// servePage serves an HTML page that the browser must revalidate, validated by its content and
+// never by its modification time. The servers behind one load balancer can hold different builds
+// whose pages' times say nothing about which build wrote them (a rollback serves the older file),
+// so a revalidation answered by If-Modified-Since could keep one build's page in front of another
+// build's assets. The page carries an ETag of its bytes and no Last-Modified, so a browser holding
+// another build's page, or one cached before this, gets the page this server has.
+func servePage(w http.ResponseWriter, req *http.Request, path string) {
+	page, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		writeError(w, http.StatusNotFound, "dashboard build not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read failed")
+		return
+	}
+	sum := sha256.Sum256(page)
+	w.Header().Set("Content-Type", contentType(path))
+	w.Header().Set("Cache-Control", pageCacheControl)
+	w.Header().Set("ETag", `"`+hex.EncodeToString(sum[:16])+`"`)
+	http.ServeContent(w, req, path, time.Time{}, bytes.NewReader(page))
 }
 
 func serveFile(w http.ResponseWriter, req *http.Request, path string) {
@@ -573,13 +658,13 @@ func (r *router) takePendingState(token string) (pendingState, bool) {
 	return pending, pending.expiresAt.After(time.Now())
 }
 
-func oauthStateCookieFor(value string, maxAge int) *http.Cookie {
+func oauthStateCookieFor(value string, maxAge int, secure bool) *http.Cookie {
 	return &http.Cookie{
 		Name:     oauthStateCookie,
 		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   os.Getenv("DISPATCH_INSECURE_COOKIE") == "",
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   maxAge,
 	}

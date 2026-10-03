@@ -6,7 +6,7 @@ import {
   dispatchToolSchema,
   dispatchToolSpecs,
   ISSUE_STATUSES,
-  SPEC_SECTIONS,
+  SEARCH_QUERY_MAX,
 } from "./dispatch-tools";
 import { type SchemaApi, type SchemaNode, zodSchemaApi } from "./tool-schema";
 
@@ -52,34 +52,28 @@ function recordingSchemaApi(): {
   };
 }
 
-function dispatchSkillSpecSections() {
+/** Every `## ` heading of the Dispatch skill, the names a tool description may point at. */
+function dispatchSkillHeadings() {
   const repoRoot = resolve(import.meta.dir, "../../..");
   const skill = readFileSync(resolve(repoRoot, "skills/dispatch/SKILL.md"), "utf8");
-  const sectionStart = skill.indexOf("## Writing a spec\n");
-  if (sectionStart === -1) throw new Error("Dispatch skill has no Writing a spec section");
+  return skill.split("\n").flatMap((line) => {
+    const match = line.match(/^## (.+)$/u);
+    return match === null ? [] : [match[1]];
+  });
+}
 
-  const sectionEnd = skill.indexOf("\n## ", sectionStart + 1);
-  return skill
-    .slice(sectionStart, sectionEnd === -1 ? undefined : sectionEnd)
-    .split("\n")
-    .flatMap((line) => {
-      const match = line.match(/^\| \*\*(.+?)\*\* \|/u);
-      return match === null ? [] : [match[1]];
-    });
+function specFor(name: string) {
+  const spec = dispatchToolSpecs.find((candidate) => candidate.name === name);
+  if (!spec) throw new Error(`missing ${name}`);
+  return spec;
 }
 
 const validCalls = {
   dispatch_issue: { project: "DSP", title: "Native workspace" },
   dispatch_issue_update: { issue: "DSP-1", status: "in_progress" },
   dispatch_claim: { issue: "DSP-1" },
-  dispatch_ask: { issue: "DSP-1", question: "Ship this?" },
-  dispatch_edit_ask: {
-    ask: "ask-1",
-    question: "Ship the revised plan?",
-    options: [{ label: "Ship", description: "Approve the revision." }],
-    multiple: false,
-    urgency: "high",
-  },
+  dispatch_ask: specFor("dispatch_ask").example,
+  dispatch_edit_ask: { ...specFor("dispatch_edit_ask").example, multiple: false, urgency: "high" },
   dispatch_resolve_ask: {
     ask: "ask-1",
     kind: "retracted",
@@ -101,7 +95,10 @@ const validCalls = {
     ops: [{ op: "replace", find: "old", with: "new" }],
   },
   dispatch_doc_read: { issue: "DSP-1" },
-  dispatch_request_approval: { issue: "DSP-1" },
+  dispatch_request_approval: {
+    issue: "DSP-1",
+    summary: "A live sync replaces the nightly export.",
+  },
   dispatch_artifact: { issue: "DSP-1", name: "design.pdf", path: "design.pdf" },
   dispatch_read: { issue: "DSP-1" },
   dispatch_search: { query: "astrolabe" },
@@ -112,9 +109,7 @@ const validCalls = {
 } as const;
 
 function schemaFor(name: keyof typeof validCalls) {
-  const spec = dispatchToolSpecs.find((candidate) => candidate.name === name);
-  if (!spec) throw new Error(`missing ${name}`);
-  return dispatchToolSchema(spec, schemaApi);
+  return dispatchToolSchema(specFor(name), schemaApi);
 }
 
 const ISSUE_UPDATE_RULES =
@@ -197,12 +192,66 @@ describe("dispatchToolSpecs", () => {
     );
   });
 
+  test("keeps the question and options contracts on optional ask fields", () => {
+    for (const name of ["dispatch_ask", "dispatch_edit_ask"] as const) {
+      const tool = dispatchToolSpecs.find((candidate) => candidate.name === name);
+      if (tool === undefined) throw new Error(`${name} spec is missing`);
+      const argumentsSchema = tool.arguments(schemaApi) as unknown as {
+        question: z.ZodType;
+        options: z.ZodType;
+      };
+      expect(argumentsSchema.question.description, name).toContain(
+        "never enumerate choices in the question"
+      );
+      expect(argumentsSchema.options.description, name).toContain(
+        "description says what that approach costs"
+      );
+    }
+  });
+
   test("dispatch_search rejects a one-character query and a limit above 50", () => {
     const schema = schemaFor("dispatch_search");
 
     expect(schema.safeParse({ query: "a" }).success).toBe(false);
     expect(schema.safeParse({ query: "ok", limit: 51 }).success).toBe(false);
     expect(schema.safeParse({ query: "ok", limit: 50, project: "LEGION" }).success).toBe(true);
+  });
+
+  test("dispatch_search accepts a query at the limit and refuses one character over by name", () => {
+    const schema = schemaFor("dispatch_search");
+
+    expect(schema.safeParse({ query: "x".repeat(SEARCH_QUERY_MAX) }).success).toBe(true);
+    const over = schema.safeParse({ query: "x".repeat(SEARCH_QUERY_MAX + 1) });
+    expect(over.error?.issues.map((issue) => issue.message)).toEqual([
+      `is 1 characters over the ${SEARCH_QUERY_MAX}-character limit (${SEARCH_QUERY_MAX + 1}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage`,
+    ]);
+  });
+
+  test("dispatch_search takes a project key or none, and refuses anything else by name", () => {
+    const schema = schemaFor("dispatch_search");
+
+    // The key's length limits, and anchors that hold at the ends of the whole value rather than
+    // of a line, are what keep the search URL short ("Search limits" in
+    // packages/contracts/AGENTS.md), and this copy of the pattern changes without a migration.
+    for (const project of [undefined, "", "AB", "K8S", "LEGION", "LEGSMOKE", "ABCDEFGHIJ"]) {
+      expect(schema.safeParse({ query: "ok", project }).success).toBe(true);
+    }
+    for (const project of [
+      "A",
+      "ABCDEFGHIJK",
+      "1ABC",
+      "legion",
+      " LEGION",
+      "LEGION\n",
+      "LEGION\nX",
+      "LEGION-1",
+      "中".repeat(100),
+    ]) {
+      const refused = schema.safeParse({ query: "ok", project });
+      expect(refused.error?.issues.map((issue) => issue.message)).toEqual([
+        "project must be a project key such as CORE",
+      ]);
+    }
   });
 
   test("dispatch_open_asks accepts no arguments or a project and rejects unknown selectors", () => {
@@ -419,9 +468,8 @@ describe("dispatchToolSpecs", () => {
     ).toBe(true);
   });
 
-  // Sami, 2026-09-24, answering "may agents set issue priority (P0–P3), or only propose it for
-  // you?" on dispatch://LEGION/artifact/issue-status-conventions-md: "Agents may set". Only
-  // priority was ruled on, so rank stays the board's and is still refused.
+  // Agents may set an issue's priority (dispatch://LEGION/artifact/issue-status-conventions-md);
+  // rank stays the board's and is refused.
   test("dispatch_issue_update takes the four priority buckets and null, but never rank", () => {
     const schema = schemaFor("dispatch_issue_update");
 
@@ -496,9 +544,13 @@ describe("dispatchToolSpecs", () => {
     const schema = schemaFor("dispatch_edit_ask");
 
     expect(schema.safeParse({ ask: "ask-1" }).success).toBe(false);
-    expect(schema.safeParse({ ask: "ask-1", question: "Ship the revised plan?" }).success).toBe(
-      true
-    );
+    expect(
+      schema.safeParse({
+        ask: "ask-1",
+        question:
+          "The revised plan changes the release, but it has not been reviewed. How should we proceed?",
+      }).success
+    ).toBe(true);
   });
 
   test("accepts a comment turn only alongside reply_to_ask", () => {
@@ -529,10 +581,10 @@ describe("dispatchToolSpecs", () => {
     ).toBe(false);
   });
 
-  // A mistyped `with` (`replace:`) used to be stripped by Zod's default strip mode, so the call
-  // validated with `with` simply absent - which the server reads as the one `with` that deletes
-  // the match. The edit applied, 200, and the quoted prose was gone with nothing to tell the
-  // model. Every key of an op but `op` is optional, so an unknown key is the only signal there is.
+  // A mistyped `with` (`replace:`) stripped by Zod's default strip mode would validate with `with`
+  // simply absent - which the server reads as the one `with` that deletes the match: the edit would
+  // apply, 200, and the quoted prose would be gone with nothing to tell the model. Every key of an
+  // op but `op` is optional, so an unknown key is the only signal there is.
   test("rejects a document edit op carrying an unknown key rather than stripping it", () => {
     const schema = schemaFor("dispatch_doc_edit");
     const target = { issue: "DSP-1", artifact: "spec" };
@@ -666,7 +718,14 @@ describe("dispatchToolSpecs", () => {
 
   test("accepts exactly one issue or project owner", () => {
     const cases = [
-      ["dispatch_ask", { project: "CORE", artifact: "runbook-md", question: "Publish?" }],
+      [
+        "dispatch_ask",
+        {
+          project: "CORE",
+          artifact: "runbook-md",
+          question: "The runbook is ready for readers. How should we publish it?",
+        },
+      ],
       ["dispatch_comment", { project: "CORE", artifact: "runbook-md", body: "Looks good." }],
       [
         "dispatch_suggest",
@@ -701,7 +760,10 @@ describe("dispatchToolSpecs", () => {
 
   test("requires artifact with project on document tools but not dispatch_artifact", () => {
     const cases = [
-      ["dispatch_ask", { project: "CORE", question: "Publish?" }],
+      [
+        "dispatch_ask",
+        { project: "CORE", question: "The runbook is ready. How should we publish it?" },
+      ],
       ["dispatch_comment", { project: "CORE", body: "Looks good." }],
       ["dispatch_suggest", { project: "CORE", quote: "draft", replace_with: "final" }],
       [
@@ -738,7 +800,7 @@ describe("dispatchToolSpecs", () => {
     expect(
       schemaFor("dispatch_ask").safeParse({
         ref: "dispatch://CORE/artifact/runbook-md",
-        question: "Publish?",
+        question: "The runbook is ready for readers. How should we publish it?",
       }).success
     ).toBe(true);
     expect(
@@ -825,19 +887,33 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({}).success).toBe(false);
     expect(schema.safeParse({ comment: "comment-1", reason: "done" }).success).toBe(false);
   });
-  test("keeps shared spec guidance aligned with the Dispatch skill", () => {
-    const skillSections = dispatchSkillSpecSections();
-    expect(skillSections).toEqual([...SPEC_SECTIONS]);
-    const sectionOrder = SPEC_SECTIONS.join(", ");
+  test("dispatch_request_approval refuses a call with no summary, or an empty one", () => {
+    const schema = schemaFor("dispatch_request_approval");
+    expect(schema.safeParse({ issue: "DSP-1" }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", summary: "" }).success).toBe(false);
+    expect(
+      schema.safeParse({ issue: "DSP-1", summary: "Proposes a live sync in place of the export." })
+        .success
+    ).toBe(true);
+  });
+
+  test("points dispatch_issue's spec and dispatch_doc_edit at a section the Dispatch skill has", () => {
     const issue = dispatchToolSpecs.find((spec) => spec.name === "dispatch_issue");
     const documentEdit = dispatchToolSpecs.find((spec) => spec.name === "dispatch_doc_edit");
     if (!issue || !documentEdit) throw new Error("missing spec-writing tools");
-
     const issueArguments = issue.arguments(schemaApi) as unknown as {
       spec: z.ZodOptional<z.ZodString>;
     };
-    expect(issueArguments.spec.unwrap().description).toContain(sectionOrder);
-    expect(documentEdit.description).toContain(sectionOrder);
+    const headings = dispatchSkillHeadings();
+
+    for (const [tool, description] of [
+      ["dispatch_issue spec", issueArguments.spec.unwrap().description ?? ""],
+      ["dispatch_doc_edit", documentEdit.description],
+    ] as const) {
+      const section = description.match(/the "([^"]+)" section of skill:\/\/dispatch/u)?.[1];
+      if (section === undefined) throw new Error(`${tool} names no section of skill://dispatch`);
+      expect(headings, tool).toContain(section);
+    }
   });
 
   test("dispatch_follow takes a full ask id and follow or unfollow, nothing else", () => {

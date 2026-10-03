@@ -25,7 +25,7 @@ func ReadInTransaction(txn *crdt.Transaction, frag *crdt.YXmlFragment) (*Node, e
 type textDeltaReader func(*crdt.YXmlText) ([]crdt.Delta, error)
 
 func readDocument(frag *crdt.YXmlFragment, readDelta textDeltaReader) (*Node, error) {
-	children, err := readChildren(frag, readDelta)
+	children, err := readChildren(frag, readDelta, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -36,12 +36,12 @@ func readDocument(frag *crdt.YXmlFragment, readDelta textDeltaReader) (*Node, er
 	return doc, nil
 }
 
-func readChildren(frag *crdt.YXmlFragment, readDelta textDeltaReader) ([]*Node, error) {
+func readChildren(frag *crdt.YXmlFragment, readDelta textDeltaReader, depth int) ([]*Node, error) {
 	var out []*Node
 	for _, child := range frag.Children() {
 		switch c := child.(type) {
 		case *crdt.YXmlElement:
-			n, err := readElement(c, readDelta)
+			n, err := readElement(c, readDelta, depth)
 			if err != nil {
 				return nil, err
 			}
@@ -59,12 +59,15 @@ func readChildren(frag *crdt.YXmlFragment, readDelta textDeltaReader) ([]*Node, 
 	return out, nil
 }
 
-func readElement(e *crdt.YXmlElement, readDelta textDeltaReader) (*Node, error) {
+func readElement(e *crdt.YXmlElement, readDelta textDeltaReader, depth int) (*Node, error) {
+	if err := treeDepthError(depth); err != nil {
+		return nil, err
+	}
 	n := &Node{Type: e.NodeName}
 	if attrs := e.GetAttributeValues(); len(attrs) > 0 {
 		n.Attrs = treeAttrs(e.NodeName, attrs)
 	}
-	children, err := readChildren(&e.YXmlFragment, readDelta)
+	children, err := readChildren(&e.YXmlFragment, readDelta, depth+1)
 	if err != nil {
 		return nil, err
 	}

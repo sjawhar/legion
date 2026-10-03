@@ -120,10 +120,7 @@ func InsertTableRows(doc *Node, target Range, markdown string, after bool, budge
 	if err != nil || !supported {
 		return nil, supported, err
 	}
-	rows, err = normalizeTableRows(rows, table.Children[0], width)
-	if err != nil {
-		return nil, true, err
-	}
+	rows = normalizeTableRows(rows, table.Children[0], width)
 
 	out := cloneNode(doc)
 	outTable := nodeAtPath(out, tablePath)
@@ -142,12 +139,12 @@ func InsertTableRows(doc *Node, target Range, markdown string, after bool, budge
 	return out, true, nil
 }
 
-func normalizeTableRows(rows []*Node, header *Node, width int) ([]*Node, error) {
+// normalizeTableRows pads each parsed row to width with cells taking the header's attributes. No
+// row holds more: goldmark cuts every body row at its synthetic header's width, and the parse
+// refuses one holding text past it (markWideRows).
+func normalizeTableRows(rows []*Node, header *Node, width int) []*Node {
 	out := make([]*Node, 0, len(rows))
 	for _, row := range rows {
-		if len(row.Children) > width {
-			return nil, fmt.Errorf("%w: got %d cells, table has %d", ErrTableWidth, len(row.Children), width)
-		}
 		normalized := cloneNode(row)
 		for len(normalized.Children) < width {
 			template := header.Children[len(normalized.Children)]
@@ -161,7 +158,7 @@ func normalizeTableRows(rows []*Node, header *Node, width int) ([]*Node, error) 
 		}
 		out = append(out, normalized)
 	}
-	return out, nil
+	return out
 }
 
 type insertionBoundary struct {
@@ -613,13 +610,15 @@ func afterRange(node *Node, path []int, textblockStart, cut int) (*Node, error) 
 	return out, nil
 }
 
-func emptyDocument(doc *Node) bool {
+// EmptyDocument reports whether doc holds nothing but the one empty paragraph a document with no
+// content holds (Parse of empty markdown, DeleteBlock of its last block).
+func EmptyDocument(doc *Node) bool {
 	return len(doc.Children) == 1 && doc.Children[0].Type == "paragraph" && len(doc.Children[0].Children) == 0
 }
 
 func fitReplacement(parent, with, openingListItem *Node, hasPrefixParagraph bool) ([]*Node, bool) {
 	var source []*Node
-	if !emptyDocument(with) {
+	if !EmptyDocument(with) {
 		source = make([]*Node, 0, len(with.Children))
 		for _, node := range with.Children {
 			source = append(source, cloneNode(node))

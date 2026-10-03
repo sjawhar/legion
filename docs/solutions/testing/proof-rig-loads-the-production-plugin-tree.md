@@ -27,7 +27,7 @@ LEGION-12's release (pi-envoy 1.17.1) was proven on a rig that loaded the Legion
 and failed on the first real worker: the `secretsd` plugin replaces the bash tool and drops the
 `env` field the fix relied on (the mechanism is in
 [omp-tool-call-hook-rewrites-are-model-visible](../envoy/omp-tool-call-hook-rewrites-are-model-visible.md),
-lesson 2). Sami's ruling on 2026-09-13 (AGENTC-79) followed: the agent that builds a change proves
+lesson 2). Sami's ruling on 2026-09-13 followed: the agent that builds a change proves
 it before merge on a production-like surface. LEGION-54 turned that into a rig mode and the mode
 caught two more defects the extension-only rig never would have. This note is the pattern, so the
 next rig author starts from it rather than from the README's default.
@@ -41,12 +41,13 @@ this note adds only what the production mode changed.
 
 `RIG_PLUGINS=production` copies `~/.omp/profiles/legion/plugins` (`package.json`, `bun.lock`,
 `node_modules`, ~240 MB) into the rig profile, deletes the profile's `agent/extensions/` so exactly
-one copy of each extension loads, and then swaps only `node_modules/@sjawhar/pi-legion-envoy`:
-`RIG_LEGION_BUILD=branch` runs the checkout's `bun run build` and copies `dist/envoy.js` and
-`dist/legion.js` over the installed package's `dist/` (the installed `package.json` already names
-those files in `omp.extensions`); `RIG_LEGION_BUILD=<version>` runs `npm pack` and extracts the
-release in place. Everything else in the tree — `secretsd`, `superpowers`, codegraph, knives —
-loads exactly as it does in production, at the pinned versions.
+one copy of each extension loads, and then swaps only `node_modules/@sjawhar/pi-legion-envoy` for a
+tarball extracted in its place, so the rig runs exactly what `npm pack` ships (`dist/` with the
+bundles and `dist/skills`, `agents/`, `package.json`). `RIG_LEGION_BUILD=branch` packs the checkout
+with `scripts/e2e/lib/pack-plugin.sh`, the release's pack steps and the same script the stage
+proofs install through; `RIG_LEGION_BUILD=<version>` runs `npm pack` on the release. Everything else
+in the tree — `secretsd`, `superpowers`, codegraph, knives — loads exactly as it does in production,
+at the pinned versions.
 
 Two consequences worth knowing before the first run:
 
@@ -80,9 +81,10 @@ resolve its *own* `gh` to the shim and hand every child pane a second `worker-bi
 So the rig deliberately taints its launch PATH — this pane's `worker-bin` first, a second
 `/tmp/other-daemon/worker-bin` last — and the worker's `printenv` probe (verdict G) must show the
 rig's `worker-bin` exactly once. The strip that makes this true is one shared function,
-`pathWithoutWorkerBin` in `packages/daemon/src/daemon/worker-bin.ts`, applied at the daemon
-boundary (`resolveDaemonEnvironment`), in `legion gh` before it spawns `gh`, and in the rig's
-`workerEnvironment` — never re-implemented per call site. The general rule for anything a daemon
+`workerbin.FreePath` in `packages/daemon/internal/runtime/workerbin`, applied where the daemon
+resolves the `gh`, `git` and `jj` every pane is told (`resolveTools`, which the rig's
+`daemon-pane.go` calls too), in `legion gh` before it spawns `gh`, and in `legion controller start`
+— never re-implemented per call site. The general rule for anything a daemon
 puts on a pane for life is in
 [config-env-keys-that-panes-also-carry](../daemon/config-env-keys-that-panes-also-carry.md); the
 rig's job is to start from the environment that rule protects against, not from a clean shell.

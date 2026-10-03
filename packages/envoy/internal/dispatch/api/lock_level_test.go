@@ -36,12 +36,12 @@ var (
 // Its reach is the statement as this scan can assemble it: a `for update` spelled in a string
 // literal, or in a chain of literals and package-level constants, `var`s included, resolved to
 // a fixpoint so a constant written from another constant carries the inner text too. That is
-// how every owner-table lock in this module is written, sixteen statements in all - eleven a
+// how every owner-table lock in this module is written, seventeen statements in all - eleven a
 // plain `select ... for no key update`, three a plain `for key share` or `for share` at the
-// weaker levels named above, and two a row shape welded in from constants at the ask reads:
+// weaker levels named above, and three a row shape welded in from constants at the ask reads:
 // api/asks.go's `select `+askRowColumns+askRowFrom+` where a.id = $1 for no key update of a`,
-// whose askRowColumns is docs.AskColumns plus its own columns, and docs/ask_blocks.go's
-// `select `+AskColumns.
+// whose askRowColumns is docs.AskColumns plus its own columns, docs/ask_blocks.go's
+// `select `+AskColumns, and docs/approval_ask.go's `select `+AskColumns+` ... for no key update`.
 //
 // An operand the scan cannot resolve - a call, a runtime value - contributes its own string
 // literals instead, joined by a space and padded at both ends. A clause those literals spell is
@@ -52,8 +52,10 @@ var (
 // keeping such a site off `for update` is a review matter rather than a guarantee this check
 // makes.
 //
-// `for update` elsewhere is untouched: doc_checkpoints, comments, messages, message_deliveries,
-// comment_mentions, comment_deliveries, user_issue_state and architecture_sources all use it.
+// `for update` elsewhere is untouched: doc_checkpoints, comments, message_deliveries,
+// comment_mentions, comment_deliveries, user_issue_state and architecture_sources all use it. A
+// targeted message's own row is taken `for no key update` (message_delivery.go), so the session's
+// reply, whose foreign key takes it `for key share`, never waits on it.
 //
 // The match is statement-scoped and conservative, and it prints the statement rather than naming
 // a table, because which row a statement locks is a property of the whole statement. `for update`

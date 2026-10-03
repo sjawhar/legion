@@ -738,9 +738,9 @@ test("a pasted rendered callout and decision keep attributes, content, and the o
 
 // A copy of an answered decision pasted above it is a new block. The editor keeps a block's id on
 // the block that held it before the paste and mints one for the copy, so the answered ask stays
-// on the original and the copy is indexed as a fresh open ask with the same question. The editor
-// once kept the id on whichever of the two came first, so the copy took the original's ask, its
-// answer with it, and the original came back as a fresh ask.
+// on the original and the copy is indexed as a fresh open ask with the same question. Keeping the
+// id on whichever of the two comes first would hand the copy the original's ask, its answer with
+// it, and bring the original back as a fresh ask.
 test("a copy of an answered decision pasted above it leaves the answer on the original", async ({
   browser,
 }) => {
@@ -819,9 +819,9 @@ test("an ask and a callout pasted together as plain text arrive as written", asy
 
 // A lone typed block pasted as plain text beside a paragraph's text stays a block of its own, on
 // either side of that text: the pasted slice stops at the block, so its content never joins the
-// paragraph the caret is in. It once did: an ask pasted at the end of "End." stored "End.Which
-// one?" and a bare list, one pasted at its start stored "- BEnd." as the ask's last option, and a
-// callout stored "End.Careful." or "Careful.End." inside the callout.
+// paragraph the caret is in. Were it to join, an ask pasted at the end of "End." would store
+// "End.Which one?" and a bare list, one pasted at its start "- BEnd." as the ask's last option, and
+// a callout "End.Careful." or "Careful.End." inside the callout.
 const loneAsk = ':::ask{#d2 urgency="med" multiple="false"}\nWhich one?\n\n- A\n- B\n:::\n';
 const loneAskStored = /:::ask\{#d2 [^}]*\}\nWhich one\?\n\n- A\n- B\n:::\n/.source;
 const loneCallout = ':::callout{#c2 kind="warning" title="Risk"}\nCareful.\n:::\n';
@@ -941,9 +941,9 @@ for (const [target, spec, quote, pasted, stored] of [
 // Where nothing inside the caret's typed block can hold the pasted block, the pasted text joins the
 // text at the caret. A lone callout, a lone ask, a list or a table pasted into an ask's question, as
 // plain text or as HTML, joins the question as text, since an ask holds only its question and one
-// options list. Each once split the ask, and the ask's own options moved to a new ask under an
-// empty question. Text joining a bold question takes the bold only when it is one line, as a
-// one-line paste does anywhere else: a lone callout or a list pasted there once came out bold too.
+// options list. Splitting the ask instead would move its own options to a new ask under an empty
+// question. Text joining a bold question takes the bold only when it is one line, as a one-line
+// paste does anywhere else, so a lone callout or a list pasted there does not come out bold.
 const question = "Which here?";
 // It ends on a letter: after "?" the closing ** would sit between punctuation and a letter, where
 // pmdoc writes it but doesn't read it back as closing the bold.

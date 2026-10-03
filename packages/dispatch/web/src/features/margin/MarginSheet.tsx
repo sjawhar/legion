@@ -13,6 +13,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import type { ComposerKind } from "../conversation/MentionComposer";
 import {
   COMPACT_VIEWPORT_QUERY,
   PHONE_VIEWPORT_QUERY,
@@ -36,6 +37,7 @@ export interface MarginSheetModel {
     closeComposer: () => void;
     onAction: (id: string, action: MarginItemAction) => void;
     onComposerSaved: () => void;
+    onComposerKindChange: (kind: ComposerKind) => string | undefined;
     onEdit: (id: string, body: string) => Promise<unknown>;
     onRetryAction: () => void;
     onUnpin: (eventId: number) => void;
@@ -312,6 +314,7 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
                 onAction={actions.onAction}
                 onCloseComposer={actions.closeComposer}
                 onComposerSaved={actions.onComposerSaved}
+                onComposerKindChange={actions.onComposerKindChange}
                 onEdit={actions.onEdit}
                 onRetryAction={actions.onRetryAction}
                 onRetryAnsweredAsk={actions.onRetryAnsweredAsk}

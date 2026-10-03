@@ -9,7 +9,9 @@
 #                            production -> a copy of the real `legion` profile's plugin tree
 #                                          (secretsd included) with only the Legion plugin swapped
 #        RIG_LEGION_BUILD    branch (default) | a released version such as 1.17.1 — which Legion
-#                            plugin build production mode installs
+#                            plugin build production mode installs: branch packs the checkout
+#                            (scripts/e2e/lib/pack-plugin.sh), a version is `npm pack`ed from the
+#                            registry; either tarball is extracted in the installed plugin's place
 #        RIG_REFRESH_PLUGINS 1 -> re-copy the plugin tree even if the rig profile already has one
 #        RIG_PROFILE         rig profile name (l12rig); RIG_SOURCE_PROFILE the copied one (legion)
 # prints: RIG=<rig dir> RIG_PLUGINS=<mode> RIG_LEGION_BUILD=<build> on success
@@ -66,21 +68,29 @@ if [ "$PLUGINS_MODE" = production ]; then
     echo "the copied plugin tree has no @sjawhar/pi-legion-envoy: $PKG" >&2
     exit 2
   }
-  # Swap only the Legion plugin.
+  # Swap only the Legion plugin, for a tarball extracted in its place: what `npm pack` ships
+  # (dist/ with the bundles and dist/skills, agents/, package.json), nothing kept from the
+  # installed release. The rest of the copied tree stays, secretsd and the other plugins included;
+  # the Legion package needs none of it, since its bundles inline every dependency except the
+  # @oh-my-pi/* packages Oh My Pi itself provides.
+  rm -rf "$RIG/pkgs"
+  mkdir -p "$RIG/pkgs"
   if [ "$LEGION_BUILD" = branch ]; then
-    # The checkout's build over the installed dist/. The installed package.json stays: its
-    # omp.extensions already names dist/envoy.js and dist/legion.js.
-    (cd "$SRC/packages/pi-envoy" && bun run build >/dev/null)
-    cp "$SRC/packages/pi-envoy/dist/envoy.js" "$SRC/packages/pi-envoy/dist/legion.js" "$PKG/dist/"
+    # The checkout's own plugin, packed by the one pack step the live proofs use, as the release
+    # packs it.
+    test -f "$SRC/scripts/e2e/lib/pack-plugin.sh" || {
+      echo "the checkout has no scripts/e2e/lib/pack-plugin.sh to pack its plugin with: $SRC" >&2
+      exit 2
+    }
+    TARBALL=$(bash "$SRC/scripts/e2e/lib/pack-plugin.sh" "$RIG/pkgs")
     BUILD_COMMIT=$(jj -R "$SRC" log -r @ --no-graph -T commit_id 2>/dev/null || echo unknown)
   else
     # A released build, exactly as `bun add @sjawhar/pi-legion-envoy@<version>` would install it.
-    mkdir -p "$RIG/pkgs"
-    TARBALL=$(cd "$RIG/pkgs" && npm pack "@sjawhar/pi-legion-envoy@$LEGION_BUILD" --silent)
-    rm -rf "$PKG"
-    mkdir -p "$PKG"
-    tar -xzf "$RIG/pkgs/$TARBALL" --strip-components=1 -C "$PKG"
+    TARBALL="$RIG/pkgs/$(cd "$RIG/pkgs" && npm pack "@sjawhar/pi-legion-envoy@$LEGION_BUILD" --silent)"
   fi
+  rm -rf "$PKG"
+  mkdir -p "$PKG"
+  tar -xzf "$TARBALL" --strip-components=1 -C "$PKG"
 else
   # No plugins directory, so exactly one copy of each extension loads: the checkout's, symlinked.
   rm -rf "$PROFILE_DIR/plugins"
@@ -90,24 +100,22 @@ else
 fi
 
 # Scratch state directory: what the daemon's `state_dir` holds for a pane.
-mkdir -p "$RIG/state/bin" "$RIG/state/secrets" "$RIG/state/gh" "$RIG/ws"
+mkdir -p "$RIG/state/secrets" "$RIG/state/gh" "$RIG/ws"
 chmod 0700 "$RIG/state/secrets"
 printf 'rig-boot\n' > "$RIG/state/secrets/boot"
 chmod 0600 "$RIG/state/secrets/boot"
 
-# The `gh` shim, installed the way the daemon installs it at startup. A checkout without the
-# module (main before LEGION-54) gets none here: its 1.17.x extensions wrote the shim themselves.
-if test -f "$SRC/packages/daemon/src/daemon/worker-bin.ts"; then
-  bun "$SRC/packages/daemon/src/daemon/worker-bin.ts" "$RIG/state" >/dev/null
-fi
+# The checkout's own Go `legion`, built beside the state directory as the daemon's own binary is.
+test -f "$SRC/packages/daemon/cmd/legion/main.go" || {
+  echo "the checkout has no Go legion to build (packages/daemon/cmd/legion): $SRC" >&2
+  exit 2
+}
+(cd "$SRC/packages/daemon" && go build -o "$RIG/legion" ./cmd/legion)
 
-# The checkout's own `legion` command-line tool, the way `<state_dir>/bin/legion` re-execs the
-# daemon's runtime in production.
-cat > "$RIG/state/bin/legion" <<EOF
-#!/bin/sh
-exec "$(command -v bun)" "$SRC/packages/daemon/src/cli/index.ts" "\$@"
-EOF
-chmod 0755 "$RIG/state/bin/legion"
+# worker-bin/gh and bin/legion, installed by the daemon's own boot step (workerbin.Install, run
+# through daemon-pane.ts): the `gh` shim drops its own directory from PATH and execs `legion gh`,
+# and the launcher execs the daemon's binary, here the one just built.
+WORKER_BIN=$(bun "$SRC/packages/pi-envoy/scripts/grant-rig/daemon-pane.ts" "$SRC/packages/daemon" install "$RIG/state" "$RIG/legion")
 
 # Appends what the calling shell command actually ran under, so the worker prompt never has to
 # name the credential: the grant file's contents and mode (file delivery), then the plain
@@ -131,9 +139,10 @@ if ! test -d "$RIG/ws/.jj"; then
   jj git init "$RIG/ws" >/dev/null
 fi
 
-# What this rig runs, for report.json.
+# What this rig runs, for report.json, and the gh shim's directory, which verdict G expects first
+# on the pane's PATH.
 cat > "$RIG/rig-mode.json" <<EOF
-{"plugins":"$PLUGINS_MODE","legionBuild":"$LEGION_BUILD","commit":"$BUILD_COMMIT","checkout":"$SRC"}
+{"plugins":"$PLUGINS_MODE","legionBuild":"$LEGION_BUILD","commit":"$BUILD_COMMIT","checkout":"$SRC","workerBin":"$WORKER_BIN"}
 EOF
 
 : > "$RIG/standin.log"

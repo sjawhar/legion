@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"path"
 	"strconv"
@@ -21,9 +24,13 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
-const maxArtifactBlobSize = 25 << 20
+const (
+	maxArtifactBlobSize      = 25 << 20
+	maxDocumentMarkdownBytes = int(maxJSONRequestBytes) // A Markdown document; maxJSONRequestBytes bounds an issue's spec and every edit the same way (LEGION-465).
+)
 
 func (s *server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
@@ -115,12 +122,32 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 		writeError(w, "INVALID_ARTIFACT", http.StatusBadRequest, "invalid artifact content type")
 		return
 	}
-	s.storeArtifact(w, r, input, actor, artifactKind(mediaType), target)
+	kind := artifactKind(mediaType)
+	if kind == "doc" && len(input.content) > maxDocumentMarkdownBytes {
+		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "a markdown document is at most 1 MiB; a larger file is stored as a binary artifact under another content type")
+		return
+	}
+	// A markdown document is stored as text. Its inline content was read as a JSON string, which
+	// holds no byte that is not UTF-8 and was read for U+0000, so only a multipart file reaches here
+	// holding either. Any other file is stored as bytes, beside its part's Content-Type as text; the
+	// document path stores no part header.
+	if kind == "doc" && !text.StorableBytes(input.content) {
+		s.writeHandlerError(w, unstorableText("file", string(input.content)))
+		return
+	}
+	if kind != "doc" {
+		if refusal := unstorableText("file Content-Type", input.contentType); refusal != nil {
+			s.writeHandlerError(w, refusal)
+			return
+		}
+	}
+	s.storeArtifact(w, r, input, actor, kind, target)
 }
 
 func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (artifactUploadInput, bool) {
 	var body jsonArtifactUpload
-	decoder := json.NewDecoder(r.Body)
+	var read bytes.Buffer
+	decoder := json.NewDecoder(io.TeeReader(r.Body, &read))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&body); err != nil {
 		var maxBytesError *http.MaxBytesError
@@ -133,6 +160,10 @@ func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (art
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		writeError(w, "INVALID_JSON", http.StatusBadRequest, "request body must contain one JSON value")
+		return artifactUploadInput{}, false
+	}
+	if refusal := unstorableJSON("", read.Bytes()); refusal != nil {
+		s.writeHandlerError(w, refusal)
 		return artifactUploadInput{}, false
 	}
 	if body.Primary != nil {
@@ -156,8 +187,27 @@ func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (art
 }
 
 func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request) (artifactUploadInput, bool) {
+	// Only the size limits are 413: the body past maxArtifactBlobSize and a megabyte of fields
+	// (uploadArtifactFor's MaxBytesReader), or fields past what the parser holds in memory. A file
+	// the server cannot spool to its temporary directory is the server's failure, 500. Any other
+	// refusal is a body the parser cannot read, answered with its reason.
 	if err := r.ParseMultipartForm(1 << 20); err != nil {
-		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+		var tooLarge *http.MaxBytesError
+		var spool *fs.PathError
+		switch {
+		case errors.As(err, &tooLarge):
+			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+		case errors.Is(err, multipart.ErrMessageTooLarge):
+			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "the upload's form fields are too large to read")
+		case errors.As(err, &spool):
+			s.writeHandlerError(w, fmt.Errorf("spool multipart upload: %w", err))
+		default:
+			writeError(w, "ARTIFACT_INPUT", http.StatusBadRequest, "invalid multipart body: "+err.Error())
+		}
+		return artifactUploadInput{}, false
+	}
+	if refusal := unstorableForm(r.MultipartForm.Value); refusal != nil {
+		s.writeHandlerError(w, refusal)
 		return artifactUploadInput{}, false
 	}
 	var supplied *model.Actor
@@ -165,6 +215,10 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 		var actor model.Actor
 		if err := json.Unmarshal([]byte(raw), &actor); err != nil {
 			writeError(w, "INVALID_JSON", http.StatusBadRequest, "invalid multipart actor")
+			return artifactUploadInput{}, false
+		}
+		if refusal := unstorableJSON("actor", []byte(raw)); refusal != nil {
+			s.writeHandlerError(w, refusal)
 			return artifactUploadInput{}, false
 		}
 		supplied = &actor
@@ -283,8 +337,8 @@ func (s *server) storeArtifact(
 	// has not locked it: the issue branch above locks its issue, but this one only read its
 	// project. Every writer that takes the owner row at all takes it before the room lock -
 	// the durable writers never take it - and the event this upload appends takes it after the
-	// document write has taken the room. Without this line the upload ran room -> owner against
-	// a settlement's owner -> room, and Postgres broke the cycle with a 500.
+	// document write has taken the room. Without this line the upload would run room -> owner
+	// against a settlement's owner -> room, and Postgres would break the cycle with a 500.
 	if target.IssueKey == nil && !created {
 		if err := s.requireOpenOwner(r.Context(), tx, ownerForArtifact(artifact)); err != nil {
 			s.writeHandlerError(w, err)
@@ -314,6 +368,7 @@ func (s *server) storeArtifact(
 	defer ledger.Discard()
 	var documentMarkdown string
 	var documentChanges model.ReferenceChanges
+	var movedEvents []model.Event
 	if kind == "doc" {
 		if created {
 			documentMarkdown, err = s.deps.Docs.SeedText(documentCtx, artifact.ID, string(input.content), actor)
@@ -359,6 +414,15 @@ func (s *server) storeArtifact(
 	}
 	var diff *string
 	if !created && kind == "doc" {
+		// This route writes its version itself rather than through the document service, so its
+		// open approval request follows that version just as every other version write does.
+		movedEvents, err = docs.MoveApprovalAsk(
+			r.Context(), tx, s.deps.Events, artifact.ID, version, s.deps.ServerURL,
+		)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		diff, err = s.namedVersionDiff(r.Context(), tx, artifact.ID, version)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -401,19 +465,19 @@ func (s *server) storeArtifact(
 		// document's ask blocks are indexed and its block ids repaired.
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publish(event)
-	var decisionBlocks *int
+	s.publish(append(movedEvents, event)...)
+	var blocks *documentBlocks
 	if kind == "doc" {
-		decisionBlocks = countAskBlocks(documentMarkdown)
+		blocks = readDocumentBlocks(documentMarkdown)
 	}
 	if advice != nil {
-		advice.DecisionBlocks = decisionBlocks
+		advice.documentBlocks = blocks
 	}
 	responsePayload := map[string]any{"artifact": artifact, "version": version}
 	if target.IssueKey != nil {
 		WriteJSON(w, http.StatusCreated, withAdvice(responsePayload, advice))
-	} else if decisionBlocks != nil {
-		WriteJSON(w, http.StatusCreated, withDecisionBlockAdvice(responsePayload, *decisionBlocks))
+	} else if blocks != nil {
+		WriteJSON(w, http.StatusCreated, withDocumentBlockAdvice(responsePayload, blocks))
 	} else {
 		WriteJSON(w, http.StatusCreated, responsePayload)
 	}
@@ -497,6 +561,27 @@ func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
 		blocks[index].References = counts
 	}
 	WriteJSON(w, http.StatusOK, blocks)
+}
+
+func (s *server) getArtifactBlockPath(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	path, err := s.deps.Docs.BlockPath(r.Context(), artifact.ID, r.PathValue("block_id"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, path)
 }
 
 // blockReferences counts the comments and asks anchored directly to each block.
@@ -584,6 +669,32 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(content)
 }
 
+// commitArtifactVersionEvent appends the artifact.version event of a version the transaction wrote
+// and stamps the document's new mention edges with it (refs.Stamp), after the append so stamping
+// never touches sequence allocation.
+func (s *server) commitArtifactVersionEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	eventOwner owner,
+	actor model.Actor,
+	artifactID, name string,
+	written docs.VersionResult,
+	diff *string,
+) (model.Event, error) {
+	event, err := s.appendEvent(ctx, tx, eventOwner.event(
+		"artifact.version",
+		actor,
+		docs.ArtifactVersionEventPayload(artifactID, name, written.Version, diff, written.Changes),
+	))
+	if err != nil {
+		return model.Event{}, err
+	}
+	if err := refs.Stamp(ctx, tx, "artifact", artifactID, event.ID); err != nil {
+		return model.Event{}, err
+	}
+	return event, nil
+}
+
 func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -642,16 +753,8 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, eventOwner.event(
-		"artifact.version",
-		actor,
-		docs.ArtifactVersionEventPayload(artifact.ID, artifact.Name, version, diff, named.Changes),
-	))
+	event, err := s.commitArtifactVersionEvent(r.Context(), tx, eventOwner, actor, artifact.ID, artifact.Name, named, diff)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := refs.Stamp(r.Context(), tx, "artifact", artifact.ID, event.ID); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -719,8 +822,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	var written *docs.VersionResult
 	var published []model.Event
-	// A batch that left the document as it was names no version, however deliberate its summary:
-	// AGENTC-193 grew seven versions, five of them byte-identical, from edits that changed nothing.
+	// A batch that left the document as it was names no version, however deliberate its summary,
+	// so edits that change nothing never pile up byte-identical versions.
 	if edit.Changed {
 		summary := strings.TrimSpace(input.Summary)
 		if summary != "" {
@@ -749,16 +852,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			event, err := s.appendEvent(r.Context(), tx, eventOwner.event(
-				"artifact.version",
-				actor,
-				docs.ArtifactVersionEventPayload(artifact.ID, artifact.Name, written.Version, diff, written.Changes),
-			))
+			event, err := s.commitArtifactVersionEvent(r.Context(), tx, eventOwner, actor, artifact.ID, artifact.Name, *written, diff)
 			if err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-			if err := refs.Stamp(r.Context(), tx, "artifact", artifact.ID, event.ID); err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
@@ -795,8 +890,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		// Which operations the live document did not hold once this write reached it: a
 		// concurrent change that landed after the version was rendered and before the publish is
 		// past undoing, so the edit reports it rather than refusing (LEGION-269). null means the
-		// check reached no verdict - the publish failed and the room is reloading - which is not
-		// the same statement as the empty list.
+		// check reached no verdict - the publish failed and the room is reloading, or the room
+		// holds a tree too deep to read - which is not the same statement as the empty list.
 		"lost_ops": lostOps(ledger, artifact.ID),
 		"token":    edit.Token,
 	}, advice))

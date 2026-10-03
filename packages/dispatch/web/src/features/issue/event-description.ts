@@ -1,4 +1,5 @@
 import type { Event } from "../../api/types";
+import { capabilityLabel } from "../conversation/delivery";
 import { actorLabel, describeAskResolution } from "../refs/actor";
 
 export function eventDescription(event: Event): string {
@@ -25,6 +26,8 @@ export function eventDescription(event: Event): string {
       return `Ask answered: ${event.payload.question}`;
     case "ask.edited":
       return `Ask edited: ${event.payload.question}`;
+    case "ask.handed_back":
+      return `Ask handed back: ${event.payload.question}`;
     case "comment.resolved":
       return "Comment resolved";
     case "comment.reopened":
@@ -35,11 +38,13 @@ export function eventDescription(event: Event): string {
     case "message.answered":
       return event.payload.body;
     case "message.delivery":
-      // A duplicate attempt reached the listener and put nothing on the recipient's subject;
-      // its state is still `sent`, so reporting the state alone would read as a delivery.
+      // A duplicate attempt reached the listener and the stream stored nothing new; its state is
+      // still `sent`, so reporting the state alone would read as a fresh delivery.
       return event.payload.duplicate === true
-        ? `Message already delivered: ${event.payload.delivery}`
-        : `Message ${event.payload.state}: ${event.payload.delivery}`;
+        ? `Message already delivered: ${capabilityLabel(event.payload.delivery)}`
+        : `Message ${event.payload.state}: ${capabilityLabel(event.payload.delivery)}`;
+    case "message.accepted":
+      return "Message taken as the session's own turn";
     case "ask.opened":
       return `Ask opened: ${event.payload.question}`;
     case "ask.anchor_refreshed":
@@ -54,11 +59,10 @@ export function eventDescription(event: Event): string {
         ? "Comment lost its quote"
         : "Comment re-anchored after an edit";
     case "comment.delivery":
-      // Same rule as message.delivery above: a duplicate is still `sent`, so the state alone
-      // would report a delivery the mentioned session never received.
+      // Same rule as message.delivery above.
       return event.payload.duplicate === true
-        ? `Comment already delivered: ${event.payload.delivery}`
-        : `Comment ${event.payload.state}: ${event.payload.delivery}`;
+        ? `Comment already delivered: ${capabilityLabel(event.payload.delivery)}`
+        : `Comment ${event.payload.state}: ${capabilityLabel(event.payload.delivery)}`;
     case "issue.created":
       return "Issue created";
     case "issue.updated":

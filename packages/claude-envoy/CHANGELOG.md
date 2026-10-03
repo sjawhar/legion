@@ -1,5 +1,93 @@
 # Changelog
 
+## [0.6.3]
+
+### Changed
+
+- An approval request carries nothing new (LEGION-475). `dispatch_request_approval`'s `summary`
+  says only what the human is approving, with no commentary and no question; its description, its
+  refusal while a decision block is open, its two result texts and a stale approval's line say to
+  request again only once the human has agreed to every point in the new version. The `dispatch`
+  and `dispatch-first` skills this plugin ships say to brainstorm a design change in its issue's
+  spec rather than in chat.
+
+## [0.6.2]
+
+### Fixed
+
+- A malformed delivery can no longer make Claude Code accept a repeat just because one identity
+  field is empty or otherwise invalid (LEGION-468, #1668). The channel read a frame's `event_id`,
+  `dedupe_key`, `source` and `source_event_id` as one record, so a single invalid field discarded
+  all of them and the frame passed as new. It now ignores only the invalid field and keeps a
+  valid `event_id` or `dedupe_key`, so either still recognises the second copy; when neither is
+  valid, the delivery remains at-least-once.
+
+## [0.6.1]
+
+### Fixed
+
+- A Dispatch Retry no longer reaches a Claude Code session twice. The channel recognised a repeat
+  by its `event_id`, and the listener mints a new one for every send, so a same-mode Retry of a
+  message that had already reached the session arrived as a new event and was notified again, while the
+  dashboard promised "Retry won't deliver it twice". The channel now recognises a repeat by its
+  `dedupe_key`, which a Retry shares with the send before it, through the same
+  `createDeliveryDedupe` the Oh My Pi extension uses, for the 72-hour duplicate window and only for
+  a key that names its event (`dedupeKeyNamesItsEvent` in `@legion/contracts`): every Dispatch key,
+  a webhook key of its delivery id, and a key the listener or the shared transport minted once for
+  its message. Any other key is never dropped, so two distinct events that share one (the MCP
+  bridge's, the Go daemon's outbox row id) both arrive. A second copy of one publish, which a
+  session that follows overlapping topics (a pull request's whole thread and its checks) receives
+  once per subscription, is still recognised by the `event_id` the copies share, whatever its key,
+  so a CI settlement reaches Claude once. A send whose notification failed, or a Dispatch frame
+  the channel answered with an error instead of showing it, is released, so its re-send still
+  arrives; the release undoes only what that frame's own claim recorded, so a frame that merely
+  carries a recorded Dispatch key cannot unclaim it. Keys live in memory, at most 250,000 of them
+  with the oldest forgotten first; a restarted channel server (`claude --resume` included)
+  forgets them.
+
+## [0.6.0]
+
+### Changed
+
+- `dispatch_request_approval` requires `summary`: the proposals in the document's latest version
+  the human hasn't already agreed to, in one to three sentences (LEGION-387). The Inbox shows it
+  after "Approve spec.md (version N)?", and the result text quotes the question the human sees.
+  It needs a Dispatch server that accepts `summary`; an older one refuses the call.
+- `dispatch_request_approval` is refused, with nothing sent, while the document holds an open
+  decision block, and the refusal names each block.
+- `dispatch_doc_edit` is refused, with nothing sent, when a `delete` or `retype` would take a
+  decision block out of the document while its ask is open, even in a batch that inserts it
+  again; the refusal names `replace`, `move` and, for the session that asked, `dispatch_edit_ask` instead. A whole-document
+  replace through `dispatch_artifact` is not refused, so it can still remove an open block.
+- The `dispatch_issue` and `dispatch_doc_edit` descriptions no longer list spec headings; they
+  point at the dispatch skill's "Writing a spec", which describes a spec as the design
+  conversation: the problem and its evidence, each open question a decision block at the end of
+  the section that discusses it, and approval requested only once those are settled.
+- `dispatch_search` refuses a `query` over 1,000 characters (LEGION-386) and a `project` that is
+  not a project key such as CORE before any request, naming the rule. Both ride in the search URL,
+  which the load balancer in front of production Dispatch answers with a bare HTML `414` when it
+  is too long, so this refusal is what stops a pasted passage from becoming that error; a
+  lowercased key, which used to come back as no results, is now refused by name.
+
+## [0.5.0]
+
+### Added
+
+- With Dispatch configured, every Claude Code session and subagent carries the `dispatch-first`
+  skill (LEGION-386): the hook command puts it into the model's context as `additionalContext` on
+  every `SessionStart` (startup, resume, clear, compact, fork) and on every `SubagentStart`, each a
+  hook of its own so the open-asks summary cannot push it past Claude Code's 10,000-character hook
+  limit. On a resume or fork Claude Code adds it only when the transcript does not already hold the
+  same text, so a session opened on 0.4.0 gets it when it is resumed on 0.5.0, and one that started
+  with it keeps one copy. The plugin ships the skill as a third symlink, `skills/dispatch-first`,
+  and the hook reads it from `${CLAUDE_PLUGIN_ROOT}` at run time; an install without it fails the
+  hook naming the file.
+
+### Changed
+
+- The two hook commands are one bundle, `dist/session-hook.js` (`hooks/session-hook.ts`), whose
+  argument picks the mode: `open-asks` or `dispatch-first`. `dist/open-asks-hook.js` is gone.
+
 ## [0.4.0]
 
 ### Added

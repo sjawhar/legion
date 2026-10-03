@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import type { Artifact } from "../web/src/api/types";
 
 import {
   createComment,
@@ -34,7 +35,7 @@ test("a spec's approval is a human review pinned to its version: requested by th
   const artifactID = issue.primary_artifact_id;
 
   // The agent asks for approval; the Inbox shows a fixed-option approval ask.
-  const requested = await requestApproval(artifactID, session);
+  const requested = await requestApproval(artifactID, {}, session);
   expect(requested.version).toBe(1);
   const alice = await asUser(browser, "alice");
   try {
@@ -120,18 +121,336 @@ test("a spec's approval is a human review pinned to its version: requested by th
   }
 });
 
+test("an approval request stays in one Inbox card while its document version moves", async ({
+  browser,
+}) => {
+  await createProject({ key: "FOLLOW", name: "Approval follow" });
+  const issue = await createIssue({
+    project: "FOLLOW",
+    spec: "The plan.",
+    title: "Follow approval",
+  });
+  const artifactID = issue.primary_artifact_id;
+  const requested = await requestApproval(
+    artifactID,
+    { summary: "Caps retries at three attempts." },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${requested.ask.id}`);
+    await expect(
+      page.locator('[data-inbox-section="human"]').getByTestId(`ask-${requested.ask.id}`)
+    ).toBeVisible();
+
+    await editArtifact(
+      artifactID,
+      { ops: [{ op: "replace", find: "The plan.", with: "The revised plan." }] },
+      session
+    );
+    let movedArtifact: Artifact | undefined;
+    await expect
+      .poll(async () => {
+        movedArtifact = await getArtifact(artifactID, { login: "alice" });
+        return movedArtifact.versions.length;
+      })
+      .toBeGreaterThan(1);
+    if (movedArtifact === undefined) throw new Error("the moved artifact was not read");
+    const movedVersion = Math.max(...movedArtifact.versions.map((version) => version.number));
+
+    await page.reload();
+    await expect(
+      page.locator('[data-inbox-section="agent"]').getByTestId(`ask-${requested.ask.id}`)
+    ).toBeVisible();
+    await expect(card).toContainText(
+      `Approve spec.md (version ${movedVersion})? Caps retries at three attempts.`
+    );
+    await page.goto(`/issues/${issue.key}`);
+    await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on agents (1)");
+
+    const handedBack = await requestApproval(
+      artifactID,
+      { summary: "Adds the rollback budget." },
+      session
+    );
+    expect(handedBack.ask.id).toBe(requested.ask.id);
+    await page.goto("/");
+    await expect(
+      page.locator('[data-inbox-section="human"]').getByTestId(`ask-${requested.ask.id}`)
+    ).toBeVisible();
+    await expect(card).toContainText(
+      `Approve spec.md (version ${movedVersion})? Adds the rollback budget.`
+    );
+    await card.getByRole("radio", { name: /^Approve/ }).check();
+    await card.getByRole("button", { name: "Answer" }).click();
+    await expect(card).toHaveCount(0);
+    await expect
+      .poll(async () => (await getArtifact(artifactID, { login: "alice" })).approval)
+      .toMatchObject({ state: "approved", version: movedVersion, ask_id: requested.ask.id });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a human comment, revision, and hand-back return an approval card to Waiting on you", async ({
+  browser,
+}) => {
+  await createProject({ key: "TURN", name: "Approval turn" });
+  const issue = await createIssue({
+    project: "TURN",
+    spec: "The plan.",
+    title: "Hand-back turn",
+  });
+  const requested = await requestApproval(
+    issue.primary_artifact_id,
+    { summary: "Names the initial proposal." },
+    session
+  );
+  await createComment(
+    issue.key,
+    { ask_id: requested.ask.id, body: "Please clarify the rollout." },
+    { login: "alice" }
+  );
+  await editArtifact(
+    issue.primary_artifact_id,
+    { ops: [{ op: "replace", find: "The plan.", with: "The revised plan." }] },
+    session
+  );
+  await requestApproval(issue.primary_artifact_id, { summary: "Clarifies the rollout." }, session);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    await expect(
+      page.locator('[data-inbox-section="human"]').getByTestId(`ask-${requested.ask.id}`)
+    ).toBeVisible();
+    await page.goto(`/issues/${issue.key}`);
+    await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (1)");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an unchanged hand-back after a human comment and a progress note returns the card to Waiting on you", async ({
+  browser,
+}) => {
+  await createProject({ key: "SAME", name: "Unchanged hand-back" });
+  const issue = await createIssue({
+    project: "SAME",
+    spec: "The plan.",
+    title: "Unchanged hand-back",
+  });
+  const summary = "Names the existing proposal.";
+  const requested = await requestApproval(issue.primary_artifact_id, { summary }, session);
+  await createComment(
+    issue.key,
+    { ask_id: requested.ask.id, body: "Please clarify the rollout." },
+    { login: "alice" }
+  );
+  await createComment(
+    issue.key,
+    { ask_id: requested.ask.id, body: "Checking the rollout.", turn: "agent" },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    await expect(
+      page.locator('[data-inbox-section="agent"]').getByTestId(`ask-${requested.ask.id}`)
+    ).toBeVisible();
+
+    // The same version, question and summary: the hand-back alone changes whose turn it is, and the
+    // open Inbox moves the card on the ask.handed_back event it records, which rewords nothing.
+    const handedBack = await requestApproval(issue.primary_artifact_id, { summary }, session);
+    expect(handedBack.ask.id).toBe(requested.ask.id);
+    const card = page
+      .locator('[data-inbox-section="human"]')
+      .getByTestId(`ask-${requested.ask.id}`);
+    await expect(card).toBeVisible();
+    await expect(card).toContainText(`Approve spec.md (version 1)? ${summary}`);
+    await expect(card).not.toContainText("Edited");
+    const askEvents = (await getIssueEvents(issue.key, { limit: 200 }, { login: "alice" }))
+      .filter((event) => event.type.startsWith("ask."))
+      .map((event) => event.type);
+    expect(askEvents).toEqual(["ask.opened", "ask.handed_back"]);
+    await page.goto(`/issues/${issue.key}`);
+    await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (1)");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a hand-back is an activity line in the issue's Conversation, live and after a reload", async ({
+  browser,
+}) => {
+  await createProject({ key: "LINE", name: "Hand-back line" });
+  const issue = await createIssue({ project: "LINE", spec: "The plan.", title: "Hand-back line" });
+  const requested = await requestApproval(
+    issue.primary_artifact_id,
+    { summary: "Names the existing proposal." },
+    session
+  );
+  await createComment(
+    issue.key,
+    { ask_id: requested.ask.id, body: "Please clarify the rollout." },
+    { login: "alice" }
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    // A cold event stream starts at the server's head, and the client refetches nothing on its first
+    // open, so an event committed before the stream subscribes never arrives live. The server
+    // subscribes before it answers the stream's headers (streamEvents, api/events.go), so once the
+    // response arrives the hand-back below reaches this tab.
+    const streaming = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/events"
+    );
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await streaming;
+    const askTurn = page.locator(`[data-turn="ask:${requested.ask.id}"]`);
+    await expect(askTurn).toHaveCount(1);
+    const handBackLine = page.locator('[data-kind="activity"]', {
+      hasText: `handed “${requested.ask.question}” back for approval`,
+    });
+    await expect(handBackLine).toHaveCount(0);
+
+    // The human's comment left the request waiting on its agent, so this call hands it back.
+    const handedBack = await requestApproval(issue.primary_artifact_id, {}, session);
+    expect(handedBack.ask.id).toBe(requested.ask.id);
+    await expect(handBackLine).toBeVisible();
+    // The hand-back rewords nothing: no edit line, and the ask is still one card.
+    await expect(
+      page.locator('[data-kind="activity"]', { hasText: "edited the question" })
+    ).toHaveCount(0);
+    await expect(askTurn).toHaveCount(1);
+
+    await page.reload();
+    await expect(handBackLine).toBeVisible();
+    await expect(askTurn).toHaveCount(1);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an answer started before a hand-back that rewords nothing is saved, and the card gains no edit history", async ({
+  browser,
+}) => {
+  await createProject({ key: "KEEP", name: "Kept answer" });
+  const issue = await createIssue({ project: "KEEP", spec: "The plan.", title: "Kept answer" });
+  const summary = "Names the existing proposal.";
+  const requested = await requestApproval(issue.primary_artifact_id, { summary }, session);
+  await createComment(
+    issue.key,
+    { ask_id: requested.ask.id, body: "Please clarify the rollout." },
+    { login: "alice" }
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    // No live stream on this page: the card stays as the human loaded it, mid-answer.
+    const answering = await alice.newPage();
+    await answering.route("**/api/v1/events**", (route) => route.abort());
+    await answering.goto("/");
+    const shown = answering
+      .locator('[data-inbox-section="agent"]')
+      .getByTestId(`ask-${requested.ask.id}`);
+    await expect(shown).toBeVisible();
+    await shown.getByRole("radio", { name: /^Approve/ }).check();
+
+    await requestApproval(issue.primary_artifact_id, { summary }, session);
+
+    // Another page sees the hand-back: the card is the human's turn, and it was never reworded.
+    const watching = await alice.newPage();
+    await watching.goto("/");
+    const handedBack = watching
+      .locator('[data-inbox-section="human"]')
+      .getByTestId(`ask-${requested.ask.id}`);
+    await expect(handedBack).toBeVisible();
+    await expect(handedBack).not.toContainText("Edited");
+
+    await shown.getByRole("button", { name: "Answer" }).click();
+    await expect(
+      answering.getByText("Your answer was not saved, because the question changed.")
+    ).toHaveCount(0);
+    await expect
+      .poll(async () => (await getArtifact(issue.primary_artifact_id, { login: "alice" })).approval)
+      .toMatchObject({ state: "approved", version: 1, ask_id: requested.ask.id });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an approval ask's Inbox card shows a question carrying a long summary whole", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "GATE", name: "Gate" });
+  const issue = await createIssue({ project: "GATE", spec: "The plan.", title: "Design gate" });
+  // Nearly as long as the ask cap leaves a summary: 762 units, budgeted against the longest version
+  // a request can reach ("Approve spec.md (version 9999999999)? "), cut at a word so the text still
+  // reads as a sentence.
+  const opening =
+    "Retries a failed push at most three times, one minute apart, and then stops and names the push that failed. ";
+  const ending = "Nothing else in the retry path changes.";
+  const filler = opening.repeat(8).slice(0, 762 - ending.length);
+  const summary = filler.slice(0, filler.lastIndexOf(" ") + 1) + ending;
+  expect(summary.length).toBeGreaterThan(740);
+  expect(summary.length).toBeLessThanOrEqual(762);
+  const requested = await requestApproval(issue.primary_artifact_id, { summary }, session);
+  expect(requested.ask.question).toBe(`Approve spec.md (version 1)? ${summary}`);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${requested.ask.id}`);
+    await expect(card).toBeVisible();
+    const question = card.locator("p", { hasText: ending });
+    await expect(question).toHaveText(requested.ask.question);
+    // Whole means nothing between the question and its card clips it: no clamp, ellipsis or box
+    // shorter or narrower than the text it holds.
+    const clipped = await question.evaluate((element) => {
+      const clips: string[] = [];
+      for (let node: Element | null = element; node !== null; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.webkitLineClamp !== "none" || style.textOverflow === "ellipsis") {
+          clips.push(`${node.tagName}: line clamp ${style.webkitLineClamp}, ${style.textOverflow}`);
+        }
+        if (node.scrollHeight > node.clientHeight + 1 || node.scrollWidth > node.clientWidth + 1) {
+          clips.push(
+            `${node.tagName}: ${node.scrollWidth}x${node.scrollHeight} in ${node.clientWidth}x${node.clientHeight}`
+          );
+        }
+        if (node.tagName === "ARTICLE") {
+          break;
+        }
+      }
+      return clips;
+    });
+    expect(clipped).toEqual([]);
+    await card.screenshot({ path: testInfo.outputPath("approval-long-question.png") });
+  } finally {
+    await alice.close();
+  }
+});
+
 test("reading an approved spec and moving the caret through its numbered list leaves its approval current", async ({
   browser,
 }) => {
   await createProject({ key: "GATE", name: "Gate" });
-  // Numbered outcomes, as the default spec template asks for under Acceptance.
+  // A spec holding a numbered list, which the caret moves through below.
   const issue = await createIssue({
     project: "GATE",
     spec: "## Acceptance\n\n1. The migration ships.\n2. The error rate stays flat.\n",
     title: "Design gate",
   });
   const artifactID = issue.primary_artifact_id;
-  const requested = await requestApproval(artifactID, session);
+  const requested = await requestApproval(artifactID, {}, session);
   const alice = await asUser(browser, "alice");
   const bob = await asUser(browser, "bob");
   try {
@@ -181,7 +500,7 @@ test("an agent's comment on part of an identifier in an approved spec leaves its
     title: "Design gate",
   });
   const artifactID = issue.primary_artifact_id;
-  const requested = await requestApproval(artifactID, session);
+  const requested = await requestApproval(artifactID, {}, session);
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
@@ -232,7 +551,7 @@ test("rejecting a suggestion on part of an identifier in an approved spec leaves
     },
     session
   );
-  const requested = await requestApproval(artifactID, session);
+  const requested = await requestApproval(artifactID, {}, session);
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
@@ -272,7 +591,7 @@ test("an approval request for an unassigned issue's non-primary document remains
     { content: "Supporting review target.", name: "supporting-design.md" },
     session
   );
-  const nonPrimary = await requestApproval(supporting.artifact.id, session);
+  const nonPrimary = await requestApproval(supporting.artifact.id, {}, session);
   await expect
     .poll(
       async () => (await getArtifact(issue.primary_artifact_id, { login: "alice" })).approval?.state

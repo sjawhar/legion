@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -71,9 +72,9 @@ select r.kind, case when r.owner_artifact_id is null then 'issue' else 'document
        r.owner_project, r.owner_slug, r.owner_artifact_id::text, r.owner_name,
        ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, r.rank,
        ts_headline('english',
-         case when q.term <> '' and strpos(lower(r.text), lower(q.term)) > 0
+         search_text(case when q.term <> '' and strpos(lower(r.text), lower(q.term)) > 0
               then substr(r.text, greatest(1, strpos(lower(r.text), lower(q.term)) - 1500), 4000)
-              else left(r.text, 4000) end,
+              else left(r.text, 4000) end),
          q.tsq, $5) as headline
   from ranked r left join artifacts ar on ar.id = r.artifact_id, q
  order by r.rank desc, r.updated_at desc, r.kind, r.id
@@ -88,6 +89,19 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	searchText := strings.TrimSpace(query.Get("q"))
 	if utf8.RuneCountInString(searchText) < 2 {
 		writeError(w, "INVALID_QUERY", http.StatusBadRequest, "q must be at least 2 characters")
+		return
+	}
+	// q is capped as dispatch_search caps it, counted after trimming so a query the tool sends is
+	// never refused here, and a project must be a key (an empty one searches every project). Both
+	// ride in the URL; packages/contracts/AGENTS.md "Search limits" says what keeps it short.
+	if length := len16(searchText); length > contracts.SearchQueryMax {
+		tooLong := capExceededError("q", length, contracts.SearchQueryMax)
+		writeError(w, tooLong.code, tooLong.status, tooLong.message+"; "+contracts.SearchQueryHint)
+		return
+	}
+	project := strings.TrimSpace(query.Get("project"))
+	if project != "" && !projectKeyPattern.MatchString(project) {
+		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, "project must be a project key such as CORE")
 		return
 	}
 
@@ -107,12 +121,12 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if nodes == 0 {
-		writeError(w, "INVALID_QUERY", http.StatusBadRequest, "query has no searchable terms")
+		WriteJSON(w, http.StatusOK, model.SearchResponse{Results: []model.SearchResult{}})
 		return
 	}
 
 	started := time.Now()
-	rows, err := s.deps.Store.Pool.Query(r.Context(), searchQuery, searchText, strings.TrimSpace(query.Get("project")), limit, firstTerm(searchText), headlineOptions)
+	rows, err := s.deps.Store.Pool.Query(r.Context(), searchQuery, searchText, project, limit, firstTerm(searchText), headlineOptions)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

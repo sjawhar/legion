@@ -1,9 +1,10 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { api } from "../../api/client";
 import type { Artifact } from "../../api/types";
 import { MarginProvider } from "../margin/margin-context";
 import { ProofDocument } from "./ProofDocument";
@@ -32,6 +33,10 @@ test("ProofDocument keeps transport active without cursor decorations in the com
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "",
+    version: null,
+  });
   const view = render(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
@@ -59,6 +64,7 @@ test("ProofDocument keeps transport active without cursor decorations in the com
     expect(runtime.editors[0]?.options.awareness).toBeNull();
   } finally {
     view.unmount();
+    getArtifactText.mockRestore();
     if (clientWidth === undefined) {
       Reflect.deleteProperty(document.documentElement, "clientWidth");
     } else {

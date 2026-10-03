@@ -79,6 +79,9 @@ interface RingEntry {
   /** False once the host has settled this message; a settled entry is never replaced. */
   readonly streaming: boolean;
   readonly message: ReadableMessage;
+  /** The Dispatch message a user message delivered, when the caller says it is one: a person's
+   *  direct message the session took as its own user turn. */
+  readonly dispatchMessageId: string | undefined;
 }
 
 export interface AgentStreamPublisherDeps {
@@ -179,7 +182,7 @@ function conversationParts(content: unknown): AgentStreamPart[] {
 
 /** The frame a ring entry becomes. This is the only place a message's content is read. */
 function frameFor(entry: RingEntry): AgentStreamFrame {
-  const { message } = entry;
+  const { dispatchMessageId, message } = entry;
   if (message.role === "toolResult" && message.toolCallId !== undefined) {
     return {
       kind: "tool-result",
@@ -205,6 +208,7 @@ function frameFor(entry: RingEntry): AgentStreamFrame {
       parts: conversationParts(message.host.content),
       role: message.role === "assistant" ? "assistant" : "user",
       streaming: entry.streaming,
+      ...(dispatchMessageId === undefined ? {} : { dispatchMessageId }),
     },
     seq: entry.seq,
     v: AGENT_STREAM_PROTOCOL,
@@ -251,11 +255,12 @@ export class AgentStreamPublisher {
   /**
    * Records one of the session's messages and, while a viewer is attached, publishes it.
    * `streaming` is false for a settled message (`message_end`, and every user or tool-result
-   * message) and true for an assistant message still being produced. Returns whether the
-   * message was recorded: false for one this build does not carry, and for a late streaming
-   * update of a message the host has already settled.
+   * message) and true for an assistant message still being produced. `dispatchMessageId` is the
+   * Dispatch message a user message delivered, which the caller alone can know; a later record of
+   * the same message keeps it. Returns whether the message was recorded: false for one this build
+   * does not carry, and for a late streaming update of a message the host has already settled.
    */
-  record(subject: string, raw: unknown, streaming: boolean): boolean {
+  record(subject: string, raw: unknown, streaming: boolean, dispatchMessageId?: string): boolean {
     const message = readMessage(raw);
     if (message === null) return false;
     const key = keyFor(message);
@@ -266,6 +271,7 @@ export class AgentStreamPublisher {
     this.#seq += 1;
     const entry: RingEntry = {
       at: message.timestamp,
+      dispatchMessageId: dispatchMessageId ?? this.#history.get(key)?.dispatchMessageId,
       key,
       message,
       seq: this.#seq,
@@ -301,9 +307,9 @@ export class AgentStreamPublisher {
    * relay arms the session before it asks (`Watch` then `Replay` on one connection, in that
    * order), so a genuine viewer is never refused.
    *
-   * The budget is UTF-8 bytes, which is what NATS measures. Counting UTF-16 code units let a
-   * history of box-drawing tool output or CJK text build a reply three times its measured size
-   * and over the server's 1 MiB `max_payload`, which the publish then threw on.
+   * The budget is UTF-8 bytes, which is what NATS measures. Counting UTF-16 code units would let
+   * a history of box-drawing tool output or CJK text build a reply three times its measured size,
+   * over the server's 1 MiB `max_payload`, and the publish would throw.
    */
   replay(sessionID: string): AgentStreamReplay {
     if (!this.watched) return { frames: [], session_id: sessionID, v: AGENT_STREAM_PROTOCOL };

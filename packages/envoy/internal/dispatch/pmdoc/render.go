@@ -187,7 +187,11 @@ func holdsAContainerTheBrowserDrops(doc *Node) bool {
 // kept two ways: as the browser editor's parser compares labels (footnoteLabelKey), since it
 // matches a reference to its definition whatever the case, and lowercased, as this renderer
 // compared them before it did, since text escaped then must be escaped still.
-type footnoteLabelSet struct{ keys, lowered map[string]bool }
+type footnoteLabelSet struct {
+	keys, lowered    map[string]bool
+	longestRuneCount int
+	hasBracket       bool
+}
 
 // refersTo reports whether text shaped like a reference with label is escaped: it would read as a
 // reference to a defined label, or this renderer escaped it when it lowercased labels. An escape
@@ -204,6 +208,12 @@ func definedFootnoteLabels(doc *Node) footnoteLabelSet {
 			if label, ok := node.Attrs["label"].(string); ok {
 				labels.keys[footnoteLabelKey(label)] = true
 				labels.lowered[strings.ToLower(label)] = true
+				runeCount := 0
+				for range label {
+					runeCount++
+				}
+				labels.longestRuneCount = max(labels.longestRuneCount, runeCount)
+				labels.hasBracket = labels.hasBracket || strings.Contains(label, "[")
 			}
 		}
 		for _, child := range node.Children {
@@ -819,17 +829,63 @@ func hardBreaksAsSpaces(nodes []*Node) []*Node {
 }
 
 // asWritten is doc as its markdown writes it: without the marks the rendering does not write
-// (StripAnchorMarks), and with each line break its textblocks hold in the one form markdown
-// carries. The browser editor holds two more. A soft line break it keeps from a paste (a hard break
-// with isInline) it draws as a space, and one is written: both parsers read a soft break as one too.
-// A line feed in text outside code it draws as a line break (white-space: break-spaces), and a
-// hard break is written, which both parsers read back as the editor draws it, except where nothing
-// but whitespace follows it in its textblock: a hard break there reads back as a backslash, and a
-// line feed as nothing, as trailing whitespace does.
+// (StripAnchorMarks), with each line break its textblocks hold in the one form markdown
+// carries, and with each U+0000 as U+FFFD (writeNulsAsReplacement). The browser editor holds two
+// more line breaks. A soft line break it keeps from a paste (a hard break with isInline) it draws
+// as a space, and one is written: both parsers read a soft break as one too. A line feed in text
+// outside code it draws as a line break (white-space: break-spaces), and a hard break is written,
+// which both parsers read back as the editor draws it, except where nothing but whitespace follows
+// it in its textblock: a hard break there reads back as a backslash, and a line feed as nothing,
+// as trailing whitespace does.
 func asWritten(doc *Node) *Node {
 	out := StripAnchorMarks(doc)
 	writeLineBreaksIn(out)
+	writeNulsAsReplacement(out)
 	return out
+}
+
+// nulAsReplacement is text with each U+0000 written as U+FFFD, which is what CommonMark reads the
+// character as (§2.3 Insecure characters), so no markdown carries one back; PostgreSQL's text and
+// jsonb cannot store one either. A browser's edit can still put one in a live document, past every
+// check a route makes, so text Dispatch takes from a document's tree passes through this: its
+// rendering (asWritten), an anchor's quote (FindMark), an ask block's question and options and a
+// heading's text (TextContent), and the text a quote is matched against (buildFlattenedText). A
+// document's settlement and every write that versions it store that text, so one U+0000 left in it
+// as it is would fail all of them, and text copied from what a read serves would match nothing.
+func nulAsReplacement(text string) string {
+	if strings.IndexByte(text, 0) < 0 {
+		return text
+	}
+	return strings.ReplaceAll(text, "\x00", "\uFFFD")
+}
+
+// writeNulsAsReplacement writes each U+0000 under node that the rendering would write as it is -
+// in a node's text, in a string attribute a node or mark writes (a link's href, an image's alt, a
+// code block's language), or in a block's id - as U+FFFD (nulAsReplacement). node is the
+// rendering's own copy (StripAnchorMarks clones each node's and mark's attributes). A typed block's
+// other attributes are written quoted (renderTypedAttributes), U+0000 as the escape \x00 that its
+// parser unquotes back, so they keep it; its id is written bare, `#` and the id.
+func writeNulsAsReplacement(node *Node) {
+	node.Text = nulAsReplacement(node.Text)
+	if !IsTypedBlock(node.Type) {
+		writeNulsInAttrs(node.Attrs)
+	} else if id, ok := node.Attrs[BlockIDAttr].(string); ok && strings.IndexByte(id, 0) >= 0 {
+		node.Attrs[BlockIDAttr] = nulAsReplacement(id)
+	}
+	for _, mark := range node.Marks {
+		writeNulsInAttrs(mark.Attrs)
+	}
+	for _, child := range node.Children {
+		writeNulsAsReplacement(child)
+	}
+}
+
+func writeNulsInAttrs(attrs Attrs) {
+	for name, value := range attrs {
+		if text, ok := value.(string); ok && strings.IndexByte(text, 0) >= 0 {
+			attrs[name] = nulAsReplacement(text)
+		}
+	}
 }
 
 // writeLineBreaksIn gives every textblock under node its line breaks as asWritten writes them.
@@ -860,21 +916,35 @@ func writtenLineBreaks(nodes []*Node) []*Node {
 		}
 		out = append(out, &Node{Type: "text", Text: text, Marks: marks})
 	}
+	onlyWhitespaceAfter := make([]bool, len(nodes))
+	whitespace := true
+	for index := len(nodes) - 1; index >= 0; index-- {
+		onlyWhitespaceAfter[index] = whitespace
+		node := nodes[index]
+		whitespace = whitespace && node.Type == "text" && strings.TrimSpace(node.Text) == ""
+	}
 	for index, node := range nodes {
 		switch {
 		case node.Type == "hardbreak" && node.Attrs["isInline"] == true:
 			appendText(" ", nil)
 		case node.Type == "text" && !nodeHasMark(node, "inlineCode") && strings.Contains(node.Text, "\n"):
-			lines := strings.Split(node.Text, "\n")
-			for line, text := range lines {
-				if line > 0 {
-					if onlyWhitespaceFollows(strings.Join(lines[line:], "\n"), nodes[index+1:]) {
-						appendText("\n", node.Marks)
-					} else {
-						out = append(out, &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}})
-					}
+			value := node.Text
+			lastNonWhitespace := len(strings.TrimRightFunc(value, unicode.IsSpace))
+			lineStart := 0
+			for {
+				lineEnd := strings.IndexByte(value[lineStart:], '\n')
+				if lineEnd < 0 {
+					appendText(value[lineStart:], node.Marks)
+					break
 				}
-				appendText(text, node.Marks)
+				lineEnd += lineStart
+				appendText(value[lineStart:lineEnd], node.Marks)
+				if lastNonWhitespace <= lineEnd+1 && onlyWhitespaceAfter[index] {
+					appendText("\n", node.Marks)
+				} else {
+					out = append(out, &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}})
+				}
+				lineStart = lineEnd + 1
 			}
 		case node.Type == "text":
 			appendText(node.Text, node.Marks)
@@ -883,20 +953,6 @@ func writtenLineBreaks(nodes []*Node) []*Node {
 		}
 	}
 	return out
-}
-
-// onlyWhitespaceFollows reports whether text, and after it every one of rest, holds nothing but
-// whitespace.
-func onlyWhitespaceFollows(text string, rest []*Node) bool {
-	if strings.TrimSpace(text) != "" {
-		return false
-	}
-	for _, node := range rest {
-		if node.Type != "text" || strings.TrimSpace(node.Text) != "" {
-			return false
-		}
-	}
-	return true
 }
 
 func num(value any, fallback float64) float64 {

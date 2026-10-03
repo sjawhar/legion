@@ -29,13 +29,13 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { MentionComposer } from "../conversation/MentionComposer";
-import { pulseBlock } from "../doc/marks";
 import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
+import { useMargin } from "./margin-context";
 import type { CommentActionFailure } from "./useCommentActionQueue";
 import type { MarginItemAction, MarginOwner, Thread, ThreadComment } from "./useMarginItems";
 
@@ -213,6 +213,7 @@ export function ThreadCard({
   savingCommentEditId,
   onEditingChange: setEditingId,
 }: ThreadCardProps): ReactNode {
+  const { focusBlock } = useMargin();
   const active = expanded || selected;
   const root = thread.root.comment;
   const rootSuggestion = root.suggestion;
@@ -277,7 +278,7 @@ export function ThreadCard({
             thread.anchor?.orphaned &&
             typeof thread.anchor.block_id === "string"
           ) {
-            pulseBlock(thread.anchor.block_id);
+            focusBlock(thread.anchor.block_id);
           }
         }}
         onKeyDown={(event) => {
@@ -302,7 +303,7 @@ export function ThreadCard({
             thread.anchor?.orphaned &&
             typeof thread.anchor.block_id === "string"
           ) {
-            pulseBlock(thread.anchor.block_id);
+            focusBlock(thread.anchor.block_id);
           }
           event.stopPropagation();
           onSelect?.();
@@ -441,7 +442,7 @@ export function ThreadCard({
                 thread.anchor?.orphaned &&
                 typeof thread.anchor.block_id === "string"
               ) {
-                pulseBlock(thread.anchor.block_id);
+                focusBlock(thread.anchor.block_id);
               }
               onToggle();
             }}

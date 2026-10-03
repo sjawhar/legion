@@ -2,9 +2,9 @@ package main
 
 import (
 	"encoding/json"
-	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -110,6 +110,38 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 	}
 }
 
+// A replacement that waits out the old task's durable serves /v1 while it waits, so a SIGTERM there
+// (a circuit-breaker rollback, a second deploy) is an ordered shutdown like any other: HTTP drains,
+// NATS drains, nothing on the path is an error, and the durable the old task holds is left alone.
+func TestASIGTERMWhileAnotherTaskHoldsTheDurableIsAnOrderedShutdown(t *testing.T) {
+	const machineID = "sigterm-during-bind"
+	old, holder := durableHeldElsewhere(t, testnats.URL(t), "listener-"+machineID)
+
+	listener := startListenerProcess(t, buildListener(t), old.Conn.ConnectedUrl(), machineID)
+	listener.waitForOutput(t, "subscribe failed, retrying")
+	if err := listener.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM: %v", err)
+	}
+	listener.waitExit(t, "SIGTERM")
+	output := listener.output.String()
+	if code := listener.cmd.ProcessState.ExitCode(); code != 1 {
+		t.Fatalf("exit code = %d, want 1 (-1 is a death by the signal, with no ordered shutdown):\n%s", code, output)
+	}
+	for _, line := range []string{"received signal, shutting down", "envoy-listener shutdown complete"} {
+		if !strings.Contains(output, line) {
+			t.Fatalf("the listener's output has no %q:\n%s", line, output)
+		}
+	}
+	for line := range strings.SplitSeq(output, "\n") {
+		if errorLine.MatchString(line) {
+			t.Fatalf("a SIGTERM during the durable's bind wait logged an error: %s", line)
+		}
+	}
+	if !holder.IsValid() {
+		t.Fatal("the old task's subscription to the durable is gone after the replacement's shutdown")
+	}
+}
+
 // listenerTestToken is the shared /v1 bearer every test-started listener is given.
 const listenerTestToken = "listener-test-token"
 
@@ -149,11 +181,15 @@ func startListenerProcess(t *testing.T, binary, uri, machineID string, env ...st
 	return process
 }
 
-// buildListener builds this package's listener binary into the test's temporary directory.
 func buildListener(t *testing.T) string {
 	t.Helper()
 	binary := filepath.Join(t.TempDir(), "envoy-listener")
-	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+	args := []string{"build", "-o", binary}
+	if overlay := os.Getenv("ENVOY_TEST_GO_OVERLAY"); overlay != "" {
+		args = append(args, "-overlay", overlay)
+	}
+	args = append(args, ".")
+	if out, err := exec.Command("go", args...).CombinedOutput(); err != nil {
 		t.Fatalf("build the listener: %v\n%s", err, out)
 	}
 	return binary
@@ -162,21 +198,8 @@ func buildListener(t *testing.T) string {
 // postListener calls a listener /v1 route as the test's shared-token caller and requires a 200.
 func postListener(t *testing.T, port int, path, body string) {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:"+strconv.Itoa(port)+path, strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("%s: %v", path, err)
-	}
-	request.Header.Set("Authorization", "Bearer "+listenerTestToken)
-	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("%s: %v", path, err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		var responseBody strings.Builder
-		_, _ = io.Copy(&responseBody, response.Body)
-		t.Fatalf("%s: status %d: %s", path, response.StatusCode, responseBody.String())
+	if status, answer := callListener(t, port, http.MethodPost, path, body); status != http.StatusOK {
+		t.Fatalf("%s: status %d: %s", path, status, answer)
 	}
 }
 
@@ -214,6 +237,26 @@ func (p *listenerProcess) waitHealthy(t *testing.T) {
 	}
 	_ = p.cmd.Process.Kill()
 	t.Fatalf("the listener never became healthy:\n%s", p.output.String())
+}
+
+// waitForOutput waits up to 30 s for each of lines to appear in the listener's output, and fails the
+// test when the listener exits first or a line never appears.
+func (p *listenerProcess) waitForOutput(t *testing.T, lines ...string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for _, line := range lines {
+		for !strings.Contains(p.output.String(), line) {
+			select {
+			case <-p.exited:
+				t.Fatalf("the listener exited before it logged %q:\n%s", line, p.output.String())
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the listener never logged %q:\n%s", line, p.output.String())
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
 }
 
 // waitExit waits up to 30 s for the listener to exit, and fails the test with its output when it is

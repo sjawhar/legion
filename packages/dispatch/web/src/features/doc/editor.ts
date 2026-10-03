@@ -4,7 +4,7 @@ import type { Doc } from "yjs";
 import type { BlockSchema } from "../../api/types";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 
-export type { MarkAction, StoredMark } from "@legion/proof-editor";
+export type { MarkAction, RetypeOutcome, RetypeRefusal, StoredMark } from "@legion/proof-editor";
 
 export type EditorHandle = ProofEditorHandle;
 export type EditorOptions = CreateProofEditorOptions & { blockSchema: BlockSchema };

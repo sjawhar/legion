@@ -24,8 +24,8 @@ export interface NameVersionDialogProps {
 }
 
 /**
- * The "Name version" toolbar action's confirmation dialog — an in-app replacement for the
- * `window.prompt` it used to call, matching the app's own focus-trap/Escape/backdrop dialog
+ * The "Name version" toolbar action's confirmation dialog — an in-app dialog rather than
+ * `window.prompt`, matching the app's own focus-trap/Escape/backdrop dialog
  * convention (see ReferencePicker for the same shape). Unmounts entirely while closed so
  * `useDialog`'s `open` effect (focus trap, Escape, scroll lock) only ever runs while a caller
  * actually wants it showing.

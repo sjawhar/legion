@@ -20,6 +20,24 @@ func TestEqualIgnoresAttrKeyOrder(t *testing.T) {
 	}
 }
 
+// A run carrying two comments may list them in either order (Y attribute map iteration, the
+// engine's mark set): sorting gives one order, so the two compare equal.
+func TestSortMarksOrdersTwoMarksOfOneType(t *testing.T) {
+	bob := Mark{Type: "proofComment", Attrs: Attrs{"id": "c1", "by": "user:bob"}}
+	alice := Mark{Type: "proofComment", Attrs: Attrs{"id": "c2", "by": "user:alice"}}
+	strong := Mark{Type: "strong"}
+	left := []Mark{alice, strong, bob}
+	right := []Mark{bob, alice, strong}
+	sortMarks(left)
+	sortMarks(right)
+	if !marksEqual(left, right) {
+		t.Fatalf("sorted %v and %v differ", left, right)
+	}
+	if left[0].Attrs["id"] != "c1" || left[1].Attrs["id"] != "c2" || left[2].Type != "strong" {
+		t.Fatalf("sorted = %v, want by type, then id", left)
+	}
+}
+
 func TestValidateRejectsInlineAtomAsDocumentChild(t *testing.T) {
 	n := &Node{Type: "doc", Children: []*Node{{Type: "html", Attrs: Attrs{"value": "<i>"}}}}
 	if err := n.Validate(); err == nil || !errors.Is(err, ErrSchema) {

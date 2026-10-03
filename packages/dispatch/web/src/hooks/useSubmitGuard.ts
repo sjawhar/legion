@@ -10,7 +10,10 @@ export interface SubmitGuard {
    * re-render lags a same-tick double click or Retry press, so this gates on a ref that
    * updates synchronously instead of on a mutation's (React-state) `isPending`. */
   guard: (fn: () => void) => boolean;
-  /** Clears the guard; call from the mutation's `onSettled`. */
+  /** Clears the guard. A caller that allows one press per request calls it from the mutation's
+   * `onSettled`; one that only drops a same-tick double press, letting the next press through
+   * while the first is still out (the broadcast queue, `features/agents/BroadcastSends.tsx`),
+   * calls it on the next task. */
   release: () => void;
   /** Repeats the mutation's latest input if a request is not already in flight. */
   retryLast: <Input>(mutation: RetryableMutation<Input>) => boolean;

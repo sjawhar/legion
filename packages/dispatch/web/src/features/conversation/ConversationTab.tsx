@@ -73,7 +73,14 @@ import {
   type ThreadReply,
   visibleConversationItems,
 } from "./conversation-model";
-import { duplicateText, isSafeRetry, safeRetryGuidance, withGuidance } from "./delivery";
+import {
+  duplicateText,
+  failureGuidance,
+  isSafeRetry,
+  MODE_LABELS,
+  receiptAnsweredWithError,
+  withGuidance,
+} from "./delivery";
 import { MentionComposer, type ReplyTarget } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
 import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
@@ -113,6 +120,7 @@ function eventItems(data: { pages: Event[][] } | undefined): Event[] {
 function attemptsOf(deliveries: readonly MessageDeliveryEvent[]): TargetedMessageAttempt[] {
   return deliveries.map((attempt) => ({
     attempt: attempt.payload.attempt,
+    answeredWithError: receiptAnsweredWithError(attempt),
     createdAt: attempt.created_at,
     delivery: attempt.payload.delivery,
     duplicate: attempt.payload.duplicate,
@@ -460,13 +468,16 @@ function CommentDeliveryList({
           state: delivery.state,
           createdAt: delivery.created_at,
           duplicate: delivery.duplicate,
+          answeredWithError: delivery.answeredWithError,
+          error: delivery.error,
         };
         // The same rule the targeted-message card applies: a mention's Retry re-sends its own
-        // mode under its own key, so it can only be offered while the stream would still
-        // recognise the repeat. The list offers no mode-change action, so its guidance says
-        // nothing about one.
+        // mode under its own key, so it is offered only while `isSafeRetry` holds, and the
+        // guidance beside it names that Retry or a new comment, so a closed issue, which takes
+        // neither, says nothing about one.
         const safeRetry = isSafeRetry(outcome);
         const canRetry = capabilities === undefined || capabilities.includes(delivery.delivery);
+        const guidance = disabled ? undefined : failureGuidance(outcome, "mention");
         return (
           <li
             className="flex flex-wrap items-center gap-x-2"
@@ -476,14 +487,8 @@ function CommentDeliveryList({
               {delivery.target} · {delivery.duplicate === true ? duplicateText : delivery.state}
               {delivery.error === null
                 ? ""
-                : ` · ${
-                    safeRetry
-                      ? withGuidance(delivery.error, safeRetryGuidance("mention", delivery.error))
-                      : delivery.error
-                  }`}
-              {delivery.error === null && safeRetry
-                ? ` · ${safeRetryGuidance("mention", delivery.error)}`
-                : ""}
+                : ` · ${guidance === undefined ? delivery.error : withGuidance(delivery.error, guidance)}`}
+              {delivery.error === null && guidance !== undefined ? ` · ${guidance}` : ""}
             </span>
             {disabled || !canRetry || !safeRetry ? null : (
               <button
@@ -497,13 +502,7 @@ function CommentDeliveryList({
             )}
             {disabled || canRetry ? null : (
               <span className={textMutedOnSurface}>
-                {delivery.target} no longer supports{" "}
-                {delivery.delivery === "btw"
-                  ? "BTW"
-                  : delivery.delivery === "aside"
-                    ? "Aside"
-                    : "normal delivery"}
-                .
+                {delivery.target} no longer supports {MODE_LABELS[delivery.delivery]}.
               </span>
             )}
           </li>
@@ -1373,8 +1372,8 @@ export function ConversationTab({
                   set its own width it pushed the line, the turns list and the document past
                   the viewport. The description keeps a floor so it wraps as prose rather than
                   one word per line. */}
-              {/* Who and when are one group that never breaks: the time used to wrap alone to
-                  the start of the next row once the author took most of the line. The author
+              {/* Who and when are one group that never breaks, so the time never wraps alone to
+                  the start of the next row when the author takes most of the line. The author
                   truncates inside it, with the full label on hover - a live session title can
                   be a whole sentence - and only the description wraps, with a floor so it
                   wraps as prose rather than one word per line. */}

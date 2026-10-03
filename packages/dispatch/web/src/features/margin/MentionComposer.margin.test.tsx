@@ -6,9 +6,9 @@ import { ApiError, api } from "../../api/client";
 import {
   type ComposerAnchor,
   type ComposerKind,
-  composerReferences,
   MentionComposer,
 } from "../conversation/MentionComposer";
+import { composerReferences } from "../refs/routes";
 import type { MarginOwner } from "./useMarginItems";
 
 function Composer({
@@ -284,6 +284,43 @@ test("Composer submits the configured ask options, multiple selection, and urgen
     composer.unmount();
   } finally {
     createAsk.mockRestore();
+  }
+});
+
+// A send clears the whole draft, not the body alone. In a host that keeps the composer mounted,
+// as this harness does, a sent suggestion's replacement or a sent ask's options left standing
+// would read as a second draft waiting to go.
+test("a sent suggestion or ask leaves no replacement or options behind", async () => {
+  const createAsk = spyOn(api, "createAsk").mockResolvedValue(undefined as never);
+  const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
+
+  try {
+    const suggestion = renderComposer("suggestion");
+    const replacement = screen.getByLabelText<HTMLTextAreaElement>("Replacement");
+    fireEvent.change(replacement, { target: { value: "replacement" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(replacement.value).toBe(""));
+    suggestion.unmount();
+
+    const ask = renderComposer("ask");
+    fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Which path?" } });
+    fireEvent.change(screen.getByLabelText("Option 1 label"), { target: { value: "Ship" } });
+    fireEvent.change(screen.getByLabelText("Option 1 description"), {
+      target: { value: "Proceed now" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add option" }));
+    fireEvent.change(screen.getByLabelText("Option 2 label"), { target: { value: "Hold" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await waitFor(() => expect(createAsk).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getAllByLabelText(/Option \d+ label/)).toHaveLength(1));
+    expect(screen.getByLabelText<HTMLTextAreaElement>("Question").value).toBe("");
+    expect(screen.getByLabelText<HTMLInputElement>("Option 1 label").value).toBe("");
+    expect(screen.getByLabelText<HTMLInputElement>("Option 1 description").value).toBe("");
+    ask.unmount();
+  } finally {
+    createAsk.mockRestore();
+    createComment.mockRestore();
   }
 });
 

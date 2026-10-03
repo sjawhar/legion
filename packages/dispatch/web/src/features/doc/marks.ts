@@ -69,34 +69,6 @@ export function composerKindFor(kind: SelectionBarKind): "comment" | "suggestion
   return kind;
 }
 
-export function setActiveMarkClass(root: HTMLElement, markIds: readonly string[]): void {
-  const activeMarkIds = new Set(markIds);
-  for (const mark of root.querySelectorAll<HTMLElement>("[data-id]")) {
-    mark.classList.toggle("dispatch-mark-active", activeMarkIds.has(mark.dataset.id ?? ""));
-  }
-}
-
-export function setActiveBlockClass(root: HTMLElement, blockIds: readonly string[]): void {
-  const activeBlockIds = new Set(blockIds);
-  for (const block of root.querySelectorAll<HTMLElement>("[data-block-id]")) {
-    block.classList.toggle(
-      "dispatch-block-active",
-      activeBlockIds.has(block.dataset.blockId ?? "")
-    );
-  }
-}
-
-/** Scrolls the block into view and flashes it for 1.2 s so the reader sees where a card points. */
-export function pulseBlock(blockId: string): void {
-  const escaped =
-    typeof CSS !== "undefined" && typeof CSS.escape === "function"
-      ? CSS.escape(blockId)
-      : blockId.replace(/["\\]/g, "\\$&");
-  const block = document.querySelector<HTMLElement>(`[data-block-id="${escaped}"]`);
-  if (block === null) {
-    return;
-  }
-  block.scrollIntoView({ behavior: "smooth", block: "center" });
-  block.classList.add("dispatch-mark-pulse");
-  window.setTimeout(() => block.classList.remove("dispatch-mark-pulse"), 1200);
+export function selectionBarKindFor(kind: "comment" | "suggestion" | "ask"): SelectionBarKind {
+  return kind === "suggestion" ? "suggest" : kind;
 }

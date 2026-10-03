@@ -191,6 +191,12 @@ export interface WriteAdvice {
   readonly session_writes_since_human?: number;
   readonly your_open_asks?: Array<{ id: string; question: string }>;
   readonly decision_blocks?: number;
+  /**
+   * The typed block openings (`:::ask{…}`) the written document holds as text rather than as
+   * blocks, outside code: written inside a line, or escaped. `examples` quotes the first few with a
+   * little of the text before each. Omitted when there are none.
+   */
+  readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
 }
 /** Response-only; never on an event payload. */
 export type Advised<T> = T & { readonly advice?: WriteAdvice };
@@ -271,6 +277,31 @@ export interface IssueSummary
     IssueRouteReach {
   readonly labels?: string[];
   readonly open_asks: number;
+}
+
+/**
+ * The most issues one page of `GET /api/v1/issues` holds: `limit` is 1 to this. Generated into Go
+ * as `contracts.MaxIssuePageLimit`, which the server enforces, and the `dispatch_issues` tool's
+ * `limit` takes the same bound, so the two ends agree.
+ */
+export const MAX_ISSUE_PAGE_LIMIT = 250;
+
+/**
+ * The page size of `GET /api/v1/issues` when a caller pages with `offset` alone, and of
+ * `dispatch_issues` when it names no `limit`. Generated into Go as `contracts.DefaultIssuePageLimit`.
+ */
+export const DEFAULT_ISSUE_PAGE_LIMIT = 50;
+
+/**
+ * `GET /api/v1/issues?limit=&offset=`: one page of the filtered listing in its order, with `total`,
+ * how many issues the filters matched, and the `limit` and `offset` that chose the page. Without
+ * either parameter the route answers the plain `IssueSummary[]`.
+ */
+export interface IssueSummaryPage {
+  readonly issues: IssueSummary[];
+  readonly total: number;
+  readonly limit: number;
+  readonly offset: number;
 }
 
 export interface IssueChild {
@@ -412,6 +443,20 @@ export interface ArtifactApproval {
   readonly reason?: string | null;
   readonly ask_id?: string | null;
   readonly requested_by?: Actor;
+  /** Whose move the open request waits on (`Ask.waiting_on`), on `awaiting` alone: `agent` once a
+   *  version moved it past the one its agent last handed to the human, or a reply left it with the
+   *  agent; `human` otherwise. */
+  readonly waiting_on?: AskTurn;
+}
+
+/** What `POST /api/v1/artifacts/{id}/approval-requests` answers: the document's open request (null
+ *  when its latest version is already approved), the version it names, and the document's approval
+ *  as the call left it. */
+export interface ApprovalRequestResponse {
+  readonly ask: Ask | null;
+  readonly artifact_id: string;
+  readonly version: number;
+  readonly approval: ArtifactApproval;
 }
 
 export interface ArtifactBlock {
@@ -425,6 +470,56 @@ export interface ArtifactBlock {
     readonly comments: number;
     readonly asks: number;
   };
+}
+
+/** One node on a block's path from the document's top-level block down to the block: its type,
+ *  its block id ("" for a node the live document has not stamped yet) and its index among its
+ *  parent's children. */
+export interface BlockPathEntry {
+  readonly type: string;
+  readonly id: string;
+  readonly index: number;
+}
+
+/** Where a block stands in the table holding it. `row` is the row's index (0 is the header row)
+ *  and `column` the cell's index in its row — the indexes `delete_row` and `delete_column` take.
+ *  `row` is null for the table block itself; `column` and `header` are null for the table and for
+ *  a row block. `header` is the text of the header cell drawn above the cell's column once colspans
+ *  and rowspans take their places, "" where no header cell covers it. `cells` is each cell of the
+ *  row as its opening words, by child index; null for the table block. */
+export interface TablePosition {
+  readonly id: string;
+  readonly row: number | null;
+  readonly column: number | null;
+  readonly header: string | null;
+  readonly cells: readonly string[] | null;
+}
+
+/** Where a block stands in its document: `GET /api/v1/artifacts/{id}/blocks/{block_id}`'s answer,
+ *  and a comment's or ask's `anchor_block`. `table` is present for a table block and for every
+ *  block inside one. */
+export interface BlockPath {
+  readonly id: string;
+  readonly type: string;
+  readonly path: readonly BlockPathEntry[];
+  readonly table?: TablePosition;
+}
+
+/** Where a comment's or an ask's anchor's block stands in the live document. Set on the
+ *  single-record reads alone (`GET /api/v1/comments/{id}`, `GET /api/v1/asks/{id}`); lists and
+ *  events never carry it. */
+export interface AnchorPosition {
+  /** Absent when the anchor names no block, the block has left the document, the document could
+   *  not be read (`anchor_block_error` then says why), or the server predates it. */
+  readonly anchor_block?: BlockPath;
+  /** Why `anchor_block` is absent although the anchor names a block: the read could not read its
+   *  document, named by the code the API answers that error with elsewhere. The read itself still
+   *  answers. */
+  readonly anchor_block_error?:
+    | "DOC_SERVICE_UNAVAILABLE"
+    | "DOC_SCHEMA"
+    | "DOCUMENT_UNLOADABLE"
+    | "INTERNAL";
 }
 
 /** An opaque SHA-256 token for one stable block's full Proof state, including inline marks. */
@@ -464,7 +559,16 @@ export interface Version {
 
 export type AskKind = "question" | "approval";
 
-export interface Ask {
+/** The document and version an approval ask names. `requested_version` is the version the agent
+ *  last handed to the human; a lower value means the agent is revising the moved request. */
+export interface AskApproval {
+  readonly artifact_id: string;
+  readonly name: string;
+  readonly version: number;
+  readonly requested_version: number;
+}
+
+export interface Ask extends AnchorPosition {
   readonly id: string;
   readonly issue_key: string | null;
   readonly artifact_id?: string | null;
@@ -496,11 +600,15 @@ export interface Ask {
    *  null when nobody has replied. Who spoke last; whose turn it is comes from `waiting_on`.
    *  Absent on every other ask read. */
   readonly last_reply?: AskLastReply | null;
-  /** Whose reply an open ask needs next: the `turn` of its newest reply, `human` when nobody
-   *  has replied. Present on every open-ask read (inbox rows, ask lists, the ask detail, the
-   *  issue detail's `open_asks`); absent on closed asks and on `ask.*` event payloads. */
+  /** Whose reply an open ask needs next. A moved approval request stays with its agent while
+   *  `requested_version` is below `version`; a hand-back (`ask.handed_back`) returns it to the
+   *  human until a reply newer than the one it answered decides it by its `turn`. Present on every
+   *  open-ask read (inbox rows, ask lists, the ask detail, the issue detail's `open_asks`); absent on
+   *  closed asks and on `ask.*` event payloads. */
   readonly waiting_on?: AskTurn;
   readonly edited_at: string | null;
+  /** Present only on a server-created approval ask. */
+  readonly approval?: AskApproval;
 }
 
 /** Who holds the turn on an open ask after a reply: `human` when the human needs to act,
@@ -641,6 +749,11 @@ export type AskEventPayload = Ask & ReferenceChangesPayload;
 export type AskEditEventPayload = AskEventPayload & {
   readonly previous: AskEditPrevious;
   readonly edited_by: Actor;
+  /** A version move of an approval request that already waits on its agent: it changes only the
+   *  version the request names, so its event, like a human's unnamed `artifact.version`, carries
+   *  `notify: false` and reaches no follower. Absent on every other edit, the move that takes the
+   *  request from the human included. */
+  readonly quiet?: true;
 };
 
 /** One recorded rewording of an ask: what the question was before this edit, who edited, when. */
@@ -663,9 +776,10 @@ export interface CommentDelivery {
   readonly delivery: DeliveryCapability;
   readonly session_id: string | null;
   readonly envelope_id: string | null;
-  /** The stream already held this message when the attempt was sent, so the mentioned session
-   *  gained nothing from it; `envelope_id` is then null. Absent on a row written before the
-   *  field existed, which reads as false. */
+  /** The stream already held this message when the attempt was sent: an earlier attempt landed,
+   *  so this one is recognised as a repeat and not handed to the mentioned session again
+   *  (`DELIVERY_DUPLICATE_WINDOW_MS` states where, and the limits). `envelope_id` is then null.
+   *  Absent on a row written before the field existed, which reads as false. */
   readonly duplicate?: boolean;
   readonly state: "pending" | "sent" | "failed";
   readonly error: string | null;
@@ -689,13 +803,14 @@ export interface CommentDeliveryEventPayload {
    *  the attempt's claim, and both reply handlers settle the row in the statement that appends
    *  theirs. The attempt row itself reads `pending` between its commit and that outcome. */
   readonly state: "sent" | "failed";
-  /** The stream already held this message, so the mentioned session gained nothing from this
-   *  attempt. Absent means false. */
+  /** The stream already held this message: an earlier attempt landed, so this one is recognised as
+   *  a repeat and not handed to the mentioned session again (`DELIVERY_DUPLICATE_WINDOW_MS`).
+   *  Absent means false. */
   readonly duplicate?: boolean;
   readonly error?: string;
   readonly reply_id: string | null;
 }
-export interface Comment {
+export interface Comment extends AnchorPosition {
   readonly id: string;
   readonly issue_key: string | null;
   readonly artifact_id?: string | null;
@@ -716,6 +831,17 @@ export interface Comment {
   readonly created_at: string;
   readonly mentions: CommentMention[];
   readonly deliveries: CommentDelivery[];
+}
+
+/** What a route that writes a comment answers (`POST /api/v1/issues/{key}/comments`,
+ *  `POST /api/v1/artifacts/{id}/comments`, and the delivery callback
+ *  `POST /api/v1/comments/{id}/reply`): the comment row and, on a reply to an open ask, whom that
+ *  ask waits on now that the reply is its newest. It is the value the comment's event carries
+ *  under the same name, and may differ from `turn`: an agent's reply on a moved approval request
+ *  leaves that request waiting on the agent. A replayed delivery callback, which writes nothing,
+ *  answers the stored reply without it. */
+export interface CommentWriteResponse extends Comment {
+  readonly ask_waiting_on?: AskTurn;
 }
 
 export interface Suggestion {
@@ -782,19 +908,55 @@ export const MAX_BROADCAST_RECIPIENTS = 100;
 export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
 
 /**
- * How long the notification stream recognises a repeated delivery as a duplicate, in
- * milliseconds. This is the single source for that window: `bus/stream.go`'s
- * `streamDuplicateWindow` is generated from it (`scripts/gen-go.ts` emits
- * `contracts.DeliveryDuplicateWindow`), and the SPA reads it to decide whether re-sending a
- * failed attempt in its own mode can still be promised not to deliver twice.
+ * How long a repeated delivery is recognised, in milliseconds: the window behind the dashboard's
+ * promise that a same-mode Retry "won't deliver it twice". This comment is where that promise is
+ * stated; every other place that relies on it points here.
  *
- * It equals the stream's retention: past it the stream holds neither the message nor its
- * MsgId, so a same-mode retry publishes a second frame and the agent is handed the same
- * instruction again.
+ * Dispatch keys a send by message and mode (`<message>:<mode>`, `<comment>:<target>:<mode>`), the
+ * same for every attempt, and the listener makes that key, scoped to the recipient
+ * (`agent.<session>.<key>`), the envelope's `dedupe_key`. A same-mode Retry of a send that already
+ * landed therefore repeats that frame's dedupe key, and only that: the listener mints a new
+ * `event_id` for every send. Two things recognise the repeat inside this window, both only for a
+ * key that names its event (`dedupeKeyNamesItsEvent` in `envelope.ts`, which every Dispatch key
+ * does), and a recipient is protected by whichever of them sits between it and the bus:
  *
- * It also bounds webhook redelivery dedupe: a GitHub, Slack or Ghost Wispr envelope publishes
+ * - The notification stream stores such a frame under a MsgId of its dedupe key and topic, so it
+ *   keeps one copy and answers the repeat as a duplicate, which the attempt records as
+ *   `duplicate`. That protects a session the listener pushes to from the stream. It does not
+ *   protect a session that subscribes over core NATS: JetStream's check applies to the stream's
+ *   copy only, and a core subscriber is handed every publish, repeats included.
+ * - Each host that subscribes over core NATS (the Oh My Pi extension, the Claude Code channel)
+ *   hands its agent at most one frame per such key inside this window, through
+ *   `createDeliveryDedupe` in `@legion/envoy-client/delivery`. A frame the host answered with an
+ *   error instead (a BTW whose side turn failed) was never handed over, so the host releases its
+ *   key and a same-mode re-send of it reaches the agent.
+ *
+ * It fails in three places. A host holds its keys in memory, so one that restarts after the first
+ * frame landed has forgotten it and a Retry reaches that agent a second time; that is ordinary,
+ * not rare: `claude --resume` starts a new channel process on the same conversation, and a
+ * Sandbox pod resumes its session in a new process. The stream stores a re-send of an attempt the
+ * session answered with an error no more than any other repeat, so a session the listener pushes
+ * to never receives it, and its attempt reads as a duplicate. The dashboard therefore offers no
+ * same-mode Retry for such an attempt and points at a mode change, which is a new key; sending
+ * that Retry under a new key is LEGION-431. And a host keeps at most `DELIVERY_DEDUPE_KEY_LIMIT`
+ * keys, forgetting the oldest past it, so a re-send of a key it was handed before that many later
+ * ones reaches the agent again. The limit is two and a half times what the whole stream stored in
+ * one window when it was set, so a host reaches it only once traffic grows past that or a
+ * producer floods a topic it follows.
+ *
+ * Past the window neither remembers the key, and a same-mode retry is a second delivery, so the
+ * dashboard makes the promise only inside it, and names the restart
+ * (`packages/dispatch/web/src/features/conversation/delivery.ts`). `scripts/gen-go.ts` emits this
+ * as `contracts.DeliveryDuplicateWindow`, which `bus/stream.go` uses for both the stream's
+ * duplicate window and its retention.
+ *
+ * It also bounds webhook redelivery dedupe: a GitHub, Slack or Ghost Wispr envelope is stored
  * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a
- * window shorter than that lets a GitHub redelivery publish a second copy.
+ * window shorter than that lets a GitHub redelivery be stored, and handed to a host, twice.
+ *
+ * This window bounds a *delivery* retry, not a broadcast *create*:
+ * `CreateBroadcastInput.idempotency_key` is a database row that lives as long as its broadcast,
+ * so a repeated `POST /api/v1/broadcasts` is recognised with no window, however late it arrives.
  */
 export const DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 
@@ -820,10 +982,12 @@ export interface MessageDelivery {
   readonly session_id: string;
   readonly envelope_id: string | null;
   /**
-   * The stream already held this message when the attempt was sent, so the recipient gained
-   * nothing from it. The attempt is still `sent` - it reached the listener - but `envelope_id`
-   * is null, because the envelope this send minted is the one the stream discarded. Absent on a
-   * row written before the field existed, which reads as false.
+   * The stream already held this message when the attempt was sent: an earlier attempt landed,
+   * so this one is recognised as a repeat and not handed to the recipient again
+   * (`DELIVERY_DUPLICATE_WINDOW_MS` states where, and the limits). The attempt is still `sent` -
+   * it reached the listener - but `envelope_id` is null, because the stream discarded the
+   * envelope this send minted. Absent on a row written before the field existed, which reads as
+   * false.
    */
   readonly duplicate?: boolean;
   /**
@@ -837,6 +1001,29 @@ export interface MessageDelivery {
   readonly error: string | null;
   readonly reply_id: string | null;
   readonly created_at: string;
+  /**
+   * Whoever's send opened the attempt: the person who wrote or retried the message, or the session
+   * a bearer's retry named. A resume keeps it. Null on an attempt written before Dispatch recorded
+   * it, and absent from a Dispatch older than the field.
+   */
+  readonly requested_by?: Actor | null;
+  /**
+   * The attempt's session took the message as its user's own turn
+   * (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`), and when. At most one attempt of
+   * a message is ever accepted; null on every other attempt, absent from a Dispatch older than the
+   * fields. The session said it took the message, so this outranks a `failed` state the send
+   * recorded afterwards.
+   */
+  readonly accepted_as?: "user_turn" | null;
+  readonly accepted_at?: string | null;
+}
+
+/**
+ * `POST /api/v1/messages/{id}/deliveries/{attempt}/accept`'s answer: the attempt it accepted, and
+ * the body of the message as Dispatch stored it.
+ */
+export interface AcceptedMessageDelivery extends MessageDelivery {
+  readonly body: string;
 }
 
 export interface Message {
@@ -846,6 +1033,11 @@ export interface Message {
   readonly body: string;
   readonly target: string | null;
   readonly in_reply_to: string | null;
+  /**
+   * The broadcast this message is one recipient's copy of; null for every other message, and
+   * absent from a Dispatch older than the field.
+   */
+  readonly broadcast_id?: string | null;
   readonly deliveries: MessageDelivery[];
   readonly created_at: string;
 }
@@ -883,10 +1075,22 @@ export interface MessageDeliveryEventPayload {
   readonly target?: string;
   readonly title: string;
   readonly state: "sent" | "failed";
-  /** The stream already held this message, so the recipient gained nothing from this attempt:
-   *  it reached the listener and put nothing new on the session's subject. Absent means false. */
+  /** The stream already held this message: an earlier attempt landed, so this one is recognised as
+   *  a repeat and not handed to the recipient again (`DELIVERY_DUPLICATE_WINDOW_MS`). Absent means
+   *  false. */
   readonly duplicate?: boolean;
   readonly error?: string;
+}
+
+/** `message.accepted`: the session an attempt went to took the message as its user's own turn.
+ *  It is never a second `message.delivery` receipt; the send still appends its own. `target` is
+ *  the message's own, `session:<recipient>` for a direct message. */
+export interface MessageAcceptedEventPayload {
+  readonly message_id: string;
+  readonly attempt: number;
+  readonly session_id: string;
+  readonly accepted_as: "user_turn";
+  readonly target: string;
 }
 
 export type SearchResultKind = "issue" | "document" | "comment" | "ask" | "message";
@@ -1076,7 +1280,8 @@ export interface ArtifactVersionEventPayload extends ReferenceChangesPayload {
 
 /** `artifact.approved` and `artifact.changes_requested`: a human review of a document,
  *  pinned to `version`; `reason` is required for changes requested; `ask_id` names the
- *  approval ask the review answered, null when given from the document header. */
+ *  approval ask the review answered, null when given from the document header with no
+ *  approval ask open at that version. */
 export interface ArtifactReviewEventPayload {
   readonly artifact_id: string;
   readonly name: string;
@@ -1270,9 +1475,18 @@ export type DispatchEvent =
       readonly type: "ask.anchor_refreshed";
       readonly payload: AskEventPayload;
     })
+  /** Every rewording: a PATCH edit, a block ask's new text, and an approval request's move to a new
+   *  version or new summary. Each one stamps the ask's `edited_at`. */
   | (DispatchEventBase & {
       readonly type: "ask.edited";
       readonly payload: AskEditEventPayload;
+    })
+  /** An agent handed its approval request back to the human: `approval.requested_version` is the
+   *  version it handed back. It rewords nothing and leaves `edited_at` as it was; a hand-back
+   *  with a new summary is an `ask.edited` followed by this event. */
+  | (DispatchEventBase & {
+      readonly type: "ask.handed_back";
+      readonly payload: AskEventPayload;
     })
   | (DispatchEventBase & { readonly type: "ask.answered"; readonly payload: AskEventPayload })
   | (DispatchEventBase & {
@@ -1333,6 +1547,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "message.delivery";
       readonly payload: MessageDeliveryEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "message.accepted";
+      readonly payload: MessageAcceptedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "message.answered";
@@ -1401,7 +1619,7 @@ export type UserState = Record<string, UserIssueState>;
 /** One viewer's state for one agent's conversation. Exchanges whose newest message is at or
  * before `cleared_before` (RFC3339, the viewer's Clear) are hidden for that viewer only;
  * `read_through` is how far the viewer has read; `unread_replies` counts the session's replies
- * to messages this viewer sent that are newer than both. */
+ * to messages this viewer sent that are newer than both and not read by id (`read_replies`). */
 export interface UserAgentState {
   readonly cleared_before?: string;
   readonly read_through?: string;
@@ -1410,11 +1628,14 @@ export interface UserAgentState {
   readonly unread_replies?: number;
 }
 
-/** `PUT /api/v1/me/agents/{session_id}/state`: a Clear, a read mark, or both. `read_through`
- * only moves forward; the response is the session's whole `UserAgentState`. */
+/** `PUT /api/v1/me/agents/{session_id}/state`: a Clear, a read mark, replies read by id, or any
+ * of them together. `read_through` only moves forward and covers every reply up to it;
+ * `read_replies` names the session's own messages and covers those alone, for a view that shows
+ * only some of a session's replies. The response is the session's whole `UserAgentState`. */
 export interface UserAgentStateInput {
   readonly cleared_before?: string;
   readonly read_through?: string;
+  readonly read_replies?: readonly string[];
 }
 
 /** `GET /api/v1/me/agents/state`: keyed by session ID. */
@@ -1685,6 +1906,15 @@ export interface CreateBroadcastInput {
   /** The sessions the human selected. A session named twice is one recipient; one that is no
    *  longer live, or that does not advertise `delivery`, comes back under `excluded`. */
   readonly session_ids: readonly string[];
+  /** Names this one send, the same on every retry of it: letters, digits, `.`, `_`, `:` and `-`,
+   *  at most 128 characters. The server answers a repeat (same human, same key, same body, mode
+   *  and session_ids) with the broadcast the first request made, 200 instead of 201, and refuses
+   *  a reuse of the key for a different request with 409 BROADCAST_KEY_REUSED, whose body names
+   *  the broadcast that already used the key as `broadcast_id`; that request is not sent.
+   *  Recognised for as long as the broadcast exists: there is no window (see
+   *  DELIVERY_DUPLICATE_WINDOW_MS). The dashboard sends a UUID per composed send; a script mints
+   *  its own. Required. */
+  readonly idempotency_key: string;
 }
 
 export interface IssueRead {
@@ -1697,6 +1927,32 @@ export interface ArtifactText {
   readonly version: number | null;
   /** Opaque SHA-256 token for the full Proof document state, including inline marks, when served by a precondition-aware Dispatch server. */
   readonly token?: string;
+}
+
+/**
+ * The close code the document websocket (`/ws/doc/{room}`) refuses a room with when the tree it
+ * holds is outside the Proof schema: it completes the upgrade and closes with this code, and
+ * `DOCUMENT_SCHEMA_CLOSE_REASON`, before any sync, so a browser editor never receives a tree it
+ * would normalize and write back. It is in the private 4000-4999 range beside Hocuspocus's own 4401
+ * and 4403, and the dashboard reads it as the document's repair state, never as a dropped
+ * connection to retry. Generated into Go as `contracts.DocumentSchemaCloseCode`.
+ */
+export const DOCUMENT_SCHEMA_CLOSE_CODE = 4409;
+
+/** The reason the document websocket closes with `DOCUMENT_SCHEMA_CLOSE_CODE`: the code reads of
+ *  that document answer (`409 DOC_SCHEMA`). Generated into Go as
+ *  `contracts.DocumentSchemaCloseReason`. */
+export const DOCUMENT_SCHEMA_CLOSE_REASON = "DOC_SCHEMA";
+
+export interface ArtifactRebuildReport {
+  readonly head: number;
+  readonly removed_checkpoints: number;
+  readonly removed_snapshots: number;
+  readonly removed_updates: number;
+  /** The version whose markdown the rebuilt document holds: its latest saved version, or the
+   *  version a rebuild from supplied markdown that changed the document wrote. */
+  readonly source_version: number;
+  readonly validation_error: string;
 }
 
 export interface ArtifactVersionText extends Version {
@@ -1920,8 +2176,8 @@ export const CommentEventPayloadSchema = z
   // clients are known to read today, but the wire payload always carries every
   // field the server model has. .passthrough() keeps a field this schema hasn't
   // caught up to riding along instead of silently vanishing when a consumer that
-  // reads it is added later — the failure mode that dropped ask_waiting_on/turn
-  // from a comment.created reply without any test catching it.
+  // reads it is added later, as ask_waiting_on and turn would vanish from a
+  // comment.created reply with no test to catch it.
   .passthrough();
 
 export const MessageEventPayloadSchema = z.object({
@@ -1943,6 +2199,9 @@ export const DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.ex
   body: z.string(),
   target: z.string(),
   in_reply_to: z.string().nullable(),
+  // The broadcast a frame's message is one recipient's copy of, as the frame claims it: a frame is
+  // untrusted, so neither its value nor its absence proves anything.
+  broadcast_id: z.string().nullish(),
   deliveries: z.array(z.unknown()),
   created_at: z.string(),
 });

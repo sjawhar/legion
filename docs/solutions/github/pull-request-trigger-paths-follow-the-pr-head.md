@@ -72,7 +72,7 @@ When `release.yaml` calls `worker-image.yaml` with `uses:`, the **caller job's**
 cover every scope the callee declares — job-level `permissions:` on the calling job replace the
 workflow-level set for that job, so put the callee's set there (`contents: read` and
 `packages: write` for `worker-image.yaml`) rather than widening the top-level block for every job
-in the file. The step that appends the image digest to the CLI release needs `contents: write`, so
+in the file. The step that appends the image digest to the legion release needs `contents: write`, so
 it runs in `release.yaml`'s own `worker_image_release_note` job; the called workflow, which also
 builds PR-authored code on `pull_request`, never gets that scope.
 
@@ -84,7 +84,7 @@ Declare `secrets:` explicitly or omit it.
 ## Rerun the failed jobs, not the run
 
 The remedy text for a failed image build must say `gh run rerun <run-id> --failed`. A whole-run
-rerun of a `release.yaml` invocation re-executes the `cli` job at the same commit, which now sees
-its own `cli-vX` tag, computes an empty bump range, skips, and hands the image job an empty
-`cli_version` — the retried image publishes `sha-` only, with no version tag and no release-body
+rerun of a `release.yaml` invocation re-executes the `legion` job at the same commit, which now sees
+its own `legion-vX` tag, computes an empty bump range, skips, and hands the image job an empty
+`legion_version` — the retried image publishes `sha-` only, with no version tag and no release-body
 append. `--failed` keeps the succeeded jobs' recorded outputs.

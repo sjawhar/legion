@@ -1,0 +1,121 @@
+name: Docs
+
+# Builds the documentation site (docs/site) on every pull request that could change it, and
+# publishes it to GitHub Pages (https://sjawhar.github.io/legion/) on every push to main. The site's
+# reference pages are generated from packages/ and skills/ at build time, so those paths rebuild it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/site/**"
+      - "packages/**"
+      - "skills/**"
+      - ".github/workflows/docs.yaml"
+  pull_request:
+    paths:
+      - "docs/site/**"
+      - "packages/**"
+      - "skills/**"
+      - ".github/workflows/docs.yaml"
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # The screenshots step boots Dispatch on the e2e harness, which needs a database it may
+    # truncate.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/setup-bun
+      # Astro runs on Node.js (22.12 or newer).
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+      # docs/site/scripts/build-binaries.sh builds the Go binaries the reference generators run, and
+      # the screenshots step builds the Dispatch server; both modules name the same Go.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: packages/daemon/go.mod
+          cache-dependency-path: |
+            packages/daemon/go.sum
+            packages/envoy/go.sum
+      - run: bun install --frozen-lockfile
+      - name: Lint the docs site
+        run: bun run lint
+        working-directory: docs/site
+      - name: Typecheck the docs site
+        run: bun run typecheck
+        working-directory: docs/site
+      # The pages' screenshots are made, not committed (docs/site/media/README.md): Dispatch on
+      # the e2e harness, seeded with example data, captured in Chromium.
+      - name: Build the Dispatch dashboard the screenshots show
+        run: bun run build:web
+        working-directory: packages/dispatch
+      - name: Install Playwright Chromium
+        # The runner image's chrome-stable apt source intermittently fails `apt-get update`, which
+        # takes `--with-deps` down with it; Chrome itself is preinstalled, so the source goes.
+        run: |
+          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
+          bunx playwright install --with-deps chromium
+        working-directory: docs/site
+      - name: Take the screenshots
+        run: bun run docs:media
+        # A step of the run that hangs fails it within two minutes (STEP_TIMEOUT_MS in
+        # docs/site/media/harness.ts); this bounds the rest, the build and the boot.
+        timeout-minutes: 15
+        env:
+          DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # What each failed shot's page showed, and the harness's process logs: a hang leaves the
+      # Dispatch server's goroutines at the end of dispatch.log.
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: docs-failed-shots-${{ github.run_attempt }}
+          path: |
+            docs/site/media/.work/failed-shots
+            docs/site/media/.work/harness
+          if-no-files-found: ignore
+      # Generates the reference pages, then builds the site; starlight-links-validator fails it on a
+      # broken internal link.
+      - name: Build the docs site
+        run: bun run docs:build
+      - if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: docs/site/dist
+
+  deploy:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    # One deployment at a time, and a queued one is never cancelled half-way.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

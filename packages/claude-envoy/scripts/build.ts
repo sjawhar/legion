@@ -1,20 +1,22 @@
-// Bundle the plugin's two executables into self-contained files the Claude Code
+// Bundle the plugin's executables into self-contained files the Claude Code
 // plugin cache can run: the cache holds the git tree with no node_modules, so
 // every dependency (workspace packages included) is inlined here and `dist/`
-// is committed. `--check` rebuilds into a scratch directory and fails when the
-// result differs from the committed files; CI runs it on the Bun version pinned
-// in the repo-root `.bun-version`, because bundler output differs across Bun
-// releases.
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+// is committed, with `THIRD_PARTY_NOTICES` beside the bundles holding the
+// license of every third-party package they inline. `--check` rebuilds into a
+// scratch directory and fails when the result differs from the committed
+// files; CI runs it on the Bun version pinned in the repo-root `.bun-version`,
+// because bundler output differs across Bun releases.
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { thirdPartyNotices } from "../../../scripts/third-party-notices"
 
 const packageRoot = resolve(import.meta.dir, "..")
 
 /** Output name -> source entrypoint, relative to the package root. */
 export const BUNDLE_ENTRYPOINTS = {
   "envoy-channel": "bin/envoy-channel.ts",
-  "open-asks-hook": "hooks/open-asks-hook.ts",
+  "session-hook": "hooks/session-hook.ts",
 } as const
 
 export async function buildBundles(outdir: string): Promise<void> {
@@ -28,10 +30,16 @@ export async function buildBundles(outdir: string): Promise<void> {
     minify: { whitespace: false, identifiers: false, syntax: false },
     sourcemap: "none",
     naming: "[name].[ext]",
+    metafile: true,
   })
   if (!result.success) {
     throw new AggregateError(result.logs, "bundle build failed")
   }
+  if (!result.metafile) throw new Error("Bun.build returned no metafile")
+  await writeFile(
+    join(outdir, "THIRD_PARTY_NOTICES"),
+    await thirdPartyNotices(Object.keys(result.metafile.inputs), process.cwd()),
+  )
 }
 
 async function checkBundles(distDirectory: string): Promise<string[]> {

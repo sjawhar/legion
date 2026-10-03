@@ -21,7 +21,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/sjawhar/envoy/internal/broker/approvers"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
 )
@@ -32,6 +31,7 @@ var (
 	ErrAlreadyEnrolled  = errors.New("this runtime is already enrolled and live")
 	ErrPodIdentity      = errors.New("the projected token does not identify this pod")
 	ErrNotLive          = errors.New("enrollment is not live")
+	ErrInvalidSlot      = errors.New("a slot is only for a pod enrollment and must match ^[a-z][a-z0-9-]{0,62}$")
 )
 
 type Credential struct {
@@ -49,6 +49,10 @@ type Enrollment struct {
 	Thumbprint string
 	SessionID  *string
 	PodToken   string
+	// Slot names one of several independent identities in one pod (record.ValidSlot): each slot
+	// of a pod is an enrollment of its own, with its own key, lease and grants. "" is the one
+	// identity of every box, host and single-identity pod enrollment.
+	Slot string
 	// Subject is a pod enrollment's verified service-account subject, set by Create from the
 	// projected token itself and never from the caller; nil for box and host.
 	Subject      *string
@@ -73,7 +77,7 @@ type Service struct {
 	// Chain re-verifies a launcher credential's issuance chain on every AuthenticateLauncher
 	// call: a launcher_credentials row is never trusted on its own, since it must still trace
 	// back to a genuinely signed, human-approved credential-request record. NewChainVerifier
-	// builds one against this same Store and an approvers.Service.
+	// builds one against this same Store.
 	Chain *record.ChainVerifier
 
 	// testConflictHook, when set, runs once a 23505 insert conflict is detected in createAttempt,
@@ -117,57 +121,9 @@ func (s *Service) MintLauncherCredentialTx(ctx context.Context, tx pgx.Tx, opera
 }
 
 // NewChainVerifier builds the record.ChainVerifier AuthenticateLauncher's issuance-chain
-// re-verification uses, wired against st and approversSvc: FetchRecord and FetchApproval read
-// straight from Postgres. VerifyAssertion re-runs the approver's real WebAuthn signature check
-// (approvers.Service.VerifyAssertion — full origin/rpID/flags/challenge/signature verification,
-// plus the approver key's own current active/revoked state) inside a transaction it always rolls
-// back, so a re-check can never persist a side effect. The assertion's own authenticator
-// signature counter was already advanced once, for real, by the original (committed) decision at
-// ApplyDecision time, so every honest re-check of that exact same stored assertion fails the
-// counter-monotonicity check on its own — approvers.ErrCounterReplay — and that is the ONLY error
-// this treats as success: the counter check runs strictly after every cryptographic check inside
-// VerifyAssertion, so a forged signature, wrong origin/rpID/challenge, or a since-revoked or
-// tombstoned key all fail before the counter is ever reached, and none of those wrap
-// ErrCounterReplay.
-func NewChainVerifier(st *store.Store, approversSvc *approvers.Service, audience string, skew time.Duration) *record.ChainVerifier {
-	return &record.ChainVerifier{
-		Audience: audience,
-		Skew:     skew,
-		FetchRecord: func(ctx context.Context, recordID string) (string, time.Time, bool, error) {
-			var body string
-			var createdAt time.Time
-			err := st.Pool.QueryRow(ctx, `select body, created_at from credential_requests where id=$1 and kind='launcher_credential'`, recordID).Scan(&body, &createdAt)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return "", time.Time{}, false, nil
-			}
-			if err != nil {
-				return "", time.Time{}, false, err
-			}
-			return body, createdAt, true, nil
-		},
-		FetchApproval: func(ctx context.Context, recordID string) (json.RawMessage, bool, error) {
-			var assertion json.RawMessage
-			err := st.Pool.QueryRow(ctx, `select assertion from credential_request_events where record_id=$1 and event='approved'`, recordID).Scan(&assertion)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, false, nil
-			}
-			if err != nil {
-				return nil, false, err
-			}
-			return assertion, true, nil
-		},
-		VerifyAssertion: func(ctx context.Context, login string, challenge [32]byte, assertion json.RawMessage) error {
-			tx, err := st.Pool.Begin(ctx)
-			if err != nil {
-				return err
-			}
-			defer tx.Rollback(ctx)
-			if _, err := approversSvc.VerifyAssertion(ctx, tx, login, challenge, assertion); err != nil && !errors.Is(err, approvers.ErrCounterReplay) {
-				return err
-			}
-			return nil
-		},
-	}
+// re-verification uses, scoped to launcher_credential records.
+func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *record.ChainVerifier {
+	return st.ChainVerifier("launcher_credential", audience, skew)
 }
 
 // AuthenticateLauncher answers proof.Verifier's LookupLauncher hook directly: given a launcher
@@ -222,10 +178,22 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 	return cred, nil
 }
 
+// Create enrolls in under cred. An enrollment's operator is its credential's: the email of the
+// person who approved the machine login that minted it (machine.Service.ApplyDecision), recorded
+// whether or not the launcher states one. A stated operator that names anyone else, or any operator
+// stated under a service credential, is ErrOperatorMismatch. A live enrollment is unique per
+// launcher credential, runtime id and slot: the same key in the same slot gets its live enrollment
+// back (Existing), a different key in a live slot is ErrAlreadyEnrolled, and another slot of the
+// same pod is an enrollment of its own. A slot is valid only on a pod enrollment (ErrInvalidSlot);
+// a pod's runtime id is always the pod UID its projected token proves, whichever slot it enrolls.
 func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (Enrollment, error) {
-	if in.Operator != nil {
-		in.Operator = new(record.CanonicalLogin(*in.Operator))
+	if in.Slot != "" && (in.Kind != "pod" || !record.ValidSlot(in.Slot)) {
+		return Enrollment{}, ErrInvalidSlot
 	}
+	if in.Operator != nil && (cred.Operator == nil || record.CanonicalLogin(*in.Operator) != *cred.Operator) {
+		return Enrollment{}, ErrOperatorMismatch
+	}
+	in.Operator = cred.Operator
 	if !authorized(cred, in.Kind, in.Operator) {
 		return Enrollment{}, ErrOperatorMismatch
 	}
@@ -266,11 +234,10 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 		return Enrollment{}, false, err
 	}
 	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at)
-		values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		in.ID, in.Kind, in.RuntimeID, in.Operator, in.Thumbprint, in.SessionID, in.Subject, cred.ID, in.LeaseExpires)
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, slot, operator, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at)
+		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		in.ID, in.Kind, in.RuntimeID, in.Slot, in.Operator, in.Thumbprint, in.SessionID, in.Subject, cred.ID, in.LeaseExpires)
+	if store.IsUniqueViolation(err) {
 		// The failed insert aborted tx, which still holds its pooled connection. Release it before
 		// recovery asks the pool for one: holding one connection while waiting for a second is how
 		// enough concurrent retries of one enrollment deadlock the whole pool.
@@ -285,19 +252,20 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 	if err != nil {
 		return Enrollment{}, false, err
 	}
-	if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ('enrollment.created',$1,$2, jsonb_build_object('kind',$3::text,'runtime_id',$4::text,'thumbprint',$5::text))`,
-		in.ID, "launcher:"+cred.ID.String(), in.Kind, in.RuntimeID, in.Thumbprint); err != nil {
+	if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ('enrollment.created',$1,$2,
+		jsonb_strip_nulls(jsonb_build_object('kind',$3::text,'runtime_id',$4::text,'thumbprint',$5::text,'slot',nullif($6::text,''))))`,
+		in.ID, "launcher:"+cred.ID.String(), in.Kind, in.RuntimeID, in.Thumbprint, in.Slot); err != nil {
 		return Enrollment{}, false, err
 	}
 	return in, false, tx.Commit(ctx)
 }
 
 // recoverConflict resolves an insert that collided with an unrevoked enrollment of the same
-// runtime under the same launcher credential. The launcher may be retrying after a crash between
-// our 201 and its persist: the same key gets its live enrollment back, and a different key for a
-// live runtime is a refusal. A colliding row whose lease has lapsed is not live, whatever its
+// runtime and slot under the same launcher credential. The launcher may be retrying after a crash
+// between our 201 and its persist: the same key gets its live enrollment back, and a different key
+// for a live slot is a refusal. A colliding row whose lease has lapsed is not live, whatever its
 // revoked_at says: it is ended here — like a revoke, with an enrollment.expired audit row — and
-// the caller retries, so a lapsed lease never leaves the runtime id permanently locked.
+// the caller retries, so a lapsed lease never leaves the slot permanently locked.
 func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrollment) (Enrollment, bool, error) {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -307,7 +275,7 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 	var existing Enrollment
 	var live bool
 	err = tx.QueryRow(ctx, `select id, thumbprint, lease_expires_at, lease_expires_at > now() from enrollments
-		where launcher_credential_id=$1 and runtime_id=$2 and revoked_at is null for update`, cred.ID, in.RuntimeID).
+		where launcher_credential_id=$1 and runtime_id=$2 and slot=$3 and revoked_at is null for update`, cred.ID, in.RuntimeID, in.Slot).
 		Scan(&existing.ID, &existing.Thumbprint, &existing.LeaseExpires, &live)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Enrollment{}, true, nil
@@ -316,7 +284,7 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 		return Enrollment{}, false, err
 	}
 	if !live {
-		if err := endEnrollment(ctx, tx, existing.ID.String(), "broker", "enrollment.expired", "its lease lapsed"); err != nil {
+		if _, _, err := endLapsed(ctx, tx, existing.ID.String()); err != nil {
 			return Enrollment{}, false, err
 		}
 		return Enrollment{}, true, tx.Commit(ctx)
@@ -330,42 +298,105 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 
 // endEnrollment ends enrollment id inside tx: it is marked revoked, every live grant under it is
 // revoked, and every request still pending under it is cancelled — an approval must never land
-// on a session that has ended — with one audit row per cancelled request and one kind row for
-// the enrollment. The caller holds the enrollment row's lock.
-func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason string) error {
+// on a session that has ended — with its audit row and its record's cancelled event
+// (store.EndPendingRequests, so no approver's pending list keeps showing it), and one kind row
+// for the enrollment. It reports how many grants it revoked and requests it cancelled. The caller
+// holds the enrollment row's lock.
+func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason string) (grantsRevoked int64, requestsCancelled int, err error) {
 	if _, err := tx.Exec(ctx, `update enrollments set revoked_at=now() where id=$1`, id); err != nil {
-		return err
+		return 0, 0, err
 	}
-	if _, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where enrollment_id=$1 and revoked_at is null`, id, actor); err != nil {
-		return err
+	tag, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where enrollment_id=$1 and revoked_at is null`, id, actor)
+	if err != nil {
+		return 0, 0, err
 	}
 	detail := "the requesting enrollment ended: " + reason
-	rows, err := tx.Query(ctx, `update requests set state='cancelled', decided_at=now(), decided_by=$2, decision_detail=$3
-		where enrollment_id=$1 and state='pending' returning id`, id, actor, detail)
+	cancelled, err := store.EndPendingRequests(ctx, tx, store.RequestsOfEnrollment, id, store.RequestEnd{
+		State: "cancelled", Actor: actor, DecidedBy: &actor, Detail: detail, AuditDetail: map[string]any{"reason": detail},
+	})
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
-	var cancelled []string
-	for rows.Next() {
-		var requestID string
-		if err := rows.Scan(&requestID); err != nil {
-			rows.Close()
-			return err
+	if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ($1,$2,$3, jsonb_build_object('reason',$4::text))`, kind, id, actor, reason); err != nil {
+		return 0, 0, err
+	}
+	return tag.RowsAffected(), len(cancelled), nil
+}
+
+// endLapsed ends an enrollment whose lease lapsed: endEnrollment with actor broker and an
+// enrollment.expired audit row, for recoverConflict and the sweep alike.
+func endLapsed(ctx context.Context, tx pgx.Tx, id string) (grantsRevoked int64, requestsCancelled int, err error) {
+	return endEnrollment(ctx, tx, id, "broker", "enrollment.expired", "its lease lapsed")
+}
+
+// LapsedEnrollment is one enrollment EndLapsed ended.
+type LapsedEnrollment struct {
+	ID                string
+	Kind              string
+	RuntimeID         string
+	Slot              string
+	LeaseExpires      time.Time
+	GrantsRevoked     int64
+	RequestsCancelled int
+}
+
+// lapsedBatch is how many lapsed enrollments EndLapsed ends in one transaction.
+const lapsedBatch = 100
+
+// EndLapsed ends every enrollment whose lease has lapsed and that nothing has ended yet: a pod that
+// is gone, a box whose launcher stopped renewing, a host session whose helper died. Each is ended
+// as Revoke ends one (endEnrollment, actor "broker", an enrollment.expired audit row), so its
+// grants are revoked and its pending requests cancelled and dropped from the approver's list,
+// rather than waiting there for their own expiry with an approval that could grant nothing.
+//
+// Lapsed means what Lookup means by not live: lease_expires_at no later than Postgres's now(). A
+// session that keeps renewing keeps its lease ahead of now() and is never selected, and Renew
+// refuses an enrollment once its lease has lapsed, so ending one takes nothing a session could
+// still use. Rows a concurrent Renew or Revoke has locked are skipped (the next sweep sees them
+// as they are then), and an ended row has revoked_at set and is never selected again, so a sweep
+// that finds nothing changes nothing. It works in batches of lapsedBatch, each one transaction,
+// and returns what it ended.
+func (s *Service) EndLapsed(ctx context.Context) ([]LapsedEnrollment, error) {
+	var ended []LapsedEnrollment
+	for {
+		batch, err := s.endLapsedBatch(ctx)
+		ended = append(ended, batch...)
+		if err != nil || len(batch) < lapsedBatch {
+			return ended, err
 		}
-		cancelled = append(cancelled, requestID)
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
+}
+
+func (s *Service) endLapsedBatch(ctx context.Context) ([]LapsedEnrollment, error) {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
 	}
-	for _, requestID := range cancelled {
-		if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, actor, detail) values ('request.cancelled',$1,$2,$3, jsonb_build_object('reason',$4::text))`,
-			id, requestID, actor, detail); err != nil {
-			return err
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `select id, kind, runtime_id, slot, lease_expires_at from enrollments
+		where revoked_at is null and lease_expires_at <= now()
+		order by lease_expires_at limit $1 for update skip locked`, lapsedBatch)
+	if err != nil {
+		return nil, err
+	}
+	batch, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (LapsedEnrollment, error) {
+		var e LapsedEnrollment
+		err := row.Scan(&e.ID, &e.Kind, &e.RuntimeID, &e.Slot, &e.LeaseExpires)
+		return e, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i := range batch {
+		batch[i].GrantsRevoked, batch[i].RequestsCancelled, err = endLapsed(ctx, tx, batch[i].ID)
+		if err != nil {
+			return nil, err
 		}
 	}
-	_, err = tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ($1,$2,$3, jsonb_build_object('reason',$4::text))`, kind, id, actor, reason)
-	return err
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return batch, nil
 }
 
 func (s *Service) Renew(ctx context.Context, id string) (time.Time, error) {
@@ -429,7 +460,7 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	if revokedAt != nil {
 		return ErrNotLive
 	}
-	if err := endEnrollment(ctx, tx, id, by, "enrollment.revoked", "revoked by its launcher"); err != nil {
+	if _, _, err := endEnrollment(ctx, tx, id, by, "enrollment.revoked", "revoked by its launcher"); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -453,15 +484,15 @@ func (s *Service) Lookup(ctx context.Context, id string) (string, bool, error) {
 	return thumbprint, live, err
 }
 
-// Get answers this enrollment's own metadata (kind, operator, lease expiry) for
+// Get answers this enrollment's own metadata (kind, operator, slot, lease expiry) for
 // GET /v1/enrollments/self. Added in Task 11 for that read, following the same query pattern as
 // Lookup above. Unlike Lookup, which proof.Verifier calls with an untrusted, possibly malformed id
 // straight off a forged proof, Get is only ever called with an id a proof has already
 // authenticated, so it need not guard against a non-UUID id the way Lookup does.
 func (s *Service) Get(ctx context.Context, id string) (Enrollment, error) {
 	var e Enrollment
-	err := s.Store.Pool.QueryRow(ctx, `select id, kind, runtime_id, operator, lease_expires_at from enrollments where id=$1 and revoked_at is null`, id).
-		Scan(&e.ID, &e.Kind, &e.RuntimeID, &e.Operator, &e.LeaseExpires)
+	err := s.Store.Pool.QueryRow(ctx, `select id, kind, runtime_id, operator, slot, lease_expires_at from enrollments where id=$1 and revoked_at is null`, id).
+		Scan(&e.ID, &e.Kind, &e.RuntimeID, &e.Operator, &e.Slot, &e.LeaseExpires)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Enrollment{}, ErrNotLive
 	}
@@ -493,8 +524,7 @@ func (s *Service) SessionID(ctx context.Context, id string) (string, error) {
 // so the table stays bounded without a separate job.
 func (s *Service) Replay(ctx context.Context, jti string, expires time.Time) (bool, error) {
 	_, err := s.Store.Pool.Exec(ctx, `insert into proof_jtis (jti, expires_at) values ($1,$2)`, jti, expires)
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+	if store.IsUniqueViolation(err) {
 		return false, nil
 	}
 	if err != nil {

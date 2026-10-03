@@ -26,6 +26,7 @@ import {
   type MarginTab,
   marginItemId,
   marginItemMarkId,
+  marginItemRecord,
   threadMarkId,
   useMarginItems,
   useMarginOwner,
@@ -63,6 +64,7 @@ export function useMarginSheet(): MarginSheetModel {
     markPlacements,
     pendingCompose,
     placementsReported,
+    retypeCompose,
     selectItem,
     selectedItemId,
     setHoveredItemId,
@@ -383,7 +385,7 @@ export function useMarginSheet(): MarginSheetModel {
       .map((item) => marginItemMarkId(item))
       .filter((markId): markId is string => markId !== undefined);
     const blockIds = selectedItems
-      .map((item) => (item.kind === "ask" ? item.ask.anchor : item.comment.anchor))
+      .map((item) => marginItemRecord(item).anchor)
       .flatMap((anchor) =>
         anchor?.orphaned && typeof anchor.block_id === "string" ? [anchor.block_id] : []
       );
@@ -399,8 +401,7 @@ export function useMarginSheet(): MarginSheetModel {
   );
   useEffect(() => {
     const item = marginItems.find((candidate) => marginItemId(candidate) === selectedItemId);
-    const anchor =
-      item === undefined ? undefined : item.kind === "ask" ? item.ask.anchor : item.comment.anchor;
+    const anchor = item === undefined ? undefined : marginItemRecord(item).anchor;
     if (!anchor?.orphaned || typeof anchor.block_id !== "string") {
       selectedBlockFocus.current = undefined;
       return;
@@ -471,7 +472,14 @@ export function useMarginSheet(): MarginSheetModel {
     focus,
     margin: marginRef,
     onSelectCard,
-    placementsPublished: placementsReported,
+    // Only the report of the document whose cards this margin shows. A document the route has
+    // left can stay registered behind the next route's loading view - Suspense keeps the old
+    // page mounted, hidden, until the new page's code has arrived and its throttled reveal
+    // commits - and its report would read a press there as the reader working a placed document.
+    placementsPublished:
+      placementsReported &&
+      visibleArtifact !== undefined &&
+      documentBridge?.artifactId === visibleArtifact.id,
     routeItemId,
     routeItemKey,
     setHoveredItemId,
@@ -487,6 +495,7 @@ export function useMarginSheet(): MarginSheetModel {
       closeComposer,
       onAction,
       onComposerSaved,
+      onComposerKindChange: retypeCompose,
       onEdit,
       onUnpin: unpin,
       onRetryAction: retryItem,

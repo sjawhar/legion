@@ -17,11 +17,13 @@ import {
 } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import {
+  createDeliveryDedupe,
+  DedupeIdentitySchema,
   type DispatchDelivery,
   expectsLaneReceipt,
   inboundTimestamp,
   postDeliveryReply,
-  rememberBounded,
+  type RenderInboundResult,
   renderInbound,
   senderLabel,
 } from "@legion/envoy-client/delivery";
@@ -31,6 +33,10 @@ import {
   resolveDispatchConfig,
 } from "@legion/envoy-client/dispatch-config";
 import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
+import {
+  dispatchFirstSkillFile,
+  readDispatchFirstContext,
+} from "@legion/envoy-client/dispatch-first";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import {
   createFollowAnnouncer,
@@ -57,6 +63,18 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import { AgentStreamPublisher } from "../src/agent-stream";
+import { withDispatchFirst } from "../src/dispatch-first";
+import {
+  type AcceptedUserTurn,
+  endInjectedUserTurns,
+  HANDLED_ATTEMPT_ENTRY,
+  handledAttemptKey,
+  handledAttempts,
+  isUserTurnCandidate,
+  matchInjectedUserTurn,
+  noteInjectedUserTurn,
+  turnFromAccept,
+} from "../src/dispatch-user-turn";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import {
@@ -74,11 +92,7 @@ import type {
   ToolResult,
 } from "../src/pi-types";
 import { sideTurn } from "../src/side-turn";
-import {
-  isRegisteredSubagent,
-  type SessionIdentityContext,
-  subagentSessionCheck,
-} from "../src/subagent-session";
+import { type SessionIdentityContext, subagentSessionCheck } from "../src/subagent-session";
 import { toolFailure, toolSuccess } from "../src/tool-result";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
@@ -96,6 +110,19 @@ const CAPABILITIES_WITHOUT_BTW: readonly DeliveryCapability[] = DELIVERY_CAPABIL
 );
 
 /**
+ * The identity a delivery is claimed under, each field read on its own by the shared rule for it
+ * (`DedupeIdentitySchema`): a field the rule refuses identifies nothing, and a valid sibling still
+ * does. `renderInbound` renders a frame whose `dedupe_key` is empty, and that frame's `event_id`
+ * must still recognise its second copy.
+ */
+const ClaimIdentitySchema = DedupeIdentitySchema.extend({
+  event_id: DedupeIdentitySchema.shape.event_id.catch(undefined),
+  dedupe_key: DedupeIdentitySchema.shape.dedupe_key.catch(undefined),
+  source: DedupeIdentitySchema.shape.source.catch(undefined),
+  source_event_id: DedupeIdentitySchema.shape.source_event_id.catch(undefined),
+});
+
+/**
  * Transcript entry recording the role this session holds. Successful claims
  * write `{ role }`; legacy `{ role: null }` release records remain authoritative
  * when a resumed session decides whether to reclaim.
@@ -103,6 +130,13 @@ const CAPABILITIES_WITHOUT_BTW: readonly DeliveryCapability[] = DELIVERY_CAPABIL
 const ROLE_CLAIM_ENTRY = "envoy-role-claim";
 
 const OPEN_ASKS_TIMEOUT_MS = 3_000;
+
+/**
+ * How long a person's direct message waits on Dispatch's acceptance before it arrives as a card
+ * instead: the frames on the agent subject are delivered one at a time, so a hung Dispatch must
+ * not hold every message behind this one for the client's own minute.
+ */
+const USER_TURN_ACCEPT_TIMEOUT_MS = 10_000;
 
 /**
  * Transcript entry marking a session Legion drives. The process-wide bridge knows the same
@@ -204,7 +238,7 @@ const ASK_SELF_CHECK_TIMEOUT_MS = 60_000;
 const ASK_CHECKS_PER_PERIOD = 5;
 
 const UNASKED_WAIT_REMINDER =
-  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask (or dispatch_request_approval for a document), naming exactly what you need and from whom.";
+  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask, naming exactly what you need and from whom.";
 
 /** Tools whose success means the agent opened the ask itself, so the nudge has nothing to say. */
 const ASK_OPENING_TOOLS: readonly string[] = ["dispatch_ask", "dispatch_request_approval"];
@@ -305,6 +339,9 @@ function resolveSkillsDirectory(): string {
   return found;
 }
 const SKILLS_DIRECTORY = resolveSkillsDirectory();
+// Read once at load, so a plugin packed without the skill fails to load naming the file. A throw
+// inside the `context` handler would not do that: Oh My Pi catches it and sends the request anyway.
+const DISPATCH_FIRST_CONTEXT = readDispatchFirstContext(dispatchFirstSkillFile(SKILLS_DIRECTORY));
 
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
@@ -326,7 +363,7 @@ export default function envoyExtension(pi: PiApi): void {
   };
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch });
   const subscriptions = new Map<string, Subscription>();
-  const dedupeKeys = new Set<string>();
+  const delivered = createDeliveryDedupe();
   let connection: NatsConnection | undefined;
   let sessionDirectory = "";
   let sessionID = "";
@@ -337,9 +374,9 @@ export default function envoyExtension(pi: PiApi): void {
   let claimedRoleTopic: string | undefined;
   // The session id `claimedRoleTopic` was claimed under (endOutgoingRole).
   let claimedRoleSessionID: string | undefined;
-  // Notice subjects this session takes only while it holds `claimedRoleTopic` (the Go controller's
-  // topic, go-bootstrap.ts). They are never registered with the listener, so a resumed process
-  // cannot recover them: the role's claim is their only source, and `endRole` closes them.
+  // Notice subjects this session takes only while it holds `claimedRoleTopic` (the controller's
+  // topic, controller-session.ts). They are never registered with the listener, so a resumed
+  // process cannot recover them: the role's claim is their only source, and `endRole` closes them.
   const roleNoticeSubjects = new Set<string>();
   // Counts role ends, so a role-bound subscription still opening when its role ended can tell
   // (subscribeUnlessRoleEnds).
@@ -407,6 +444,10 @@ export default function envoyExtension(pi: PiApi): void {
   /** The bridge set is the process-local record; the transcript is what a fresh process reads. */
   const legionManaged = (id: string): boolean =>
     legionManagedTranscript || legionRoleClaimBridge().managedSessions.has(id);
+  // The attempts of a person's direct message this session delivered, as a card or as a turn
+  // (`HANDLED_ATTEMPT_ENTRY`): read from every entry of the session file, so a resume, a switch to
+  // another branch of the tree, or both keep a delivered attempt from being accepted again.
+  let handledDispatchAttempts = new Set<string>();
 
   const availabilityWarningSessionIDs = new Set<string>();
 
@@ -492,6 +533,7 @@ export default function envoyExtension(pi: PiApi): void {
       awarenessGeneration++;
     }
     legionManagedTranscript = branch.some(isLegionManagedEntry);
+    handledDispatchAttempts = handledAttempts(context.sessionManager.getEntries());
   };
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
@@ -517,6 +559,62 @@ export default function envoyExtension(pi: PiApi): void {
     result: { readonly body?: string; readonly error?: string }
   ): Promise<void> => {
     await postDeliveryReply(currentDispatchConfig(), sessionID, delivery, result);
+  };
+
+  // The user turn a person's direct Send or Aside becomes (`src/dispatch-user-turn.ts`): only one
+  // whose acceptance by this session Dispatch records, as the body and mode Dispatch answers. The
+  // attempt is recorded as handled before Dispatch is asked, so whatever this frame becomes - a
+  // turn, or the card every refusal, error and timeout keeps, a broken Dispatch configuration
+  // included - no later frame naming the attempt is accepted: a replay, or one forged inside the
+  // accept's minute for a Send that arrived as a card. Undefined for every frame that is not a
+  // turn; the caller then delivers today's card, which is the delivery, and posts nothing.
+  //
+  // A forged frame can name an attempt before Dispatch's frame does and so spend it; what that
+  // costs is `packages/pi-envoy/AGENTS.md`'s (the record's limit). Do not skip the record when
+  // the accept answers 404: the route answers 404 for a transient database error too, and a frame
+  // another subscription's pump carded while that accept was in flight would be forgotten, so a
+  // Send that arrived as a card could become a turn on a later forged frame.
+  const acceptedUserTurn = async (
+    rendered: RenderInboundResult
+  ): Promise<AcceptedUserTurn | undefined> => {
+    if (!isUserTurnCandidate(rendered)) return undefined;
+    const { delivery } = rendered;
+    const key = handledAttemptKey(delivery.id, delivery.attempt);
+    if (handledDispatchAttempts.has(key)) {
+      logger.warn(
+        "envoy: a frame names a Dispatch attempt this session already delivered; it arrives as a card",
+        { attempt: delivery.attempt, messageID: delivery.id }
+      );
+      return undefined;
+    }
+    handledDispatchAttempts.add(key);
+    pi.appendEntry(HANDLED_ATTEMPT_ENTRY, { attempt: delivery.attempt, message_id: delivery.id });
+    try {
+      const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
+      if (config === null) return undefined;
+      const accepted = await new DispatchClient(
+        config.url,
+        config.token,
+        fetch,
+        AbortSignal.timeout(USER_TURN_ACCEPT_TIMEOUT_MS)
+      ).acceptMessageDelivery(delivery.id, delivery.attempt, {
+        actor: { id: sessionID, kind: "session" },
+      });
+      const turn = turnFromAccept(accepted);
+      if (turn === undefined) {
+        logger.warn(
+          "envoy: Dispatch accepted a direct message without the stored body and mode to inject; it arrives as a card",
+          { attempt: delivery.attempt, messageID: delivery.id }
+        );
+      }
+      return turn;
+    } catch (error) {
+      logger.warn(
+        "envoy: Dispatch did not accept a direct message as this session's turn; it arrives as a card",
+        { attempt: delivery.attempt, messageID: delivery.id, error: messageFor(error) }
+      );
+      return undefined;
+    }
   };
 
   const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
@@ -553,12 +651,14 @@ export default function envoyExtension(pi: PiApi): void {
     // also reaches the issue's own topic (every subscriber, not just the
     // removed session), so this only fires for a removal naming us.
     for (const topic of subscriptionRemovedTopics(raw, sessionID) ?? []) closeIntentionally(topic);
-    const dedupeKey = rendered.envelope?.dedupe_key;
-    const duplicate = dedupeKey !== undefined && dedupeKeys.has(dedupeKey);
     // Steering: mid-turn the message is injected at the next tool boundary
     // instead of waiting for the turn to finish; idle it still starts a turn
     // (triggerTurn), so wake-on-message behavior is unchanged.
-    if (!duplicate && !rendered.skip) {
+    const dedupeIdentity = ClaimIdentitySchema.safeParse(rendered.envelope);
+    const claim = rendered.skip
+      ? undefined
+      : delivered.claim(dedupeIdentity.success ? dedupeIdentity.data : undefined);
+    if (claim !== undefined) {
       const envelope = rendered.envelope;
       if (envelope !== undefined) {
         inbox.unshift({
@@ -569,14 +669,20 @@ export default function envoyExtension(pi: PiApi): void {
         });
         if (inbox.length > 50) inbox.pop();
       }
+      // An error reply means the agent was not handed the frame: Dispatch records the attempt
+      // failed, and a same-mode re-send of it must reach this session again, so the claim is
+      // released before the reply goes out. A BTW side turn adds nothing to the transcript, so
+      // running it again for that re-send repeats no work the session kept.
+      const refuse = async (delivery: DispatchDelivery, error: string): Promise<void> => {
+        claim.release();
+        await postDispatchReply(delivery, { error });
+      };
       try {
         if (rendered.rejectedDelivery !== undefined) {
           console.warn(
             `[envoy] rejecting malformed Dispatch targeted delivery ${rendered.rejectedDelivery.id}`
           );
-          await postDispatchReply(rendered.rejectedDelivery, {
-            error: "Invalid Dispatch targeted delivery frame",
-          });
+          await refuse(rendered.rejectedDelivery, "Invalid Dispatch targeted delivery frame");
         } else if (rendered.malformedDelivery === true) {
           console.warn(
             "[envoy] dropping malformed Dispatch targeted delivery without a reply address"
@@ -585,38 +691,44 @@ export default function envoyExtension(pi: PiApi): void {
           const answer = sideTurn(pi, activeSessionContext);
           if (shuttingDown) {
             // A session that is shutting down starts no model call, but a frame can still drain in.
-            await postDispatchReply(rendered.delivery, {
-              error: "This OMP session is shutting down",
-            });
+            await refuse(rendered.delivery, "This OMP session is shutting down");
           } else if (answer === undefined) {
-            await postDispatchReply(rendered.delivery, {
-              error: "This OMP host does not support BTW delivery",
-            });
+            await refuse(rendered.delivery, "This OMP host does not support BTW delivery");
           } else {
             try {
               const reply = await answer({ prompt: rendered.delivery.body });
               await postDispatchReply(rendered.delivery, { body: reply.replyText });
             } catch (error) {
-              await postDispatchReply(rendered.delivery, { error: messageFor(error) });
+              await refuse(rendered.delivery, messageFor(error));
             }
           }
         } else {
-          pi.sendMessage(
-            { customType: "envoy-message", content: rendered.content, display: true },
-            {
-              deliverAs: rendered.delivery?.mode === "aside" ? "aside" : "steer",
-              triggerTurn: true,
-            }
-          );
+          const turn = await acceptedUserTurn(rendered);
+          if (turn === undefined) {
+            pi.sendMessage(
+              { customType: "envoy-message", content: rendered.content, display: true },
+              {
+                deliverAs: rendered.delivery?.mode === "aside" ? "aside" : "steer",
+                triggerTurn: true,
+              }
+            );
+          } else {
+            // Sent exactly as Enter, or an aside, at the terminal sends it.
+            noteInjectedUserTurn(sessionID, turn.body, turn.messageId);
+            pi.sendUserMessage(
+              turn.body,
+              turn.mode === "aside" ? { deliverAs: "aside" } : undefined
+            );
+          }
         }
       } catch (error) {
+        claim.release();
         console.warn(
           `[envoy] failed to deliver envelope ${envelope?.event_id ?? "unknown"}`,
           error
         );
         throw error;
       }
-      if (dedupeKey !== undefined) rememberBounded(dedupeKeys, dedupeKey, 1000);
     }
   };
 
@@ -784,12 +896,18 @@ export default function envoyExtension(pi: PiApi): void {
     void pumpAgentStreamControl(subscription, session);
   };
 
-  /** One of this session's messages, on its way to whoever has the session open. Only the
-   *  top-level instance publishes: a `task` subagent's instance never learns a session id, and
-   *  its work reaches the viewer as the parent's tool call anyway. */
+  /** One of this session's messages, on its way to whoever has the session open, tagged with the
+   *  Dispatch message a user message delivered when it matches a person's turn this extension sent
+   *  in. Only the top-level instance publishes: a `task` subagent's instance never learns a session
+   *  id, and its work reaches the viewer as the parent's tool call anyway. */
   const recordAgentStreamMessage = (message: unknown, streaming: boolean): void => {
     if (sessionID === "") return;
-    agentStream.record(agentStreamFramesSubject(sessionID), message, streaming);
+    agentStream.record(
+      agentStreamFramesSubject(sessionID),
+      message,
+      streaming,
+      matchInjectedUserTurn(sessionID, message)
+    );
   };
 
   pi.on("message_start", async (event) => {
@@ -933,7 +1051,7 @@ export default function envoyExtension(pi: PiApi): void {
     const regained = legionRoleClaimBridge().regained;
     if (regained === undefined) return;
     // Detached from the heartbeat chain: the hook is a daemon round-trip this side cannot bound
-    // (`/controller/ready` drains held notices and runs a forced resync), and the chain's
+    // (`claims/ready`, retried on a 5xx or a transport failure), and the chain's
     // `healing` latch must release as soon as registration and the claim are settled, or the
     // next tick could never register. `Promise.resolve().then` also catches a synchronous throw.
     void Promise.resolve()
@@ -1239,12 +1357,10 @@ export default function envoyExtension(pi: PiApi): void {
 
   // A `task` subagent loads its own instance of this module in the parent's process and fires
   // its own session_start. It shares the parent's Envoy identity: registering it would list an
-  // untitled session per subagent, heartbeated for as long as the parent process lives. Two
-  // tests, either enough: the transcript layout (file storage), and the host's own roster
-  // (any storage, any transcript or none).
-  const isSubagentTranscript = subagentSessionCheck();
-  const isSubagent = async (context: SessionIdentityContext): Promise<boolean> =>
-    (await isSubagentTranscript(context)) || isRegisteredSubagent(context);
+  // untitled session per subagent, heartbeated for as long as the parent process lives. The
+  // host's own roster decides (any storage, any transcript or none), and the transcript layout
+  // only where the roster gives no opinion.
+  const isSubagent = subagentSessionCheck();
 
   /**
    * The Envoy address a reply to this instance reaches, and the source session its sends carry.
@@ -1256,14 +1372,16 @@ export default function envoyExtension(pi: PiApi): void {
    * top-level one that spawned it, resolved from its transcript path
    * (`resolveEnvoySession`). That resolves to `""` when this process cannot say which
    * top-level session that is, and an empty address is what the caller reports and sends —
-   * naming an unrelated live session would send peers to a session that never spawned it.
+   * naming an unrelated live session would send peers to a session that never spawned it. A hook
+   * that already asked the subagent check passes its answer as `subagent`, so it asks once.
    */
   const replyAddress = async (
     context: SessionIdentityContext,
-    liveSessionID = ""
+    liveSessionID = "",
+    subagent?: boolean
   ): Promise<string> => {
     if (sessionID !== "") return liveSessionID || sessionID;
-    if (!(await isSubagent(context))) return liveSessionID;
+    if (!(subagent ?? (await isSubagent(context)))) return liveSessionID;
     return resolveEnvoySession(context.sessionManager.getSessionFile());
   };
 
@@ -1421,8 +1539,8 @@ export default function envoyExtension(pi: PiApi): void {
     // the coercion pass delete an unknown key beside valid required fields and validation then
     // "succeeds" with silently narrowed args, while the non-strict schema preserves unknown
     // root fields so they reach `executeDispatchTool`, whose own always-strict parse names the
-    // field the caller invented. Verified against the live agent loop on 18.2.2 (legion #1242
-    // review); the xd:// write path's half of this contract is can1357/oh-my-pi#12871.
+    // field the caller invented. The xd:// write path's half of this contract is
+    // can1357/oh-my-pi#12871.
     for (const spec of dispatchToolSpecs) {
       pi.registerTool({
         name: spec.name,
@@ -1450,6 +1568,12 @@ export default function envoyExtension(pi: PiApi): void {
         },
       });
     }
+    // Every session with the Dispatch tools, Legion panes and `task` subagents included, carries
+    // the dispatch-first skill on every request: any of them can file, ask, or start work.
+    pi.on("context", async (event) => {
+      const messages = withDispatchFirst(event.messages, DISPATCH_FIRST_CONTEXT);
+      return messages === undefined ? undefined : { messages };
+    });
   }
 
   registerEnvoyWhoamiCommand(pi, replyAddress);
@@ -1473,7 +1597,7 @@ export default function envoyExtension(pi: PiApi): void {
     ) {
       return undefined;
     }
-    // Memoized per instance: one transcript stat for the life of the session.
+    // Memoized per instance once settled: one answer for the life of the session.
     if (await isSubagent(context)) return undefined;
     // The user typed, so a check still in flight is about to answer for a run they have moved
     // past. This runs before the arming query rather than in `armAskAwareness`: a slow Dispatch
@@ -1533,6 +1657,11 @@ export default function envoyExtension(pi: PiApi): void {
   // next-turn context instead of a turn of its own, consumed when the user next prompts.
   pi.on("agent_end", async (event, context) => {
     const id = context.sessionManager.getSessionId();
+    // A person's direct message not yet seen as a user message by the end of the run is not
+    // looked for again (`src/dispatch-user-turn.ts`). The record is kept under this instance's own
+    // `sessionID`, where `deliver` notes a turn and the stream recorder matches it, and not under
+    // the host's live id, which a fresh terminal's differs from until the heartbeat heals it.
+    endInjectedUserTurns(sessionID);
     // Only a run that settled normally is nudged: steering an interrupt (`aborted`), a provider
     // failure (`error`), a truncation, or a run with no reply of its own answers the user's cancel,
     // or a failure, with a turn nobody asked for.
@@ -1844,7 +1973,8 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.publish: {
           const topic = stringFor(parameters, "topic");
-          const source = await replyAddress(context);
+          const inSubagent = await isSubagent(context);
+          const source = await replyAddress(context, "", inSubagent);
           const result = await client.publish({
             sourceSessionID: source,
             topic,
@@ -1858,8 +1988,7 @@ export default function envoyExtension(pi: PiApi): void {
           // the role case is visible here (a plain topic's subscribers are not in the answer);
           // AGENTS.md and the envoy skill carry the general rule. A direct envoy_send is
           // unaffected: the agent-subject lane has no such skip.
-          const undelivered =
-            source !== "" && result.holder === source && (await isSubagent(context));
+          const undelivered = source !== "" && result.holder === source && inSubagent;
           const published =
             result.holder === undefined
               ? `published ${result.envelope.event_id}`
@@ -1887,7 +2016,7 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.whoami: {
           const inSubagent = await isSubagent(context);
-          const address = await replyAddress(context);
+          const address = await replyAddress(context, "", inSubagent);
           // A `task` subagent registers no Envoy session of its own, so the address a reply
           // reaches is the session that spawned it. Its own host id is reported beside that,
           // never as the reply address: nothing is listening on it.

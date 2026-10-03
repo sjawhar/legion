@@ -186,9 +186,13 @@ func (m *Machine) SessionID(ctx context.Context, id string) (string, error) {
 // Grant is a live grant's public summary, for GET /v1/enrollments/self. It follows the same query
 // pattern as OwnerOf and enrollment above.
 type Grant struct {
-	ID        string    `json:"grant_id"`
-	RequestID string    `json:"request_id"`
-	Approver  *string   `json:"approver"`
+	// The grant's id, which the values and revoke routes take.
+	ID string `json:"grant_id"`
+	// The request it answered.
+	RequestID string `json:"request_id"`
+	// The login that approved it; null for a grant the rules gave automatically.
+	Approver *string `json:"approver"`
+	// When it expires.
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
@@ -232,14 +236,20 @@ type PendingSummary struct {
 }
 
 // PendingForApprover lists every still-pending credential-request record — of either kind — that
-// names approver, newest first: GET /v1/pending's exact contract. A record counts as pending when
-// it carries no terminal decision event yet, matching credential_request_decision's own partial
-// index.
+// names approver, newest first: GET /v1/pending's exact contract. The rule for pending, which
+// ReadRecord applies too: an agent_secret record is pending while its request is. Every writer
+// moves the request out of 'pending' together with the record's terminal event
+// (store.EndPendingRequests, ApplyDecision), but a request an ended enrollment cancelled before
+// endEnrollment wrote that event carries none, so the request row is the truth. A machine login
+// has no request row and is pending while it carries no terminal decision event, matching
+// credential_request_decision's own partial index.
 func (m *Machine) PendingForApprover(ctx context.Context, approver string) ([]PendingSummary, error) {
 	rows, err := m.Store.Pool.Query(ctx, `select cr.id, cr.kind, cr.body, cr.created_at from credential_requests cr
-		where cr.approver=$1 and not exists (
-			select 1 from credential_request_events ev where ev.record_id=cr.id and ev.event in ('approved','denied','expired','cancelled')
-		) order by cr.created_at desc`, record.CanonicalLogin(approver))
+		where cr.approver=$1 and (
+			(cr.kind='agent_secret' and cr.id in (select r.record_id from requests r where r.state='pending'))
+			or (cr.kind='launcher_credential' and not exists (
+				select 1 from credential_request_events ev where ev.record_id=cr.id and ev.event = any($2)))
+		) order by cr.created_at desc`, record.CanonicalLogin(approver), record.TerminalEventNames())
 	if err != nil {
 		return nil, err
 	}
@@ -298,8 +308,8 @@ type RecordDetail struct {
 }
 
 // ReadRecord reads a credential-request record's full detail by id, for GET
-// /v1/credential-requests/{id} and, reused verbatim, POST /v1/machine-logins/lookup (which adds
-// its own challenges on top). pgx.ErrNoRows means no such record.
+// /v1/credential-requests/{id} and, reused verbatim, POST /v1/machine-logins/lookup.
+// pgx.ErrNoRows means no such record.
 func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail, error) {
 	var canonical, approver, kind string
 	var createdAt, expiresAt time.Time
@@ -315,8 +325,9 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 	if err != nil {
 		return RecordDetail{}, err
 	}
+	agentSecret := kind == "agent_secret"
 	var enr *record.Enrollment
-	if kind != "launcher_credential" {
+	if agentSecret {
 		e := body.Enrollment
 		enr = &e
 	}
@@ -333,10 +344,20 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 		Identifiers: identifiers, Service: service, Reason: obj.Reason, LifetimeSeconds: body.LifetimeSeconds,
 		RulesVersion: body.RulesVersion, ExpiresAt: expiresAt, RequestedAt: createdAt,
 	}
+	// Whether the record is still pending follows PendingForApprover's rule: an agent_secret record
+	// by its request's state, a machine login by its terminal event. A decided record's terminal
+	// event names the decision; a request an ended enrollment cancelled before endEnrollment wrote
+	// that event has none, and its request row stands in for it.
 	var event, credID string
 	var decidedAt time.Time
-	err = m.Store.Pool.QueryRow(ctx, `select event, at, coalesce(credential_id,'') from credential_request_events
-		where record_id=$1 and event in ('approved','denied','expired','cancelled')`, recordID).Scan(&event, &decidedAt, &credID)
+	if agentSecret {
+		err = m.Store.Pool.QueryRow(ctx, `select coalesce(ev.event, r.state), coalesce(ev.at, r.decided_at), coalesce(ev.credential_id, '')
+			from requests r left join credential_request_events ev on ev.record_id=r.record_id and ev.event = any($2)
+			where r.record_id=$1 and r.state <> 'pending'`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID)
+	} else {
+		err = m.Store.Pool.QueryRow(ctx, `select event, at, coalesce(credential_id,'') from credential_request_events
+			where record_id=$1 and event = any($2)`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID)
+	}
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return detail, nil
@@ -358,12 +379,14 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 }
 
 // ApproverGrant is one live, approval-granted grant an approver (or its enrollment's operator) may
-// revoke, for GET /v1/grants?approver=<login>.
+// revoke, for GET /v1/grants?approver=<login>. Approver is the login that approved it, which for an
+// operator's own list can be another login.
 type ApproverGrant struct {
 	GrantID    string
 	RecordID   *string
 	Enrollment record.Enrollment
 	Names      []string
+	Approver   string
 	ExpiresAt  time.Time
 	CreatedAt  time.Time
 }
@@ -373,7 +396,7 @@ type ApproverGrant struct {
 // appears here — newest first.
 func (m *Machine) GrantsForApprover(ctx context.Context, approver string) ([]ApproverGrant, error) {
 	login := record.CanonicalLogin(approver)
-	rows, err := m.Store.Pool.Query(ctx, `select g.id, r.record_id, e.kind, e.runtime_id, coalesce(e.operator,''), g.expires_at, g.created_at,
+	rows, err := m.Store.Pool.Query(ctx, `select g.id, r.record_id, e.kind, e.runtime_id, coalesce(e.operator,''), e.slot, g.approver, g.expires_at, g.created_at,
 		coalesce((select array_agg(rs.name order by rs.name) from request_secrets rs where rs.request_id=r.id and rs.decision<>'deny'), '{}')
 		from grants g
 		join requests r on r.id=g.request_id
@@ -388,7 +411,7 @@ func (m *Machine) GrantsForApprover(ctx context.Context, approver string) ([]App
 	var out []ApproverGrant
 	for rows.Next() {
 		var g ApproverGrant
-		if err := rows.Scan(&g.GrantID, &g.RecordID, &g.Enrollment.Kind, &g.Enrollment.RuntimeID, &g.Enrollment.Operator, &g.ExpiresAt, &g.CreatedAt, &g.Names); err != nil {
+		if err := rows.Scan(&g.GrantID, &g.RecordID, &g.Enrollment.Kind, &g.Enrollment.RuntimeID, &g.Enrollment.Operator, &g.Enrollment.Slot, &g.Approver, &g.ExpiresAt, &g.CreatedAt, &g.Names); err != nil {
 			return nil, err
 		}
 		out = append(out, g)

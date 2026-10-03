@@ -37,12 +37,20 @@ one line. The work was the proof.
 | `packages/daemon/docker/worker.Dockerfile` | the `cli` stage runs the same `bun` command into `/out/omp-pin`; the `tools` stage `mise x "$pin" -- omp --version` / `mise where`; the runtime stage's probe step runs `legion probe-image` |
 | `.github/workflows/worker-image.yaml` | `pull_request.paths` names `packages/daemon/**`, `omp-pin.ts` included, so a PR that touches it builds the image |
 | `.github/workflows/envoy-and-contracts.yaml` | the `daemon-go` job installs the pin and exports `LEGION_TEST_OMP`, so the Go daemon's real-binary tests run on it |
+| `.github/workflows/envoy-and-contracts.yaml` | the `pi-envoy` job installs the pin the same way, so pi-envoy's real-binary tests (`extensions/legion-phase-stall-omp.test.ts`, `extensions/dispatch-first-omp.test.ts`) run on it; the profile, flags and RPC reader they share are `extensions/test-omp-harness.ts`, where a pin that changes one is fixed once |
 
 So a bump is `grep -rn "<old version>" .` (excluding `.jj`, `.git`, `node_modules`) to confirm
-nothing else names it, edit line 4, and run the Go daemon's real-binary tests with `LEGION_TEST_OMP` at the new pin (the 18.1.21 → 18.2.9
+nothing else names it, edit line 4, and run the Go daemon's and pi-envoy's real-binary tests with `LEGION_TEST_OMP` at the new pin (the 18.1.21 → 18.2.9
 bump, LEGION-208 4b.16, found a changed key-failure message and a changed catalog cost that way).
 Do not add any other test that asserts the new string: it repeats the constant, fails on every
 legitimate bump, and defends no behavior.
+
+The Go tests and pi-envoy's real-binary tests run the binary under a fresh HOME per case, and each
+HOME's natives (about 355 MiB at 18.2.9) are hardlinks to one copy per binary, which the first run
+on a machine, in either language, extracts into
+`$XDG_CACHE_HOME/legion/test-omp-natives/<digest of the binary>/` (`~/.cache` when XDG_CACHE_HOME
+is unset; Go's `testbin.OMPHome`, pi-envoy's `extensions/test-omp-natives.ts`). A bump therefore
+adds one such directory; the old pin's can be removed once no checkout on the machine still tests it.
 
 ## The proof set
 

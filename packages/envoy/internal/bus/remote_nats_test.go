@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -78,7 +80,7 @@ func TestDialRefusesANATSServerThatIsNotThisMachines(t *testing.T) {
 	uri := testnats.URL(t)
 	remote := remoteLookingURL(t, uri)
 
-	_, err := bus.Dial("relay", []string{remote})
+	_, err := bus.Dial("relay", []string{remote}, os.LookupEnv)
 	if !errors.Is(err, bus.ErrRemoteNATS) {
 		t.Fatalf("dial %s = %v, want a %v", remote, err, bus.ErrRemoteNATS)
 	}
@@ -86,7 +88,7 @@ func TestDialRefusesANATSServerThatIsNotThisMachines(t *testing.T) {
 		t.Fatalf("refusal %q does not name both the server %s and the override %s", err, remote, bus.AllowRemoteEnvVar)
 	}
 
-	conn, err := bus.Dial("relay", []string{uri})
+	conn, err := bus.Dial("relay", []string{uri}, os.LookupEnv)
 	if err != nil {
 		t.Fatalf("dial this machine's NATS: %v", err)
 	}
@@ -140,9 +142,47 @@ func TestConnectReachesANonLocalNATSWhenTheRunSaysSo(t *testing.T) {
 	}
 }
 
-// remoteLookingURL reaches the test's own NATS by an address of this machine that is not
-// loopback, which is what a NATS on another machine looks like to the refusal. No test reaches a
-// NATS it did not start.
+// A connect handed an environment (WithEnvironment, or Dial's environment: envoy-dispatch hands its
+// settings table) reads the reach and the credential there and nowhere else, for Connect,
+// ConnectOwningStream and Dial alike. Every case fails before it dials.
+func TestAHandedEnvironmentReplacesTheProcessEnvironment(t *testing.T) {
+	const remote = "nats://nats.example:4222"
+	t.Setenv(bus.AllowRemoteEnvVar, "1")
+	t.Setenv("NATS_NKEY_SEED_FILE", filepath.Join(t.TempDir(), "the process's seed"))
+	handed := func(values map[string]string) func(string) (string, bool) {
+		return func(key string) (string, bool) {
+			value, set := values[key]
+			return value, set
+		}
+	}
+	connects := map[string]func(func(string) (string, bool)) error{
+		"Connect": func(environment func(string) (string, bool)) error {
+			_, err := bus.Connect([]string{remote}, bus.WithEnvironment(environment))
+			return err
+		},
+		"ConnectOwningStream": func(environment func(string) (string, bool)) error {
+			_, err := bus.ConnectOwningStream([]string{remote}, bus.WithEnvironment(environment))
+			return err
+		},
+		"Dial": func(environment func(string) (string, bool)) error {
+			_, err := bus.Dial("handed", []string{remote}, environment)
+			return err
+		},
+	}
+	for name, connect := range connects {
+		if err := connect(handed(nil)); !errors.Is(err, bus.ErrRemoteNATS) {
+			t.Errorf("%s with no opt-in handed: %v, want a refusal whatever the process says", name, err)
+		}
+		err := connect(handed(map[string]string{bus.AllowRemoteEnvVar: "1", "NATS_NKEY_SEED": "the handed seed"}))
+		if err == nil || !strings.Contains(err.Error(), "NATS_NKEY_SEED does not hold a valid nkey seed") {
+			t.Errorf("%s with the opt-in and a seed handed: %v, want the handed seed refused", name, err)
+		}
+	}
+}
+
+// remoteLookingURL reaches the test's own NATS, as the same user, by an address of this machine
+// that is not loopback, which is what a NATS on another machine looks like to the refusal. No test
+// reaches a NATS it did not start.
 func remoteLookingURL(t *testing.T, uri string) string {
 	t.Helper()
 	parsed, err := url.Parse(uri)
@@ -158,7 +198,8 @@ func remoteLookingURL(t *testing.T, uri string) string {
 		if !ok || network.IP.IsLoopback() || network.IP.To4() == nil {
 			continue
 		}
-		return "nats://" + net.JoinHostPort(network.IP.String(), parsed.Port())
+		parsed.Host = net.JoinHostPort(network.IP.String(), parsed.Port())
+		return parsed.String()
 	}
 	t.Skip("no non-loopback IPv4 address on this machine to reach the test server by")
 	return ""

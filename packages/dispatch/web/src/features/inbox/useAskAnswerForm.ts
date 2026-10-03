@@ -32,6 +32,38 @@ interface UseAskAnswerFormOptions {
   onAnswered?: (id: string) => void;
 }
 
+/** A failed answer, as the card shows it. */
+interface AskAnswerFailure {
+  message: string;
+  /** False for a refusal the same answer never gets past. */
+  retryable: boolean;
+}
+
+/**
+ * The refusals the same answer is refused with again however often it is sent, and what the card
+ * says for each: the ask was answered or closed elsewhere, or its question changed (the card
+ * reloads it, so the next answer is to the new wording). Any other failure may pass on a retry.
+ */
+function answerFailure(error: Error): AskAnswerFailure {
+  if (error instanceof ApiError) {
+    switch (error.code) {
+      case "ASK_CLOSED":
+        return {
+          message: "This ask was already answered, so your answer was not saved.",
+          retryable: false,
+        };
+      case "ASK_RESOLVED":
+        return { message: "This ask was closed, so your answer was not saved.", retryable: false };
+      case "ASK_EDITED":
+        return {
+          message: "Your answer was not saved, because the question changed.",
+          retryable: false,
+        };
+    }
+  }
+  return { message: "Could not save your answer.", retryable: true };
+}
+
 export function useAskAnswerForm({
   answer,
   ask,
@@ -240,6 +272,7 @@ export function useAskAnswerForm({
   const completed = justAnswered ?? (displayedAsk.state === "open" ? null : displayedAsk);
 
   return {
+    answerFailure: mutation.error === null ? null : answerFailure(mutation.error),
     answerFieldId,
     answerPlaceholder,
     answerText,

@@ -213,6 +213,37 @@ test("only inEditable bindings fire while an input, textarea, select, or content
   }
 });
 
+test("a checkbox, radio or button takes no text, so single keys still fire while one has focus", () => {
+  const { keymap, press } = harness();
+  const next = binding("next", "j");
+  keymap.register("global", [next.definition]);
+
+  const typed = (type: string) => {
+    const input = document.createElement("input");
+    input.type = type;
+    return input;
+  };
+  const shortcutTargets = [typed("checkbox"), typed("radio"), typed("button")];
+  const typing = [typed("text"), typed("search"), typed("unknown-becomes-text")];
+  for (const element of [...shortcutTargets, ...typing]) {
+    document.body.appendChild(element);
+  }
+  try {
+    for (const target of shortcutTargets) {
+      expect(press("j", { target })).toBe(true);
+    }
+    expect(next.fired()).toBe(shortcutTargets.length);
+    for (const target of typing) {
+      expect(press("j", { target })).toBe(false);
+    }
+    expect(next.fired()).toBe(shortcutTargets.length);
+  } finally {
+    for (const element of [...shortcutTargets, ...typing]) {
+      element.remove();
+    }
+  }
+});
+
 test("an already-handled key (defaultPrevented) or one mid-IME-composition is left alone", () => {
   const { keymap, press } = harness();
   const next = binding("next", "j");
@@ -248,4 +279,173 @@ test("project and board are page scopes: their bindings are described under thei
   expect(toggleView.fired()).toBe(1);
   expect(press("j")).toBe(true);
   expect(nextCard.fired()).toBe(1);
+});
+
+test("actions() lists each scope below the innermost dialog once, innermost scope first", () => {
+  const { keymap } = harness();
+  const create = binding("create", "c");
+  const toggleView = binding("toggle-view", "v");
+  const closePalette = binding("close-palette", "Escape", { inEditable: true });
+  keymap.register("global", [create.definition]);
+  keymap.register("project", [toggleView.definition]);
+  keymap.register(DIALOG_SCOPE, [closePalette.definition]);
+  // A page can push its scope twice (a panel kept mounted while hidden); one row all the same.
+  keymap.pushScope("project");
+  keymap.pushScope("project");
+  keymap.pushScope(DIALOG_SCOPE);
+
+  expect(keymap.actions().map((action) => [action.scope, action.id])).toEqual([
+    ["project", "toggle-view"],
+    ["global", "create"],
+  ]);
+});
+
+test("actions() orders a scope's rows by label, never by when its component registered them", () => {
+  const { keymap } = harness();
+  // Registration order is mount timing: the same page reached by a navigation and by a reload
+  // registers its scopes in a different order, and the highlighted first row must not follow it.
+  keymap.register("issue", [binding("set-p1", [], { label: "Set priority P1" }).definition]);
+  keymap.register("global", [binding("go-inbox", "g i", { label: "Go to Inbox" }).definition]);
+  keymap.register("issue", [binding("close", [], { label: "Close issue" }).definition]);
+  keymap.register("global", [binding("create", "c", { label: "Create issue" }).definition]);
+  keymap.pushScope("issue");
+
+  expect(keymap.actions().map((action) => action.label)).toEqual([
+    "Close issue",
+    "Set priority P1",
+    "Create issue",
+    "Go to Inbox",
+  ]);
+});
+
+test("actions() omits palette:false, multi-key, inEditable and unavailable bindings", () => {
+  const { keymap } = harness();
+  const next = binding("next", "j", { palette: false });
+  const arrows = binding("arrows", ["ArrowDown", "ArrowUp"]);
+  const search = binding("search", "$mod+k", { inEditable: true });
+  const move = binding("move", "Shift+J", { when: () => false });
+  const open = binding("open", "o");
+  keymap.register("board", [
+    next.definition,
+    arrows.definition,
+    search.definition,
+    move.definition,
+    open.definition,
+  ]);
+  keymap.pushScope("board");
+
+  expect(keymap.actions().map((action) => action.id)).toEqual(["open"]);
+});
+
+test("an inEditable binding is no row unless it says palette: true, which makes it one", () => {
+  const { keymap } = harness();
+  const back = binding("back", "Escape", { inEditable: true });
+  const send = binding("send", "$mod+Enter", { inEditable: true, palette: true });
+  keymap.register("board", [back.definition, send.definition]);
+  keymap.pushScope("board");
+
+  expect(keymap.actions().map((action) => action.id)).toEqual(["send"]);
+});
+
+test("a binding with several keys is a row only when it says so, and the row presses its first key", () => {
+  const { keymap } = harness();
+  let pressed = "";
+  const ascend = binding("ascend", ["h", "ArrowLeft"], {
+    label: "Up one level",
+    palette: true,
+    run: (event) => {
+      pressed = event.key;
+    },
+  });
+  const arrows = binding("arrows", ["ArrowDown", "ArrowUp"]);
+  keymap.register("architecture", [ascend.definition, arrows.definition]);
+  keymap.pushScope("architecture");
+
+  const rows = keymap.actions();
+  expect(rows.map((action) => action.id)).toEqual(["ascend"]);
+  rows[0]?.run();
+  expect(pressed).toBe("h");
+});
+
+test("a keyless binding never fires on a key press yet is offered as an action", () => {
+  const { keymap, press } = harness();
+  const close = binding("close", [], { label: "Close issue" });
+  keymap.register("issue", [close.definition]);
+  keymap.pushScope("issue");
+
+  expect(press("c")).toBe(false);
+  expect(press("Enter")).toBe(false);
+  expect(close.fired()).toBe(0);
+  expect(keymap.describe().map((entry) => [entry.id, entry.keys])).toEqual([["close", []]]);
+  expect(keymap.actions()).toMatchObject([
+    { id: "close", keys: [], label: "Close issue", scope: "issue" },
+  ]);
+});
+
+test("running an action fires its binding once with a keydown carrying its first key", () => {
+  const { keymap } = harness();
+  const fired: string[] = [];
+  keymap.register("global", [
+    { id: "snooze", keys: "s", label: "Snooze", run: (event) => fired.push(`snooze:${event.key}`) },
+    {
+      id: "close",
+      keys: [],
+      label: "Close issue",
+      run: (event) => fired.push(`close:${event.key}`),
+    },
+  ]);
+
+  for (const action of keymap.actions()) {
+    action.run();
+  }
+
+  // Sorted, so the assertion is about which key each binding received and that each ran once,
+  // not about the row order `actions()` chose (pinned by its own test above).
+  expect([...fired].sort()).toEqual(["close:", "snooze:s"]);
+});
+
+test("a row runs its binding only if the binding still applies when the row is chosen", () => {
+  const { keymap } = harness();
+  let closed = true;
+  const reopen = binding("reopen", [], { label: "Reopen issue", when: () => closed });
+  keymap.register("issue", [reopen.definition]);
+  keymap.pushScope("issue");
+  const [row] = keymap.actions();
+
+  // The issue was reopened elsewhere while the palette was open: the row's control has gone.
+  closed = false;
+  row?.run();
+  expect(reopen.fired()).toBe(0);
+
+  closed = true;
+  row?.run();
+  expect(reopen.fired()).toBe(1);
+});
+
+test("a row does nothing once its binding's component has unregistered it", () => {
+  const { keymap } = harness();
+  const close = binding("close", [], { label: "Close issue" });
+  const unregister = keymap.register("issue", [close.definition]);
+  keymap.pushScope("issue");
+  const [row] = keymap.actions();
+
+  // The issue header unmounted while the palette was open (the page fell to its error view).
+  unregister();
+  row?.run();
+  expect(close.fired()).toBe(0);
+});
+
+test("rows within a scope read alphabetically, a lowercase word among capitalised ones included", () => {
+  const { keymap } = harness();
+  keymap.register("global", [
+    binding("go-settings", "g s", { label: "Go to Settings" }).definition,
+    binding("go-project", "g p", { label: "Go to project…" }).definition,
+    binding("go-inbox", "g i", { label: "Go to Inbox" }).definition,
+  ]);
+
+  expect(keymap.actions().map((action) => action.label)).toEqual([
+    "Go to Inbox",
+    "Go to project…",
+    "Go to Settings",
+  ]);
 });

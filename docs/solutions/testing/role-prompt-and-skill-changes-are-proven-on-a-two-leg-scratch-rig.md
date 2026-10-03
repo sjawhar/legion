@@ -15,7 +15,7 @@ date: 2026-09-13
 status: active
 module: pi-envoy
 applies_when:
-  - A pull request changes `packages/pi-envoy/roles/*.md`, `skills/*/SKILL.md`, or anything else a pane receives through `--append-system-prompt` or resolves through `skill://`
+  - A pull request changes `packages/daemon/internal/prompts/roles/*.md`, `skills/*/SKILL.md`, or anything else a pane receives through `--append-system-prompt` or resolves through `skill://`
   - An acceptance criterion says "a daemon-spawned <role> pane receives a prompt stating …" or "a worker reads `skill://…` and quotes …"
   - The implementer's own proof is required before the phase completes (LEGION-53's rule), and a unit grep over the source files is not it
 related_issues:
@@ -50,27 +50,24 @@ daemon runs from `$LEGION_WORKSPACE`. Every grep that must be ≥ 1 on leg B mus
 checkout on disk rather than to the branch; with it, the only variable between the legs is the branch.
 Do leg A first: once leg B's profile exists you will not want to rebuild it.
 
-## 2. What `setup.sh`'s branch mode does not swap: `dist/skills` and the manifest
+## 2. What `setup.sh`'s branch mode installs: the packed plugin, manifest and skills included
 
-`RIG_LEGION_BUILD=branch` copies `dist/envoy.js` and `dist/legion.js` over the installed package and
-nothing else. `skill://` resolves from `package.json`'s `omp.skills` → `dist/skills`, which `prepack.sh`
-builds as `cp -r ../../skills dist/skills` at publish time, so the rig profile still serves the
-*released* skills until you do the same by hand:
+`RIG_LEGION_BUILD=branch` packs the checkout with `scripts/e2e/lib/pack-plugin.sh`, the release's pack
+steps, and extracts the tarball in place of the installed package: the bundles, `dist/skills` (what
+`skill://` serves, through `package.json`'s `omp.skills`), `agents/` and the packed `package.json`.
+Check the branch's skill text before any pane launches:
 
 ```sh
 PKG="$HOME/.omp/profiles/<rig>/plugins/node_modules/@sjawhar/pi-legion-envoy"
-rm -rf "$PKG/dist/skills" && cp -r "$LEGION_WORKSPACE/skills" "$PKG/dist/skills"
-cp "$LEGION_WORKSPACE/packages/pi-envoy/package.json" "$PKG/package.json"
-jq '.omp.extensions = ["dist/envoy.js","dist/legion.js"]' "$PKG/package.json" > "$PKG/p.tmp" && mv "$PKG/p.tmp" "$PKG/package.json"
 grep -c '<new phrase>' "$PKG/dist/skills/legion-worker/SKILL.md"   # ≥ 1 before any pane launches
 ```
 
-The manifest copy matters for a second reason: the daemon's boot gate compares the installed
+The manifest matters because the daemon's boot gate compares the installed
 `legion.daemonApiVersion` with its own `LEGION_DAEMON_API_VERSION`, and it reads that manifest through
 OMP's ambient plugin root — **the daemon's own `OMP_PROFILE`**. So the rig daemon is started with
-`OMP_PROFILE=<rig> PI_PROFILE=<rig>` (and this pane's `PI_CODING_AGENT_DIR` unset), and the manifest
-must say what the branch's `packages/pi-envoy/package.json` says (`main` was already at contract 2 while
-LEGION-53's branch was at 1; a mismatch is a boot refusal naming both numbers, not a silent pass).
+`OMP_PROFILE=<rig> PI_PROFILE=<rig>` (and this pane's `PI_CODING_AGENT_DIR` unset); the packed
+manifest carries the branch's contract number, and a mismatch is a boot refusal naming both numbers,
+not a silent pass.
 
 ## 3. Admission without Dispatch: seed one queued tree, log the status writes
 
@@ -148,8 +145,8 @@ call succeeds, which is the before half of the before/after pair.
 ## Checklist before reporting the proof
 
 - Leg A ran first, on the released plugin and `main`'s CLI, and every new-phrase grep is 0 there.
-- `dist/skills` and the manifest were swapped by hand and the new phrase grepped ≥ 1 in the package
-  *before* the first pane launched.
+- Leg B's plugin is the branch's packed plugin (`setup.sh`'s branch mode), and the new phrase grepped
+  ≥ 1 in its `dist/skills` *before* the first pane launched.
 - One `--append-system-prompt` per pane, role prompt last; the branch head the daemon ran from is an
   ancestor of the head the reviewer will read.
 - Each role's own sentence quoted from its system prompt by the real worker; `skill://` quotes taken

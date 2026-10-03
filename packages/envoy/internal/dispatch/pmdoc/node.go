@@ -47,8 +47,26 @@ var markTypes = map[string]bool{
 
 var yattrMarkSuffix = regexp.MustCompile(`^(.*)--[a-zA-Z0-9+/=]{8}$`)
 
+// sortMarks puts marks in one order whatever order they arrive in: by type, then, for two marks of
+// one type (the record marks, which may overlap: anchorMarkTypes), by id, and by their attributes
+// only when the ids tie. Every positional comparison of two mark sets (marksEqual, run joining)
+// relies on it.
 func sortMarks(marks []Mark) {
-	sort.Slice(marks, func(i, j int) bool { return marks[i].Type < marks[j].Type })
+	sort.Slice(marks, func(i, j int) bool { return markLess(marks[i], marks[j]) })
+}
+
+func markLess(left, right Mark) bool {
+	if left.Type != right.Type {
+		return left.Type < right.Type
+	}
+	leftID, _ := left.Attrs["id"].(string)
+	rightID, _ := right.Attrs["id"].(string)
+	if leftID != rightID {
+		return leftID < rightID
+	}
+	leftJSON, _ := json.Marshal(canonicalAttrs(left.Attrs))
+	rightJSON, _ := json.Marshal(canonicalAttrs(right.Attrs))
+	return string(leftJSON) < string(rightJSON)
 }
 
 func marksEqual(left, right []Mark) bool {
@@ -75,12 +93,15 @@ func yattrToMarkName(name string) string {
 }
 
 func (n *Node) Validate() error {
-	return validateNode(n)
+	return validateNode(n, 0)
 }
 
-func validateNode(n *Node) error {
+func validateNode(n *Node, depth int) error {
 	if n == nil {
 		return fmt.Errorf("%w: nil node", ErrSchema)
+	}
+	if err := treeDepthError(depth); err != nil {
+		return err
 	}
 	if !nodeTypes[n.Type] {
 		if _, typed := typedBlock(n.Type); !typed {
@@ -94,9 +115,15 @@ func validateNode(n *Node) error {
 		if !markTypes[m.Type] {
 			return fmt.Errorf("%w: mark %q", ErrSchema, m.Type)
 		}
+		if err := attrNestingError("mark", m.Type, m.Attrs); err != nil {
+			return err
+		}
+	}
+	if err := attrNestingError("node", n.Type, n.Attrs); err != nil {
+		return err
 	}
 	for _, child := range n.Children {
-		if err := validateNode(child); err != nil {
+		if err := validateNode(child, depth+1); err != nil {
 			return err
 		}
 	}
@@ -270,15 +297,22 @@ func askQuestionOpening(ask *Node) string {
 	if len(ask.Children) == 0 || ask.Children[0] == nil || ask.Children[0].Type != "paragraph" {
 		return ""
 	}
-	question := []rune(strings.Join(strings.Fields(textContent(ask.Children[0])), " "))
-	if len(question) == 0 {
+	question := openingWords(oneLineText(ask.Children[0]))
+	if question == "" {
 		return ""
 	}
+	return fmt.Sprintf(", asking %q,", question)
+}
+
+// openingWords is text's first 40 characters, cut short with an ellipsis where it runs on: how a
+// refusal names a block whose author has only its text to find it by.
+func openingWords(text string) string {
 	const opening = 40
-	if len(question) > opening {
-		question = append([]rune(strings.TrimRight(string(question[:opening]), " ")), '…')
+	runes := []rune(text)
+	if len(runes) <= opening {
+		return text
 	}
-	return fmt.Sprintf(", asking %q,", string(question))
+	return strings.TrimRight(string(runes[:opening]), " ") + "…"
 }
 
 // askContentBreak names the first child that breaks the content rule paragraph+ bullet_list? -

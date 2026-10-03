@@ -3,8 +3,8 @@ name: Worker Image
 on:
   workflow_call:
     inputs:
-      cli_version:
-        description: Version the `cli` job released in this run (empty when it released nothing)
+      legion_version:
+        description: Version the `legion` job released in this run (empty when it released nothing)
         type: string
         required: false
         default: ""
@@ -18,8 +18,8 @@ on:
   # Post-merge only: GitHub dispatches a workflow only once it exists on the default branch.
   workflow_dispatch:
     inputs:
-      cli_version:
-        description: Optional CLI version to also tag the image with (main only)
+      legion_version:
+        description: Optional legion version to also tag the image with (main only)
         type: string
         required: false
         default: ""
@@ -28,14 +28,13 @@ on:
   # the whole PR diff, so the check attaches to every head of such a PR — a handoff-only commit on top
   # of a Dockerfile change still gets it. A `push` trigger filters on the pushed commits alone and left
   # a PR head with no image check (LEGION-23 tester round 1). The paths are every file worker.Dockerfile
-  # builds from: the root manifest, lockfile, patches and every root workspace's package.json (the cli
-  # stage's frozen install); the packages it copies whole — the compiled CLI (packages/daemon, with the
-  # Dockerfile), the plugin (packages/pi-envoy, packages/envoy-client, packages/contracts), the
-  # provisioning code (packages/workspace), the skills, the Go module and its build inputs
-  # (packages/daemon-go, go.work, go.work.sum), and packages/envoy (copied whole for its
-  # agent-secrets binary, AGENTC-393); the context's .dockerignore; and this workflow. The final
-  # `legion probe-image` runs the image's own CLI and plugin, so a PR that breaks either fails here
-  # instead of merging and publishing nothing.
+  # builds from: the root manifest, lockfile, patches and every root workspace's package.json (the plugin
+  # stage's frozen install); the packages it copies whole — the Dockerfile (packages/daemon), the plugin
+  # (packages/pi-envoy, packages/envoy-client, packages/contracts), the skills, the Go module and its
+  # build inputs (packages/daemon, go.work, go.work.sum), and packages/envoy (copied whole for its
+  # agent-secrets binary, AGENTC-393); the OMP pin (.omp-pin); the context's .dockerignore; and this
+  # workflow. The final `legion probe-image` runs the image's own `legion` and plugin, so a PR that
+  # breaks either fails here instead of merging and publishing nothing.
   # .github/scripts/check-image-trigger-paths.sh fails the build when this list misses a file the
   # image build reads.
   pull_request:
@@ -50,16 +49,16 @@ on:
       - packages/proof-editor/package.json
       - packages/dispatch/package.json
       - packages/envoy/internal/dispatch/pmdoc/gen/package.json
+      - docs/site/package.json
       - packages/daemon/**
       - packages/pi-envoy/**
       - packages/envoy-client/**
       - packages/contracts/**
-      - packages/workspace/**
       - skills/**
-      - packages/daemon-go/**
       - go.work
       - go.work.sum
       - packages/envoy/**
+      - .omp-pin
       - .dockerignore
       - .github/workflows/worker-image.yaml
 
@@ -98,14 +97,14 @@ jobs:
       - name: Compute tags
         id: meta
         env:
-          CLI_VERSION: ${{ inputs.cli_version }}
+          LEGION_VERSION: ${{ inputs.legion_version }}
         run: |
           short="${BUILT_SHA::12}"
           tags="${IMAGE}:sha-${short}"
           version_label="sha-$short"
-          if [ "$GITHUB_REF" = "refs/heads/main" ] && [ -n "$CLI_VERSION" ]; then
-            tags="${tags}"$'\n'"${IMAGE}:${CLI_VERSION}"
-            version_label="$CLI_VERSION"
+          if [ "$GITHUB_REF" = "refs/heads/main" ] && [ -n "$LEGION_VERSION" ]; then
+            tags="${tags}"$'\n'"${IMAGE}:${LEGION_VERSION}"
+            version_label="$LEGION_VERSION"
           fi
           {
             echo "built_sha=$BUILT_SHA"

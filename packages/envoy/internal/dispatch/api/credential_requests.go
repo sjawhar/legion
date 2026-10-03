@@ -1,9 +1,12 @@
 // credential_requests.go relays Dispatch's credential-request UI to the secrets broker
-// (contract v9's "UI routes"). Every handler here does the same five things: require a human
-// caller, require the broker to be configured, resolve or read its input, call the matching
-// agentsecrets.Client method, and forward the broker's exact status and body — Dispatch relays,
-// it never decides (design v4, "The approval signal is a WebAuthn assertion... Dispatch renders
-// and relays; it never decides").
+// (the "UI routes" of the shared broker contract,
+// dispatch://AGENTC-393/artifact/plan-overview-md). Every handler does the same five things:
+// require a human caller, require the broker to be configured, resolve or read its input, call
+// the matching agentsecrets.Client method, and forward the broker's exact status and body — the
+// broker decides. The pending list alone answers null rather than 404 FEATURE_OFF without a broker.
+// The one thing Dispatch supplies is who decides: approve, deny and revoke send the
+// login requireHuman resolved, in Dispatch's canonical lowercase form, as the approver, and never
+// forward the browser's body, so nothing a browser sends can name the approver (AGENTC-393).
 package api
 
 import (
@@ -17,7 +20,8 @@ import (
 )
 
 // requireAgentSecrets answers 404 FEATURE_OFF when this Dispatch has no broker configured
-// (DISPATCH_AGENT_SECRETS_URL unset); every credential-request route needs it after requireHuman.
+// (DISPATCH_AGENT_SECRETS_URL unset); every credential-request route but the pending list needs it
+// after requireHuman.
 func (s *server) requireAgentSecrets(w http.ResponseWriter) (*agentsecrets.Client, bool) {
 	if s.deps.AgentSecrets == nil {
 		writeError(w, "FEATURE_OFF", http.StatusNotFound, "agent-secrets is not configured on this Dispatch")
@@ -58,24 +62,52 @@ func resolveApproverMe(w http.ResponseWriter, r *http.Request, actor model.Actor
 }
 
 // readRelayBody reads a mutation's body verbatim, capped like every other JSON mutation, and
-// hands it to the broker unparsed: Dispatch relays, it does not model these shapes.
-func readRelayBody(w http.ResponseWriter, r *http.Request) (json.RawMessage, bool) {
+// hands it to the broker unparsed: Dispatch relays, it does not model these shapes. A string the
+// body holds that carries U+0000 is refused as decodeJSON refuses one: the broker reads these
+// strings against PostgreSQL too (a machine login's typed code is a query's parameter there), and
+// Dispatch is these routes' only caller.
+func (s *server) readRelayBody(w http.ResponseWriter, r *http.Request) (json.RawMessage, bool) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxJSONRequestBytes))
 	if err != nil {
 		writeError(w, "REQUEST_TOO_LARGE", http.StatusRequestEntityTooLarge, "request body exceeds the size limit")
 		return nil, false
 	}
+	if refusal := unstorableJSON("", body); refusal != nil {
+		s.writeHandlerError(w, refusal)
+		return nil, false
+	}
 	return json.RawMessage(body), true
+}
+
+// decisionFor builds the broker's decision body for an approve or deny: the approver is the
+// caller's canonical login, and the one field read from the browser's body is a machine login's
+// typed code. Any other field the browser sends, an approver among them, is ignored, never
+// forwarded. An empty body is a decision with no code.
+func (s *server) decisionFor(w http.ResponseWriter, r *http.Request, actor model.Actor) (agentsecrets.Decision, bool) {
+	body, ok := s.readRelayBody(w, r)
+	if !ok {
+		return agentsecrets.Decision{}, false
+	}
+	var input struct {
+		Code *string `json:"code"`
+	}
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &input); err != nil {
+			writeError(w, "INVALID_DECISION", http.StatusBadRequest, "request body must be a JSON object")
+			return agentsecrets.Decision{}, false
+		}
+	}
+	return agentsecrets.Decision{Approver: canonicalLogin(actor.ID), Code: input.Code}, true
 }
 
 // --- GET /api/v1/credential-requests, GET .../{id} ---
 
+// listCredentialPending answers the viewer's pending list, or null when this Dispatch has no broker.
+// Every page reads this list (the Needs-you badge counts it), and a deployment without a broker is
+// an ordinary one, so "no broker" is an answer here rather than the 404 FEATURE_OFF the other
+// credential routes give: a 404 made every page of such a deployment log a failed request.
 func (s *server) listCredentialPending(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
-	if !ok {
-		return
-	}
-	client, ok := s.requireAgentSecrets(w)
 	if !ok {
 		return
 	}
@@ -83,7 +115,11 @@ func (s *server) listCredentialPending(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	body, err := client.Pending(r.Context(), login)
+	if s.deps.AgentSecrets == nil {
+		WriteJSON(w, http.StatusOK, nil)
+		return
+	}
+	body, err := s.deps.AgentSecrets.Pending(r.Context(), login)
 	relayBrokerResponse(w, body, err)
 }
 
@@ -102,34 +138,36 @@ func (s *server) getCredentialRecord(w http.ResponseWriter, r *http.Request) {
 // --- POST .../{id}/approve, .../{id}/deny, .../machine-lookup ---
 
 func (s *server) approveCredentialRecord(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
 		return
 	}
 	client, ok := s.requireAgentSecrets(w)
 	if !ok {
 		return
 	}
-	relayBody, ok := readRelayBody(w, r)
+	decision, ok := s.decisionFor(w, r, actor)
 	if !ok {
 		return
 	}
-	body, err := client.Approve(r.Context(), r.PathValue("id"), relayBody)
+	body, err := client.Approve(r.Context(), r.PathValue("id"), decision)
 	relayBrokerResponse(w, body, err)
 }
 
 func (s *server) denyCredentialRecord(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
 		return
 	}
 	client, ok := s.requireAgentSecrets(w)
 	if !ok {
 		return
 	}
-	relayBody, ok := readRelayBody(w, r)
+	decision, ok := s.decisionFor(w, r, actor)
 	if !ok {
 		return
 	}
-	body, err := client.Deny(r.Context(), r.PathValue("id"), relayBody)
+	body, err := client.Deny(r.Context(), r.PathValue("id"), decision)
 	relayBrokerResponse(w, body, err)
 }
 
@@ -141,50 +179,11 @@ func (s *server) lookupMachineCredential(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	relayBody, ok := readRelayBody(w, r)
+	relayBody, ok := s.readRelayBody(w, r)
 	if !ok {
 		return
 	}
 	body, err := client.MachineLookup(r.Context(), relayBody)
-	relayBrokerResponse(w, body, err)
-}
-
-// --- GET /api/v1/credential-keys/{login}, POST .../{kind}/{step} ---
-
-func (s *server) getCredentialKeys(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
-		return
-	}
-	client, ok := s.requireAgentSecrets(w)
-	if !ok {
-		return
-	}
-	body, err := client.Keys(r.Context(), r.PathValue("login"))
-	relayBrokerResponse(w, body, err)
-}
-
-// credentialKeyCeremony drives one step of a key registration or endorsement ceremony. kind and
-// step are path segments, not a wildcard the client method validates itself (agentsecrets.Client.
-// Ceremony trusts its caller) — anything outside the four valid combinations is a plain 404, the
-// same shape routes/router.go uses for an unmatched path, minus its top-level "hint" field.
-func (s *server) credentialKeyCeremony(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
-		return
-	}
-	client, ok := s.requireAgentSecrets(w)
-	if !ok {
-		return
-	}
-	kind, step := r.PathValue("kind"), r.PathValue("step")
-	if (kind != "register" && kind != "endorse") || (step != "begin" && step != "finish") {
-		writeError(w, "NOT_FOUND", http.StatusNotFound, "no route for "+r.Method+" "+r.URL.Path)
-		return
-	}
-	relayBody, ok := readRelayBody(w, r)
-	if !ok {
-		return
-	}
-	body, err := client.Ceremony(r.Context(), r.PathValue("login"), kind, step, relayBody)
 	relayBrokerResponse(w, body, err)
 }
 
@@ -207,18 +206,18 @@ func (s *server) listCredentialGrants(w http.ResponseWriter, r *http.Request) {
 	relayBrokerResponse(w, body, err)
 }
 
+// revokeCredentialGrant ends a grant as the caller: the broker allows it only when the caller's
+// login is the grant's approver or its enrollment's operator. The browser's body carries nothing
+// Dispatch reads.
 func (s *server) revokeCredentialGrant(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
 		return
 	}
 	client, ok := s.requireAgentSecrets(w)
 	if !ok {
 		return
 	}
-	relayBody, ok := readRelayBody(w, r)
-	if !ok {
-		return
-	}
-	body, err := client.RevokeByApprover(r.Context(), r.PathValue("id"), relayBody)
+	body, err := client.RevokeByApprover(r.Context(), r.PathValue("id"), canonicalLogin(actor.ID))
 	relayBrokerResponse(w, body, err)
 }
