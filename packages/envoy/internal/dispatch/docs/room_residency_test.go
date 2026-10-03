@@ -302,11 +302,10 @@ func TestAWriteInsideApplyOutlivesTheRoomsLastPeer(t *testing.T) {
 }
 
 // A document only the API touches - an agent's edit, a read outside any transaction - has no
-// browser to leave its room, so only ygo's idle sweep evicts it. The room must leave ygo's resident
-// rooms within the idle timeout and a sweep of the API's last touch, as a room its last browser
-// left does (roomIdleTimeout), and the document must read back what the API wrote. Before ygo
-// v1.50.1-sami.2 (reearth/ygo#269) Server.Apply cleared the room's idle stamp and nothing set it
-// again, so such a room stayed resident until the process exited (LEGION-484).
+// browser to leave its room. ygo stamps such a room idle when the Server.Apply that touched it
+// returns, so its idle sweep evicts the room within the idle timeout and a sweep of the API's last
+// touch, as it evicts a room its last browser left (roomIdleTimeout), and the document reads back
+// what the API wrote.
 func TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -323,14 +322,9 @@ func TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout(t *testing.T) {
 		if !resident() {
 			t.Fatalf("the %s did not load the document's room", touch)
 		}
-		touched := time.Now()
-		for resident() {
-			if waited := time.Since(touched); waited > 10*time.Second {
-				t.Fatalf("the document's room is still resident %v after the %s, the API's last touch; ygo's idle sweep must evict it %v after that touch and a sweep",
-					waited.Round(time.Second), touch, service.srv.RoomIdleTimeout)
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
+		waitFor(t, 10*time.Second, fmt.Sprintf("ygo's idle sweep to evict the document's room after the %s, the API's last touch (idle timeout %v)", touch, service.srv.RoomIdleTimeout), func() bool {
+			return !resident()
+		})
 	}
 
 	written, err := service.ReplaceText(ctx, artifactID, "Edited by an agent.\n", agent)

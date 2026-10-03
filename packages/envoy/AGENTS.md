@@ -285,33 +285,19 @@ lock and none takes a room's state lock. A read that may load its room (a versio
 and holds the room: a room looked up again with `GetDoc` once that Apply returned can have been
 evicted in between.
 
-Every decode of a document's whole state takes a pending queue as long as the most items one
-update can carry (`newDocumentCopy`, `maxUpdateItems`): the copy, a write's fork (`forkLive`), and
-every decode of the stored history - a read with no room resident (`loadDocument`), the history
-check behind a room's load and a rebuild's refusal (`validateUpdate`), and the room's own load
-(`Server.MaxPendingItems`, set in `New`) - and so do the two checks that decode one update alone:
-the store's, of each update it appends (`appendUpdate`, `AppendUpdateTx`), and ygo's, of each
-update the service broadcasts (`Server.BroadcastUpdate`, which takes `Server.MaxPendingItems`).
-ygo's decoder defers an item whose parent it cannot place yet and parks every later item of that
-client behind it as a clock gap, refusing the update once its queue is full, 100,000 at ygo's
-default (LEGION-502). A whole state first resolves the parents it holds itself - a container a
-later client's group holds, one garbage collection emptied when a peer deleted it - so it parks
-only what leans on something outside it; an update decoded alone parks every item that leans on
-the document it was written against. A browser update of more than 100,000 items written against
-blocks the document already holds, such as 75,000 paragraphs with their block ids written ahead of
-one, failed the store's check, so the room failed and dropped the edit
-(`TestTheStoreTakesOneBrowserUpdateItsRoomTook`), and a settlement that stamps more than 100,000
-blocks' ids failed the broadcast's check, so its room failed on every reload. A room whose peer
+Every decode of document bytes takes the pending queue `maxUpdateItems`, whose comment
+(`internal/dispatch/docs/persistence.go`) states the rule and its reason: whether the service builds
+the decoder (`newDocumentCopy`: the copy, a write's fork, every decode of the stored history, and
+the store's check of each update it appends) or ygo builds it for the service
+(`Server.MaxPendingItems`, set in `New`: the rooms, and ygo's check of each update the service
+broadcasts). In a room, which keeps what it parks across updates, the queue is also the most the
+room's peers can park, about ten times ygo's default. `TestTheStoreTakesOneBrowserUpdateItsRoomTook`
+and `TestASettlementStampsMoreBlocksThanYgosDefaultQueue` are updates ygo's default queue refuses,
+which fail the room; `TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`,
+`TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent` and
+`TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent` check that a document whose peer
 deleted a chain of 200,000 nested blocks, or whose lower-numbered client wrote 150,000 items ahead
-of a block the server wrote, is copied, read, opened and kept from a rebuild whole
-(`TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel`,
-`TestACopyHoldsEveryItemItsRoomParksForOneClient`,
-`TestAStoredHistoryLoadsWhatItsRoomParksForOneClient`); a whole-state decode that refused it would
-read the document as `409 DOCUMENT_UNLOADABLE` once its room was evicted, and the rebuild that code
-offers would replace its history with its latest saved version. ygo refuses any update that
-declares more than `maxUpdateItems` items, so no decode of one parks past that queue; in a room,
-which keeps what it parks across updates, it is also the most the room's peers can park, about ten
-times ygo's default.
+of a block the server wrote, is copied, read, opened and kept from a rebuild whole.
 
 A room whose last peer leaves, or that only the service's `Server.Apply` touches - an agent's
 edit, a read outside any transaction - stays resident until it has been idle for a minute

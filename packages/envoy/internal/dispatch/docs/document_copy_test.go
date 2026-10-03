@@ -16,14 +16,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
-// A browser whose client id is lower than the server's writes many blocks into a paragraph the
-// server created. A room's whole state lists its clients in ascending order, so ygo's decoder
-// meets the browser's first block before the paragraph it lands in, and 150,000 of the browser's
-// items depend on that paragraph, past ygo's default pending queue of 100,000; ygo resolves them
-// from the rest of the state rather than park them (reearth/ygo#260). The room holds and serves
-// that document, so every copy the service takes of it - the snapshot a read renders, and the
-// fork a write starts from - holds it too, item for item.
-func TestACopyHoldsEveryItemItsRoomParksForOneClient(t *testing.T) {
+// A browser whose client id is lower than the server's writes 150,000 blocks into a paragraph the
+// server created. A room's whole state lists its clients in ascending order, so the decoder meets
+// every one of the browser's blocks before the paragraph it lands in. The room holds and serves
+// that document, so every copy the service takes of it - the snapshot a read renders, and the fork
+// a write starts from - holds it too, item for item.
+func TestACopyHoldsEveryItemOneClientWroteAheadOfItsParent(t *testing.T) {
 	const blocks = 150_000
 	live := crdt.New(crdt.WithClientID(1_000_000))
 	fragment := live.GetXmlFragment(fragmentName)
@@ -62,19 +60,17 @@ func TestACopyHoldsEveryItemItsRoomParksForOneClient(t *testing.T) {
 }
 
 // storedHistoryBlocks is how many paragraphs the browser of
-// TestAStoredHistoryLoadsWhatItsRoomParksForOneClient writes, past ygo's default pending queue of
-// 100,000, in two updates each under it.
+// TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent writes, in two updates.
 const storedHistoryBlocks = 150_000
 
-// The same document, in a document's stored history rather than a copy of its room. A server
-// client writes a paragraph; a browser numbered lower writes storedHistoryBlocks paragraphs ahead
-// of it in two updates, each of which the store takes on its own, as a room persists them. The
-// merged history meets the browser's paragraphs before the one they lean on, more of them than
-// ygo's default pending queue holds, and the room that wrote it served it. That document is whole:
-// a read with no room resident serves it, a room opens on it, and a rebuild, which would replace
-// its history with its latest saved version, refuses it as a document that loads and leaves its
-// history as it was.
-func TestAStoredHistoryLoadsWhatItsRoomParksForOneClient(t *testing.T) {
+// The same shape of document, in a document's stored history rather than a copy of its room. A
+// server client writes a paragraph; a browser numbered lower writes storedHistoryBlocks paragraphs
+// ahead of it in two updates, each of which the store takes on its own, as a room persists them.
+// The merged history meets the browser's paragraphs before the one they lean on, and the room that
+// wrote it served it. That document is whole: a read with no room resident serves it, a room opens
+// on it, and a rebuild, which would replace its history with its latest saved version, refuses it
+// as a document that loads and leaves its history as it was.
+func TestAStoredHistoryLoadsEveryItemOneClientWroteAheadOfItsParent(t *testing.T) {
 	service, artifactID := newTestService(t)
 	// Settlement is not under test, and its stamp of every paragraph's block id would race the
 	// subtests' reads of the history.

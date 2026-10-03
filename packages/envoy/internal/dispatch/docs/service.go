@@ -300,9 +300,9 @@ func (s *Service) applyCaptured(ctx context.Context, room string, origin any, mu
 }
 
 // errRoomReplaced is a repair refused because the room no longer holds the document its caller
-// read - the room was evicted, its last browser having left or a CloseRoom having closed it, and
-// the write would load a replacement from the store - or given up because the room left the
-// server while the repair's transaction committed into it.
+// read - the room was evicted, by ygo's idle sweep once its last browser left or the API last
+// touched it, or by a CloseRoom, and the write would load a replacement from the store - or given
+// up because the room left the server while the repair's transaction committed into it.
 var errRoomReplaced = errors.New("document room was replaced")
 
 // applySuppressed writes one repair - settlement's, or the block-id backfill's - into room's live
@@ -543,14 +543,10 @@ func New(deps Deps) *Service {
 	// append it inside the API transaction, so persistence stays per update.
 	srv.PersistCoalesceWindow = -1
 	srv.CompactEvery = 200
-	// A room decodes its stored history into its own document, so it takes the pending queue
-	// every other decode of that history takes (newDocumentCopy), and ygo's check of each update
-	// the service broadcasts (Server.BroadcastUpdate) decodes that update alone under this queue:
-	// at ygo's default of 100,000, a settlement stamping more blocks' ids than that failed the
-	// broadcast, and the room failed on every reload (LEGION-502). The queue is maxUpdateItems
-	// because ygo refuses any one update declaring more items than that, so no decode of one
-	// update can park past it. It is also the most a room's peers can park in it, about ten times
-	// ygo's default; bounding what one peer's update can do to a room is LEGION-487.
+	// The rooms, and ygo's check of each update the service broadcasts (Server.BroadcastUpdate),
+	// decode under maxUpdateItems, the queue every decode of document bytes takes (see
+	// maxUpdateItems). It is also the most a room's peers can park in it, about ten times ygo's
+	// default; bounding what one peer's update can do to a room is LEGION-487.
 	srv.MaxPendingItems = maxUpdateItems
 	// A room whose last peer leaves, or that only Server.Apply touches, stays resident until it has
 	// been idle for roomIdleTimeout: ygo stamps a room idle when its last peer leaves, and when an
@@ -562,10 +558,10 @@ func New(deps Deps) *Service {
 	// the next access has already loaded the store without it and serves, and takes, the next
 	// write on a state missing the first. The two writes, each made from the same document, merge
 	// into a document neither wrote, which can hold no block at all. Idle eviction refuses a
-	// room any Apply holds (idle_sweep.go:185) and counts its idle time from the last Apply's
-	// return, and the sweeper flushes the room before it evicts it, so every write a room the
-	// sweeper evicts has taken is durable before a successor can load. CloseRoom
-	// checks peers alone too (inject.go:475-621), and the service still calls it to close an
+	// room any Apply holds (evictIdleRoom's inflight check) and counts its idle time from the last
+	// Apply's return, and the sweeper flushes the room before it evicts it, so every write a room
+	// the sweeper evicts has taken is durable before a successor can load. CloseRoom
+	// checks peers alone too (Server.CloseRoom), and the service still calls it to close an
 	// issue's rooms (SetIssueClosed), for a room with an editor at Shutdown, and to evict one
 	// (evictRoom): a write that commits on a room it has retired reaches the store through ygo's
 	// stranded persistence, on the committing goroutine (persistence.go:126-163). A published
