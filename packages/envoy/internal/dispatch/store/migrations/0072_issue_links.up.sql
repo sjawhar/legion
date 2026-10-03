@@ -1,4 +1,4 @@
--- 0068_issue_links.up.sql
+-- 0072_issue_links.up.sql
 --
 -- Issue-to-issue dependency links. Today an issue can wait only on another issue through
 -- blocked_by; the kind column keeps the table extensible without changing its identity.
