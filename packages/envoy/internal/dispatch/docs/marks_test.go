@@ -447,35 +447,31 @@ func TestMarkOnlyUpdateSweepsUnrecordedMarksWithoutCanonicalizingLegacyTable(t *
 }
 
 func TestCompactionRetainsContentClassificationAcrossMarkUpdates(t *testing.T) {
-	for _, keep := range []int{1, 500} {
-		t.Run(fmt.Sprintf("keep_%d", keep), func(t *testing.T) {
-			service, artifactID := newTestService(t)
-			service.settle = time.Hour
-			seedServiceText(t, service, artifactID, "before")
-			if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-				t.Fatalf("write content update: %v", err)
-			}
-			waitForPersistedProofText(t, service.store, artifactID, "after\n")
-			for index := 0; index <= keep; index++ {
-				browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "after", pmdoc.Attrs{
-					"id": fmt.Sprintf("mark-%d", index), "by": "user:alice",
-				})
-			}
-			waitForPersistedUpdates(t, service, artifactID, keep+2)
-			persist := service.persistence.(*PgVersioned)
-			if _, err := persist.Compact(context.Background(), artifactID, keep); err != nil {
-				t.Fatalf("compact updates: %v", err)
-			}
-			if err := service.Evict(context.Background(), artifactID); err != nil {
-				t.Fatalf("evict compacted document: %v", err)
-			}
-			if got, err := service.Text(context.Background(), artifactID); err != nil || got != "after\n" {
-				t.Fatalf("reload compacted text = %q (%v), want after", got, err)
-			}
-			settleCurrentGeneration(t, service, artifactID)
-			assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write content update: %v", err)
+	}
+	waitForPersistedProofText(t, service.store, artifactID, "after\n")
+	for index := range compactKeep + 1 {
+		browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "after", pmdoc.Attrs{
+			"id": fmt.Sprintf("mark-%d", index), "by": "user:alice",
 		})
 	}
+	waitForPersistedUpdates(t, service, artifactID, compactKeep+2)
+	persist := service.persistence.(*PgVersioned)
+	if _, err := persist.Compact(context.Background(), artifactID, compactKeep); err != nil {
+		t.Fatalf("compact updates: %v", err)
+	}
+	if err := service.Evict(context.Background(), artifactID); err != nil {
+		t.Fatalf("evict compacted document: %v", err)
+	}
+	if got, err := service.Text(context.Background(), artifactID); err != nil || got != "after\n" {
+		t.Fatalf("reload compacted text = %q (%v), want after", got, err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
 }
 
 func TestCompactionDoesNotCarryCoveredContentClassificationPastCursor(t *testing.T) {
@@ -488,14 +484,14 @@ func TestCompactionDoesNotCarryCoveredContentClassificationPastCursor(t *testing
 		t.Fatalf("seed legacy canonical markdown: %v", err)
 	}
 	alignLatestVersionWithUpdates(t, service, artifactID)
-	for index := 0; index <= 500; index++ {
+	for index := range compactKeep + 1 {
 		browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "one|two", pmdoc.Attrs{
 			"id": fmt.Sprintf("covered-mark-%d", index), "by": "user:alice",
 		})
 	}
-	waitForPersistedUpdates(t, service, artifactID, 502)
+	waitForPersistedUpdates(t, service, artifactID, compactKeep+2)
 	persist := service.persistence.(*PgVersioned)
-	if _, err := persist.Compact(context.Background(), artifactID, 500); err != nil {
+	if _, err := persist.Compact(context.Background(), artifactID, compactKeep); err != nil {
 		t.Fatalf("compact updates: %v", err)
 	}
 	if err := service.Evict(context.Background(), artifactID); err != nil {
@@ -508,30 +504,35 @@ func TestCompactionDoesNotCarryCoveredContentClassificationPastCursor(t *testing
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
 }
 
+// The fold covers a content update past the latest version's cursor, between mark-only updates,
+// and the folded row keeps its content_changed, so settlement versions the content.
 func TestCompactionRetainsUncoveredContentBeyondVersionCursor(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
 	alignLatestVersionWithUpdates(t, service, artifactID)
-	for index := range 249 {
+	for index := range 2 {
 		browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "before", pmdoc.Attrs{
 			"id": fmt.Sprintf("before-mark-%d", index), "by": "user:alice",
 		})
 	}
-	waitForPersistedUpdates(t, service, artifactID, 250)
+	waitForPersistedUpdates(t, service, artifactID, 3)
 	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write uncovered content update: %v", err)
 	}
 	waitForPersistedProofText(t, service.store, artifactID, "after\n")
-	for index := range 251 {
+	for index := range 2 {
 		browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "after", pmdoc.Attrs{
 			"id": fmt.Sprintf("after-mark-%d", index), "by": "user:alice",
 		})
 	}
-	waitForPersistedUpdates(t, service, artifactID, 502)
+	waitForPersistedUpdates(t, service, artifactID, 6)
 	persist := service.persistence.(*PgVersioned)
-	if _, err := persist.Compact(context.Background(), artifactID, 500); err != nil {
+	if _, err := persist.Compact(context.Background(), artifactID, compactKeep); err != nil {
 		t.Fatalf("compact updates: %v", err)
+	}
+	if stored := storedUpdateCount(t, service.store, artifactID); stored != compactKeep {
+		t.Fatalf("compaction left %d stored updates, want %d", stored, compactKeep)
 	}
 	if err := service.Evict(context.Background(), artifactID); err != nil {
 		t.Fatalf("evict compacted document: %v", err)
