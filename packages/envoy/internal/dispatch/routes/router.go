@@ -468,17 +468,16 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	candidate := filepath.Join(r.ctx.WebDistDir, normalized)
 	info, err := os.Stat(candidate)
 	if err == nil && !info.IsDir() {
-		switch {
-		case filepath.Ext(candidate) == ".html":
+		if filepath.Ext(candidate) == ".html" {
 			servePage(w, req, candidate)
-		case isReservedPath(normalized, assetRoots):
+			return
+		}
+		if isReservedPath(normalized, assetRoots) {
 			// A 304 keeps it, and net/http drops it from an error it answers instead (a file
 			// removed after its stat), so a failure is never kept for an asset's year.
 			w.Header().Set("Cache-Control", assetCacheControl)
-			serveFile(w, req, candidate)
-		default:
-			serveFile(w, req, candidate)
 		}
+		serveFile(w, req, candidate)
 		return
 	}
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {

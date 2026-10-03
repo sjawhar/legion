@@ -616,17 +616,16 @@ func TestStaticHandlerCacheControl(t *testing.T) {
 	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
 	context.WebDistDir = webDist
 
-	const immutable = "public, max-age=31536000, immutable"
 	for _, tc := range []struct {
 		path         string
 		status       int
 		cacheControl string
 	}{
-		{path: "/", status: http.StatusOK, cacheControl: "no-cache"},
-		{path: "/issues/CORE-1", status: http.StatusOK, cacheControl: "no-cache"},
-		{path: "/agents/broadcasts/5f0c", status: http.StatusOK, cacheControl: "no-cache"},
-		{path: "/assets/index-abc123.js", status: http.StatusOK, cacheControl: immutable},
-		{path: "/assets/index-abc123.css", status: http.StatusOK, cacheControl: immutable},
+		{path: "/", status: http.StatusOK, cacheControl: pageCacheControl},
+		{path: "/issues/CORE-1", status: http.StatusOK, cacheControl: pageCacheControl},
+		{path: "/agents/broadcasts/5f0c", status: http.StatusOK, cacheControl: pageCacheControl},
+		{path: "/assets/index-abc123.js", status: http.StatusOK, cacheControl: assetCacheControl},
+		{path: "/assets/index-abc123.css", status: http.StatusOK, cacheControl: assetCacheControl},
 		{path: "/assets/index-missing.js", status: http.StatusNotFound, cacheControl: ""},
 		{path: "/favicon.svg", status: http.StatusOK, cacheControl: ""},
 		{path: "/favicon.ico", status: http.StatusOK, cacheControl: ""},
@@ -676,8 +675,8 @@ func TestStaticHandlerRevalidatesPagesByContent(t *testing.T) {
 	}
 
 	same := get("/issues/CORE-1", http.Header{"If-None-Match": {etag}})
-	if same.Code != http.StatusNotModified || same.Header().Get("Cache-Control") != "no-cache" {
-		t.Fatalf("revalidating this build's page: status %d Cache-Control %q, want 304 and no-cache", same.Code, same.Header().Get("Cache-Control"))
+	if same.Code != http.StatusNotModified || same.Header().Get("Cache-Control") != pageCacheControl {
+		t.Fatalf("revalidating this build's page: status %d Cache-Control %q, want 304 and %q", same.Code, same.Header().Get("Cache-Control"), pageCacheControl)
 	}
 
 	later := time.Now().Add(24 * time.Hour).UTC().Format(http.TimeFormat)
