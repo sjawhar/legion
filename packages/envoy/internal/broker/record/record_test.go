@@ -302,6 +302,56 @@ func TestChainVerifierHoldsASlotlessAndASlottedRecordToTheirOwnBytes(t *testing.
 	}
 }
 
+// TestAnyoneApproverAdmitsEveryLoginButItself pins the approver AnyoneApprover against a person's:
+// a record naming anyone is decided by any login, never by the sentinel itself or an empty login,
+// and its chain verifies over whichever login approved it; a record naming a person is decided by
+// that person alone, the sentinel included.
+func TestAnyoneApproverAdmitsEveryLoginButItself(t *testing.T) {
+	key, _ := proof.NewKey()
+	now := time.Now()
+	compact, err := Sign(key, "https://secrets.test", secretDetail(), "shared", "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := podBody(compact)
+	shared.Approver = AnyoneApprover
+	owned := podBody(compact)
+	owned.Approver = "sami@example.com"
+	for _, c := range []struct {
+		body  Body
+		login string
+		want  string
+	}{
+		{shared, " Bob@Example.com ", "bob@example.com"},
+		{shared, "sami@example.com", "sami@example.com"},
+		{shared, AnyoneApprover, ""},
+		{shared, " ANYONE ", ""},
+		{shared, "  ", ""},
+		{owned, "Sami@Example.com", "sami@example.com"},
+		{owned, "bob@example.com", ""},
+		{owned, AnyoneApprover, ""},
+	} {
+		got, err := c.body.ApproverLogin(c.login)
+		if c.want == "" && !errors.Is(err, ErrNotApprover) || c.want != "" && (err != nil || got != c.want) {
+			t.Errorf("ApproverLogin(approver %q, login %q) = %q, %v; want %q", c.body.Approver, c.login, got, err, c.want)
+		}
+	}
+	for decider, verifies := range map[string]bool{"bob@example.com": true, AnyoneApprover: false} {
+		verifier := &ChainVerifier{
+			Audience: "https://secrets.test", Skew: time.Minute,
+			FetchRecord: func(context.Context, string) (string, time.Time, bool, error) {
+				return shared.Canonical(), now, true, nil
+			},
+			FetchDecisions: func(context.Context, string) ([]TerminalEvent, error) {
+				return []TerminalEvent{{Event: "approved", Login: decider}}, nil
+			},
+		}
+		if _, err := verifier.Verify(context.Background(), shared.ID()); (err == nil) != verifies {
+			t.Errorf("Verify(shared record approved by %q) = %v, want verified %v", decider, err, verifies)
+		}
+	}
+}
+
 func TestForgedSignatureFailsForRequestObject(t *testing.T) {
 	attackerKey, err := proof.NewKey()
 	if err != nil {

@@ -377,7 +377,7 @@ func (b *Broker) readLoginStatus(ctx context.Context, pendingID string) (launche
 }
 
 // enrollBody is POST /v1/enrollments's shape in the shared broker contract (the v8 "approver"
-// field is gone: the broker's rules pick a request's approver, never the enrollment).
+// field is gone: the broker's policy picks a request's approver, never the enrollment).
 type enrollBody struct {
 	Kind       string  `json:"kind"`
 	RuntimeID  string  `json:"runtime_id"`

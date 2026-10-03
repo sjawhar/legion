@@ -55,6 +55,10 @@ func CanonicalLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }
 
+// AnyoneApprover is the approver of a record anyone signed in to Dispatch may decide: a request
+// for a shared human-tier secret. It is never a person's login, and no login is it.
+const AnyoneApprover = "anyone"
+
 // AuthorizationDetail is one entry of a request object's RFC 9396 authorization_details.
 type AuthorizationDetail struct {
 	Type       string   `json:"type"` // "agent_secret" | "launcher_credential"
@@ -212,7 +216,7 @@ type Enrollment struct{ Kind, RuntimeID, Operator, Slot string }
 // signed request object. It is never updated after creation.
 type Body struct {
 	Request         string // compact JWS
-	Approver        string // canonical login
+	Approver        string // canonical login, or AnyoneApprover
 	Enrollment      Enrollment
 	LifetimeSeconds int
 	RulesVersion    string
@@ -358,14 +362,16 @@ func ParseBody(canonical string) (Body, error) {
 	return b, nil
 }
 
-// ApproverLogin canonicalizes login and returns it when it is the approver this record names, and
-// ErrNotApprover otherwise. A record's approver is resolved when it is created — an approval
-// rule's login:<name>, the requesting enrollment's operator for approver: operator, or a machine
-// login's login_hint — so this one comparison is every decision's and every chain re-check's
-// approver rule, and the login it returns is the one a decision records.
+// ApproverLogin canonicalizes login and returns it when it may decide this record, and
+// ErrNotApprover otherwise: login must be the approver the record names, or, when that is
+// AnyoneApprover, any login at all. A record's approver is resolved when it is created — a
+// secret's owner, AnyoneApprover for a shared human-tier secret, or a machine login's login_hint —
+// so this one comparison is every decision's and every chain re-check's approver rule, and the
+// login it returns is the one a decision records.
 func (b Body) ApproverLogin(login string) (string, error) {
 	login = CanonicalLogin(login)
-	if login == "" || login != CanonicalLogin(b.Approver) {
+	approver := CanonicalLogin(b.Approver)
+	if login == "" || login == AnyoneApprover || login != approver && approver != AnyoneApprover {
 		return "", ErrNotApprover
 	}
 	return login, nil

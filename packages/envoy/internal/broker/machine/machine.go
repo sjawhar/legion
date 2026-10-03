@@ -22,8 +22,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
-	"github.com/sjawhar/envoy/internal/broker/rules"
 	"github.com/sjawhar/envoy/internal/broker/store"
 )
 
@@ -50,7 +50,8 @@ var (
 type Service struct {
 	Store  *store.Store
 	Enroll *enroll.Service
-	Rules  *rules.Current
+	// Policy is the secret policy, whose version a machine-login record carries.
+	Policy *policy.Current
 
 	Audience           string
 	Skew               time.Duration
@@ -125,8 +126,9 @@ func deref(s *string) string {
 }
 
 // Login verifies a signed machine credential-request object and opens a pending record for a
-// human to approve or deny: login_hint is required (it names the operator who must decide it)
-// and authorization_details must carry exactly one launcher_credential entry.
+// human to approve or deny: login_hint is required (it names the operator who must decide it, so
+// it is never record.AnyoneApprover) and authorization_details must carry exactly one
+// launcher_credential entry.
 // Nothing here touches Dispatch; the record and its poll row are the whole state, and rate
 // limiting this unauthenticated route is the api layer's job, not this one's.
 func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, code string, err error) {
@@ -137,6 +139,9 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 	}
 	if obj.LoginHint == "" {
 		return "", "", fmt.Errorf("%w: login_hint is required for a machine login", record.ErrRequestInvalid)
+	}
+	if record.CanonicalLogin(obj.LoginHint) == record.AnyoneApprover {
+		return "", "", fmt.Errorf("%w: a machine login's login_hint names its operator, never %q", record.ErrRequestInvalid, record.AnyoneApprover)
 	}
 	if len(obj.Details) != 1 || obj.Details[0].Type != "launcher_credential" {
 		return "", "", fmt.Errorf("%w: exactly one launcher_credential detail is required", record.ErrRequestInvalid)
@@ -163,7 +168,7 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 		Approver:        record.CanonicalLogin(obj.LoginHint),
 		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-", Operator: ""},
 		LifetimeSeconds: int(s.CredentialLifetime.Seconds()),
-		RulesVersion:    s.Rules.Get().Version,
+		RulesVersion:    s.Policy.Get().Version,
 		ExpiresAt:       now.Add(s.PendingTTL).UTC().Truncate(time.Second),
 		Code:            code,
 	}

@@ -16,17 +16,17 @@ func TestGrantsForApproverNamesWhoApproved(t *testing.T) {
 	if err != nil || pending.RecordID == nil {
 		t.Fatalf("Create(pending) = %+v, %v", pending, err)
 	}
-	dec, err := m.ApplyDecision(ctx, *pending.RecordID, true, "Alice")
+	dec, err := m.ApplyDecision(ctx, *pending.RecordID, true, "Alice@Example.com")
 	if err != nil || dec.GrantID == "" {
 		t.Fatalf("ApplyDecision(alice): %+v %v", dec, err)
 	}
-	for _, viewer := range []string{operator, "alice"} {
+	for _, viewer := range []string{operator, otherPerson} {
 		grants, err := m.GrantsForApprover(ctx, viewer)
 		if err != nil {
 			t.Fatalf("GrantsForApprover(%s): %v", viewer, err)
 		}
-		if len(grants) != 1 || grants[0].GrantID != dec.GrantID || grants[0].Approver != "alice" {
-			t.Fatalf("GrantsForApprover(%s) = %+v, want grant %s approved by alice", viewer, grants, dec.GrantID)
+		if len(grants) != 1 || grants[0].GrantID != dec.GrantID || grants[0].Approver != otherPerson {
+			t.Fatalf("GrantsForApprover(%s) = %+v, want grant %s approved by %s", viewer, grants, dec.GrantID, otherPerson)
 		}
 	}
 }
@@ -71,7 +71,7 @@ func TestEachSlotOfAPodSignsItsOwnRecordAndListsItsOwnGrant(t *testing.T) {
 		if err != nil || dec.GrantID == "" {
 			t.Fatalf("ApplyDecision(slot %q) = %+v, %v", slot, dec, err)
 		}
-		values, _, _, err := m.Values(ctx, dec.GrantID, id)
+		values, _, err := m.Values(ctx, dec.GrantID, id)
 		if err != nil || values["DEEL_API_KEY"] != "deel-v1" {
 			t.Fatalf("Values(slot %q) = %v, %v; want the chain to verify and release", slot, values, err)
 		}
