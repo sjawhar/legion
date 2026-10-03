@@ -49,11 +49,11 @@ Agents page, where they can message the agents that are running.
 ### Envoy
 
 The events between everything else, carried on NATS JetStream. Envoy's listener turns GitHub
-webhooks into events, Dispatch publishes its own, and the listener delivers each event to the agent
-sessions subscribed to its topic: one issue's events, one session's inbox, or a role, which reaches
-whichever session holds it. Delivery is at least once. Events stay in the stream for 72 hours, and
-the Legion daemon reads them through durable consumers, so an event that arrives while it is down is
-read when it comes back. Agent harnesses connect through the clients in this repository:
+webhooks into events, Dispatch publishes its own, and each event reaches the agent sessions
+subscribed to its topic: one issue's events, one session's inbox, or a role, which the listener
+hands to whichever session holds it. Delivery is at least once. Events stay in the stream for 72
+hours, and the Legion daemon reads them through durable consumers, so an event that arrives while it
+is down is read when it comes back. Agent harnesses connect through the clients in this repository:
 `packages/pi-envoy` for Oh My Pi, `packages/claude-envoy` for Claude Code and `packages/envoy-plugin`
 for OpenCode, all built on `packages/envoy-client`.
 
