@@ -41,6 +41,8 @@ import (
 const (
 	// defaultListenPort is the port when DISPATCH_PORT is unset; listenAddress joins it to the host.
 	defaultListenPort = "8766"
+	// defaultEnvoyURL is the Envoy listener when ENVOY_URL is unset: this machine's.
+	defaultEnvoyURL   = "http://127.0.0.1:9020"
 	shutdownTimout    = 5 * time.Second
 	readHeaderTimeout = 10 * time.Second
 	idleTimeout       = 2 * time.Minute
@@ -461,7 +463,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	}
 	envoyURL := strings.TrimSpace(env.get("ENVOY_URL"))
 	if envoyURL == "" {
-		envoyURL = "http://127.0.0.1:9020"
+		envoyURL = defaultEnvoyURL
 	}
 	parsed, err := url.Parse(envoyURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
@@ -772,10 +774,10 @@ func healthzHandler(database *store.Store, natsClient *bus.Client, commit string
 	}
 }
 
-// listenAddress builds the listen address from DISPATCH_LISTEN_HOST and DISPATCH_PORT (8766
-// when unset). An empty host binds every interface (the containerized production default);
-// local compose deployments set 127.0.0.1. An IPv6 host may be written with or without brackets:
-// one pair comes off here and JoinHostPort puts it back.
+// listenAddress builds the listen address from DISPATCH_LISTEN_HOST and DISPATCH_PORT
+// (defaultListenPort when unset). An empty host binds every interface (the containerized
+// production default); local compose deployments set 127.0.0.1. An IPv6 host may be written with
+// or without brackets: one pair comes off here and JoinHostPort puts it back.
 func listenAddress(env settingValues) (string, error) {
 	host := strings.TrimSpace(env.get("DISPATCH_LISTEN_HOST"))
 	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
