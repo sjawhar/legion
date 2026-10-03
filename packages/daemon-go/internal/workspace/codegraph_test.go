@@ -327,6 +327,16 @@ esac
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = builder.Process.Kill() })
+	// Start returns once execve has closed the child's close-on-exec pipe, before the kernel has
+	// laid out the new argv: /proc/<pid>/cmdline reads empty until it has, and again across the
+	// script's own `exec -a`, and an empty cmdline reads as not codegraph. A real builder writes its
+	// PID to the lock from its own running code, after its exec has finished, so the lock is written
+	// only once the stand-in is there too: argv[0] is codegraph.
+	waitFor(t, func() bool {
+		cmdline, _ := os.ReadFile("/proc/" + strconv.Itoa(builder.Process.Pid) + "/cmdline")
+		argv0, _, _ := strings.Cut(string(cmdline), "\x00")
+		return argv0 == "codegraph"
+	}, "the stand-in builder to exec as codegraph")
 	lock := filepath.Join(dir, ".codegraph", "codegraph.lock")
 	if err := os.WriteFile(lock, []byte(strconv.Itoa(builder.Process.Pid)), 0o600); err != nil {
 		t.Fatal(err)
@@ -340,6 +350,68 @@ esac
 	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
 	if !slices.Equal(lines, []string{"status"}) {
 		t.Fatalf("codegraph calls = %v, want exactly status alone (no index or init while the lock names a live process)", lines)
+	}
+}
+
+// TestWarmCodegraphIndexJudgesAnEmptyLockByItsAge: CodeGraph creates `.codegraph/codegraph.lock`
+// before it writes the builder's PID into it, so a build that has only just started shows an
+// empty lock. A fresh empty lock is held, and warming skips the repair rather than start a second
+// writer beside that build. One older than codegraphEmptyLockGrace is what a builder that died
+// between the create and the write leaves behind: stale, so the repair runs. So is one dated
+// further than the grace into the future, which no starting build wrote.
+func TestWarmCodegraphIndexJudgesAnEmptyLockByItsAge(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// age is how old the lock's mtime is when warming reads it; negative is in the future.
+		// Zero means the stub's own `status` creates the lock, as a build taking it while warming
+		// runs would, so the lock is as young as it can be when warming reads it.
+		age  time.Duration
+		want []string
+	}{
+		{"fresh empty lock: a build about to write its PID holds it, no repair", 0, []string{"status"}},
+		{"empty lock older than the grace: a dead builder's, repaired", codegraphEmptyLockGrace + time.Minute, []string{"status", "index"}},
+		{"empty lock dated past the grace in the future: stale, repaired", -codegraphEmptyLockGrace - time.Minute, []string{"status", "index"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			callLog := filepath.Join(t.TempDir(), "calls.log")
+			dir := t.TempDir()
+			lock := filepath.Join(dir, ".codegraph", "codegraph.lock")
+			if err := os.Mkdir(filepath.Dir(lock), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			takeLock := ""
+			if tc.age == 0 {
+				takeLock = " : > .codegraph/codegraph.lock;"
+			} else {
+				if err := os.WriteFile(lock, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				mtime := time.Now().Add(-tc.age)
+				if err := os.Chtimes(lock, mtime, mtime); err != nil {
+					t.Fatal(err)
+				}
+			}
+			binDir := t.TempDir()
+			script := `#!/bin/sh
+printf '%s\n' "$1" >> '` + callLog + `'
+case "$1" in
+status)` + takeLock + ` echo '{"initialized":true,"index":{"state":"indexing"}}' ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(binDir, "codegraph"), []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			warmCodegraphIndex(context.Background(), dir)
+			calls, err := os.ReadFile(callLog)
+			if err != nil {
+				t.Fatalf("read codegraph call log: %v", err)
+			}
+			if lines := strings.Split(strings.TrimSpace(string(calls)), "\n"); !slices.Equal(lines, tc.want) {
+				t.Fatalf("codegraph calls = %v, want %v", lines, tc.want)
+			}
+		})
 	}
 }
 
