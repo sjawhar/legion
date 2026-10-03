@@ -160,24 +160,6 @@ func replayFixture(function string, input json.RawMessage) ([]byte, error) {
 			return nil, err
 		}
 		return canonicalOutcome(EffectiveOutcome(decoded.PR.record(), decoded.Incoming))
-	case "acceptGitHubFence":
-		var decoded struct {
-			PR        fixturePullRequest  `json:"pr"`
-			CheckRuns []record.AttemptRun `json:"checkRuns"`
-		}
-		if err := decodeFixture(input, &decoded); err != nil {
-			return nil, err
-		}
-		return canonicalJSON(AcceptGitHubFence(decoded.PR.record(), decoded.CheckRuns))
-	case "supersededBy":
-		var decoded struct {
-			Incoming fixtureHeadClock `json:"incoming"`
-			Applied  fixtureHeadClock `json:"applied"`
-		}
-		if err := decodeFixture(input, &decoded); err != nil {
-			return nil, err
-		}
-		return canonicalJSON(SupersededBy(decoded.Incoming.clock(), decoded.Applied.clock()))
 	case "classifyPush":
 		var decoded PushPayload
 		if err := decodeFixture(input, &decoded); err != nil {
@@ -352,7 +334,6 @@ type fixturePullRequest struct {
 	CheckRuns       *[]record.AttemptRun   `json:"ciCheckRuns"`
 	Generation      *int64                 `json:"ciSettlementGeneration"`
 	Snapshot        *string                `json:"ciSnapshot"`
-	Reconciled      bool                   `json:"ciReconciled"`
 	PendingPush     *record.ClassifiedPush `json:"pendingPush"`
 	HeadCounted     *bool                  `json:"headCounted"`
 	PlannedRed      bool                   `json:"plannedRed"`
@@ -389,16 +370,7 @@ func (fixture fixturePullRequest) record() record.PullRequest {
 		HeadUpdatedAt: timestampJSON(fixture.HeadUpdatedAt), HeadUpdatedAtSource: fixture.HeadUpdatedAtSource, Verdict: fixture.Verdict,
 		Failing: append([]string{}, fixture.Failing...), FailingStatuses: append([]string{}, fixture.FailingStatuses...),
 		FixAttempts: fixture.FixAttempts, BlockedAttempts: blocked, CheckRuns: checkRuns, Generation: generation, Snapshot: snapshot,
-		Reconciled: fixture.Reconciled, Pushes: pushes, HeadCounted: headCounted, PlannedRed: fixture.PlannedRed}
-}
-
-type fixtureHeadClock struct {
-	UpdatedAt json.RawMessage `json:"updatedAt"`
-	Source    string          `json:"source"`
-}
-
-func (fixture fixtureHeadClock) clock() HeadClock {
-	return HeadClock{UpdatedAt: timestampJSON(fixture.UpdatedAt), Source: fixture.Source}
+		Pushes: pushes, HeadCounted: headCounted, PlannedRed: fixture.PlannedRed}
 }
 
 type fixtureGate struct {

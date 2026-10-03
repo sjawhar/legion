@@ -182,7 +182,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 
 const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at, head_updated_at_source,
 	verdict, failing, failing_statuses, fix_attempts, blocked_attempts, check_runs,
-	generation, snapshot, reconciled, pushes, head_counted, planned_red, review_seen, review_seen_at, state,
+	generation, snapshot, pushes, head_counted, planned_red, review_seen, review_seen_at, state,
 	checked_head`
 
 func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
@@ -240,22 +240,22 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	}
 	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
 		head_updated_at_source, verdict, failing, failing_statuses, fix_attempts,
-		blocked_attempts, check_runs, generation, snapshot, reconciled, pushes, head_counted, planned_red,
+		blocked_attempts, check_runs, generation, snapshot, pushes, head_counted, planned_red,
 		review_seen, review_seen_at, state, checked_head)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
 		head_updated_at_source = excluded.head_updated_at_source, verdict = excluded.verdict,
 		failing = excluded.failing, failing_statuses = excluded.failing_statuses,
 		fix_attempts = excluded.fix_attempts,
 		blocked_attempts = excluded.blocked_attempts, check_runs = excluded.check_runs,
-		generation = excluded.generation, snapshot = excluded.snapshot, reconciled = excluded.reconciled,
+		generation = excluded.generation, snapshot = excluded.snapshot,
 		pushes = excluded.pushes, head_counted = excluded.head_counted,
 		planned_red = excluded.planned_red, review_seen = excluded.review_seen,
 		review_seen_at = excluded.review_seen_at, state = excluded.state, checked_head = excluded.checked_head`,
 		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt, pr.HeadUpdatedAtSource,
 		pr.Verdict, failing, failingStatuses, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
-		pr.Generation, pr.Snapshot, pr.Reconciled, pushes, pr.HeadCounted, pr.PlannedRed,
+		pr.Generation, pr.Snapshot, pushes, pr.HeadCounted, pr.PlannedRed,
 		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead,
 	)
 	if err != nil {
@@ -299,7 +299,7 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 		// commits, and so does its newest review, which orders every review it will have.
 		"update pull_requests set fix_attempts = 0, blocked_attempts = 0, head_counted = '', " +
 			"planned_red = false, checked_head = '', verdict = '', failing = '[]'::jsonb, " +
-			"failing_statuses = '[]'::jsonb, check_runs = '[]'::jsonb, reconciled = false where " + where,
+			"failing_statuses = '[]'::jsonb, check_runs = '[]'::jsonb where " + where,
 		"delete from design_gates where " + where,
 		"update phases set handoff_commit = '', rounds = 0, verdict = '', summary = '', decision = null where " + where,
 		// A READY the gate refused waits on the merger's packet, which the statement above clears.
@@ -317,7 +317,7 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	var failing, failingStatuses, checkRuns, pushes []byte
 	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
 		&pr.HeadUpdatedAtSource, &pr.Verdict, &failing, &failingStatuses,
-		&pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot, &pr.Reconciled,
+		&pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot,
 		&pushes, &pr.HeadCounted, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
 		&pr.CheckedHead); err != nil {
 		return nil, err

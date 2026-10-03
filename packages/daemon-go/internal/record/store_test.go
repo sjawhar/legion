@@ -142,7 +142,7 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		Verdict: "failing", Failing: []string{"unit"}, FailingStatuses: []string{"unit / test"},
 		FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
-		Snapshot: "snapshot-4", Reconciled: true, Pushes: pushes, HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged,
+		Snapshot: "snapshot-4", Pushes: pushes, HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged,
 	}
 	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Rounds: 2, Verdict: "pass"}
 	gate := DesignGate{Issue: issue.Key, ArtifactID: "artifact-208", LatestVersion: 7, ApprovedVersion: &approved}
@@ -279,7 +279,7 @@ func samePullRequest(got, want PullRequest) bool {
 		reflect.DeepEqual(got.Failing, want.Failing) && reflect.DeepEqual(got.FailingStatuses, want.FailingStatuses) &&
 		got.FixAttempts == want.FixAttempts &&
 		got.BlockedAttempts == want.BlockedAttempts && reflect.DeepEqual(got.CheckRuns, want.CheckRuns) &&
-		got.Generation == want.Generation && got.Snapshot == want.Snapshot && got.Reconciled == want.Reconciled &&
+		got.Generation == want.Generation && got.Snapshot == want.Snapshot &&
 		reflect.DeepEqual(got.Pushes, want.Pushes) && got.HeadCounted == want.HeadCounted &&
 		got.PlannedRed == want.PlannedRed
 }
@@ -565,7 +565,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	want := map[string][]string{
 		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status"},
 		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at"},
-		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state", "checked_head"},
+		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state", "checked_head"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},
 		"processed_events": {"source", "event_id", "processed_at"},

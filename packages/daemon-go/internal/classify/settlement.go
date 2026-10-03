@@ -10,21 +10,6 @@ const (
 	SettlementDuplicate SettlementClassification = "duplicate"
 	SettlementConflict  SettlementClassification = "conflict"
 	SettlementNewer     SettlementClassification = "newer"
-	SettlementRefresh   SettlementClassification = "refresh"
-)
-
-// GitHubFenceEffect states what a complete GitHub rollup can do to a stored CI fence. The Go
-// daemon reads no rollup, so nothing on its path produces one: AcceptGitHubFence, and the
-// Reconciled branch of ClassifySettlement, replay the shipped daemon's recorded classification
-// fixtures (packages/contracts/fixtures/classification) until LEGION-208 Stage 7 deletes them.
-type GitHubFenceEffect string
-
-const (
-	GitHubFenceAdvance  GitHubFenceEffect = "advance"
-	GitHubFenceApply    GitHubFenceEffect = "apply"
-	GitHubFenceUnfenced GitHubFenceEffect = "unfenced"
-	GitHubFenceStale    GitHubFenceEffect = "stale"
-	GitHubFenceConflict GitHubFenceEffect = "conflict"
 )
 
 // SettlementCandidate is the listener's proposed CI outcome for one commit and its ordering
@@ -76,8 +61,8 @@ func ClassifySettlement(pr record.PullRequest, in SettlementCandidate) Settlemen
 		return SettlementConflict
 	}
 
-	// Generation zero is a valid listener generation. The record's empty snapshot is the contract's
-	// representation of a GitHub-authored fence, which has no listener generation.
+	// Generation zero is a valid listener generation. An empty snapshot is a fence no listener
+	// settlement wrote (the intake refuses a settlement without one), which has no generation.
 	hasListenerIdentity := pr.Snapshot != ""
 	if hasListenerIdentity && in.Generation < pr.Generation {
 		return SettlementStale
@@ -88,17 +73,7 @@ func ClassifySettlement(pr record.PullRequest, in SettlementCandidate) Settlemen
 		}
 		return SettlementConflict
 	}
-	// Reconciled is never true on the Go path: a refresh only keeps it, and only a GitHub read,
-	// which the Go daemon does not make, could set it (see GitHubFenceEffect).
-	if !pr.Reconciled {
-		return SettlementNewer
-	}
-
-	effective := EffectiveOutcome(pr, in)
-	if effective.Verdict == pr.Verdict && sameStringMultiset(effective.Failing, pr.Failing) {
-		return SettlementRefresh
-	}
-	return SettlementStale
+	return SettlementNewer
 }
 
 // EffectiveOutcome preserves failures omitted by an incomplete listener observation and every
@@ -125,46 +100,4 @@ func EffectiveOutcome(pr record.PullRequest, in SettlementCandidate) CiOutcome {
 		return CiOutcome{Verdict: "red", Failing: failing, FailingStatuses: failingStatuses}
 	}
 	return CiOutcome{Verdict: in.Verdict, Failing: []string{}, FailingStatuses: failingStatuses}
-}
-
-// AcceptGitHubFence decides whether a complete GitHub rollup can update a stored CI fence.
-func AcceptGitHubFence(pr record.PullRequest, checkRuns []record.AttemptRun) GitHubFenceEffect {
-	fenced := pr.CheckRuns != nil && len(pr.CheckRuns) > 0
-	if len(checkRuns) == 0 {
-		if fenced {
-			return GitHubFenceStale
-		}
-		return GitHubFenceUnfenced
-	}
-	if pr.CheckRuns == nil {
-		return GitHubFenceAdvance
-	}
-
-	switch CompareAttemptSets(pr.CheckRuns, checkRuns) {
-	case AttemptSetNewer:
-		return GitHubFenceAdvance
-	case AttemptSetEqual:
-		return GitHubFenceApply
-	case AttemptSetOlder:
-		return GitHubFenceStale
-	default:
-		return GitHubFenceConflict
-	}
-}
-
-func sameStringMultiset(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	counts := make(map[string]int, len(left))
-	for _, value := range left {
-		counts[value]++
-	}
-	for _, value := range right {
-		if counts[value] == 0 {
-			return false
-		}
-		counts[value]--
-	}
-	return true
 }

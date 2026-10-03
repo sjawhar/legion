@@ -1,13 +1,5 @@
 package classify
 
-import "time"
-
-// HeadClock is the ordering clock for a PR-head observation.
-type HeadClock struct {
-	UpdatedAt time.Time `json:"updatedAt"`
-	Source    string    `json:"source"`
-}
-
 // PushPayload keeps absent payload fields distinct from explicit empty strings.
 type PushPayload struct {
 	ChangedPaths          *string `json:"changed_paths,omitempty"`
@@ -18,21 +10,6 @@ type PushPayload struct {
 type PushClassification struct {
 	HandoffOnly bool   `json:"handoffOnly"`
 	Unknown     string `json:"unknown,omitempty"`
-}
-
-// SupersededBy fences a stale GitHub observation. A complete GitHub read wins a same-clock tie
-// over a webhook; two observations from the same source still apply in arrival order.
-func SupersededBy(incoming, applied HeadClock) bool {
-	if incoming.UpdatedAt.IsZero() || applied.UpdatedAt.IsZero() {
-		return false
-	}
-	if incoming.UpdatedAt.Before(applied.UpdatedAt) {
-		return true
-	}
-	if incoming.UpdatedAt.After(applied.UpdatedAt) {
-		return false
-	}
-	return applied.Source == "resync" && incoming.Source == "webhook"
 }
 
 // ClassifyPush determines whether every supplied path is a Legion handoff file. The listener's
