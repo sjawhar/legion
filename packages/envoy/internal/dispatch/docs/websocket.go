@@ -91,7 +91,7 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 	if a.service.roomFailed(room) {
 		return nil
 	}
-	contentChanged, durable, credit, found := a.service.consumeUpdateClass(room, update)
+	contentChanged, durable, credit, creditVersion, found := a.service.consumeUpdateClass(room, update)
 	if found && durable {
 		defer a.service.finishDurableAppend(room)
 	}
@@ -99,8 +99,10 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 		return nil
 	}
 	var err error
+	creditStored := credit.empty()
 	if store, ok := a.store.(creditedUpdateStore); ok {
 		_, err = store.AppendUpdateWithSettlementCredit(context.Background(), room, update, contentChanged, credit)
+		creditStored = true
 	} else if store, ok := a.store.(classifiedUpdateStore); ok {
 		_, err = store.AppendUpdateWithClass(context.Background(), room, update, contentChanged)
 	} else {
@@ -109,6 +111,9 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 	if err != nil {
 		a.service.failRoom(room, err)
 		return err
+	}
+	if found && creditStored {
+		a.service.settlementCreditPersisted(room, creditVersion)
 	}
 	if found && durable && contentChanged {
 		a.service.scheduleSettleAfterAppend(room)
@@ -120,7 +125,7 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	if a.service.roomFailed(room) {
 		return nil
 	}
-	contentChanged, durable, credit, found := a.service.consumeUpdateClass(room, update)
+	contentChanged, durable, credit, creditVersion, found := a.service.consumeUpdateClass(room, update)
 	if found && durable {
 		defer a.service.finishDurableAppend(room)
 	}
@@ -128,8 +133,10 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		return nil
 	}
 	var err error
+	creditStored := credit.empty()
 	if store, ok := a.store.(creditedUpdateStore); ok {
 		_, err = store.AppendUpdateWithSettlementCredit(ctx, room, update, contentChanged, credit)
+		creditStored = true
 	} else if store, ok := a.store.(classifiedUpdateStore); ok {
 		_, err = store.AppendUpdateWithClass(ctx, room, update, contentChanged)
 	} else {
@@ -138,6 +145,9 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	if err != nil {
 		a.service.failRoom(room, err)
 		return err
+	}
+	if found && creditStored {
+		a.service.settlementCreditPersisted(room, creditVersion)
 	}
 	if found && durable && contentChanged {
 		a.service.scheduleSettleAfterAppend(room)
@@ -444,13 +454,14 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	state.contentMarkdown = contentMarkdown
 	// The document owes a settlement no settlement committed: one a shutdown's budget cut short,
 	// or one a room failure dropped (failRoomLocked). Its timer lived in the process or the room
-	// that is gone, so this load settles once rather than waiting for an edit to arm one - unless
-	// the load is a settlement's own warm-up, which settles it next. A room that failed again
-	// while this load ran leaves the row for its own replacement.
-	if owed {
+	// that is gone, so an open room settles once rather than waiting for an edit to arm one - unless
+	// the load is a settlement's own warm-up, which settles it next. A closed room keeps the credit
+	// durable on its pending-settlement row; it settles only after its issue reopens. A room that
+	// failed again while this load ran leaves the row for its own replacement.
+	if owed && open {
 		state.mergeSettlementCreditLocked(credit)
 	}
-	if state.failed == nil && owed && !state.settleWarming {
+	if state.failed == nil && open && owed && !state.settleWarming {
 		s.scheduleSettleLocked(room, state)
 	}
 	s.unlockState(room, state)
@@ -471,11 +482,14 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		replica.catchUp(room, doc)
 		contentChanged := s.updateChangesMarkdown(room, replica.doc)
 		replica.mu.Unlock()
-		var credit settlementCredit
+		var (
+			credit        settlementCredit
+			creditVersion uint64
+		)
 		if contentChanged {
-			credit = s.creditContentChange(room, origin)
+			credit, creditVersion = s.creditContentChange(room, origin)
 		}
-		s.recordUpdateClass(room, update, contentChanged, true, credit)
+		s.recordUpdateClass(room, update, contentChanged, true, credit, creditVersion)
 		s.scheduleSettle(room)
 	})
 	return nil
@@ -555,9 +569,9 @@ func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {
 // connection sent it, so every connected peer joins `pending`: when exactly one is connected it is
 // the latest edit source and replaces `lastActor`, and otherwise the edit cannot be pinned on a
 // single peer and no older actor may stand in for it.
-func (s *Service) creditContentChange(room string, origin any) settlementCredit {
+func (s *Service) creditContentChange(room string, origin any) (settlementCredit, uint64) {
 	if _, published := origin.(*liveWriteOrigin); published {
-		return settlementCredit{}
+		return settlementCredit{}, 0
 	}
 	value, service := s.serviceOrigins.Load(origin)
 	state := s.lockState(room)
@@ -567,8 +581,9 @@ func (s *Service) creditContentChange(room string, origin any) settlementCredit 
 			state.pending[actorKey(*actor)] = *actor
 			state.lastActor = new(*actor)
 			state.unsettled = true
+			state.creditVersion++
 		}
-		return state.settlementCreditLocked()
+		return state.settlementCreditLocked(), state.creditVersion
 	}
 	var sole *model.Actor
 	ambiguous := false
@@ -586,7 +601,8 @@ func (s *Service) creditContentChange(room string, origin any) settlementCredit 
 	}
 	state.lastActor = sole
 	state.unsettled = true
-	return state.settlementCreditLocked()
+	state.creditVersion++
+	return state.settlementCreditLocked(), state.creditVersion
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits

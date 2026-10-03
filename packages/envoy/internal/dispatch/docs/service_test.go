@@ -2387,6 +2387,7 @@ func (s *Service) recordActor(room string, actor model.Actor) {
 	state.pending[actorKey(actor)] = actor
 	state.lastActor = new(actor)
 	state.unsettled = true
+	state.creditVersion++
 	s.unlockState(room, state)
 }
 

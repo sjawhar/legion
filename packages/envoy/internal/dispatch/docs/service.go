@@ -1657,27 +1657,30 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 	for _, room := range rooms {
 		state := s.lockExistingState(room)
 		changed := true
+		var (
+			credit        settlementCredit
+			creditVersion uint64
+		)
 		if state != nil {
 			changed = state.closed != closed
 			state.closed = closed
 			if closed && changed {
 				state.gen++
 				s.stopSettleTimer(state.settle)
-				credit := state.settlementCreditLocked()
-				// The room's state is held until its unsettled authors reach the row that leaves
-				// its settlement owed. That row is also where a restart finds them after reopen.
-				if err := s.persistSettlementCredit(ctx, room, credit); err != nil {
-					slog.Error("dispatch: record closing document settlement authors", "room", room, "error", err)
-				} else {
-					clear(state.pending)
-					state.lastActor = nil
-					state.unsettled = false
-				}
+				// Snapshot while the state is locked, then write after unlocking: settlement holds
+				// the document's advisory lock before it takes state.mu, so taking that lock here
+				// while holding the state would invert the lock order.
+				credit, creditVersion = state.settlementCreditLocked(), state.creditVersion
 			}
 			s.unlockState(room, state)
 		}
-		// A room still loading has no state yet, and is closed once it has loaded.
 		if closed && changed {
+			if err := s.persistSettlementCredit(ctx, room, credit); err != nil {
+				slog.Error("dispatch: record closing document settlement authors", "room", room, "error", err)
+			} else {
+				s.settlementCreditPersisted(room, creditVersion)
+			}
+			// A room still loading has no state yet, and is closed once it has loaded.
 			_ = s.srv.CloseRoom(room, true)
 		}
 	}
