@@ -208,6 +208,32 @@ func TestAnApprovalGivenWhileItsSecretWasRefusedReleasesNothing(t *testing.T) {
 	}
 }
 
+// TestAnApprovalOfASecretNoLongerServedIsLeftToItsApprover pins that the current tags constrain an
+// approval only for a secret they still serve: once ALICE_KEY leaves the namespace they name no
+// approver for it, so alice, the approver the request waits on, may still approve it, and the
+// grant releases nothing at its first read.
+func TestAnApprovalOfASecretNoLongerServedIsLeftToItsApprover(t *testing.T) {
+	m, _, _, _ := newFixture(t)
+	ctx := context.Background()
+	enr, key := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
+	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need alice's", "ALICE_KEY"), "")
+	if err != nil || req.RecordID == nil {
+		t.Fatalf("Create = %+v, %v, want pending", req, err)
+	}
+
+	fixtureStore(m).Delete(policytest.ID("ALICE_KEY"))
+	if err := m.Policy.Refresh(ctx); err != nil {
+		t.Fatalf("policy refresh: %v", err)
+	}
+	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, otherPerson)
+	if err != nil || dec.State != "granted" {
+		t.Fatalf("ApplyDecision(alice) once ALICE_KEY is gone = %+v, %v; want granted", dec, err)
+	}
+	if values, _, err := m.Values(ctx, dec.GrantID, enr); !errors.Is(err, ErrGrantNotLive) {
+		t.Fatalf("Values once ALICE_KEY is gone = %v, %v; want ErrGrantNotLive", values, err)
+	}
+}
+
 // TestAnOwnersApprovalSurvivesHerRaisingTheTier pins that a decision records the login later
 // checks compare: alice approves bob's session for her agent-tier ALICE_KEY with her login cased
 // and padded, then raises the secret to human tier. She is still its approver, so the grant keeps
