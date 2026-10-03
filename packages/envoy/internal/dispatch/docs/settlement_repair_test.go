@@ -16,7 +16,8 @@ import (
 
 // Settlement repairs an ask block's server-owned attributes into the document as it stands when
 // the repair is written, not into the tree settlement read before its database work: a paragraph a
-// browser edits in between keeps the edit, and the stored document holds both (LEGION-479).
+// browser edits in between keeps the edit, and the stored document and the version the settlement
+// writes hold both (LEGION-479).
 func TestSettlementRepairKeepsAnEditMadeAfterItsRead(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -39,6 +40,49 @@ func TestSettlementRepairKeepsAnEditMadeAfterItsRead(t *testing.T) {
 		answer.At.Format(time.RFC3339Nano) + "\" selected=\"[]\"}\nShip it?\n:::\n\nContext after.\n"
 	waitForDocumentText(t, service, artifactID, want)
 	waitForPersistedProofText(t, service.store, artifactID, want)
+	requireLatestVersionMarkdown(t, service, artifactID, want)
+}
+
+// The same race on the block-id stamp: a settlement that stamped ids and then sees a peer's edit
+// before it versions writes the version of the document as it stands, the edit included, rather
+// than of the tree its stamp read (LEGION-479).
+func TestSettlementStampVersionKeepsAnEditMadeAfterItsRead(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	settleCurrentGeneration(t, service, artifactID)
+	editLiveTree(t, service, artifactID, appendUnidentifiedBlocks(t, "added"))
+
+	var edited atomic.Bool
+	service.afterSettleReconcile = func(room string) {
+		if room == artifactID && edited.CompareAndSwap(false, true) {
+			editAsPeer(t, service, artifactID, replaceRun("before", "before, edited"))
+		}
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if !edited.Load() {
+		t.Fatal("settlement never reached the window between its stamp and its version")
+	}
+
+	const want = "before, edited\n\nadded\n"
+	waitForDocumentText(t, service, artifactID, want)
+	requireNoSuppressedSlots(t, service, artifactID, "after the stamp")
+	waitForPersistedProofText(t, service.store, artifactID, want)
+	requireLatestVersionMarkdown(t, service, artifactID, want)
+}
+
+// requireLatestVersionMarkdown requires the document's latest version to hold want.
+func requireLatestVersionMarkdown(t *testing.T, service *Service, artifactID, want string) {
+	t.Helper()
+	var markdown string
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select markdown from artifact_versions where artifact_id = $1 order by number desc limit 1
+	`, artifactID).Scan(&markdown); err != nil {
+		t.Fatalf("read the latest document version: %v", err)
+	}
+	if markdown != want {
+		t.Fatalf("latest version markdown = %q, want %q", markdown, want)
+	}
 }
 
 // A browser that deletes the ask block settlement is repairing, between the reconciliation and its

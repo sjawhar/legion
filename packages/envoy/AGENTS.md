@@ -52,6 +52,8 @@ its own), and every path releases it: a slot nothing finishes holds the worker a
 update. A repair reports whether its transaction wrote anything; one that wrote nothing still
 committed that transaction, and ygo hands the worker an update for it too (the document's delete
 set), so its slot is finished with that update and the worker takes it rather than storing it. A
+settlement that wrote into the room renders its version from the document as it stands after the
+repairs (`lockedTreeOf`), so a peer's edit made since its read is in that version too. A
 settlement that wrote
 into the room commits what it wrote even when the document moved after its read, since the room and
 its browsers hold it; one that wrote nothing leaves a moved document to the settlement the move

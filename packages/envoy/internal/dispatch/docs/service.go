@@ -1179,6 +1179,16 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			s.failRoom(room, err)
 			return
 		}
+		// The version is the document as it stands after the repairs, read under its lock, not the
+		// tree settlement reconciled before them: a peer's edit made since is in the room, its
+		// browsers and its stored updates, and a version rendered from the earlier tree would leave
+		// it out (LEGION-479).
+		tree, err = lockedTreeOf(doc)
+		if err != nil {
+			s.discardSuppressedPersistence(room, slots...)
+			s.failRoom(room, err)
+			return
+		}
 	}
 	markdown, err := renderTree(tree)
 	if err != nil {
@@ -1198,9 +1208,8 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	state.mu.Lock()
 	// A settlement that wrote into the room commits what it wrote even when the document has moved
 	// since its read: the room and its peers hold those updates, and dropped here they would never
-	// reach the store. Its version is the document at the updates it read; the move's own update
-	// is appended once this transaction releases the room lock, and the settlement that move
-	// scheduled versions it.
+	// reach the store. Its version is the document as it stood after the repairs, the move
+	// included; the move's own update is appended once this transaction releases the room lock.
 	if s.stopping.Load() || state.closed || state.failed != nil || (state.gen != generation && len(slots) == 0) {
 		state.mu.Unlock()
 		s.discardSuppressedPersistence(room, slots...)

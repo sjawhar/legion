@@ -89,6 +89,20 @@ func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 	return tree, nil
 }
 
+// lockedTreeOf reads doc's tree from a copy of its state taken under the document's lock, so the
+// tree is the document as it stood at one moment. It opens no transaction on doc, since ygo hands
+// the room's persistence an update for every transaction it commits, even one that only reads.
+func lockedTreeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
+	if doc == nil {
+		return nil, errDocUnloaded
+	}
+	copied := crdt.New()
+	if err := crdt.ApplyUpdateV1(copied, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
+		return nil, fmt.Errorf("copy live document: %w", err)
+	}
+	return treeOf(copied)
+}
+
 func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmdoc.Node, error) {
 	if fragment == nil {
 		return nil, errDocUnloaded
