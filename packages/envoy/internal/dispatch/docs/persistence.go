@@ -3,6 +3,9 @@ package docs
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -48,7 +51,7 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	if head == 0 {
 		return persistence.LoadResult{}, tx.Commit(ctx)
 	}
-	update, err := stateThrough(ctx, tx, room, head)
+	update, _, err := stateThrough(ctx, tx, room, head)
 	if err != nil {
 		return persistence.LoadResult{}, err
 	}
@@ -290,9 +293,10 @@ func (p *PgVersioned) MaterializeAt(ctx context.Context, room string, version pe
 		return nil, nil
 	}
 	// A version read opens its own transaction, so it marks its context like every other
-	// opener: the pool refuses a second connection taken under it (store.ErrNestedAcquire).
+	// opener: the pool refuses a second connection taken under it (store.ErrNestedAcquire). It reads
+	// one snapshot, as Load does, since stateThrough can read the room's updates twice.
 	ctx = store.WithTransactionTracking(ctx)
-	tx, err := p.pool().Begin(ctx)
+	tx, err := p.pool().BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return nil, fmt.Errorf("begin materialize document: %w", err)
 	}
@@ -307,7 +311,7 @@ func (p *PgVersioned) MaterializeAt(ctx context.Context, room string, version pe
 	if version > head {
 		version = head
 	}
-	update, err := stateThrough(ctx, tx, room, version)
+	update, _, err := stateThrough(ctx, tx, room, version)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +425,7 @@ func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persis
 // Compact folds a room's oldest updates into the oldest record it keeps, which then holds their
 // state (stateThrough): what the document still holds of them, and none of the content they
 // inserted that a later update deleted. The room's state is unchanged, and so is every retained
-// version's.
+// version's. Updates whose state does not read back as the document they make are left as stored.
 func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -477,18 +481,21 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		if len(versions) <= keep {
 			return tx.Commit(ctx)
 		}
-		deleted = len(versions) - keep
-		folded, err := stateThrough(ctx, tx, room, persistence.Version(versions[deleted]))
+		state, folded, err := stateThrough(ctx, tx, room, persistence.Version(versions[len(versions)-keep]))
 		if err != nil {
 			return fmt.Errorf("fold compacted document updates: %w", err)
 		}
+		if !folded {
+			return tx.Commit(ctx)
+		}
+		deleted = len(versions) - keep
 		contentChanged := false
 		for index, class := range contentClasses[:deleted+1] {
 			contentChanged = contentChanged || (versions[index] > coveredCursor && class)
 		}
 		if _, err := tx.Exec(ctx, `
 			update doc_updates set update = $3, content_changed = $4 where artifact_id = $1 and version = $2
-		`, room, versions[deleted], folded, contentChanged); err != nil {
+		`, room, versions[deleted], state, contentChanged); err != nil {
 			return fmt.Errorf("fold compacted document updates: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
@@ -555,16 +562,27 @@ func (p *PgVersioned) head(ctx context.Context, q Queryer, room string) (persist
 // that applies a load included.
 //
 // A document parks an update whose dependencies have not arrived, and a delete of an item it does
-// not hold, and its encoding carries neither. A room that loads the state parks them again until a
-// peer sends what they wait on, so stateThrough keeps them: when the document parked anything, it
+// not hold, and its encoding carries neither, so when the document parked anything stateThrough
 // merges the encoding with each stored update's structs past the document's state vector and with
-// every stored update's deletes.
+// every stored update's deletes, for a room that loads the state to park them again.
+//
+// The state is kept only when it reads back as the document that made it: decoded into a fresh
+// document, it must make the same state vector. ygo does not encode every document it can hold - a
+// stored update can carry a skipped clock range, which a merge writes for a client's missing
+// update, and so can the merge of a parked update - and a state that reads back otherwise would
+// renumber or drop what the stored updates hold. stateThrough then returns the stored updates
+// merged whole, as they were read before it folded them, and reports that it did not fold them,
+// so a compaction keeps them as stored. That merge still holds the skip, and a room that loads it
+// drops the missing update if it arrives later, as it did before.
 //
 // A log of one update is returned as stored: compaction leaves the state as one update, and a
 // document's first update deletes nothing an earlier one inserted.
-func stateThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) ([]byte, error) {
-	doc := crdt.New()
+func stateThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version) ([]byte, bool, error) {
+	var doc *crdt.Doc
 	apply := func(update []byte) error {
+		if doc == nil {
+			doc = crdt.New()
+		}
 		if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
 			return fmt.Errorf("apply document update: %w", err)
 		}
@@ -572,7 +590,7 @@ func stateThrough(ctx context.Context, tx pgx.Tx, room string, version persisten
 	}
 	var first []byte
 	seen := 0
-	read, err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
+	if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
 		seen++
 		switch seen {
 		case 1:
@@ -585,63 +603,99 @@ func stateThrough(ctx context.Context, tx pgx.Tx, room string, version persisten
 			first = nil
 		}
 		return apply(update)
-	})
-	if err != nil || read == 0 {
-		return nil, err
+	}); err != nil {
+		return nil, false, err
 	}
-	if read == 1 {
-		return first, nil
+	switch seen {
+	case 0:
+		return nil, true, nil
+	case 1:
+		return first, true, nil
 	}
 	state := crdt.EncodeStateAsUpdateV1(doc, nil)
-	if parked := doc.PendingStats(); parked.Items == 0 && parked.DeleteRanges == 0 {
-		return state, nil
-	}
-	integrated := doc.StateVector()
-	parts := [][]byte{state}
-	if _, err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
-		rest, err := crdt.DiffUpdateV1(update, integrated)
-		if err != nil {
-			return fmt.Errorf("read parked document update: %w", err)
+	made := doc.StateVector()
+	if parked := doc.PendingStats(); parked.Items > 0 || parked.DeleteRanges > 0 {
+		parts := [][]byte{state}
+		if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
+			rest, err := crdt.DiffUpdateV1(update, made)
+			if err != nil {
+				return fmt.Errorf("read parked document update: %w", err)
+			}
+			parts = append(parts, rest)
+			return nil
+		}); err != nil {
+			return nil, false, err
 		}
-		parts = append(parts, rest)
+		kept, err := crdt.MergeUpdatesV1(parts...)
+		if err != nil {
+			return nil, false, fmt.Errorf("keep parked document updates: %w", err)
+		}
+		state = kept
+	}
+	doc = nil
+	misread := readsBackOtherwise(state, made)
+	if misread == nil {
+		return state, true, nil
+	}
+	slog.Warn("dispatch: a document's folded state reads back otherwise; serving its stored updates merged",
+		"room", room, "version", int64(version), "error", misread)
+	var updates [][]byte
+	if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
+		updates = append(updates, update)
 		return nil
 	}); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	kept, err := crdt.MergeUpdatesV1(parts...)
+	merged, err := crdt.MergeUpdatesV1(updates...)
 	if err != nil {
-		return nil, fmt.Errorf("keep parked document updates: %w", err)
+		return nil, false, fmt.Errorf("merge document updates: %w", err)
 	}
-	return kept, nil
+	return merged, false, nil
+}
+
+// readsBackOtherwise names how state, decoded into a fresh document, differs from the state vector
+// made, the state vector of the document that encoded it, or returns nil when it does not.
+func readsBackOtherwise(state []byte, made crdt.StateVector) error {
+	doc := crdt.New()
+	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
+		return fmt.Errorf("decode the folded state: %w", err)
+	}
+	read := doc.StateVector()
+	clients := slices.Concat(slices.Collect(maps.Keys(made)), slices.Collect(maps.Keys(read)))
+	slices.Sort(clients)
+	for _, client := range slices.Compact(clients) {
+		if read[client] != made[client] {
+			return fmt.Errorf("client %d reads back at clock %d, the stored updates make %d", client, read[client], made[client])
+		}
+	}
+	return nil
 }
 
 // eachUpdateThrough calls use with each of the room's stored updates through version, oldest first,
-// reading one row at a time, and reports how many it read.
-func eachUpdateThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version, use func([]byte) error) (int, error) {
+// reading one row at a time.
+func eachUpdateThrough(ctx context.Context, tx pgx.Tx, room string, version persistence.Version, use func([]byte) error) error {
 	rows, err := tx.Query(ctx, `
 		select update from doc_updates
 		where artifact_id = $1 and version <= $2
 		order by version asc
 	`, room, int64(version))
 	if err != nil {
-		return 0, fmt.Errorf("read document updates: %w", err)
+		return fmt.Errorf("read document updates: %w", err)
 	}
 	defer rows.Close()
-	read := 0
 	for rows.Next() {
 		var update []byte
 		if err := rows.Scan(&update); err != nil {
-			return read, fmt.Errorf("scan document update: %w", err)
+			return fmt.Errorf("scan document update: %w", err)
 		}
 		if err := use(update); err != nil {
-			return read, err
+			return err
 		}
-		read++
 	}
 	if err := rows.Err(); err != nil {
-		return read, fmt.Errorf("read document updates: %w", err)
+		return fmt.Errorf("read document updates: %w", err)
 	}
-	return read, nil
+	return nil
 }
 
 func (p *PgVersioned) recoverPruneTx(ctx context.Context, tx pgx.Tx, room string) error {

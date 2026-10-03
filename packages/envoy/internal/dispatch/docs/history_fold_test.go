@@ -185,6 +185,161 @@ func TestALoadAndACompactionKeepWhatTheDocumentParked(t *testing.T) {
 	arrive(t, "the compacted load", compacted.Update)
 }
 
+// A stored update can hold a skipped clock range: a merge of one client's updates around a missing
+// one writes the gap as a skip. ygo counts the skipped clocks as integrated and encodes the
+// client's items after the gap at clocks lower by its length, so a folded state of such a log
+// names parents its own items no longer carry. A load serves the stored updates merged instead,
+// and a compaction keeps them, so the document reads as its rows applied in order. Row 0 is what a
+// compaction stored for a log that lacked one of client 101's updates: 101:27+29 is a skip.
+func TestAStateThatReadsBackOtherwiseIsNeitherLoadedNorStored(t *testing.T) {
+	rows := base64Rows(t,
+		"AwkBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nBwABAAYGAAEBBnN0cm9uZwR0cnVlhAECAWOEAQMDb2ZngQEGA4YBCQZzdHJvbmcEbnVsbCEAAQACaWQBIQEFbWFya3MCYzABA2QAxGUmZScMIGRwYWcgYmllY21oiAELAXcDMTMyqAEMAXYDBGtpbmR3B2NvbW1lbnQHcmVwbGllc3UCdwpmcGttb2dqbW5pfEKeAAAEdGV4dHeNAWttb2tjbW1kZGhmcG5rYWFvZGNsYWNwZ2xjIGdpYmpvbWdmZGJrYmpjZm4gIGdjb3Boa25ubW9sbGdvayBlaWVpYWxkbmNocGtiY2ltYmhsbWtqZmlwZCBwY2pkZmRwY2ViZGxtbmxiZWRsaGdiYWlnbGZoaGJjaWxubmFmaGFkYmRhaG9rbWZrY29rbAdlAMQBAwEEFGZwIGRpaW1oY2NuZWJoZmNvZmRvwWUTAQQBxGUUAQQGbmcga21hCh0oAQVtYXJrcwJjMgF2AwRraW5kdwdjb21tZW50B3JlcGxpZXN1AncKamFkYWFuICBvYnxCYAAABHRleHR3TmloampuaiBvaGVwa2hlYWdkaW9lbG1wamlsZmNuaW5uIGxjbWNobm5uaGhoYXBnbWhib25pbGRuIGlmbmVobW5jamNwYWZkbG5vZWZjZMYBCAEJBGNvZGUEdHJ1ZYYBCgRjb2RlBG51bGwCAQIHAwsCZQEUAQ==",
+		"AAIBAgcDCwJlARQB",
+		"AAIBAgcDCwJlARQB",
+		"AAIBAgcDCwJlAhQBOAE=",
+		"AAIBAgcDCwJlAhQBOAE=",
+		"AAIBAgcDCwJlAhQBOAE=",
+		"AQdlO0cBAAMHaGVhZGluZwcAZTsGBABlPBFjbG1pZ3BjYyBnbW8gYmZnaSgAZTsCaWQBdwMzNDnGZTNlNARjb2RlBHRydWXGZRFlEgRjb2RlBG51bGzEAQUBBgdvZWJocGFoAgECBwMLAmUDFAE4ATwS",
+	)
+	database := storetest.Open(t)
+	versioned := NewPgVersioned(database)
+	ctx := context.Background()
+	artifactID := createDocument(t, database, "skip")
+	for _, row := range rows {
+		if _, err := versioned.AppendUpdate(ctx, artifactID, row); err != nil {
+			t.Fatalf("append update: %v", err)
+		}
+	}
+	applied := crdt.New()
+	for index, row := range rows {
+		if err := crdt.ApplyUpdateV1(applied, row, nil); err != nil {
+			t.Fatalf("apply row %d: %v", index, err)
+		}
+	}
+	want := rawReading(t, applied)
+	for _, step := range []string{"the load", "the load after compaction"} {
+		if step != "the load" {
+			if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
+				t.Fatalf("compact: %v", err)
+			}
+			if stored := storedUpdateCount(t, database, artifactID); stored != len(rows) {
+				t.Fatalf("compaction left %d stored updates, want the %d it could not fold", stored, len(rows))
+			}
+		}
+		loaded, err := versioned.Load(ctx, artifactID)
+		if err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		doc := crdt.New()
+		if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+			t.Fatalf("%s: apply: %v", step, err)
+		}
+		if got := rawReading(t, doc); got != want {
+			t.Fatalf("%s reads\n%s\nthe rows applied in order read\n%s", step, got, want)
+		}
+	}
+}
+
+// rawReading is a document's tree as ygo holds it - element names and attributes, text deltas with
+// their marks - and its margin records, schema or no schema.
+func rawReading(t *testing.T, doc *crdt.Doc) string {
+	t.Helper()
+	var reading strings.Builder
+	var walk func(*crdt.YXmlFragment)
+	walk = func(fragment *crdt.YXmlFragment) {
+		for _, child := range fragment.Children() {
+			switch node := child.(type) {
+			case *crdt.YXmlElement:
+				attributes, err := json.Marshal(node.GetAttributes())
+				if err != nil {
+					t.Fatalf("encode attributes: %v", err)
+				}
+				fmt.Fprintf(&reading, "<%s %s>", node.NodeName, attributes)
+				walk(&node.YXmlFragment)
+				fmt.Fprintf(&reading, "</%s>", node.NodeName)
+			case *crdt.YXmlText:
+				delta, err := json.Marshal(node.ToDelta())
+				if err != nil {
+					t.Fatalf("encode text: %v", err)
+				}
+				reading.Write(delta)
+			}
+		}
+	}
+	walk(doc.GetXmlFragment(fragmentName))
+	marks, err := doc.GetMap(marksMapName).ToJSON()
+	if err != nil {
+		t.Fatalf("read the margin records: %v", err)
+	}
+	return reading.String() + " " + string(marks)
+}
+
+// A compaction that runs while one of a client's updates is missing, its later updates stored,
+// loses nothing the missing update brings once it is stored. Client 101's clocks 10-11 are stored
+// before its clocks 7-9, with a compaction between them.
+func TestACompactionBeforeAMissingUpdateLosesNothingOnceItArrives(t *testing.T) {
+	rows := base64Rows(t,
+		"AQFlAAQBAXQFIGNlY2gA",
+		"AQJlBQcBAWEBKABlBQF2AXcDaGJmAA==",
+		"AQJlCicBAW0GbmVzdGVkASgAZQoBawF3BWdmYWhlAA==",
+		"AQFlB8RlAWUCA2JmZwA=",
+	)
+	database := storetest.Open(t)
+	versioned := NewPgVersioned(database)
+	ctx := context.Background()
+	artifactID := createDocument(t, database, "gap")
+	for index, row := range rows {
+		if _, err := versioned.AppendUpdate(ctx, artifactID, row); err != nil {
+			t.Fatalf("append update %d: %v", index, err)
+		}
+		if index == 2 {
+			if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
+				t.Fatalf("compact: %v", err)
+			}
+		}
+	}
+	read := func(what string, state []byte) string {
+		t.Helper()
+		doc := crdt.New()
+		if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
+			t.Fatalf("%s: apply: %v", what, err)
+		}
+		nested, err := doc.GetMap("m").ToJSON()
+		if err != nil {
+			t.Fatalf("%s: read the map: %v", what, err)
+		}
+		return fmt.Sprintf("%q %s", doc.GetText("t").ToString(), nested)
+	}
+	merged, err := crdt.MergeUpdatesV1(rows...)
+	if err != nil {
+		t.Fatalf("merge the stored updates: %v", err)
+	}
+	want := read("the merged log", merged)
+	if want != `" cbfgech" {"nested":{"k":"gfahe"}}` {
+		t.Fatalf("the merged log reads %s, want what Yjs reads", want)
+	}
+	loaded, err := versioned.Load(ctx, artifactID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := read("the load", loaded.Update); got != want {
+		t.Fatalf("the load reads %s, want %s", got, want)
+	}
+}
+
+func base64Rows(t *testing.T, encoded ...string) [][]byte {
+	t.Helper()
+	rows := make([][]byte, len(encoded))
+	for index, row := range encoded {
+		decoded, err := base64.StdEncoding.DecodeString(row)
+		if err != nil {
+			t.Fatalf("decode row %d: %v", index, err)
+		}
+		rows[index] = decoded
+	}
+	return rows
+}
+
 type historyFixture struct {
 	Name   string `json:"name"`
 	B64    string `json:"yjs_update_v1_b64"`
