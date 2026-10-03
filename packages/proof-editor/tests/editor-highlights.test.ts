@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import type { EditorState } from "@milkdown/kit/prose/state";
 import { DecorationSet, type EditorView } from "@milkdown/kit/prose/view";
 import { comment } from "proof-sdk-upstream/src/editor/plugins/marks";
+import * as Y from "yjs";
 import { blockIdOf } from "../src/editor/schema/block-ids";
 import { editorHighlightsPlugin } from "../src/editor-highlights";
 import { markedText } from "./mark-text";
@@ -23,6 +24,19 @@ function drawn(view: EditorView, className: string): string[] {
     view.dom.querySelectorAll(`.${className}`),
     (element) => element.textContent ?? ""
   );
+}
+
+/** A collaborator types `text` at the end of the document's block at `index`: another Y.Doc that
+ *  holds `ydoc`'s state makes the edit, and its update reaches `ydoc` as the network delivers one. */
+function typeAsCollaborator(ydoc: Y.Doc, index: number, text: string): void {
+  const collaborator = new Y.Doc();
+  Y.applyUpdate(collaborator, Y.encodeStateAsUpdate(ydoc));
+  const block = collaborator.getXmlFragment("prosemirror").get(index);
+  if (!(block instanceof Y.XmlElement)) throw new Error(`block ${index} is not an element`);
+  const content = block.get(0);
+  if (!(content instanceof Y.XmlText)) throw new Error(`block ${index} holds no text`);
+  content.insert(content.length, text);
+  Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(collaborator, Y.encodeStateVector(ydoc)));
 }
 
 /** Runs `focus` with `window.setTimeout` held and returns the one timer it set, the pulse's end,
@@ -88,6 +102,41 @@ test("text inserted with an active mark's id is drawn active too", async () => {
 
     // "The quick brown fox" ends its paragraph at 20.
     view.dispatch(view.state.tr.insert(20, view.state.schema.text(" again", [recorded])));
+
+    expect(markedText(view.state.doc, mark.id)).toBe("quick brown again");
+    expect(drawn(view, "dispatch-mark-active")).toEqual(["quick brown", " again"]);
+  });
+});
+
+test("a collaborator's edit after the active mark leaves it drawn", async () => {
+  await withMarksEditor("The quick brown fox\n\nSecond paragraph", ({ handle, view, ydoc }) => {
+    const mark = comment(view, "quick brown", "bob", "", { from: 5, to: 16 });
+    handle.setActiveMarks([mark.id]);
+    expect(drawn(view, "dispatch-mark-active")).toEqual(["quick brown"]);
+
+    // y-prosemirror applies a remote update as one step that replaces the whole document, so the
+    // step's content holds the active mark and, after it, text that carries none.
+    typeAsCollaborator(ydoc, 1, "!");
+
+    expect(view.state.doc.child(1).textContent).toBe("Second paragraph!");
+    expect(drawn(view, "dispatch-mark-active")).toEqual(["quick brown"]);
+  });
+});
+
+test("one insert of text with an active mark's id, then plain text, draws the marked text active", async () => {
+  await withMarksEditor("The quick brown fox", ({ handle, view }) => {
+    const mark = comment(view, "quick brown", "bob", "", { from: 5, to: 16 });
+    handle.setActiveMarks([mark.id]);
+    const recorded = view.state.doc
+      .nodeAt(5)
+      ?.marks.find((candidate) => candidate.attrs.id === mark.id);
+    if (recorded === undefined) throw new Error("the comment mark is not in the document");
+    const { schema } = view.state;
+
+    // "The quick brown fox" ends its paragraph at 20.
+    view.dispatch(
+      view.state.tr.insert(20, [schema.text(" again", [recorded]), schema.text(" and plain")])
+    );
 
     expect(markedText(view.state.doc, mark.id)).toBe("quick brown again");
     expect(drawn(view, "dispatch-mark-active")).toEqual(["quick brown", " again"]);

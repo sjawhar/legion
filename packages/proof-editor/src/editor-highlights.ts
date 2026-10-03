@@ -130,10 +130,11 @@ function highlightDecorations(doc: ProseMirrorNode, value: EditorHighlights): De
   return DecorationSet.create(doc, decorations);
 }
 
+/** Whether any node in `content` carries a highlighted block or mark id. */
 function holdsHighlightedTarget(content: Fragment, value: EditorHighlights): boolean {
   let found = false;
   content.descendants((node) => {
-    found =
+    found ||=
       blockClasses(node, value).length > 0 ||
       (node.isInline && markClasses(node, value).length > 0);
     return !found;
