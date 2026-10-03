@@ -456,22 +456,25 @@ predates a subcommand cannot boot and migrate when a deployment asks it for one.
 GitHub sign-in knew them by to the email the Google Workspace sign-in names them by. A deployment
 runs it once, as a one-off task of the Dispatch service's own task definition, with the service
 scaled to 0 and scaled back after: a running server's rooms would not see the documents' updates.
+Like every database subcommand it first brings the schema to the current migration (through
+`0068_people`, which creates `people` and drops `users`).
 
 ```bash
 DATABASE_URL=postgres://... DISPATCH_PEOPLE_MAP='{"<login>": "<email>"}' envoy-dispatch migrate-people
 ```
 
 `DISPATCH_PEOPLE_MAP` is a JSON object from each GitHub login, matched in any case, to its person's
-email, lowercased; the server never reads it. The command rewrites:
+email, lowercased; only this subcommand reads it, never the server. The command rewrites:
 
 - every JSON actor column and every event's actor and payload: a person
   (`{"kind":"user","id":<login>}`), an agent writing under a person's token
   (`{"kind":"session","owner":<login>}`), an issue's `assignee`, an answer's `user`, and the
   `login` of `user_state.updated` and `user_agent_state.updated`;
 - `issues.assignee`, `agent_tokens.owner` and the per-person tables (`user_issue_state`,
-  `user_agent_state`, `user_agent_read`, `user_ask_snooze`, `broadcast_idempotency_keys`), merging
-  the rows two casings of one login, or a login and the email, kept apart: a pin either row held,
-  every dismissal, the later or further mark;
+  `user_agent_state`, `user_agent_read`, `user_agent_reply_read`, `user_ask_snooze`,
+  `broadcast_idempotency_keys`), merging the rows two casings of one login, or a login and the
+  email, kept apart: a pin either row held, every dismissal, the later or further mark, a reply read
+  under either;
 - each document's answered asks (`answered_by`), by an update appended to the document's state,
   never by replacing it, so a browser that kept the document across the outage merges the rename
   when it reconnects. The update is no content change, so settling the document versions nothing,
@@ -496,6 +499,17 @@ documents.answered_by=0`) and how many people it recorded. Exit 0 when everyone 
 refused, changing nothing, when a login was left after the move, also changing nothing, or when a
 document could not be read or renamed (each named), in which case the database has moved and a
 second run finishes the documents once they can be read.
+
+Before it commits, a schema census searches every column of every table in the database's own
+schema (`information_schema.columns`) whose type is text, character varying, character, citext, an
+array of those, json or jsonb, so a table or column added after the command was written is
+searched too. It counts the rows holding a login the map names as a whole value: the value itself
+and an array's element, compared lowercased, and every string and object key anywhere in a JSON
+value. It prints `migrate-people: census <table>.<column>=<n>` for each column and a total, and a
+column above 0 fails the run, naming each one, and changes nothing. Prose is not searched for a
+login inside it: a comment's body, a title or a document's text that mentions a login mentions it,
+and names no one. `artifact_versions` is not searched, since a version keeps the names it was
+written with.
 
 ## Reference graph
 

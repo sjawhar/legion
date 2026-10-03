@@ -1,6 +1,6 @@
 // Package peoplemigration is `envoy-dispatch migrate-people`: it moves every record that names a
 // person by the GitHub login Dispatch's GitHub sign-in knew them by to the email its Google
-// Workspace sign-in names them by (AGENTC-1563).
+// Workspace sign-in names them by.
 //
 // A person is named in three shapes. Text columns hold the bare login, in the casing its writer
 // stored: the per-person tables, the assignee and a personal token's owner. JSON columns hold the
@@ -174,6 +174,16 @@ var loginColumns = []loginColumn{
 		on conflict (login, session_id) do update
 		set read_through = greatest(user_agent_read.read_through, excluded.read_through)
 	`, `delete from user_agent_read r using people_map m where m.login = lower(r.login)`}},
+	// One person's replies read one by one: a reply read under either spelling stays read. The
+	// write records a reply under its own session only, so two rows for one reply differ in
+	// nothing but the spelling of the person, and either is the one kept.
+	{table: "user_agent_reply_read", column: "login", rewrite: []string{`
+		insert into user_agent_reply_read (login, session_id, reply_id)
+		select distinct on (m.email, r.reply_id) m.email, r.session_id, r.reply_id
+		from user_agent_reply_read r join people_map m on m.login = lower(r.login)
+		order by m.email, r.reply_id, r.session_id
+		on conflict (login, reply_id) do nothing
+	`, `delete from user_agent_reply_read r using people_map m where m.login = lower(r.login)`}},
 	// One person's snooze of one ask: the later wake.
 	{table: "user_ask_snooze", column: "login", rewrite: []string{`
 		insert into user_ask_snooze (login, ask_id, snoozed_until)
@@ -391,6 +401,15 @@ func Run(ctx context.Context, database *store.Store, documents *docs.Service, pe
 	if left := after.total(); left != 0 {
 		after.write(out, "after")
 		return fmt.Errorf("%d rows still name a person by login after the move; nothing was changed", left)
+	}
+	// The fields above are the ones this code knows of; the schema census searches every column
+	// that can hold a login, so a table or column added since still fails the run.
+	hits, err := schemaCensus(ctx, tx, people, out)
+	if err != nil {
+		return err
+	}
+	if len(hits) > 0 {
+		return fmt.Errorf("%d columns still hold a login the map names after the move: %s; nothing was changed", len(hits), strings.Join(hits, ", "))
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit: %w", err)

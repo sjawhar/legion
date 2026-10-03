@@ -128,6 +128,11 @@ func seedEveryPersonField(t *testing.T, database *store.Store) string {
 	`)
 	exec(`insert into user_agent_read (login, session_id, read_through) values ('ada-example', 's1', '2026-09-03T00:00:00Z')`)
 	exec(`
+		insert into user_agent_reply_read (login, session_id, reply_id) values
+		('Ada-Example', 's1', $1), ('ada-example', 's1', $1),
+		('ada@example.com', 's1', '00000000-0000-4000-8000-000000000001'), ('ada-example', 's1', '00000000-0000-4000-8000-000000000001')
+	`, direct)
+	exec(`
 		insert into user_ask_snooze (login, ask_id, snoozed_until)
 		select 'Ada-Example', id, '2026-10-01T00:00:00Z' from asks where block_id = 'decision'
 	`)
@@ -316,6 +321,8 @@ func TestRunMovesEveryPersonFieldToEmail(t *testing.T) {
 		{"Bob's issue state, its dismissals in their order", `select dismissed from user_issue_state where login = 'bob@example.com'`, []any{"z", "y"}},
 		{"Ada's Clear, the later of her two", `select jsonb_agg(to_jsonb(s)) from user_agent_state s`,
 			[]any{map[string]any{"login": ada, "session_id": "s1", "cleared_before": "2026-09-02T00:00:00+00:00"}}},
+		{"Ada's replies read by id, from two casings and the row her email already had", `select jsonb_agg(jsonb_build_array(login, session_id) order by reply_id) from user_agent_reply_read`,
+			[]any{[]any{ada, "s1"}, []any{ada, "s1"}}},
 		{"the session generations: the login's goes, the email's stays", `select jsonb_object_agg(login, generation) from user_sessions`,
 			map[string]any{ada: 1.0}},
 		{"the people the records name", `select jsonb_agg(email order by email) from people`, []any{ada, bob}},
@@ -335,11 +342,14 @@ func TestRunMovesEveryPersonFieldToEmail(t *testing.T) {
 	for _, line := range []string{
 		"migrate-people: before issues.assignee=2\n",
 		"migrate-people: before user_issue_state.login=4\n",
+		"migrate-people: before user_agent_reply_read.login=3\n",
 		"migrate-people: before events.payload=4\n",
 		"migrate-people: before user_sessions.login=1\n",
 		"migrate-people: before documents.answered_by=1\n",
 		"migrate-people: after issues.assignee=0\n",
 		"migrate-people: after documents.answered_by=0\n",
+		"migrate-people: census user_agent_reply_read.login=0\n",
+		"migrate-people: census events.payload=0\n",
 		"migrate-people: people recorded=2\n",
 	} {
 		if !strings.Contains(out, line) {
