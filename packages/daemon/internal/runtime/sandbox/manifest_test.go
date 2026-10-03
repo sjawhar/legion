@@ -228,7 +228,7 @@ func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	}
 	env := envOf(podOf(t, r, workerSpec(t), false).Containers[0])
 	got := kubeExpand(env["PI_SHELL_PREFIX"], env)
-	want := `PATH='/legion/worker-bin:/opt/legion/bin:'${PATH#'/legion/worker-bin:/opt/legion/bin:'} &&`
+	want := shellprefix.For("/legion/worker-bin", "/opt/legion/bin")
 	if got != want {
 		t.Fatalf("PI_SHELL_PREFIX\n got: %s\nwant: %s", got, want)
 	}

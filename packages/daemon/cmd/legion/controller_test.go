@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
@@ -498,7 +499,7 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 		"ENVOY_NATS_URL":                "nats://a:4222,nats://b:4222",
 		"ENVOY_URL":                     "http://envoy.test:9020",
 		"PATH":                          workerBin + ":" + bin + ":/usr/bin:/bin",
-		"PI_SHELL_PREFIX":               "PATH='" + workerBin + ":" + bin + ":'${PATH#'" + workerBin + ":" + bin + ":'} &&",
+		"PI_SHELL_PREFIX":               shellprefix.For(workerBin, bin),
 		"GH_CONFIG_DIR":                 filepath.Join(c.defaultDir, "gh"),
 		"GH_TOKEN":                      "",
 		"GITHUB_TOKEN":                  "",

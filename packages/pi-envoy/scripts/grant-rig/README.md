@@ -115,7 +115,7 @@ the pane's for life, never per command:
 | `LEGION_DAEMON_URL` | `http://127.0.0.1:<port>` (the stand-in) |
 | `LEGION_STATE_DIR`, `LEGION_WORKSPACE` | `$RIG/state`, `$RIG/ws` |
 | `LEGION_GH_PATH`, `LEGION_GIT_PATH`, `LEGION_JJ_PATH` | the first `gh`, `git` and `jj` on the inherited PATH, as the daemon resolves them at boot |
-| `PI_SHELL_PREFIX` | `PATH='$RIG/state/worker-bin:$RIG/state/bin:'${PATH#'…'} &&` (`shellprefix.For`) |
+| `PI_SHELL_PREFIX` | `shellprefix.For($RIG/state/worker-bin, $RIG/state/bin)`: drops every PATH entry that is either directory, wherever the shell's rc left it, then puts both in front, each once |
 | `GIT_TERMINAL_PROMPT` | `0` |
 | `LEGION_GRANT_FILE` | `$RIG/state/secrets/legion-l12rig-rig-1-implementer-grant` (`runtime.GrantFile`) |
 | `PATH` | `$RIG/state/worker-bin`, then `$RIG/state/bin`, then the inherited PATH |

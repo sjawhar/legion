@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
 // One window per issue, named for it; a key too long for a window name keeps a prefix and a hash
@@ -105,7 +106,7 @@ func TestPanePairs(t *testing.T) {
 		"-e", "LEGION_WORKSPACE=/state/workspaces/LEGION-43",
 		"-e", "ENVOY_NATS_URL=nats://a:4222,nats://b:4222",
 		"-e", "ENVOY_URL=http://127.0.0.1:9020",
-		"-e", "PI_SHELL_PREFIX=PATH='/state/worker-bin:/state/bin:'${PATH#'/state/worker-bin:/state/bin:'} &&",
+		"-e", "PI_SHELL_PREFIX=" + shellprefix.For("/state/worker-bin", "/state/bin"),
 		"-e", "GIT_TERMINAL_PROMPT=0",
 		"-e", "LEGION_GRANT_FILE=/state/secrets/legion-omp-legion-43-tester-grant",
 		"-e", "XDG_CONFIG_HOME=/state/home/.config",

@@ -140,7 +140,7 @@
               },
               {
                 "name": "PI_SHELL_PREFIX",
-                "value": "PATH='/legion/worker-bin:/opt/legion/bin:'$${PATH#'/legion/worker-bin:/opt/legion/bin:'} &&"
+                "value": "__legion_path=:$${PATH//:/::}: && __legion_path=$${__legion_path//:'/legion/worker-bin':/} && __legion_path=$${__legion_path//:'/opt/legion/bin':/} && __legion_path=$${__legion_path//::/:} && __legion_path=$${__legion_path#:} && PATH='/legion/worker-bin:/opt/legion/bin'$${__legion_path:+:$${__legion_path%:}} && unset __legion_path &&"
               },
               {
                 "name": "GIT_TERMINAL_PROMPT",

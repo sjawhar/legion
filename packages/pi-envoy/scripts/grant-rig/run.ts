@@ -208,12 +208,22 @@ const RIG_CLAIM: WorkerClaim = { project: "l12rig", issue: "RIG-1", role: "imple
  * (`workerbin.DirName`, packages/daemon/internal/runtime/workerbin). */
 const WORKER_BIN = "worker-bin";
 
-/** `shellprefix.For`: the prefix Oh My Pi's bash tool runs before each command, which moves
- * `dirs` back to the front of PATH (an rc file the shell sourced may have put its own first). */
+/** `shellprefix.For`: the prefix Oh My Pi's bash tool runs before each command, which removes every
+ * PATH entry that is one of `dirs`, wherever an rc file the shell sourced left it, and puts `dirs`
+ * in front, in order, each once. */
 function shellPrefix(...dirs: string[]): string {
   const literal = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
-  const head = `${dirs.join(path.delimiter)}${path.delimiter}`;
-  return `PATH=${literal(head)}\${PATH#${literal(head)}} &&`;
+  const sep = path.delimiter;
+  const rest = "__legion_path";
+  const steps = [`${rest}=${sep}\${PATH//${sep}/${sep}${sep}}${sep}`];
+  for (const dir of dirs) steps.push(`${rest}=\${${rest}//${sep}${literal(dir)}${sep}/}`);
+  steps.push(
+    `${rest}=\${${rest}//${sep}${sep}/${sep}}`,
+    `${rest}=\${${rest}#${sep}}`,
+    `PATH=${literal(dirs.join(sep))}\${${rest}:+${sep}\${${rest}%${sep}}}`,
+    `unset ${rest}`
+  );
+  return `${steps.join(" && ")} &&`;
 }
 
 /** The first executable `tool` on `searchPath`, as the daemon resolves gh, git and jj once at
