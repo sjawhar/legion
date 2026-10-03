@@ -112,3 +112,8 @@
 
 - Removed `HandoffMessage`, `validateHandoffMessage`, and `MESSAGES_DIR_NAME`: the `legion handoff message|messages` commands they served are gone, and nothing else read `.legion/messages/`.
 - Removed `legionNoticeSubject`: the Go daemon publishes no notice on an issue's topic any more, and its one caller, `legionControllerNoticeSubject`, now builds the controller topic itself.
+- Removed the handoff schema: `validatePhaseHandoff`, `describePhaseHandoffProblems`,
+  `describePhaseHandoffWriteProblems`, `isHandoffPhase`, the phase handoff interfaces,
+  `PHASE_FILE_NAMES`, `LEGION_DIR_NAME`, `HANDOFF_SCHEMA_VERSION`, `PLAN_REVIEW_MAX_ROUNDS` and
+  `PLAN_REVIEW_VERDICTS`. The Go `legion handoff write` holds each phase's handoff to the same
+  rules and names every field at fault; `HANDOFF_PHASES`, the `legion` tool's phase words, stays.
