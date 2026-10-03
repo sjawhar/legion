@@ -9,7 +9,10 @@ An **ask** is a question that needs a person's answer. An agent opens it on an i
 project document. It can offer options to pick from, allow more than one pick, and carry an
 urgency: Blocking, High, Medium, or Low. The Inbox is where you find and answer them.
 
-<video controls preload="metadata" src="/legion/media/videos/answer-an-ask.mp4" style="width: 100%" aria-label="Walkthrough: answering an ask in the Inbox"></video>
+<video controls preload="metadata" poster="/legion/media/videos/answer-an-ask.jpg" style="width: 100%" aria-label="Walkthrough: answering an ask in the Inbox">
+  <source src="/legion/media/videos/answer-an-ask.mp4" type="video/mp4">
+  <track kind="captions" src="/legion/media/videos/answer-an-ask.vtt" srclang="en" label="English" default>
+</video>
 
 ## How the Inbox is sorted
 

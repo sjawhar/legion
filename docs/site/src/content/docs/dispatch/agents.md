@@ -69,6 +69,11 @@ agent answers there. Watch the answer in the [live view](#the-live-view).
 
 A broadcast sends one message to many agents.
 
+<video controls preload="metadata" poster="/legion/media/videos/broadcast-and-replies.jpg" style="width: 100%" aria-label="Walkthrough: broadcasting to agents and reading their replies">
+  <source src="/legion/media/videos/broadcast-and-replies.mp4" type="video/mp4">
+  <track kind="captions" src="/legion/media/videos/broadcast-and-replies.vtt" srclang="en" label="English" default>
+</video>
+
 1. Tick the checkbox on each agent you want, or press `x` on a focused row. The checkbox above the
    list, **Select all matching agents**, ticks every agent the filters match, including those in
    the folded groups.
