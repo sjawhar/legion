@@ -114,11 +114,22 @@ it is a `crdt.New`, which drops an item's content in the transaction that delete
 applies a load included; a version stores its own markdown in `artifact_versions`; and no route
 reads an update or a state before the head. What a load's document parks - an update whose
 dependency no stored update supplies, a delete of an item none holds - is merged back into the
-state, since the room that loads it parks it again until a peer sends what it waits on.
+state, so the room that loads it parks it again until a peer sends what it waits on. A state is
+kept only when it reads back as the document that made it: decoded into a fresh document, it must
+make the same state vector. ygo does not encode every document it holds as it holds it; at
+`v1.49.6-sami.3` a merge writes a client's missing update as a skipped clock range, which ygo
+counts as integrated, so the fold of a log with such a gap would renumber the client's later
+items. A state that reads back otherwise is logged (`dispatch: a document's folded state reads
+back otherwise`), the load serves the stored updates merged whole, and compaction leaves them as
+stored. That merge holds the same skip, so the room that loads it still drops the missing update
+if it arrives later.
 Compaction (`Compact`, which ygo runs as a room closes and as the server shuts down, and the outbox
 runs over every document every 24 hours, `CompactAll`) folds the whole log into one row holding
 that state (`compactKeep`), whose `content_changed` says whether any row it folded past the latest
-version's cursor changed content.
+version's cursor changed content. A compacted `doc_updates`, and any backup of it taken later,
+therefore holds no text a write deleted: text deleted before a version captured it is gone (Sami's
+decision, LEGION-496). `doc_updates` is snapshotted once, and the snapshot kept 90 days, right
+before the first deploy that compacts this way.
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
