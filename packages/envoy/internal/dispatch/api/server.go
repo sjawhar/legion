@@ -74,10 +74,12 @@ type Deps struct {
 	// is unconfigured) means the feature is off, and every handler that needs it answers
 	// 404 FEATURE_OFF.
 	AgentSecrets *agentsecrets.Client
-	// Lifetime bounds work a handler starts and does not wait for: it is the process's own
-	// context, cancelled when the server is shutting down, so a deploy stops a broadcast's
-	// remaining deliveries instead of leaving goroutines behind. Nil means unbounded, which
-	// is what a test gets.
+	// Lifetime bounds work a handler starts and does not wait for, and every event stream: it is
+	// the process's own context, cancelled when the server is shutting down, so a deploy stops a
+	// broadcast's remaining deliveries instead of leaving goroutines behind, and ends each open
+	// stream (streamEvents, streamAgentConversation) so http.Server.Shutdown is not held for its
+	// whole budget by a connection that never goes idle. Nil means unbounded, which is what a
+	// test gets.
 	Lifetime         context.Context
 	TestHooksEnabled bool
 }

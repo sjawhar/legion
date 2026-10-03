@@ -159,9 +159,15 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
+	shutdown := s.lifetime().Done()
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-shutdown:
+			// The server is shutting down, and a stream never goes idle on its own, so
+			// http.Server.Shutdown would wait its whole budget for it. Ending it sends the client
+			// to its reconnect, which resumes from the last id it saw on whichever server is up.
 			return
 		case event, open := <-subscription:
 			if !open {
