@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // SourceDir is the fixed directory an architecture source's model is read
@@ -169,7 +170,13 @@ func (i *Importer) Sync(ctx context.Context, project string) (model.Architecture
 	if importErr != nil {
 		return i.failed(ctx, parent, source, importErr)
 	}
-	return i.project(ctx, source, commit, listing.SHA, files, parsed)
+	updated, importErr := i.project(ctx, source, commit, listing.SHA, files, parsed)
+	// A projection PostgreSQL refused is recorded like any other import failure. A source that
+	// moved or was deleted while the sync ran has nothing to record it on.
+	if importErr != nil && !errors.Is(importErr, errSourceMoved) && !errors.Is(importErr, ErrNoSource) {
+		return i.failed(ctx, parent, source, importErr)
+	}
+	return updated, importErr
 }
 
 // failed records importErr on the source row and hands both back: the Sync
@@ -489,7 +496,7 @@ func (i *Importer) recordFailure(ctx context.Context, source model.ArchitectureS
 const maxFailureMessage = 4 << 10
 
 func capFailureMessage(failure error) string {
-	message := failure.Error()
+	message := text.StorableReplacement(failure.Error())
 	if len(message) <= maxFailureMessage {
 		return message
 	}
