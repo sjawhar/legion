@@ -170,23 +170,7 @@ func TestConcurrentColdReadsStayWithinTheMemoryBound(t *testing.T) {
 			writer.stop(t)
 			for _, readers := range []int{2, 4} {
 				server := memory.start(t)
-				peak := server.peakAboveIdle(t, func() {
-					failures := make([]error, readers)
-					var group sync.WaitGroup
-					for index := range readers {
-						group.Go(func() {
-							answer, err := server.trySend(http.MethodGet, "/api/v1/artifacts/"+upload.artifactID+"/text", "", nil, http.Header{"X-Dispatch-User": {"alice"}})
-							if err == nil && answer.status != http.StatusOK {
-								err = fmt.Errorf("read %d: status %d body %.300s", index, answer.status, answer.body)
-							}
-							failures[index] = err
-						})
-					}
-					group.Wait()
-					if err := errors.Join(failures...); err != nil {
-						t.Fatal(err)
-					}
-				})
+				peak := server.peakAboveIdle(t, func() { server.coldTextReads(t, upload.artifactID, readers) })
 				server.stop(t)
 				t.Logf("%s: %d cold text reads at once, %d MiB above idle", shape.name, readers, peak>>20)
 				if readers == 2 && peak > concurrentMemoryBound {

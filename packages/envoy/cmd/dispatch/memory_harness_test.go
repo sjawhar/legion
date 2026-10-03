@@ -437,25 +437,30 @@ func (h *memoryHarness) coldReads(t *testing.T, name, artifactID string) {
 		}
 	}
 	server := h.start(t)
-	peak := server.peakAboveIdle(t, func() {
-		failures := make([]error, 4)
-		var group sync.WaitGroup
-		for index := range failures {
-			group.Go(func() {
-				answer, err := server.trySend(http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", "", nil, http.Header{"X-Dispatch-User": {"alice"}})
-				if err == nil && answer.status != http.StatusOK {
-					err = fmt.Errorf("read %d: status %d body %.300s", index, answer.status, answer.body)
-				}
-				failures[index] = err
-			})
-		}
-		group.Wait()
-		if err := errors.Join(failures...); err != nil {
-			t.Fatal(err)
-		}
-	})
+	peak := server.peakAboveIdle(t, func() { server.coldTextReads(t, artifactID, 4) })
 	server.stop(t)
 	t.Logf("%s: four cold text reads at once, %d MiB above idle", name, peak>>20)
+}
+
+// coldTextReads reads a document's text readers times at once, failing unless every read answers
+// 200. Its caller measures the fresh server's peak around it.
+func (p *dispatchProcess) coldTextReads(t *testing.T, artifactID string, readers int) {
+	t.Helper()
+	failures := make([]error, readers)
+	var group sync.WaitGroup
+	for index := range readers {
+		group.Go(func() {
+			answer, err := p.trySend(http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", "", nil, http.Header{"X-Dispatch-User": {"alice"}})
+			if err == nil && answer.status != http.StatusOK {
+				err = fmt.Errorf("read %d: status %d body %.300s", index, answer.status, answer.body)
+			}
+			failures[index] = err
+		})
+	}
+	group.Wait()
+	if err := errors.Join(failures...); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // coldEdit sends edit, a one-word edit, to a document on a server that has not loaded it, fails the

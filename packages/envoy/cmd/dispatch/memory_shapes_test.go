@@ -151,6 +151,7 @@ func heaviestAdmittedShapes(t *testing.T) []admittedShape {
 		{"hard breaks of two spaces", repeated("a  \n")},
 		{"hard breaks of a backslash", repeated("a\\\n")},
 		{"HTML spans", repeated("<b>a</b>")},
+		{"autolinks", repeated("<https://a.example> ")},
 		{"images", repeated("![](u)")},
 		{"footnote references", func(units int) string { return strings.Repeat("[^a]", units) + "\n\n[^a]: note" }},
 		{"empty list items", repeated("-\n")},

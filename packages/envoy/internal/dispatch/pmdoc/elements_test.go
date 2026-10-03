@@ -360,7 +360,7 @@ func TestEveryNodeOfTheSchemaWeighsWhatItMakes(t *testing.T) {
 				if err != nil {
 					t.Fatalf("%s spelling %d: parse %d units: %v", typeName, index, units, err)
 				}
-				walkNodes(tree, func(node *Node) {
+				Walk(tree, func(node *Node) bool {
 					if node.Type == "text" {
 						texts++
 					} else {
@@ -369,6 +369,7 @@ func TestEveryNodeOfTheSchemaWeighsWhatItMakes(t *testing.T) {
 					if node.Type == typeName {
 						spelled++
 					}
+					return true
 				})
 				return size.Elements, elements, texts, spelled
 			}
@@ -385,10 +386,19 @@ func TestEveryNodeOfTheSchemaWeighsWhatItMakes(t *testing.T) {
 	}
 }
 
-// walkNodes visits node and every node under it.
-func walkNodes(node *Node, visit func(*Node)) {
-	visit(node)
-	for _, child := range node.Children {
-		walkNodes(child, visit)
+func BenchmarkWalk(b *testing.B) {
+	const nodes = 1 + 2*1024
+	tree := &Node{Type: "doc"}
+	for range 1024 {
+		tree.Children = append(tree.Children, &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: "x"}}})
 	}
+	visited := 0
+	b.ResetTimer()
+	for range b.N {
+		Walk(tree, func(*Node) bool {
+			visited++
+			return true
+		})
+	}
+	b.ReportMetric(float64(visited)/float64(b.N*nodes), "visits/node")
 }
