@@ -8,8 +8,9 @@ import fixtureJson from "../__fixtures__/ask-census.json";
 import type { CensusAsk, CensusEvent } from "../ask-census.ts";
 
 /** The recorded asks and events of the three approval rounds LEGION-470 measured, from before
- * F1, each event reduced to the fields the census reads. They are Dispatch's JSON, whose literal
- * fields a JSON import widens to `string`. */
+ * F1, each event reduced to the fields the census reads: the approval asks' events, and the
+ * in-window events of the decision blocks in each round's document. They are Dispatch's JSON,
+ * whose literal fields a JSON import widens to `string`. */
 export const recordedRounds = fixtureJson as unknown as {
   readonly issues: ReadonlyArray<{
     readonly key: string;

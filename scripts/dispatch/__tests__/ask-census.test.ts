@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import {
   applyCodes,
+  type CensusEvent,
   excludeSessionAsks,
   fetchIssueEvents,
   filterAsksInWindow,
@@ -128,7 +129,9 @@ describe("ask census", () => {
       approvalRequests: 9,
     });
     // Each request made again opened a new row before F1, so every arrival is an ask.opened. A
-    // human's thread reply is a turn; a session's is not.
+    // human's thread reply is a turn; a session's is not. One turn each of LEGION-464's and
+    // AGENTC-418's is a human's reply on a decision block in the spec; LEGION-462's block was
+    // answered before its first request, so it is no turn.
     expect(
       recordedRounds.issues.flatMap((issue) =>
         summarizeApprovalRounds(issue.events).map((round) => ({ issue: issue.key, ...round }))
@@ -139,7 +142,7 @@ describe("ask census", () => {
         artifactId: "83feb774-59a9-4a3d-bf6b-ce583ac5aebf",
         inboxRows: 4,
         arrivals: 4,
-        humanTurns: 1,
+        humanTurns: 2,
         exceedsHumanTurnBudget: true,
       },
       {
@@ -147,7 +150,7 @@ describe("ask census", () => {
         artifactId: "4bd9cfed-2e6e-4d79-83a4-ef99173d088d",
         inboxRows: 3,
         arrivals: 3,
-        humanTurns: 3,
+        humanTurns: 4,
         exceedsHumanTurnBudget: false,
       },
       {
@@ -258,4 +261,78 @@ describe("ask census", () => {
       ],
     });
   });
+});
+
+function blockAnswered(seq: number, block: string): CensusEvent {
+  return {
+    id: seq,
+    type: "ask.answered",
+    actor: { kind: "user", id: "alice" },
+    payload: {
+      id: `block-ask-${block}`,
+      kind: "question",
+      block_id: block,
+      block_artifact: { id: ARTIFACT, primary: true, slug: "spec" },
+    } as CensusEvent["payload"],
+  };
+}
+
+test("a hand-back after the human answers a decision block in the requested document is within budget", () => {
+  const events = [
+    opened(1, 1),
+    edited(2, 2, 1, { version: 1 }),
+    blockAnswered(3, "q1"),
+    edited(4, 4, 1, { version: 2 }),
+    handedBack(5, 4),
+    edited(6, 5, 4, { version: 4 }),
+    blockAnswered(7, "q2"),
+    edited(8, 7, 4, { version: 5 }),
+    handedBack(9, 7),
+  ];
+  expect(summarizeApprovalRounds(events)).toEqual([
+    {
+      artifactId: ARTIFACT,
+      inboxRows: 1,
+      arrivals: 3,
+      humanTurns: 2,
+      exceedsHumanTurnBudget: false,
+    },
+  ]);
+});
+
+test("a reply on a decision block is a turn once the round begins, and only in the requested document", () => {
+  function blockReply(seq: number, block: string): CensusEvent {
+    return {
+      id: seq,
+      type: "comment.created",
+      actor: { kind: "user", id: "alice" },
+      payload: { id: `comment-${seq}`, ask_id: `block-ask-${block}` },
+    };
+  }
+  // The replied-to blocks were indexed before the window, so only the issue's asks name their
+  // documents.
+  const asks = [
+    { id: "block-ask-q1", block_artifact: { id: ARTIFACT, primary: true, slug: "spec" } },
+    { id: "block-ask-notes", block_artifact: { id: "artifact-2", primary: false, slug: "notes" } },
+  ];
+  const events = [
+    blockAnswered(1, "q0"),
+    opened(2, 1),
+    blockReply(3, "notes"),
+    edited(4, 2, 1, { version: 1 }),
+    blockReply(5, "q1"),
+    handedBack(6, 2),
+    edited(7, 3, 2, { version: 2 }),
+    handedBack(8, 3),
+  ];
+  const round = { artifactId: ARTIFACT, inboxRows: 1, arrivals: 3 };
+
+  // The reply on q1 is the one turn: q0 was answered before the first request, and the notes
+  // block lives in another document.
+  expect(summarizeApprovalRounds(events, asks)).toEqual([
+    { ...round, humanTurns: 1, exceedsHumanTurnBudget: true },
+  ]);
+  expect(summarizeApprovalRounds(events)).toEqual([
+    { ...round, humanTurns: 0, exceedsHumanTurnBudget: true },
+  ]);
 });

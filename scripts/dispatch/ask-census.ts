@@ -4,6 +4,7 @@ import type {
   ArtifactReviewEventPayload,
   Ask,
   AskApproval,
+  AskBlockArtifact,
   DispatchEvent,
   Issue,
 } from "../../packages/contracts/src/dispatch-api";
@@ -23,11 +24,14 @@ type DispatchConfig = Pick<ActiveDispatchConfig, "url" | "token">;
 /** The fields of an ask the census reads. */
 export type CensusAsk = Pick<
   Ask,
-  "id" | "created_at" | "kind" | "block_id" | "question" | "author"
+  "id" | "created_at" | "kind" | "block_id" | "block_artifact" | "question" | "author"
 >;
 
 /** The document an approval ask names, as every `ask.*` event of one records it. */
 type RecordedApproval = Pick<AskApproval, "artifact_id">;
+
+/** The document a decision block's ask lives in, as every `ask.*` event of one records it. */
+type RecordedBlockArtifact = Pick<AskBlockArtifact, "id">;
 
 /**
  * The fields of a recorded Dispatch event the approval count reads. The history it reads predates
@@ -44,6 +48,7 @@ export interface CensusEvent {
     /** The ask a comment replied to or a review answered. */
     readonly ask_id?: ArtifactReviewEventPayload["ask_id"];
     readonly approval?: RecordedApproval;
+    readonly block_artifact?: RecordedBlockArtifact;
   };
 }
 
@@ -83,6 +88,8 @@ interface CensusOptions {
 }
 
 interface MutableApprovalRound {
+  /** Where in the events the round's first approval event stands. */
+  readonly start: number;
   inboxRows: number;
   arrivals: number;
   humanTurnKeys: Set<string>;
@@ -158,11 +165,12 @@ export function summarizeAsks(asks: readonly Pick<CensusAsk, "kind" | "block_id"
 
 function approvalRound(
   rounds: Map<string, MutableApprovalRound>,
-  artifactId: string
+  artifactId: string,
+  start: number
 ): MutableApprovalRound {
   const existing = rounds.get(artifactId);
   if (existing !== undefined) return existing;
-  const created = { inboxRows: 0, arrivals: 0, humanTurnKeys: new Set<string>() };
+  const created = { start, inboxRows: 0, arrivals: 0, humanTurnKeys: new Set<string>() };
   rounds.set(artifactId, created);
   return created;
 }
@@ -172,39 +180,56 @@ function approvalRound(
  * each `ask.opened` and each `ask.handed_back`. An `ask.edited` only rewords a request, by moving
  * it to a new version or giving it a new summary, so it never arrives; a hand-back with a new
  * summary is an `ask.edited` followed by its `ask.handed_back`, and arrives once. Before F1 a
- * request made again opened a new row, a new `ask.opened`, so the same rule counts it. A round
- * with more arrivals than human turns plus one is flagged.
+ * request made again opened a new row, a new `ask.opened`, so the same rule counts it.
+ *
+ * A human's turn is an answer to the request or a reply in its thread, and, once the round has
+ * begun, an answer or a reply on a decision block in the document the request names: a choice a
+ * request's thread raises becomes such a block, and the hand-back after its answer responds to
+ * that turn. `asks` names each block's document for a reply on a block with no `ask.*` event among
+ * `events`. A round with more arrivals than human turns plus one is flagged.
  */
-export function summarizeApprovalRounds(events: readonly CensusEvent[]): ApprovalRound[] {
+export function summarizeApprovalRounds(
+  events: readonly CensusEvent[],
+  asks: readonly Pick<CensusAsk, "id" | "block_artifact">[] = []
+): ApprovalRound[] {
   const rounds = new Map<string, MutableApprovalRound>();
   const approvalAskArtifacts = new Map<string, string>();
+  const blockAskArtifacts = new Map<string, string>();
+  for (const ask of asks) {
+    if (ask.block_artifact !== undefined) blockAskArtifacts.set(ask.id, ask.block_artifact.id);
+  }
 
-  for (const { type, payload } of events) {
-    if (payload.kind !== "approval" || payload.id === undefined || payload.approval === undefined) {
-      continue;
+  for (const [index, { type, payload }] of events.entries()) {
+    if (payload.id === undefined) continue;
+    if (payload.kind === "question" && payload.block_artifact !== undefined) {
+      blockAskArtifacts.set(payload.id, payload.block_artifact.id);
     }
+    if (payload.kind !== "approval" || payload.approval === undefined) continue;
     const artifactId = payload.approval.artifact_id;
     approvalAskArtifacts.set(payload.id, artifactId);
-    const round = approvalRound(rounds, artifactId);
+    const round = approvalRound(rounds, artifactId, index);
     if (type === "ask.opened") round.inboxRows += 1;
     if (type === "ask.opened" || type === "ask.handed_back") round.arrivals += 1;
   }
 
-  for (const event of events) {
+  for (const [index, event] of events.entries()) {
     if (event.actor?.kind !== "user") continue;
     const askId = event.payload.ask_id ?? event.payload.id;
     if (askId === undefined) continue;
-    const artifactId = approvalAskArtifacts.get(askId);
-    if (artifactId === undefined) continue;
-    if (event.type === "comment.created") {
-      approvalRound(rounds, artifactId).humanTurnKeys.add(`comment:${event.id}`);
-    }
+    const approvalArtifactId = approvalAskArtifacts.get(askId);
+    const artifactId = approvalArtifactId ?? blockAskArtifacts.get(askId);
+    const round = artifactId === undefined ? undefined : rounds.get(artifactId);
+    if (round === undefined) continue;
+    // A block answered before the round's first request was part of writing the document, not a
+    // turn in the round.
+    if (approvalArtifactId === undefined && index < round.start) continue;
+    if (event.type === "comment.created") round.humanTurnKeys.add(`comment:${event.id}`);
     if (
       event.type === "ask.answered" ||
       event.type === "artifact.approved" ||
       event.type === "artifact.changes_requested"
     ) {
-      approvalRound(rounds, artifactId).humanTurnKeys.add(`answer:${askId}`);
+      round.humanTurnKeys.add(`answer:${askId}`);
     }
   }
 
@@ -386,7 +411,10 @@ async function censusIssue(
   return {
     windowAsks,
     issueRow: asks.length === 0 ? undefined : { issue, ...summarizeAsks(asks) },
-    approvalRounds: summarizeApprovalRounds(events).map((round) => ({ issue, ...round })),
+    approvalRounds: summarizeApprovalRounds(events, issueAsks).map((round) => ({
+      issue,
+      ...round,
+    })),
     standaloneQuestions: asks.filter(isStandaloneQuestion).map((ask) => ({ ...ask, issue })),
   };
 }

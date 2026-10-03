@@ -44,5 +44,9 @@ arrivals, and human turns. An arrival is the request reaching the human's Inbox:
 and each `ask.handed_back`. An `ask.edited` only rewords a request (a move to a new version, a new
 summary) and never arrives; a hand-back with a new summary is an `ask.edited` followed by its
 `ask.handed_back`, one arrival. Before F1 a request made again opened a new row, so there each
-arrival is an `ask.opened`. A round with more arrivals than human turns plus one is flagged.
-`scripts/e2e/lib/design-gate-approval-requests.jq` reads the same arrivals for the stage 4b proof.
+arrival is an `ask.opened`. A human turn is an answer to the request or a reply in its thread,
+and, from the round's first request on, an answer or reply on a decision block in the document
+the request names: a choice the human raises while the request is open becomes such a block, and
+the hand-back after its answer responds to that turn. A round with more arrivals than human turns
+plus one is flagged. `scripts/e2e/lib/design-gate-approval-requests.jq` reads the same arrivals
+for the stage 4b proof.
