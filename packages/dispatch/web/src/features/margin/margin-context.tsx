@@ -12,21 +12,18 @@ import {
 import type { ComposerAnchor, ComposerKind } from "../conversation/composer-model";
 import { heldSends } from "../conversation/held-sends";
 import type { RetypeOutcome, RetypeRefusal } from "../doc/editor";
-import { pulseBlock } from "../doc/marks";
 import type { MarkPlacement } from "./useMarginItems";
 
 export interface DocumentBridge {
-  /** The document the bridge drives. */
-  readonly artifactId: string;
+  /** The artifact the registered document shows. The link hold compares it with the artifact
+   *  whose cards the margin shows before it trusts the registered document's layout report. */
+  artifactId: string;
   focusBlock(blockId: string): void;
   focusMark(markId: string): void;
   /** Removes the record mark `markId` from the document, whatever its kind. */
   removeMark(markId: string): void;
   /** Replaces the provisional mark `markId` with one of `kind` over the same text. */
   retypeMark(markId: string, kind: ComposerKind): RetypeOutcome;
-  /** Names the mark the open composer holds, or null when none is open, so the document treats a
-   *  selection-bar action that cuts into it as the composer's own write. */
-  setComposerMark(markId: string | null): void;
   setActiveBlocks(blockIds: readonly string[]): void;
   setActiveMarks(markIds: readonly string[]): void;
 }
@@ -35,8 +32,6 @@ export interface DocumentBridge {
 const KIND_SWITCH_REFUSALS: Record<RetypeRefusal["refused"], string> = {
   missing:
     "That highlight is gone from the document. Close this composer and select the text again.",
-  overlaps:
-    "Someone else's comment already covers part of this text. Close this composer and select text outside it.",
   unmarkable:
     "A suggestion needs whole words inside one table cell. Comment or ask about this selection instead, or close this composer and select again.",
 };
@@ -86,7 +81,6 @@ interface OpenCompose {
 
 interface MarginContextValue {
   blockFilterId: string | undefined;
-  blockFocusRequest: { blockId: string; seq: number } | undefined;
   blockPlacements: ReadonlyMap<string, MarkPlacement>;
   /** Ends the open compose `seq` unsaved, if it is still the open one: its mark leaves the
    *  document and the editor's promise rejects. */
@@ -104,8 +98,9 @@ interface MarginContextValue {
   markPlacements: ReadonlyMap<string, MarkPlacement>;
   /** The compose the reader has open and has not sent. */
   pendingCompose: PendingCompose | undefined;
-  /** Whether the open document has reported its layout: it says so by publishing placements,
-   *  and takes the answer back when it unregisters. An empty map is still an answer - a document
+  /** Whether the registered document has reported its layout: it says so by publishing
+   *  placements, and the answer resets whenever a document registers or unregisters, or the
+   *  registered document withdraws a hidden layout. An empty map is still an answer - a document
    *  with no live mark and no typed block has one - so the maps cannot stand in for this. */
   placementsReported: boolean;
   registerDocument(bridge: DocumentBridge | undefined): void;
@@ -122,6 +117,8 @@ interface MarginContextValue {
   setMarkItemIds(markItemIds: ReadonlyMap<string, string>): void;
   setMarkPlacements(placements: ReadonlyMap<string, MarkPlacement>): void;
   shownCompose: ShownCompose | undefined;
+  /** Takes back the registered document's layout while it is hidden and has no layout to report. */
+  withdrawPlacements(): void;
 }
 
 const unavailableMargin = (): never => {
@@ -130,7 +127,6 @@ const unavailableMargin = (): never => {
 
 const MarginContext = createContext<MarginContextValue>({
   blockFilterId: undefined,
-  blockFocusRequest: undefined,
   blockPlacements: new Map(),
   cancelCompose: unavailableMargin,
   clearBlockFilter: unavailableMargin,
@@ -156,16 +152,13 @@ const MarginContext = createContext<MarginContextValue>({
   setMarkItemIds: unavailableMargin,
   setMarkPlacements: unavailableMargin,
   shownCompose: undefined,
+  withdrawPlacements: unavailableMargin,
 });
 
 export function MarginProvider({ children }: { children: ReactNode }): ReactNode {
   const queryClient = useQueryClient();
   const store = heldSends(queryClient);
   const [blockFilterId, setBlockFilterId] = useState<string>();
-  const [blockFocusRequest, setBlockFocusRequest] = useState<{
-    blockId: string;
-    seq: number;
-  }>();
   const [blockPlacements, setBlockPlacements] = useState<ReadonlyMap<string, MarkPlacement>>(
     () => new Map()
   );
@@ -186,38 +179,16 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   // (the editor holds `composeForMark` for the document's lifetime).
   const openCompose = useRef<OpenCompose | undefined>(undefined);
   const bridgeRef = useRef<DocumentBridge | undefined>(undefined);
-  // The mark the open document was last told the composer holds, so it is told each change once.
-  const toldComposerMark = useRef<{ bridge: DocumentBridge; markId: string | null } | undefined>(
-    undefined
-  );
-  // The mark the composer on the open document holds: the open compose's, or the one a held send
-  // names there, since the send is out to it or its refusal will retry to it.
-  const tellComposerMark = useCallback(() => {
-    const bridge = bridgeRef.current;
-    if (bridge === undefined) return;
-    const markId =
-      openCompose.current?.request.anchor.mark_id ??
-      store.get(marginComposeSendKey(bridge.artifactId))?.request.anchor?.mark_id ??
-      null;
-    const told = toldComposerMark.current;
-    if (told?.bridge === bridge && told.markId === markId) return;
-    toldComposerMark.current = { bridge, markId };
-    bridge.setComposerMark(markId);
-  }, [store]);
   const show = useCallback((artifact: string, turnedAway: boolean) => {
     sequence.current += 1;
     setShownCompose({ artifact, seq: sequence.current, turnedAway });
   }, []);
-  // Every change to the open compose goes through here: the ref the callbacks read, the state the
-  // sheet renders, and the mark the document treats as the composer's own.
-  const publishCompose = useCallback(
-    (next: OpenCompose | undefined) => {
-      openCompose.current = next;
-      setPendingCompose(next?.request);
-      tellComposerMark();
-    },
-    [tellComposerMark]
-  );
+  // Every change to the open compose goes through here: the ref the callbacks read, and the state
+  // the sheet renders.
+  const publishCompose = useCallback((next: OpenCompose | undefined) => {
+    openCompose.current = next;
+    setPendingCompose(next?.request);
+  }, []);
   // From Send on, the compose is its send's: the held-send store keeps its draft, its refusal and
   // the mark it names, whatever unmounts its composer, until the send lands or the reader discards
   // the refusal. So the open compose ends there - the editor's promise resolves, keeping the mark -
@@ -228,9 +199,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       if (open !== undefined && store.get(marginComposeSendKey(open.request.anchor.artifact))) {
         publishCompose(undefined);
         open.resolve();
-        return;
       }
-      tellComposerMark();
     });
     const unlisten = store.onOutcome(({ kind, send }) => {
       const markId = send.request.anchor?.mark_id;
@@ -246,7 +215,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       unsubscribe();
       unlisten();
     };
-  }, [publishCompose, store, tellComposerMark]);
+  }, [publishCompose, store]);
 
   // The margin owns the provisional mark a compose request names: it leaves the document when the
   // composer ends unsaved - cancelled, or replaced by a newer composer - and it changes kind with
@@ -327,9 +296,6 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   }, []);
   const focusBlock = useCallback(
     (blockId: string) => {
-      sequence.current += 1;
-      pulseBlock(blockId);
-      setBlockFocusRequest({ blockId, seq: sequence.current });
       documentBridge?.focusBlock(blockId);
     },
     [documentBridge]
@@ -345,25 +311,22 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const setMarkItemIds = useCallback((nextMarkItemIds: ReadonlyMap<string, string>) => {
     markItemIds.current = nextMarkItemIds;
   }, []);
-  // Placements describe the open document. The provider outlives the route, so a document that
-  // unregisters has to take its offsets with it: left behind, they place the next document's
-  // cards from the last one's layout, and they tell the link's hold that this landing is already
-  // over before the new document has reported anything.
+  const withdrawPlacements = useCallback(() => {
+    setBlockPlacements(new Map());
+    setMarkPlacements(new Map());
+    setPlacementsReported(false);
+  }, []);
+  // Placements describe the registered document, so each registration - the next document, or
+  // none - starts with no report. The provider outlives the route: offsets left behind would
+  // place the next document's cards from the last one's layout, and would tell the link's hold
+  // that this landing is already over before the new document has reported anything.
   const registerDocument = useCallback(
     (bridge: DocumentBridge | undefined) => {
       bridgeRef.current = bridge;
       setDocumentBridge(bridge);
-      // A document registers fresh whenever `ProofDocument` remounts its editor - a new artifact
-      // or block schema - and the margin's composer outlives that: the new editor has to learn
-      // which mark the composer holds, as the one it replaces was told.
-      tellComposerMark();
-      if (bridge === undefined) {
-        setBlockPlacements(new Map());
-        setMarkPlacements(new Map());
-        setPlacementsReported(false);
-      }
+      withdrawPlacements();
     },
-    [tellComposerMark]
+    [withdrawPlacements]
   );
   const publishBlockPlacements = useCallback((placements: ReadonlyMap<string, MarkPlacement>) => {
     setBlockPlacements(placements);
@@ -382,7 +345,6 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const value = useMemo<MarginContextValue>(
     () => ({
       blockFilterId,
-      blockFocusRequest,
       blockPlacements,
       cancelCompose,
       clearBlockFilter,
@@ -408,10 +370,10 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       setMarkItemIds,
       setMarkPlacements: publishMarkPlacements,
       shownCompose,
+      withdrawPlacements,
     }),
     [
       blockFilterId,
-      blockFocusRequest,
       blockPlacements,
       cancelCompose,
       clearBlockFilter,
@@ -436,6 +398,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       selectedItemId,
       setMarkItemIds,
       shownCompose,
+      withdrawPlacements,
     ]
   );
 

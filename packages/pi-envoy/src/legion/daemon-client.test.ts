@@ -7,7 +7,7 @@ import {
   LegionDaemonContractError,
 } from "./daemon-client";
 
-/** A response the daemon's own golden test wrote (`packages/daemon-go/internal/api`). */
+/** A response the daemon's own golden test wrote (`packages/daemon/internal/api`). */
 function daemonFixture(name: string): Record<string, unknown> {
   return JSON.parse(
     readFileSync(

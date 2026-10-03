@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stage 2's gate for the Go coordinator: supervision on tmux, proven against the real things. The
-# Go daemon launches a real Oh My Pi — the pinned build (packages/daemon/src/daemon/omp-pin.ts)
+# Go daemon launches a real Oh My Pi — the pinned build (.omp-pin)
 # with this checkout's plugin in an isolated OMP profile — in panes of its private tmux server,
 # against a real Envoy listener and NATS on the host and a real Postgres. Every gate behaviour is
 # one named check that prints what it observed; the first check that does not hold ends the run
@@ -258,7 +258,7 @@ export TMUX_TMPDIR=$work/tmux   # so are the daemons' private tmux servers
 # The daemon receives the ordinary operator PATH, including any OMP wrapper it holds. It must
 # resolve the configured tool's executable itself; this proof checks the OMP child is that pinned
 # binary, rather than repairing PATH before the daemon sees it.
-pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
+pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 omp_bin=$(mise where "$pin")/bin
 [ -x "$omp_bin/omp" ] || fail "mise has no omp executable for $pin under $omp_bin"
@@ -271,7 +271,7 @@ profile_omp() { HOME="$omp_home" OMP_PROFILE="$profile" "$omp_bin/omp" "$@"; }
 port=$(bash "$root/scripts/e2e/lib/free-port.sh") || fail "no free port for the daemon"
 deadline_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port") || fail "no free port for the second daemon"
 envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port") || fail "no free port for the Envoy listener"
-(cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
+(cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
 stage_role_prompts "$root" "$work"
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 # The binary under proof, checkable after the run: the source it was built from, what a changed

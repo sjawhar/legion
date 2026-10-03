@@ -567,7 +567,14 @@ export function useMarginSheet(): MarginSheetModel {
     focus,
     margin: marginRef,
     onSelectCard,
-    placementsPublished: placementsReported,
+    // Only the report of the document whose cards this margin shows. A document the route has
+    // left can stay registered behind the next route's loading view - Suspense keeps the old
+    // page mounted, hidden, until the new page's code has arrived and its throttled reveal
+    // commits - and its report would read a press there as the reader working a placed document.
+    placementsPublished:
+      placementsReported &&
+      visibleArtifact !== undefined &&
+      documentBridge?.artifactId === visibleArtifact.id,
     routeItemId,
     routeItemKey,
     setHoveredItemId,

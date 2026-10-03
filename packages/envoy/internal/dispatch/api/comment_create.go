@@ -590,16 +590,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	events := []model.Event{}
 	if snapshot != nil {
-		snapshotEvent, err := s.appendEvent(r.Context(), tx, owner.event(
-			"artifact.version",
-			actor,
-			docs.ArtifactVersionEventPayload(anchor.ArtifactID, artifactName, snapshot.Version, nil, snapshot.Changes),
-		))
+		snapshotEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
 		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if err := refs.Stamp(r.Context(), tx, "artifact", anchor.ArtifactID, snapshotEvent.ID); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

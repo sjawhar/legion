@@ -252,7 +252,8 @@ func parseAgentStateCutoff(name string, value *string) (*time.Time, error) {
 // make a reply unread again), and/or replies read one by one (read_replies, the session's own
 // messages by id, which a view that shows only some of a session's replies writes so it marks
 // nothing it did not show), announces the write to the viewer's other tabs unless it was only
-// replies already read, and answers with the session's whole state.
+// replies already read by id or passed by the read mark (one the Clear hides is neither), and
+// answers with the session's whole state.
 func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -312,7 +313,7 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	// A Clear or a read mark is announced whenever it is given; replies read by id only when one
-	// of them was not read already (below).
+	// of them gets a row (below).
 	announce := clearedBefore != nil || readThrough != nil
 	// A cutoff up to agentStateCutoffSkew ahead of the server clock is accepted, so a browser a few
 	// seconds fast is not refused, but it is stored as no later than now: a reply that lands in
@@ -406,9 +407,10 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Replies read by id that were all read already change nothing, so nothing is announced: a
-	// broadcast page sends its replies again on every visit while the session has an unread reply
-	// elsewhere, and each event would refetch the badge in every tab the viewer has open.
+	// Replies read by id that all had a row or sat at or before the read mark change nothing, so
+	// nothing is announced: a broadcast page sends its replies again on every visit while the
+	// session has an unread reply elsewhere, and each event would refetch the badge in every tab
+	// the viewer has open.
 	if !announce {
 		// Nothing was written; end the transaction before the state is read through the pool.
 		if err := tx.Rollback(r.Context()); err != nil {

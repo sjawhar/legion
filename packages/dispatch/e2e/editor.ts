@@ -3,6 +3,7 @@ import {
   expect,
   type Locator,
   type Page,
+  type Route,
   type WebSocketRoute,
 } from "@playwright/test";
 
@@ -67,11 +68,26 @@ export function markSpan(page: Page, markId: string): Locator {
   return documentEditor(page).locator(`[data-id="${markId}"]`);
 }
 
-/** Waits until `page`'s editor shows the mark `markId` over exactly `quote`. */
+/** The text of each mark among `spans`, keyed by mark id: a mark another mark nests inside renders
+ *  as more than one span, and an outer span's text includes the spans inside it, so a mark's text
+ *  is its own spans' text joined in document order. */
+export function markTexts(spans: Locator): Promise<Record<string, string>> {
+  return spans.evaluateAll((elements) => {
+    const texts: Record<string, string> = {};
+    for (const element of elements) {
+      const id = element.getAttribute("data-id") ?? "";
+      texts[id] = (texts[id] ?? "") + (element.textContent ?? "");
+    }
+    return texts;
+  });
+}
+
+/** Waits until `page`'s editor shows the mark `markId` over exactly `quote`, whether it renders as
+ *  one span or, with another mark nested inside it, as several. */
 export async function expectMark(page: Page, markId: string, quote: string): Promise<void> {
-  const mark = markSpan(page, markId);
-  await expect(mark).toBeVisible();
-  await expect(mark).toHaveText(quote);
+  const spans = markSpan(page, markId);
+  await expect(spans.first()).toBeVisible();
+  await expect.poll(async () => (await markTexts(spans))[markId] ?? "").toBe(quote);
 }
 
 export function cursorLabel(page: Page, name: string): Locator {
@@ -79,7 +95,8 @@ export function cursorLabel(page: Page, name: string): Locator {
 }
 
 /** Selects the first occurrence of `quote` inside the focused ProseMirror node the way a drag
- * does: a DOM Range plus the selectionchange ProseMirror's DOMObserver listens to. */
+ * does: a DOM Range plus the selectionchange ProseMirror's DOMObserver listens to. A quote no one
+ * text node holds - text another mark's span splits - is found across the text nodes in order. */
 export async function selectEditorText(page: Page, quote: string): Promise<void> {
   await setEditorRange(page, { extent: "whole", quote });
   await actionBar(page).waitFor({ state: "visible" });
@@ -114,17 +131,30 @@ async function setEditorRange(page: Page, target: EditorRange): Promise<void> {
       if (last === null) throw new Error("the editor holds no text a caret can enter");
       range.setStart(last, last.textContent?.length ?? 0);
     } else {
+      // Reads the text nodes as one text, so a quote another mark's span splits is found as
+      // readily as one a single node holds, and maps the quote's two ends back to their nodes.
       const { extent, quote } = target;
-      let found = false;
+      const runs: { node: Node; start: number; end: number }[] = [];
+      let text = "";
       for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-        const index = node.textContent?.indexOf(quote) ?? -1;
-        if (index < 0) continue;
-        range.setStart(node, extent === "after" ? index + quote.length : index);
-        range.setEnd(node, extent === "before" ? index : index + quote.length);
-        found = true;
-        break;
+        const start = text.length;
+        text += node.textContent ?? "";
+        runs.push({ end: text.length, node, start });
       }
-      if (!found) throw new Error(`quote is not in the editor: ${quote}`);
+      const index = text.indexOf(quote);
+      const first = runs.find((run) => run.start <= index && index < run.end);
+      const last = runs.find(
+        (run) => run.start < index + quote.length && index + quote.length <= run.end
+      );
+      if (index < 0 || first === undefined || last === undefined) {
+        throw new Error(`quote is not in the editor: ${quote}`);
+      }
+      const startAt = { node: first.node, offset: index - first.start };
+      const endAt = { node: last.node, offset: index + quote.length - last.start };
+      const from = extent === "after" ? endAt : startAt;
+      const to = extent === "before" ? startAt : endAt;
+      range.setStart(from.node, from.offset);
+      range.setEnd(to.node, to.offset);
     }
     const selection = window.getSelection();
     selection?.removeAllRanges();
@@ -280,6 +310,30 @@ export async function documentTransport(
       }
     },
   };
+}
+
+/**
+ * Holds the first request `page` makes for a URL matching `url` and lets every later one through,
+ * so a test decides when that one download ends: `held` resolves with its route once the page has
+ * made it, for the test to abort or continue. Install it before the navigation that makes the
+ * request. The route stays installed for the page's life on purpose. A `{ times: 1 }` route does
+ * not stay: Playwright removes an expiring route from the page before its handler runs, and a page
+ * left with no route stops intercepting while that request is still held (playwright-core 1.63,
+ * `Page._onRoute`). In Chromium the reload a failed chunk starts then got no response in 12 of 40
+ * runs.
+ */
+export async function holdFirstRequest(page: Page, url: RegExp): Promise<{ held: Promise<Route> }> {
+  const first = Promise.withResolvers<Route>();
+  let holding = false;
+  await page.route(url, async (route) => {
+    if (!holding) {
+      holding = true;
+      first.resolve(route);
+      return;
+    }
+    await route.continue();
+  });
+  return { held: first.promise };
 }
 
 export interface Clipboard {

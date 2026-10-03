@@ -600,7 +600,11 @@ test("two suggestions on one block are each accepted from their collapsed card",
   }
 });
 
-test("accepting the later of two suggestions on the same text leaves the earlier Conversation turn orphaned", async ({
+// The later suggestion rewrites "brown fox", which holds all of the earlier one's "fox", so its
+// accept leaves the earlier suggestion no text to anchor to. (A suggestion over exactly the same
+// text as the accepted one is a mark that covers all the replaced text, and moves onto the new text
+// with the accept, as a comment there does.)
+test("accepting a later suggestion over an earlier one's text leaves the earlier Conversation turn orphaned", async ({
   browser,
 }) => {
   await createProject({ key: "SUGG", name: "Suggestion cards" });
@@ -615,9 +619,9 @@ test("accepting the later of two suggestions on the same text leaves the earlier
     suggestion: { replace_with: "cat" },
   });
   const later = await createComment(issue.key, {
-    anchor: { artifact: "spec", quote: "fox" },
+    anchor: { artifact: "spec", quote: "brown fox" },
     body: "Suggested replacement.",
-    suggestion: { replace_with: "dog" },
+    suggestion: { replace_with: "brown dog" },
   });
   const alice = await asUser(browser, "alice");
 
@@ -663,9 +667,9 @@ test("an orphaned suggestion stays non-actionable through resolve and reopen", a
     suggestion: { replace_with: "cat" },
   });
   const later = await createComment(issue.key, {
-    anchor: { artifact: "spec", quote: "fox" },
+    anchor: { artifact: "spec", quote: "brown fox" },
     body: "Suggested replacement.",
-    suggestion: { replace_with: "dog" },
+    suggestion: { replace_with: "brown dog" },
   });
   const alice = await asUser(browser, "alice");
 

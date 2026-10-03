@@ -279,8 +279,9 @@ packages/dispatch/e2e/playwright-report/
 # runbook had operators create inside the checkout; never tracked.
 deploy/kubernetes/daemon/overlays/kind/secrets/
 
-# Docs media: the screenshots CI takes before each site build (videos are committed), and the
-# media scripts' scratch (docs/site/media/README.md).
+# Docs media: the screenshots CI takes before each site build (videos are committed, and so is the
+# broker's media, which CI cannot make), and the media scripts' scratch (docs/site/media/README.md).
 docs/site/public/media/*
 !docs/site/public/media/videos/
+!docs/site/public/media/broker/
 docs/site/media/.work/

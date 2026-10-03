@@ -26,6 +26,7 @@ import {
   selectEditorText,
   setSheet,
 } from "./editor";
+import { commentWithBody } from "./margin-helpers";
 import { resetDatabase, setCommentAuthorService } from "./seed";
 import { asUser } from "./users";
 
@@ -40,19 +41,6 @@ async function expandedConversationThread(page: Page, rootId: string): Promise<L
   await turn.getByRole("button", { name: "Expand thread" }).click();
   const phoneThread = page.getByRole("dialog", { name: "Thread" });
   return (await phoneThread.count()) === 0 ? turn : phoneThread;
-}
-
-async function commentWithBody(issueKey: string, artifactId: string | undefined, body: string) {
-  await expect
-    .poll(() =>
-      listComments(issueKey, artifactId).then((items) => items.find((item) => item.body === body))
-    )
-    .toBeDefined();
-  const comment = (await listComments(issueKey, artifactId)).find((item) => item.body === body);
-  if (comment === undefined) {
-    throw new Error(`Comment with body ${body} was not created.`);
-  }
-  return comment;
 }
 
 test.beforeEach(async () => {
