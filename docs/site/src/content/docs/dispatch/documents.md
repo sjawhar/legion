@@ -133,8 +133,8 @@ a phrase, `OR` between words, and `-` before a word to leave it out: `"merge que
 
 A very long text made almost entirely of words that each appear once, such as a list of hundreds
 of kilobytes of identifiers, holds more words than one search index entry can. Search then covers
-its opening part, the largest of its first half, quarter, eighth and so on that fits, and does not
-find the words after it. An issue is always found by its key.
+its opening part, the largest of its first half, quarter, eighth and so on that fits, up to the
+last whole word in it, and does not find the words after it. An issue is always found by its key.
 
 Results are grouped by the issue or document they belong to. Choosing a document result opens the
 document and highlights the first place the words appear. Text typed into a live document can take

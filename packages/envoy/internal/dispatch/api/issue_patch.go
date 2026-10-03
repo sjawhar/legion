@@ -37,12 +37,12 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.Title != nil {
-		title := strings.TrimSpace(*input.Title)
-		if title == "" {
+		*input.Title = strings.TrimSpace(*input.Title)
+		if *input.Title == "" {
 			writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "title must not be blank")
 			return
 		}
-		if length := len16(title); length > contracts.IssueTitleMax {
+		if length := len16(*input.Title); length > contracts.IssueTitleMax {
 			capExceeded(w, "title", length, contracts.IssueTitleMax)
 			return
 		}
@@ -159,7 +159,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		sets = append(sets, column+" = $"+strconv.Itoa(len(args)))
 	}
 	if input.Title != nil {
-		set("title", strings.TrimSpace(*input.Title))
+		set("title", *input.Title)
 	}
 	if input.Status != nil {
 		args = append(args, status)
