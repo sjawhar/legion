@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +118,40 @@ func TestTheHelperWarnsBeforeItsLauncherCredentialExpiresAndDropsItThen(t *testi
 	}
 	if why := b.noCredentialReason(); why != dropExpired {
 		t.Fatalf("why a session cannot enroll after the expiry: %q; want %q, not the broker's refusal", why, dropExpired)
+	}
+}
+
+// TestTheHelperWarnsADayBeforeTheExpiry: with no lead set, as in production, the warning comes a
+// day before the credential expires. A credential with less than a day left warns at once; one
+// with more than a day left does not warn yet.
+func TestTheHelperWarnsADayBeforeTheExpiry(t *testing.T) {
+	for _, tc := range []struct {
+		lifetime time.Duration
+		warns    bool
+	}{
+		{23 * time.Hour, true},
+		{25 * time.Hour, false},
+	} {
+		t.Run(tc.lifetime.String(), func(t *testing.T) {
+			var out syncBuffer
+			f := newFakeBroker(t)
+			f.mu.Lock()
+			f.loginLifetime = tc.lifetime
+			f.mu.Unlock()
+			b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), HTTP: f.srv.Client(),
+				Log: slog.New(slog.NewJSONHandler(&out, nil))}
+			expiryLogin(t, b)
+			warned := func() bool {
+				return slices.ContainsFunc(logRecords(t, &out), func(rec map[string]any) bool { return rec["msg"] == expiresSoonMsg })
+			}
+			deadline := time.Now().Add(300 * time.Millisecond)
+			for !warned() && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if got := warned(); got != tc.warns {
+				t.Fatalf("a credential expiring in %s: warned within 300 ms %v; want %v (log: %s)", tc.lifetime, got, tc.warns, out.String())
+			}
+		})
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -58,6 +59,30 @@ func waitForRecord(t *testing.T, out *syncBuffer, msg string) map[string]any {
 			t.Fatalf("no line %q within 5 s; log:\n%s", msg, out.String())
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestARestartWithNoLoginSaysWhyTheSessionCannotEnroll: a restarted helper holds no launcher
+// credential, and a session it re-pins must revoke its prior enrollment before it enrolls again.
+// That revoke cannot run, and the helper says so at ERROR, naming the session, the prior
+// enrollment and why: no login since the start, since a restart discards the credential.
+func TestARestartWithNoLoginSaysWhyTheSessionCannotEnroll(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "sessions.json")
+	pid := recordPrior(t, state, "enr-prior")
+	var out syncBuffer
+	r := newLoggedRig(t, state, slog.New(slog.NewJSONHandler(&out, nil))) // Recover re-pins the child; no login
+	sess := r.srv.Registry.Get(pid)
+	if sess == nil {
+		t.Fatal("the live process must be re-pinned")
+	}
+	line := waitForRecord(t, &out, "session cannot enroll: revoking its lapsed enrollment first needs a launcher credential, and the helper holds none; run: agent-secrets launcher login, and have a human approve it")
+	for k, v := range map[string]any{
+		"level": "ERROR", "runtime_id": sess.RuntimeID, "enrollment_id": "enr-prior",
+		"why": "no machine login since the helper started; a restart discards the launcher credential",
+	} {
+		if line[k] != v {
+			t.Fatalf("the line for the re-pinned session: %s = %v; want %v (line %v)", k, line[k], v, line)
+		}
 	}
 }
 
