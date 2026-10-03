@@ -311,6 +311,9 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// A Clear or a read mark is announced whenever it is given; replies read by id only when one
+	// of them was not read already (below).
+	announce := clearedBefore != nil || readThrough != nil
 	// A cutoff up to agentStateCutoffSkew ahead of the server clock is accepted, so a browser a few
 	// seconds fast is not refused, but it is stored as no later than now: a reply that lands in
 	// the gap is still after the viewer's Clear and read mark, so it shows and it counts.
@@ -327,9 +330,6 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// A Clear or a read mark is announced whenever it is given; replies read by id only when one
-	// of them was not read already (below).
-	announce := clearedBefore != nil || readThrough != nil
 	if readThrough != nil {
 		if _, err := tx.Exec(r.Context(), `
 			insert into user_agent_read (login, session_id, read_through)
@@ -364,11 +364,22 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
+		// A reply the session's read mark has already passed is read without a row, and the
+		// prune below would delete one again, so only the others are written; a revisit of
+		// replies the mark covers writes nothing and announces nothing. The rows go in the ids'
+		// sorted order (ordinality), so two writes lock new rows in one order.
 		inserted, err := tx.Exec(r.Context(), `
-			insert into user_agent_reply_read (login, reply_id)
-			select $1, unnest($2::uuid[])
+			insert into user_agent_reply_read (login, session_id, reply_id)
+			select $1, $2, wanted.id
+			from unnest($3::uuid[]) with ordinality as wanted(id, position)
+			where not exists (
+				select 1 from messages
+				join user_agent_read on user_agent_read.login = $1 and user_agent_read.session_id = $2
+				where messages.id = wanted.id and messages.created_at <= user_agent_read.read_through
+			)
+			order by wanted.position
 			on conflict do nothing
-		`, canonicalLogin(actor.ID), readReplies)
+		`, canonicalLogin(actor.ID), sessionID, readReplies)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -378,18 +389,17 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	if readThrough != nil {
 		// A reply at or before the session's read mark is read whatever user_agent_reply_read
 		// holds, and the mark only moves forward, so the rows of the replies it now passes are dead
-		// and are deleted here; without this the table grows by one row per reply ever read by id.
-		// The rows are the path session's own replies, the only ids read_replies takes for it, and
-		// a session answers only what was delivered to it, so its replies sit under roots targeted
-		// at it, where this mark is the one the unread count reads. A Clear plays no part: it can
-		// move back.
+		// and are deleted here; without this a row would outlive every reason for it. The rows are
+		// the ones read under this session (user_agent_reply_read_session serves the lookup), all
+		// of them its own replies, and a session answers only what was delivered to it, so its
+		// replies sit under roots targeted at it, where this mark is the one the unread count
+		// reads. A Clear plays no part: it can move back.
 		if _, err := tx.Exec(r.Context(), `
 			delete from user_agent_reply_read
 			using messages, user_agent_read
-			where user_agent_reply_read.login = $1
+			where user_agent_reply_read.login = $1 and user_agent_reply_read.session_id = $2
 			  and user_agent_read.login = $1 and user_agent_read.session_id = $2
 			  and messages.id = user_agent_reply_read.reply_id
-			  and messages.author->>'kind' = 'session' and messages.author->>'id' = $2
 			  and messages.created_at <= user_agent_read.read_through
 		`, canonicalLogin(actor.ID), sessionID); err != nil {
 			s.writeHandlerError(w, err)

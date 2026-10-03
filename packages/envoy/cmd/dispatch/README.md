@@ -280,7 +280,8 @@ ask a `version` to backfill from, and the other two change no row.
 
 Migration `0067_user_agent_reply_read` creates the table of replies a human has read by id, which
 the broadcast page writes for the replies it shows and the unread count leaves out, beside the
-per-session read mark. It creates a table and touches no row; its census answers `0`.
+per-session read mark, and its `(login, session_id)` index, which the read mark's prune of one
+session's rows reads. It creates a table and touches no row; its census answers `0`.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

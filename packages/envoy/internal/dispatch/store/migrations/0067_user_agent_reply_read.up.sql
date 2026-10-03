@@ -10,9 +10,14 @@
 -- The login is canonical (lower case), like user_agent_read's (0051), so one person has one set
 -- however their identity source spells their login. No foreign key to messages: the write checks
 -- that each id is the session's own message, and a key would only lock messages for a table that
--- is empty when it is created.
+-- is empty when it is created. session_id is that session, the one whose read mark the write that
+-- moves it prunes the row by: the primary key serves the unread count's lookup of one reply, and
+-- the index the prune of one session's rows, which would otherwise read every row the login holds.
 create table user_agent_reply_read (
   login text not null,
+  session_id text not null,
   reply_id uuid not null,
   primary key (login, reply_id)
 );
+
+create index user_agent_reply_read_session on user_agent_reply_read (login, session_id);

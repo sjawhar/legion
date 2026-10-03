@@ -1192,56 +1192,133 @@ func TestRepliesReadByIDAgainRecordNoEvent(t *testing.T) {
 	}
 }
 
+// readByIDRows is every row of user_agent_reply_read as login/reply_id, sorted.
+func readByIDRows(t *testing.T, database *store.Store) []string {
+	t.Helper()
+	read, err := database.Pool.Query(context.Background(), `
+		select login || '/' || reply_id::text from user_agent_reply_read order by 1
+	`)
+	if err != nil {
+		t.Fatalf("read user_agent_reply_read: %v", err)
+	}
+	rows, err := pgx.CollectRows(read, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read user_agent_reply_read: %v", err)
+	}
+	return rows
+}
+
+// putAgentState writes login's state for sessionID and fails the test unless it is accepted.
+func putAgentState(t *testing.T, handler http.Handler, login, sessionID string, state map[string]any) {
+	t.Helper()
+	written := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/"+sessionID+"/state", state, login)
+	if written.Code != http.StatusOK {
+		t.Fatalf("PUT %s's %s state %v: status=%d body=%s", login, sessionID, state, written.Code, written.Body.String())
+	}
+}
+
+// seedDirectAnswer writes login's direct message to sessionID and the session's answer to it,
+// straight into the store, and returns the answer's id.
+func seedDirectAnswer(t *testing.T, database *store.Store, login, sessionID string) string {
+	t.Helper()
+	var answer string
+	if err := database.Pool.QueryRow(context.Background(), `
+		with root as (
+			insert into messages (issue_key, author, body, target, in_reply_to)
+			values (null, jsonb_build_object('kind', 'user', 'id', $1::text), 'A question', 'session:' || $2, null)
+			returning id, target
+		)
+		insert into messages (issue_key, author, body, target, in_reply_to)
+		select null, jsonb_build_object('kind', 'session', 'id', $2::text), 'An answer', target, id from root
+		returning id::text
+	`, login, sessionID).Scan(&answer); err != nil {
+		t.Fatalf("seed %s's answer to %s: %v", sessionID, login, err)
+	}
+	return answer
+}
+
 // A reply at or before the session's read mark is read whatever user_agent_reply_read holds, so
-// the write that moves the mark deletes the rows of the replies it passes: the table keeps only
-// replies newer than the mark, and a reply read by id that the mark has not reached keeps its row
-// and stays read. The login is mixed-case so a delete keyed on another spelling would leave rows.
+// the write that moves the mark deletes the rows of that viewer's replies from that session it
+// passes, and only those: a reply read by id that the mark has not reached keeps its row and stays
+// read, and so do the viewer's rows for another session and another viewer's rows for this one,
+// though their replies are older than the mark. The login is mixed-case so a delete keyed on
+// another spelling would leave rows.
 func TestAReadMarkDeletesTheRowsOfRepliesItPasses(t *testing.T) {
 	handler, database, _, reply, _ := directConversationFrom(t, "Alice")
+	otherSession := seedDirectAnswer(t, database, "alice", "s2")
+	putAgentState(t, handler, "Alice", "s2", map[string]any{"read_replies": []string{otherSession}})
+	bobsRoot := decodeBody[model.Message](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "Bob's question.", "delivery": "aside",
+	}, "bob"))
+	otherLogin := decodeBody[model.Message](t, replyTo(t, handler, bobsRoot.ID, "Bob's answer."))
+	putAgentState(t, handler, "bob", "s1", map[string]any{"read_replies": []string{otherLogin.ID}})
 	first := decodeBody[model.Message](t, reply("First."))
 	second := decodeBody[model.Message](t, reply("Second."))
-	if !second.CreatedAt.After(first.CreatedAt) {
-		t.Fatalf("both answers carry %s, so no read mark sits between them", first.CreatedAt)
+	if !second.CreatedAt.After(first.CreatedAt) || !first.CreatedAt.After(otherLogin.CreatedAt) {
+		t.Fatalf("answers at %s, %s and %s, want each after the one before", otherLogin.CreatedAt, first.CreatedAt, second.CreatedAt)
 	}
-	rows := func() []string {
-		t.Helper()
-		read, err := database.Pool.Query(context.Background(), `
-			select reply_id::text from user_agent_reply_read where login = 'alice' order by 1
-		`)
-		if err != nil {
-			t.Fatalf("read user_agent_reply_read: %v", err)
-		}
-		ids, err := pgx.CollectRows(read, pgx.RowTo[string])
-		if err != nil {
-			t.Fatalf("read user_agent_reply_read: %v", err)
-		}
-		return ids
-	}
-	put := func(state map[string]any) {
-		t.Helper()
-		marked := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", state, "Alice")
-		if marked.Code != http.StatusOK {
-			t.Fatalf("PUT %v: status=%d body=%s", state, marked.Code, marked.Body.String())
-		}
+	others := []string{"alice/" + otherSession, "bob/" + otherLogin.ID}
+	slices.Sort(others)
+	want := func(rows ...string) []string {
+		all := append(slices.Clone(others), rows...)
+		slices.Sort(all)
+		return all
 	}
 
-	put(map[string]any{"read_replies": []string{first.ID, second.ID}})
-	if got := rows(); len(got) != 2 {
-		t.Fatalf("after reading both by id: rows %v, want both answers", got)
+	putAgentState(t, handler, "Alice", "s1", map[string]any{"read_replies": []string{first.ID, second.ID}})
+	if got, all := readByIDRows(t, database), want("alice/"+first.ID, "alice/"+second.ID); !slices.Equal(got, all) {
+		t.Fatalf("after reading both by id: rows %v, want %v", got, all)
 	}
-	put(map[string]any{"read_through": first.CreatedAt})
-	if got := rows(); len(got) != 1 || got[0] != second.ID {
-		t.Fatalf("after a read mark through the first answer: rows %v, want only %s", got, second.ID)
+	putAgentState(t, handler, "Alice", "s1", map[string]any{"read_through": first.CreatedAt})
+	if got, all := readByIDRows(t, database), want("alice/"+second.ID); !slices.Equal(got, all) {
+		t.Fatalf("after a read mark through the first answer: rows %v, want %v", got, all)
 	}
 	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
 		t.Fatalf("after a read mark through the first answer: %#v, want nothing unread", got)
 	}
-	put(map[string]any{"read_through": second.CreatedAt})
-	if got := rows(); len(got) != 0 {
-		t.Fatalf("after a read mark through every answer read by id: rows %v, want none", got)
+	putAgentState(t, handler, "Alice", "s1", map[string]any{"read_through": second.CreatedAt})
+	if got, all := readByIDRows(t, database), want(); !slices.Equal(got, all) {
+		t.Fatalf("after a read mark through every answer read by id: rows %v, want only the other session's and the other login's, %v", got, all)
+	}
+	for _, viewer := range []struct{ login, session string }{{"alice", "s1"}, {"alice", "s2"}, {"bob", "s1"}} {
+		if got := unreadReplies(t, handler, viewer.login, viewer.session); got.UnreadReplies != 0 {
+			t.Fatalf("%s's %s after the read mark: %#v, want nothing unread", viewer.login, viewer.session, got)
+		}
+	}
+}
+
+// Reading by id a reply the session's read mark has already passed changes nothing: no row comes
+// back for the mark to delete again, and no event goes out. A broadcast page revisited while the
+// session has an unread reply elsewhere sends such replies again.
+func TestRepliesReadByIDThatAReadMarkPassedRecordNothing(t *testing.T) {
+	handler, database, _, reply, _ := directConversationFrom(t, "alice")
+	answer := decodeBody[model.Message](t, reply("On it."))
+	announced := func() int {
+		t.Helper()
+		var count int
+		if err := database.Pool.QueryRow(context.Background(), `
+			select count(*) from events where type = 'user_agent_state.updated'
+		`).Scan(&count); err != nil {
+			t.Fatalf("count user_agent_state.updated events: %v", err)
+		}
+		return count
+	}
+
+	putAgentState(t, handler, "alice", "s1", map[string]any{"read_replies": []string{answer.ID}})
+	putAgentState(t, handler, "alice", "s1", map[string]any{"read_through": answer.CreatedAt})
+	if got := readByIDRows(t, database); len(got) != 0 {
+		t.Fatalf("after a read mark through the answer: rows %v, want none", got)
+	}
+	before := announced()
+	putAgentState(t, handler, "alice", "s1", map[string]any{"read_replies": []string{answer.ID}})
+	if got := readByIDRows(t, database); len(got) != 0 {
+		t.Fatalf("after reading by id an answer the mark passed: rows %v, want none", got)
+	}
+	if got := announced(); got != before {
+		t.Fatalf("after reading by id an answer the mark passed: %d events, want still %d", got, before)
 	}
 	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
-		t.Fatalf("after a read mark through both answers: %#v, want nothing unread", got)
+		t.Fatalf("after reading by id an answer the mark passed: %#v, want nothing unread", got)
 	}
 }
 

@@ -68,7 +68,9 @@
   on every tab, while the session's older reply to another message, or one newer than the page
   shows, still counts. An id may take any form `uuid.Parse` reads; one it cannot read, or one that
   is not a message that session wrote, is `400 INVALID_STATE`. A request naming only replies
-  already read changes nothing and appends no `user_agent_state.updated` event (LEGION-485).
+  already read, or replies the session's read mark has passed, changes nothing and appends no
+  `user_agent_state.updated` event, and a `read_through` deletes the viewer's rows for that
+  session whose replies it reaches (LEGION-485).
 
 ### Changed
 
