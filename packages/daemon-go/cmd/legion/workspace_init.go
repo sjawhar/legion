@@ -59,7 +59,7 @@ func (e volumeLostError) Error() string { return string(e) }
 // failures to stderr — together the init log the runtime quotes — with exit 1, or 3 for a lost
 // volume.
 func runWorkspaceInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
+	if len(args) == 0 || helpRequested(args[0]) {
 		fmt.Fprintf(stderr, "usage: %s\n       %s\n", workspaceFetchUsage, workspaceProvisionUsage)
 		return 2
 	}
@@ -79,13 +79,13 @@ func runWorkspaceInit(ctx context.Context, args []string, stdout, stderr io.Writ
 		repo := flags.String("repo", "", "repository as <owner>/<name> (required)")
 		root := flags.String("root", "/legion", "tree volume root directory")
 		credentialHelper := flags.String("credential-helper", "", "git credential helper written into the shared clone's config (required)")
-		feed := flags.String("feed", "", "the pod's feed directory, which `workspace-init fetch` filled (required)")
+		feed := flags.String("feed", "", "the pod's feed directory, which workspace-init fetch filled (required)")
 		if code, ok := parseWorkspaceInitFlags(flags, args[1:], workspaceProvisionUsage, stderr); !ok {
 			return code
 		}
 		run = func() error { return workspaceInit(ctx, *issue, *repo, *root, *credentialHelper, *feed, stdout) }
 	default:
-		fmt.Fprintf(stderr, "legion workspace-init: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(stderr, "legion workspace-init: unknown subcommand %q\nusage: %s\n       %s\n", args[0], workspaceFetchUsage, workspaceProvisionUsage)
 		return 2
 	}
 	err := run()

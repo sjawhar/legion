@@ -261,6 +261,59 @@ func TestUnknownSubcommandIsUsageError(t *testing.T) {
 	}
 }
 
+// `legion --help` is the one place the commands are listed, which the docs site's CLI reference is
+// generated from: every command, each on a line of its own, on stdout with exit 0; a bare `legion`
+// prints the same list as a usage error.
+func TestHelpListsEveryCommand(t *testing.T) {
+	for _, tc := range []struct {
+		argv   []string
+		code   int
+		stdout bool
+	}{
+		{[]string{"legion", "--help"}, 0, true},
+		{[]string{"legion", "-h"}, 0, true},
+		{[]string{"legion", "help"}, 0, true},
+		{[]string{"legion"}, 2, false},
+	} {
+		var out, errb bytes.Buffer
+		code := run(context.Background(), tc.argv, &out, &errb)
+		listed := errb.String()
+		if tc.stdout {
+			listed = out.String()
+		}
+		if code != tc.code {
+			t.Fatalf("%v = %d, want %d; stderr %q", tc.argv, code, tc.code, errb.String())
+		}
+		for name := range commands {
+			if !strings.Contains(listed, "\n  "+name+" ") {
+				t.Errorf("%v does not list %s: %q", tc.argv, name, listed)
+			}
+		}
+	}
+}
+
+// A command with subcommands answers --help with the usage that names them, and does nothing else:
+// the docs site's CLI generator reads each subcommand from that line.
+func TestDispatchersAnswerHelpWithTheirSubcommands(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		usage   string
+	}{
+		{"claims", "usage: legion claims spawn|deliver|suspend|resume|stop|close|list [flags]"},
+		{"handoff", "usage: legion handoff write|read|complete [flags]"},
+		{"workspace-init", "usage: legion workspace-init fetch --repo"},
+		{"controller", "usage: legion controller start --config"},
+		{"threads", "usage: legion threads resolve --pr"},
+		{"gh", "usage: legion gh -- <gh arguments>"},
+	} {
+		var out, errb bytes.Buffer
+		code := run(context.Background(), []string{"legion", tc.command, "--help"}, &out, &errb)
+		if code != 2 || !strings.HasPrefix(errb.String(), tc.usage) || strings.Contains(errb.String(), "unknown subcommand") {
+			t.Errorf("legion %s --help = %d, stderr %q; want exit 2 and stderr starting %q", tc.command, code, errb.String(), tc.usage)
+		}
+	}
+}
+
 func TestVersionPrintsBuildInfo(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"legion", "version"}, &out, &errb); code != 0 {

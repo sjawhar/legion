@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -42,40 +44,71 @@ var revision string
 
 type command func(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
-var commands = map[string]command{
-	"version":        runVersion,
-	"start":          runStart,
-	"stop":           runStop,
-	"state":          runState,
-	"legions":        runLegions,
-	"status":         runStatus,
-	"restart":        runRestart,
-	"worker-shim":    runWorkerShim,
-	"claims":         runClaims,
-	"gh":             runGh,
-	"credential":     runCredential,
-	"handoff":        runHandoff,
-	"threads":        runThreads,
-	"push":           runPush,
-	"probe-image":    runProbeImage,
-	"workspace-init": runWorkspaceInit,
-	"controller":     runController,
+// subcommand is one `legion` command: what runs it, and its line in `legion --help`.
+type subcommand struct {
+	run     command
+	summary string
+}
+
+var commands = map[string]subcommand{
+	"version":        {runVersion, "print the version and the commit the binary was built from"},
+	"start":          {runStart, "run the Legion daemon from legion.yaml in the foreground; --check-config validates the file and exits"},
+	"stop":           {runStop, "stop the daemon registered for legion.yaml's project"},
+	"state":          {runState, "print the daemon's state: admission, issues, pending Dispatch status writes (--json for all of it)"},
+	"legions":        {runLegions, "list the daemons registered on this machine"},
+	"status":         {runStatus, "status <team>: is that daemon running; status <issue> todo|backlog|icebox: set the issue's Dispatch status"},
+	"restart":        {runRestart, "stop a registered daemon and start it again from the configuration it recorded"},
+	"worker-shim":    {runWorkerShim, "bridge an agent's Oh My Pi to the daemon's worker stream (the daemon starts it in every pod)"},
+	"claims":         {runClaims, "the operator's hand on the daemon's claims: spawn, deliver, suspend, resume, stop, close, list"},
+	"gh":             {runGh, "run gh with a GitHub token from this session's grant; merges and GitHub-issue writes are refused"},
+	"credential":     {runCredential, "git credential helper answering with a token from this session's grant"},
+	"handoff":        {runHandoff, "write or read a phase's .legion/ handoff, or report the phase complete"},
+	"threads":        {runThreads, "resolve a pull request's review threads whose opener accepted the reply"},
+	"push":           {runPush, "push the issue branch (@-) to legion/<issue>, the one push every phase worker uses"},
+	"probe-image":    {runProbeImage, "run the worker image's launch probes (the image build and the daemon's probe Sandbox run it)"},
+	"workspace-init": {runWorkspaceInit, "a Sandbox pod's two init containers: fetch the repository, provision the issue's workspace"},
+	"controller":     {runController, "start the controller, the interactive Oh My Pi session an operator talks to"},
+}
+
+// helpRequested says whether a command's first argument asks for its usage.
+func helpRequested(arg string) bool {
+	return arg == "-h" || arg == "-help" || arg == "--help"
+}
+
+// usage is `legion --help`: every command, alphabetically, with its one line.
+func usage(w io.Writer) {
+	fmt.Fprintln(w, "usage: legion <command> [flags]")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Commands:")
+	for _, name := range slices.Sorted(maps.Keys(commands)) {
+		fmt.Fprintf(w, "  %-16s %s\n", name, commands[name].summary)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Run `legion <command> --help` for a command's flags.")
 }
 
 func run(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
 	if len(argv) < 2 {
-		fmt.Fprintln(stderr, "usage: legion <command> [flags]")
+		usage(stderr)
 		return 2
+	}
+	if argv[1] == "help" || helpRequested(argv[1]) {
+		usage(stdout)
+		return 0
 	}
 	cmd, ok := commands[argv[1]]
 	if !ok {
-		fmt.Fprintf(stderr, "legion: unknown command %q\n", argv[1])
+		fmt.Fprintf(stderr, "legion: unknown command %q; run legion --help for the commands\n", argv[1])
 		return 2
 	}
-	return cmd(ctx, argv[2:], stdout, stderr)
+	return cmd.run(ctx, argv[2:], stdout, stderr)
 }
 
-func runVersion(_ context.Context, _ []string, stdout, _ io.Writer) int {
+func runVersion(_ context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		fmt.Fprintln(stderr, "usage: legion version")
+		return 2
+	}
 	version := "(devel)"
 	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
 		version = info.Main.Version
@@ -393,11 +426,15 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return runIssueStatus(ctx, args[0], args[1], args[2:], stdout, stderr)
 	}
 	flags := newFlags("status", stderr)
+	statusUsage := func() {
+		fmt.Fprintf(stderr, "usage: legion status <team>\n       %s\n", strings.TrimPrefix(issueStatusUsage, "usage: "))
+	}
+	flags.Usage = statusUsage
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: legion status <team>")
+		statusUsage()
 		return 2
 	}
 	team := flags.Arg(0)
@@ -437,11 +474,12 @@ func dialHost(bind string) string {
 
 func runRestart(ctx context.Context, args []string, _, stderr io.Writer) int {
 	flags := newFlags("restart", stderr)
+	flags.Usage = func() { fmt.Fprintln(stderr, "usage: legion restart <team>") }
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	if flags.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: legion restart <team>")
+		flags.Usage()
 		return 2
 	}
 	team := flags.Arg(0)

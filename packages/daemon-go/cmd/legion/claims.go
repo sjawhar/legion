@@ -34,7 +34,7 @@ var claimsCommands = map[string]command{
 }
 
 func runClaims(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
+	if len(args) == 0 || helpRequested(args[0]) {
 		fmt.Fprintln(stderr, claimsUsage)
 		return 2
 	}

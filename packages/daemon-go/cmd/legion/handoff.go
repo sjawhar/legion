@@ -24,9 +24,12 @@ import (
 // HANDOFF_PHASES). A pane's role is its claim role, LEGION_ROLE, never one of these.
 var handoffPhases = map[string]bool{"architect": true, "plan": true, "implement": true, "test": true, "review": true}
 
+// handoffUsage names every subcommand of `legion handoff`.
+const handoffUsage = "usage: legion handoff write|read|complete [flags]"
+
 func runHandoff(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: legion handoff write|read|complete [flags]")
+	if len(args) == 0 || helpRequested(args[0]) {
+		fmt.Fprintln(stderr, handoffUsage)
 		return 2
 	}
 	switch args[0] {
@@ -37,7 +40,7 @@ func runHandoff(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	case "complete":
 		return runHandoffComplete(ctx, args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "legion handoff: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(stderr, "legion handoff: unknown subcommand %q\n%s\n", args[0], handoffUsage)
 		return 2
 	}
 }
