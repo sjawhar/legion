@@ -2,34 +2,24 @@ package docs
 
 import (
 	"context"
-	"fmt"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/store/searchtest"
 )
 
 // A browser edit that grows a document past Postgres's limit on one search vector settles into a
-// version, and the version is found by the words that open it (LEGION-505). 100,000 words no two
-// alike, `w000001 w000002 …` a hundred to a paragraph, are 800 KB of markdown and 1,000 paragraphs,
-// inside every bound a document has, and their whole vector is 1.2 MB of lexemes and positions,
-// past the 1,048,575 bytes Postgres holds in one tsvector. Before 0068 the settlement's version
-// write failed with `string is too long for tsvector`, and so did every settlement of the document.
+// version, and the version is found by the words that open it (LEGION-505). 100,000 distinct words
+// a hundred to a paragraph (searchtest.DistinctWords) are 1,000 paragraphs, inside every bound a
+// document has, and pass that limit. Before 0068 the settlement's version write failed with
+// `string is too long for tsvector`, and so did every settlement of the document.
 func TestSettlementVersionsADocumentPastTheSearchVectorLimit(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
 	before := latestVersionNumber(t, service, artifactID)
 
-	var words strings.Builder
-	for word := 1; word <= 100_000; word++ {
-		fmt.Fprintf(&words, "w%06d", word)
-		if word%100 == 0 {
-			words.WriteString("\n\n")
-		} else {
-			words.WriteString(" ")
-		}
-	}
-	editLiveTree(t, service, artifactID, appendBlocks(t, words.String()))
+	editLiveTree(t, service, artifactID, appendBlocks(t, searchtest.DistinctWords(100_000, "\n\n")))
 	settleCurrentGeneration(t, service, artifactID)
 	waitForDocumentVersion(t, service.store, artifactID, before+1)
 
