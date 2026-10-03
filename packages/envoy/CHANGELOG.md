@@ -74,6 +74,13 @@
   passed is neither, though the count leaves it out: a Clear can move back, so the first request
   naming that reply writes its row and appends the event. A `read_through` deletes the viewer's
   rows for that session whose replies it reaches (LEGION-485).
+- A Dispatch document edit's response reports `advice.decision_blocks_added`: how many ask blocks
+  the edited document holds whose block id no ask block in the document before it carried, read
+  from the parsed trees the edit was applied to. A block inserted in a blockquote, on a list item's
+  line or behind four or more colons counts, as does a block retyped into an ask; an opener inside
+  a fence or indented code counts nothing, nor does a block the edit moved or reworded. An issue
+  document's edit carries it beside the issue advice; a project document's edit, which before
+  carried no advice, now carries `advice` holding the count alone (LEGION-470).
 
 ### Changed
 
@@ -85,19 +92,20 @@
 - A Dispatch approval request follows its document's versions instead of being retracted and
   reopened on every edit (LEGION-470). A version write moves the open request to the new version
   (`ask.edited`), keeping its thread and summary, and leaves it Waiting on agents until its agent
-  calls `POST /api/v1/artifacts/{id}/approval-requests` again. Only the move that takes the request
-  from the human wakes its asker and followers; each later move while it already waits on its agent
-  is recorded quiet (`quiet: true` on its `ask.edited`, `notify: false`, no follower route), as a
-  human's unnamed version is, so a person typing in a document with a request open sends one
-  delivery, not one per settled version. While the request waits on its agent
-  (moved, or answered in its thread), that call hands it back to the human with the new event
-  `ask.handed_back`, rewording it first when the summary is new (`ask.edited`); a hand-back that
-  rewords nothing leaves the question and `edited_at` alone, so an answer the human had started is
-  still saved. While the request already waits on the human, the same summary is a repeat that
-  writes nothing and a different one is refused `409 APPROVAL_WAITS_ON_HUMAN`, since an approval
-  request carries nothing new. The route answers 201 when it wrote anything and 200 when the
-  request already stood as asked. A summary's limit is counted against a ten-digit version, so no
-  version move takes the question past the ask cap. `ask.approval` gains `requested_version`, the
+  calls `POST /api/v1/artifacts/{id}/approval-requests` again. Only the first move since the
+  request was opened or handed back wakes its asker and followers, even when a reply in its thread
+  had already left it waiting on its agent; each later move, while `requested_version` is already
+  below the version it named, is recorded quiet (`quiet: true` on its `ask.edited`,
+  `notify: false`, no follower route), as a human's unnamed version is, so a person typing in a
+  document with a request open sends one delivery, not one per settled version. While the request
+  waits on its agent (moved, or answered in its thread), that call hands it back to the human with
+  the new event `ask.handed_back`, rewording it first when the summary is new (`ask.edited`); a
+  hand-back that rewords nothing leaves the question and `edited_at` alone, so an answer the human
+  had started is still saved. While the request already waits on the human, the same summary is a
+  repeat that writes nothing and a different one is refused `409 APPROVAL_WAITS_ON_HUMAN`, since an
+  approval request carries nothing new. The route answers 201 when it wrote anything and 200 when
+  the request already stood as asked. A summary's limit is counted against a ten-digit version, so
+  no version move takes the question past the ask cap. `ask.approval` gains `requested_version`, the
   version last handed to the human, and a document's `approval` gains `waiting_on` while it is
   `awaiting`. Every route that writes a comment (both comment routes and the delivery callback
   `POST /api/v1/comments/{id}/reply`) answers `ask_waiting_on`, the value the comment's event
@@ -198,6 +206,9 @@
 
 ### Fixed
 - A document's stored update log kept every byte any write had inserted, and every cold load of it built all of it: Dispatch merged the stored updates whole, and a merge keeps the content of deleted items. Five hundred 2,000-character replies to one anchored comment, each projecting the thread's margin record again, left 257 MB stored under a 3 KB document, and a cold one-word edit of it then took 1,842 MiB, past the 1,024 MiB task. A load now applies the stored updates one at a time to a document that collects garbage and returns what it holds, so it costs the live document and one update; and compaction, which runs as a room closes, as the server shuts down and daily, folds the whole log into that state rather than keeping the newest 500 updates beside a merge of the rest. An update a load's document parks for a dependency the log lacks is merged back into that state. A log the fold cannot apply, or a state that does not read back as the document that made it, is not used: the load merges the stored updates whole as before, and compaction leaves them as stored. After compaction, `doc_updates` and any backup of it hold no text a write deleted, so text deleted before a version captured it is gone (Sami's decision, LEGION-496). `doc_updates` is snapshotted once, and the snapshot kept 90 days, right before the first deploy that carries this.
+- A document edit that repairs an ask a browser left unreadable now reports it in
+  `decision_blocks_added`, matching the open ask its next settlement creates. An edit keeps that
+  count as count-only advice when the bounded issue-advice query fails (LEGION-470).
 - A NUL character (U+0000) in caller text no longer answers `500 INTERNAL`: PostgreSQL's text and jsonb cannot hold one, so every Dispatch route that stored such text (issue titles, specs and labels, comments, messages, broadcasts, asks and their answers, document uploads, edits and versions, a bearer's `actor`, a session id in a path) failed at the database. The API's input layer refuses it once instead, before anything is written: `400 NUL_CHARACTER` naming where it stands and its position, as in `options[1].label holds a NUL character (U+0000) at character 2, which Dispatch cannot store`; a NUL in a name the caller wrote is shown as `\u0000`, so no refusal sends one back. It reads every string and member name of a JSON body, a multipart upload's fields and markdown file, the body a credential decision or machine-login lookup relays to the secrets broker, and every route's path and query parameters, so a read such as `GET /api/v1/issues?label=` refuses one too. The document websocket refuses, before the upgrade, a bearer whose `X-Dispatch-Actor` JSON spells one in its session id or origin: that actor became the author of the versions the connection's edits made, so every settlement of the document failed and the third failure in a row failed its room. The check covers every parameter, field and member a request carries, so these requests main accepted are now refused: a retype whose typed attribute holds a NUL, an insert whose markdown holds a raw NUL inside a typed block's quoted attribute (written as the escape `\x00`, the same value is still taken), a query parameter or multipart field no route reads holding a NUL or a byte that is not UTF-8, and a websocket `X-Dispatch-Actor` whose unread member spells a NUL (LEGION-507).
 - A byte that is not UTF-8 in a path or query parameter (`%FF`), in a multipart upload's field or in a binary file part's `Content-Type`, which the upload stores as the artifact's type, no longer answers `500 INTERNAL`, and one in an uploaded markdown file no longer panics the server, which dropped the connection: PostgreSQL's text cannot hold such a byte, and the document writer refuses one by panicking. The input layer refuses it where it refuses a NUL, `400 INVALID_UTF8` naming the field, the byte and its position. A JSON body cannot carry one, since decoding writes each such byte as U+FFFD (LEGION-507).
 - A NUL character a browser edit puts in a document no longer stops the document from settling. The Yjs update reaches the live document past every route's check, and the version settlement rendered from it, an ask block's question and an anchored comment's or ask's quote each failed at PostgreSQL, so settlement failed every time it ran; with the character in the document's text or under an anchor, every agent edit and named version of the document answered `500` too, until someone deleted it in the editor. Dispatch now writes the character as U+FFFD, which is what CommonMark reads it as, in the markdown it renders and serves and in the ask and anchor text it takes from the document, and matches a quote, a `# Title` quote and a `heading:` anchor against that text, so one copied from `GET /text` finds its target; a typed block's other attributes keep it, written quoted as the escape `\x00` that reads back as U+0000 (LEGION-507).

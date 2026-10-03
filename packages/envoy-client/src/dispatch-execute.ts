@@ -2992,7 +2992,8 @@ async function resolveExistingIssue(
     throw error;
   }
 }
-function asObject(value: unknown): Record<string, unknown> | null {
+/** `value` as a JSON object (not null, not an array), or null for anything else. */
+export function asObject(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
