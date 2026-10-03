@@ -626,15 +626,13 @@ func (p *PgVersioned) head(ctx context.Context, q Queryer, room string) (persist
 // every stored update's deletes, for a room that loads the state to park them again.
 //
 // The state is kept only when it reads back as the document that made it: decoded into a fresh
-// document, it must make the same state vector. ygo does not encode every document it can hold - a
-// stored update can carry a skipped clock range, which a merge writes for a client's missing
-// update, and so can the merge of a parked update - and a state that reads back otherwise would
-// renumber or drop what the stored updates hold. stateThrough then returns the stored updates
-// merged whole, as they were read before it folded them, and reports that it did not fold them,
-// so a compaction keeps them as stored. That merge still holds the skip, and a room that loads it
-// drops the missing update if it arrives later, as it did before. So does a log the document
-// cannot apply, such as one parking more than ygo's pending queue holds: its merge is what a load
-// of it decodes and refuses (ErrDocumentUnloadable), which offers its rebuild.
+// document, it must make the same state vector. ygo v1.50.1-sami.2 preserves the known skipped
+// clock ranges and right origins when it re-encodes a document, but the check also protects a
+// stored state an earlier build made or a later encoder change that reads back otherwise.
+// stateThrough then returns the stored updates merged whole, as they were read before it folded
+// them, and reports that it did not fold them, so a compaction keeps them as stored. So does a log
+// the fold's document cannot apply, such as one parking more than ygo's pending queue holds: its
+// merge is what a load of it decodes and refuses (ErrDocumentUnloadable), which offers its rebuild.
 //
 // A log of one update is returned as stored: compaction leaves the state as one update, and a
 // document's first update deletes nothing an earlier one inserted.

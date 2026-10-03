@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -186,12 +187,10 @@ func TestALoadAndACompactionKeepWhatTheDocumentParked(t *testing.T) {
 }
 
 // A stored update can hold a skipped clock range: a merge of one client's updates around a missing
-// one writes the gap as a skip. ygo counts the skipped clocks as integrated and encodes the
-// client's items after the gap at clocks lower by its length, so a folded state of such a log
-// names parents its own items no longer carry. A load serves the stored updates merged instead,
-// and a compaction keeps them, so the document reads as its rows applied in order. Row 0 is what a
-// compaction stored for a log that lacked one of client 101's updates: 101:27+29 is a skip.
-func TestAStateThatReadsBackOtherwiseIsNeitherLoadedNorStored(t *testing.T) {
+// one writes the gap as a skip. The fold keeps the client's later items at their own clocks, so a
+// load and a compacted load read as the rows applied in order. Row 0 is what a compaction stored
+// for a log that lacked one of client 101's updates: 101:27+29 is a skip.
+func TestALogWithASkippedClockRangeFoldsIntoItsState(t *testing.T) {
 	rows := base64Rows(t,
 		"AwkBAAcBC3Byb3NlbWlycm9yAwdoZWFkaW5nBwABAAYGAAEBBnN0cm9uZwR0cnVlhAECAWOEAQMDb2ZngQEGA4YBCQZzdHJvbmcEbnVsbCEAAQACaWQBIQEFbWFya3MCYzABA2QAxGUmZScMIGRwYWcgYmllY21oiAELAXcDMTMyqAEMAXYDBGtpbmR3B2NvbW1lbnQHcmVwbGllc3UCdwpmcGttb2dqbW5pfEKeAAAEdGV4dHeNAWttb2tjbW1kZGhmcG5rYWFvZGNsYWNwZ2xjIGdpYmpvbWdmZGJrYmpjZm4gIGdjb3Boa25ubW9sbGdvayBlaWVpYWxkbmNocGtiY2ltYmhsbWtqZmlwZCBwY2pkZmRwY2ViZGxtbmxiZWRsaGdiYWlnbGZoaGJjaWxubmFmaGFkYmRhaG9rbWZrY29rbAdlAMQBAwEEFGZwIGRpaW1oY2NuZWJoZmNvZmRvwWUTAQQBxGUUAQQGbmcga21hCh0oAQVtYXJrcwJjMgF2AwRraW5kdwdjb21tZW50B3JlcGxpZXN1AncKamFkYWFuICBvYnxCYAAABHRleHR3TmloampuaiBvaGVwa2hlYWdkaW9lbG1wamlsZmNuaW5uIGxjbWNobm5uaGhoYXBnbWhib25pbGRuIGlmbmVobW5jamNwYWZkbG5vZWZjZMYBCAEJBGNvZGUEdHJ1ZYYBCgRjb2RlBG51bGwCAQIHAwsCZQEUAQ==",
 		"AAIBAgcDCwJlARQB",
@@ -222,8 +221,8 @@ func TestAStateThatReadsBackOtherwiseIsNeitherLoadedNorStored(t *testing.T) {
 			if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
 				t.Fatalf("compact: %v", err)
 			}
-			if stored := storedUpdateCount(t, database, artifactID); stored != len(rows) {
-				t.Fatalf("compaction left %d stored updates, want the %d it could not fold", stored, len(rows))
+			if stored := storedUpdateCount(t, database, artifactID); stored != compactKeep {
+				t.Fatalf("compaction left %d stored updates, want %d", stored, compactKeep)
 			}
 		}
 		loaded, err := versioned.Load(ctx, artifactID)
@@ -324,6 +323,109 @@ func TestACompactionBeforeAMissingUpdateLosesNothingOnceItArrives(t *testing.T) 
 	}
 	if got := read("the load", loaded.Update); got != want {
 		t.Fatalf("the load reads %s, want %s", got, want)
+	}
+}
+
+// A compacted document preserves the right origins that later text updates depend on. Compaction
+// runs after nine rows; after the tenth, Yjs and the stored rows merged both read "hc  chb".
+func TestACompactedDocumentKeepsItsOrderThroughLaterUpdates(t *testing.T) {
+	rows := base64Rows(t,
+		"AQFlAAQBAXQBYwA=",
+		"AQFkAAgBAWECdwRlZyBnfEBAAAABZQEAAQ==",
+		"AQJnAIdkAQEoAGcAAXYBdwZlIGVhaGcBZQEAAQ==",
+		"AQFkAohnAAJ3BiBlIGhjZXxAoAAAAWUBAAE=",
+		"AQFmAIRlAAFoAWUBAAE=",
+		"AQJnAsZlAGYABGJvbGQEdHJ1ZYZmAARib2xkBG51bGwBZQEAAQ==",
+		"AQFnBMRmAGcDAWMBZQEAAQ==",
+		"AQFkBMRnBGcDAWIBZQEAAQ==",
+		"AQFnBcRnBGQEBCAgY2gBZQEAAQ==",
+		"AAFlAQAB",
+	)
+	database := storetest.Open(t)
+	versioned := NewPgVersioned(database)
+	ctx := context.Background()
+	artifactID := createDocument(t, database, "right-origin")
+	for index, row := range rows {
+		if _, err := versioned.AppendUpdate(ctx, artifactID, row); err != nil {
+			t.Fatalf("append update %d: %v", index, err)
+		}
+		if index == 8 {
+			if _, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil {
+				t.Fatalf("compact: %v", err)
+			}
+			if stored := storedUpdateCount(t, database, artifactID); stored != compactKeep {
+				t.Fatalf("compaction left %d stored updates, want %d", stored, compactKeep)
+			}
+		}
+	}
+	read := func(what string, update []byte) string {
+		t.Helper()
+		doc := crdt.New()
+		if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
+			t.Fatalf("%s: apply: %v", what, err)
+		}
+		return doc.GetText("t").ToString()
+	}
+	merged, err := crdt.MergeUpdatesV1(rows...)
+	if err != nil {
+		t.Fatalf("merge the stored updates: %v", err)
+	}
+	want := read("the stored rows merged", merged)
+	if want != "hc  chb" {
+		t.Fatalf("the stored rows merged read %q, want what Yjs reads", want)
+	}
+	loaded, err := versioned.Load(ctx, artifactID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := read("the compacted load", loaded.Update); got != want {
+		t.Fatalf("the compacted load reads %q, want %q", got, want)
+	}
+}
+
+// A log whose updates park more items than the fold's pending queue holds is not folded: the load
+// serves the stored updates merged whole, and compaction leaves every row stored.
+func TestALogTheFoldCannotApplyIsLoadedMergedAndKept(t *testing.T) {
+	writer := crdt.New(crdt.WithClientID(7))
+	text := writer.GetText("t")
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
+	base := crdt.EncodeStateAsUpdateV1(writer, nil)
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "x", nil) })
+	rows := [][]byte{base}
+	for range 2 {
+		before := writer.StateVector()
+		writer.Transact(func(txn *crdt.Transaction) {
+			for range maxUpdateItems/2 + 1 {
+				text.Insert(txn, 0, "y", nil)
+			}
+		})
+		rows = append(rows, crdt.EncodeStateAsUpdateV1(writer, before))
+	}
+	database := storetest.Open(t)
+	versioned := NewPgVersioned(database)
+	ctx := context.Background()
+	artifactID := createDocument(t, database, "unfoldable")
+	for index, row := range rows {
+		if _, err := versioned.AppendUpdate(ctx, artifactID, row); err != nil {
+			t.Fatalf("append update %d: %v", index, err)
+		}
+	}
+	merged, err := crdt.MergeUpdatesV1(rows...)
+	if err != nil {
+		t.Fatalf("merge the stored updates: %v", err)
+	}
+	loaded, err := versioned.Load(ctx, artifactID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !bytes.Equal(loaded.Update, merged) {
+		t.Fatalf("the load returned %d bytes, want the %d-byte merge of its stored updates", len(loaded.Update), len(merged))
+	}
+	if deleted, err := versioned.Compact(ctx, artifactID, compactKeep); err != nil || deleted != 0 {
+		t.Fatalf("compact deleted %d rows (%v), want every stored update kept", deleted, err)
+	}
+	if stored := storedUpdateCount(t, database, artifactID); stored != len(rows) {
+		t.Fatalf("compaction left %d stored updates, want %d", stored, len(rows))
 	}
 }
 

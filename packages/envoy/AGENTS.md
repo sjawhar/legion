@@ -151,15 +151,13 @@ reads an update or a state before the head. What a load's document parks - an up
 dependency no stored update supplies, a delete of an item none holds - is merged back into the
 state, so the room that loads it parks it again until a peer sends what it waits on. A state is
 kept only when it reads back as the document that made it: decoded into a fresh document, it must
-make the same state vector. ygo does not encode every document it holds as it holds it; at
-`v1.49.6-sami.3` a merge writes a client's missing update as a skipped clock range, which ygo
-counts as integrated, so the fold of a log with such a gap would renumber the client's later
-items. A state that reads back otherwise is logged (`dispatch: a document's folded state reads
-back otherwise`), the load serves the stored updates merged whole, and compaction leaves them as
-stored. That merge holds the same skip, so the room that loads it still drops the missing update
-if it arrives later. So is a log the fold's document cannot apply, such as one parking more than
-the pending queue below holds: its merge is what `loadDocument` decodes and refuses as
-`ErrDocumentUnloadable`, which offers the rebuild.
+make the same state vector. ygo `v1.50.1-sami.2` preserves skipped clock ranges and right origins
+when it re-encodes a document. The read-back check still protects a stored state an earlier build
+made, or a later encoder change, that reads back otherwise: it is logged (`dispatch: a document's
+folded state reads back otherwise`), the load serves the stored updates merged whole, and
+compaction leaves them as stored. So does a log the fold's document cannot apply, such as one
+parking more than the pending queue below holds: its merge is what `loadDocument` decodes and
+refuses as `ErrDocumentUnloadable`, which offers the rebuild.
 Compaction (`Compact`, which ygo runs as a room closes and as the server shuts down, and the outbox
 runs over every document every 24 hours, `CompactAll`) folds the whole log into one row holding
 that state (`compactKeep`), whose `content_changed` says whether any row it folded past the latest
