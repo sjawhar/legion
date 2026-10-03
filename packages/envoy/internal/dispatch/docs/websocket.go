@@ -314,13 +314,17 @@ func (s *Service) authorizeSchemaVersion(room, clientSchemaVersion string) (webs
 	return websocket.ConnectionConfig{ReadOnly: schemaReadOnly(open, clientSchemaVersion)}, nil
 }
 
+// ActorHeader is the header a document websocket's bearer names its session in, as the JSON of a
+// session actor.
+const ActorHeader = "X-Dispatch-Actor"
+
 func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 	if token, present := auth.BearerToken(r); present {
 		if !auth.MatchesSharedAgentToken(token, s.agentToken) {
 			return model.Actor{}, errors.New("invalid document bearer token")
 		}
 		var supplied model.Actor
-		if err := json.Unmarshal([]byte(r.Header.Get("X-Dispatch-Actor")), &supplied); err != nil {
+		if err := json.Unmarshal([]byte(r.Header.Get(ActorHeader)), &supplied); err != nil {
 			return model.Actor{}, fmt.Errorf("decode document bearer actor: %w", err)
 		}
 		if supplied.Kind != "session" || strings.TrimSpace(supplied.ID) == "" {
