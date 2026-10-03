@@ -82,21 +82,23 @@ func WarmCodegraphIndexInBackground(dir string) {
 // DO_NOT_TRACK=1 disables both CodeGraph's telemetry and its update check (its bundled docs rank
 // DO_NOT_TRACK above CODEGRAPH_TELEMETRY above stored config above default-on), so an automatic,
 // non-opt-in warm-up never phones home.
-func warmCodegraphIndex(ctx context.Context, dir string) {
+// It returns what the index lock read as when it consulted it (codegraphLockHeldByLiveProcess's
+// reading, which its own log lines quote), or the empty string when it never read the lock.
+func warmCodegraphIndex(ctx context.Context, dir string) string {
 	codegraphPath, err := exec.LookPath("codegraph")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up skipped for %s: %s\n", dir, err)
-		return
+		return ""
 	}
 	status, err := runCodegraph(ctx, codegraphPath, dir, "status", "--json")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up could not run for %s: %s\n", dir, err)
-		return
+		return ""
 	}
 	dirExists, err := pathExists(filepath.Join(dir, ".codegraph"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up could not run for %s: %s\n", dir, err)
-		return
+		return ""
 	}
 	// The lock read and the kill(pid, 0) syscall below are worth paying for only when a repair
 	// might actually run: a complete index already needs neither, and logging a "skipped" line
@@ -107,29 +109,34 @@ func warmCodegraphIndex(ctx context.Context, dir string) {
 		initialized, indexComplete := codegraphStatus(status.stdout)
 		complete = initialized && indexComplete
 	}
-	lockLive := dirExists && !complete && codegraphLockHeldByLiveProcess(dir)
+	lockLive, lockReading := false, ""
+	if dirExists && !complete {
+		lockLive, lockReading = codegraphLockHeldByLiveProcess(dir)
+	}
 	step := nextCodegraphStep(dirExists, lockLive, status.exitCode, status.stdout)
 	if step == codegraphStepNone {
 		if lockLive {
-			fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up for %s skipped: a build in progress holds the index lock\n", dir)
+			fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up for %s skipped: a build in progress holds the index lock (%s)\n", dir, lockReading)
 		}
-		return
+		return lockReading
 	}
 	subcommand := "init"
 	if step == codegraphStepIndex {
 		if _, already := indexed.LoadOrStore(dir, struct{}{}); already {
-			return
+			return lockReading
 		}
 		subcommand = "index"
+		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up running codegraph index in %s: no build holds the index lock (%s)\n", dir, lockReading)
 	}
 	result, err := runCodegraph(ctx, codegraphPath, dir, subcommand)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up could not run for %s: %s\n", dir, err)
-		return
+		return lockReading
 	}
 	if result.exitCode != 0 {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph %s failed for %s (exit %d): %s\n", subcommand, dir, result.exitCode, strings.TrimSpace(result.stderr))
 	}
+	return lockReading
 }
 
 // codegraphStep is the single next codegraph subcommand nextCodegraphStep decides, or none.
@@ -212,43 +219,81 @@ func codegraphStatus(stdout string) (initialized, complete bool) {
 // unrelated process would read as live forever, so where `/proc/<pid>/cmdline` exists, the
 // process also has to look like codegraph — a dead builder whose PID is unused, or whose slot now
 // holds something else, is correctly stale. `/proc` absent (non-Linux) falls back to the liveness
-// check alone.
-func codegraphLockHeldByLiveProcess(dir string) bool {
+// check alone. Its second result says what it read, in the words the warm-up's log lines and its
+// tests' failure messages quote: the lock's content and mtime and, for a PID, the answer to signal
+// 0 and the process's scheduler state and cmdline as /proc shows them at the moment it decided.
+func codegraphLockHeldByLiveProcess(dir string) (bool, string) {
 	lock, err := os.Open(filepath.Join(dir, ".codegraph", "codegraph.lock"))
 	if err != nil {
-		return false
+		return false, err.Error()
 	}
 	defer lock.Close()
 	content, err := io.ReadAll(lock)
 	if err != nil {
-		return false
+		return false, err.Error()
+	}
+	info, statErr := lock.Stat()
+	reading := fmt.Sprintf("content %q", content)
+	if statErr != nil {
+		reading += fmt.Sprintf(", mtime unread: %v", statErr)
+	} else {
+		reading += ", mtime " + info.ModTime().Format(time.RFC3339Nano)
 	}
 	text := strings.TrimSpace(string(content))
 	if text == "" {
-		info, err := lock.Stat()
-		if err != nil {
-			return false
+		if statErr != nil {
+			return false, reading
 		}
-		return time.Since(info.ModTime()).Abs() < codegraphEmptyLockGrace
+		age := time.Since(info.ModTime())
+		if age.Abs() < codegraphEmptyLockGrace {
+			return true, fmt.Sprintf("%s: empty for %s, within the %s grace", reading, age, codegraphEmptyLockGrace)
+		}
+		return false, fmt.Sprintf("%s: empty for %s, outside the %s grace", reading, age, codegraphEmptyLockGrace)
 	}
 	pid, err := strconv.Atoi(text)
 	if err != nil || pid <= 0 {
-		return false
+		return false, reading + ": not a PID"
 	}
 	// Signal 0 sends nothing; a nil error means the process exists and is signalable, and EPERM
 	// means it exists but belongs to another user — both are live. Any other error (typically
 	// ESRCH) means it is gone.
 	sigErr := syscall.Kill(pid, 0)
 	if sigErr != nil && !errors.Is(sigErr, syscall.EPERM) {
-		return false
+		return false, fmt.Sprintf("%s: signal 0 to pid %d: %v", reading, pid, sigErr)
 	}
+	reading += fmt.Sprintf(": pid %d answers signal 0", pid)
+	if sigErr != nil {
+		reading += fmt.Sprintf(" (%v)", sigErr)
+	}
+	reading += ", " + procState(pid)
 	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
 		// No /proc entry at all (process gone between the signal and this read, or a non-Linux
 		// host where /proc never exists): the signal result is all there is to go on.
-		return true
+		return true, fmt.Sprintf("%s, cmdline unread: %v", reading, err)
 	}
-	return strings.Contains(string(cmdline), "codegraph")
+	if strings.Contains(string(cmdline), "codegraph") {
+		return true, fmt.Sprintf("%s, cmdline %q names codegraph", reading, cmdline)
+	}
+	return false, fmt.Sprintf("%s, cmdline %q does not name codegraph", reading, cmdline)
+}
+
+// procState names pid's scheduler state (R, S, D, Z, …) from /proc/<pid>/stat: the first field
+// after the parenthesized command name, which may itself hold spaces and parentheses.
+func procState(pid int) string {
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return fmt.Sprintf("state unread: %v", err)
+	}
+	end := bytes.LastIndexByte(stat, ')')
+	if end < 0 {
+		return fmt.Sprintf("state unparsed: %q", stat)
+	}
+	fields := strings.Fields(string(stat[end+1:]))
+	if len(fields) == 0 {
+		return fmt.Sprintf("state unparsed: %q", stat)
+	}
+	return "state " + fields[0]
 }
 
 type codegraphResult struct {

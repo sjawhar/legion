@@ -342,14 +342,21 @@ esac
 		t.Fatal(err)
 	}
 
-	warmCodegraphIndex(context.Background(), dir)
+	reading := warmCodegraphIndex(context.Background(), dir)
 	calls, err := os.ReadFile(callLog)
 	if err != nil {
 		t.Fatalf("read codegraph call log: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
 	if !slices.Equal(lines, []string{"status"}) {
-		t.Fatalf("codegraph calls = %v, want exactly status alone (no index or init while the lock names a live process)", lines)
+		// The stand-in as warming saw it when it decided, beside the same read once warming has
+		// returned. The state and cmdline tell a stand-in caught mid-exec (state R, an empty
+		// cmdline, usually codegraph's by the second read) from a dead one (state Z, or gone).
+		if reading == "" {
+			reading = "never read"
+		}
+		_, after := codegraphLockHeldByLiveProcess(dir)
+		t.Fatalf("codegraph calls = %v, want exactly status alone (no index or init while the lock names a live process)\nwarming read the lock as: %s\nthe lock reads now as: %s", lines, reading, after)
 	}
 }
 
