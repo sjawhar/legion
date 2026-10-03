@@ -215,7 +215,14 @@ count in `api/routes_table_test.go`. `auth` is `public`, `any` (user or bearer),
 under a server root (`/api`, `/v1`, `/auth`, `/ws`, `/healthz`) is answered by
 `routes/router.go` with `404 {"code":"NOT_FOUND","error":"no route for <METHOD> <path>","hint":"GET
 /api/v1 lists every route"}` before any dashboard lookup; only paths outside those roots fall back
-to the SPA shell.
+to the SPA shell. Every page the static handler serves (`index.html` and that fallback) carries
+`Cache-Control: no-cache` and an `ETag` of its bytes, never a `Last-Modified` (`servePage` in
+`routes/router.go`): a browser revalidates it before running it, gets a 304 only for the page this
+server holds, and gets this server's page in place of any other, since the servers behind one load
+balancer can hold different builds whose file times say nothing about which is newer (a rollback
+serves the older file). A file under `/assets`, Vite's content-hashed output, carries
+`public, max-age=31536000, immutable`; any other file (the favicon) carries none, and a missing
+asset's 404 carries none either.
 
 Every `/api/v1` route accepts an authenticated user or an agent bearer unless
 the table says human only.

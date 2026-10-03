@@ -227,15 +227,16 @@ func writeJSONError(w http.ResponseWriter, status int, message string, expected 
 }
 
 // writeNATSError answers a request NATS did not serve. What NATS refuses however often it is sent
-// is the caller's own input, so it is answered naming why: a message too large to take whole, or a
-// session id or role whose KV key would make a subject too long (bus.ErrTooLarge), is a 413, and a
-// topic or key NATS does not accept in a subject (bus.ErrInvalidSubject) a 400. Any other failure
-// is status with message.
+// (bus.ErrRefused) is the caller's own input, so it is answered naming why: a message too large to
+// take whole, or a session id or role whose KV key would make a subject too long (bus.ErrTooLarge),
+// is a 413, and any other refusal, a topic or key NATS does not accept in a subject
+// (bus.ErrInvalidSubject) or a key outside nats.go's key alphabet (bus.ErrInvalidKey: `ses:bad`), a
+// 400. Any other failure is status with message.
 func writeNATSError(w http.ResponseWriter, err error, status int, message string) {
 	switch {
 	case errors.Is(err, bus.ErrTooLarge):
 		writeJSONError(w, http.StatusRequestEntityTooLarge, err.Error())
-	case errors.Is(err, bus.ErrInvalidSubject):
+	case errors.Is(err, bus.ErrRefused):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	default:
 		writeJSONError(w, status, message)

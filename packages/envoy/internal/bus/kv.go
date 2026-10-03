@@ -11,13 +11,15 @@ import (
 // KeyValue is a KV handle that checks a key before nats.go builds a subject from it, since nats.go
 // checks only the characters a key may hold: a key whose subject would reach past maxSubjectBytes is
 // ErrTooLarge, and one NATS would not accept in a subject (an empty token, `a..b`, which nats.go
-// allows, or whitespace) is ErrInvalidSubject, each refused before anything is sent. A write (Put,
-// PutString, Create, Update) is held to the longest subject any call on its key builds, a watcher's
-// create request, so a key written through it stays readable, watchable and deletable. Any other
-// call is held only to the subject it builds itself, so a key an earlier build stored past the write
-// bound still lists and deletes, and still reads while its get fits: a store serves it or skips it,
-// and a reaper removes it. EnsureKeyValue and OpenKeyValue are how the listener and Dispatch open
-// every bucket; a test wraps a handle it injects faults through as KeyValue{KeyValue: handle}.
+// allows, or whitespace) is ErrInvalidSubject, each refused before anything is sent. nats.go's own
+// refusal of a key outside its alphabet is named the ErrInvalidKey it is (invalidKey), so every
+// key a call refuses however often it is named is an ErrRefused. A write (Put, PutString, Create,
+// Update) is held to the longest subject any call on its key builds, a watcher's create request, so
+// a key written through it stays readable, watchable and deletable. Any other call is held only to
+// the subject it builds itself, so a key an earlier build stored past the write bound still lists
+// and deletes, and still reads while its get fits: a store serves it or skips it, and a reaper
+// removes it. EnsureKeyValue and OpenKeyValue are how the listener and Dispatch open every bucket; a
+// test wraps a handle it injects faults through as KeyValue{KeyValue: handle}.
 type KeyValue struct {
 	nats.KeyValue
 }
@@ -75,52 +77,76 @@ func (kv KeyValue) write(key string) error {
 	return kv.check(key, watchOverhead(kv.Bucket()))
 }
 
+// invalidKey names nats.go's refusal of a key outside its key alphabet (nats.ErrInvalidKey) as the
+// ErrInvalidKey it is, naming key. nats.go checks the alphabet before it sends anything (an exact
+// key on a read, write or delete, a search key on a watch), so the handle reads its answer rather
+// than repeat its check.
+func invalidKey(key any, err error) error {
+	if errors.Is(err, nats.ErrInvalidKey) {
+		return fmt.Errorf("%w: key %q: %w", ErrInvalidKey, key, err)
+	}
+	return err
+}
+
 func (kv KeyValue) Get(key string) (nats.KeyValueEntry, error) {
 	if err := kv.check(key, getOverhead(kv.Bucket())); err != nil {
 		return nil, err
 	}
-	return kv.KeyValue.Get(key)
+	entry, err := kv.KeyValue.Get(key)
+	return entry, invalidKey(key, err)
+}
+
+// GetRevision gets key by revision, which names the revision rather than the key in its subject, so
+// only nats.go's alphabet check refuses a key here.
+func (kv KeyValue) GetRevision(key string, revision uint64) (nats.KeyValueEntry, error) {
+	entry, err := kv.KeyValue.GetRevision(key, revision)
+	return entry, invalidKey(key, err)
 }
 
 func (kv KeyValue) Put(key string, value []byte) (uint64, error) {
 	if err := kv.write(key); err != nil {
 		return 0, err
 	}
-	return kv.KeyValue.Put(key, value)
+	revision, err := kv.KeyValue.Put(key, value)
+	return revision, invalidKey(key, err)
 }
 
 func (kv KeyValue) PutString(key string, value string) (uint64, error) {
 	if err := kv.write(key); err != nil {
 		return 0, err
 	}
-	return kv.KeyValue.PutString(key, value)
+	revision, err := kv.KeyValue.PutString(key, value)
+	return revision, invalidKey(key, err)
 }
 
 func (kv KeyValue) Create(key string, value []byte) (uint64, error) {
 	if err := kv.write(key); err != nil {
 		return 0, err
 	}
-	return kv.KeyValue.Create(key, value)
+	revision, err := kv.KeyValue.Create(key, value)
+	return revision, invalidKey(key, err)
 }
 
 func (kv KeyValue) Update(key string, value []byte, last uint64) (uint64, error) {
 	if err := kv.write(key); err != nil {
 		return 0, err
 	}
-	return kv.KeyValue.Update(key, value, last)
+	revision, err := kv.KeyValue.Update(key, value, last)
+	return revision, invalidKey(key, err)
 }
 
 func (kv KeyValue) Delete(key string, opts ...nats.DeleteOpt) error {
 	if err := kv.check(key, putOverhead(kv.Bucket())); err != nil {
 		return err
 	}
-	return kv.KeyValue.Delete(key, opts...)
+	return invalidKey(key, kv.KeyValue.Delete(key, opts...))
 }
 
 // DeleteAtRead deletes key at the revision it reads, so a write that lands in between is kept, and
 // returns that revision, 0 when there was none to read. A key it may not read (ErrRefused) it may not
-// write either, since a write is held to the longest bound, so nothing can land in between: that key
-// is deleted at no revision, as a key it finds missing is.
+// write either, since a write is held to the longest bound and nats.go refuses a key outside its
+// alphabet everywhere, so nothing can land in between: that key is deleted at no revision, as a key
+// it finds missing is, and a key outside the alphabet is refused by the delete too.
 func (kv KeyValue) DeleteAtRead(key string) (uint64, error) {
 	entry, err := kv.Get(key)
 	var revision uint64
@@ -140,14 +166,15 @@ func (kv KeyValue) Purge(key string, opts ...nats.DeleteOpt) error {
 	if err := kv.check(key, putOverhead(kv.Bucket())); err != nil {
 		return err
 	}
-	return kv.KeyValue.Purge(key, opts...)
+	return invalidKey(key, kv.KeyValue.Purge(key, opts...))
 }
 
 func (kv KeyValue) Watch(keys string, opts ...nats.WatchOpt) (nats.KeyWatcher, error) {
 	if err := kv.check(keys, watchOverhead(kv.Bucket())); err != nil {
 		return nil, err
 	}
-	return kv.KeyValue.Watch(keys, opts...)
+	watcher, err := kv.KeyValue.Watch(keys, opts...)
+	return watcher, invalidKey(keys, err)
 }
 
 func (kv KeyValue) WatchFiltered(keys []string, opts ...nats.WatchOpt) (nats.KeyWatcher, error) {
@@ -156,14 +183,16 @@ func (kv KeyValue) WatchFiltered(keys []string, opts ...nats.WatchOpt) (nats.Key
 			return nil, err
 		}
 	}
-	return kv.KeyValue.WatchFiltered(keys, opts...)
+	watcher, err := kv.KeyValue.WatchFiltered(keys, opts...)
+	return watcher, invalidKey(keys, err)
 }
 
 func (kv KeyValue) History(key string, opts ...nats.WatchOpt) ([]nats.KeyValueEntry, error) {
 	if err := kv.check(key, watchOverhead(kv.Bucket())); err != nil {
 		return nil, err
 	}
-	return kv.KeyValue.History(key, opts...)
+	history, err := kv.KeyValue.History(key, opts...)
+	return history, invalidKey(key, err)
 }
 
 // StreamState is what one STREAM.INFO read says about the stream behind a KV bucket: its name, the

@@ -65,6 +65,7 @@ var commands = map[string]commandEntry{
 	"restart":        {runRestart, "stop a registered daemon and start it again from the configuration it recorded"},
 	"worker-shim":    {runWorkerShim, "bridge an agent's Oh My Pi to the daemon's worker stream (the daemon starts it in every pod)"},
 	"launcher":       {runLauncher, "PID 1 of one role container in an issue pod: starts and stops that role's worker-shim on the daemon's command"},
+	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
 	"gh":             {runGh, "run gh with a GitHub token from this session's grant; merges and GitHub-issue writes are refused"},
 	"credential":     {runCredential, "git credential helper answering with a token from this session's grant"},

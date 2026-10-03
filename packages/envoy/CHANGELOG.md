@@ -197,12 +197,34 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A Dispatch page whose HTML and assets came from different builds stayed blank: during a rolling deploy the load balancer sent a browser's HTML to one task and its hashed entry chunk to the other, which never had it and answered 404, and nothing reloaded the page, since the lazy-chunk recovery runs only once the entry has. The page now reloads itself once when one of its own build's scripts (same origin, under `/assets/`) fails to load, from the same once-per-session budget as the lazy-chunk recovery, never while offline or while the page is being left (from `beforeunload` or `pagehide` until `pageshow`); another origin's script, such as an extension's, never triggers it. Every page the server serves (`index.html` and the shell for a browser route) now carries `Cache-Control: no-cache` and an `ETag` of its bytes in place of `Last-Modified`: a browser could run a heuristically fresh page from an older build after any deploy, and a revalidation by file time could keep another build's page, since a task holding an older file (a rollback, or the other side of the overlap) answered it 304. Every file under `/assets` carries `public, max-age=31536000, immutable`, and `GET /index.html` answers the page rather than redirecting to `/` (LEGION-521).
 - A listener whose session cache had not yet seen a role holder another listener registered a moment ago released the holder's fresh claim as lapsed: a lookup (`GET /v1/roles/<role>`, a role publish) or a role delivery read the claim from the role bucket and the holder from a cache that trails the session bucket, so during a rolling deploy the old task could delete the claim the replacement had just accepted, and the role reached nobody until its holder claimed it again. A soft claim could take such a holder's role, and the role reaper end its claim, the same way. Each now reads the holder from the session bucket itself before it takes anything from it (LEGION-456).
 - One MiB of `>` formed 1,048,576 nested quotes inside the document cap and eventually ended the process in a stack overflow while its tree was validated. Dispatch now refuses the document before building that tree (LEGION-465).
 - Reading a textblock's inline markdown took one stack frame per nested mark, so the stack and memory it needed grew with the nesting the caller wrote: one 1 MiB upload of 262,140 nested strong marks read with no error but peaked at about 0.9 GB of memory. The inline bound above is checked before any walk of those marks that recurses, and goldmark's own walk through a link's label, which enters every image the label holds, meets each image held to the bound as it is made (LEGION-465).
 - A table whose rows hold an escaped pipe in a code span parsed in time quadratic in its size: goldmark's table transformer checked every code span's text against every escaped pipe in the document, and 1 MiB of such rows took over two minutes. Dispatch takes the backslash out of those pipes itself, in one pass, and 1 MiB parses in about two seconds (LEGION-465).
+- An id outside nats.go's key alphabet (`ses:bad`) failed whatever met it in the interest and role buckets, since nats.go refuses such a key on every read, write and delete and the stores took that refusal for a failure. A role claim over such a holder, which an earlier build's bare-string claim or a direct bucket write can leave in the role bucket, wrote the claim and then answered 500. A caller could cause the same 500 itself: a session subscribed to a role topic outside the alphabet (`notifications.role.bad:role`, which subscribe accepts) got it on every unsubscribe of that topic, every unsubscribe of all its topics and every `DELETE /v1/interests/<id>`, and its interest stayed. An interest or claim stored under such a key, which only a direct bucket write makes, stopped the interest reaper or the role reaper at that key every five minutes, logging `reaper cycle failed` or `role claim reaper cycle failed` at ERROR. The handle every bucket opens through now names nats.go's refusal as the refusal it is (`bus.ErrInvalidKey`, naming the key), so each of these skips the key as it already skipped one past the key bound: the claim and the unsubscribe answer 200, and the reapers go on, with a WARN naming the key they cannot delete, which an operator removes by hand (`packages/envoy/AGENTS.md`). A `/v1` route given a session id or role outside the alphabet answers 400 naming it, where it answered 500 (503 on subscribe, 404 reading the interests of a session it holds none for), and Dispatch reads a 400 or 413 from `GET /v1/interests/<id>` as no interest, as it reads a 404 (LEGION-456).
 - Marking or unmarking a document's text, and checking whether a concurrent change removed the text a write inserted, walked the live tree one stack frame per level with no bound, where an authenticated peer can grow the tree through any number of small websocket updates. Each now refuses a node more than 1,000 levels deep, text included, as the document's reads do, and a peer's update that deepens the tree between a write's read and its transaction is answered `500 DOC_SCHEMA` rather than `500 INTERNAL` (LEGION-465).
-- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.49.6-sami.3` (commit `7cf8e9ff`), which walks the deleted children iteratively and carries the transactional GC fix; the change is open upstream (LEGION-465).
+- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork (at `v1.50.1-sami.2` since the entry below), which walks the deleted children iteratively and carries the transactional GC fix, both open upstream as reearth/ygo#263 and #262 (LEGION-465).
+- Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.50.1-sami.2` (commit
+  `e792b8c7`, on upstream `main` at `4d6865dc`), which adds six ygo fixes to the two above, each
+  open upstream (LEGION-496, LEGION-502, LEGION-484). Text no longer changes order when a document
+  is encoded again: ygo folded a character into the run before it even when the two were typed
+  toward different right-hand neighbours, so a browser joining a room, settlement's copy of a room
+  and a compacted state could read the text in a different order from the room (reearth/ygo#266).
+  An update that fills a gap in one client's updates is no longer discarded: ygo integrated a
+  merged update's items past the gap, and now parks them until the gap arrives (#257). A complete
+  document state no longer fails once 100,000 of its items wait on items later in the same state,
+  as when a browser whose client id is lower than the server's writes more than 100,000 blocks
+  into a paragraph the server wrote: ygo resolves a state's own dependencies before it applies its
+  pending cap (#260). A room's broadcast of an update Dispatch writes now validates the update
+  with the server's `MaxPendingItems`, the queue the room itself decodes with, rather than ygo's
+  default of 100,000 (#267), so a write touching more than 100,000 of a document's existing items
+  reaches the room's browsers. ygo's bundled stores keep such an update rather than refusing it
+  (#268); Dispatch stores documents through its own store, which already validates under the
+  room's queue, so this changes no Dispatch write. A room no browser is in, which only the API
+  reads or writes, is now evicted `roomIdleTimeout` (a minute) after the API last touched it, as a
+  room its last browser left already was: ygo's `Server.Apply` cleared the room's idle stamp and
+  nothing set it again, so such a room stayed in memory until the process exited (#269).
 
 - A document write whose issue closed, or whose server shut down with an editor connected, while
   the committed write was being applied to its room no longer hangs. Closing the room retired its
@@ -250,13 +272,23 @@
   which it does only after the store returns, and the worker's exit compaction waited for the
   room's lock, which the settlement held. Until the server restarted the document did not settle
   and none of its later updates were stored, since every update a document stores takes that lock.
-  The store now discards the repair's own update without waiting once its room has left the
-  server, and the settlement fails the room so it reloads; the room worker's compaction skips a
-  room whose lock is held, except when it evicts a failed room. The same slot wait held
+  Every close of the room the server makes now waits for the repair to reach the room's
+  persistence (LEGION-498, below), and the room worker's compaction skips a room whose lock is
+  held, except when it evicts a failed room. The same slot wait held
   `envoy-dispatch backfill-block-ids` for good at a document whose room closed under its stamp.
-  Two cases still hang until the server restarts, tracked as LEGION-498: a room that fails while
-  the settlement commits into it, whose eviction waits for the room's lock on purpose, and a
-  second writer committing into the room while it retires under the repair's commit.
+- A document whose room failed while a settlement wrote a repair into it (a block id it stamps, an
+  ask block's attributes it restores) no longer stays failed until the server restarts, with every
+  read and write that waited for its recovery hung and none of its updates stored (LEGION-498). The
+  failed room's eviction waited for the document's lock, which the settlement held, while the
+  settlement waited for the room's persistence worker that the eviction had retired. A room the
+  server closed under a settlement's repair while a second write committed into it, such as a
+  published edit, hung the same way, each write's store waiting on the other's. The server's own
+  closes of a room (a failed room's eviction, an issue's close, a shutdown's close of a room with
+  an editor) now wait until a repair being written into the room has reached its persistence, and
+  a repair that meets a close under way writes nothing, as one whose room was replaced does. An
+  edit that reached the room's persistence just ahead of a settlement's repair is no longer dropped
+  in the repair's place when the settlement discards the repair because the issue closed or the
+  server began stopping.
 - Saving a document, comment, ask, or message with a long run of underscore-joined characters
   no longer takes quadratic time in Postgres search indexing. `pmdoc` also avoids quadratic work
   in Goldmark's email and delimiter scans and in renderer closer scans. A document that exceeds
