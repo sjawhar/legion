@@ -898,9 +898,15 @@ document version, ask question, comment body, or issue message) are derived on e
 `created_at` and `source_seq` (the `events.id` that introduced it, stamped by `refs.Stamp` right
 after the source's event is appended, in the same transaction). Structural relations stay in the
 columns that own them and the `graph_edges` view (migration 0032) unions both into one typed edge
-relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifacts.issue_key`),
-`anchored_to` (ask/comment anchors), `owned_by` (project-document asks/comments), `replies_to`
-(comment and message threads), `followed_by` (`ask_followers`). Artifact targets are addressed by
+relation: `mentions`, `child_of` (`issues.parent_key`), `blocked_by` (`issue_links`),
+`attached_to` (`artifacts.issue_key`), `anchored_to` (ask/comment anchors), `owned_by`
+(project-document asks/comments), `replies_to` (comment and message threads), `followed_by`
+(`ask_followers`). An issue may wait only on issues in its own project through `blocked_by`.
+For cycle checks an issue has two halves: it starts after its `blocked_by` targets are done and
+after its parent starts, and it is done after it starts and after its children are done. A
+write that would make either half wait on itself is `409 DEPENDENCY_CYCLE`. One sibling may
+wait on another, but a child cannot wait on its parent and a parent cannot wait on its
+descendant through `blocked_by`. Artifact targets are addressed by
 `ref_key`, artifact sources by uuid; each arm has the index its `to`/`from` predicate needs.
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
@@ -908,7 +914,7 @@ exists, and refuses to run without `dispatch.server_url`.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
-issue's own `child_of` and `affects` edges, and the cited node's `?to=` backlink names the spec.
+issue's own `child_of`, `blocked_by` and `affects` edges, and the cited node's `?to=` backlink names the spec.
 Where a reference in text ends, and what it names, is one rule with two readers: `text.ExtractAt`,
 which every write indexes through, and the dashboard's `composerReferences` (`refs/routes.ts`,
 scanning with `referenceSpans` and parsing with `referenceRouteFromHref`), behind its reference

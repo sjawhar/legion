@@ -93,6 +93,7 @@ type ToolArguments = {
   readonly anchor?: unknown;
   readonly options?: unknown;
   readonly labels?: unknown;
+  readonly blocked_by?: unknown;
   readonly external_links?: unknown;
   readonly ops?: unknown;
   readonly in_reply_to?: unknown;
@@ -2002,11 +2003,13 @@ export async function executeDispatchTool(
       const assignee = optionalString(args, "assignee");
       const components = optionalComponents(args, "components");
       const labels = args.labels;
+      const blockedBy = args.blocked_by;
       try {
         const created = await client.issue({
           project,
           title,
           ...(parent === undefined ? {} : { parent }),
+          ...(Array.isArray(blockedBy) ? { blocked_by: blockedBy as string[] } : {}),
           ...(external === undefined ? {} : { external }),
           ...(force === undefined ? {} : { force }),
           ...(spec === undefined ? {} : { spec }),
@@ -2065,6 +2068,7 @@ export async function executeDispatchTool(
       const components = optionalComponents(args, "components");
       const priority = optionalPriority(args, "priority");
       const labels = Array.isArray(args.labels) ? (args.labels as string[]) : undefined;
+      const blockedBy = Array.isArray(args.blocked_by) ? (args.blocked_by as string[]) : undefined;
       const requestedLinks = Array.isArray(args.external_links)
         ? [...new Set(args.external_links as string[])]
         : undefined;
@@ -2107,6 +2111,7 @@ export async function executeDispatchTool(
           ...(priority === undefined ? {} : { priority }),
           ...(route === undefined ? {} : { route }),
           ...(parent === undefined ? {} : { parent: parent === "" ? null : parent }),
+          ...(blockedBy === undefined ? {} : { blocked_by: blockedBy }),
           ...(components === undefined ? {} : { components }),
           ...(requestedLinks === undefined
             ? {}
@@ -2162,6 +2167,13 @@ export async function executeDispatchTool(
         ...(parent === undefined
           ? []
           : [after.parent === null ? "parent cleared" : `parent -> ${after.parent}`]),
+        ...(blockedBy === undefined
+          ? []
+          : [
+              after.blocked_by.length === 0
+                ? "blocked_by cleared"
+                : `blocked by ${after.blocked_by.join(", ")}`,
+            ]),
         ...(components === undefined ? [] : [componentsChange(components, after.components)]),
       ];
       const adviceLines = renderAdvice(input.tool, after.key, after.advice, {

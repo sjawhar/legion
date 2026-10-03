@@ -24,6 +24,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		ExternalLinks *[]model.ExternalLink `json:"external_links"`
 		Assignee      json.RawMessage       `json:"assignee"`
 		Parent        json.RawMessage       `json:"parent"`
+		BlockedBy     *[]string             `json:"blocked_by"`
 		Components    json.RawMessage       `json:"components"`
 		Actor         *model.Actor          `json:"actor"`
 	}
@@ -125,7 +126,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		// A closed issue takes only its rank (board order) and its component attachment
 		// (classified without reopening), alone or beside a reopening status; every other
 		// field, and closing it again, waits for a reopen.
-		others := input.Title != nil || input.Labels != nil || priorityProvided || input.Route != nil || input.ExternalLinks != nil || assigneeProvided || parentProvided
+		others := input.Title != nil || input.Labels != nil || priorityProvided || input.Route != nil || input.ExternalLinks != nil || assigneeProvided || parentProvided || input.BlockedBy != nil
 		reopening := input.Status != nil && status != "done"
 		if others || (input.Status != nil && !reopening) || (input.Status == nil && input.Rank == nil && !componentsProvided) {
 			writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
@@ -189,7 +190,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		}
 		set("route", route)
 	}
-	changed := len(sets) > 0 || componentsProvided
+	changed := len(sets) > 0 || componentsProvided || input.BlockedBy != nil
 	if changed {
 		sets = append(sets, "updated_at = now()")
 		if _, err := tx.Exec(r.Context(), `update issues set `+strings.Join(sets, ", ")+` where key = $1`, args...); err != nil {
@@ -206,6 +207,18 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	if componentsProvided {
 		if err := writeIssueComponents(r.Context(), tx, key, before.Project, *components); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if input.BlockedBy != nil {
+		if err := writeBlockedBy(r.Context(), tx, key, before.Project, *input.BlockedBy); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if parentProvided && parent != nil {
+		if err := assertParentLeavesNoDependencyCycle(r.Context(), tx, key, *parent); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

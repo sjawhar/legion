@@ -40,6 +40,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		Project    string          `json:"project"`
 		Title      string          `json:"title"`
 		Parent     *string         `json:"parent"`
+		BlockedBy  []string        `json:"blocked_by"`
 		External   string          `json:"external"`
 		Force      bool            `json:"force"`
 		Spec       *string         `json:"spec"`
@@ -240,6 +241,10 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		insert into issues (key, project_key, number, title, parent_key, created_by, labels, priority, rank, assignee)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`, key, input.Project, number, input.Title, parent, actorJSON, labels, priority, issueRank, assignee); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := writeBlockedBy(r.Context(), tx, key, input.Project, input.BlockedBy); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

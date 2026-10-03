@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1071,4 +1072,160 @@ func TestIssueChildrenSubtreeRollup(t *testing.T) {
 	if len(leafRow.ExternalLinks) != 0 {
 		t.Fatalf("leaf external links = %#v, want none", leafRow.ExternalLinks)
 	}
+}
+
+// blocked_by is an issue-to-issue dependency: create and PATCH replace its complete target
+// set, every issue payload exposes it, and list rows include it with the primary artifact id.
+func TestIssueBlockedByRoundTrip(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	type issueRead struct {
+		Key               string   `json:"key"`
+		BlockedBy         []string `json:"blocked_by"`
+		PrimaryArtifactID string   `json:"primary_artifact_id"`
+	}
+	create := func(title string, fields map[string]any) issueRead {
+		t.Helper()
+		body := map[string]any{"project": "CORE", "title": title}
+		for name, value := range fields {
+			body[name] = value
+		}
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", body, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+		return decodeBody[issueRead](t, response)
+	}
+	first := create("First blocker", nil)
+	second := create("Second blocker", nil)
+	dependent := create("Dependent", map[string]any{"blocked_by": []string{second.Key, first.Key}})
+	want := []string{first.Key, second.Key}
+	if !slices.Equal(dependent.BlockedBy, want) {
+		t.Fatalf("created blocked_by = %v, want %v", dependent.BlockedBy, want)
+	}
+
+	detail := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+dependent.Key, nil, "alice")
+	if detail.Code != http.StatusOK {
+		t.Fatalf("read issue: status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	if got := decodeBody[issueRead](t, detail).BlockedBy; !slices.Equal(got, want) {
+		t.Fatalf("read blocked_by = %v, want %v", got, want)
+	}
+
+	listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=CORE", nil, "alice")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list issues: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	var listedDependent *issueRead
+	for _, row := range decodeBody[[]issueRead](t, listed) {
+		if row.Key == dependent.Key {
+			listedDependent = &row
+			break
+		}
+	}
+	if listedDependent == nil || !slices.Equal(listedDependent.BlockedBy, want) || listedDependent.PrimaryArtifactID == "" {
+		t.Fatalf("list row = %#v, want blocked_by=%v and a primary_artifact_id", listedDependent, want)
+	}
+
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+dependent.Key+"/events", nil, "alice")
+	if events.Code != http.StatusOK {
+		t.Fatalf("list events: status=%d body=%s", events.Code, events.Body.String())
+	}
+	var log []struct {
+		Type    string          `json:"type"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.NewDecoder(events.Body).Decode(&log); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	foundCreated := false
+	for _, event := range log {
+		if event.Type != "issue.created" {
+			continue
+		}
+		foundCreated = true
+		var payload issueRead
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode issue.created payload: %v", err)
+		}
+		if !slices.Equal(payload.BlockedBy, want) {
+			t.Fatalf("issue.created blocked_by = %v, want %v", payload.BlockedBy, want)
+		}
+	}
+	if !foundCreated {
+		t.Fatalf("issue events = %s, want issue.created", events.Body.String())
+	}
+
+	cleared := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+dependent.Key, map[string]any{
+		"blocked_by": []string{},
+	}, "alice")
+	if cleared.Code != http.StatusOK {
+		t.Fatalf("clear blocked_by: status=%d body=%s", cleared.Code, cleared.Body.String())
+	}
+	if got := decodeBody[issueRead](t, cleared).BlockedBy; len(got) != 0 {
+		t.Fatalf("patched blocked_by = %v, want []", got)
+	}
+}
+
+// A blocked_by dependency cannot make a child wait on its parent, a parent wait on its descendant,
+// or any issue wait on itself. One sibling may wait on another, and blockers never cross a
+// Dispatch project boundary.
+func TestIssueBlockedByRefusesDependencyCycles(t *testing.T) {
+	handler := newTestHandler(t)
+	for _, project := range []string{"CORE", "SIDE"} {
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+			"key": project, "name": project,
+		}, "alice"); response.Code != http.StatusCreated {
+			t.Fatalf("create project %s: status=%d body=%s", project, response.Code, response.Body.String())
+		}
+	}
+	create := func(project, title string, fields map[string]any) model.Issue {
+		t.Helper()
+		body := map[string]any{"project": project, "title": title, "force": true}
+		for name, value := range fields {
+			body[name] = value
+		}
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", body, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Issue](t, response)
+	}
+	expectRefusal := func(name string, response *httptest.ResponseRecorder, status int, code string) {
+		t.Helper()
+		if response.Code != status || !strings.Contains(response.Body.String(), `"code":"`+code+`"`) {
+			t.Fatalf("%s: status=%d body=%s, want %d %s", name, response.Code, response.Body.String(), status, code)
+		}
+	}
+
+	first := create("CORE", "First", nil)
+	second := create("CORE", "Second", map[string]any{"blocked_by": []string{first.Key}})
+	expectRefusal("dependency loop", dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+first.Key, map[string]any{
+		"blocked_by": []string{second.Key},
+	}, "alice"), http.StatusConflict, "DEPENDENCY_CYCLE")
+
+	parent := create("CORE", "Parent", nil)
+	child := create("CORE", "Child", map[string]any{"parent": parent.Key})
+	expectRefusal("child waits on its parent", dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child.Key, map[string]any{
+		"blocked_by": []string{parent.Key},
+	}, "alice"), http.StatusConflict, "DEPENDENCY_CYCLE")
+	create("CORE", "Sibling", map[string]any{"parent": parent.Key, "blocked_by": []string{child.Key}})
+
+	childToReparent := create("CORE", "Child to reparent", nil)
+	intermediate := create("CORE", "Intermediate", map[string]any{"blocked_by": []string{childToReparent.Key}})
+	parentWithBlocker := create("CORE", "Parent with blocker", map[string]any{
+		"blocked_by": []string{intermediate.Key},
+	})
+	expectRefusal("reparent closes dependency loop", dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+childToReparent.Key, map[string]any{
+		"parent": parentWithBlocker.Key,
+	}, "alice"), http.StatusConflict, "DEPENDENCY_CYCLE")
+
+	foreign := create("SIDE", "Foreign", nil)
+	expectRefusal("foreign-project blocker", dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+		"project": "CORE", "title": "Cross-project dependency", "blocked_by": []string{foreign.Key},
+	}, "alice"), http.StatusBadRequest, "BLOCKED_BY_OUTSIDE_PROJECT")
 }
