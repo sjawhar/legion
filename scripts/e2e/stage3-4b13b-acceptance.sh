@@ -730,7 +730,12 @@ for f in "${parts[@]}"; do
   cmp -s "$pdir/$f" "$root/packages/daemon/internal/prompts/go/$f" || fail "$pdir/$f is not the head's embedded $f"
 done
 note "all ${#parts[@]} Go prompt parts in $pdir equal the head's packages/daemon/internal/prompts/go/* (${parts[*]})"
-jj -R "$root" file show -r "$base_rev" root:packages/daemon/internal/prompts/go/merger.md >"$evidence/merger.base.md"
+# The daemon's package directory was renamed after the default base revision, so the base's
+# merger.md is found at whichever package path that revision has, and must be exactly one. jj
+# prints the paths it lists relative to the working directory, hence the listing from the root.
+base_merger=$(cd "$root" && jj file list -r "$base_rev" 'root-glob:"packages/*/internal/prompts/go/merger.md"')
+[ -n "$base_merger" ] && [ "$(wc -l <<<"$base_merger")" = 1 ] || fail "the base revision $base_rev holds '$base_merger' for packages/*/internal/prompts/go/merger.md, want exactly one file"
+jj -R "$root" file show -r "$base_rev" "root:$base_merger" >"$evidence/merger.base.md"
 [ -s "$evidence/merger.base.md" ] || fail "the base revision's merger.md read back empty"
 cmp -s "$evidence/merger.base.md" "$pdir/merger.md" && fail "the base merger.md equals the head's; nothing to prove"
 stat -c '%n %.9Y' "$pdir"/*.md >"$evidence/prompts-mtime-before.txt"
