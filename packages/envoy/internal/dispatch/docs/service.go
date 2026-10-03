@@ -1908,6 +1908,10 @@ func (s *Service) recordUpdateClass(room string, update []byte, contentChanged, 
 	}
 }
 
+// consumeUpdateClass takes the class the room's update observer recorded for update, wherever it
+// stands among the room's recorded updates. ygo fires a transaction's observers after the
+// transaction has released the document's lock, so two peers' updates reach persistence in the
+// order their read loops hand them on, which need not be the order the room recorded them in.
 func (s *Service) consumeUpdateClass(room string, update []byte) (bool, bool, bool) {
 	state := s.room(room)
 	state.mu.Lock()
@@ -1937,6 +1941,10 @@ func (s *Service) finishDurableAppend(room string) {
 func (s *Service) hasDurableAppend(room string) bool {
 	return s.room(room).durableAppends.Load() > 0
 }
+
+// waitForPendingUpdates waits until the room has handed persistence every update its update
+// observer recorded, from every peer and the service alike. It counts the room, not a writer: a
+// peer still writing keeps it waiting for as long as the room stores more slowly than it writes.
 func (s *Service) waitForPendingUpdates(ctx context.Context, room string) error {
 	for s.hasPendingUpdates(room) {
 		select {
