@@ -10,21 +10,6 @@ const (
 	SettlementDuplicate SettlementClassification = "duplicate"
 	SettlementConflict  SettlementClassification = "conflict"
 	SettlementNewer     SettlementClassification = "newer"
-	SettlementRefresh   SettlementClassification = "refresh"
-)
-
-// GitHubFenceEffect states what a complete GitHub rollup can do to a stored CI fence. The Go
-// daemon reads no rollup, so nothing on its path produces one: AcceptGitHubFence, and the
-// Reconciled branch of ClassifySettlement, replay the shipped daemon's recorded classification
-// fixtures (packages/contracts/fixtures/classification) until LEGION-208 Stage 7 deletes them.
-type GitHubFenceEffect string
-
-const (
-	GitHubFenceAdvance  GitHubFenceEffect = "advance"
-	GitHubFenceApply    GitHubFenceEffect = "apply"
-	GitHubFenceUnfenced GitHubFenceEffect = "unfenced"
-	GitHubFenceStale    GitHubFenceEffect = "stale"
-	GitHubFenceConflict GitHubFenceEffect = "conflict"
 )
 
 // SettlementCandidate is the listener's proposed CI outcome for one commit and its ordering
@@ -53,12 +38,11 @@ type SettlementCandidate struct {
 	Failing    []string            `json:"failing"`
 }
 
-// CiOutcome is the effective result after combining a partial listener settlement with stored
-// failures and GitHub-only failing statuses.
+// CiOutcome is the effective result of a partial listener settlement combined with the stored
+// failures it omits.
 type CiOutcome struct {
-	Verdict         string   `json:"verdict"`
-	Failing         []string `json:"failing"`
-	FailingStatuses []string `json:"failingStatuses"`
+	Verdict string   `json:"verdict"`
+	Failing []string `json:"failing"`
 }
 
 // ClassifySettlement decides whether a listener settlement may update the stored CI fence.
@@ -76,33 +60,19 @@ func ClassifySettlement(pr record.PullRequest, in SettlementCandidate) Settlemen
 		return SettlementConflict
 	}
 
-	// Generation zero is a valid listener generation. The record's empty snapshot is the contract's
-	// representation of a GitHub-authored fence, which has no listener generation.
-	hasListenerIdentity := pr.Snapshot != ""
-	if hasListenerIdentity && in.Generation < pr.Generation {
+	if in.Generation < pr.Generation {
 		return SettlementStale
 	}
-	if hasListenerIdentity && in.Generation == pr.Generation {
+	if in.Generation == pr.Generation {
 		if in.Snapshot == pr.Snapshot {
 			return SettlementDuplicate
 		}
 		return SettlementConflict
 	}
-	// Reconciled is never true on the Go path: a refresh only keeps it, and only a GitHub read,
-	// which the Go daemon does not make, could set it (see GitHubFenceEffect).
-	if !pr.Reconciled {
-		return SettlementNewer
-	}
-
-	effective := EffectiveOutcome(pr, in)
-	if effective.Verdict == pr.Verdict && sameStringMultiset(effective.Failing, pr.Failing) {
-		return SettlementRefresh
-	}
-	return SettlementStale
+	return SettlementNewer
 }
 
-// EffectiveOutcome preserves failures omitted by an incomplete listener observation and every
-// GitHub-only failing status.
+// EffectiveOutcome preserves failures omitted by an incomplete listener observation.
 func EffectiveOutcome(pr record.PullRequest, in SettlementCandidate) CiOutcome {
 	reported := make(map[string]struct{}, len(in.CheckRuns)+len(in.Failing))
 	for _, run := range in.CheckRuns {
@@ -119,52 +89,8 @@ func EffectiveOutcome(pr record.PullRequest, in SettlementCandidate) CiOutcome {
 			failing = append(failing, name)
 		}
 	}
-	failingStatuses := make([]string, len(pr.FailingStatuses))
-	copy(failingStatuses, pr.FailingStatuses)
-	if len(failing) != 0 || len(failingStatuses) != 0 {
-		return CiOutcome{Verdict: "red", Failing: failing, FailingStatuses: failingStatuses}
+	if len(failing) != 0 {
+		return CiOutcome{Verdict: "red", Failing: failing}
 	}
-	return CiOutcome{Verdict: in.Verdict, Failing: []string{}, FailingStatuses: failingStatuses}
-}
-
-// AcceptGitHubFence decides whether a complete GitHub rollup can update a stored CI fence.
-func AcceptGitHubFence(pr record.PullRequest, checkRuns []record.AttemptRun) GitHubFenceEffect {
-	fenced := pr.CheckRuns != nil && len(pr.CheckRuns) > 0
-	if len(checkRuns) == 0 {
-		if fenced {
-			return GitHubFenceStale
-		}
-		return GitHubFenceUnfenced
-	}
-	if pr.CheckRuns == nil {
-		return GitHubFenceAdvance
-	}
-
-	switch CompareAttemptSets(pr.CheckRuns, checkRuns) {
-	case AttemptSetNewer:
-		return GitHubFenceAdvance
-	case AttemptSetEqual:
-		return GitHubFenceApply
-	case AttemptSetOlder:
-		return GitHubFenceStale
-	default:
-		return GitHubFenceConflict
-	}
-}
-
-func sameStringMultiset(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	counts := make(map[string]int, len(left))
-	for _, value := range left {
-		counts[value]++
-	}
-	for _, value := range right {
-		if counts[value] == 0 {
-			return false
-		}
-		counts[value]--
-	}
-	return true
+	return CiOutcome{Verdict: in.Verdict, Failing: []string{}}
 }
