@@ -227,18 +227,17 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 	})
 }
 
-// overlapping runs read, which reports whether its run overlapped a peer's update, until
-// overlapsWanted runs have, failing the test if that takes past overlapDeadline. Under -race a
-// walk of the live tree is reported only when an update lands while it walks, and a read whose
-// runs are slow - a database round trip each, or a settlement's transaction - would meet few of
-// them in a fixed time.
+// overlapping runs read until overlapsWanted runs have met a peer's update. The peer keeps
+// typing until the test ends, so the evidence arrives at the speed the loaded machine permits;
+// the test's own context is the bound when it cannot.
 func overlapping(t *testing.T, read func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(overlapDeadline)
 	runs := 0
 	for overlapped := 0; overlapped < overlapsWanted; runs++ {
-		if time.Now().After(deadline) {
-			t.Fatalf("%d of %d runs overlapped a peer's update in %s, want %d", overlapped, runs, overlapDeadline, overlapsWanted)
+		select {
+		case <-t.Context().Done():
+			t.Fatalf("%d of %d runs overlapped a peer's update before the test ended, want %d", overlapped, runs, overlapsWanted)
+		default:
 		}
 		if read() {
 			overlapped++
@@ -247,10 +246,7 @@ func overlapping(t *testing.T, read func() bool) {
 	t.Logf("%d runs, %d of them beside a peer's update", runs, overlapsWanted)
 }
 
-const (
-	overlapsWanted  = 50
-	overlapDeadline = time.Minute
-)
+const overlapsWanted = 50
 
 // peerApplied is how much of peer's typing the room has applied: its clock for the peer.
 func peerApplied(service *Service, artifactID string, peer crdt.ClientID) uint64 {
