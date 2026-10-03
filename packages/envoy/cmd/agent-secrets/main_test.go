@@ -375,6 +375,29 @@ func TestTopLevelHelpExitsZero(t *testing.T) {
 	}
 }
 
+// TestEveryFormAnswersHelp pins that each form usage lists answers -h with its own synopsis and
+// exit 0, flags or none, before it needs a broker, a key or a helper; the docs site's CLI
+// reference is built from these answers.
+func TestEveryFormAnswersHelp(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	for _, c := range commands {
+		if c.name == "--version" {
+			continue
+		}
+		args := append(strings.Fields(c.name), "-h")
+		if c.name == "" {
+			args = []string{"NAME", "-h", "--", "true"}
+		}
+		_, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(), nil, args...)
+		if exit != 0 {
+			t.Fatalf("agent-secrets %s: exit = %d, want 0: %s", strings.Join(args, " "), exit, stderr)
+		}
+		if !strings.Contains(stderr, "usage: "+c.synopsis) {
+			t.Fatalf("agent-secrets %s: stderr = %q, want its synopsis %q", strings.Join(args, " "), stderr, c.synopsis)
+		}
+	}
+}
+
 // TestExecFormRefusesToRunWhenAGrantedNameIsProxyOnly is the regression for the review's
 // Important finding 3: a granted request whose delivery is "proxy" (or otherwise missing from
 // the grant's values) must never exec — a proxy-only secret has no value for the CLI to release

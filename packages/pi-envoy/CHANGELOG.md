@@ -4,6 +4,27 @@
 
 ### Changed
 
+- Brainstorming happens in the spec (LEGION-475). When a session has Dispatch, the `dispatch`
+  skill's "Design changes are brainstormed here" replaces the brainstorming skill's chat questions
+  and its spec file: the first version holds only what the conversation has established and every
+  question that is ready, each as a decision block at the end of the section that sets it up, and
+  each next version folds the answers in, in the human's words with the date. An approval request
+  carries nothing new: it goes out only once the human has agreed to every point in the spec, a
+  point they have not agreed to getting its own decision block first or leaving the spec, and its
+  `summary` says only what the human is approving, with no commentary. A lane's technical decisions
+  are made in the plan or the code, not the spec. The `legion-architect` skill, both root architect
+  role prompts and `dispatch_request_approval`'s description say the same, and `dispatch-first`
+  sends an agent to the `dispatch` skill before its first design question. A root architect's spec
+  adds only the evidence each decision needs and what the human decides, each as a decision block;
+  the architect's decomposition, its waves, how each outcome is proven and the integration test go
+  in the child issues and the planner's `.legion/plan.json`, so the design gate never asks the
+  human to approve the architect's own calls. The `dispatch` skill, its approval reference and
+  `legion-architect` describe the approval request as Dispatch keeps it: a new version moves the
+  open request and leaves it waiting on the agent, whose next request, once the human has agreed
+  to every point in the new version, hands the same request back; an answer closes it, so the
+  request after an answer opens a new one. A reply under an open ask whose next move is the
+  agent's, such as an approval request it must revise or hand back, goes with `reply_to_ask` and
+  `turn: "agent"`, since a default-turn reply hands the request back to the human unchanged.
 - The plugin speaks one daemon (LEGION-223): every Legion session boots through the Go daemon's
   claim routes (`claims/register`, `claims/ready`) and mints its grants there, whatever its
   environment holds. The TypeScript daemon's client, its `legion` tool (`spawn_worker`,
@@ -53,13 +74,9 @@
   decision to their architect, which writes the block (`legion-worker`, the headless role text); a
   new version of an approved root spec closes the design gate, so the root architect requests
   approval again once the answer is folded in (`legion-architect`, the architect role texts).
-- An approval request carries nothing new and is handed back once per revision, when the revision
-  is complete and the human has agreed to every point in it (`dispatch_request_approval`'s
-  description, "Approval of a spec", `legion-architect`). Its `summary` says only what the human
-  is approving ("Approval of a spec", `legion-architect`, the root architect's role text and its
-  Go-daemon part). `references/documents.md#approval-requests` states once how a request follows
-  its document and whom it waits on, which call writes nothing and which is refused, and that
-  `Approve` and `Request changes` close it, so the next call opens a new one.
+- `dispatch_request_approval`'s description says the request is handed back once per revision,
+  when the revision is complete, never after each edit, that `Approve` and `Request changes` close
+  it, and that a new version of a Legion root spec closes its armed design gate (LEGION-470).
 - The run-end nudge offers a decision block in the document a question concerns, or `dispatch_ask`
   for a to-do. A `dispatch_doc_edit` that inserts an ask block or retypes a block into one spends
   the nudge's check, as `dispatch_ask` does, and so does a `dispatch_issue` or `dispatch_artifact`

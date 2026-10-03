@@ -70,27 +70,48 @@ type apiRoute struct {
 
 // routes is the one list of the broker's routes; a new route is a new row here, never a bare
 // mux.HandleFunc. The contract for every row is the shared broker contract
-// (dispatch://AGENTC-393/artifact/plan-overview-md).
+// (dispatch://AGENTC-393/artifact/plan-overview-md). The comment above each row says what the
+// route does; the broker's generated HTTP reference (scripts/docs/broker/refgen) prints it and
+// refuses a row without one.
 func routes() []apiRoute {
 	return []apiRoute{
+		// Enroll a box's, host session's or pod's signing key under the caller's machine credential.
 		{http.MethodPost, "/v1/enrollments", launcherAuth((*server).createEnrollment)},
+		// Revoke an enrollment made under the caller's machine credential's operator.
 		{http.MethodDelete, "/v1/enrollments/{id}", launcherAuth((*server).deleteEnrollment)},
+		// Start a machine login: answers the confirmation code a person types and a pending id.
 		{http.MethodPost, "/v1/launcher-credentials", public((*server).machineLogin)},
+		// Poll a machine login by its pending id; once approved, answers its credential's id.
 		{http.MethodGet, "/v1/launcher-credentials/{pending}", public((*server).readMachineLogin)},
+		// Extend the calling session's lease.
 		{http.MethodPost, "/v1/enrollments/{id}/renew", sessionAuth((*server).renewEnrollment)},
+		// Describe the calling session's enrollment and its live grants.
 		{http.MethodGet, "/v1/enrollments/self", sessionAuth((*server).readSelf)},
+		// Request secrets: the rules grant or deny them at once, or a person must approve them.
 		{http.MethodPost, "/v1/requests", sessionAuth((*server).createRequest)},
+		// Read one of the calling session's requests.
 		{http.MethodGet, "/v1/requests/{id}", sessionAuth((*server).readRequest)},
+		// Cancel one of the calling session's pending requests.
 		{http.MethodPost, "/v1/requests/{id}/cancel", sessionAuth((*server).cancelRequest)},
+		// Release a live grant's values to the session that holds it.
 		{http.MethodPost, "/v1/grants/{id}/values", sessionAuth((*server).grantValues)},
+		// End a grant the calling session holds.
 		{http.MethodPost, "/v1/grants/{id}/revoke", sessionAuth((*server).revokeGrant)},
+		// List the pending requests and machine logins the named person decides.
 		{http.MethodGet, "/v1/pending", uiAuth((*server).listPending)},
+		// Read a credential-request record: what was asked, by whom, why, and its decision.
 		{http.MethodGet, "/v1/credential-requests/{record}", uiAuth((*server).readRecord)},
+		// Approve a pending record as the named person; a machine login also needs its code.
 		{http.MethodPost, "/v1/credential-requests/{record}/approve", uiAuth((*server).approveRecord)},
+		// Deny a pending record as the named person; a machine login also needs its code.
 		{http.MethodPost, "/v1/credential-requests/{record}/deny", uiAuth((*server).denyRecord)},
+		// Find a pending machine login by the confirmation code its machine shows.
 		{http.MethodPost, "/v1/machine-logins/lookup", uiAuth((*server).lookupMachineLogin)},
+		// List the live grants the named person approved or operates.
 		{http.MethodGet, "/v1/grants", uiAuth((*server).listGrantsForApprover)},
+		// End a grant as its approver or as its enrollment's operator.
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", uiAuth((*server).revokeByApprover)},
+		// Report whether the broker can reach its database.
 		{http.MethodGet, "/healthz", public((*server).healthz)},
 	}
 }

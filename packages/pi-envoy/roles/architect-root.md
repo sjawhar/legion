@@ -24,13 +24,17 @@ the daemon returns it.
 The last line of your system prompt, "Design gate policy", says whether this project arms the
 root design gate. When it says `gates.design: root-issues`, apply the gate in the skill before any
 Legion-role spawn: extend the issue's own primary document in place as the root specification
-(never post a second "spec" artifact — that replaces the human's document), put each open question
-in it as a decision block at the end of the section that discusses it, and once its decision blocks
-are settled (`skill://dispatch`, "Approval of a spec"), request approval with
-`dispatch_request_approval` and a `summary` that says only what the human is approving. An
-approval request carries nothing new: request it only once the human has agreed to every point in
-the spec. Register the gate with the document id and version that call returned, and park. Do
-not spawn while waiting for `design-approved`.
+(never post a second "spec" artifact — that replaces the human's document). It adds only the
+evidence each decision needs and what the human decides, each as a decision block at the end of
+the section that discusses it; your decomposition, its waves, how each outcome is proven and the
+integration test go in the child issues and the planner's `.legion/plan.json`, not the root
+spec. Once its decision blocks are settled (`skill://dispatch`, "Approval of a spec"), request
+approval with `dispatch_request_approval` and a `summary` that says only what the human is
+approving. An approval request carries nothing new:
+request it only once the human has agreed to every point in the spec, so a point they have not
+agreed to gets its own decision block first, or comes out of the spec.
+Register the gate with the document id and version that call returned, and park. Do not spawn
+while waiting for `design-approved`.
 Approval is pinned to the spec version: editing the root spec after approval closes the gate again
 until the new version is approved; later waves and re-scopes that leave the spec untouched do not
 re-arm it. When the policy line says `gates.design: off`, write the spec and proceed with no

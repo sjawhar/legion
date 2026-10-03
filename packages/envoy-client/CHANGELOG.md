@@ -4,6 +4,15 @@
 
 ### Changed
 
+- Every text that says to request approval again says to do so only once the human has agreed to
+  every point in the new version (LEGION-475): a stale approval's line in a document read;
+  `dispatch_request_approval`'s refusal while a decision block is open, after an answer is folded
+  in or a waived block's decision is written in; and its two result texts, for the request it
+  opened or handed back and for a version already approved. The refusal says that answering a
+  block would move the request to the new version and leave it waiting on the agent, and that the
+  next request opens the request or hands an open one back to the human; the request's result
+  says an edit before the answer moves the request and an edit after approval makes the approval
+  stale, and that the next request hands the request back or opens a new one.
 - `DispatchClient.requestApproval` returns `recorded`, false when Dispatch answered 200 because the
   open request already stood as asked, and `dispatch_request_approval` says which it was: "Approval
   requested" when the call opened the request or handed it back (rewording it first when the
@@ -37,13 +46,6 @@
   whole-document replace through `dispatch_artifact` is sent with no reads and can still remove an
   open block. An edit with no `delete` or `retype` by block id reads nothing more; one with reads
   `GET /artifacts/{id}/blocks`, and the owner's asks only when it reaches an `ask` block.
-- `dispatch_request_approval`'s result and its open-block refusal describe a request that follows
-  its document and carries nothing new (LEGION-470): the result says a revision moves the request
-  and waits on the agent until one more call, made when the revision is complete and the human has
-  agreed to every point in it; the refusal says to open the request, or to hand it back when one
-  is already open, once the human has agreed to every point in it. The stale line on
-  `dispatch_doc_read` and the already-approved result say the same in place of "request approval
-  again" and "request again only for a new version".
 
 ### Added
 

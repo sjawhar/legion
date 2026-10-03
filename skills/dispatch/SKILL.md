@@ -1,6 +1,6 @@
 ---
 name: dispatch
-description: "Use before posting a message, a status update, or a periodic status update; before asking a question that references another message, artifact, or eval; and when asking Sami a question, updating the spec, commenting on a document, attaching an artifact, or calling a dispatch_* tool."
+description: "Use before posting a message, a status update, or a periodic status update; before asking a question that references another message, artifact, or eval; before asking a design question or brainstorming a change; and when asking Sami a question, updating the spec, commenting on a document, attaching an artifact, or calling a dispatch_* tool."
 ---
 
 # Dispatch
@@ -26,6 +26,7 @@ after `skill://dispatch/` is relative to this skill's base directory.
 | call `dispatch_doc_edit`: rewrite a paragraph, insert or move a block, change a table's cells, rows or columns | [Editing a document](skill://dispatch/references/document-edits.md) |
 | write a typed block (an `:::ask`, a callout), comment on or suggest a change to a document, upload an artifact, or retry after `DOC_SERVICE_UNAVAILABLE` | [Documents](skill://dispatch/references/documents.md) |
 | choose your next issue, claim one, move its status or priority, reorder a board, or audit a project's backlog | [Working an issue](skill://dispatch/references/issues.md) |
+| start or answer a design conversation in a spec: each turn, a comment that settles a question, coming to terms, a worked example | [Brainstorming in the spec](skill://dispatch/references/brainstorming.md) |
 | find who answers an ask, edit, retract or resolve one, reply with the turn, or follow a thread | [Asks after they open](skill://dispatch/references/asks.md) |
 | catch up after a restart, trace what cites a node, or write a `dispatch://` reference | [Reading back](skill://dispatch/references/reading.md) |
 | answer a BTW, Aside or Steer frame, or a message from the Agents page | [Targeted and direct messages](skill://dispatch/references/messages.md) |
@@ -34,10 +35,18 @@ after `skill://dispatch/` is relative to this skill's base directory.
 
 ## Design changes are brainstormed here
 
-For a major design change the design conversation happens in Dispatch, in the spec: write it
-early, while it is still a draft with real alternatives, and let it grow as the human answers
-([Writing a spec](#writing-a-spec)). A finished spec dropped after a chat-only design is not that
-conversation.
+When a session has Dispatch, a design change needing the human's choices is brainstormed in its
+issue's spec, not chat or a repository design document. The first version holds only established
+facts and every ready question, each a decision block at the end of the section that sets it up; a
+question waits only when it depends on an answer still open. Each next version replies in each
+human comment's thread (`dispatch_comment` with `reply_to`; under an open ask whose next move is
+yours, such as an approval request you must revise or hand back, `reply_to_ask` with
+`turn: "agent"`, since a default-turn reply hands it back to the human), folds the answers into the
+surrounding text while their decision blocks stay, in the human's words (or the option they chose)
+with the date, and adds the questions they open. Approval is requested at the end, not after each
+section, when nothing in the spec is new to the human. Before you write a spec's first version, and
+again before each next turn, read [Brainstorming in the spec](skill://dispatch/references/brainstorming.md):
+each step, and a worked example.
 
 ## Writing for the human
 
@@ -75,10 +84,13 @@ evidence for it, in plain words: what goes wrong, for whom, and the counts or ca
 It grows in place as the conversation goes. It is the issue's one primary document: extend it with
 a new version that keeps the human's own text, never a second "spec" artifact beside it.
 
-- **Each open question is a decision block**, placed as [Decision blocks](#decision-blocks) says.
-  Because it is an ask, it reaches the human's Inbox, and the answer lands next to its context.
+- **Each open question is a decision block**, shaped and placed as [Decision blocks](#decision-blocks)
+  says. Because it is an ask, it reaches the human's Inbox, and the answer lands next to its context.
 - **A settled point records the human's own words and the date**, quoted, so no reader mistakes
-  it for your inference. A point you inferred says so, with the reasoning.
+  it for your inference; an answer that is only a chosen option is recorded in the form
+  `Sami chose "Commit author" on the question below (2026-10-02)`. A point you inferred says so,
+  with the reasoning. One carried in from another document keeps its provenance: an agent's
+  inference there is marked one here, or stays out until the human raises it.
 - **Sections follow the topic.** No heading is required and none has a fixed place; name each
   section for what it discusses.
 - **A changed point is rewritten, not appended to.** When an answer or a new fact changes the
@@ -91,6 +103,9 @@ a new version that keeps the human's own text, never a second "spec" artifact be
 - **No progress.** The spec records the design and its decisions, never status, timestamps, an
   "Update HH:MMZ" section, a pull-request list, or handoff notes. Progress is not a Dispatch
   object at all; it lives in your transcript and your pull request (see [Messages](#messages)).
+- **No commentary.** The spec talks about the design, never about the spec or the conversation: no
+  sentence calls it a draft, a conversation, a version or a turn; says what a later version will
+  add; describes an earlier version or correction; or narrates the exchange that produced it.
 
 Before a new version goes out, read it as the human will: no two passages conflict, each point has
 one reading, and every decision block passes the phone test above. A worked example is
@@ -101,20 +116,16 @@ after the section on models.
 ## Decision blocks
 
 A decision a human must make is an `:::ask` block at the end of the section that discusses it,
-carrying the options, what each costs, and your recommendation. Never gather decisions into a
-list, at the top, at the bottom or in an "open questions" section, and never ask one as a
-standalone `dispatch_ask` that points at the spec.
+shaped as [Writing for the human](#writing-for-the-human) says for a question, with what
+constrains the answer split into measured, known and unknown. It asks how to solve the problem,
+never whether to apply a change already chosen. Never gather decisions into a list, at the top,
+at the bottom or in an "open questions" section, and never ask one as a standalone `dispatch_ask`
+that points at the spec.
 
 The block is what reaches the human's Inbox. A question phrased as prose in the spec reaches
 nobody. A spec with no ask blocks is fine only when the issue genuinely needs no human decision.
-When `dispatch_issue` or `dispatch_artifact` answers `This spec holds no ask blocks …`, read it as a
-question: either no decision is needed and you say nothing, or you forgot to make it a block. When
-it answers `… typed-block openings in this document are text, not blocks`, the quoted openings are
-blocks stored as prose (inside a line, or a paste with something before every line): fix the markdown
-and upload again; a mention on purpose belongs in code. Neither answer sees a spec wrapped whole in a
-code fence (take the fence off), a malformed opening inside a line (`::ask{`, `:::ask {`: an ask opens
-only as `:::ask{…}` on a line of its own), or any `dispatch_doc_edit`: after an edit that writes an
-ask, `dispatch_doc_read` the section and check it renders as `:::ask{#<id> …}` on its own line.
+What `dispatch_issue` and `dispatch_artifact` answer about a spec's blocks, and how to check an edit
+wrote one, is in [Typed blocks](skill://dispatch/references/documents.md#typed-blocks).
 
 **Wrong:** a **Decisions needed** list at the top of the spec with three bullets.
 **Right:** each decision an `:::ask{#slug}` block at the end of the design section that discusses
@@ -125,10 +136,6 @@ A spec that already has the pile is repaired with `move`, not rewritten: `dispat
 the block and keeps its ask, its answer and its followers; the context paragraphs that were lifted
 out of Design move the same way, and the emptied section is deleted. An ask block has two ids that
 differ; [Editing a document](skill://dispatch/references/document-edits.md) says which.
-
-A decision block after approval reopens the design: writing it makes the approval stale, which is
-right. Fold the answered block into the text, then request approval as
-[Approval requests](skill://dispatch/references/documents.md#approval-requests) says.
 
 See [Typed blocks](#typed-blocks) for the syntax and [Before you ask](#before-you-ask) under
 [Asking](#asking) to decide whether the question is a real decision at all.
@@ -209,11 +216,10 @@ field, and choosing your next issue are in [Working an issue](skill://dispatch/r
 
 Two kinds of question reach a human. A decision about the design a document records is a decision
 block in that document ([Decision blocks](#decision-blocks)), whatever phase the work is in and
-whether or not the document was approved; the document's approval state is the human's business,
-not a reason to keep the question out. A Legion phase worker sends such a decision to its
-architect instead, which writes the block (`skill://legion-worker`). A to-do or permission only a
-human can give, or a decision with no document to live in, is a `dispatch_ask`. The gates below
-apply to both.
+whether or not the document was approved: a block in an approved document makes the approval
+stale, which is right. A Legion phase worker sends such a decision to its architect, which writes
+the block (`skill://legion-worker`). A to-do or permission only a human can give, or a decision
+with no document to live in, is a `dispatch_ask`. The gates below apply to both.
 
 ### Before you ask
 
@@ -330,13 +336,12 @@ through an open ask. A to-do, permission, credential or grant renewal, setting o
 change, review click, or conflict between two of their own rules is a `dispatch_ask` the moment you
 know. Start with the problem and why it matters, then the constraints, options and their costs, and
 your recommendation. For an action only the human can perform, state what it changes and risks;
-never make the action itself the question. A decision about the design a document records is a
-decision block in that document, whatever phase the work is in. Never write a human to-do only into
-a spec, a comment reply, a message, or a pull-request body: nothing in those paths reaches the
-human's Inbox, and a human who is not reading the document does not know they are the blocker.
-Before asking, try to remove the step: a value already on the machine, a permission you already
-hold, an API that replaces the click. One ask per item, `urgency: "high"` when work is stopped on
-it; while it is open, keep working on everything that is not.
+never make the action itself the question (a design decision is a decision block, as above). Never
+write a human to-do only into a spec, a comment reply, a message, or a pull-request body: nothing
+in those paths reaches the human's Inbox, and a human who is not reading the document does not
+know they are the blocker. Before asking, try to remove the step: a value already on the machine, a
+permission you already hold, an API that replaces the click. One ask per item, `urgency: "high"`
+when work is stopped on it; while it is open, keep working on everything that is not.
 
 Once an ask is open (who answers it, handing a human a to-do, editing, retracting or resolving it,
 answering a clarification, whose turn a reply gives), see
@@ -377,11 +382,13 @@ See [Following](#following) for why you receive what happens to asks you open an
 
 Approval is a property of a document, not a question you phrase: a human approves a specific
 version, the way a pull-request review approves a commit, and any later version makes that
-approval stale. Answering a decision block writes a new version, so request approval only when
-all three hold: every decision block is settled, which means answered and folded into the text, or
-waived as the next paragraph says; the human has agreed to every point in the spec; and the current
-version has not been approved. A Legion root spec under an armed design gate always goes to approval
-once all three hold (`skill://legion-architect`).
+approval stale. A later version also moves an open request to that version and leaves it waiting
+on you until you request again, which hands the same request back to the human. Answering a
+decision block writes a new version, so request approval only when all three hold: every decision
+block is settled, which means answered and folded into the text, or waived as the next paragraph
+says; the human has agreed to every point in the spec; and the current version has not been
+approved. A Legion root spec under an armed design gate always goes to approval once all three
+hold (`skill://legion-architect`).
 
 When all three hold, request it in the pass that finishes the spec: a design waiting with nothing in
 the human's Inbox waits on nobody. When a human asks for approval while a block is open, do not
@@ -389,13 +396,6 @@ request it and do not hold it silently: name each open block and ask them to ans
 it. For a waiver, close the block with `dispatch_resolve_ask` (`kind: "resolved"`, their words as
 `reason`), then write their decision into the text in their words and request.
 `dispatch_request_approval` refuses while any block is open.
-
-Once a request is open, hand it back once per revision, when the revision is complete, never after
-each edit. A human who comments on the request instead of answering it is continuing the design
-conversation: reply in the thread; when the comment raises a choice that is theirs, write it into
-the spec as a decision block; when it changes the design, rewrite the text and then hand the
-request back once. A reply that only answers the comment returns the request to the human by
-itself.
 
 An approval request carries nothing new: a point the human has not agreed to gets its own decision
 block first, with your recommendation, or, when it is a choice you can make yourself

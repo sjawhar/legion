@@ -43,10 +43,14 @@ unreadable in the browser refuses nothing it is carried through unchanged by. Fo
 
 ```md
 :::ask{urgency="high" multiple="false"}
-Should we ship the migration?
+Today's release is blocked by a database migration. The maintenance window closes in two hours;
+whether production data needs an index rebuild is unknown. How should we complete the migration?
+Recommendation: rehearse on a production snapshot, then apply in the window, because it finds the
+unknown cost before production while keeping today's release possible.
 
-- Ship: Release the verified change.
-- Hold: Wait for another review.
+- Apply now: Meets today's release, but recovery may be slower if the index rebuild is needed.
+- Rehearse then apply: Costs rehearsal time, but exposes the rebuild and rollback cost before production.
+- Defer the release: Avoids migration risk today, but leaves the release and its fixes unavailable.
 :::
 ```
 
@@ -54,6 +58,15 @@ When a human answers a decision written as an ask block, the answer lives on tha
 `dispatch_resolve_ask` when the decision is resolved without a human response, or preserve the
 human's answer; never rewrite the question into its answer or blank its options. An edit that leaves
 an ask block without a question or with a blank option is rejected with `INVALID_ASK_BLOCK`.
+
+When `dispatch_issue` or `dispatch_artifact` answers `This spec holds no ask blocks …`, read it as a
+question: either no decision is needed and you say nothing, or you forgot to make it a block. When
+it answers `… typed-block openings in this document are text, not blocks`, the quoted openings are
+blocks stored as prose (inside a line, or a paste with something before every line): fix the markdown
+and upload again; a mention on purpose belongs in code. Neither answer sees a spec wrapped whole in a
+code fence (take the fence off), a malformed opening inside a line (`::ask{`, `:::ask {`: an ask opens
+only as `:::ask{…}` on a line of its own), or any `dispatch_doc_edit`: after an edit that writes an
+ask, `dispatch_doc_read` the section and check it renders as `:::ask{#<id> …}` on its own line.
 
 ## Comments and suggestions
 
@@ -157,36 +170,20 @@ names each block and its ask. An answer or a `dispatch_resolve_ask` closes the a
 reaches a version only when the document settles, about two seconds later, or with your next
 `dispatch_doc_edit`: fold the answer into the text (or, for a waiver, write the human's decision
 in) before you request. A block written in the last few seconds counts as open before Dispatch has
-opened its ask.
-
-One request lasts until a human answers it, and at any moment it waits either on the human or on
-you:
-
-- A new version moves an open request to that version, and the request then waits on you. Only
-  the move that takes it from the human sends its followers an event (`ask.edited`), never to the
-  session whose own version moved it; a move while it already waits on you sends nothing.
-  `dispatch_read` and `dispatch_doc_read` show whom it waits on:
-  `Approval: awaiting, waiting on agent (requested by …, ask …)`.
-- A human's reply in its thread leaves it waiting on you too; your own reply there returns it to
-  the human, unless you post it as a progress note (`turn: "agent"`) or a new version moved it.
-- While it waits on you, the next `dispatch_request_approval` hands the same row back to the
-  human's Inbox at the latest version (`ask.handed_back`). Make that call once the revision is
-  complete and the human has agreed to every point in it: the request carries nothing new.
-- While it waits on the human, a call hands nothing back. The same `summary`, or none, writes
-  nothing, and the result says the request already waits on the human, so the call changed
-  nothing. A different `summary` is refused (`APPROVAL_WAITS_ON_HUMAN`), since it would rewrite
-  the card the human is reading: raise what changed with the human first, in the request's thread
-  or as a decision block.
-- `Approve` and `Request changes` each close the request. The answer reaches you as
-  `artifact.approved` or `artifact.changes_requested` with the pinned `version`;
-  `changes_requested` carries the reason, which is your next piece of work. After either answer
-  there is no request to hand back: the next call opens a new one at the latest version.
-- A call while the latest version is approved opens nothing and says so.
-
-`stale` on `dispatch_read` and `dispatch_doc_read` means the document was approved and then
-edited: request approval again once that revision is complete and the human has agreed to every
-point in it. On a Legion root spec under an armed design gate, any later version closes the gate
-for the whole tree until a human approves it (`skill://legion-architect`).
+opened its ask. A document holds one open request. A new version moves it to that version, keeping
+its thread and summary, and leaves it waiting on you, as a human's reply in its thread does; a move
+your own edit made sends you no event, and `dispatch_read` and `dispatch_doc_read` show it as
+`Approval: awaiting, waiting on agent`. Call again when "Approval of a spec" in `skill://dispatch`
+allows: that hands the same request back to the human, reworded first when `summary` is new. Your
+own reply in its thread hands it back too, with no call and the summary it already holds, unless
+you post it with `reply_to_ask` and `turn: "agent"` (`reply_to` carries no turn, so its reply takes
+the default, `human`) or a new version has moved the request since your last
+`dispatch_request_approval`. While it waits on the human, a call with the same `summary` changes
+nothing, and one with a different `summary` is refused, since it would rewrite the card they are
+reading. The answer reaches you as `artifact.approved` or `artifact.changes_requested` with the
+pinned `version` and closes the request, so the next call opens a new one; `changes_requested`
+carries the reason, which is your next piece of work. Those reads show the document's approval
+state; `stale` means it was approved and then edited.
 
 ## A document that is reloading
 
