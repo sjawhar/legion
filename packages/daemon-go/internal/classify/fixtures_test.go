@@ -58,11 +58,11 @@ func TestFixturesReplayByteExactly(t *testing.T) {
 	}
 }
 
-// TestFixtureRecordsAreCanonicalAndNamedByTheirInput holds every record to the contract in the
-// fixture directory's README: a record's bytes are its canonical JSON, and its file name is the
-// SHA-256 of its input's canonical JSON. A record edited by hand and left misnamed or reformatted
-// fails here.
-func TestFixtureRecordsAreCanonicalAndNamedByTheirInput(t *testing.T) {
+// TestFixtureRecordsFollowTheDirectoryContract holds every record to the contract in the fixture
+// directory's README: a record sits in the directory named for its function, its bytes are its
+// canonical JSON, and its file name is the SHA-256 of its input's canonical JSON. A record edited
+// by hand and left misfiled, reformatted or misnamed fails here.
+func TestFixtureRecordsFollowTheDirectoryContract(t *testing.T) {
 	for _, path := range fixtureFiles(t) {
 		name := filepath.Join(filepath.Base(filepath.Dir(path)), filepath.Base(path))
 		encoded, err := os.ReadFile(path)
@@ -80,6 +80,9 @@ func TestFixtureRecordsAreCanonicalAndNamedByTheirInput(t *testing.T) {
 		if err := json.Unmarshal(encoded, &parsed); err != nil {
 			t.Fatalf("decode %s: %v", name, err)
 		}
+		if directory := filepath.Base(filepath.Dir(path)); parsed.Function != directory {
+			t.Errorf("%s is in %s/, but its fn is %q", name, directory, parsed.Function)
+		}
 		input, err := canonicalRecordJSON(parsed.Input)
 		if err != nil {
 			t.Fatalf("re-encode the input of %s: %v", name, err)
@@ -91,9 +94,9 @@ func TestFixtureRecordsAreCanonicalAndNamedByTheirInput(t *testing.T) {
 	}
 }
 
-// canonicalRecordJSON re-encodes raw the way the records are written: object keys sorted, no
-// whitespace, no trailing newline, numbers as written, and no HTML escaping, the form
-// `jq -cjS .` prints.
+// canonicalRecordJSON re-encodes raw in the records' canonical form, the one `jq -cjS .` prints:
+// object keys sorted, no whitespace, no trailing newline, numbers as written, and no HTML escaping.
+// The replay compares both of its sides in this form too.
 func canonicalRecordJSON(raw []byte) ([]byte, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
@@ -312,7 +315,7 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 
 func keptFixtureOutput(function string, raw json.RawMessage) ([]byte, error) {
 	if function != "reduceDispatchEvent" && function != "reduceGithubEvent" {
-		return canonicalJSONRaw(raw)
+		return canonicalRecordJSON(raw)
 	}
 	var output map[string]json.RawMessage
 	if err := decodeFixture(raw, &output); err != nil {
@@ -325,14 +328,6 @@ func keptFixtureOutput(function string, raw json.RawMessage) ([]byte, error) {
 		}
 	}
 	return canonicalJSON(kept)
-}
-
-func canonicalJSONRaw(raw json.RawMessage) ([]byte, error) {
-	var value any
-	if err := decodeFixture(raw, &value); err != nil {
-		return nil, err
-	}
-	return canonicalJSON(value)
 }
 
 func decodeFixture(input json.RawMessage, target any) error {
@@ -350,16 +345,13 @@ func decodeFixture(input json.RawMessage, target any) error {
 	return nil
 }
 
+// canonicalJSON is value encoded in the records' canonical form (canonicalRecordJSON).
 func canonicalJSON(value any) ([]byte, error) {
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
 	}
-	var generic any
-	if err := json.Unmarshal(encoded, &generic); err != nil {
-		return nil, err
-	}
-	return json.Marshal(generic)
+	return canonicalRecordJSON(encoded)
 }
 
 func canonicalOutcome(outcome CiOutcome) ([]byte, error) {
