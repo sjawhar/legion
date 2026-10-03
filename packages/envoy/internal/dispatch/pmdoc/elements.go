@@ -20,11 +20,12 @@ import (
 // read-back of each run, the read-back of the whole document, the live document - and in every read
 // and settlement of the document it stores: a mebibyte of `)_` makes 786,432 of them and held a
 // gigabyte (LEGION-481). The heaviest document of each shape measured at this limit holds at most
-// about 190 MiB above the server's idle memory to store and settle (a four-column table), and
-// 150 MiB to read (cmd/dispatch's memory tests). Over this repository's 618 markdown files
-// (MeasureDocument), every one of 4 KiB or more weighs 1.5 to 379 elements a kibibyte, so prose
-// passes to the 1 MiB cap and the densest, a comparison matrix, to about 173 KiB; smaller files run
-// denser, up to 1,296 a kibibyte for a 147-byte test fixture of empty list items.
+// about 220 MiB above the server's idle memory to store and settle (spans of `<b>*a*</b>`), and
+// 170 MiB to read (cmd/dispatch's memory tests, and the shapes the reviews measured beside them).
+// Over this repository's 618 markdown files (MeasureDocument), every one of 4 KiB or more weighs 1.5
+// to 379 elements a kibibyte, so prose passes to the 1 MiB cap and the densest, a comparison matrix,
+// to about 173 KiB; smaller files run denser, up to 1,421 a kibibyte for a 147-byte test fixture of
+// empty list items.
 const MaxDocumentElements = 65_536
 
 // nodeGuard is how many times MaxDocumentElements goldmark may make nodes, lines and table cells,
@@ -118,7 +119,11 @@ func countedElements(pc parser.Context) *parseCount {
 }
 
 // What elementWeight weighs each node of goldmark's tree, in units of an inline node's: the memory
-// the node costs at its worst, measured through the upload route.
+// the node costs at its worst, measured through the upload route. Every node the Proof tree makes
+// other than a text is an element of the live document carrying attributes - a block its id - and
+// costs about what two inline nodes do, so the markdown that makes one weighs at least two
+// (TestEveryNodeOfTheSchemaWeighsWhatItMakes): each node class weighed below that let the heaviest
+// document of it the limit admitted pass the 256 MiB a request may hold.
 const (
 	// inlineWeight is a piece of inline syntax, a mark or a line of text.
 	inlineWeight = 1
@@ -128,6 +133,13 @@ const (
 	// blockWeight is a block other than a table cell: the Proof block and the attributes it
 	// carries in the live document.
 	blockWeight = 3
+	// impliedBlockWeight is a block the Proof tree makes that goldmark's tree has no node for
+	// (impliedBlocks): the empty paragraph a list item, a quote, a footnote definition or a typed
+	// block holding nothing is read as holding, or a list item opening with another block holds
+	// ahead of it, and the empty row of a table with no body row. Weighed as nothing, the heaviest
+	// document of empty list items, quotes or footnote definitions the limit admitted held 220 to
+	// 236 MiB to store, two elements to every three it weighed, as inline HTML weighed as one did.
+	impliedBlockWeight = blockWeight
 	// tableCellWeight is a table cell: the cell, the paragraph and the text the Proof tree makes
 	// of it.
 	tableCellWeight = 4
@@ -140,9 +152,19 @@ const (
 	// rawHTMLWeight is a piece of inline HTML, a tag or a comment: the Proof tree makes it a node
 	// of its own carrying the HTML as an attribute, and the live document an element with that
 	// attribute, splitting its textblock's text. Weighed as one inline node, the heaviest document
-	// of `<b>a</b>` spans the limit admitted held 213 to 257 MiB to store, the most of any shape and
-	// past the 256 MiB a request may hold.
+	// of `<b>a</b>` spans the limit admitted held 213 to 261 MiB to store, past the 256 MiB a
+	// request may hold.
 	rawHTMLWeight = 2
+	// imageWeight is an image: the Proof tree makes it a node of its own carrying its source, its
+	// alt text and its title as attributes, and the live document an element with all three,
+	// splitting its textblock's text, so it costs what a block does. Weighed as one inline node, the
+	// heaviest document of `![](u)` the limit admitted held 327 to 383 MiB to store, and four cold
+	// reads of it at once up to 1,044 MiB.
+	imageWeight = 3
+	// footnoteReferenceWeight is a footnote reference: a node of its own carrying its label as an
+	// attribute, and an element with it in the live document. Weighed as one inline node, the
+	// heaviest document of `[^a]` the limit admitted held 262 to 316 MiB to store.
+	footnoteReferenceWeight = 2
 	// escapeWeight is a backslash escape or a character reference in a text: goldmark keeps it in
 	// its text node, so it makes no node there, but it spells a character - `_`, `~`, `[` - that
 	// the Proof tree holds bare and every rendering writes again, and the renderer reads each run
@@ -184,7 +206,8 @@ func escapes(value []byte) int {
 	return count
 }
 
-// elementWeight is what one node of goldmark's tree weighs.
+// elementWeight is what one node of goldmark's tree weighs, the blocks the Proof tree makes of it
+// that goldmark's tree has no node for included.
 func elementWeight(node ast.Node) int {
 	switch {
 	case node.Kind() == ast.KindDocument:
@@ -192,20 +215,77 @@ func elementWeight(node ast.Node) int {
 	case node.Kind() == extensionast.KindTableCell:
 		return tableCellWeight
 	case node.Type() == ast.TypeBlock:
-		return blockWeight
+		return blockWeight + impliedBlockWeight*impliedBlocks(node)
 	case node.Kind() == ast.KindText && node.(*ast.Text).HardLineBreak():
 		return inlineWeight + hardbreakWeight
 	case node.Kind() == ast.KindAutoLink:
 		return autolinkWeight
 	case node.Kind() == ast.KindRawHTML:
 		return rawHTMLWeight
+	case node.Kind() == ast.KindImage:
+		return imageWeight
+	case node.Kind() == extensionast.KindFootnoteLink:
+		return footnoteReferenceWeight
 	}
 	return inlineWeight
 }
 
-// weights is how a refusal of a write's elements names the weights.
-var weights = fmt.Sprintf("a block weighs %d elements, a table cell %d, a hard line break %d, a piece of inline HTML %d, an autolink %d, and each piece of inline syntax, escape, mark and line of text %d",
-	blockWeight, tableCellWeight, hardbreakWeight, rawHTMLWeight, autolinkWeight, inlineWeight)
+// impliedBlocks is how many blocks the Proof tree makes of block that goldmark's tree holds no node
+// for: the empty paragraph a container holding nothing, or a list item opening with another block,
+// is read as holding (emptyParagraphFirst), and the empty row of a table with no body row
+// (parseTable).
+func impliedBlocks(block ast.Node) int {
+	switch block.Kind() {
+	case ast.KindListItem:
+		if first := block.FirstChild(); first == nil || first.Kind() != ast.KindParagraph && first.Kind() != ast.KindTextBlock {
+			return 1
+		}
+	case ast.KindBlockquote, extensionast.KindFootnote, kindTypedDirective:
+		if block.FirstChild() == nil {
+			return 1
+		}
+	case extensionast.KindTable:
+		if block.ChildCount() == 1 {
+			return 1
+		}
+	}
+	return 0
+}
+
+// weighed is each weight elementWeight and nodeWeight give, as a refusal names it, in the order it
+// names them: the one list of the weights, which every refusal of a write's elements carries
+// (weights) and cmd/dispatch's README restates for its readers.
+var weighed = []struct {
+	what   string
+	weight int
+}{
+	{"a block", blockWeight},
+	{"the empty block an empty container is read as holding", impliedBlockWeight},
+	{"a table cell", tableCellWeight},
+	{"a hard line break", hardbreakWeight},
+	{"an image", imageWeight},
+	{"a piece of inline HTML", rawHTMLWeight},
+	{"an autolink", autolinkWeight},
+	{"a footnote reference", footnoteReferenceWeight},
+	{"an escape", escapeWeight},
+	{"each piece of inline syntax, mark and line of text", inlineWeight},
+}
+
+// weights is how a refusal of a write's elements names the weights (weighed).
+var weights = func() string {
+	named := make([]string, len(weighed))
+	for index, entry := range weighed {
+		switch index {
+		case 0:
+			named[index] = fmt.Sprintf("%s weighs %d elements", entry.what, entry.weight)
+		case len(weighed) - 1:
+			named[index] = fmt.Sprintf("and %s %d", entry.what, entry.weight)
+		default:
+			named[index] = fmt.Sprintf("%s %d", entry.what, entry.weight)
+		}
+	}
+	return strings.Join(named, ", ")
+}()
 
 // MaxDocumentBytes is the most bytes of markdown one document may hold: what one upload of a
 // markdown document may send, and what a write may grow a stored document's rendering to.

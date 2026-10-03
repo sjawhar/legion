@@ -144,6 +144,11 @@ func TestMeasureDocumentCountsWhatAnUploadCounts(t *testing.T) {
 		{"table rows", func(units int) string { return "| a | b |\n| - | - |\n" + strings.Repeat("| x | y |\n", units) }},
 		{"links", repeated("[a](b) ")},
 		{"autolinks", repeated("<https://a.example> ")},
+		{"images", repeated("![](u)")},
+		{"footnote references", func(units int) string { return strings.Repeat("[^a]", units) + "\n\n[^a]: b\n" }},
+		{"empty list items", repeated("-\n")},
+		{"empty quotes", repeated(">\n\n")},
+		{"tables with no body row", repeated("| a |\n| - |\n\n")},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
 			uploads := func(units int) bool {
@@ -273,5 +278,117 @@ func TestATableThePaddingRefusesMeasuresPastTheLimit(t *testing.T) {
 	}
 	if size := MeasureDocument(table); !size.TooHeavy() {
 		t.Fatalf("the table measures %+v, want it past the limit", size)
+	}
+}
+
+// Every node the Proof tree makes is an element of the live document or a text in one, and costs
+// the server memory in each stage of a write and in every load of the document it stores. An
+// element costs about what two inline nodes do: a hard line break, a piece of inline HTML, an
+// image and a footnote reference each once weighed one, and the heaviest document of each the
+// limit admitted held 257 to 383 MiB above idle to store, past the 256 MiB one request may hold.
+// So the markdown that makes each node type of the schema weighs at least two elements for each
+// element it makes and one for each text, in the cheapest spellings of it below, an empty
+// container's included, and a node type the schema gains fails this test until it is given a
+// spelling and a weight. The document and its front matter, one a document, are not spelled.
+func TestEveryNodeOfTheSchemaWeighsWhatItMakes(t *testing.T) {
+	repeated := func(unit string) func(int) string {
+		return func(units int) string { return strings.Repeat(unit, units) }
+	}
+	under := func(head, unit string) func(int) string {
+		return func(units int) string { return head + strings.Repeat(unit, units) }
+	}
+	numbered := func(format string) func(int) string {
+		return func(units int) string {
+			var markdown strings.Builder
+			for index := range units {
+				fmt.Fprintf(&markdown, format, index)
+			}
+			return markdown.String()
+		}
+	}
+	headerOnlyTable := repeated("| a |\n| - |\n\n")
+	spellings := map[string][]func(units int) string{
+		"paragraph":           {repeated("a\n\n")},
+		"heading":             {repeated("#\n"), repeated("# a\n")},
+		"blockquote":          {repeated(">\n\n"), repeated("> a\n\n")},
+		"bullet_list":         {repeated("-\n*\n")},
+		"ordered_list":        {repeated("1.\n1)\n")},
+		"list_item":           {repeated("-\n"), repeated("- a\n"), repeated("- # a\n")},
+		"code_block":          {repeated("```\n```\n"), repeated("```\na\n```\n")},
+		"hr":                  {repeated("***\n")},
+		"hardbreak":           {repeated("a  \n"), repeated("a\\\n")},
+		"image":               {repeated("![](u)"), repeated("![a](u)"), repeated("[![](u)](v)")},
+		"html":                {repeated("<b>"), under("a", "<!---->")},
+		"table":               {headerOnlyTable},
+		"table_header_row":    {headerOnlyTable},
+		"table_header":        {headerOnlyTable, repeated("| | | |\n| - | - | - |\n\n")},
+		"table_row":           {under("| a |\n| - |\n", "| |\n")},
+		"table_cell":          {under("| a | b | c | d |\n| - | - | - | - |\n", "| | | | |\n"), under("| a | b |\n| - | - |\n", "| x | y |\n")},
+		"footnote_definition": {numbered("[^%d]:\n"), numbered("[^%d]: a\n")},
+		"footnote_reference":  {func(units int) string { return strings.Repeat("[^a]", units) + "\n\n[^a]: b\n" }},
+		"text":                {repeated("a*b*"), repeated(")_")},
+		"callout":             {repeated(":::callout{}\n:::\n\n"), repeated(":::callout{}\na\n:::\n\n")},
+		"ask":                 {numbered(":::ask{#ask-%d}\n:::\n\n"), numbered(":::ask{#ask-%d}\nq\n:::\n\n")},
+	}
+	oneADocument := map[string]bool{"doc": true, "frontmatter": true}
+	types := typedBlockNames()
+	for typeName := range nodeTypes {
+		types = append(types, typeName)
+	}
+	for typeName := range oneADocument {
+		if !nodeTypes[typeName] {
+			t.Errorf("%s is no node type of the schema", typeName)
+		}
+	}
+	for _, typeName := range types {
+		if oneADocument[typeName] {
+			continue
+		}
+		if len(spellings[typeName]) == 0 {
+			t.Errorf("the schema's node type %s has no spelling here: give it its cheapest markdown, and weigh the elements it makes", typeName)
+		}
+		for index, spelling := range spellings[typeName] {
+			// measure is what units of the spelling weigh, the elements and texts their tree
+			// holds, and how many of its nodes are of the type spelled.
+			measure := func(units int) (weight, elements, texts, spelled int) {
+				markdown := spelling(units)
+				size := MeasureDocument(markdown)
+				if !size.Counted {
+					t.Fatalf("%s spelling %d: %d units measure %+v, want them counted", typeName, index, units, size)
+				}
+				tree, err := Parse(markdown)
+				if err != nil {
+					t.Fatalf("%s spelling %d: parse %d units: %v", typeName, index, units, err)
+				}
+				walkNodes(tree, func(node *Node) {
+					if node.Type == "text" {
+						texts++
+					} else {
+						elements++
+					}
+					if node.Type == typeName {
+						spelled++
+					}
+				})
+				return size.Elements, elements, texts, spelled
+			}
+			weight, elements, texts, spelled := measure(64)
+			moreWeight, moreElements, moreTexts, moreSpelled := measure(128)
+			weight, elements, texts, spelled = moreWeight-weight, moreElements-elements, moreTexts-texts, moreSpelled-spelled
+			if spelled < 64 {
+				t.Errorf("%s spelling %d: 64 units more make %d more %s nodes, want one a unit at least", typeName, index, spelled, typeName)
+			}
+			if cost := 2*elements + texts; weight < cost {
+				t.Errorf("%s spelling %d: 64 units weigh %d elements, and make %d elements and %d texts, which weigh %d", typeName, index, weight, elements, texts, cost)
+			}
+		}
+	}
+}
+
+// walkNodes visits node and every node under it.
+func walkNodes(node *Node, visit func(*Node)) {
+	visit(node)
+	for _, child := range node.Children {
+		walkNodes(child, visit)
 	}
 }

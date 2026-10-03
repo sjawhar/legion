@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -402,4 +403,151 @@ func (b *lockedBuffer) tail() string {
 		output = output[len(output)-4000:]
 	}
 	return output
+}
+
+// coldPeaks reads and edits a document on servers that have not loaded it (coldReads, coldEdit)
+// and fails the test where a read or the edit holds more than the bound above idle.
+func (h *memoryHarness) coldPeaks(t *testing.T, name, artifactID string, edit map[string]any) {
+	t.Helper()
+	h.coldReads(t, name, artifactID)
+	if peak := h.coldEdit(t, name, artifactID, edit); peak > requestMemoryBound {
+		t.Errorf("%s: a cold one-word edit held %d MiB above idle, want at most %d MiB", name, peak>>20, requestMemoryBound>>20)
+	}
+}
+
+// coldReads reads a document on servers that have not loaded it - its text and a websocket load of
+// its room, each on a fresh server, then four reads of its text at once - and fails the test where
+// one of the first two holds more than the bound above idle. Every peak is logged under name; the
+// four reads at once are logged beside the production task's 1,024 MiB.
+func (h *memoryHarness) coldReads(t *testing.T, name, artifactID string) {
+	t.Helper()
+	for _, cold := range []struct {
+		name string
+		run  func(server *dispatchProcess)
+	}{
+		{"text read", func(server *dispatchProcess) { server.get(t, "/api/v1/artifacts/"+artifactID+"/text") }},
+		{"websocket load", func(server *dispatchProcess) { server.loadOverWebsocket(t, artifactID) }},
+	} {
+		server := h.start(t)
+		peak := server.peakAboveIdle(t, func() { cold.run(server) })
+		server.stop(t)
+		t.Logf("%s: a cold %s, %d MiB above idle", name, cold.name, peak>>20)
+		if peak > requestMemoryBound {
+			t.Errorf("%s: a cold %s held %d MiB above idle, want at most %d MiB", name, cold.name, peak>>20, requestMemoryBound>>20)
+		}
+	}
+	server := h.start(t)
+	peak := server.peakAboveIdle(t, func() {
+		failures := make([]error, 4)
+		var group sync.WaitGroup
+		for index := range failures {
+			group.Go(func() {
+				answer, err := server.trySend(http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", "", nil, http.Header{"X-Dispatch-User": {"alice"}})
+				if err == nil && answer.status != http.StatusOK {
+					err = fmt.Errorf("read %d: status %d body %.300s", index, answer.status, answer.body)
+				}
+				failures[index] = err
+			})
+		}
+		group.Wait()
+		if err := errors.Join(failures...); err != nil {
+			t.Fatal(err)
+		}
+	})
+	server.stop(t)
+	t.Logf("%s: four cold text reads at once, %d MiB above idle", name, peak>>20)
+}
+
+// coldEdit sends edit, a one-word edit, to a document on a server that has not loaded it, fails the
+// test unless it is taken, and logs and returns its peak above the server's idle memory.
+func (h *memoryHarness) coldEdit(t *testing.T, name, artifactID string, edit map[string]any) int64 {
+	t.Helper()
+	server := h.start(t)
+	var answer response
+	peak := server.peakAboveIdle(t, func() { answer = server.edit(t, artifactID, edit) })
+	server.stop(t)
+	t.Logf("%s: a cold one-word edit answered %d, %d MiB above idle", name, answer.status, peak>>20)
+	if answer.status != http.StatusOK {
+		t.Errorf("%s: a cold one-word edit answered %d %.300s, want 200", name, answer.status, answer.body)
+	}
+	return peak
+}
+
+// blockAsks are the ids of the asks settlement indexes from the blocks ask-0 to ask-<count-1> of
+// the issue's spec, in that order, once it has indexed every one.
+func (p *dispatchProcess) blockAsks(t *testing.T, issueKey string, count int) []string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		answer := p.send(t, http.MethodGet, "/api/v1/issues/"+issueKey+"/asks?state=all", "", nil, http.Header{"X-Dispatch-User": {"alice"}})
+		var asks []struct {
+			ID      string  `json:"id"`
+			BlockID *string `json:"block_id"`
+		}
+		if answer.status != http.StatusOK || json.Unmarshal(answer.body, &asks) != nil {
+			t.Fatalf("list the issue's asks: status %d body %.300s", answer.status, answer.body)
+		}
+		byBlock := map[string]string{}
+		for _, ask := range asks {
+			if ask.BlockID != nil {
+				byBlock[*ask.BlockID] = ask.ID
+			}
+		}
+		ids := make([]string, 0, count)
+		for index := range count {
+			if id, found := byBlock[fmt.Sprintf("ask-%d", index)]; found {
+				ids = append(ids, id)
+			}
+		}
+		if len(ids) == count {
+			return ids
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("settlement indexed %d of the spec's %d asks", len(ids), count)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// createdIssue is an issue a memory test created, and its primary document.
+type createdIssue struct {
+	Key               string `json:"key"`
+	PrimaryArtifactID string `json:"primary_artifact_id"`
+}
+
+// createIssue creates an issue of the memory harness's project whose spec is spec, past the
+// near-duplicate check its title would meet beside the others a test creates.
+func (p *dispatchProcess) createIssue(t *testing.T, title, spec string) createdIssue {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"project": "MEM", "title": title, "spec": spec, "force": true})
+	if err != nil {
+		t.Fatalf("encode the issue: %v", err)
+	}
+	created := p.send(t, http.MethodPost, "/api/v1/issues", "application/json", bytes.NewReader(body), http.Header{"X-Dispatch-User": {"alice"}})
+	var issue createdIssue
+	if created.status != http.StatusCreated || json.Unmarshal(created.body, &issue) != nil || issue.PrimaryArtifactID == "" {
+		t.Fatalf("create the issue %q: status %d body %.300s", title, created.status, created.body)
+	}
+	return issue
+}
+
+// edit sends one edit operation to a document as a person does.
+func (p *dispatchProcess) edit(t *testing.T, artifactID string, op map[string]any) response {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"ops": []map[string]any{op}})
+	if err != nil {
+		t.Fatalf("encode the edit: %v", err)
+	}
+	return p.send(t, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits", "application/json", bytes.NewReader(body), http.Header{"X-Dispatch-User": {"alice"}})
+}
+
+// text is a document's markdown, as GET .../text answers it.
+func (p *dispatchProcess) text(t *testing.T, artifactID string) string {
+	t.Helper()
+	answer := p.send(t, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", "", nil, http.Header{"X-Dispatch-User": {"alice"}})
+	var text struct{ Markdown string }
+	if answer.status != http.StatusOK || json.Unmarshal(answer.body, &text) != nil {
+		t.Fatalf("read the document's text: status %d body %.300s", answer.status, answer.body)
+	}
+	return text.Markdown
 }

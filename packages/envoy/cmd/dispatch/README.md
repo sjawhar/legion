@@ -514,7 +514,7 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/search?q=&project=&limit=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results with `<mark>` snippets and SPA `href`s; `limit` 1–50 (default 20). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`. |
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |
 | `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist. |
-| `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank gives an empty primary document at version 1. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`, and a spec whose markdown makes more than 65,536 elements (a block weighs 3, a table cell 4, a hard line break 3, a piece of inline HTML 2, an autolink 2, a piece of inline syntax, a mark, a line of text or an escape 1) is `413 CAP_EXCEEDED`, naming the line that passes the limit; so is one whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements. |
+| `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank gives an empty primary document at version 1. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`, and a spec whose markdown makes more than 65,536 elements (weighed as Element weights below lists) is `413 CAP_EXCEEDED`, naming the line that passes the limit; so is one whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements. |
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. An anchor is exactly `{artifact, quote, occurrence?}` for a server-written quote mark or `{artifact, mark_id}` for a mark already written by a browser. A quote mark carries the ask's id and who asked, which no rendering shows and every load of the document builds: the marks a document's comments, suggestions and asks hold on its text carry at most 1 MiB of ids and authors, and a quote anchor that would leave them past it and carrying more is `413 CAP_EXCEEDED`, naming the bound and both sizes. |
 | `/api/v1/issues/{key}/asks?state=` | GET | cookie, trusted header, or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
 | `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask and its reply thread. |
@@ -530,8 +530,8 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/comments/{id}/accept` | POST | cookie or trusted header | Apply and accept an anchored suggestion. An accept that would leave the document's markdown (what `.../text` answers) longer than 1 MiB and longer than it was, or making more than 65,536 elements and more than it did, is `413 CAP_EXCEEDED` and leaves the suggestion open. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and leaves the suggestion open; one removed after it answers `200` with `lost: true`. |
 | `/api/v1/comments/{id}/reject` | POST | cookie or trusted header | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | cookie, trusted header, or bearer | Post an issue message. |
-| `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (a block weighs 3, a table cell 4, a hard line break 3, a piece of inline HTML 2, an autolink 2, a piece of inline syntax, a mark, a line of text or an escape 1), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live document the server could not load again with room to spare; or whose formatting is more items than one document update can store (1,048,576), naming the count. |
-| `/api/v1/projects/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (a block weighs 3, a table cell 4, a hard line break 3, a piece of inline HTML 2, an autolink 2, a piece of inline syntax, a mark, a line of text or an escape 1), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live document the server could not load again with room to spare; or whose formatting is more items than one document update can store (1,048,576), naming the count. |
+| `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live document the server could not load again with room to spare; or whose formatting is more items than one document update can store (1,048,576), naming the count. |
+| `/api/v1/projects/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live document the server could not load again with room to spare; or whose formatting is more items than one document update can store (1,048,576), naming the count. |
 | `/api/v1/artifacts/{id}` | GET | cookie, trusted header, or bearer | Read an artifact, its versions, and incoming references. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/rebuild` | POST | cookie or trusted header (human only) | Rebuild a document only when its durable history cannot load (`409 DOCUMENT_UNLOADABLE` on its reads): deletes its document updates, checkpoints, and snapshots, then writes one fresh update from the latest saved version or optional `{markdown}`. A supplied markdown source that changes the document writes the next immutable version, emits `artifact.version`, and moves an open approval request to that version, where it waits on its agent, as every version does; an omitted source keeps the existing latest-version behavior. The rebuild, that version, its event and the move commit in one transaction, and every refusal comes before anything is written: a live room is `409 DOCUMENT_LIVE`; a healthy, non-resident document is `409 DOCUMENT_LOADS`; supplied markdown on a closed issue's document is `409 ISSUE_CLOSED`; supplied markdown held to a new document's limits - more than 65,536 elements, or stored as markdown longer than 1 MiB or making more than 65,536 elements - is `413 CAP_EXCEEDED`. The latest saved version rebuilds whatever it weighs. A refused or failed rebuild leaves the document unchanged. It answers the report, whose `source_version` is the version the rebuilt document holds: its latest saved version, or the version supplied markdown wrote. |
 | `/api/v1/artifacts/{id}/text` | GET | cookie, trusted header, or bearer | Read a live document's markdown. `{id}` must be a UUID. A stored tree outside the Proof schema is `409 DOC_SCHEMA`, and a stored history that cannot load `409 DOCUMENT_UNLOADABLE` (Document errors). |
@@ -586,6 +586,56 @@ Table-row fragments contain body rows only: omit the table header and delimiter 
 padded to the table width while all operations in the edit request add at most 10,000 cells; a
 larger request is rejected as `INVALID_OP` on `markdown`. A row holding text in a cell past the
 table's width is rejected as `TABLE_WIDTH`; blank cells there are dropped.
+
+## Element weights
+
+One write's markdown, and the markdown a document stores, make at most 65,536 elements
+(`pmdoc.MaxDocumentElements`), weighed node by node over the tree goldmark parses, front matter
+apart. Every route that takes caller markdown refuses past that with `413 CAP_EXCEEDED`, and its
+message lists these weights, written once in `pmdoc/elements.go` (`weighed`):
+
+| Node | Weight |
+| --- | --- |
+| a block (paragraph, heading, quote, list, list item, code block, rule, table, table row, footnote definition, typed block) | 3 |
+| the empty block an empty container is read as holding: the paragraph of a list item, quote, footnote definition or typed block holding nothing (or of a list item opening with another block), and the row of a table with no body row | 3 more |
+| a table cell | 4 |
+| a hard line break, beside its line of text | 3 |
+| an image | 3 |
+| a piece of inline HTML, a tag or a comment | 2 |
+| an autolink | 2 |
+| a footnote reference | 2 |
+| an escape: a backslash before punctuation, or a character reference | 1 |
+| a piece of inline syntax, a mark, a line of text | 1 |
+
+Every node the Proof tree makes other than a text is an element of the live document carrying
+attributes, and costs the server about what two inline nodes do; each node class that weighed less
+let the heaviest document of it the limit admitted hold past the 256 MiB one request may, until it
+was weighed as above. `TestEveryNodeOfTheSchemaWeighsWhatItMakes` holds every node type of the
+schema to at least two elements for each element its cheapest markdown makes and one for each text,
+and fails for a node type the schema gains until it is given that markdown and a weight. What each
+node type weighs:
+
+| Proof node | Made of | Weight | Attributes |
+| --- | --- | --- | --- |
+| `doc` | the document | 0, one a document | none |
+| `frontmatter` | front matter | 0, one a document, apart from the count | none |
+| `paragraph` | a paragraph, or a tight list item's text | 3, or 3 as an empty container's | block id |
+| `heading` | a heading | 3 | block id, level, id |
+| `blockquote` | a quote | 3, and 3 when empty | block id |
+| `bullet_list`, `ordered_list` | a list | 3 | block id, spread, order |
+| `list_item` | a list item; a task item's marker is 1 more | 3, and 3 when empty or opening with another block | block id, label, list type, checked, spread |
+| `code_block` | fenced or indented code | 3 | block id, language |
+| `hr` | a thematic break | 3 | block id |
+| `table` | a table | 3, and 3 with no body row | block id |
+| `table_header_row`, `table_row` | a row | 3 | block id |
+| `table_header`, `table_cell` | a cell and its paragraph | 4 | block id, alignment, spans |
+| `footnote_definition` | a footnote definition | 3, and 3 when empty | block id, label |
+| `callout`, `ask` (typed blocks) | a `:::name{…}` block | 3, and 3 when empty | block id and the schema's attributes |
+| `text` | a run of text; each mark a run carries is the inline syntax that opens it | 1 | none (marks) |
+| `hardbreak` | a hard line break | 3, beside its line's 1 | isInline |
+| `image` | an image; its alt text's nodes weigh 1 each | 3 | source, alt, title |
+| `html` | a piece of inline HTML | 2 | the HTML |
+| `footnote_reference` | a footnote reference | 2 | label |
 
 ## Document errors
 
