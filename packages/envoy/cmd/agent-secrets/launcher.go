@@ -40,11 +40,12 @@ func cmdLauncher(args []string, stdout, stderr io.Writer) int {
 // login, prints the broker's confirmation code for the operator to type on the Dispatch
 // credential page, then polls the helper until the login reaches a terminal state.
 func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
-	if flaglessHelp("launcher login", args, stderr) {
-		return 0
+	flagArgs, positional := splitArgs(args, nil)
+	if err := newFlagSet("launcher login", stderr).Parse(flagArgs); err != nil {
+		return exitUsage(err)
 	}
-	if len(args) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets launcher login: unexpected argument %q\n", args[0])
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets launcher login: unexpected argument %q\n", positional[0])
 		return exitUsageError
 	}
 	sock, _ := helperSocket()
@@ -106,11 +107,12 @@ func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
 // same, and so does a refused credential on a helper from before login_refused, which keeps
 // running until it restarts. Every answer with no credential says on stderr what to do about it.
 func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
-	if flaglessHelp("launcher login-status", args, stderr) {
-		return 0
+	flagArgs, positional := splitArgs(args, nil)
+	if err := newFlagSet("launcher login-status", stderr).Parse(flagArgs); err != nil {
+		return exitUsage(err)
 	}
-	if len(args) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets launcher login-status: unexpected argument %q\n", args[0])
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets launcher login-status: unexpected argument %q\n", positional[0])
 		return exitUsageError
 	}
 	sock, _ := helperSocket()

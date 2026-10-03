@@ -215,32 +215,23 @@ func writeCommandHelp(w io.Writer, c command) {
 }
 
 // newFlagSet is the flag set of the form named name: its errors and its -h go to stderr, and -h
-// prints the form's synopsis and summary above its flags.
+// prints the form's synopsis and summary, then its flags when it defines any. A form with no
+// flags parses its arguments with it too, so its -h answers as every other form's does and any
+// flag is a usage error.
 func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 	c := lookupCommand(name)
 	flags := flag.NewFlagSet(strings.TrimSpace("agent-secrets "+name), flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
 		writeCommandHelp(flags.Output(), c)
-		fmt.Fprintln(flags.Output(), "\nflags:")
-		flags.PrintDefaults()
+		hasFlags := false
+		flags.VisitAll(func(*flag.Flag) { hasFlags = true })
+		if hasFlags {
+			fmt.Fprintln(flags.Output(), "\nflags:")
+			flags.PrintDefaults()
+		}
 	}
 	return flags
-}
-
-// flaglessHelp answers -h, -help or --help, before any "--" in args, for a form that takes no
-// flags: it prints the form's help to stderr, as a flag set's -h does, and reports that it did.
-func flaglessHelp(name string, args []string, stderr io.Writer) bool {
-	for _, a := range args {
-		if a == "--" {
-			return false
-		}
-		if a == "-h" || a == "-help" || a == "--help" {
-			writeCommandHelp(stderr, lookupCommand(name))
-			return true
-		}
-	}
-	return false
 }
 
 func exitUsage(err error) int {
@@ -597,11 +588,11 @@ func cmdUnenrollHelper(enrollmentID string, stderr io.Writer) int {
 // ---------------------------------------------------------------------------
 
 func cmdRenew(args []string, stdout, stderr io.Writer) int {
-	if flaglessHelp("renew", args, stderr) {
-		return 0
-	}
 	flagArgs, positional := splitArgs(args, nil)
-	if len(positional) > 0 || len(flagArgs) > 0 {
+	if err := newFlagSet("renew", stderr).Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if len(positional) > 0 {
 		fmt.Fprintln(stderr, "agent-secrets renew: no arguments are accepted")
 		return exitUsageError
 	}
@@ -739,11 +730,11 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 // ---------------------------------------------------------------------------
 
 func cmdCancel(args []string, stdout, stderr io.Writer) int {
-	if flaglessHelp("cancel", args, stderr) {
-		return 0
-	}
 	flagArgs, positional := splitArgs(args, nil)
-	if len(flagArgs) > 0 || len(positional) != 1 {
+	if err := newFlagSet("cancel", stderr).Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if len(positional) != 1 {
 		fmt.Fprintln(stderr, "agent-secrets cancel: exactly one request_id is required")
 		return exitUsageError
 	}
@@ -765,11 +756,11 @@ func cmdCancel(args []string, stdout, stderr io.Writer) int {
 // ---------------------------------------------------------------------------
 
 func cmdRevoke(args []string, stdout, stderr io.Writer) int {
-	if flaglessHelp("revoke", args, stderr) {
-		return 0
-	}
 	flagArgs, positional := splitArgs(args, nil)
-	if len(flagArgs) > 0 || len(positional) != 1 {
+	if err := newFlagSet("revoke", stderr).Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if len(positional) != 1 {
 		fmt.Fprintln(stderr, "agent-secrets revoke: exactly one grant_id is required")
 		return exitUsageError
 	}
