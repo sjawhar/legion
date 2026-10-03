@@ -1,9 +1,11 @@
 """The walkthrough's cut: which footage plays, in what order, and the narration laid over it.
 
-Each clip is a window of one raw file in that file's own seconds (a cast's event times, a browser
-recording's timestamps), cut hard: no speed change, no held frame. Its narration parts start at
-offsets from the clip's start; build.py fails when one runs past its clip's end or into the next
-part. The narration was written after the cut, to each clip's measured length, and says only what
+Each clip is a window of one raw file, cut hard: no speed change, no held frame. Its start, its
+end and each narration part's start are a mark the recorder set in that file
+(walkthrough.record.ts's `mark(...)`, recorded in raw/sections.json) plus an offset in seconds, so
+a new take re-times the cut itself. `start` and `end` are every file's first and last instants.
+build.py fails when a part runs past its clip's end, into the next part, or starts before its
+clip. The narration was written after the cut, to each clip's measured length, and says only what
 the clip shows.
 
 The video opens on its payoff, the command that received the key, then shows how it got there in
@@ -16,12 +18,20 @@ from __future__ import annotations
 from typing import NamedTuple
 
 
+class At(NamedTuple):
+    """A moment in a clip's source: the time of `mark` plus `offset` seconds."""
+
+    mark: str
+    offset: float = 0.0
+
+
 class Clip(NamedTuple):
     id: str
     source: str
-    start: float
-    end: float
-    narration: tuple[tuple[str, float], ...] = ()
+    start: At
+    end: At
+    narration: tuple[tuple[str, At], ...] = ()
+
 
 # The narration parts in speaking order; narrate.py sends each with its neighbours' text. Names are
 # written as they are said: DEMO_API_KEY as "the demo API key".
@@ -45,14 +55,19 @@ NARRATION: dict[str, str] = {
 }
 
 CLIPS: list[Clip] = [
-    Clip("open", "t4-ran.cast", 0.15, 5.85, (("open", 0.2),)),
-    Clip("login", "t1-login.cast", 0.25, 6.74, (("login", 0.2),)),
-    Clip("machine", "b1-machine.webm", 1.8, 13.4, (("machine-code", 0.3), ("machine-approve", 6.2))),
-    Clip("session", "t2-session.cast", 0.8, 15.2,
-         (("session-issued", 0.3), ("session-register", 4.6), ("session-self", 11.2))),
-    Clip("request", "t3-request.cast", 0.8, 12.6, (("request-ask", 0.4), ("request-wait", 9.0))),
-    Clip("approve", "b2-approve.webm", 1.2, 13.6,
-         (("approve-inbox", 0.2), ("approve-record", 3.9), ("approve-click", 9.75))),
-    Clip("ran", "t4-ran.cast", 2.5, 13.8, (("ran-runs", 0.2), ("ran-status", 8.0))),
-    Clip("grants", "b3-grants.webm", 1.5, 12.5, (("grants-list", 0.4), ("grants-revoke", 7.0))),
+    Clip("open", "t4-ran.cast", At("start", 0.15), At("status-typing", -0.2), (("open", At("start", 0.35)),)),
+    Clip("login", "t1-login.cast", At("typing", -0.3), At("code", 2.5), (("login", At("typing", -0.1)),)),
+    Clip("machine", "b1-machine.webm", At("page", 0.3), At("result", 1.4),
+         (("machine-code", At("page", 0.6)), ("machine-approve", At("record", 0.4)))),
+    Clip("session", "t2-session.cast", At("status-typing", -0.3), At("self", 1.5),
+         (("session-issued", At("status-typing", 0.0)), ("session-register", At("register-typing", 0.0)),
+          ("session-self", At("self", -0.6)))),
+    Clip("request", "t3-request.cast", At("typing", -0.3), At("waiting", 2.4),
+         (("request-ask", At("typing", 0.1)), ("request-wait", At("waiting", -0.4)))),
+    Clip("approve", "b2-approve.webm", At("inbox", -0.3), At("result", 1.0),
+         (("approve-inbox", At("inbox", -0.1)), ("approve-record", At("record", -0.4)), ("approve-click", At("approve", -1.0)))),
+    Clip("ran", "t4-ran.cast", At("start", 2.5), At("decided", 2.5),
+         (("ran-runs", At("start", 2.7)), ("ran-status", At("decided", -0.2)))),
+    Clip("grants", "b3-grants.webm", At("settings", -0.3), At("result", 1.0),
+         (("grants-list", At("grants", 0.4)), ("grants-revoke", At("revoke", 0.5)))),
 ]

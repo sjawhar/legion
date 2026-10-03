@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generates narration/<id>.mp3 for the narration parts edl.py names, through ElevenLabs.
 
-  secrets ELEVENLABS_API_KEY -- uv run --no-project --with elevenlabs python3 narrate.py [ID...]
+  ELEVENLABS_API_KEY=<key> uv run --no-project --with elevenlabs python3 narrate.py [ID...]
 
 Regenerates the parts named, or every part when none is; each part is sent with the text of the
 parts around it, so the voice carries from one to the next. The voice and its settings are the
@@ -29,7 +29,7 @@ SETTINGS = VoiceSettings(stability=0.75, similarity_boost=0.85, style=0.0, speed
 def main() -> int:
     key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
     if key == "":
-        print("narrate.py: ELEVENLABS_API_KEY is unset; run it as: secrets ELEVENLABS_API_KEY -- uv run --no-project --with elevenlabs python3 narrate.py", file=sys.stderr)
+        print("narrate.py: ELEVENLABS_API_KEY is unset; put the ElevenLabs key in the environment (secrets ELEVENLABS_API_KEY -- <command> is one way)", file=sys.stderr)
         return 1
     ids = list(NARRATION)
     wanted = sys.argv[1:] or ids
