@@ -1956,13 +1956,17 @@ statement moves the request rows and writes each one's audit row and its record'
 `ApplyDecision` decides a pending record on the deciding human's login — approve
 mints the grant while the requesting enrollment is still live, deny denies it — re-deriving the
 record's id, refusing any login but the record's approver whatever the record's state
-(`record.ErrNotApprover`, `403 NOT_APPROVER`), re-verifying its embedded request object, and
-writing the decision event (which records the deciding login), the request transition and the
-audit row in one transaction; a non-pending record, and one past its expiry that the sweeper has
-not yet expired, is `409 RECORD_TERMINAL` for its approver (a duplicate or late decision changes
-nothing) — but a record past its expiry, whether the sweeper has recorded it expired or not,
-answers with a message saying it expired before its approver acted (`requests.ErrExpired`), never
-that it was decided. An `agent_secret` record is pending while its request is: `GET /v1/pending`
+(`record.ErrNotApprover`, `403 NOT_APPROVER`), and any login the current policy would not have
+approve one of the request's names (`currentPolicyAdmits`, the same error: once a shared
+human-tier secret is a person's, a request waiting on `anyone` is that person's alone, and one
+waiting on a person for a secret now another's is no one's), re-verifying its embedded request
+object, and writing the decision event (which records the deciding login), the request transition
+and the audit row in one transaction; a non-pending record, and one past its expiry that the
+sweeper has not yet expired, is `409 RECORD_TERMINAL` for its approver (a duplicate or late
+decision changes nothing) — but a record past its expiry, whether the sweeper has recorded it
+expired or not, answers with a message saying it expired before its approver acted
+(`requests.ErrExpired`), never that it was decided. An `agent_secret` record is pending while its
+request is: `GET /v1/pending`
 (`PendingForApprover`, which lists `anyone` records for every approver) lists it only then, and
 `GET /v1/credential-requests/{id}` (`ReadRecord`)
 reads it as pending only then; a decided record's terminal event names the decision, and a request
@@ -1973,7 +1977,9 @@ live grant's values, each read from the secret its request froze (the ARN), re-c
 enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the policy version moved
 since the grant was decided — that the current policy still allows every granted name
 (`stillAllowed`: a name the policy no longer serves, denies, or now wants approved that was granted
-automatically, all refuse); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
+automatically, or that it now wants approved by someone the request's `decided_by` login is not,
+all refuse, so a grant outlives an owner change only when its approver may still approve the
+secret); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`.
 Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
 reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant

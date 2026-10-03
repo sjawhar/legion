@@ -20,18 +20,19 @@ import (
 // Values releases the values of a live grant to its own enrollment. Every call re-checks the
 // enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and —
 // when the policy has changed since the grant's request was decided — that the current policy
-// still allows this requester every granted name (stillAllowed). Each value is read from the
-// secret the request froze. It holds no pooled connection across a Secrets Manager read: the
-// grant's names are read into memory before the first value is fetched.
+// still allows this requester every granted name under the login that decided it
+// (stillAllowed). Each value is read from the secret the request froze. It holds no pooled
+// connection across a Secrets Manager read: the grant's names are read into memory before the
+// first value is fetched.
 func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map[string]string, time.Time, error) {
-	var owner, requestID, policyVersion string
+	var owner, requestID, policyVersion, decidedBy string
 	var expires time.Time
 	var live bool
 	var enr enrollmentRow
 	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and g.expires_at > now() and e.revoked_at is null and e.lease_expires_at > now(),
-		g.request_id, r.rules_version, e.operator
+		g.request_id, r.rules_version, coalesce(r.decided_by, ''), e.operator
 		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id where g.id=$1`, grantID).
-		Scan(&owner, &expires, &live, &requestID, &policyVersion, &enr.Operator)
+		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &enr.Operator)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, time.Time{}, ErrGrantNotLive
 	}
@@ -47,13 +48,13 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	if err := m.VerifyChain(ctx, grantID); err != nil {
 		return nil, time.Time{}, err
 	}
-	granted, err := m.grantedSecrets(ctx, requestID)
+	granted, err := grantedSecrets(ctx, m.Store.Pool, requestID)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
 	if set := m.Policy.Get(); policyVersion != set.Version {
 		for _, g := range granted {
-			if err := stillAllowed(set, g.name, g.decision, enr.requester()); err != nil {
+			if err := stillAllowed(set, g.name, g.decision, decidedBy, enr.requester()); err != nil {
 				return nil, time.Time{}, err
 			}
 		}
@@ -81,8 +82,8 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 // grantedSecret is one name a request did not deny, as frozen when the request was decided.
 type grantedSecret struct{ name, source, decision string }
 
-func (m *Machine) grantedSecrets(ctx context.Context, requestID string) ([]grantedSecret, error) {
-	rows, err := m.Store.Pool.Query(ctx, `select name, source, decision from request_secrets where request_id=$1 and decision <> 'deny' order by name`, requestID)
+func grantedSecrets(ctx context.Context, q querier, requestID string) ([]grantedSecret, error) {
+	rows, err := q.Query(ctx, `select name, source, decision from request_secrets where request_id=$1 and decision <> 'deny' order by name`, requestID)
 	if err != nil {
 		return nil, err
 	}
@@ -100,10 +101,13 @@ func (m *Machine) grantedSecrets(ctx context.Context, requestID string) ([]grant
 
 // stillAllowed re-checks one granted name against a policy newer than the one its request was
 // decided under. The policy must still serve the name and still let this requester have it: a
-// deny refuses, and so does a name granted automatically that the current policy wants approved,
-// since no human ever approved it. A name a human approved stays allowed while the policy still
-// wants an approval, whoever the approver now is.
-func stillAllowed(set *policy.Set, name, frozenDecision string, requester policy.Requester) error {
+// deny refuses; so does a name granted automatically that the current policy wants approved,
+// since no human ever approved it; and so does a name the current policy wants approved by
+// someone decidedBy, the login that decided the request, is not (record.MayDecide). So an
+// approval keeps its grant while the secret stays the approver's, or becomes shared, whose
+// approver is anyone, and a secret handed to a person stops every grant that person did not
+// approve.
+func stillAllowed(set *policy.Set, name, frozenDecision, decidedBy string, requester policy.Requester) error {
 	d, err := set.Evaluate(name, requester)
 	if errors.Is(err, policy.ErrUnknownSecret) {
 		return fmt.Errorf("%w: %s is no longer an agent secret", ErrGrantNotLive, name)
@@ -114,8 +118,12 @@ func stillAllowed(set *policy.Set, name, frozenDecision string, requester policy
 	switch {
 	case d.Outcome == policy.Deny:
 		return fmt.Errorf("%w: the current policy no longer allows %s", ErrGrantNotLive, name)
-	case frozenDecision == policy.Automatic && d.Outcome == policy.Approval:
+	case d.Outcome != policy.Approval:
+		return nil
+	case frozenDecision == policy.Automatic:
 		return fmt.Errorf("%w: the current policy requires approval for %s", ErrGrantNotLive, name)
+	case !record.MayDecide(record.KindAgentSecret, d.Approver, decidedBy):
+		return fmt.Errorf("%w: %s now needs its owner's approval, which this grant does not have", ErrGrantNotLive, name)
 	}
 	return nil
 }

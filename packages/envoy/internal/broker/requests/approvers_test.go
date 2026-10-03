@@ -1,0 +1,153 @@
+package requests
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
+	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
+)
+
+const (
+	// mallory is any signed-in person; her machine's session asks for the secrets below.
+	mallory = "mallory@example.com"
+	// bob is a person who owns nothing until a secret is handed to him.
+	bob = "bob@example.com"
+)
+
+// TestAnApprovalStopsWhenItsSecretChangesHands pins whose approval keeps a grant once a secret's
+// tags change: a grant its requester's own operator approved while the secret was shared and
+// human-tier, or that the secret's owner approved, releases nothing once the secret belongs to a
+// person who did not approve it, its rotated value included, and reuse no longer hands it back:
+// asking again is a new request to the new owner.
+func TestAnApprovalStopsWhenItsSecretChangesHands(t *testing.T) {
+	for name, c := range map[string]struct {
+		secret, approver, value string
+		handedOver              secrets.LocalSecret
+	}{
+		"a shared human-tier secret its requester approved, handed to a person": {
+			secret: "SHARED_KEY", approver: mallory, value: "shared-v1",
+			handedOver: policytest.Secret("SHARED_KEY", otherPerson, policy.TierHuman, "shared-v2-rotated"),
+		},
+		"a person's secret its owner approved, handed to another person": {
+			secret: "ALICE_KEY", approver: otherPerson, value: "alice-v1",
+			handedOver: policytest.Secret("ALICE_KEY", bob, policy.TierHuman, "alice-v2-rotated"),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, _, _, _ := newFixture(t)
+			ctx := context.Background()
+			enr, key := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
+			req, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", c.secret), "")
+			if err != nil || req.RecordID == nil {
+				t.Fatalf("Create = %+v, %v, want pending", req, err)
+			}
+			dec, err := m.ApplyDecision(ctx, *req.RecordID, true, c.approver)
+			if err != nil || dec.GrantID == "" {
+				t.Fatalf("ApplyDecision(%s) = %+v, %v, want granted", c.approver, dec, err)
+			}
+			if values, _, err := m.Values(ctx, dec.GrantID, enr); err != nil || values[c.secret] != c.value {
+				t.Fatalf("Values before the handover = %v, %v, want %s=%s", values, err, c.secret, c.value)
+			}
+
+			retag(t, m, c.handedOver)
+			if values, _, err := m.Values(ctx, dec.GrantID, enr); !errors.Is(err, ErrGrantNotLive) {
+				t.Fatalf("Values after %s became %s's = %v, %v; want ErrGrantNotLive", c.secret, c.handedOver.Tags[policy.TagOwner], values, err)
+			}
+			again, err := m.Create(ctx, enr, signRequest(t, m, key, "need it again", c.secret), "")
+			if err != nil || again.ID == req.ID || again.State != "pending" {
+				t.Fatalf("Create(again) = %+v, %v; want a new pending request, not the grant handed back", again, err)
+			}
+			var approver string
+			if err := m.Store.Pool.QueryRow(ctx, `select approver from credential_requests where id=$1`, *again.RecordID).Scan(&approver); err != nil || approver != c.handedOver.Tags[policy.TagOwner] {
+				t.Fatalf("new request's approver = %q, %v; want the new owner %s", approver, err, c.handedOver.Tags[policy.TagOwner])
+			}
+		})
+	}
+}
+
+// TestAPendingRequestIsDecidedByWhomTheTagsNameNow pins who decides a request whose secret changed
+// hands while it waited. One waiting on anyone for a shared human-tier secret that is now alice's
+// is refused to its requester's own operator and to any other person, approve and deny alike, and
+// stays pending until alice, whose approval releases the rotated value. One waiting on alice for a
+// secret that is now bob's is refused to both of them.
+func TestAPendingRequestIsDecidedByWhomTheTagsNameNow(t *testing.T) {
+	m, _, _, _ := newFixture(t)
+	ctx := context.Background()
+	enr, key := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
+	shared, err := m.Create(ctx, enr, signRequest(t, m, key, "need the shared one", "SHARED_KEY"), "")
+	if err != nil || shared.RecordID == nil {
+		t.Fatalf("Create(SHARED_KEY) = %+v, %v, want pending", shared, err)
+	}
+	alices, err := m.Create(ctx, enr, signRequest(t, m, key, "need alice's", "ALICE_KEY"), "")
+	if err != nil || alices.RecordID == nil {
+		t.Fatalf("Create(ALICE_KEY) = %+v, %v, want pending", alices, err)
+	}
+
+	retag(t, m,
+		policytest.Secret("SHARED_KEY", otherPerson, policy.TierHuman, "alice-owned-v2"),
+		policytest.Secret("ALICE_KEY", bob, policy.TierAgent, "bob-owned-v2"))
+	for _, c := range []struct {
+		recordID string
+		logins   []string
+	}{
+		{*shared.RecordID, []string{mallory, "carol@example.com"}},
+		{*alices.RecordID, []string{otherPerson, bob}},
+	} {
+		for _, login := range c.logins {
+			for _, approve := range []bool{true, false} {
+				if dec, err := m.ApplyDecision(ctx, c.recordID, approve, login); !errors.Is(err, record.ErrNotApprover) {
+					t.Fatalf("ApplyDecision(approve=%v, %s) after the handover = %+v, %v; want record.ErrNotApprover", approve, login, dec, err)
+				}
+			}
+		}
+	}
+	for _, id := range []string{shared.ID, alices.ID} {
+		if got, err := m.Get(ctx, id); err != nil || got.State != "pending" {
+			t.Fatalf("Get(%s) after refused decisions = %+v, %v; want pending", id, got, err)
+		}
+	}
+
+	dec, err := m.ApplyDecision(ctx, *shared.RecordID, true, otherPerson)
+	if err != nil || dec.GrantID == "" {
+		t.Fatalf("ApplyDecision(alice, the new owner) = %+v, %v; want granted", dec, err)
+	}
+	if values, _, err := m.Values(ctx, dec.GrantID, enr); err != nil || values["SHARED_KEY"] != "alice-owned-v2" {
+		t.Fatalf("Values after alice approved = %v, %v; want SHARED_KEY=alice-owned-v2", values, err)
+	}
+}
+
+// TestAnOwnersApprovalSurvivesLooseningToShared pins the control: once alice's agent-tier secret
+// is shared and human-tier, whose approver is anyone, the grant alice approved keeps releasing its
+// value and is handed back by reuse, and a request still waiting on alice is hers to decide.
+func TestAnOwnersApprovalSurvivesLooseningToShared(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx := context.Background()
+	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need alice's", "ALICE_KEY"), "")
+	if err != nil || req.RecordID == nil {
+		t.Fatalf("Create = %+v, %v, want pending", req, err)
+	}
+	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, otherPerson)
+	if err != nil || dec.GrantID == "" {
+		t.Fatalf("ApplyDecision(alice) = %+v, %v, want granted", dec, err)
+	}
+	otherEnr, otherKey := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
+	waiting, err := m.Create(ctx, otherEnr, signRequest(t, m, otherKey, "need alice's too", "ALICE_KEY"), "")
+	if err != nil || waiting.RecordID == nil {
+		t.Fatalf("Create(mallory) = %+v, %v, want pending", waiting, err)
+	}
+
+	retag(t, m, policytest.Secret("ALICE_KEY", policy.OwnerShared, policy.TierHuman, "alice-v1"))
+	if values, _, err := m.Values(ctx, dec.GrantID, enr); err != nil || values["ALICE_KEY"] != "alice-v1" {
+		t.Fatalf("Values once shared = %v, %v; want ALICE_KEY still released", values, err)
+	}
+	if again, err := m.Create(ctx, enr, signRequest(t, m, key, "again", "ALICE_KEY"), ""); err != nil || again.ID != req.ID {
+		t.Fatalf("Create(again) once shared = %+v, %v; want the live grant reused", again, err)
+	}
+	if dec, err := m.ApplyDecision(ctx, *waiting.RecordID, true, otherPerson); err != nil || dec.GrantID == "" {
+		t.Fatalf("ApplyDecision(alice) on the waiting request once shared = %+v, %v; want granted", dec, err)
+	}
+}
