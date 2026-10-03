@@ -9,12 +9,9 @@ on:
         required: false
         default: ""
     outputs:
-      digest:
-        description: The pushed image's digest (sha256:…)
-        value: ${{ jobs.build.outputs.digest }}
-      image:
-        description: The image repository the digest belongs to
-        value: ${{ jobs.build.outputs.image }}
+      ref:
+        description: The pushed image, pinned by digest (ghcr.io/sjawhar/legion-worker@sha256:…)
+        value: ${{ jobs.build.outputs.ref }}
   # Post-merge only: GitHub dispatches a workflow only once it exists on the default branch.
   workflow_dispatch:
     inputs:
@@ -85,8 +82,7 @@ jobs:
       # would be the ephemeral merge commit there); the triggering commit for workflow_call/dispatch.
       BUILT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     outputs:
-      digest: ${{ steps.build.outputs.digest }}
-      image: ${{ steps.meta.outputs.image }}
+      ref: ${{ steps.record.outputs.ref }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -108,7 +104,6 @@ jobs:
           fi
           {
             echo "built_sha=$BUILT_SHA"
-            echo "image=$IMAGE"
             echo "short=$short"
             echo "version_label=$version_label"
             echo "tags<<EOF"
@@ -147,11 +142,13 @@ jobs:
             github_token=${{ secrets.GITHUB_TOKEN }}
 
       - name: Record digest
+        id: record
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           test -n "$DIGEST"
+          echo "ref=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
           {
             echo "### Worker image"
             echo

@@ -11,8 +11,9 @@ on:
   pull_request:
     types: [opened, reopened, synchronize]
 
-# The token clones the repository (actions/checkout) and downloads tools and releases (setup-bun's
-# default `token` input, install-jj, MISE_GITHUB_TOKEN); nothing writes.
+# Read-only: no job here writes to the repository, a registry or the API. The token clones,
+# downloads pinned tools, and, where a job calls dorny/paths-filter, reads the pull request's
+# file list, which this public repository serves without `pull-requests: read`.
 permissions:
   contents: read
 
@@ -22,6 +23,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       # This workflow runs on every pull request with no path filter, so the pin check runs on
       # every change rather than only on one that touches a package.
@@ -36,6 +39,9 @@ jobs:
 
       - name: Check image triggers cover every image input
         run: .github/scripts/check-image-trigger-paths.sh
+
+      - name: Check every remote action is pinned to a commit SHA
+        run: .github/scripts/check-action-pins.sh
 
       # No Go cache here: gofmt needs none, and this job, which ends first, would save a nearly
       # empty one under the key the typecheck and test jobs share (the daemon's go.sum), where the
@@ -62,6 +68,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
@@ -97,6 +105,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
@@ -118,6 +128,9 @@ jobs:
 
       - name: Test the image trigger path check
         run: .github/scripts/check-image-trigger-paths.test.sh
+
+      - name: Test the action pin check
+        run: .github/scripts/check-action-pins.test.sh
 
       - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command, the design-gate verdict)
         run: bun test scripts/e2e/lib
