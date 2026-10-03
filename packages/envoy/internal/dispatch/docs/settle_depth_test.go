@@ -16,7 +16,8 @@ import (
 
 // A crafted client can write an over-deep tree through the room's CRDT without passing through
 // pmdoc.Update. Settlement skips that tree as it does every tree outside the schema: it writes no
-// version and does not fail the live room.
+// version and does not fail the live room. Its pending-settlement row and unsettled state stay,
+// because a later repair or restart must still settle the document rather than forget it.
 func TestSettlementSkipsATreeOverTheDepthBound(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -56,6 +57,12 @@ func TestSettlementSkipsATreeOverTheDepthBound(t *testing.T) {
 	}
 	if state.settleFailures != 0 {
 		t.Fatalf("settlement recorded %d failures for an over-deep document", state.settleFailures)
+	}
+	if !state.unsettled {
+		t.Fatal("settlement that stopped at ErrDocSchema released the document's unsettled state")
+	}
+	if _, held := service.rooms.Load(artifactID); !held {
+		t.Fatal("settlement that stopped at ErrDocSchema removed the document's state")
 	}
 }
 

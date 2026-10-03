@@ -61,9 +61,15 @@ type servicePersistenceAdapter struct {
 	store   VersionedStore
 	service *Service
 }
-
 type classifiedUpdateStore interface {
 	AppendUpdateWithClass(context.Context, string, []byte, bool) (persistence.Version, error)
+}
+
+// creditedUpdateStore atomically records an observed update's settlement credit with the durable
+// row that leaves its settlement owed. PgVersioned implements it; test-only persistence wrappers
+// can keep the ordinary classified path when their test does not exercise settlement attribution.
+type creditedUpdateStore interface {
+	AppendUpdateWithSettlementCredit(context.Context, string, []byte, bool, settlementCredit) (persistence.Version, error)
 }
 
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
@@ -85,7 +91,7 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 	if a.service.roomFailed(room) {
 		return nil
 	}
-	contentChanged, durable, found := a.service.consumeUpdateClass(room, update)
+	contentChanged, durable, credit, found := a.service.consumeUpdateClass(room, update)
 	if found && durable {
 		defer a.service.finishDurableAppend(room)
 	}
@@ -93,7 +99,9 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 		return nil
 	}
 	var err error
-	if store, ok := a.store.(classifiedUpdateStore); ok {
+	if store, ok := a.store.(creditedUpdateStore); ok {
+		_, err = store.AppendUpdateWithSettlementCredit(context.Background(), room, update, contentChanged, credit)
+	} else if store, ok := a.store.(classifiedUpdateStore); ok {
 		_, err = store.AppendUpdateWithClass(context.Background(), room, update, contentChanged)
 	} else {
 		_, err = a.store.AppendUpdate(context.Background(), room, update)
@@ -112,7 +120,7 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	if a.service.roomFailed(room) {
 		return nil
 	}
-	contentChanged, durable, found := a.service.consumeUpdateClass(room, update)
+	contentChanged, durable, credit, found := a.service.consumeUpdateClass(room, update)
 	if found && durable {
 		defer a.service.finishDurableAppend(room)
 	}
@@ -120,7 +128,9 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		return nil
 	}
 	var err error
-	if store, ok := a.store.(classifiedUpdateStore); ok {
+	if store, ok := a.store.(creditedUpdateStore); ok {
+		_, err = store.AppendUpdateWithSettlementCredit(ctx, room, update, contentChanged, credit)
+	} else if store, ok := a.store.(classifiedUpdateStore); ok {
 		_, err = store.AppendUpdateWithClass(ctx, room, update, contentChanged)
 	} else {
 		_, err = a.store.AppendUpdate(ctx, room, update)
@@ -413,7 +423,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
-	owed, err := settlementPending(ctx, rooms, room)
+	owed, credit, err := pendingSettlementCredit(ctx, rooms, room)
 	if err != nil {
 		return err
 	}
@@ -437,6 +447,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// that is gone, so this load settles once rather than waiting for an edit to arm one - unless
 	// the load is a settlement's own warm-up, which settles it next. A room that failed again
 	// while this load ran leaves the row for its own replacement.
+	if owed {
+		state.mergeSettlementCreditLocked(credit)
+	}
 	if state.failed == nil && owed && !state.settleWarming {
 		s.scheduleSettleLocked(room, state)
 	}
@@ -458,10 +471,11 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		replica.catchUp(room, doc)
 		contentChanged := s.updateChangesMarkdown(room, replica.doc)
 		replica.mu.Unlock()
-		s.recordUpdateClass(room, update, contentChanged, true)
+		var credit settlementCredit
 		if contentChanged {
-			s.creditContentChange(room, origin)
+			credit = s.creditContentChange(room, origin)
 		}
+		s.recordUpdateClass(room, update, contentChanged, true, credit)
 		s.scheduleSettle(room)
 	})
 	return nil
@@ -541,9 +555,9 @@ func (s *Service) updateChangesMarkdown(room string, replica *crdt.Doc) bool {
 // connection sent it, so every connected peer joins `pending`: when exactly one is connected it is
 // the latest edit source and replaces `lastActor`, and otherwise the edit cannot be pinned on a
 // single peer and no older actor may stand in for it.
-func (s *Service) creditContentChange(room string, origin any) {
+func (s *Service) creditContentChange(room string, origin any) settlementCredit {
 	if _, published := origin.(*liveWriteOrigin); published {
-		return
+		return settlementCredit{}
 	}
 	value, service := s.serviceOrigins.Load(origin)
 	state := s.lockState(room)
@@ -554,7 +568,7 @@ func (s *Service) creditContentChange(room string, origin any) {
 			state.lastActor = new(*actor)
 			state.unsettled = true
 		}
-		return
+		return state.settlementCreditLocked()
 	}
 	var sole *model.Actor
 	ambiguous := false
@@ -572,6 +586,7 @@ func (s *Service) creditContentChange(room string, origin any) {
 	}
 	state.lastActor = sole
 	state.unsettled = true
+	return state.settlementCreditLocked()
 }
 
 // addConnection registers a browser connected to room. It is credited only with browser edits

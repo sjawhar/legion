@@ -74,6 +74,7 @@ type documentUpdateClass struct {
 	update         []byte
 	contentChanged bool
 	durable        bool
+	credit         settlementCredit
 }
 
 // lockState returns room's state locked, creating it when the service holds none.
@@ -166,11 +167,11 @@ func (s *Service) unusedLocked(state *roomState) bool {
 		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.pendingVersions) == 0
 }
 
-func (s *Service) recordUpdateClass(room string, update []byte, contentChanged, durable bool) {
+func (s *Service) recordUpdateClass(room string, update []byte, contentChanged, durable bool, credit settlementCredit) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	state.updateClasses = append(state.updateClasses, documentUpdateClass{
-		update: append([]byte(nil), update...), contentChanged: contentChanged, durable: durable,
+		update: append([]byte(nil), update...), contentChanged: contentChanged, durable: durable, credit: credit,
 	})
 	state.pendingUpdates++
 	if durable {
@@ -178,10 +179,10 @@ func (s *Service) recordUpdateClass(room string, update []byte, contentChanged, 
 	}
 }
 
-func (s *Service) consumeUpdateClass(room string, update []byte) (bool, bool, bool) {
+func (s *Service) consumeUpdateClass(room string, update []byte) (bool, bool, settlementCredit, bool) {
 	state := s.lockExistingState(room)
 	if state == nil {
-		return true, false, false
+		return true, false, settlementCredit{}, false
 	}
 	defer s.unlockState(room, state)
 	for index, class := range state.updateClasses {
@@ -190,9 +191,9 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (bool, bool, bo
 		}
 		state.updateClasses = append(state.updateClasses[:index], state.updateClasses[index+1:]...)
 		state.pendingUpdates--
-		return class.contentChanged, class.durable, true
+		return class.contentChanged, class.durable, class.credit, true
 	}
-	return true, false, false
+	return true, false, settlementCredit{}, false
 }
 
 func (s *Service) hasPendingUpdates(room string) bool {

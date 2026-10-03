@@ -126,7 +126,7 @@ func (l *Ledger) commit(ctx context.Context) error {
 		l.fail(err)
 		return err
 	}
-	l.credit()
+	l.credit(ctx)
 	for _, written := range l.versions {
 		l.service.commitVersion(written.artifactID, written.version)
 	}
@@ -194,14 +194,17 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 
 // credit credits each content change of a committed transaction to its room, for the room's
 // next version, and each seed to its room's settlement. It runs before the transaction's own
-// versions are released, which clears the authors those versions already name. A room's state
-// holds what credit records until a settlement reads it (unsettled).
-func (l *Ledger) credit() {
+// versions are released, which clears the authors those versions already name. It also writes that
+// credit to the pending-settlement row, so a process that ends before its room's settlement does
+// not lose attribution.
+func (l *Ledger) credit(ctx context.Context) {
 	for artifactID, actor := range l.seeds {
 		state := l.service.lockState(artifactID)
 		state.lastActor = new(actor)
 		state.unsettled = true
+		credit := state.settlementCreditLocked()
 		l.service.unlockState(artifactID, state)
+		l.service.recordSettlementCredit(ctx, artifactID, credit)
 	}
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
@@ -214,7 +217,9 @@ func (l *Ledger) credit() {
 		}
 		state.lastActor = write.actor
 		state.unsettled = true
+		credit := state.settlementCreditLocked()
 		l.service.unlockState(artifactID, state)
+		l.service.recordSettlementCredit(ctx, artifactID, credit)
 	}
 }
 

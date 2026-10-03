@@ -80,15 +80,21 @@ func (p *PgVersioned) Head(ctx context.Context, room string) (persistence.Versio
 
 // AppendUpdate validates and stores one incremental V1 update as content.
 func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
-	return p.appendUpdate(ctx, room, update, true)
+	return p.appendUpdate(ctx, room, update, true, settlementCredit{})
 }
 
 // AppendUpdateWithClass validates and stores one incremental V1 update with its rendered-content classification.
 func (p *PgVersioned) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	return p.appendUpdate(ctx, room, update, contentChanged)
+	return p.appendUpdate(ctx, room, update, contentChanged, settlementCredit{})
 }
 
-func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+// AppendUpdateWithSettlementCredit validates and stores one incremental V1 update with the authors
+// its pending settlement must retain if the room goes before it runs.
+func (p *PgVersioned) AppendUpdateWithSettlementCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit settlementCredit) (persistence.Version, error) {
+	return p.appendUpdate(ctx, room, update, contentChanged, credit)
+}
+
+func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool, credit settlementCredit) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		return 0, err
 	}
@@ -99,7 +105,7 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 			return fmt.Errorf("begin document update: %w", err)
 		}
 		defer tx.Rollback(ctx)
-		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged)
+		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit)
 		if err != nil {
 			return err
 		}
@@ -124,7 +130,7 @@ func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string
 		}
 		return 0, err
 	}
-	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged)
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, settlementCredit{})
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers
@@ -169,7 +175,7 @@ func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
 	return nil
 }
 
-func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit settlementCredit) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -191,28 +197,20 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	`, room, int64(version), update, contentChanged); err != nil {
 		return 0, fmt.Errorf("append document update: %w", err)
 	}
-	if err := markSettlementPending(ctx, tx, room); err != nil {
+	if err := markSettlementPending(ctx, tx, room, credit); err != nil {
 		return 0, err
 	}
 	return version, nil
 }
 
 // markSettlementPending records, in the transaction that appends a document update, that the
-// document owes a settlement. Every update a room persists arms a settlement, and the timer that
-// runs it lives only in memory, so a settlement a shutdown cut short is found here by the room's
-// next load (onLoadDocument) and by the resumption (RunSettlementResumption). The settlement that
-// covers the update deletes the row in the transaction that commits its writes
-// (clearSettlementPending). The caller holds the document's advisory lock, which orders this row's
-// writers as it orders the updates.
-func markSettlementPending(ctx context.Context, tx pgx.Tx, room string) error {
-	if _, err := tx.Exec(ctx, `
-		insert into doc_settlements_pending (artifact_id) values ($1)
-		on conflict (artifact_id) do update
-		set marked_at = now()
-	`, room); err != nil {
-		return fmt.Errorf("record the document's pending settlement: %w", err)
-	}
-	return nil
+// document owes a settlement and the authors that settlement must retain. The timer that runs it
+// lives only in memory, so a settlement a shutdown cuts short is found here by the room's next load
+// (onLoadDocument) and by the resumption (RunSettlementResumption). The settlement that covers the
+// update deletes the row in the transaction that commits its writes (clearSettlementPending). The
+// caller holds the document's advisory lock, which orders this row's writers as it orders updates.
+func markSettlementPending(ctx context.Context, tx pgx.Tx, room string, credit settlementCredit) error {
+	return upsertSettlementCredit(ctx, tx, room, credit, true)
 }
 
 // clearSettlementPending deletes the document's pending settlement inside the settlement
@@ -224,18 +222,6 @@ func clearSettlementPending(ctx context.Context, tx pgx.Tx, room string) error {
 		return fmt.Errorf("clear the document's pending settlement: %w", err)
 	}
 	return nil
-}
-
-// settlementPending reports whether the document owes a settlement that no settlement has
-// committed.
-func settlementPending(ctx context.Context, q Queryer, room string) (bool, error) {
-	var pending bool
-	if err := q.QueryRow(ctx, `
-		select exists(select 1 from doc_settlements_pending where artifact_id = $1)
-	`, room).Scan(&pending); err != nil {
-		return false, fmt.Errorf("read the document's pending settlement: %w", err)
-	}
-	return pending, nil
 }
 
 // ListVersions returns persisted incremental update metadata newest-first.
