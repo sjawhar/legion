@@ -330,7 +330,6 @@ func TestRegisterRefusesWithNoHelperSocket(t *testing.T) {
 	runtimeDir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("AGENT_SECRETS_HELPER_SOCK", "")
-	t.Setenv("AGENT_SECRETS_KEY_DIR", newKeyDir(t))
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
 	code := cmdRegister([]string{"--exec", "--", "true"}, &stdout, &stderr)

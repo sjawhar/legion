@@ -559,19 +559,29 @@ func TestSessionID(t *testing.T) {
 	}
 }
 
-// insertPendingRequest writes a pending request row under enrollmentID the way requests.Machine
-// would, so these tests can watch what ending an enrollment does to it.
+// insertPendingRequest writes a pending request row under enrollmentID and its credential-request
+// record, linked as requests.Machine.createPending links them, so these tests can watch what
+// ending an enrollment does to both.
 func insertPendingRequest(t *testing.T, svc *Service, enrollmentID uuid.UUID) string {
 	t.Helper()
+	ctx := context.Background()
 	id := uuid.NewString()
-	if _, err := svc.Store.Pool.Exec(context.Background(), `insert into requests (id, enrollment_id, reason, state, allowed_approver, rules_version, lifetime_seconds, pending_expires_at)
-		values ($1,$2,'need it','pending','ada@example.com','v',3600, now() + interval '1 hour')`, id, enrollmentID); err != nil {
+	recordID := strings.ReplaceAll(id, "-", "")
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, enrollment_id, expires_at)
+		values ($1,'body','agent_secret','ada@example.com',$2, now() + interval '1 hour')`, recordID, enrollmentID); err != nil {
+		t.Fatalf("insert record: %v", err)
+	}
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into requests (id, enrollment_id, reason, state, allowed_approver, rules_version, lifetime_seconds, pending_expires_at, record_id)
+		values ($1,$2,'need it','pending','ada@example.com','v',3600, now() + interval '1 hour', $3)`, id, enrollmentID, recordID); err != nil {
 		t.Fatalf("insert pending request: %v", err)
 	}
 	return id
 }
 
-func requestState(t *testing.T, svc *Service, id string) (state, decidedBy string, audits int) {
+// requestState reads what ending an enrollment left on request id: its state and who decided it,
+// its request.cancelled audit rows, and its record's terminal event as "<event> by <actor>" (""
+// for none).
+func requestState(t *testing.T, svc *Service, id string) (state, decidedBy string, audits int, recordEvent string) {
 	t.Helper()
 	ctx := context.Background()
 	if err := svc.Store.Pool.QueryRow(ctx, `select state, coalesce(decided_by, '') from requests where id=$1`, id).Scan(&state, &decidedBy); err != nil {
@@ -580,12 +590,17 @@ func requestState(t *testing.T, svc *Service, id string) (state, decidedBy strin
 	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from audit where kind='request.cancelled' and request_id=$1`, id).Scan(&audits); err != nil {
 		t.Fatalf("count request.cancelled audit rows: %v", err)
 	}
-	return state, decidedBy, audits
+	if err := svc.Store.Pool.QueryRow(ctx, `select coalesce((select ev.event || ' by ' || ev.actor from credential_request_events ev
+		join requests r on r.record_id = ev.record_id where r.id=$1), '')`, id).Scan(&recordEvent); err != nil {
+		t.Fatalf("read the record's event: %v", err)
+	}
+	return state, decidedBy, audits, recordEvent
 }
 
 // TestRevokeCancelsPendingRequests pins that ending an enrollment withdraws what it was still
-// waiting on: every pending request under it is cancelled, with its own audit row, in the same
-// transaction as the revoke.
+// waiting on: every pending request under it is cancelled, with its own audit row and a cancelled
+// event on its record (so the approver's pending list stops offering it), in the same transaction
+// as the revoke.
 func TestRevokeCancelsPendingRequests(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
@@ -598,40 +613,8 @@ func TestRevokeCancelsPendingRequests(t *testing.T) {
 	if err := svc.Revoke(ctx, cred, enr.ID.String(), "launcher:test"); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	if state, by, audits := requestState(t, svc, requestID); state != "cancelled" || by != "launcher:test" || audits != 1 {
-		t.Fatalf("pending request after revoke: state=%s decided_by=%s audit rows=%d, want cancelled by launcher:test with one audit row", state, by, audits)
-	}
-}
-
-// TestRevokeClosesPendingRecords pins that a pending request's credential-request record is closed
-// with a cancelled event when its enrollment ends, so the approver's pending list (which lists
-// records with no terminal event) stops offering a request nobody can approve any more.
-func TestRevokeClosesPendingRecords(t *testing.T) {
-	svc := newService(t)
-	ctx := context.Background()
-	cred := mintCredential(t, svc, str("ada@example.com"), nil, "devbox")
-	enr, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-record", Operator: str("ada@example.com"), Thumbprint: "tp-record"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	recordID := strings.Repeat("ab", 32)
-	if _, err := svc.Store.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, enrollment_id, expires_at)
-		values ($1,'body','agent_secret','ada@example.com',$2, now() + interval '1 hour')`, recordID, enr.ID); err != nil {
-		t.Fatalf("insert record: %v", err)
-	}
-	requestID := insertPendingRequest(t, svc, enr.ID)
-	if _, err := svc.Store.Pool.Exec(ctx, `update requests set record_id=$2 where id=$1`, requestID, recordID); err != nil {
-		t.Fatalf("link record: %v", err)
-	}
-	if err := svc.Revoke(ctx, cred, enr.ID.String(), "launcher:test"); err != nil {
-		t.Fatalf("Revoke: %v", err)
-	}
-	var event, actor string
-	if err := svc.Store.Pool.QueryRow(ctx, `select event, actor from credential_request_events where record_id=$1`, recordID).Scan(&event, &actor); err != nil {
-		t.Fatalf("read the record's event: %v", err)
-	}
-	if event != "cancelled" || actor != "launcher:test" {
-		t.Fatalf("record event = %s by %s, want cancelled by launcher:test", event, actor)
+	if state, by, audits, event := requestState(t, svc, requestID); state != "cancelled" || by != "launcher:test" || audits != 1 || event != "cancelled by launcher:test" {
+		t.Fatalf("pending request after revoke: state=%s decided_by=%s audit rows=%d record event=%q, want cancelled by launcher:test with one audit row and a cancelled record event", state, by, audits, event)
 	}
 }
 
@@ -639,7 +622,7 @@ func TestRevokeClosesPendingRecords(t *testing.T) {
 // is dead to Create: re-enrolling the same key mints a fresh enrollment (never the dead one back
 // as Existing), re-enrolling a different key is not refused as already enrolled, and the lapsed
 // enrollment is ended — revoked with an enrollment.expired audit row and its pending requests
-// cancelled.
+// cancelled, each with a cancelled event on its record.
 func TestLapsedLeaseReleasesTheRuntimeID(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
@@ -676,8 +659,8 @@ func TestLapsedLeaseReleasesTheRuntimeID(t *testing.T) {
 	if !revoked || expiredAudits != 1 {
 		t.Fatalf("lapsed enrollment revoked=%v enrollment.expired audit rows=%d, want revoked with one", revoked, expiredAudits)
 	}
-	if state, by, audits := requestState(t, svc, pending); state != "cancelled" || by != "broker" || audits != 1 {
-		t.Fatalf("pending request of the lapsed enrollment: state=%s decided_by=%s audit rows=%d, want cancelled by broker", state, by, audits)
+	if state, by, audits, event := requestState(t, svc, pending); state != "cancelled" || by != "broker" || audits != 1 || event != "cancelled by broker" {
+		t.Fatalf("pending request of the lapsed enrollment: state=%s decided_by=%s audit rows=%d record event=%q, want cancelled by broker with a cancelled record event", state, by, audits, event)
 	}
 
 	lapse(sameKey.ID)

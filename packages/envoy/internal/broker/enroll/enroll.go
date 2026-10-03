@@ -284,7 +284,7 @@ func (s *Service) recoverConflict(ctx context.Context, cred Credential, in Enrol
 		return Enrollment{}, false, err
 	}
 	if !live {
-		if _, _, err := endEnrollment(ctx, tx, existing.ID.String(), "broker", "enrollment.expired", "its lease lapsed"); err != nil {
+		if _, _, err := endLapsed(ctx, tx, existing.ID.String()); err != nil {
 			return Enrollment{}, false, err
 		}
 		return Enrollment{}, true, tx.Commit(ctx)
@@ -320,17 +320,12 @@ func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason strin
 		id       string
 		recordID *string
 	}
-	var cancelled []cancelledRequest
-	for rows.Next() {
+	cancelled, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (cancelledRequest, error) {
 		var c cancelledRequest
-		if err := rows.Scan(&c.id, &c.recordID); err != nil {
-			rows.Close()
-			return 0, 0, err
-		}
-		cancelled = append(cancelled, c)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+		err := row.Scan(&c.id, &c.recordID)
+		return c, err
+	})
+	if err != nil {
 		return 0, 0, err
 	}
 	for _, c := range cancelled {
@@ -349,6 +344,12 @@ func endEnrollment(ctx context.Context, tx pgx.Tx, id, actor, kind, reason strin
 		return 0, 0, err
 	}
 	return tag.RowsAffected(), len(cancelled), nil
+}
+
+// endLapsed ends an enrollment whose lease lapsed: endEnrollment with actor broker and an
+// enrollment.expired audit row, for recoverConflict and the sweep alike.
+func endLapsed(ctx context.Context, tx pgx.Tx, id string) (grantsRevoked int64, requestsCancelled int, err error) {
+	return endEnrollment(ctx, tx, id, "broker", "enrollment.expired", "its lease lapsed")
 }
 
 // LapsedEnrollment is one enrollment EndLapsed ended.
@@ -401,23 +402,16 @@ func (s *Service) endLapsedBatch(ctx context.Context) ([]LapsedEnrollment, error
 	if err != nil {
 		return nil, err
 	}
-	var batch []LapsedEnrollment
-	for rows.Next() {
+	batch, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (LapsedEnrollment, error) {
 		var e LapsedEnrollment
-		var id uuid.UUID
-		if err := rows.Scan(&id, &e.Kind, &e.RuntimeID, &e.Slot, &e.LeaseExpires); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		e.ID = id.String()
-		batch = append(batch, e)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
+		err := row.Scan(&e.ID, &e.Kind, &e.RuntimeID, &e.Slot, &e.LeaseExpires)
+		return e, err
+	})
+	if err != nil {
 		return nil, err
 	}
 	for i := range batch {
-		batch[i].GrantsRevoked, batch[i].RequestsCancelled, err = endEnrollment(ctx, tx, batch[i].ID, "broker", "enrollment.expired", "its lease lapsed")
+		batch[i].GrantsRevoked, batch[i].RequestsCancelled, err = endLapsed(ctx, tx, batch[i].ID)
 		if err != nil {
 			return nil, err
 		}
