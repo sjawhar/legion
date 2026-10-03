@@ -58,8 +58,10 @@ export const dispatch = {
     page.getByText(`Approved. ${agentHost} can start agent sessions as you.`),
   inboxRequest: (page: Page): Locator =>
     page.getByRole("link", { name: /Secret request.*DEMO_API_KEY/s }),
-  requestReason: (page: Page): Locator => page.getByText(reason),
-  requestApproved: (page: Page): Locator => page.getByText(/^approved/i),
+  /** The decision the record page shows once approved ("Approved just now"). The word boundary
+   *  matters: the Approve and Deny buttons' row reads "ApproveDeny", which /^approved/i matches,
+   *  so a bare prefix finds the buttons until the decision replaces them. */
+  requestApproved: (page: Page): Locator => page.getByText(/^approved\b/i),
   settings: (page: Page): Locator => page.getByRole("link", { name: "Settings" }),
   liveGrants: (page: Page): Locator =>
     page.locator("section[aria-labelledby='credential-grants-heading']"),

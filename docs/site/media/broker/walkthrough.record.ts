@@ -202,10 +202,13 @@ interface ResultFrame {
 }
 
 /** Holds a page on its result: asserts the result is on screen (inside the viewport, not merely in
- *  the DOM), moves the pointer off it as a reader would, screenshots the viewport as the frame the
- *  recording must end on, notes the tight box around the result's text, then waits out
- *  resultHoldMs. The screenshot is never clipped: Chromium renders a clipped one at the clip's
- *  size, and the recording shows that render as frames of the clip on grey. */
+ *  the DOM), measures the tight box around its text and fails unless that box is a real one inside
+ *  the viewport, moves the pointer off it as a reader would, screenshots the viewport as the frame
+ *  the recording must end on, then waits out resultHoldMs. The box is measured on the element the
+ *  check saw: an element replaced since (a locator that matched what the result replaces) measures
+ *  as an empty box at the corner, where a comparison would find the corner's own pixels alike and
+ *  pass. The screenshot is never clipped: Chromium renders a clipped one at the clip's size, and
+ *  the recording shows that render as frames of the clip on grey. */
 async function holdOnResult(page: Page, result: Locator, reference: string): Promise<ResultFrame> {
   await expect(result).toBeVisible();
   await expect(result).toBeInViewport({ ratio: 1 });
@@ -213,8 +216,22 @@ async function holdOnResult(page: Page, result: Locator, reference: string): Pro
     const range = document.createRange();
     range.selectNodeContents(element);
     const { x, y, width, height } = range.getBoundingClientRect();
-    return { height, width, x, y };
+    return { connected: element.isConnected, height, width, x, y };
   });
+  if (
+    !text.connected ||
+    text.width <= 0 ||
+    text.height <= 0 ||
+    text.x < 0 ||
+    text.y < 0 ||
+    text.x + text.width > viewport.width ||
+    text.y + text.height > viewport.height
+  ) {
+    throw new Error(
+      `the result's text measures ${JSON.stringify(text)}, not a box inside the ` +
+        `${viewport.width}x${viewport.height} viewport: ${result}`
+    );
+  }
   await page.mouse.move(text.x + Math.min(text.width / 2, 120), text.y + text.height + 48, {
     steps: 12,
   });
