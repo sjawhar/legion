@@ -502,8 +502,10 @@ bot_thread_resolved_on_acceptance() {
 }
 # review_threads prints every review thread on the proof's pull request as one JSON array: each
 # thread's node id, its isResolved, and each comment's author (GraphQL names an App by its bare
-# slug), body and state (a draft in a pending review is PENDING). A pull request with more threads
-# or comments than one page holds fails rather than print part of them.
+# slug), body, state (a draft in a pending review is PENDING) and the state of the review it
+# belongs to (reviewState; a comment outside any review, which GitHub does not produce here, reads
+# null). A pull request with more threads or comments than one page holds fails rather than print
+# part of them.
 review_threads() {
   local page
   # shellcheck disable=SC2016 # a GraphQL query: its $ are GraphQL's
@@ -511,18 +513,21 @@ review_threads() {
     query($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) { pullRequest(number: $number) {
         reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { id isResolved
-          comments(first: 100) { pageInfo { hasNextPage } nodes { author { login } body state } } } } } } }') || return 1
+          comments(first: 100) { pageInfo { hasNextPage } nodes { author { login } body state pullRequestReview { state } } } } } } } }') || return 1
   jq -ce '.data.repository.pullRequest.reviewThreads
     | if .pageInfo.hasNextPage or any(.nodes[]; .comments.pageInfo.hasNextPage) then error("more review threads or comments than one page") else . end
-    | [.nodes[] | {id, isResolved, comments: [.comments.nodes[] | {author: .author.login, body, state}]}]' <<<"$page"
+    | [.nodes[] | {id, isResolved, comments: [.comments.nodes[] | {author: .author.login, body, state, reviewState: .pullRequestReview.state}]}]' <<<"$page"
 }
-# reviewer_thread prints the node id of the one review thread the Legion reviewer opened on the
-# proof's pull request, or fails naming how many it opened.
+# reviewer_thread prints the node id of the one review thread the Legion reviewer opened with a
+# CHANGES_REQUESTED review on the proof's pull request, or fails naming how many such threads it
+# opened. A thread a COMMENT review's reviewer also left (one no review round should post, but the
+# selector does not rely on that) is never picked: only its requested-changes review names the
+# correction, so only the thread that review opened is the one a correction answers.
 reviewer_thread() {
   local threads
   threads=$(review_threads) || return 1
-  jq -er '[.[] | select(.comments[0].author == "legion-reviewer")] as $mine
-    | if ($mine | length) == 1 then $mine[0].id else error("the Legion reviewer opened \($mine | length) review threads, want exactly one") end' <<<"$threads"
+  jq -er '[.[] | select(.comments[0].author == "legion-reviewer" and .comments[0].reviewState == "CHANGES_REQUESTED")] as $mine
+    | if ($mine | length) == 1 then $mine[0].id else error("the Legion reviewer opened \($mine | length) CHANGES_REQUESTED review threads, want exactly one") end' <<<"$threads"
 }
 # review_thread ID prints that thread, as review_threads prints each.
 review_thread() { review_threads | jq -ce --arg id "$1" '.[] | select(.id == $id)'; }
