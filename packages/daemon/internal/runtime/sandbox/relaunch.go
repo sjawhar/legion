@@ -34,10 +34,9 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 }
 
 // Resume starts the agent spec's claim recorded, again, from spec.ResumeSessionFile. prev is a
-// hint: the claim's Sandbox is found by the claim's name, so the relaunch waits out whatever pod
-// holds it even when prev is nil, a claim suspended across a daemon restart. The workspace-init
-// container refuses to start when the session file is missing from the tree volume — a fresh agent
-// on a claim that had one is never started.
+// hint: the issue's Sandbox is found by name. A suspended Sandbox waits out its pod before
+// restarting; an active issue pod starts only this role. The launcher checks the session file
+// before starting the child, so a missing retained session never becomes a fresh agent.
 func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if spec.ResumeSessionFile == "" {
 		return runtime.Locator{}, fmt.Errorf("resume %s: no session file to resume from", spec.Claim)
@@ -83,7 +82,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		return fail("ensure its sandbox", err)
 	}
 	pod := r.storedPod(s.Name)
-	if !ownedBy(pod, s.UID) || terminal(pod) || !r.launcherBound(ctx, s, pod) {
+	if s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || !r.launcherBound(ctx, s, pod) {
 		if s.mode() != modeSuspended {
 			if err := r.setMode(ctx, s, modeSuspended); err != nil {
 				return fail("suspend its sandbox", err)

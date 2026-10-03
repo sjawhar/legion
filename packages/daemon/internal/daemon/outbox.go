@@ -254,6 +254,17 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.seedGate(ctx, row, value)
 	case record.LingerClose:
 		return r.linger(ctx, row, value)
+	case record.IssueSuspend:
+		if r.supervisor == nil {
+			return errors.New("issue suspension executor has no claim supervisor")
+		}
+		if suspender, ok := r.supervisor.deps.Runtime.(runtime.IssueSuspender); ok {
+			return suspender.SuspendIssue(ctx, runtime.IssueResourceKey{
+				Issue: row.Issue, Tree: value.Tree, IssueGeneration: value.Generation,
+				TreeGeneration: value.TreeGeneration, StopRow: row.ID,
+			})
+		}
+		return nil
 	case record.WorkspaceRemove:
 		return r.removeWorkspace(ctx, row, value)
 	case record.MergeQueuePublish:
@@ -564,6 +575,18 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		return nil
 	case "suspend":
 		if !found {
+			// Creation persists before publishing the machine in memory. Do not consume a close
+			// in that interval: the later machine still needs this durable stop.
+			var pending bool
+			if err := r.pool.QueryRow(ctx, `select exists (select 1 from claims where token = $1
+				and ($2 <= 0 or last_start_row <= $2)
+				and (state not in ('suspended', 'failed', 'retired') or locator is not null))`,
+				string(token), row.ID).Scan(&pending); err != nil {
+				return fmt.Errorf("read stored claim for suspension %s: %w", token, err)
+			}
+			if pending {
+				return fmt.Errorf("suspend claim %s: waiting for its stored claim's supervising machine", token)
+			}
 			return nil
 		}
 		switch machine.Claim().State {
