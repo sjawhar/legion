@@ -33,12 +33,13 @@
  *                      [--label <name>]
  */
 import { randomUUID } from "node:crypto";
-import { accessSync, constants, statSync } from "node:fs";
 import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { type LegionRole, roleToken } from "@legion/contracts";
+import type { LegionRole } from "@legion/contracts";
+import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import { DAEMON_MODULE, type DaemonPane, daemonPane } from "./daemon-pane";
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /** One credential line as the unfixed hook wrote it (single-quoted), or as a model imitation
@@ -204,62 +205,32 @@ export interface WorkerClaim {
 /** The grant rig's own worker, whose role token collides with no live issue's. */
 const RIG_CLAIM: WorkerClaim = { project: "l12rig", issue: "RIG-1", role: "implementer" };
 
-/** The directory name `legion gh` and `legion credential` drop from PATH wherever it occurs
- * (`workerbin.DirName`, packages/daemon/internal/runtime/workerbin). */
-const WORKER_BIN = "worker-bin";
-
-/** `shellprefix.For`: the prefix Oh My Pi's bash tool runs before each command, which removes every
- * PATH entry that is one of `dirs`, wherever an rc file the shell sourced left it, and puts `dirs`
- * in front, in order, each once. */
-function shellPrefix(...dirs: string[]): string {
-  const literal = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
-  const sep = path.delimiter;
-  const rest = "__legion_path";
-  const steps = [`${rest}=${sep}\${PATH//${sep}/${sep}${sep}}${sep}`];
-  for (const dir of dirs) steps.push(`${rest}=\${${rest}//${sep}${literal(dir)}${sep}/}`);
-  steps.push(
-    `${rest}=\${${rest}//${sep}${sep}/${sep}}`,
-    `${rest}=\${${rest}#${sep}}`,
-    `PATH=${literal(dirs.join(sep))}\${${rest}:+${sep}\${${rest}%${sep}}}`,
-    `unset ${rest}`
-  );
-  return `${steps.join(" && ")} &&`;
+/** Where a pane's daemon is read from: a checkout's daemon module (`daemon-pane.ts`), and the
+ * role-prompt bundle its system prompt is composed from, for a pane given one. */
+export interface PaneSource {
+  readonly daemonModule: string;
+  readonly rolesDir?: string;
 }
 
-/** The first executable `tool` on `searchPath`, as the daemon resolves gh, git and jj once at
- * boot (`resolveTools`, packages/daemon/internal/daemon/tools.go) and names them on every
- * pane. */
-function resolveTool(tool: string, searchPath: string): string {
-  for (const dir of searchPath.split(path.delimiter)) {
-    if (!path.isAbsolute(dir)) continue;
-    const candidate = path.join(dir, tool);
-    try {
-      if (!statSync(candidate).isFile()) continue;
-      accessSync(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      // Not here; the daemon looks in the next PATH entry too.
-    }
-  }
-  throw new Error(`no executable ${tool} on PATH for the pane's LEGION_${tool.toUpperCase()}_PATH`);
-}
-
-/** The environment the Legion daemon's tmux runtime gives a phase-worker pane for `claim`
- * (`panePairs`, packages/daemon/internal/runtime/tmux/spawn.go), pointed at the scratch state
- * directory and the stand-in daemon, over the caller's own environment: the claim's identity, the
- * daemon URL, the state directory and workspace, the gh, git and jj the daemon resolved,
- * `PI_SHELL_PREFIX`, `LEGION_GRANT_FILE` (`runtime.GrantFile`: `<state>/secrets/<claim>-grant`),
- * and worker-bin then bin first on PATH (`workerbin.Path`). An inherited `ANTHROPIC_API_KEY`,
- * every `LEGION_*` and `DISPATCH_*` value, the GitHub variables no Legion pane carries, and every
- * inherited worker-bin PATH entry are dropped first, so worker-bin appears exactly once. The
- * profile's agent directory is under the inherited `HOME`. The skill scenario rig
- * (`../skill-scenarios/rig.sh`) builds its tester pane with it too.
+/** The pane the Legion daemon's tmux runtime gives a phase worker for `claim`, pointed at the
+ * scratch state directory and the stand-in daemon, over the caller's own environment. Everything
+ * the daemon tells the pane comes from the daemon's own functions in `source`'s module
+ * (`daemon-pane.go`): the claim's identity, the daemon URL, the state directory and workspace,
+ * Envoy (the listener and NATS the pane's own extension reaches from the caller's environment,
+ * `envoyDefaultsFromEnvironment`), the gh, git and jj the daemon resolves on the caller's PATH,
+ * `PI_SHELL_PREFIX`, `LEGION_GRANT_FILE`, the four XDG base directories, the
+ * boot token pointer (`<state>/secrets/boot`, the file the stand-in checks), and PATH with
+ * worker-bin then bin first; and, with a role bundle, the system prompt argument. An inherited
+ * `ANTHROPIC_API_KEY`, every `LEGION_*` and `DISPATCH_*` value and the GitHub variables no Legion
+ * pane carries are dropped first. The profile's agent directory is under the inherited `HOME`. The
+ * skill scenario rig (`../skill-scenarios/worker-pane.ts`) builds its tester pane with it too.
  */
-export function workerEnvironment(
+export function workerPane(
   launch: Pick<WorkerLaunch, "rig" | "port" | "profile">,
   inherited: NodeJS.ProcessEnv = process.env,
-  claim: WorkerClaim = RIG_CLAIM
-): Record<string, string> {
+  claim: WorkerClaim = RIG_CLAIM,
+  source: PaneSource = { daemonModule: DAEMON_MODULE }
+): DaemonPane {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(inherited)) {
     if (value === undefined) continue;
@@ -270,43 +241,31 @@ export function workerEnvironment(
     env[key] = value;
   }
   const home = env.HOME ?? os.homedir();
-  const agentDir = path.join(home, ".omp", "profiles", launch.profile, "agent");
   const stateDir = path.join(launch.rig, "state");
-  const workerBin = path.join(stateDir, WORKER_BIN);
-  const bin = path.join(stateDir, "bin");
-  // This rig may itself run from a Legion pane whose PATH carries that pane's worker-bin.
-  const inheritedPath = (env.PATH ?? "")
-    .split(path.delimiter)
-    .filter((entry) => entry !== "" && path.basename(entry) !== WORKER_BIN)
-    .join(path.delimiter);
-  Object.assign(env, {
-    OMP_PROFILE: launch.profile,
-    PI_PROFILE: launch.profile,
-    PI_CODING_AGENT_DIR: agentDir,
-    PI_NOTIFICATIONS: "off",
-    PI_NO_TITLE: "1",
-    LEGION_TREE: claim.issue,
-    LEGION_ISSUE: claim.issue,
-    LEGION_ROLE: claim.role,
-    LEGION_GENERATION: "1",
-    LEGION_PROJECT: claim.project,
-    LEGION_BOOT_TOKEN_FILE: path.join(stateDir, "secrets", "boot"),
-    LEGION_DAEMON_URL: `http://127.0.0.1:${launch.port}`,
-    LEGION_STATE_DIR: stateDir,
-    LEGION_WORKSPACE: path.join(launch.rig, "ws"),
-    LEGION_GH_PATH: resolveTool("gh", inheritedPath),
-    LEGION_GIT_PATH: resolveTool("git", inheritedPath),
-    LEGION_JJ_PATH: resolveTool("jj", inheritedPath),
-    PI_SHELL_PREFIX: shellPrefix(workerBin, bin),
-    GIT_TERMINAL_PROMPT: "0",
-    LEGION_GRANT_FILE: path.join(
-      stateDir,
-      "secrets",
-      `${roleToken(claim.project, claim.issue, claim.role)}-grant`
-    ),
-    PATH: [workerBin, bin, inheritedPath].join(path.delimiter),
+  const envoy = envoyDefaultsFromEnvironment(env);
+  const pane = daemonPane(source.daemonModule, {
+    ...claim,
+    stateDir,
+    workspace: path.join(launch.rig, "ws"),
+    daemonUrl: `http://127.0.0.1:${launch.port}`,
+    envoyUrl: envoy.envoyUrl,
+    natsUrls: envoy.natsUrls,
+    bootTokenFile: path.join(stateDir, "secrets", "boot"),
+    path: env.PATH ?? "",
+    rolesDir: source.rolesDir,
   });
-  return env;
+  return {
+    ...pane,
+    env: {
+      ...env,
+      OMP_PROFILE: launch.profile,
+      PI_PROFILE: launch.profile,
+      PI_CODING_AGENT_DIR: path.join(home, ".omp", "profiles", launch.profile, "agent"),
+      PI_NOTIFICATIONS: "off",
+      PI_NO_TITLE: "1",
+      ...pane.env,
+    },
+  };
 }
 
 /** The headless leg runs `omp --mode rpc`; the terminal leg runs the interactive `omp`. */
@@ -333,7 +292,7 @@ async function drive(launch: WorkerLaunch, prompt: string, label: string): Promi
 
   const child = Bun.spawn(launchArgv(launch, "rpc"), {
     cwd: path.join(launch.rig, "ws"),
-    env: workerEnvironment(launch),
+    env: workerPane(launch).env,
     stdin: "pipe",
     stdout: "pipe",
     stderr: Bun.file(stderrFile),
@@ -599,9 +558,9 @@ function parseSeenGrant(line: string): SeenGrant {
   return { fileGrant, mode, envGrant };
 }
 
-/** Verdict G: the probe's output shows the daemon's static credential environment. */
-function probeShowsPaneEnvironment(text: string, rig: string): boolean {
-  const workerBin = path.join(rig, "state", WORKER_BIN);
+/** Verdict G: the probe's output shows the daemon's static credential environment, with
+ * `workerBin`, the gh shim's directory, first on PATH and nowhere else. */
+function probeShowsPaneEnvironment(text: string, workerBin: string): boolean {
   const pathLine = text.split("\n").find((line) => line.startsWith("PATH="));
   if (!pathLine) return false;
   const entries = pathLine.slice("PATH=".length).split(path.delimiter);
@@ -753,7 +712,16 @@ async function analyze(input: {
   const leakedIds = mintedInOrder.filter(
     (id) => id.length > 0 && (transcriptText.includes(id) || ompLogText.includes(id))
   );
-  const probeOk = probeResult !== undefined && probeShowsPaneEnvironment(probeResult, input.rig);
+  // The directory setup.sh installed the gh shim in, as the daemon does at boot; a rig prepared by
+  // an older setup.sh names none.
+  const rigMode = (await Bun.file(path.join(input.rig, "rig-mode.json"))
+    .json()
+    .catch(() => ({}))) as { readonly workerBin?: unknown };
+  const workerBin = typeof rigMode.workerBin === "string" ? rigMode.workerBin : undefined;
+  const probeOk =
+    probeResult !== undefined &&
+    workerBin !== undefined &&
+    probeShowsPaneEnvironment(probeResult, workerBin);
   // A run with no bash calls proves nothing: every verdict below needs calls to judge.
   const ran = calls.length > 0;
   const recorded = executed.length > 0;
@@ -771,7 +739,7 @@ async function analyze(input: {
     `D. legion commands exit=0 and never 'Unable to redeem': ${resultsClean ? "PASS" : "FAIL"}`,
     `E. exactly one hook line per bash call, one parent instance: ${hooksOne && parentInstances.size === 1 ? "PASS" : "FAIL"} (${instances.size} legion extension instances: the parent plus one per task spawn)`,
     `F. no minted id appears in the transcript or the OMP log: ${ran && mintedInOrder.length > 0 && leakedIds.length === 0 ? "PASS" : `FAIL (${leakedIds.length} of ${mintedInOrder.length} minted ids found)`}`,
-    `G. environment probe shows no GH_CONFIG_DIR/GH_TOKEN/GITHUB_TOKEN/GH_HOST, worker-bin first on PATH exactly once: ${probeOk ? "PASS" : probeResult === undefined ? "FAIL (no probe result)" : "FAIL"}`,
+    `G. environment probe shows no GH_CONFIG_DIR/GH_TOKEN/GITHUB_TOKEN/GH_HOST, worker-bin first on PATH exactly once: ${probeOk ? "PASS" : probeResult === undefined ? "FAIL (no probe result)" : workerBin === undefined ? "FAIL (rig-mode.json names no workerBin; rerun setup.sh)" : "FAIL"}`,
   ];
 
   return {
@@ -905,7 +873,7 @@ async function driveTui(launch: WorkerLaunch, prompt: string, label: string): Pr
 
   await Bun.spawn([...TMUX, "kill-server"], { stdout: "ignore", stderr: "ignore" }).exited;
   // A fresh private server inherits this spawn's environment, so the pane gets exactly the
-  // headless leg's `workerEnvironment`.
+  // headless leg's `workerPane` environment.
   const server = Bun.spawn(
     [
       ...TMUX,
@@ -921,7 +889,7 @@ async function driveTui(launch: WorkerLaunch, prompt: string, label: string): Pr
       path.join(launch.rig, "ws"),
       ...launchArgv(launch, "tui"),
     ],
-    { env: workerEnvironment(launch), stdout: "pipe", stderr: "pipe" }
+    { env: workerPane(launch).env, stdout: "pipe", stderr: "pipe" }
   );
   if ((await server.exited) !== 0) {
     throw new Error(

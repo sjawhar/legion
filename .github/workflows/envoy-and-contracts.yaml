@@ -172,8 +172,12 @@ jobs:
               # extensions/dispatch-first-omp.test.ts).
               - '.omp-pin'
               - '.github/actions/install-omp/**'
-              # The jj its tests drive is the worker image's.
-              - 'packages/daemon/docker/worker.Dockerfile'
+              # The rigs' scripts/grant-rig/run.test.ts runs daemon-pane.go inside the daemon
+              # module, so a change to the daemon (or to the worker image's jj, whose version its
+              # Dockerfile there pins for the tests) runs it.
+              - 'packages/daemon/**'
+              - 'go.work'
+              - 'go.work.sum'
               - '.github/actions/install-jj/**'
             dispatch:
               - 'packages/dispatch/**'
@@ -300,6 +304,11 @@ jobs:
       # without one. The pin is read from .omp-pin, the repository's one copy of it, installed
       # through the mise install-jj leaves at ~/.local/bin/mise (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
+      # scripts/grant-rig/run.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/daemon/go.mod
+          cache-dependency-path: packages/daemon/go.sum
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-envoy
         run: bun run build

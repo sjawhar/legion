@@ -85,12 +85,12 @@ func testSpec() runtime.SpawnSpec {
 // in any pair.
 func TestPanePairs(t *testing.T) {
 	spec := testSpec()
-	in := paneInputs{
-		stateDir:  "/state",
-		workspace: "/state/workspaces/LEGION-43",
-		daemonURL: "http://127.0.0.1:13370",
-		envoyURL:  "http://127.0.0.1:9020",
-		natsURLs:  []string{"nats://a:4222", "nats://b:4222"},
+	in := PaneInputs{
+		StateDir:  "/state",
+		Workspace: "/state/workspaces/LEGION-43",
+		DaemonURL: "http://127.0.0.1:13370",
+		EnvoyURL:  "http://127.0.0.1:9020",
+		NATSURLs:  []string{"nats://a:4222", "nats://b:4222"},
 	}
 	spec.Secrets["NATS_NKEY_SEED"] = "SU-seed"
 	files := secretFiles("/state", spec)
@@ -124,7 +124,7 @@ func TestPanePairs(t *testing.T) {
 	}
 
 	// No NATS configured: no ENVOY_NATS_URL pair rather than an empty one.
-	in.natsURLs = nil
+	in.NATSURLs = nil
 	for _, pair := range panePairs(spec, in, files) {
 		if strings.HasPrefix(pair, "ENVOY_NATS_URL=") {
 			t.Errorf("an unconfigured NATS still produced %q", pair)
@@ -276,11 +276,11 @@ func TestNewRefusesAProviderDispatchTokenOnlyWhenDispatchIsConfigured(t *testing
 func TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime(t *testing.T) {
 	spec := testSpec()
 	spec.Env, spec.Secrets = nil, nil
-	in := paneInputs{
-		stateDir: "/state", workspace: "/state/workspaces/LEGION-43", daemonURL: "http://127.0.0.1:13370",
-		envoyURL: "http://127.0.0.1:9020", natsURLs: []string{"nats://a:4222"},
-		dispatchURL: "http://127.0.0.1:18766", dispatchTokenFile: "/state/secrets/" + runtime.DispatchTokenFileName,
-		tools: map[string]string{"LEGION_GH_PATH": "/usr/bin/gh", "LEGION_GIT_PATH": "/usr/bin/git", "LEGION_JJ_PATH": "/usr/bin/jj"},
+	in := PaneInputs{
+		StateDir: "/state", Workspace: "/state/workspaces/LEGION-43", DaemonURL: "http://127.0.0.1:13370",
+		EnvoyURL: "http://127.0.0.1:9020", NATSURLs: []string{"nats://a:4222"},
+		DispatchURL: "http://127.0.0.1:18766", DispatchTokenFile: "/state/secrets/" + runtime.DispatchTokenFileName,
+		Tools: map[string]string{"LEGION_GH_PATH": "/usr/bin/gh", "LEGION_GIT_PATH": "/usr/bin/git", "LEGION_JJ_PATH": "/usr/bin/jj"},
 	}
 	told := map[string]bool{}
 	pairs := panePairs(spec, in, secretFiles("/state", spec))

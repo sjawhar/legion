@@ -146,12 +146,12 @@ func secretFiles(stateDir string, spec runtime.SpawnSpec) []runtime.SecretFile {
 	return files
 }
 
-// paneInputs are the runtime's own values a pane's -e pairs carry.
-type paneInputs struct {
-	stateDir, workspace, daemonURL, envoyURL, dispatchURL, dispatchTokenFile string
-	natsURLs                                                                 []string
-	// tools are the daemon-resolved gh, git, and jj, keyed by the variable that names each.
-	tools map[string]string
+// PaneInputs are the runtime's own values a pane's -e pairs carry.
+type PaneInputs struct {
+	StateDir, Workspace, DaemonURL, EnvoyURL, DispatchURL, DispatchTokenFile string
+	NATSURLs                                                                 []string
+	// Tools are the daemon-resolved gh, git, and jj, keyed by the variable that names each.
+	Tools map[string]string
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
@@ -161,7 +161,7 @@ type paneInputs struct {
 // under `<state_dir>/home`, the spec's own variables sorted, then a `<NAME>_FILE` pointer per
 // secret file. PATH is never among them — tmux would replace it (LEGION-91) — and neither is any
 // secret's value.
-func panePairs(spec runtime.SpawnSpec, in paneInputs, files []runtime.SecretFile) []string {
+func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile) []string {
 	var pairs []string
 	add := func(name, value string) { pairs = append(pairs, "-e", name+"="+value) }
 	add("LEGION_TREE", spec.Tree)
@@ -169,24 +169,24 @@ func panePairs(spec runtime.SpawnSpec, in paneInputs, files []runtime.SecretFile
 	add("LEGION_ROLE", string(spec.Role))
 	add("LEGION_GENERATION", strconv.FormatUint(spec.Generation, 10))
 	add("LEGION_PROJECT", spec.Project)
-	add("LEGION_DAEMON_URL", in.daemonURL)
-	add("LEGION_STATE_DIR", in.stateDir)
-	add("LEGION_WORKSPACE", in.workspace)
-	if len(in.natsURLs) > 0 {
-		add("ENVOY_NATS_URL", strings.Join(in.natsURLs, ","))
+	add("LEGION_DAEMON_URL", in.DaemonURL)
+	add("LEGION_STATE_DIR", in.StateDir)
+	add("LEGION_WORKSPACE", in.Workspace)
+	if len(in.NATSURLs) > 0 {
+		add("ENVOY_NATS_URL", strings.Join(in.NATSURLs, ","))
 	}
-	add("ENVOY_URL", in.envoyURL)
-	if in.dispatchURL != "" {
-		add("DISPATCH_URL", in.dispatchURL)
-		add("DISPATCH_TOKEN_FILE", in.dispatchTokenFile)
+	add("ENVOY_URL", in.EnvoyURL)
+	if in.DispatchURL != "" {
+		add("DISPATCH_URL", in.DispatchURL)
+		add("DISPATCH_TOKEN_FILE", in.DispatchTokenFile)
 	}
-	for _, name := range slices.Sorted(maps.Keys(in.tools)) {
-		add(name, in.tools[name])
+	for _, name := range slices.Sorted(maps.Keys(in.Tools)) {
+		add(name, in.Tools[name])
 	}
-	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.Dir(in.stateDir), workerbin.LauncherDir(in.stateDir)))
+	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.Dir(in.StateDir), workerbin.LauncherDir(in.StateDir)))
 	add("GIT_TERMINAL_PROMPT", "0")
-	add("LEGION_GRANT_FILE", runtime.GrantFile(in.stateDir, spec.Claim))
-	for _, dir := range xdgDirectories(in.stateDir) {
+	add("LEGION_GRANT_FILE", runtime.GrantFile(in.StateDir, spec.Claim))
+	for _, dir := range xdgDirectories(in.StateDir) {
 		add(dir[0], dir[1])
 	}
 	for _, name := range sortedKeys(spec.Env) {
@@ -198,6 +198,33 @@ func panePairs(spec runtime.SpawnSpec, in paneInputs, files []runtime.SecretFile
 		add(file.Variable+"_FILE", file.Path)
 	}
 	return pairs
+}
+
+// makePaneHome makes the four XDG base directories every pane is told, under the daemon's home.
+func makePaneHome(stateDir string) error {
+	for _, dir := range xdgDirectories(stateDir) {
+		if err := os.MkdirAll(dir[1], 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PaneVariables is a launch's environment without the launch, for a process this runtime does not
+// start that must be told exactly what a pane is: the rigs under packages/pi-envoy/scripts, which
+// run Oh My Pi under it. It makes the pane's home as a launch does (makePaneHome) and returns the
+// variables panePairs tells a pane for spec, NAME=value in their order, files being the secret
+// files they point at.
+func PaneVariables(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile) ([]string, error) {
+	if err := makePaneHome(in.StateDir); err != nil {
+		return nil, err
+	}
+	pairs := panePairs(spec, in, files)
+	variables := make([]string, 0, len(pairs)/2)
+	for i := 1; i < len(pairs); i += 2 {
+		variables = append(variables, pairs[i])
+	}
+	return variables, nil
 }
 
 // paneReport is what a `-P -F` report names: the new window (new-window only), the pane, its pid.
@@ -326,10 +353,8 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		}
 		r.log.Info("tmux runtime: resuming a recorded OMP session", "claim", spec.Claim, "session", spec.ResumeSessionFile)
 	}
-	for _, dir := range xdgDirectories(r.stateDir) {
-		if err := os.MkdirAll(dir[1], 0o700); err != nil {
-			return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
-		}
+	if err := makePaneHome(r.stateDir); err != nil {
+		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
 	files := secretFiles(r.stateDir, spec)
 	if err := runtime.WriteSecretFiles(r.stateDir, files); err != nil {
@@ -342,9 +367,9 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	path = workerbin.Path(path, r.stateDir)
 	inner := innerCommand(r.ompPrefix, r.ompInvocation, spec.ResumeSessionFile, spec.Prompt)
 	command := shimShellCommand(r.socket, path, workDir, r.legion, r.streamAddress, files[0].Path, r.providerEnvDir, inner)
-	pairs := panePairs(spec, paneInputs{
-		stateDir: r.stateDir, workspace: workDir, daemonURL: r.daemonURL, envoyURL: r.envoyURL, natsURLs: r.natsURLs,
-		dispatchURL: r.dispatchURL, dispatchTokenFile: r.dispatchToken, tools: r.tools,
+	pairs := panePairs(spec, PaneInputs{
+		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
+		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, Tools: r.tools,
 	}, files)
 	return r.openPane(ctx, spec, paneCommand(pairs, command))
 }

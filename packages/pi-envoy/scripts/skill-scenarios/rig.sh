@@ -578,10 +578,10 @@ run_tester_proof() {
   port=$(sed -n 's|^listening on http://127\.0\.0\.1:||p' "$R/logs/daemon.log")
   base_env
   standins
-  # The pane the daemon would give the tester, over the base every agent gets: worker.env and
-  # system-args. The stand-ins come first, so the gh the pane names is the recording one.
-  bun "$here/worker-pane.ts" "$R" "$R/pane.env" "$port" "$profile" "$project" "$worker_key" tester \
-    "$co/packages/pi-envoy/roles" "$co/packages/daemon/internal/prompts/go"
+  # The pane the label's checkout's daemon would give the tester, over the base every agent gets:
+  # worker.env and system-args. The stand-ins come first, so the gh the pane names is the recording
+  # one.
+  bun "$here/worker-pane.ts" "$R" "$R/pane.env" "$port" "$profile" "$project" "$worker_key" tester "$co"
   {
     cat "$R/worker.env" "$services_env"
     echo "GIT_CONFIG_COUNT=0"

@@ -69,6 +69,17 @@ func paneTools(tools map[string]string) map[string]string {
 	return named
 }
 
+// PaneTools are the gh, git and jj every pane is told, resolved from lookupEnv as boot resolves them
+// (resolveTools) and keyed by the variable a pane reads each from (paneTools). It is exported for
+// the rigs under packages/pi-envoy/scripts, which tell a worker what a pane is told.
+func PaneTools(lookupEnv func(string) (string, bool)) (map[string]string, error) {
+	tools, err := resolveTools(lookupEnv)
+	if err != nil {
+		return nil, err
+	}
+	return paneTools(tools), nil
+}
+
 func envValue(environ []string, name string) (string, bool) {
 	for i := len(environ) - 1; i >= 0; i-- {
 		if value, ok := strings.CutPrefix(environ[i], name+"="); ok {

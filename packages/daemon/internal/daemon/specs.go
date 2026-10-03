@@ -53,7 +53,7 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	if err != nil {
 		return runtime.SpawnSpec{}, err
 	}
-	addressing, err := addressingFragment(s.project, c)
+	addressing, err := AddressingFragment(s.project, c)
 	if err != nil {
 		return runtime.SpawnSpec{}, err
 	}
@@ -103,12 +103,13 @@ func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 	return parts.RolePromptPaths, nil
 }
 
-// addressingFragment is the sentence that tells an agent where it and its peers are reached: its
+// AddressingFragment is the sentence that tells an agent where it and its peers are reached: its
 // own role topic, the tree architect's, and the project controller's, spelled from the tokens so
 // the model never hand-encodes one. It names no merge queue: the merger publishes nothing — the
 // daemon posts the READY packet and publishes it to `projects.<KEY>.merge_queue_role` itself
-// (workflow.Engine.ready, prompts/go/merger.md).
-func addressingFragment(project string, c supervise.Claim) (string, error) {
+// (workflow.Engine.ready, prompts/go/merger.md). It is exported for the rigs under
+// packages/pi-envoy/scripts, which tell a worker what a pane is told.
+func AddressingFragment(project string, c supervise.Claim) (string, error) {
 	architect, err := claim.NewToken(project, c.Tree, claim.RoleArchitect)
 	if err != nil {
 		return "", fmt.Errorf("the addressing of %s: %w", c.Token, err)

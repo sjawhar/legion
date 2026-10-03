@@ -25,14 +25,14 @@
  */
 import { randomUUID } from "node:crypto";
 import { appendFile } from "node:fs/promises";
-import { isLegionRole, type LegionRole, roleToken } from "@legion/contracts";
+import { isLegionRole, roleToken } from "@legion/contracts";
 import {
   LegionGrantCredentialRequest,
   LegionGrantRequest,
   LegionHandoffCompleteRequest,
-  type LegionPhase,
   LegionStateResponse,
 } from "@legion/contracts/legion-api";
+import { DAEMON_MODULE, runDaemonPane } from "./daemon-pane";
 
 const GRANT_TTL_MS = 60_000;
 /** Encoded exactly as the daemon encodes it (`legion-<project>-<key>-<role>`, lower-cased),
@@ -47,17 +47,9 @@ const ROLE_TOKEN = roleToken(project, issue, role);
 const SESSION_SECRET = "rig-secret";
 const GIT_TOKEN = "rig-token";
 
-/** The workflow phase each role's worker runs in (`workflow.RoleFor`'s inverse). */
-const ROLE_PHASE: Readonly<Record<LegionRole, LegionPhase>> = {
-  architect: "admitted",
-  planner: "planning",
-  implementer: "implementing",
-  tester: "testing",
-  reviewer: "reviewing",
-  merger: "merging",
-};
 const startedAt = new Date().toISOString();
-/** `GET /legion/v1/state`: the one issue the worker holds, admitted in the phase its role works. */
+/** `GET /legion/v1/state`: the one issue the worker holds, admitted in the phase its role works
+ * (`workflow.RoleFor`, through daemon-pane.go). */
 const STATE = LegionStateResponse.parse({
   daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
   admission: { cap: 1, active: [issue], waiting: [] },
@@ -65,7 +57,7 @@ const STATE = LegionStateResponse.parse({
     [issue]: {
       key: issue,
       generation: 1,
-      phase: ROLE_PHASE[role],
+      phase: runDaemonPane(DAEMON_MODULE, ["phase", role]).trim(),
       status: "in_progress",
       workers: {},
     },

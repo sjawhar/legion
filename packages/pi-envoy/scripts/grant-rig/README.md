@@ -17,7 +17,8 @@ listener (inherited `ENVOY_URL`), which collides with nothing.
 
 | file | what it is |
 | --- | --- |
-| `daemon-standin.ts` | Serves the worker's claim routes (`claims/register`, `claims/ready`), the grant routes and a phase completion (`GET /legion/v1/state`, `handoff/complete`) with the Go daemon's request and response shapes (`@legion/contracts/legion-api`) and the real grant rule: a grant lives 60 seconds and redeems any number of times while it lives; an unknown or expired id answers 403 `Invalid or expired grant`. Appends one JSON line per request to its log. |
+| `daemon-standin.ts` | Serves the worker's claim routes (`claims/register`, `claims/ready`), the grant routes and a phase completion (`GET /legion/v1/state`, `handoff/complete`) with the Go daemon's request and response shapes (`@legion/contracts/legion-api`) and the real grant rule: a grant lives 60 seconds and redeems any number of times while it lives; an unknown or expired id answers 403 `Invalid or expired grant`. Appends one JSON line per request to its log. Its state document puts the issue in the phase the role works, as `daemon-pane.go` reads it from the daemon's workflow. |
+| `daemon-pane.go`, `daemon-pane.ts` | The rigs' one reading of the Legion daemon: a Go `main` that `daemon-pane.ts` runs with `go run -overlay` inside a checkout's `packages/daemon`, so it calls the daemon's own functions. It installs `worker-bin/gh` and `bin/legion` (`workerbin.Install`), names the phase a role works (`workflow.RoleFor`), and prints a pane's environment (`tmux.PaneVariables`, `daemon.PaneTools`, `workerbin.Path`) and its `--append-system-prompt` argument (`prompts.Compose`, `daemon.AddressingFragment`, `omplaunch.SystemPromptArgument`). Neither rig restates any of them, so a change to the daemon reaches both. Needs `go` on PATH. |
 | `setup.sh` | Creates the throwaway profile and the scratch state directory (below), in one of two plugin modes. |
 | `run.ts` | `prompt` prints the worker's instructions; `drive` runs the headless leg over Oh My Pi's RPC mode; `tui` runs the terminal leg in a private tmux server; `analyze` scores any transcript. Both legs end with the same table. |
 
@@ -85,24 +86,25 @@ Scratch directory `$RIG` (default `mktemp -d /tmp/l12rig.XXXX`), standing in for
 | `state/secrets/boot` | The worker's boot token (`rig-boot`, mode 0600); the stand-in rejects any other. |
 | `state/secrets/legion-l12rig-rig-1-implementer-grant` | The worker's `LEGION_GRANT_FILE`, written by the extension before each bash command (mode 0600). Never read, printed, or copied by hand. |
 | `legion` | The checkout's Go `legion`, built by `setup.sh` from `packages/daemon/cmd/legion`: the daemon's own binary, which `state/bin/legion` execs. |
-| `state/bin/legion` | The launcher the daemon installs at boot (`workerbin.Install`): execs `$RIG/legion`. |
+| `state/bin/legion` | The launcher the daemon installs at boot (`workerbin.Install`, run by `setup.sh` through `daemon-pane.ts`): execs `$RIG/legion`. |
 | `state/bin/record-grant` | Appends `<grant file contents> <mode> <LEGION_GRANT or ->` to `$RIG/seen-grants.log`, so the prompt never names the credential; the third field is what a 1.17.0 (text-delivery) command ran under. |
-| `state/worker-bin/gh` | The `gh` shim the daemon installs at boot (`workerbin.InstallGh`), written by `setup.sh` the same way: drops its own directory from PATH and execs `legion gh`. |
+| `state/worker-bin/gh` | The `gh` shim the daemon installs at boot, installed with the launcher: drops its own directory from PATH and execs `legion gh`. |
+| `state/home` | The home under which the pane's four XDG base directories are made, as the daemon makes them for every pane. |
+| `state/prompts` | Empty here: only a pane given a role bundle (the skill scenarios' tester) gets the daemon's prompt snapshot. |
 | `state/gh` | The `GH_CONFIG_DIR` `legion gh` gives the gh it runs. |
 | `ws` | The worker's workspace, an empty jj repository (the boot handshake sets a jj identity on it). |
-| `rig-mode.json` | What `setup.sh` laid out: plugin mode, Legion build, checkout commit; copied into each run's `report.json`. |
+| `rig-mode.json` | What `setup.sh` laid out: plugin mode, Legion build, checkout commit, and the `worker-bin` directory verdict G expects first on the pane's PATH; copied into each run's `report.json`. |
 | `standin.log` | The stand-in daemon's request log. |
 | `seen-grants.log` | One line per `record-grant` call. |
 | `runs/<label>-<time>/` | Per run: `prompt.txt`, `events.jsonl` (headless) or `pane.txt` (terminal), `stderr.log`, `table.txt`, `report.json`. |
 
 ## Environment the worker gets
 
-`run.ts` builds it (`workerEnvironment`) from the current shell after removing `ANTHROPIC_API_KEY`,
-every `LEGION_*` and `DISPATCH_*` value, `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST`
-(no Legion pane carries them), and every inherited `worker-bin` PATH entry (a rig started from a
-Legion pane carries that pane's worker-bin first), then adds what the daemon's tmux runtime sets
-for a phase-worker pane (`panePairs`, `packages/daemon/internal/runtime/tmux/spawn.go`), which is
-the pane's for life, never per command:
+`run.ts` builds it (`workerPane`) from the current shell after removing `ANTHROPIC_API_KEY`, every
+`LEGION_*` and `DISPATCH_*` value, and `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` (no
+Legion pane carries them). It adds the profile's variables, then everything the daemon's tmux
+runtime tells a phase-worker pane, for life, never per command, as `daemon-pane.go` reads it from
+the daemon's own functions:
 
 | variable | value |
 | --- | --- |
@@ -111,14 +113,16 @@ the pane's for life, never per command:
 | `PI_NOTIFICATIONS`, `PI_NO_TITLE` | `off`, `1` |
 | `LEGION_TREE`, `LEGION_ISSUE`, `LEGION_ROLE` | `RIG-1`, `RIG-1`, `implementer` |
 | `LEGION_GENERATION`, `LEGION_PROJECT` | `1`, `l12rig` |
-| `LEGION_BOOT_TOKEN_FILE` | `$RIG/state/secrets/boot` |
+| `LEGION_BOOT_TOKEN_FILE` | `$RIG/state/secrets/boot`, the rig's own file, which the stand-in checks |
 | `LEGION_DAEMON_URL` | `http://127.0.0.1:<port>` (the stand-in) |
 | `LEGION_STATE_DIR`, `LEGION_WORKSPACE` | `$RIG/state`, `$RIG/ws` |
-| `LEGION_GH_PATH`, `LEGION_GIT_PATH`, `LEGION_JJ_PATH` | the first `gh`, `git` and `jj` on the inherited PATH, as the daemon resolves them at boot |
-| `PI_SHELL_PREFIX` | `shellprefix.For($RIG/state/worker-bin, $RIG/state/bin)`: drops every PATH entry that is either directory, wherever the shell's rc left it, then puts both in front, each once |
+| `ENVOY_URL`, `ENVOY_NATS_URL` | what the pane's own extension reaches from the current shell: its `ENVOY_URL` (else the extension's default listener) and `ENVOY_NATS_URL` |
+| `LEGION_GH_PATH`, `LEGION_GIT_PATH`, `LEGION_JJ_PATH` | the first `gh`, `git` and `jj` on the current shell's PATH less every `worker-bin` entry (a rig started from a Legion pane carries that pane's), as the daemon resolves them at boot |
+| `PI_SHELL_PREFIX` | the daemon's prefix over `$RIG/state/worker-bin` and `$RIG/state/bin`: drops every PATH entry that is either directory, wherever the shell's rc left it, then puts both in front, each once |
 | `GIT_TERMINAL_PROMPT` | `0` |
-| `LEGION_GRANT_FILE` | `$RIG/state/secrets/legion-l12rig-rig-1-implementer-grant` (`runtime.GrantFile`) |
-| `PATH` | `$RIG/state/worker-bin`, then `$RIG/state/bin`, then the inherited PATH |
+| `LEGION_GRANT_FILE` | `$RIG/state/secrets/legion-l12rig-rig-1-implementer-grant` |
+| `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` | under `$RIG/state/home` |
+| `PATH` | `$RIG/state/worker-bin`, then `$RIG/state/bin`, then the current shell's PATH |
 
 The launch argv is `secrets GEMINI_API_KEY OPENAI_API_KEY -- <omp>`, plus `--mode rpc` for the
 headless leg (`--no-secrets` drops the prefix when the keys are already in the environment). No
