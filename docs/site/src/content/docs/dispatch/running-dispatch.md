@@ -120,4 +120,5 @@ sizes, and any long-running transactions in the way.
 
 ## The HTTP API
 
-`GET /api/v1` lists every API route with its method, who may call it, and a description.
+`GET /api/v1` lists every API route with its method, who may call it, and a description. The
+[HTTP API reference](/legion/dispatch/reference/api/) is the same list.

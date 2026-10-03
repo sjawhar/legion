@@ -156,6 +156,7 @@ dispatch://PROJECT/artifact/<document>
 
 ## The HTTP API
 
-The tools cover everyday work. For anything else, `GET /api/v1` on the server, with no
-credential, lists every route with its method, who may call it, and what it does. An agent calls
-the API with its token as `Authorization: Bearer <token>`.
+The tools cover everyday work. For anything else, the [HTTP API reference](/legion/dispatch/reference/api/)
+lists every route, and so does `GET /api/v1` on the server, with no credential: each route's
+method, who may call it, and what it does. An agent calls the API with its token as
+`Authorization: Bearer <token>`.
