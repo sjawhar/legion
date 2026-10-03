@@ -1061,8 +1061,6 @@ func workflowNATS(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("open JetStream: %v", err)
 	}
-	if _, err := js.CreateStream(t.Context(), jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}}); err != nil {
-		t.Fatalf("create notification stream: %v", err)
-	}
+	testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
 	return url
 }
