@@ -32,6 +32,19 @@ import { rigState } from "./agent";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const rawDir = process.env.WALKTHROUGH_RAW_DIR ?? join(here, "walkthrough/raw");
+/** Every file a take writes into rawDir: its sections' footage, sections.json, and the scratch
+ *  directory Playwright records into. */
+const takeFiles = [
+  "t1-login.cast",
+  "b1-machine.webm",
+  "t2-session.cast",
+  "t3-request.cast",
+  "b2-approve.webm",
+  "t4-ran.cast",
+  "b3-grants.webm",
+  "sections.json",
+  ".video",
+];
 const reason = "Publish the docs preview for PR 42 with the demo API";
 const cols = 80;
 const rows = 20;
@@ -330,7 +343,8 @@ async function clickVisibly(page: Page, locator: Locator): Promise<void> {
 test("record the broker walkthrough's raw footage", async ({ browser }) => {
   test.setTimeout(900_000);
   const rig = rigState();
-  rmSync(rawDir, { force: true, recursive: true });
+  // A new take replaces the files a take writes and nothing else, whatever WALKTHROUGH_RAW_DIR names.
+  for (const file of takeFiles) rmSync(join(rawDir, file), { force: true, recursive: true });
   mkdirSync(rawDir, { recursive: true });
 
   // One persistent shell on the agent machine, which every terminal section attaches to.

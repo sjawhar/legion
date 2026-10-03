@@ -33,21 +33,32 @@ machine. It prints the addresses, then waits; Ctrl-C stops everything it started
 broker's database.
 
 It needs `go`, `bun`, `psql`, `curl`, `openssl`, `setsid`, and passwordless `sudo` with `unshare`
-and `setpriv`. Its one input, `DATABASE_URL`, names a Postgres database it may empty, as the e2e
-harness requires. It picks its ports itself (`scripts/e2e/lib/rig.sh`'s `pick_port`), so two rigs
-on one machine never meet. Postgres from the distribution's package serves, unpacked rather than
-installed (Ubuntu 24.04 shown):
+and `setpriv`. Its one input, `DATABASE_URL`, names a Postgres database on this machine that it may
+empty, as the e2e harness requires: a `postgres://` URL whose host is a loopback name or address or
+a unix socket directory. The rig refuses any other before it runs a single `psql`, and it ignores
+the variables that could send its SQL or seed elsewhere (`PGHOST`, `PGHOSTADDR`, `PGSERVICE`, and a
+deployed e2e run's `PLAYWRIGHT_BASE_URL`, `PLAYWRIGHT_DATABASE_URL` and `E2E_AGENT_TOKEN`). The
+broker's database is created beside it under a name of the run's own and dropped on exit. The rig
+picks its ports itself (`scripts/e2e/lib/rig.sh`'s `pick_port`), so two rigs on one machine never
+meet.
+
+Postgres from the distribution's package serves, unpacked rather than installed (Ubuntu 24.04
+shown). It listens on no TCP port, only on a socket in a directory no other account can enter, and
+admits only the account that runs it (peer authentication), so nobody else on the machine reaches
+its superuser:
 
 ```bash
 apt-get download postgresql-16 && dpkg-deb -x postgresql-16_*.deb /tmp/pgroot
 pgbin=/tmp/pgroot/usr/lib/postgresql/16/bin
-$pgbin/initdb -D /tmp/pgdata -U postgres --auth=trust
-$pgbin/pg_ctl -D /tmp/pgdata -l /tmp/pg.log -o "-c listen_addresses=127.0.0.1 -c port=55432 -c unix_socket_directories=/tmp" -w start
-psql "postgres://postgres@127.0.0.1:55432/postgres" -c "create database dispatch"
-DATABASE_URL="postgres://postgres@127.0.0.1:55432/dispatch?sslmode=disable" bash docs/site/media/broker/rig.sh
+install -d -m 700 /tmp/pgsock
+$pgbin/initdb -D /tmp/pgdata -U "$(id -un)" --auth=peer
+$pgbin/pg_ctl -D /tmp/pgdata -l /tmp/pg.log -o "-c listen_addresses='' -c unix_socket_directories=/tmp/pgsock" -w start
+psql "postgres:///postgres?host=/tmp/pgsock" -c "create database dispatch"
+DATABASE_URL="postgres:///dispatch?host=/tmp/pgsock" bash docs/site/media/broker/rig.sh
 ```
 
-`$pgbin/pg_ctl -D /tmp/pgdata stop` and removing `/tmp/pgroot` and `/tmp/pgdata` undo it.
+`$pgbin/pg_ctl -D /tmp/pgdata stop` and removing `/tmp/pgroot`, `/tmp/pgdata` and `/tmp/pgsock` undo
+it.
 
 Dispatch signs a person in with its session cookie, which the harness server mints at its dev
 sign-in route: open the sign-in address the rig prints, `<Dispatch>/auth/_dev/signin?login=alice`,

@@ -24,14 +24,53 @@
 # script that runs its arguments on the agent machine, in its demo directory, with its environment
 # (an interactive shell when stdin is a terminal: `agent-exec bash`); flow.ts reads both.
 #
-# DATABASE_URL, the one input, names a Postgres database this run may empty, as the e2e harness
-# requires. Every port is the run's own: the harness's three are picked (scripts/e2e/lib/rig.sh's
-# pick_port), and the broker binds one the kernel assigns.
+# DATABASE_URL, the one input, names a Postgres database on this machine (a loopback host or a unix
+# socket directory) that this run may empty, as the e2e harness requires; the rig refuses any other
+# before it runs a single psql. The broker's database is created beside it under a name of this
+# run's own and dropped on exit. Every port is the run's own: the harness's three are picked
+# (scripts/e2e/lib/rig.sh's pick_port), and the broker binds one the kernel assigns.
 #
 # Needs go, bun, psql, curl, openssl and setsid, and passwordless sudo with unshare and setpriv,
 # which give the helper its hostname; nothing else from the machine: no credential, private
 # hostname or production service.
 set -euo pipefail
+
+# Nothing but DATABASE_URL decides where this run's SQL and seed go: libpq's psql also follows
+# PGHOSTADDR (which replaces the URL's host), PGHOST and PGSERVICE, and the e2e harness's seed
+# truncates PLAYWRIGHT_DATABASE_URL and calls PLAYWRIGHT_BASE_URL with E2E_AGENT_TOKEN whenever
+# PLAYWRIGHT_BASE_URL is set (packages/dispatch/e2e/psql.ts, api.ts), as a deployed run's shell has.
+unset PGHOSTADDR PGHOST PGSERVICE PLAYWRIGHT_BASE_URL PLAYWRIGHT_DATABASE_URL E2E_AGENT_TOKEN
+
+# local_database URL succeeds when every host the postgres:// URL names is this machine: a unix
+# socket directory, localhost, 127.0.0.0/8 or ::1, the hosts Dispatch's dev sign-in accepts
+# (packages/envoy/cmd/dispatch/main.go, loopbackDatabase). The hosts are the authority's, or the
+# host query parameter's, which overrides them for libpq and pgx alike; none at all is the default
+# socket. Another form, and a hostaddr or service parameter, are refused.
+local_database() {
+  local url=$1 rest hosts param host
+  local -a params=() list=()
+  case "$url" in postgres://* | postgresql://*) ;; *) return 1 ;; esac
+  rest=${url#*://}
+  rest=${rest%%[/?]*}
+  hosts=${rest##*@}
+  if [[ $url == *\?* ]]; then
+    IFS='&' read -ra params <<<"${url#*\?}"
+    for param in "${params[@]}"; do
+      case "$param" in
+        host=*) hosts=${param#host=} ;;
+        hostaddr=* | service=*) return 1 ;;
+      esac
+    done
+  fi
+  hosts=$(printf '%b' "${hosts//%/\\x}")
+  IFS=, read -ra list <<<"$hosts"
+  for host in "${list[@]}"; do
+    [[ $host =~ ^(\[[^]]*\]|[^:]*)(:[0-9]*)?$ ]] || return 1
+    host=${BASH_REMATCH[1],,}
+    [[ $host == /* || $host == localhost || $host == "[::1]" || $host =~ ^127(\.[0-9]{1,3}){3}$ ]] ||
+      return 1
+  done
+}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
@@ -45,6 +84,10 @@ elif [ "$#" -gt 0 ]; then
   exit 2
 fi
 : "${DATABASE_URL:?DATABASE_URL must name a Postgres database this run may empty}"
+local_database "$DATABASE_URL" || {
+  echo "rig: DATABASE_URL must be a postgres:// URL naming a database on this machine (a loopback host or a unix socket directory)" >&2
+  exit 1
+}
 for tool in go bun psql curl openssl setsid sudo unshare setpriv; do
   command -v "$tool" >/dev/null || { echo "rig: $tool is required on PATH" >&2; exit 1; }
 done
@@ -95,14 +138,16 @@ trap 'exit 130' INT TERM
 note "building the broker, agent-secrets and agent-secrets-helper"
 (cd "$root/packages/envoy" && CGO_ENABLED=0 go build -o "$work/bin/" ./cmd/broker ./cmd/agent-secrets ./cmd/agent-secrets-helper)
 
-# --- The broker's database, beside DATABASE_URL's. ----------------------------------------------
+# --- The broker's database, beside DATABASE_URL's, named for this run (as dev-broker.sh names
+# its own), so a database another run or anyone else made is never the one dropped. -------------
 url_base="${DATABASE_URL%%\?*}"
 url_query="${DATABASE_URL#"$url_base"}"
-broker_database="${url_base##*/}_broker"
 admin_url="${url_base%/*}/postgres${url_query}"
-broker_database_url="${url_base%/*}/${broker_database}${url_query}"
+run_database="docs_broker_$(printf '%s' "${work##*.}" | tr '[:upper:]' '[:lower:]')"
+broker_database_url="${url_base%/*}/${run_database}${url_query}"
 PGOPTIONS="-c client_min_messages=warning" psql "$admin_url" -v ON_ERROR_STOP=1 -q \
-  -c "drop database if exists ${broker_database} with (force)" -c "create database ${broker_database}"
+  -c "create database ${run_database}"
+broker_database=$run_database
 
 # --- The broker, on example rules and a made-up secret. -------------------------------------------
 cat >"$work/agent-secret-rules.yaml" <<EOF
@@ -118,14 +163,15 @@ secrets:
 EOF
 printf '%s\n' "example/agent-secrets/DEMO_API_KEY=demo-key-not-a-real-secret-7f3a" >"$work/fake-secrets.env"
 chmod 600 "$work/fake-secrets.env"
-ui_token="$(openssl rand -hex 32)"
+# The broker's UI bearer, which Dispatch sends it, reaches both through a file, never an argv.
+(umask 077 && openssl rand -hex 32 >"$work/broker-ui-token")
 
 note "starting the broker"
 start_process broker setsid env -i PATH="$PATH" \
   BROKER_DATABASE_URL="$broker_database_url" \
   BROKER_LISTEN_ADDR=127.0.0.1:0 \
   BROKER_PUBLIC_URL=http://127.0.0.1:0 \
-  BROKER_UI_TOKEN="$ui_token" \
+  BROKER_UI_TOKEN_FILE="$work/broker-ui-token" \
   BROKER_RULES_FILE="$work/agent-secret-rules.yaml" \
   BROKER_FAKE_SECRETS_FILE="$work/fake-secrets.env" \
   "$work/bin/broker"
@@ -148,7 +194,7 @@ dispatch_url="http://127.0.0.1:${dispatch_port}"
 note "starting Dispatch at $dispatch_url"
 start_process fake_envoy setsid bun "$root/packages/dispatch/e2e/fake-envoy.ts"
 start_process fake_github setsid bun "$root/packages/dispatch/e2e/fake-github.ts"
-DISPATCH_E2E_AGENT_SECRETS_URL="$broker_url" DISPATCH_E2E_AGENT_SECRETS_TOKEN="$ui_token" \
+DISPATCH_E2E_AGENT_SECRETS_URL="$broker_url" DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE="$work/broker-ui-token" \
   start_process dispatch setsid bash "$root/packages/dispatch/e2e/run-server.sh"
 await_start fake_envoy "$fake_envoy_pid" 0 60 "the fake Envoy" curl -s -o /dev/null "http://127.0.0.1:$fake_envoy_port/"
 await_start fake_github "$fake_github_pid" 0 60 "the fake GitHub" curl -s -o /dev/null "http://127.0.0.1:$fake_github_port/"
