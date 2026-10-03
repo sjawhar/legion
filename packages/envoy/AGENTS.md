@@ -335,6 +335,19 @@ publish it runs inside, and the publish, its request and the document's writer s
 (`TestAPublishSurvivesItsRoomsWorkerRetiringUnderIt`, `TestAWriteSurvivesItsIssueClosingAsItPublishes`).
 A publish whose room `CloseRoom` removed has no peer left to broadcast to and returns.
 
+The service keeps a document's state (`docs.roomState`: its connected browsers, writer slot,
+settlement timer, pending authors, rendered markdown) only while ygo holds a room for it, loaded
+or loading, or something on the document still holds the state: an open writer, a running or
+armed settlement, authors a settlement has not read yet, a connected browser, an update the
+room's persistence has not taken, or a version whose authors wait on its commit. Whichever of
+those ends last - ygo's `OnUnloadDocument` when the room goes, or the holder's own end - forgets
+the state (`releaseIfUnusedLocked`), and every lookup that may write one skips a forgotten state
+for the document's current one (`lockState`). The document socket's cap of 1,000 rooms
+(`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms, never documents touched since the
+process started (LEGION-513). A room an `Apply` opened with no peer is idle-evicted only by a ygo
+whose `Apply` stamps the empty room idle (LEGION-484). `PgVersioned`'s per-room locks likewise
+live only while a caller holds or waits for one.
+
 The room's update observer (`updateChangesMarkdown`) renders a replica of the room, not the live
 tree, since ygo fires it after the transaction has released the document's lock and another write
 can be integrating meanwhile (`renderedReplica`). The replica is copied from the room on its first
