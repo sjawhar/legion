@@ -60,7 +60,7 @@ func recordTime(t *testing.T, rec map[string]any) time.Time {
 
 const (
 	expiresSoonMsg = "the launcher credential expires soon; the broker has no renewal, so before then run: agent-secrets launcher login, and have a human approve it"
-	expiredMsg     = "launcher credential expired; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)"
+	expiredMsg     = dropExpired + "; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)"
 )
 
 // TestTheHelperWarnsBeforeItsLauncherCredentialExpiresAndDropsItThen: the broker mints no
@@ -112,8 +112,11 @@ func TestTheHelperWarnsBeforeItsLauncherCredentialExpiresAndDropsItThen(t *testi
 	if at := recordTime(t, expired); at.Before(cred.expiresAt) {
 		t.Fatalf("the credential was dropped at %s, before its expiry %s", at, cred.expiresAt)
 	}
-	if status := b.LoginStatus(); status.State != "expired" || !status.Refused || status.CredentialHeld || !status.CredentialExpiresAt.IsZero() {
-		t.Fatalf("login-status after the expiry: %+v; want expired, refused, no credential and no expiry", status)
+	if status := b.LoginStatus(); status.State != "expired" || !status.Refused || status.Dropped != dropExpired || status.CredentialHeld || !status.CredentialExpiresAt.IsZero() {
+		t.Fatalf("login-status after the expiry: %+v; want expired, dropped at its expiry, no credential and no expiry", status)
+	}
+	if why := b.noCredentialReason(); why != dropExpired {
+		t.Fatalf("why a session cannot enroll after the expiry: %q; want %q, not the broker's refusal", why, dropExpired)
 	}
 }
 

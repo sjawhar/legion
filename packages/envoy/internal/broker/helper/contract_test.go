@@ -343,8 +343,8 @@ func TestContractARefusedLauncherCredentialIsAnErrorAndTheHelperKeepsServing(t *
 		time.Sleep(20 * time.Millisecond)
 	}
 	log := cr.logBuf.String()
-	refused := `level=ERROR msg="launcher credential refused; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)" credential_id=` + credentialID + " code=LAUNCHER_INVALID"
-	why := `why="the broker refused the launcher credential or it reached its expiry; only a new machine login a human approves replaces it"`
+	refused := `level=ERROR msg="the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)" credential_id=` + credentialID + " code=LAUNCHER_INVALID"
+	why := `why="the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch)"`
 	if !strings.Contains(log, refused) || !strings.Contains(log, why) {
 		t.Fatalf("log:\n%s\nwant %s, and the session's error naming %s", log, refused, why)
 	}
@@ -355,8 +355,8 @@ func TestContractARefusedLauncherCredentialIsAnErrorAndTheHelperKeepsServing(t *
 	if sessions := cr.call(t, Request{Op: "sessions"}); !sessions.OK || len(sessions.Sessions) != 1 || sessions.Sessions[0].State != "enrolling" {
 		t.Fatalf("sessions after the refusal: %+v; want the one session, still enrolling", sessions)
 	}
-	if status := cr.call(t, Request{Op: "login-status"}); !status.OK || status.LoginState != "expired" || !status.LoginRefused || status.CredentialHeld {
-		t.Fatalf("login-status after the refusal: %+v; want expired, refused, none held", status)
+	if status := cr.call(t, Request{Op: "login-status"}); !status.OK || status.LoginState != "expired" || !status.LoginRefused || status.CredentialDropped != dropRefused || status.CredentialHeld {
+		t.Fatalf("login-status after the refusal: %+v; want expired, refused by the broker, none held", status)
 	}
 }
 

@@ -326,10 +326,11 @@ func (s *Server) login(ctx context.Context) Response {
 // a launcher credential and when it expires; an empty LoginState means none has ever run.
 // CredentialHeld stays true through a re-login that is denied, expires or is pending while an
 // earlier login's credential is held, and LoginRefused marks a credential the helper dropped
-// (refused, or past its expiry) rather than a login nobody approved.
+// rather than a login nobody approved, with CredentialDropped saying why (the broker refused it,
+// or it reached its expiry).
 func (s *Server) loginStatus() Response {
 	ls := s.Broker.LoginStatus()
-	resp := Response{OK: true, Code: ls.Code, LoginState: ls.State, CredentialHeld: ls.CredentialHeld, LoginRefused: ls.Refused}
+	resp := Response{OK: true, Code: ls.Code, LoginState: ls.State, CredentialHeld: ls.CredentialHeld, LoginRefused: ls.Refused, CredentialDropped: ls.Dropped}
 	if !ls.CredentialExpiresAt.IsZero() {
 		resp.CredentialExpiresAt = ls.CredentialExpiresAt.UTC().Format(time.RFC3339)
 	}

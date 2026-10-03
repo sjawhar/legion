@@ -51,11 +51,50 @@ type Response struct {
 	LoginState          string        `json:"login_state,omitempty"`           // login/login-status: the most recent login's pending|issued|denied|expired; expired whenever LoginRefused and that login is not pending
 	CredentialHeld      bool          `json:"credential_held,omitempty"`       // login-status: the helper holds a launcher credential, whatever the most recent login's state
 	CredentialExpiresAt string        `json:"credential_expires_at,omitempty"` // login-status: RFC3339, when the held credential expires; empty while none is held or its broker did not say
-	LoginRefused        bool          `json:"login_refused,omitempty"`         // login-status: the broker refused the credential the helper held, or it reached the expiry the broker named, and no login has started or settled since
+	LoginRefused        bool          `json:"login_refused,omitempty"`         // login-status: the helper dropped the credential it held (the broker refused it, or it reached the expiry the broker named), and no login has started or settled since
+	CredentialDropped   string        `json:"credential_dropped,omitempty"`    // login-status: why, set exactly when LoginRefused (dropRefused or dropExpired); a helper from before this field sends LoginRefused alone
 	LeaseExpires        string        `json:"lease_expires,omitempty"`         // enroll-box: RFC3339Nano
 	Proof               string        `json:"proof,omitempty"`
 	RequestObject       string        `json:"request_object,omitempty"` // sign-request: the signed compact JWS
 	Sessions            []SessionInfo `json:"sessions,omitempty"`
+}
+
+// The causes for which the helper drops the launcher credential it holds, as login-status's
+// credential_dropped carries them: each starts the ERROR line the helper logs as it drops the
+// credential (Broker.drop), and is the reason a session cannot enroll from then until a login is
+// recorded.
+const (
+	// dropRefused: the broker answered a launcher proof 401 LAUNCHER_INVALID (clearOnInvalid).
+	dropRefused = "the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch)"
+	// dropExpired: the credential reached the expiry the broker named when it issued it
+	// (watchExpiry).
+	dropExpired = "the launcher credential reached its expiry"
+)
+
+// NoCredentialReason says why a helper holds no launcher credential, from login-status's fields:
+// the most recent login's state, login_refused and credential_dropped. The helper logs it on every
+// enrollment it cannot attempt, and `agent-secrets launcher login-status` prints it, so the journal
+// and the client say the same thing. It names no confirmation code: a pending login's code is for
+// the approver's screen, never the journal. A login still pending outranks a dropped credential,
+// since its approval is what replaces it. A helper from before credential_dropped sets
+// login_refused only when the broker refused the credential, so login_refused alone reads as that.
+func NoCredentialReason(loginState string, refused bool, dropped string) string {
+	switch {
+	case loginState == "pending":
+		return "a machine login is waiting for a human to approve it"
+	case dropped != "":
+		return dropped
+	case refused:
+		return dropRefused
+	case loginState == "denied":
+		return "the most recent machine login was denied"
+	case loginState == "expired":
+		return "the most recent machine login expired before anyone approved it"
+	case loginState == "":
+		return "no machine login since the helper started; a restart discards the launcher credential"
+	default:
+		return "the most recent machine login is " + loginState
+	}
 }
 
 // SessionInfo is one registered session as `sessions` lists it: never a key.

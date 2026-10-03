@@ -8,6 +8,35 @@ import (
 	"time"
 )
 
+// TestNoCredentialReasonNamesWhyTheHelperHoldsNone: every state login-status can report with no
+// credential held has its own reason, which the helper's journal and `launcher login-status` both
+// print: a login in flight outranks a dropped credential, a dropped credential names the cause the
+// helper recorded, and a helper from before credential_dropped, which sets login_refused only for
+// a broker refusal, reads as that refusal.
+func TestNoCredentialReasonNamesWhyTheHelperHoldsNone(t *testing.T) {
+	const refusal = "the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch)"
+	for _, tc := range []struct {
+		name, state string
+		refused     bool
+		dropped     string
+		want        string
+	}{
+		{"never logged in since the start", "", false, "", "no machine login since the helper started; a restart discards the launcher credential"},
+		{"a login waiting for approval", "pending", false, "", "a machine login is waiting for a human to approve it"},
+		{"a login waiting for approval beside a dropped credential", "pending", true, dropExpired, "a machine login is waiting for a human to approve it"},
+		{"a denied login", "denied", false, "", "the most recent machine login was denied"},
+		{"a login nobody approved in time", "expired", false, "", "the most recent machine login expired before anyone approved it"},
+		{"dropped at its expiry", "expired", true, dropExpired, "the launcher credential reached its expiry"},
+		{"dropped when the broker refused it", "expired", true, dropRefused, refusal},
+		{"refused, from a helper before credential_dropped", "expired", true, "", refusal},
+		{"a state from a newer helper", "revoked", false, "", "the most recent machine login is revoked"},
+	} {
+		if got := NoCredentialReason(tc.state, tc.refused, tc.dropped); got != tc.want {
+			t.Errorf("%s: NoCredentialReason(%q, %v, %q) = %q; want %q", tc.name, tc.state, tc.refused, tc.dropped, got, tc.want)
+		}
+	}
+}
+
 // TestALoginWakesTheEnrollmentOfASessionRegisteredWithoutACredential: a session registered while
 // the helper holds no credential keeps retrying its enrollment with a backoff that grows to a
 // minute. The login that installs a credential must wake that retry, so the session can sign

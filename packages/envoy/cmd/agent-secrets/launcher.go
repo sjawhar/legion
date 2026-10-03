@@ -104,13 +104,13 @@ func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
 // and drops the credential at that moment). A helper or broker from before the expiry was
 // reported gets a line saying it is unknown. A helper from before credential_held reports
 // only the most recent login, which reads "issued" exactly while its credential is held. The
-// helper reports a credential the broker refused, or one past its expiry, as "expired", the word
-// the dotfiles launcher gate matches, until a login starts or settles (a login still pending reads
-// "pending"), and when it says so (login_refused) stderr says the credential reached its expiry or
-// the broker refused it, and why a refusal can happen. Any other "expired" gets the neutral line:
-// a login that expired before anyone approved it reads the same, and so does a refused credential
-// on a helper from before login_refused, which keeps running until it restarts. Every answer with
-// no credential says on stderr what to do about it.
+// helper reports a credential it dropped, because the broker refused it or it reached its expiry,
+// as "expired", the word the dotfiles launcher gate matches, until a login starts or settles (a
+// login still pending reads "pending"). Every answer with no credential says on stderr why, in
+// the words the helper's journal uses for the same answer (helper.NoCredentialReason): the cause
+// the helper names (credential_dropped), a broker refusal on a helper from before that field,
+// which sets login_refused only for one, and otherwise the most recent login's state; and what to
+// do about it.
 func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, nil)
 	if err := newFlagSet("launcher login-status", stderr).Parse(flagArgs); err != nil {
@@ -149,15 +149,11 @@ func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	fmt.Fprintln(stdout, state)
-	switch {
-	case state == "pending":
-		fmt.Fprintf(stderr, "agent-secrets launcher login-status: a machine login is waiting for approval (code %s)\n", resp.Code)
-	case state == "none":
-		fmt.Fprintln(stderr, "agent-secrets launcher login-status: no machine login has run on this helper; run: agent-secrets launcher login")
-	case resp.LoginRefused:
-		fmt.Fprintln(stderr, "agent-secrets launcher login-status: this machine's launcher credential reached its expiry or the broker refused it (revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login")
-	default:
-		fmt.Fprintf(stderr, "agent-secrets launcher login-status: the last machine login is %s; run: agent-secrets launcher login\n", state)
+	reason := helper.NoCredentialReason(resp.LoginState, resp.LoginRefused, resp.CredentialDropped)
+	if state == "pending" {
+		fmt.Fprintf(stderr, "agent-secrets launcher login-status: %s (code %s)\n", reason, resp.Code)
+	} else {
+		fmt.Fprintf(stderr, "agent-secrets launcher login-status: %s; run: agent-secrets launcher login\n", reason)
 	}
 	return 1
 }
