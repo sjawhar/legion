@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net"
@@ -19,7 +20,6 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cistore"
-	"github.com/sjawhar/envoy/internal/config"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/logging"
@@ -327,10 +327,13 @@ func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, 
 
 // webhookRoute is one configured webhook path and the handler it serves over the only
 // dependencies a webhook uses: the NATS client it publishes through and the CI store the GitHub
-// route records checks in, which main opens only when that route is configured.
+// route records checks in, which main opens only when that route is configured. provider is its
+// ENVOY_WEBHOOKS name, and description what it does, for `envoy-listener routes`.
 type webhookRoute struct {
-	path    string
-	handler func(*bus.Client, *cistore.Store) http.Handler
+	provider    string
+	path        string
+	description string
+	handler     func(*bus.Client, *cistore.Store) http.Handler
 }
 
 // webhookRoutes lists the webhook routes the configuration enables. main registers the paths
@@ -339,19 +342,25 @@ type webhookRoute struct {
 func webhookRoutes(cfg *webhook.WebhookConfig) []webhookRoute {
 	var routes []webhookRoute
 	if github := cfg.GitHub; github != nil {
-		routes = append(routes, webhookRoute{"/webhook/github", func(client *bus.Client, ciStore *cistore.Store) http.Handler {
-			return webhook.GitHubHandler(github.Secret, github.MentionTrigger, github.ReviewerAppID, client, ciStore)
-		}})
+		routes = append(routes, webhookRoute{"github", "/webhook/github",
+			"GitHub's webhook deliveries, from a GitHub App or a repository webhook. A delivery without `X-GitHub-Delivery` and `X-GitHub-Event` is answered `400`, and one whose `X-Hub-Signature-256` was not made with `ENVOY_GITHUB_WEBHOOK_SECRET` `401`. Events are published under `notifications.github.<owner>.<repo>`, except check runs and suites, which are recorded: the listener publishes one `pr.<n>.checks` settlement for each commit once its checks finish. An event NATS refuses is answered `422`, any other failure to publish `503`. Any method but `POST` is answered `200` and does nothing.",
+			func(client *bus.Client, ciStore *cistore.Store) http.Handler {
+				return webhook.GitHubHandler(github.Secret, github.MentionTrigger, github.ReviewerAppID, client, ciStore)
+			}})
 	}
 	if slack := cfg.Slack; slack != nil {
-		routes = append(routes, webhookRoute{"/webhook/slack", func(client *bus.Client, _ *cistore.Store) http.Handler {
-			return webhook.SlackHandler(slack.Secret, client)
-		}})
+		routes = append(routes, webhookRoute{"slack", "/webhook/slack",
+			"Slack Events API requests. A `url_verification` request is answered with its `challenge`; any other request whose signature was not made with `ENVOY_SLACK_SIGNING_SECRET` is answered `401`. An `event_callback` is published under `notifications.slack.<team>.<channel>`. Any method but `POST` is answered `200` and does nothing.",
+			func(client *bus.Client, _ *cistore.Store) http.Handler {
+				return webhook.SlackHandler(slack.Secret, client)
+			}})
 	}
 	if ghostWispr := cfg.GhostWispr; ghostWispr != nil {
-		routes = append(routes, webhookRoute{"/webhook/ghostwispr", func(client *bus.Client, _ *cistore.Store) http.Handler {
-			return webhook.GhostWisprHandler(ghostWispr.Secret, client)
-		}})
+		routes = append(routes, webhookRoute{"ghostwispr", "/webhook/ghostwispr",
+			"Ghost Wispr's webhook deliveries. A delivery without `X-GhostWispr-Delivery` and `X-GhostWispr-Event` is answered `400`, and, when `ENVOY_GHOSTWISPR_SIGNING_SECRET` is set, one whose `X-GhostWispr-Signature` it did not make `401`. `session_started`, `session_ended` and `summary_ready` events are published under `notifications.ghostwispr.<session>`; any other event is answered `200` and dropped. Any method but `POST` is answered `200` and does nothing.",
+			func(client *bus.Client, _ *cistore.Store) http.Handler {
+				return webhook.GhostWisprHandler(ghostWispr.Secret, client)
+			}})
 	}
 	return routes
 }
@@ -410,32 +419,41 @@ func openV1Routes(gate *startingGate, ready *listenerDeps, machineID string, log
 	logger.Info("envoy-listener /v1 open", slog.Int64("since_listening_ms", time.Since(listeningAt).Milliseconds()))
 }
 
-func main() {
-	// Phase 1: Load config (synchronous, fast).
-	cfg, err := config.Load(9020)
-	if err != nil {
-		log.Fatal(err)
-	}
-	logger := logging.New(cfg.MachineID)
-	apiToken := os.Getenv("ENVOY_API_TOKEN")
-	oidcIssuer, oidcAudience, err := resolveListenerOIDCConfig(os.Getenv)
-	if err != nil {
-		log.Fatal(err)
-	}
-	apiVerifier, err := oidc.Discover(context.Background(), oidcIssuer, oidcAudience, oidc.DiscoveryTimeout)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := validateListenerAPIAuth(cfg.ListenHost, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED"), apiVerifier); err != nil {
-		log.Fatal(err)
-	}
-	logger.Info("listener API auth: " + describeListenerAPIAuth(apiToken, oidcIssuer))
+// listenerSubcommands print the tables the docs site's reference pages are generated from. Any
+// other argument is ignored, as every argument always was: a deployment that names the binary as
+// the image's command passes its path as the first argument.
+var listenerSubcommands = map[string]func(io.Writer) error{
+	"routes":   writeRoutes,
+	"settings": writeSettings,
+}
 
-	// Load webhook config (fast — env var reads only).
-	webhookCfg, err := webhook.LoadWebhookConfig()
+func main() {
+	if len(os.Args) > 1 {
+		if write, ok := listenerSubcommands[os.Args[1]]; ok {
+			if err := write(os.Stdout); err != nil {
+				fmt.Fprintln(os.Stderr, "envoy-listener "+os.Args[1]+":", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
+
+	// Phase 1: Load config (synchronous, fast). Every setting is read through the settings table.
+	env := processSettings()
+	read, err := readListenerSettings(env)
 	if err != nil {
 		log.Fatal(err)
 	}
+	cfg, apiToken, webhookCfg := read.service, read.apiToken, read.webhooks
+	logger := logging.New(cfg.MachineID)
+	apiVerifier, err := oidc.Discover(context.Background(), read.oidcIssuer, read.oidcAudience, oidc.DiscoveryTimeout)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := validateListenerAPIAuth(cfg.ListenHost, apiToken, read.allowUnauthenticated, apiVerifier); err != nil {
+		log.Fatal(err)
+	}
+	logger.Info("listener API auth: " + describeListenerAPIAuth(apiToken, read.oidcIssuer))
 
 	// Phase 2: Bind HTTP port deterministically in main goroutine before
 	// any NATS work begins. This guarantees /healthz is reachable as soon
@@ -484,10 +502,10 @@ func main() {
 	mux := http.NewServeMux()
 
 	// /metrics is always reachable — NOT gated by readiness.
-	mux.Handle("/metrics", met.Handler())
+	mux.Handle(metricsPath, met.Handler())
 
 	// /healthz is always reachable, before NATS setup as well as after it.
-	mux.HandleFunc("/healthz", healthzHandler(&deps))
+	mux.HandleFunc(healthzPath, healthzHandler(&deps))
 
 	// GaugeFunc for consumer pending — queries NATS at scrape time
 
@@ -524,7 +542,7 @@ func main() {
 
 	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here). The listener owns
 	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream).
-	client, err := bus.ConnectOwningStream(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
+	client, err := bus.ConnectOwningStream(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas), bus.WithEnvironment(env.lookup))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -615,7 +633,7 @@ func main() {
 
 	deliver := session.Deliverer{
 		MachineID:    cfg.MachineID,
-		HostBridge:   os.Getenv("ENVOY_HOST_BRIDGE"),
+		HostBridge:   read.hostBridge,
 		RequestLimit: 30 * time.Second,
 		Sessions:     sessions,
 	}
@@ -740,7 +758,7 @@ func main() {
 	summaryCtx, summaryCancel := context.WithCancel(context.Background())
 	if ciStore != nil {
 		ciDebounce := 5 * time.Second
-		if v := os.Getenv("ENVOY_CI_DEBOUNCE"); v != "" {
+		if v := read.ciDebounce; v != "" {
 			if d, perr := time.ParseDuration(v); perr == nil {
 				ciDebounce = d
 			} else {

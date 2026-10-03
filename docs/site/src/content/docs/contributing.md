@@ -28,6 +28,7 @@ The file's path is its URL: `dispatch/inbox.md` is published at `/legion/dispatc
 | `index.mdx`, `how-it-fits.md` | The Overview: the landing page and how the components fit together. |
 | `legion/` | Legion, the coordinator and its agents. |
 | `dispatch/` | Dispatch, issues and the decisions people make there. |
+| `envoy/` | Envoy, the listener and the clients that carry events to agent sessions. |
 | `broker/` | The Secrets Broker. |
 | `<section>/reference/` | Generated reference pages. Never edit or commit these; see below. |
 
@@ -76,14 +77,14 @@ generators, and `bun run generate` (part of `dev` and `build`) runs them under t
 
 - **Name and place.** A generator is an executable file directly in `docs/site/generators/` named
   `<section>-<name>.ts` or `<section>-<name>.sh`, where `<section>` is one of the content
-  directories above (`legion`, `dispatch`, `broker`). Subdirectories of `generators/` hold shared
+  directories above (`legion`, `dispatch`, `envoy`, `broker`). Subdirectories of `generators/` hold shared
   helpers and are never run. A file directly in `generators/` that breaks these rules fails the
   build.
 - **Invocation.** It runs from the repository root as `<generator> <absolute content dir>`, where
   the content directory is `docs/site/src/content/docs`. A `.ts` generator runs through Bun.
 - **Binaries.** Before any generator runs, `docs/site/scripts/build-binaries.sh` builds the Go
   binaries from the same commit and puts them first on the generator's `PATH`: `legion`,
-  `envoy-dispatch`, `envoy-broker`, `agent-secrets` and `agent-secrets-helper`.
+  `envoy-dispatch`, `envoy-listener`, `envoy-broker`, `agent-secrets` and `agent-secrets-helper`.
 - **Output.** It writes its pages, with frontmatter like any other page, under
   `<content dir>/<section>/reference/`. That directory is emptied before the generators run and is
   ignored by git. The sidebar shows it as the section's **Reference** group.

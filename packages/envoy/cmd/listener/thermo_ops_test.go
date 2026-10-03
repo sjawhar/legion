@@ -13,11 +13,9 @@ import (
 )
 
 func TestThermoOpsListenerConfigDefaultsToLoopback(t *testing.T) {
-	t.Setenv("ENVOY_MACHINE_ID", "thermo-ops")
-	t.Setenv("NATS_URLS", "nats://127.0.0.1:4222")
-	t.Setenv("ENVOY_LISTEN_HOST", "")
+	env := map[string]string{"ENVOY_MACHINE_ID": "thermo-ops", "NATS_URLS": "nats://127.0.0.1:4222", "ENVOY_LISTEN_HOST": ""}
 
-	service, err := config.Load(0)
+	service, err := config.Load(func(name string) string { return env[name] }, 0)
 	if err != nil {
 		t.Fatalf("load listener config: %v", err)
 	}
@@ -41,11 +39,9 @@ func TestThermoOpsListenerConfigDefaultsToLoopback(t *testing.T) {
 }
 
 func TestThermoOpsListenerConfigAllowsExplicitWidening(t *testing.T) {
-	t.Setenv("ENVOY_MACHINE_ID", "thermo-ops")
-	t.Setenv("NATS_URLS", "nats://127.0.0.1:4222")
-	t.Setenv("ENVOY_LISTEN_HOST", "0.0.0.0")
+	env := map[string]string{"ENVOY_MACHINE_ID": "thermo-ops", "NATS_URLS": "nats://127.0.0.1:4222", "ENVOY_LISTEN_HOST": "0.0.0.0"}
 
-	service, err := config.Load(9020)
+	service, err := config.Load(func(name string) string { return env[name] }, 9020)
 	if err != nil {
 		t.Fatalf("load listener config: %v", err)
 	}

@@ -107,11 +107,7 @@ func TestLoadWebhookConfig(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("ENVOY_REVIEWER_APP_ID", "")
-			for k, v := range tc.env {
-				t.Setenv(k, v)
-			}
-			cfg, err := LoadWebhookConfig()
+			cfg, err := LoadWebhookConfig(func(name string) string { return tc.env[name] })
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")

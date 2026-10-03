@@ -23,19 +23,22 @@ function section(label, directory) {
 export default defineConfig({
   site: "https://sjawhar.github.io",
   base: "/legion",
+  // Envoy was one Dispatch page before it had a section of its own.
+  redirects: { "/dispatch/envoy": "/legion/envoy/" },
   integrations: [
     // astro-mermaid must come before Starlight so it sees the ```mermaid fences first.
     mermaid({ autoTheme: true, enableLog: false }),
     starlight({
       title: "Legion",
       description:
-        "Documentation for Legion, which runs coding agents on Dispatch issues; Dispatch, where those issues and every human decision live; and the Secrets Broker, which gives agents credentials a human approved.",
+        "Documentation for Legion, which runs coding agents on Dispatch issues; Dispatch, where those issues and every human decision live; Envoy, which carries events and messages between them and the agents; and the Secrets Broker, which gives agents credentials a human approved.",
       social: [{ icon: "github", label: "GitHub", href: "https://github.com/sjawhar/legion" }],
       editLink: { baseUrl: "https://github.com/sjawhar/legion/edit/main/docs/site/" },
       sidebar: [
         { label: "Overview", items: ["index", "how-it-fits"] },
         section("Legion", "legion"),
         section("Dispatch", "dispatch"),
+        section("Envoy", "envoy"),
         section("Secrets Broker", "broker"),
         "contributing",
       ],

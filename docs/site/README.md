@@ -1,7 +1,7 @@
 # Legion documentation site
 
 The source of <https://sjawhar.github.io/legion/>: an [Astro Starlight](https://starlight.astro.build/)
-site covering Legion, Dispatch and the Secrets Broker. `.github/workflows/docs.yaml` builds it on
+site covering Legion, Dispatch, Envoy and the Secrets Broker. `.github/workflows/docs.yaml` builds it on
 every pull request that touches `docs/site/`, `packages/` or `skills/`, and publishes it to GitHub
 Pages on every push to `main`.
 
@@ -31,7 +31,7 @@ refuses relative links (`errorOnRelativeLinks`, its default) or, with that off, 
 
 | Path | What it holds |
 | --- | --- |
-| `src/content/docs/` | The pages. Each section (`legion/`, `dispatch/`, `broker/`) builds its sidebar from its directory. |
+| `src/content/docs/` | The pages. Each section (`legion/`, `dispatch/`, `envoy/`, `broker/`) builds its sidebar from its directory. |
 | `src/content/docs/<section>/reference/` | Generated reference pages, rebuilt on every build and ignored by git. |
 | `generators/` | The reference generators: `<section>-<name>.ts` or `.sh`, run by `scripts/generate.ts`. |
 | `scripts/generate.ts` | Runs every generator before the build, under the contract it documents. |

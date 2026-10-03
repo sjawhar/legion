@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 )
@@ -20,12 +19,15 @@ func (s Service) ListenAddress() string {
 	return net.JoinHostPort(s.ListenHost, strconv.Itoa(s.Port))
 }
 
-func Load(defaultPort int) (Service, error) {
-	machine := strings.TrimSpace(os.Getenv("ENVOY_MACHINE_ID"))
+// Load reads the listener's service settings through getenv, which answers as os.Getenv does:
+// cmd/listener hands it its settings table's reader, the one place the listener reads its
+// environment.
+func Load(getenv func(string) string, defaultPort int) (Service, error) {
+	machine := strings.TrimSpace(getenv("ENVOY_MACHINE_ID"))
 	if machine == "" {
 		return Service{}, fmt.Errorf("ENVOY_MACHINE_ID is required")
 	}
-	raw := strings.TrimSpace(os.Getenv("NATS_URLS"))
+	raw := strings.TrimSpace(getenv("NATS_URLS"))
 	if raw == "" {
 		return Service{}, fmt.Errorf("NATS_URLS is required")
 	}
@@ -34,19 +36,19 @@ func Load(defaultPort int) (Service, error) {
 		urls[i] = strings.TrimSpace(item)
 	}
 	port := defaultPort
-	if value := strings.TrimSpace(os.Getenv("PORT")); value != "" {
+	if value := strings.TrimSpace(getenv("PORT")); value != "" {
 		next, err := strconv.Atoi(value)
 		if err != nil {
 			return Service{}, fmt.Errorf("invalid PORT: %w", err)
 		}
 		port = next
 	}
-	listenHost := strings.TrimSpace(os.Getenv("ENVOY_LISTEN_HOST"))
+	listenHost := strings.TrimSpace(getenv("ENVOY_LISTEN_HOST"))
 	if listenHost == "" {
 		listenHost = "127.0.0.1"
 	}
 	replicas := 1
-	if value := strings.TrimSpace(os.Getenv("ENVOY_NATS_REPLICAS")); value != "" {
+	if value := strings.TrimSpace(getenv("ENVOY_NATS_REPLICAS")); value != "" {
 		next, err := strconv.Atoi(value)
 		if err != nil {
 			return Service{}, fmt.Errorf("invalid ENVOY_NATS_REPLICAS: %w", err)

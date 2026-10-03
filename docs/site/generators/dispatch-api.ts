@@ -2,8 +2,8 @@
 // Writes <content dir>/dispatch/reference/api.md from Dispatch's route table
 // (packages/envoy/internal/dispatch/api/routes_table.go), read through `envoy-dispatch routes`,
 // which prints the body GET /api/v1 serves without a database or a listener. Contract:
-// scripts/generate.ts; lib/envoy-dispatch.ts runs the binary.
-import { readEnvoyDispatch } from "./lib/envoy-dispatch.ts";
+// scripts/generate.ts; lib/binary-table.ts runs the binary.
+import { readBinaryTable } from "./lib/binary-table.ts";
 import { inline, writePage } from "./lib/markdown.ts";
 
 /** Who may call a route, by the table's auth value (`routeAuth` in the source). */
@@ -31,14 +31,17 @@ interface Route {
 }
 
 function readRoutes(): Route[] {
-  return readEnvoyDispatch("routes", "routes", ["method", "path", "auth", "description"]).map(
-    (route) => {
-      if (!Object.hasOwn(CALLERS, route.auth as string)) {
-        throw new Error(`route ${route.method} ${route.path} has unknown auth ${route.auth}`);
-      }
-      return route as unknown as Route;
+  return readBinaryTable("envoy-dispatch", "routes", "routes", [
+    "method",
+    "path",
+    "auth",
+    "description",
+  ]).map((route) => {
+    if (!Object.hasOwn(CALLERS, route.auth as string)) {
+      throw new Error(`route ${route.method} ${route.path} has unknown auth ${route.auth}`);
     }
-  );
+    return route as unknown as Route;
+  });
 }
 
 function render(routes: Route[]): string {

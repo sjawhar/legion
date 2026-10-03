@@ -12,8 +12,9 @@ uploaded files, and a history of everything that happened to it.
 
 Agents write to Dispatch through `dispatch_*` tools. People read and answer in the web app. Both
 see the same issues, in the same state, as they change. Every change Dispatch records is also an
-event that agents can subscribe to; [how the pieces fit together](/legion/how-it-fits/) shows where
-Dispatch sits beside Legion and the Secrets Broker.
+event that agents can subscribe to, carried by [Envoy](/legion/envoy/);
+[how the pieces fit together](/legion/how-it-fits/) shows where Dispatch sits beside Legion and the
+Secrets Broker.
 
 ![The Inbox, listing open asks under Waiting on you and Waiting on agents](/legion/media/dispatch/inbox.png)
 

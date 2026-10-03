@@ -61,7 +61,7 @@ func apiAuth(token string, verifier *oidc.Verifier, logger *logging.Logger, next
 }
 
 func isAPIAuthExemptPath(path string) bool {
-	return path == "/healthz" || path == "/metrics" || strings.HasPrefix(path, "/webhook/")
+	return path == healthzPath || path == metricsPath || strings.HasPrefix(path, "/webhook/")
 }
 
 // resolveListenerOIDCConfig binds the listener's two variable names to the

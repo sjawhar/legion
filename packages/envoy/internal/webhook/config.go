@@ -2,7 +2,6 @@ package webhook
 
 import (
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -31,9 +30,11 @@ type GhostWisprWebhook struct {
 	Secret string // empty = skip verification
 }
 
-// LoadWebhookConfig parses ENVOY_WEBHOOKS and validates required secrets.
-func LoadWebhookConfig() (*WebhookConfig, error) {
-	raw := os.Getenv("ENVOY_WEBHOOKS")
+// LoadWebhookConfig parses ENVOY_WEBHOOKS and validates required secrets, reading each variable
+// through getenv, which answers as os.Getenv does: cmd/listener hands it its settings table's
+// reader.
+func LoadWebhookConfig(getenv func(string) string) (*WebhookConfig, error) {
+	raw := getenv("ENVOY_WEBHOOKS")
 	if raw == "" {
 		return &WebhookConfig{}, nil
 	}
@@ -46,15 +47,15 @@ func LoadWebhookConfig() (*WebhookConfig, error) {
 		}
 		switch p {
 		case "github":
-			secret := strings.TrimSpace(os.Getenv("ENVOY_GITHUB_WEBHOOK_SECRET"))
+			secret := strings.TrimSpace(getenv("ENVOY_GITHUB_WEBHOOK_SECRET"))
 			if secret == "" {
 				return nil, fmt.Errorf("ENVOY_GITHUB_WEBHOOK_SECRET required when github enabled")
 			}
-			trigger := strings.TrimSpace(os.Getenv("ENVOY_GITHUB_MENTION_TRIGGER"))
+			trigger := strings.TrimSpace(getenv("ENVOY_GITHUB_MENTION_TRIGGER"))
 			if trigger == "" {
 				trigger = "@legion"
 			}
-			reviewerAppID := strings.TrimSpace(os.Getenv("ENVOY_REVIEWER_APP_ID"))
+			reviewerAppID := strings.TrimSpace(getenv("ENVOY_REVIEWER_APP_ID"))
 			if reviewerAppID == "" {
 				return nil, fmt.Errorf("ENVOY_REVIEWER_APP_ID required when github enabled")
 			}
@@ -64,13 +65,13 @@ func LoadWebhookConfig() (*WebhookConfig, error) {
 				ReviewerAppID:  reviewerAppID,
 			}
 		case "slack":
-			secret := strings.TrimSpace(os.Getenv("ENVOY_SLACK_SIGNING_SECRET"))
+			secret := strings.TrimSpace(getenv("ENVOY_SLACK_SIGNING_SECRET"))
 			if secret == "" {
 				return nil, fmt.Errorf("ENVOY_SLACK_SIGNING_SECRET required when slack enabled")
 			}
 			cfg.Slack = &SlackWebhook{Secret: secret}
 		case "ghostwispr":
-			cfg.GhostWispr = &GhostWisprWebhook{Secret: strings.TrimSpace(os.Getenv("ENVOY_GHOSTWISPR_SIGNING_SECRET"))}
+			cfg.GhostWispr = &GhostWisprWebhook{Secret: strings.TrimSpace(getenv("ENVOY_GHOSTWISPR_SIGNING_SECRET"))}
 		default:
 			return nil, fmt.Errorf("unknown webhook provider %q in ENVOY_WEBHOOKS", p)
 		}

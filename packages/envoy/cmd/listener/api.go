@@ -1050,11 +1050,10 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 	}
 }
 
-// registerV1Routes builds the /v1 routes over the listener's dependencies, which main hands over
-// only once every store is open, so no handler can see a store that is not.
-func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logger *logging.Logger) {
-	v1.HandleFunc("/v1/interests/subscribe", subscribeHandler(d, machineID, logger))
-	v1.HandleFunc("/v1/interests/unsubscribe", func(w http.ResponseWriter, r *http.Request) {
+// unsubscribeHandler removes the topics a session names from its interests, or every interest and
+// role claim it holds when it names none.
+func unsubscribeHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
@@ -1082,10 +1081,16 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 			removed = []string{}
 		}
 		writeJSON(w, http.StatusOK, map[string][]string{"removed": removed})
-	})
-	v1.HandleFunc("/v1/roles/set", roleSetHandler(d, machineID))
-	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
-	v1.HandleFunc("/v1/registry/", func(w http.ResponseWriter, r *http.Request) {
+	}
+}
+
+// registryHandler answers a live session's registry entry.
+func registryHandler(d *listenerDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
 		if sessionID == "" {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
@@ -1097,17 +1102,5 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 			return
 		}
 		writeJSON(w, http.StatusOK, entry)
-	})
-
-	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry))
-	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
-	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
-	v1.HandleFunc("/v1/messages/send", sendHandler(d))
-	v1.HandleFunc("/v1/messages/publish", publishHandler(d))
-	v1.HandleFunc("/v1", func(w http.ResponseWriter, r *http.Request) {
-		writeJSONError(w, http.StatusNotFound, "not found")
-	})
-	v1.HandleFunc("/v1/", func(w http.ResponseWriter, r *http.Request) {
-		writeJSONError(w, http.StatusNotFound, "not found")
-	})
+	}
 }

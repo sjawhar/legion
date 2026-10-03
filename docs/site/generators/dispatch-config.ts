@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 // Writes <content dir>/dispatch/reference/configuration.md from Dispatch's settings table
 // (packages/envoy/cmd/dispatch/settings.go), read through `envoy-dispatch settings`, which prints
-// every Dispatch setting. Contract: scripts/generate.ts; lib/envoy-dispatch.ts runs the binary.
-import { readEnvoyDispatch } from "./lib/envoy-dispatch.ts";
+// every Dispatch setting. Contract: scripts/generate.ts; lib/binary-table.ts runs the binary.
+import { readBinaryTable } from "./lib/binary-table.ts";
 import { inline, writePage } from "./lib/markdown.ts";
 
 interface Setting {
@@ -14,19 +14,21 @@ interface Setting {
 }
 
 function readSettings(): Setting[] {
-  return readEnvoyDispatch("settings", "settings", ["name", "required", "description"]).map(
-    (setting) => {
-      for (const field of ["file", "default"]) {
-        if (setting[field] !== null && typeof setting[field] !== "string") {
-          throw new Error(`setting ${setting.name} has a ${field} that is neither text nor null`);
-        }
+  return readBinaryTable("envoy-dispatch", "settings", "settings", [
+    "name",
+    "required",
+    "description",
+  ]).map((setting) => {
+    for (const field of ["file", "default"]) {
+      if (setting[field] !== null && typeof setting[field] !== "string") {
+        throw new Error(`setting ${setting.name} has a ${field} that is neither text nor null`);
       }
-      if (!/^(yes|no|when .+)$/.test(setting.required as string)) {
-        throw new Error(`setting ${setting.name} has required ${JSON.stringify(setting.required)}`);
-      }
-      return setting as unknown as Setting;
     }
-  );
+    if (!/^(yes|no|when .+)$/.test(setting.required as string)) {
+      throw new Error(`setting ${setting.name} has required ${JSON.stringify(setting.required)}`);
+    }
+    return setting as unknown as Setting;
+  });
 }
 
 function render(settings: Setting[]): string {

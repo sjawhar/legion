@@ -18,7 +18,7 @@ your cluster, from one published worker image.
 | A host for the daemon | Reachable from the pods on two ports: the API (`port`, 13370 by default) and the worker stream (`worker_stream_port`, the API port plus one). |
 | Postgres | One database for the daemon's record (`postgres_dsn`, or `LEGION_POSTGRES_DSN` in its environment). |
 | [Dispatch](/legion/dispatch/) | Its URL and a bearer token for Legion's agents. |
-| The Envoy listener and NATS | The listener's URL and API token, and the NATS URLs. The daemon reads Dispatch's issue events and each repository's GitHub events from Envoy's notification stream on NATS, and reaches agents through the listener. [Envoy](/legion/dispatch/envoy/) covers how a repository's webhooks reach the listener and the NATS subjects the daemon's user needs. |
+| The Envoy listener and NATS | The listener's URL and API token, and the NATS URLs. The daemon reads Dispatch's issue events and each repository's GitHub events from Envoy's notification stream on NATS, and reaches agents through the listener. [Running the listener](/legion/envoy/running-the-listener/) covers how a repository's webhooks reach the listener and the NATS subjects the daemon's user needs. |
 | Two GitHub Apps | An **implement** App (the implementer's and merger's identity) and a **review** App (every other role's), each installed on the owner of every repository Legion works, with its private key ([below](#the-two-github-apps)). |
 | The worker image | `ghcr.io/sjawhar/legion-worker`, pinned by digest. |
 | A model route | An Oh My Pi provider file and settings overlay, and the credential they read ([below](#the-model-route)). |
