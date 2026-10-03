@@ -45,3 +45,78 @@ rig (`docs/site/media/broker/README.md`). The sections depend on each other (the
 issues the session's credential, the request is the one approved), so a take records all of them.
 A new take moves every window in `edl.py`: find each clip's start and end in the new files, then
 re-time the narration offsets.
+
+## Review
+
+Reviewed on 2026-10-03 against the built `../walkthrough.mp4` in two passes, a strategic one and a
+frame-reading one. Times below are in the final cut (84.7 s, 1280x720 at 30 fps, AAC stereo).
+
+Capture rates, as `build.py` prints them (file length against the section's wall clock):
+
+| Footage | Length | Wall clock | Ratio |
+| --- | --- | --- | --- |
+| `t1-login.cast` | 6.76 s | 7.44 s | x0.909 |
+| `b1-machine.webm` | 20.04 s | actions 17.90 s, page life 21.31 s | x1.120, x0.940 |
+| `t2-session.cast` | 15.46 s | 15.85 s | x0.975 |
+| `t3-request.cast` | 12.79 s | 13.36 s | x0.957 |
+| `b2-approve.webm` | 18.04 s | actions 16.99 s, page life 18.64 s | x1.062, x0.968 |
+| `t4-ran.cast` | 13.99 s | 14.38 s | x0.973 |
+| `b3-grants.webm` | 19.12 s | actions 17.66 s, page life 20.11 s | x1.082, x0.951 |
+
+No frame is held or stretched: each clip is its window of the file at the file's own speed.
+
+### Strategic: PASS
+
+A first-time reader can do it afterwards: every command is typed on screen in full
+(`agent-secrets launcher login`, `launcher login-status`, `register --wait 10 --exec -- bash`,
+`self`, the request with `--reason`, `status <request>`), and every Dispatch page the human uses is
+shown where it is reached (Machine login, the Inbox's Credential requests, the request's page,
+Settings' Live grants). The page under the video repeats the steps with stills.
+
+Script to screen, line by line:
+
+| At | Narration | On screen |
+| --- | --- | --- |
+| 0.2 s | This command just got a key that a person approved. | The request command, its waiting lines and `DEMO_API_KEY reached this command: 31 characters, ending in 7f3a`; the approval itself is shown at 60.0 s. |
+| 5.9 s | First, the machine logs in, and prints a code to enter in Dispatch. | `agent-secrets launcher login` typed; `machine login code: LU2U-D3UM` and the page to enter it on at 9.5 s. |
+| 12.5 s | There, alice types it into the machine login page. | Enter machine login code, the code typed; the sidebar reads Signed in as alice. |
+| 18.4 s | It names example-host-build. She approves it. | The record: Identifiers example-host-build, Approver alice; Approve clicked, `Approved.` at 22.4 s. |
+| 24.1 s | Back on the machine, the login is issued. | `agent-secrets launcher login-status` answers `issued` at 27.1 s. |
+| 28.4 s | Next, it registers a session for an agent. | `agent-secrets register --wait 10 --exec -- bash` typed and run. |
+| 35.0 s | Its operator is alice. | `agent-secrets self` prints `operator: alice` at 35.4 s. |
+| 38.6 s | Now the session asks for the demo API key to run one command, and says why. | The request typed with `--reason "Publish the docs preview for PR 42 with the demo API" -- ./check-demo-key.sh`. |
+| 47.2 s | Now it waits for a person. | `request … is waiting for approval; waiting up to 30m0s` and the page to approve it at, at 47.2 s. |
+| 50.2 s | The request is in alice's Inbox. | Inbox, Credential requests: Secret request DEMO_API_KEY. |
+| 53.9 s | Its page shows the session, the lifetime, and the agent's reason. | Enrollment (the session), Lifetime 1 hour, The agent's stated reason. |
+| 59.7 s | She approves it. | Approve clicked; `Approved just now` at 60.0 s. |
+| 62.6 s | The waiting command gets the key, and runs. | `DEMO_API_KEY reached this command: 31 characters, ending in 7f3a`. |
+| 70.4 s | Its status says alice decided it. | `agent-secrets status 8aa696fc-…` prints `state: granted` and `decided_by: alice` at 70.3 s. |
+| 74.1 s | Settings lists the live grant, with alice as its approver. | Settings, Live grants: the example-host-build enrollment, DEMO_API_KEY, Approver alice. |
+| 80.7 s | Revoke ends its access at once. | The pointer on Revoke, under the section's own line "Revoking one ends its access immediately." Nothing is revoked on camera; the narration restates the text on screen. |
+
+Nothing is cut with no loss beyond the hold fixed below. At 30% shorter (about 60 s), the
+`agent-secrets self` beat (33.8 s to 38.2 s), the code typed character by character on the machine
+login page, and the Settings navigation before the grants table would go first; the opener and the
+approval beats carry the point.
+
+### Frame-reading: CUT, fixed
+
+Read: a frame every 2 s from 0.5 s, four frames around each of the seven cuts, the last frame, and
+2x crops of the sidebar, the machine-login record, the request's record, the Inbox's Credential
+requests and the Live grants row, each transcribed. No error text, stack trace or failed command
+appears. The only host names are `example-host-build` and `127.0.0.1`; the only person is `alice`;
+the secret's value never appears (only its length and last four characters, of a made-up value).
+The identifiers on screen are the rig's own: request, grant, enrollment and credential UUIDs, the
+expired login code, record ids (sha256 hashes of each record's body) and the rules-version hash.
+At 640x360 the terminal stays legible and the Dispatch labels are small but readable.
+
+One CUT: the approved machine-login page held silent for 2.6 s before the cut to the terminal
+(22.3 s to 25.4 s in the first build, 3.1 s of silence). `edl.py`'s machine clip now ends at 13.4 s
+of `b1-machine.webm` instead of 14.6 s, which leaves 1.4 s on the just-approved page and 1.9 s of
+silence, and moves every later boundary 1.2 s earlier (85.9 s to 84.7 s). The frames each side of
+all five moved boundaries were read again after the rebuild; each cut is clean.
+
+The other silences of 2 s or more run over live action: 15.95 s to 18.5 s (the pointer moves to
+Look up and the record loads), 31.6 s to 35.1 s (the register command typed, 1.4 s at the new
+prompt, `self` typed), 60.6 s to 62.7 s (1.7 s on the request just approved) and
+65.9 s to 70.5 s (1.0 s still, then the status command typed).

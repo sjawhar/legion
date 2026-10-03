@@ -47,7 +47,7 @@ NARRATION: dict[str, str] = {
 CLIPS: list[Clip] = [
     Clip("open", "t4-ran.cast", 0.15, 5.85, (("open", 0.2),)),
     Clip("login", "t1-login.cast", 0.25, 6.74, (("login", 0.2),)),
-    Clip("machine", "b1-machine.webm", 1.8, 14.6, (("machine-code", 0.3), ("machine-approve", 6.2))),
+    Clip("machine", "b1-machine.webm", 1.8, 13.4, (("machine-code", 0.3), ("machine-approve", 6.2))),
     Clip("session", "t2-session.cast", 0.8, 15.2,
          (("session-issued", 0.3), ("session-register", 4.6), ("session-self", 11.2))),
     Clip("request", "t3-request.cast", 0.8, 12.6, (("request-ask", 0.4), ("request-wait", 9.0))),
