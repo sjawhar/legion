@@ -88,6 +88,11 @@ installed dependency and fails when a fix the pinned line carries has gone missi
 runtime at all — `bun run typecheck` is what runs it, and it fails when a name crossing the
 boundary is `any` again.
 
+The copied files are proof-sdk's and stay under its MIT license, as does `upstream/`, which tsc
+derives from proof-sdk's pinned sources; `LICENSE` beside this file is that license, taken from the
+fork at 24a5fc94. Legion's own files listed above, `scripts/` and `tests/` are under the
+repository's Apache-2.0 license.
+
 ## The upstream boundary
 
 Everything `src/` imports as `proof-sdk-upstream/src/…` — the mark plugins, the mark popover,

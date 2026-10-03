@@ -264,12 +264,19 @@ legion gh -- pr comment <pr-number> \
 
 ## Planner artifact
 
-The plan lives in `.legion/plan.json` and the Dispatch issue document; never commit a plan or spec file to the repository.
+The plan lives in `.legion/plan.json` and the issue's `plan.md` document, never in the issue's
+primary document, which is its spec; never commit a plan or spec file to the repository.
 No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request: plan
 and spec content goes into the issue, never into a PR (the root `AGENTS.md`
 calls its own `docs/plans/` human-authored design history, not a Legion artifact). A skill step that says "save the plan
 to a file" is satisfied by the handoff write in the completion gate below; the planner's only
 commit is `plan: record handoff`.
+
+A plan that departs from the spec's design records the departure in `plan.md` and in the required
+`.legion/plan.json` `specDepartures`: `[]` means no departure; otherwise each bounded record names
+the spec, plan, evidence and outcome. The planner's role prompt defines that record. The planner
+never edits the spec. Whether the spec changes is the architect's decision
+(`skill://legion-architect`, section 1), and the reviewer reads the plan beside the spec.
 
 ## Implementer push and pull request
 
