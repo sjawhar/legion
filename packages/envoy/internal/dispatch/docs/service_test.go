@@ -1308,7 +1308,7 @@ func TestBackfillStampsClosedIssueDocument(t *testing.T) {
 }
 
 // A closed issue's document stays readable: GET /blocks reads it as GET /text does
-// (readDocument), rather than asking the room, whose inject gate refuses a closed issue, and
+// (readTree), rather than asking the room, whose inject gate refuses a closed issue, and
 // failing the room over that refusal.
 func TestAClosedIssuesDocumentReadsItsBlocksWithoutFailingItsRoom(t *testing.T) {
 	database := storetest.Open(t)

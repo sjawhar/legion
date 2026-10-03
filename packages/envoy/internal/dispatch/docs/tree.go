@@ -156,21 +156,6 @@ func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 	return tree, nil
 }
 
-// lockedTreeOf reads doc's tree from a copy of its state taken under the document's lock
-// (snapshotDocument), so the tree is the document as it stood at one moment. It opens no
-// transaction on doc, since ygo hands the room's persistence an update for every transaction it
-// commits, even one that only reads.
-func lockedTreeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
-	if doc == nil {
-		return nil, errDocUnloaded
-	}
-	copied, err := snapshotDocument(doc)
-	if err != nil {
-		return nil, err
-	}
-	return treeOf(copied)
-}
-
 func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmdoc.Node, error) {
 	if fragment == nil {
 		return nil, errDocUnloaded
@@ -247,7 +232,7 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 }
 
 // newDocumentCopy is a document to decode a document's state into: a snapshot or a write's fork of
-// a room this server holds, the document's stored history (loadDocument, validateUpdate), which
+// a room this server holds, the document's stored history (loadTree, validateUpdate), which
 // the room itself decodes with the same queue (New sets Server.MaxPendingItems), or one update the
 // store appends (appendUpdate, AppendUpdateTx), decoded alone, so that every item of it leaning on
 // one outside it parks. ygo's decoder parks each later item of a client behind one whose parent it

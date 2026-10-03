@@ -8,9 +8,11 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
+	"weak"
 
 	"github.com/google/uuid"
 	gws "github.com/gorilla/websocket"
@@ -241,18 +243,21 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A browser editor normalizes a tree it cannot represent and writes the result back, so no
 	// connection - a first one, or a provider's reconnect - joins a room outside the Proof schema
 	// until it is replaced from markdown. The server decides it here, for every client at once, by
-	// the read and the rendering `/text` answers with (readDocument), so a socket is refused exactly
+	// the read and the rendering `/text` answers with (readTree), so a socket is refused exactly
 	// when that read is ErrDocOutsideSchema.
-	doc, loaded, err := s.loadDocument(r.Context(), room)
+	tree, loaded, err := s.loadTree(r.Context(), room)
+	if err == nil && tree != nil {
+		if _, renderErr := documentMarkdown(tree); errors.Is(renderErr, ErrDocOutsideSchema) {
+			err = renderErr
+		}
+	}
+	if errors.Is(err, ErrDocOutsideSchema) {
+		refuseOutsideSchema(w, r, room, err)
+		return
+	}
 	if err != nil {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
-	}
-	if doc != nil {
-		if _, err := renderDocument(doc); errors.Is(err, ErrDocOutsideSchema) {
-			refuseOutsideSchema(w, r, room, err)
-			return
-		}
 	}
 	if loaded != nil {
 		preload := &preloadedDocument{loaded: *loaded}
@@ -443,7 +448,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		s.scheduleSettleLocked(room, state)
 	}
 	state.mu.Unlock()
-	replica := &renderedReplica{}
+	replica := s.keepReplica(room, doc)
 	doc.OnUpdate(func(update []byte, origin any) {
 		// A published write's update is already durable. Its suppression slot is finished here,
 		// before ygo's persistence observer, which the room registers after OnLoadDocument, hands
@@ -469,13 +474,14 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	return nil
 }
 
-// renderedReplica is the copy of a room's document its update observer renders. ygo fires the
-// observer after the transaction has released the document's lock (reearth/ygo v1.49.5,
-// crdt/doc.go:638-642), and a walk of the live tree takes no lock (crdt/yxml.go:195-211), so a
-// render of the live tree there can walk it while another transaction writes it: a torn walk reads
-// a healthy document as one outside the schema, logs a false WARN and counts the update as a content
-// change. Only the observer, holding mu, writes or renders the replica, and it brings the replica
-// up to date under the live document's lock, so each render is of the room as of one moment.
+// renderedReplica is the copy of a room's document its update observer renders and the room's
+// reads walk (readLive). ygo fires the observer after the transaction has released the document's
+// lock (reearth/ygo v1.49.5, crdt/doc.go:638-642), and a walk of the live tree takes no lock
+// (crdt/yxml.go:195-211), so a render or read of the live tree can walk it while another
+// transaction writes it: a torn walk reads a healthy document as one outside the schema, logs a
+// false WARN and counts the update as a content change. Only a holder of mu writes or walks the
+// replica, and it brings the replica up to date under the live document's lock first, so each walk
+// is of the room as of one moment.
 //
 // The update the observer is handed cannot stand in for that: observers of two transactions run
 // concurrently and in either order, and each update carries the room's whole delete set, so the
@@ -484,8 +490,77 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 // encode and decode the whole document per keystroke. The room's first update copies it once, so a
 // room that is only read holds no replica.
 type renderedReplica struct {
-	mu  sync.Mutex
-	doc *crdt.Doc
+	mu sync.Mutex
+	// live is the room document the replica follows, weak so that Service.replicas, which lists
+	// the replica for the room's reads, does not keep an evicted room's document (keepReplica).
+	live weak.Pointer[crdt.Doc]
+	doc  *crdt.Doc
+}
+
+// keepReplica makes the replica live's update observer keeps, and lists it under room for the
+// room's reads (readLive) while live is resident. The listing goes once live itself is collected,
+// so it neither outlives the room nor names a later instance of it: an evicted room's replica holds
+// a whole copy of its document.
+func (s *Service) keepReplica(room string, live *crdt.Doc) *renderedReplica {
+	replica := &renderedReplica{live: weak.Make(live)}
+	s.replicas.Store(room, replica)
+	runtime.AddCleanup(live, func(replica *renderedReplica) {
+		s.replicas.CompareAndDelete(room, replica)
+	}, replica)
+	return replica
+}
+
+// readLive runs read against live, the document resident under room, as of one moment: the
+// room's replica brought up to date under live's lock (renderedReplica), else, while the room has
+// none - it has had no update, or it is not this instance of the room - a copy taken under that
+// lock (snapshotDocument). It opens no transaction on live, since ygo hands the room's persistence
+// an update for every transaction it commits, even one that only reads. read must not keep doc
+// past its return, take the replica's lock or hold a room's state lock: the update observer takes
+// the state lock while it holds the replica's (updateChangesMarkdown), so a caller holding the
+// state lock reads a copy instead.
+func (s *Service) readLive(room string, live *crdt.Doc, read func(doc *crdt.Doc)) error {
+	if live == nil {
+		return errDocUnloaded
+	}
+	if listed, ok := s.replicas.Load(room); ok {
+		replica := listed.(*renderedReplica)
+		if replica.live.Value() == live && replica.read(room, live, read) {
+			return nil
+		}
+	}
+	copied, err := snapshotDocument(live)
+	if err != nil {
+		return err
+	}
+	read(copied)
+	return nil
+}
+
+// liveTree is the tree of live, the document resident under room, as of one moment (readLive).
+func (s *Service) liveTree(room string, live *crdt.Doc) (*pmdoc.Node, error) {
+	var tree *pmdoc.Node
+	var treeErr error
+	if err := s.readLive(room, live, func(doc *crdt.Doc) { tree, treeErr = treeOf(doc) }); err != nil {
+		return nil, err
+	}
+	return tree, treeErr
+}
+
+// read runs read against the replica brought up to date with live, holding mu, and reports
+// whether it did: a replica the room's first update has not made yet, or whose copy failed, has
+// nothing to read.
+func (r *renderedReplica) read(room string, live *crdt.Doc, read func(doc *crdt.Doc)) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.doc == nil {
+		return false
+	}
+	r.catchUp(room, live)
+	if r.doc == nil {
+		return false
+	}
+	read(r.doc)
+	return true
 }
 
 // catchUp brings the replica up to date with live: what live gained since the replica's state
