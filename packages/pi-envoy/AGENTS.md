@@ -75,9 +75,9 @@ acknowledged, and a receipt that fails to publish is logged while delivery conti
 
 ## Daemon contract
 
-The plugin speaks to the Legion daemon (`packages/daemon-go`) through
+The plugin speaks to the Legion daemon (`packages/daemon`) through
 `src/legion/daemon-client.ts`, which reads every response through the strict schemas of
-`@legion/contracts/legion-go-api`, and boots every Legion session through the claim session
+`@legion/contracts/legion-api`, and boots every Legion session through the claim session
 (`src/legion/claim-session.ts`) or, for the controller, the controller session
 (`src/legion/controller-session.ts`). `package.json` declares the contract it was built against as
 `legion.daemonApiVersion` (currently 12): the claim, credential, workflow, controller, and state
@@ -142,7 +142,7 @@ other secret files, and every Sandbox pod's names the providers Secret's own `NA
 extension's Envoy connections read the seed from it (`@legion/envoy-client`'s `nats-auth.ts`), so
 they authenticate as that nkey user once production NATS stops admitting credential-less clients.
 With no seed there is no pointer, and the connections carry no credential.
-Contract 10 adds `POST /legion/v1/roots/close` (`LegionGoRootCloseRequest`: `grantId`, `issue`,
+Contract 10 adds `POST /legion/v1/roots/close` (`LegionRootCloseRequest`: `grantId`, `issue`,
 `reason`), the `legion` tool's `close_root`: a root architect ends its tree while the root is
 admitted and no phase has started, and the daemon posts the reason on the issue before it writes
 `done`.
@@ -185,12 +185,12 @@ And the daemon refuses a controller registration whose `pluginContract` is not i
 `LEGION_PROJECT`, or one whose controller role is not that of the project the state names
 (`legionProjectToken` in `@legion/contracts`, the daemon's own rule), stops the claim there; then
 `claims/register` with the capability in place of a boot token, answered with
-`api.ControllerRegisterResponse` (`LegionGoControllerRegisterResponse`), then the Envoy role
+`api.ControllerRegisterResponse` (`LegionControllerRegisterResponse`), then the Envoy role
 `legion-<project>-controller`, then a subscription to the project's controller topic
 `notifications.legion.<project>.controller` (`legionControllerNoticeSubject`, the project from
 `LEGION_PROJECT`), then a controller grant per credentialed tool call from the `/grants`
 controller-session form with the secret the registration was issued. What the daemon publishes
-on that topic is listed at `notify.ControllerTopic` (`packages/daemon-go/internal/notify`). The
+on that topic is listed at `notify.ControllerTopic` (`packages/daemon/internal/notify`). The
 subscription lasts while the session holds the controller role (`subscribeLegionNotice`'s
 `whileHolding`): once another live session holds it, the heartbeat's refused re-assertion closes
 it, so a replaced controller stops taking wakes within one heartbeat, and a dropped connection's
@@ -441,7 +441,6 @@ state never nudges.
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
 | Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the twenty-one native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))` — deliberately NOT strict: on installed OMP hosts a strict host schema makes the coercion pass delete an unknown key beside valid required fields and hand the executor silently narrowed args, while non-strict preserves unknown root fields so `executeDispatchTool`'s own always-strict parse names the invented field (the xd:// half is can1357/oh-my-pi#12871) — register it (and every Envoy tool) with `lenientArgValidation: true` so the host hands raw arguments through and `executeDispatchTool` / `parseEnvoyToolArguments` is the one refusal (a `ToolInputError` naming every problem), pass the live session id/title and host AbortSignal to `executeDispatchTool`, and never subscribe from a tool result: the `tool_result` hook only announces `details.follows` once per ask. |
-| Role session prompts | `roles/` | Phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue. Root architect, controller, and sub-architect prompts remain single-file. The daemon concatenates the parts into the first portion of its one `--append-system-prompt` value (OMP's flag is last-wins), followed by the addressing fragment (roots and phase workers) and, when the deployment's `legion.yaml` sets `instructions`, `<state_dir>/deployment-instructions.md` as the last part |
 | Real end-to-end delivery smoke | `smoke-delivery.sh`, `smoke-btw.sh`, `scripts/README.md` | Manual installed-plugin smokes against live Envoy; `smoke-btw.sh` creates a targeted Dispatch BTW or Steer attempt and verifies its correlated reply |
 
 ## Critical conventions

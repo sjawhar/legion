@@ -1,0 +1,83 @@
+[
+  {
+    "file": "t1-login.cast",
+    "marks": {
+      "typing": 1.333,
+      "code": 3.631
+    },
+    "wallSeconds": 6.493
+  },
+  {
+    "actSeconds": 15.446,
+    "file": "b1-machine.webm",
+    "marks": {
+      "page": 0.428,
+      "typing": 2.572,
+      "record": 5.363,
+      "approve": 9.782,
+      "result": 9.823
+    },
+    "resultSimilarityAtEnd": 0.985496,
+    "resultSimilarityBeforeEnd": 0.982175,
+    "wallSeconds": 16.52
+  },
+  {
+    "file": "t2-session.cast",
+    "marks": {
+      "status-typing": 1.281,
+      "issued": 3.836,
+      "register-typing": 5.336,
+      "self-typing": 10.081,
+      "self": 11.804
+    },
+    "wallSeconds": 18.602
+  },
+  {
+    "file": "t3-request.cast",
+    "marks": {
+      "typing": 1.276,
+      "waiting": 8.812
+    },
+    "wallSeconds": 12.112
+  },
+  {
+    "actSeconds": 16.873,
+    "file": "b2-approve.webm",
+    "marks": {
+      "inbox": 0.302,
+      "record": 4.083,
+      "approve": 11.062,
+      "result": 11.118
+    },
+    "resultSimilarityAtEnd": 0.991987,
+    "resultSimilarityBeforeEnd": 0.987309,
+    "wallSeconds": 17.874
+  },
+  {
+    "file": "t4-ran.cast",
+    "marks": {
+      "approve": 12.364,
+      "key": 20.66,
+      "status-typing": 25.164,
+      "status-word": 26.522,
+      "status-typed": 28.704,
+      "decided": 29.181
+    },
+    "wallSeconds": 33.013
+  },
+  {
+    "actSeconds": 16.909,
+    "file": "b3-grants.webm",
+    "marks": {
+      "record": 0.604,
+      "settings": 3.136,
+      "grants": 3.206,
+      "row": 4.379,
+      "revoke": 7.806,
+      "result": 11.334
+    },
+    "resultSimilarityAtEnd": 0.996155,
+    "resultSimilarityBeforeEnd": 0.996545,
+    "wallSeconds": 19.178
+  }
+]

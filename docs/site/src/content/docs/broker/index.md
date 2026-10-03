@@ -95,6 +95,8 @@ every worker pod it starts, so each pod's agent gets only the grants of that pod
 
 - [Quickstart](/legion/broker/quickstart/): use a secret from an agent session, and see what the
   approver sees.
+- [Walkthrough](/legion/broker/walkthrough/): a narrated video of one secret request, from the
+  agent's ask through the approval in Dispatch to the command that runs with it.
 - [Concepts](/legion/broker/concepts/): sessions, machine logins, rules, grants, approvals and the
   audit record.
 - Guides: [approve a request](/legion/broker/guides/approve-a-request/),

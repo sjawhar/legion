@@ -1,0 +1,128 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"maps"
+	"os"
+	"path/filepath"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/notify"
+	"github.com/sjawhar/legion/daemon/internal/prompts"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
+)
+
+var _ supervise.Specs = specs{}
+
+// specs builds the part of every launch the claim does not carry. An operator may retain a
+// one-off prompt under the state directory for the Stage 2 proof; otherwise the Go daemon
+// composes the shipped role parts plus its own role-specific instructions. The repository is the
+// configured project's; the runtime locates the issue's workspace from it.
+type specs struct {
+	stateDir     string
+	project      string
+	instructions string
+	secrets      map[string]string
+	repo         ghrepo.Repository
+	prompts      *prompts.Composer
+	// designGate is the project's design gate policy (gates.design), which a tree's root architect
+	// is told after its addressing (DesignGateFragment).
+	designGate config.DesignGate
+	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
+	// GitHub Apps.
+	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+}
+
+// rolePromptPath is where a claim's role prompt is kept for every launch of it.
+func rolePromptPath(stateDir string, token claim.Token) string {
+	return filepath.Join(stateDir, "prompts", string(token)+".md")
+}
+
+// SpawnSpec is the launch's secrets (launchSecrets: the Envoy bearer and the NATS nkey seed, each
+// when the daemon has one), its prompt — the role prompt parts, the addressing sentence, and the
+// deployment instructions — and its repository; for a claim whose workspace was lost with its
+// session, the issue's branch the recreated workspace is recovered from.
+func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
+	promptPaths, err := s.rolePromptPaths(c)
+	if err != nil {
+		return runtime.SpawnSpec{}, err
+	}
+	addressing, err := AddressingFragment(s.project, c)
+	if err != nil {
+		return runtime.SpawnSpec{}, err
+	}
+	if claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
+		addressing += " " + DesignGateFragment(s.designGate)
+	}
+	env := map[string]string{}
+	if s.identity != nil {
+		id, err := s.identity(ctx, c.Role)
+		if err != nil {
+			return runtime.SpawnSpec{}, fmt.Errorf("the git identity of %s: %w", c.Token, err)
+		}
+		env = id.Env()
+	}
+	spec := runtime.SpawnSpec{
+		Env:     env,
+		Secrets: maps.Clone(s.secrets),
+		Prompt: runtime.PromptParts{
+			RolePromptPaths:            promptPaths,
+			Addressing:                 addressing,
+			DeploymentInstructionsPath: s.instructions,
+		},
+		Repository: s.repo,
+	}
+	if c.WorkspaceLost {
+		spec.WorkspaceRecoveredFrom = workspace.Bookmark(c.Issue)
+	}
+	return spec, nil
+}
+
+// rolePromptPaths keeps an explicit operator prompt as a narrow test override. Every ordinary
+// claim uses the role prompts daemon boot snapshotted below its state directory (prompts.New).
+func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
+	override := rolePromptPath(s.stateDir, c.Token)
+	if _, err := os.Stat(override); err == nil {
+		return []string{override}, nil
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("the role prompt of %s: %w", c.Token, err)
+	}
+	if s.prompts == nil {
+		return nil, errors.New("the daemon prompt bundle was not constructed at boot")
+	}
+	parts, err := s.prompts.Compose(c.Role, claim.IsTreeRoot(c.Issue, c.Tree))
+	if err != nil {
+		return nil, err
+	}
+	return parts.RolePromptPaths, nil
+}
+
+// AddressingFragment is the sentence that tells an agent where it and its peers are reached: its
+// own role topic, the tree architect's, and the project controller's, spelled from the tokens so
+// the model never hand-encodes one. It names no merge queue: the merger publishes nothing — the
+// daemon posts the READY packet and publishes it to `projects.<KEY>.merge_queue_role` itself
+// (workflow.Engine.ready, prompts/go/merger.md). It is exported for the rigs under
+// packages/pi-envoy/scripts, which tell a worker what a pane is told.
+func AddressingFragment(project string, c supervise.Claim) (string, error) {
+	architect, err := claim.NewToken(project, c.Tree, claim.RoleArchitect)
+	if err != nil {
+		return "", fmt.Errorf("the addressing of %s: %w", c.Token, err)
+	}
+	return fmt.Sprintf("Legion addressing: your role topic is `%s%s`; the architect that owns your issue is `%s%s`; "+
+		"the project's controller is `%s%s`; a sibling role on your issue is your topic with the trailing `-<role>` replaced.",
+		notify.RoleTopicPrefix, c.Token, notify.RoleTopicPrefix, architect, notify.RoleTopicPrefix, claim.ControllerToken(project)), nil
+}
+
+// DesignGateFragment is the sentence a tree's root architect is told after its addressing, and the
+// operator's controller as its launch addressing (`legion controller start`): this project's design
+// gate policy, the "Design gate policy" line the shared role prompts read. What each policy asks of
+// the architect is in its Go role part (prompts/go/architect-root.md).
+func DesignGateFragment(policy config.DesignGate) string {
+	return fmt.Sprintf("Design gate policy: `gates.design: %s`.", policy)
+}

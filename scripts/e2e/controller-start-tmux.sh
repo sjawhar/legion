@@ -60,8 +60,6 @@ fail() { echo "FAIL $check: $*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/leftovers.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
 . "$root/scripts/e2e/lib/omp-home.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/stage-role-prompts.sh
-. "$root/scripts/e2e/lib/stage-role-prompts.sh"
 
 # Unconditional: every run removes what it made, whatever it ended on.
 cleanup() {
@@ -110,12 +108,11 @@ for tool in go docker jq curl tmux bun mise; do command -v "$tool" >/dev/null ||
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
 export XDG_STATE_HOME=$work/xdg TMUX_TMPDIR=$work/tmux
-pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
+pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 pick_port daemon_port
 pick_port envoy_port
-(cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
-stage_role_prompts "$root" "$work"
+(cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 note "legion $("$work/legion" version); OMP pin $pin; daemon port $daemon_port; listener port $envoy_port"
 
@@ -288,7 +285,7 @@ for pair in LEGION_CONTROLLER=1 LEGION_ROLE=controller "LEGION_PROJECT=$ptoken" 
   "ENVOY_TOKEN_FILE=$work/envoy-token" "ENVOY_NATS_URL=$nats_url" "HOME=$omp_home" "OMP_PROFILE=$profile"; do
   [ "$(env_of "$omp1" "${pair%%=*}")" = "${pair#*=}" ] || fail "omp $omp1 has ${pair%%=*}=$(env_of "$omp1" "${pair%%=*}"), want ${pair#*=}"
 done
-env_of "$omp1" PI_SHELL_PREFIX | grep -qF "'$ctl_state/worker-bin:$ctl_state/bin:'" || fail "PI_SHELL_PREFIX = $(env_of "$omp1" PI_SHELL_PREFIX)"
+env_of "$omp1" PI_SHELL_PREFIX | grep -qF "PATH='$ctl_state/worker-bin:$ctl_state/bin'\${__legion_path" || fail "PI_SHELL_PREFIX = $(env_of "$omp1" PI_SHELL_PREFIX)"
 [ -z "$(env_of "$omp1" LEGION_CONTROLLER_SECRET)" ] || fail "the controller secret's value is in omp's environment"
 tr '\0' '\n' <"/proc/$omp1/cmdline" | grep -qxF -- "--append-system-prompt" || fail "omp has no --append-system-prompt"
 ! tr '\0' '\n' <"/proc/$omp1/cmdline" | grep -qx -- "--mode\|rpc\|--resume.*" || fail "omp runs --mode rpc or --resume"
@@ -386,8 +383,8 @@ func main() {
 	}
 }
 GO
-printf '{"Replace":{"%s":"%s"}}' "$root/packages/daemon-go/cmd/liveprobe-accept/main.go" "$work/liveprobe.go" >"$work/overlay.json"
-verdicts=$(cd "$root/packages/daemon-go" && go run -overlay "$work/overlay.json" ./cmd/liveprobe-accept \
+printf '{"Replace":{"%s":"%s"}}' "$root/packages/daemon/cmd/liveprobe-accept/main.go" "$work/liveprobe.go" >"$work/overlay.json"
+verdicts=$(cd "$root/packages/daemon" && go run -overlay "$work/overlay.json" ./cmd/liveprobe-accept \
   "http://127.0.0.1:$envoy_port" "$work/envoy-token" "$ptoken" "$session2" "$session1" 2>"$evidence/checks/liveprobe.log" | tr '\n' ' ')
 [ "$verdicts" = "$session2=alive $session1=gone " ] || fail "verdicts: $verdicts; log $(cat "$evidence/checks/liveprobe.log")"
 note "controller.Prober on the live listener: $verdicts"

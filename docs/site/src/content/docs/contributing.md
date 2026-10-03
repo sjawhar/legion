@@ -97,8 +97,21 @@ description in its `SKILL.md`, as [Skills](/legion/legion/reference/skills/).
 
 The scripts that make screenshots and narrated walkthroughs live in `docs/site/media/`, and its
 README says how to run and extend them. Screenshots are taken in CI before every site build and
-are not committed; videos are committed with their sources. Their output goes in
-`docs/site/public/media/`. A file at `public/media/<path>` is published at `/legion/media/<path>`,
-so a page embeds a screenshot as `![The Inbox](/legion/media/<path>.png)`.
+are not committed; videos are committed with their sources. Only their output goes in
+`docs/site/public/media/`, which the site publishes as it is. A file at `public/media/<path>` is
+published at `/legion/media/<path>`, so a page embeds a screenshot as
+`![The Inbox](/legion/media/<path>.png)`.
 Media shows example data only: this repository is public, so no real hostname, account, token or
 private URL appears in a page, image or video.
+
+The secrets broker's media is made differently. It needs a rig of its own (a broker, its client
+and an example agent machine) that the shared harness does not boot and CI does not run, so its
+screenshots are committed too, and its walkthrough has a build of its own:
+`docs/site/media/broker/walkthrough/build.py` makes it from the cut in `edl.py`, not
+`walkthrough.ts`. Its terminal casts are recorded live against the rig between its browser
+sections, since each section acts on what the one before it left. Its browser sections are
+Playwright's `recordVideo` at 1280x720, which `build.py` renders at 30 fps. The shared pipeline
+avoids that recorder for its blur; this walkthrough keeps it because the committed footage and the
+marks the cut is placed at come from it, and changing it needs a new take. It publishes the video,
+its captions and its poster to `public/media/broker/`.
+`docs/site/media/broker/walkthrough/README.md` says how to record and build it.
