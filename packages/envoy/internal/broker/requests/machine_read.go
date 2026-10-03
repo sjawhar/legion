@@ -321,7 +321,7 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 	if err != nil {
 		return RecordDetail{}, err
 	}
-	agentSecret := kind == "agent_secret"
+	agentSecret := kind == record.KindAgentSecret
 	var enr *record.Enrollment
 	if agentSecret {
 		e := body.Enrollment

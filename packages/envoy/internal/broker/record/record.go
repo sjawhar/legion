@@ -174,7 +174,7 @@ func validateDetails(details []AuthorizationDetail) error {
 	}
 	allSecret := true
 	for _, d := range details {
-		if d.Type != "agent_secret" {
+		if d.Type != KindAgentSecret {
 			allSecret = false
 			break
 		}
@@ -187,7 +187,7 @@ func validateDetails(details []AuthorizationDetail) error {
 		}
 		return nil
 	}
-	if len(details) != 1 || details[0].Type != "launcher_credential" {
+	if len(details) != 1 || details[0].Type != KindLauncherCredential {
 		return errors.New("authorization_details mixes types")
 	}
 	d := details[0]

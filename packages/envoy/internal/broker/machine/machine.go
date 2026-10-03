@@ -143,7 +143,7 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 	if record.CanonicalLogin(obj.LoginHint) == record.AnyoneApprover {
 		return "", "", fmt.Errorf("%w: a machine login's login_hint names its operator, never %q", record.ErrRequestInvalid, record.AnyoneApprover)
 	}
-	if len(obj.Details) != 1 || obj.Details[0].Type != "launcher_credential" {
+	if len(obj.Details) != 1 || obj.Details[0].Type != record.KindLauncherCredential {
 		return "", "", fmt.Errorf("%w: exactly one launcher_credential detail is required", record.ErrRequestInvalid)
 	}
 	fresh, err := s.Replay(ctx, obj.JTI, obj.Expires.Add(s.Skew+jtiRetentionMargin))

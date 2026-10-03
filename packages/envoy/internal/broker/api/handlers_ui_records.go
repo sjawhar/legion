@@ -166,7 +166,7 @@ func (s *server) decideRecord(w http.ResponseWriter, r *http.Request, approve bo
 		writeInternal(w, "read credential request kind", err)
 		return
 	}
-	if kind == "launcher_credential" {
+	if kind == record.KindLauncherCredential {
 		s.decideMachineLogin(w, r, recordID, approve, body)
 		return
 	}

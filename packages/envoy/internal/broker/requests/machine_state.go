@@ -139,7 +139,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	if obj.Thumbprint != enr.Thumbprint {
 		return Request{}, fmt.Errorf("%w: iss is not this enrollment's own key", record.ErrRequestInvalid)
 	}
-	if len(obj.Details) == 0 || obj.Details[0].Type != "agent_secret" {
+	if len(obj.Details) == 0 || obj.Details[0].Type != record.KindAgentSecret {
 		return Request{}, fmt.Errorf("%w: this endpoint accepts only agent_secret authorization_details", record.ErrRequestInvalid)
 	}
 	fresh, err := m.Replay(ctx, obj.JTI, obj.Expires.Add(m.Skew+jtiRetentionMargin))
