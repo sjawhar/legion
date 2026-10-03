@@ -151,10 +151,11 @@ func TestAClaimOfARoleAnEarlierListenersSessionHeldSucceeds(t *testing.T) {
 }
 
 // nats.go refuses a key outside its key alphabet (`ses:bad`, `bad:role`) on every read, write and
-// delete (nats.ErrInvalidKey), however often it is sent, as the bus handle refuses one past a
-// subject's bound (bus.ErrRefused). No build writes such a key, but a direct bucket write stores
-// one, since its subject is one NATS accepts. Such a key must not fail a sweep or a caller's request
-// over every other key: the reapers skip it, and removing a session skips a claim stored under one.
+// delete, however often it is sent, and the bus handle names that refusal bus.ErrInvalidKey, a
+// bus.ErrRefused like a key past a subject's bound. No build writes such a key, but a direct bucket
+// write stores one, since its subject is one NATS accepts. Such a key must not fail a sweep or a
+// caller's request over every other key: the reapers skip it, and removing a session skips a claim
+// stored under one.
 func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
 	type stored struct {
 		bucket, key string

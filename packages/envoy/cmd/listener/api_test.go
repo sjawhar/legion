@@ -1399,7 +1399,7 @@ func TestRoleSetHandlerSoftClaim(t *testing.T) {
 
 	t.Run("a holder no session can register as is superseded", func(t *testing.T) {
 		// ses:bad is outside nats.go's key alphabet, so no session registers under it, and its
-		// interest can be neither read nor written (nats.ErrInvalidKey). An earlier build's
+		// interest can be neither read nor written (bus.ErrInvalidKey). An earlier build's
 		// bare-string claim, or a direct bucket write, can still name it as the holder.
 		roles, err := client.JS().KeyValue(store.RoleBucket)
 		if err != nil {

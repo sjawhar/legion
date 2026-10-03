@@ -450,22 +450,12 @@ func (r *Registry) releaseRoleClaims(sessionID string, topics []string) error {
 	return nil
 }
 
-// keyRefused reports whether err refuses a key however often a call names it: the bus handle's own
-// refusal (bus.ErrRefused: a key whose subject NATS would refuse), or nats.go's for a key outside
-// its key alphabet (nats.ErrInvalidKey: `ses:bad`), which no KV call can read, write or delete. No
-// build writes such a key, but an earlier build's bare-string claim can name one as a role's holder
-// and a direct bucket write can store one, so a claim, a removal or a sweep that meets one skips it
-// rather than fail over every other key.
-func keyRefused(err error) bool {
-	return errors.Is(err, bus.ErrRefused) || errors.Is(err, nats.ErrInvalidKey)
-}
-
 // releaseRoleClaim deletes role's claim when sessionID holds it. A claim this build cannot read
-// (keyRefused) has a holder nothing can tell, so it is left to the role reaper, which deletes it
-// when it can.
+// (bus.ErrRefused) has a holder nothing can tell, so it is left to the role reaper, which deletes
+// it.
 func (r *Registry) releaseRoleClaim(sessionID, role string) error {
 	claim, entry, err := r.roleClaim(role)
-	if keyRefused(err) {
+	if errors.Is(err, bus.ErrRefused) {
 		r.logger().Warn("role registry left a stored claim it cannot read to the role reaper", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
 		return nil
 	}
@@ -664,13 +654,10 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 
 	if oldSessionID != "" && oldSessionID != sessionID {
 		err := r.removeInterestTopics(oldSessionID, []string{roleTopic})
-		if keyRefused(err) {
-			// The old holder is a session id this build cannot write: one an earlier build
-			// registered past the bound this one holds keys to (bus.ErrRefused), or one outside
-			// nats.go's key alphabet (nats.ErrInvalidKey), which an earlier build's bare-string claim
-			// or a direct bucket write can name. The claim is written and the caller named nothing
-			// NATS refuses, so it succeeds; the interest reaper removes the old holder's interest, if
-			// it has one it can delete, once its session is gone.
+		if errors.Is(err, bus.ErrRefused) {
+			// The old holder is a session an earlier build registered under an id this one cannot
+			// write. The claim is written and the caller named nothing too long, so it succeeds; the
+			// interest reaper removes the old holder's interest once its session is gone.
 			r.logger().Warn("registry role claim left an old holder's interest it cannot write to the reaper",
 				slog.String("role", role),
 				slog.Int("key_bytes", len(oldSessionID)),
@@ -798,7 +785,7 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 	reaped := 0
 	for _, sid := range stale {
 		err := r.deleteInterest(sid)
-		if keyRefused(err) {
+		if errors.Is(err, bus.ErrRefused) {
 			r.logger().Warn("reaper skipped an interest it cannot delete", slog.Int("key_bytes", len(sid)), slog.String("error", err.Error()))
 			continue
 		}
@@ -813,9 +800,8 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 // ReapRoleClaims removes claims whose holders did not re-register before the
 // session TTL elapsed. It is intentionally separate from Reap: the interest
 // reaper must not tear down a role during a listener restart grace window. A
-// claim this build cannot read (keyRefused: an earlier build stored it past
-// what a read of it may send, or a direct bucket write under a key outside
-// nats.go's key alphabet) no build can resolve or write again, so it is
+// claim this build cannot read (bus.ErrRefused: an earlier build stored it past
+// what a read of it may send) no build can resolve or write again, so it is
 // deleted too; one it cannot delete either is skipped, and the sweep goes on.
 func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Duration) (int, error) {
 	roles, err := r.roles().Keys()
@@ -828,12 +814,12 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 	reaped := 0
 	for _, role := range roles {
 		claim, err := r.RoleClaim(role)
-		if keyRefused(err) {
+		if errors.Is(err, bus.ErrRefused) {
 			switch err := r.roles().Delete(role); {
 			case err == nil:
 				r.logger().Warn("role reaper deleted a claim it cannot read", slog.Int("key_bytes", len(role)))
 				reaped++
-			case keyRefused(err):
+			case errors.Is(err, bus.ErrRefused):
 				r.logger().Warn("role reaper skipped a claim it cannot delete", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
 			default:
 				return 0, err

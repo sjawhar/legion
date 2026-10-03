@@ -13,8 +13,9 @@ import (
 // A KV call builds its subjects from its key, which nats.go checks only for the characters a key may
 // hold. A key long enough to take the subject past the server's protocol line would close the
 // connection every subscription and watcher of the client runs on, and one holding an empty token
-// (`a..b`, which nats.go allows) names a subject no stream matches. The handle a bucket opens with
-// refuses both as the ErrRefused they are, before sending anything, on every call that builds a
+// (`a..b`, which nats.go allows) names a subject no stream matches; one outside nats.go's key
+// alphabet (`ses:bad`) nats.go refuses itself. The handle a bucket opens with refuses each as the
+// ErrRefused it is, naming the key or its size, before sending anything, on every call that builds a
 // subject from its key, whether the open created the bucket or found it.
 func TestAKeyValueHandleRefusesAKeyNATSWouldRefuse(t *testing.T) {
 	client, err := Connect([]string{testnats.URL(t)})
@@ -81,15 +82,21 @@ func requireKeysChecked(t *testing.T, client *Client, kv nats.KeyValue, letter s
 		key  string
 		want error
 		says string
+		// also is nats.go's own error, which a caller that asks for it still finds.
+		also error
 	}{
-		{"a key past the server's protocol line", strings.Repeat("k", 5000), ErrTooLarge, "a key of 5000 bytes"},
-		{"a key holding an empty token", "sess..x", ErrInvalidSubject, `"sess..x"`},
+		{"a key past the server's protocol line", strings.Repeat("k", 5000), ErrTooLarge, "a key of 5000 bytes", nil},
+		{"a key holding an empty token", "sess..x", ErrInvalidSubject, `"sess..x"`, nil},
+		{"a key outside nats.go's key alphabet", "ses:bad", ErrInvalidKey, `"ses:bad"`, nats.ErrInvalidKey},
 	} {
 		for name, call := range calls {
 			t.Run(tc.name+"/"+name, func(t *testing.T) {
 				err := call(tc.key)
 				if !errors.Is(err, tc.want) || !errors.Is(err, ErrRefused) {
 					t.Fatalf("%s error = %v, want %v, an ErrRefused", name, err, tc.want)
+				}
+				if tc.also != nil && !errors.Is(err, tc.also) {
+					t.Fatalf("%s error = %v, want it to match %v too", name, err, tc.also)
 				}
 				if !strings.Contains(err.Error(), tc.says) {
 					t.Fatalf("%s error = %q, want it to say %q", name, err, tc.says)
